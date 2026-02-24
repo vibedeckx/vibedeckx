@@ -110,7 +110,7 @@ export function AppSidebar({
               className={cn(
                 "flex items-center gap-1.5 rounded-md pl-7 pr-2 py-1.5 text-xs transition-colors",
                 "hover:bg-accent hover:text-accent-foreground",
-                selectedBranch === wt.branch
+                activeView === "workspace" && selectedBranch === wt.branch
                   ? "bg-primary/15 text-primary font-medium ring-1 ring-primary/20"
                   : "text-muted-foreground"
               )}
