@@ -162,10 +162,10 @@ function FileTreeNode({
         <span className="truncate">{entry.name}</span>
       </div>
       <div className="shrink-0 flex items-center gap-2 ml-1">
-        <span className="text-[11px] text-muted-foreground/70 group-hover:hidden whitespace-nowrap">
+        <span className="text-[11px] text-muted-foreground/70 group-hover:hidden whitespace-nowrap w-[52px] text-right tabular-nums">
           {entry.mtime && formatRelativeTime(entry.mtime)}
         </span>
-        <span className="text-[11px] text-muted-foreground/70 group-hover:hidden whitespace-nowrap tabular-nums">
+        <span className="text-[11px] text-muted-foreground/70 group-hover:hidden whitespace-nowrap w-[52px] text-right tabular-nums">
           {entry.size != null && formatFileSize(entry.size)}
         </span>
         <div className="hidden group-hover:block">
