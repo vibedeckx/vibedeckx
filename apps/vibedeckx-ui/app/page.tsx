@@ -1,6 +1,5 @@
 'use client';
-import { Suspense, useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProjectSelector } from '@/components/project/project-selector';
 import { ProjectCard } from '@/components/project/project-card';
 import { useProjects } from '@/hooks/use-projects';
@@ -17,31 +16,27 @@ import { AppSidebar, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import { FilesView } from '@/components/files';
 import type { ExecutionMode, Task } from '@/lib/api';
+import { useUrlState } from '@/hooks/use-url-state';
+import { buildUrl } from '@/lib/url-state';
 
 export type WorkspaceStatus = 'idle' | 'assigned' | 'working' | 'completed';
 
-function isValidTab(value: string | null): value is ActiveView {
-  return value === 'workspace' || value === 'tasks' || value === 'files';
-}
-
 export default function Home() {
-  return (
-    <Suspense>
-      <HomeContent />
-    </Suspense>
-  );
-}
+  const { projectId: urlProject, tab: urlTab, branch: urlBranch } = useUrlState();
 
-function HomeContent() {
-  const searchParams = useSearchParams();
-  const urlProject = searchParams.get('project');
-  const urlTab = searchParams.get('tab');
-  const urlBranch = searchParams.get('branch');
+  // Redirect legacy ?project= URLs to new path format
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('project')) {
+      const url = buildUrl({ projectId: urlProject, tab: urlTab, branch: urlBranch });
+      window.history.replaceState(null, '', url);
+    }
+  }, []);
 
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createWorktreeDialogOpen, setCreateWorktreeDialogOpen] = useState(false);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
-  const [activeView, setActiveView] = useState<ActiveView>(isValidTab(urlTab) ? urlTab : 'tasks');
+  const [activeView, setActiveView] = useState<ActiveView>(urlTab);
   const agentRef = useRef<AgentConversationHandle>(null);
   const prevProjectId = useRef<string | undefined>(undefined);
 
@@ -167,11 +162,11 @@ function HomeContent() {
   // Sync state to URL
   useEffect(() => {
     if (projectsLoading) return;
-    const params = new URLSearchParams();
-    if (currentProject) params.set('project', currentProject.id);
-    if (activeView !== 'tasks') params.set('tab', activeView);
-    if (selectedBranch) params.set('branch', selectedBranch);
-    const url = params.toString() ? `?${params.toString()}` : window.location.pathname;
+    const url = buildUrl({
+      projectId: currentProject?.id,
+      tab: activeView,
+      branch: selectedBranch,
+    });
     window.history.replaceState(null, '', url);
   }, [currentProject?.id, activeView, selectedBranch, projectsLoading]);
 
