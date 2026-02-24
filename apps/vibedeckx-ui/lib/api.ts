@@ -140,6 +140,13 @@ export interface ExecutorProcess {
   finished_at: string | null;
 }
 
+export interface TerminalSession {
+  id: string;
+  projectId: string;
+  name: string;
+  cwd: string;
+}
+
 export type LogMessage =
   | { type: "stdout"; data: string }
   | { type: "stderr"; data: string }
@@ -764,5 +771,33 @@ export const api = {
     if (branch) params.set("branch", branch);
     if (target) params.set("target", target);
     return `${getApiBase()}/api/projects/${projectId}/file-download?${params.toString()}`;
+  },
+
+  // Terminal API
+  async getTerminals(projectId: string): Promise<TerminalSession[]> {
+    const res = await fetch(`${getApiBase()}/api/projects/${projectId}/terminals`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.terminals;
+  },
+
+  async createTerminal(projectId: string, branch?: string | null): Promise<TerminalSession> {
+    const res = await fetch(`${getApiBase()}/api/projects/${projectId}/terminals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch }),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.terminal;
+  },
+
+  async closeTerminal(terminalId: string): Promise<void> {
+    await fetch(`${getApiBase()}/api/terminals/${terminalId}`, {
+      method: "DELETE",
+    });
   },
 };
