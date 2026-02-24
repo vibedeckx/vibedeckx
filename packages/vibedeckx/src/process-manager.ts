@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { Executor, ExecutorProcessStatus, Storage } from "./storage/types.js";
+import type { EventBus } from "./event-bus.js";
 
 export type LogMessage =
   | { type: "stdout"; data: string }
@@ -21,6 +22,7 @@ interface RunningProcess {
   logs: LogMessage[];
   subscribers: Set<LogSubscriber>;
   executorId: string;
+  projectId: string;
   projectPath: string;
   skipDb: boolean;
 }
@@ -30,9 +32,14 @@ const LOG_RETENTION_MS = 5 * 60 * 1000; // 5 minutes
 export class ProcessManager {
   private processes: Map<string, RunningProcess> = new Map();
   private storage: Storage;
+  private eventBus: EventBus | null = null;
 
   constructor(storage: Storage) {
     this.storage = storage;
+  }
+
+  setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
   }
 
   /**
@@ -70,6 +77,8 @@ export class ProcessManager {
       this.startRegularProcess(processId, executor, cwd, skipDb);
     }
 
+    this.eventBus?.emit({ type: "executor:started", projectId: executor.project_id, executorId: executor.id, processId });
+
     return processId;
   }
 
@@ -106,6 +115,7 @@ export class ProcessManager {
       logs: [],
       subscribers: new Set(),
       executorId: executor.id,
+      projectId: executor.project_id,
       projectPath: cwd,
       skipDb,
     };
@@ -134,6 +144,7 @@ export class ProcessManager {
       const msg: LogMessage = { type: "finished", exitCode: code };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code });
 
       // Schedule cleanup after retention period
       setTimeout(() => {
@@ -159,6 +170,7 @@ export class ProcessManager {
       logs: [],
       subscribers: new Set(),
       executorId: executor.id,
+      projectId: executor.project_id,
       projectPath: cwd,
       skipDb,
     };
@@ -194,6 +206,7 @@ export class ProcessManager {
       const msg: LogMessage = { type: "finished", exitCode };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode });
 
       // Schedule cleanup after retention period
       setTimeout(() => {
@@ -215,6 +228,7 @@ export class ProcessManager {
       const finishMsg: LogMessage = { type: "finished", exitCode: 1 };
       runningProcess.logs.push(finishMsg);
       this.broadcast(processId, finishMsg);
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1 });
     });
   }
 
