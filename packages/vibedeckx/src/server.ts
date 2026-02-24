@@ -16,6 +16,7 @@ import fileRoutes from "./routes/file-routes.js";
 import agentSessionRoutes from "./routes/agent-session-routes.js";
 import taskRoutes from "./routes/task-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
+import eventRoutes from "./routes/event-routes.js";
 
 // API Key from environment variable for remote access authentication
 const API_KEY = process.env.VIBEDECKX_API_KEY;
@@ -90,6 +91,7 @@ export const createServer = (opts: { storage: Storage }) => {
   server.register(fileRoutes);
   server.register(agentSessionRoutes);
   server.register(taskRoutes);
+  server.register(eventRoutes);
 
   // 提供静态 UI 文件
   server.register(fastifyStatic, {
