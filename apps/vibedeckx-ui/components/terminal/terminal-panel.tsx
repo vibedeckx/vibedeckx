@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { Plus, X, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -21,18 +21,19 @@ function TerminalInstance({
   terminalId: string;
   onExit: (id: string) => void;
 }) {
-  const { logs, isPty, sendInput, sendResize, exitCode } = useExecutorLogs(terminalId);
+  const { logs, sendInput, sendResize, exitCode } = useExecutorLogs(terminalId);
 
   // When shell exits, notify parent
-  if (exitCode !== null) {
-    // Use setTimeout to avoid setState during render
-    setTimeout(() => onExit(terminalId), 0);
-  }
+  useEffect(() => {
+    if (exitCode !== null) {
+      onExit(terminalId);
+    }
+  }, [exitCode, onExit, terminalId]);
 
   return (
     <ExecutorOutput
       logs={logs}
-      isPty={isPty || true}
+      isPty={true}
       className="h-full rounded-none border-0"
       onInput={sendInput}
       onResize={sendResize}

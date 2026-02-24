@@ -29,9 +29,10 @@ export function useTerminals(
 
     api.getTerminals(projectId).then((list) => {
       setTerminals(list);
-      if (list.length > 0 && !activeTerminalId) {
-        setActiveTerminalId(list[0].id);
-      }
+      setActiveTerminalId((prev) => {
+        if (prev === null && list.length > 0) return list[0].id;
+        return prev;
+      });
     });
   }, [projectId]);
 
@@ -46,12 +47,14 @@ export function useTerminals(
     await api.closeTerminal(id);
     setTerminals((prev) => {
       const next = prev.filter((t) => t.id !== id);
-      if (activeTerminalId === id) {
-        setActiveTerminalId(next.length > 0 ? next[next.length - 1].id : null);
-      }
+      setActiveTerminalId((prevActive) =>
+        prevActive === id
+          ? (next.length > 0 ? next[next.length - 1].id : null)
+          : prevActive
+      );
       return next;
     });
-  }, [activeTerminalId]);
+  }, []);
 
   const setActiveTerminal = useCallback((id: string) => {
     setActiveTerminalId(id);
@@ -61,12 +64,14 @@ export function useTerminals(
   const removeTerminal = useCallback((id: string) => {
     setTerminals((prev) => {
       const next = prev.filter((t) => t.id !== id);
-      if (activeTerminalId === id) {
-        setActiveTerminalId(next.length > 0 ? next[next.length - 1].id : null);
-      }
+      setActiveTerminalId((prevActive) =>
+        prevActive === id
+          ? (next.length > 0 ? next[next.length - 1].id : null)
+          : prevActive
+      );
       return next;
     });
-  }, [activeTerminalId]);
+  }, []);
 
   return {
     terminals,
