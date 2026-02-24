@@ -107,7 +107,7 @@ export class ProcessManager {
       shell = "powershell.exe";
     } else {
       shell = process.env.SHELL || "/bin/zsh";
-      if (shell === "bash" || shell === "zsh" || shell === "sh") {
+      if (!shell.includes("/")) {
         shell = `/bin/${shell}`;
       }
     }
@@ -205,44 +205,30 @@ export class ProcessManager {
     ptyProcess.onData((data: string) => {
       const msg: LogMessage = { type: "pty", data };
       runningProcess.logs.push(msg);
-      // Ring buffer for terminals: cap at TERMINAL_MAX_LOG_ENTRIES
-      if (runningProcess.isTerminal && runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-      }
       this.broadcast(processId, msg);
     });
 
     // Handle PTY exit
     ptyProcess.onExit(({ exitCode }) => {
       const code = exitCode ?? 0;
+      const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
 
       console.log(`[ProcessManager] PTY process ${processId} exited with code ${code}`);
 
-      if (runningProcess.isTerminal) {
-        // Terminal processes: clean up immediately, no DB update, no event
-        const msg: LogMessage = { type: "finished", exitCode: code };
-        runningProcess.logs.push(msg);
-        this.broadcast(processId, msg);
-        this.processes.delete(processId);
-      } else {
-        // Executor processes: existing behavior
-        const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
-
-        if (!skipDb) {
-          this.storage.executorProcesses.updateStatus(processId, status, code);
-        }
-
-        const msg: LogMessage = { type: "finished", exitCode: code };
-        runningProcess.logs.push(msg);
-        this.broadcast(processId, msg);
-        this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code });
-
-        // Schedule cleanup after retention period
-        setTimeout(() => {
-          console.log(`[ProcessManager] Cleaning up process ${processId}`);
-          this.processes.delete(processId);
-        }, LOG_RETENTION_MS);
+      if (!skipDb) {
+        this.storage.executorProcesses.updateStatus(processId, status, code);
       }
+
+      const msg: LogMessage = { type: "finished", exitCode: code };
+      runningProcess.logs.push(msg);
+      this.broadcast(processId, msg);
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code });
+
+      // Schedule cleanup after retention period
+      setTimeout(() => {
+        console.log(`[ProcessManager] Cleaning up process ${processId}`);
+        this.processes.delete(processId);
+      }, LOG_RETENTION_MS);
     });
   }
 
