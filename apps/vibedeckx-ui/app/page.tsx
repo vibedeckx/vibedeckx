@@ -1,5 +1,6 @@
 'use client';
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Suspense, useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { ProjectSelector } from '@/components/project/project-selector';
 import { ProjectCard } from '@/components/project/project-card';
 import { useProjects } from '@/hooks/use-projects';
@@ -19,12 +20,30 @@ import type { ExecutionMode, Task } from '@/lib/api';
 
 export type WorkspaceStatus = 'idle' | 'assigned' | 'working' | 'completed';
 
+function isValidTab(value: string | null): value is ActiveView {
+  return value === 'workspace' || value === 'tasks' || value === 'files';
+}
+
 export default function Home() {
+  return (
+    <Suspense>
+      <HomeContent />
+    </Suspense>
+  );
+}
+
+function HomeContent() {
+  const searchParams = useSearchParams();
+  const urlProject = searchParams.get('project');
+  const urlTab = searchParams.get('tab');
+  const urlBranch = searchParams.get('branch');
+
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createWorktreeDialogOpen, setCreateWorktreeDialogOpen] = useState(false);
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<ActiveView>('tasks');
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
+  const [activeView, setActiveView] = useState<ActiveView>(isValidTab(urlTab) ? urlTab : 'tasks');
   const agentRef = useRef<AgentConversationHandle>(null);
+  const prevProjectId = useRef<string | undefined>(undefined);
 
   const {
     projects,
@@ -34,7 +53,7 @@ export default function Home() {
     updateProject,
     deleteProject,
     selectProject,
-  } = useProjects();
+  } = useProjects(urlProject);
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
@@ -129,9 +148,12 @@ export default function Home() {
     updateTask(taskId, { assigned_branch: null });
   }, [selectedBranch, updateTask]);
 
-  // Reset branch selection when project changes
+  // Reset branch selection when switching between projects (not on initial load)
   useEffect(() => {
-    setSelectedBranch(null);
+    if (prevProjectId.current !== undefined && prevProjectId.current !== currentProject?.id) {
+      setSelectedBranch(null);
+    }
+    prevProjectId.current = currentProject?.id;
   }, [currentProject?.id]);
 
   // Auto-select first worktree if current selection is not in the list
@@ -141,6 +163,17 @@ export default function Home() {
       setSelectedBranch(worktrees[0].branch);
     }
   }, [worktrees, worktreesLoading, selectedBranch]);
+
+  // Sync state to URL
+  useEffect(() => {
+    if (projectsLoading) return;
+    const params = new URLSearchParams();
+    if (currentProject) params.set('project', currentProject.id);
+    if (activeView !== 'tasks') params.set('tab', activeView);
+    if (selectedBranch) params.set('branch', selectedBranch);
+    const url = params.toString() ? `?${params.toString()}` : window.location.pathname;
+    window.history.replaceState(null, '', url);
+  }, [currentProject?.id, activeView, selectedBranch, projectsLoading]);
 
   const handleWorktreeCreated = useCallback((branch: string) => {
     refetchWorktrees();

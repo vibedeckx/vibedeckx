@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api, type Project, type SyncButtonConfig } from "@/lib/api";
 
-export function useProjects() {
+export function useProjects(initialProjectId?: string | null) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
@@ -14,12 +14,15 @@ export function useProjects() {
       const data = await api.getProjects();
       setProjects(data);
       if (data.length > 0 && !currentProject) {
-        setCurrentProject(data[0]);
+        const preferred = initialProjectId
+          ? data.find((p) => p.id === initialProjectId)
+          : null;
+        setCurrentProject(preferred ?? data[0]);
       }
     } finally {
       setLoading(false);
     }
-  }, [currentProject]);
+  }, [currentProject, initialProjectId]);
 
   useEffect(() => {
     fetchProjects();
