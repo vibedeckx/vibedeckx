@@ -12,6 +12,7 @@ import executorRoutes from "./routes/executor-routes.js";
 import processRoutes from "./routes/process-routes.js";
 import worktreeRoutes from "./routes/worktree-routes.js";
 import diffRoutes from "./routes/diff-routes.js";
+import fileRoutes from "./routes/file-routes.js";
 import agentSessionRoutes from "./routes/agent-session-routes.js";
 import taskRoutes from "./routes/task-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
@@ -86,6 +87,7 @@ export const createServer = (opts: { storage: Storage }) => {
   server.register(processRoutes);
   server.register(worktreeRoutes);
   server.register(diffRoutes);
+  server.register(fileRoutes);
   server.register(agentSessionRoutes);
   server.register(taskRoutes);
 

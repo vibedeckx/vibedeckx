@@ -202,6 +202,24 @@ export interface CommitEntry {
   date: string;
 }
 
+export interface BrowseEntry {
+  name: string;
+  type: "file" | "directory";
+  size?: number;
+}
+
+export interface BrowseResponse {
+  path: string;
+  items: BrowseEntry[];
+}
+
+export interface FileContentResponse {
+  binary: boolean;
+  tooLarge?: boolean;
+  content: string | null;
+  size: number;
+}
+
 export const api = {
   async getProjects(): Promise<Project[]> {
     const res = await fetch(`${getApiBase()}/api/projects`);
@@ -696,5 +714,54 @@ export const api = {
       const error = await res.json();
       throw new Error(error.error);
     }
+  },
+
+  // File Browser API
+  async browseProjectDirectory(
+    projectId: string,
+    relativePath?: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<BrowseResponse> {
+    const params = new URLSearchParams();
+    if (relativePath) params.set("path", relativePath);
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const res = await fetch(`${getApiBase()}/api/projects/${projectId}/browse${query}`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async getFileContent(
+    projectId: string,
+    filePath: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<FileContentResponse> {
+    const params = new URLSearchParams({ path: filePath });
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+    const res = await fetch(`${getApiBase()}/api/projects/${projectId}/file-content?${params.toString()}`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  getFileDownloadUrl(
+    projectId: string,
+    filePath: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): string {
+    const params = new URLSearchParams({ path: filePath });
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+    return `${getApiBase()}/api/projects/${projectId}/file-download?${params.toString()}`;
   },
 };

@@ -14,6 +14,7 @@ import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
 import { AppSidebar, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
+import { FilesView } from '@/components/files';
 import type { ExecutionMode, Task } from '@/lib/api';
 
 export type WorkspaceStatus = 'idle' | 'assigned' | 'working' | 'completed';
@@ -292,6 +293,15 @@ Please proceed step by step and let me know if there are any issues or conflicts
               onCreateTask={createTask}
               onUpdateTask={updateTask}
               onDeleteTask={deleteTask}
+            />
+          </div>
+
+          {/* Files View — kept mounted, hidden via CSS */}
+          <div className={activeView !== 'files' ? 'hidden' : 'flex-1 overflow-hidden'}>
+            <FilesView
+              projectId={currentProject?.id ?? null}
+              project={currentProject}
+              selectedBranch={selectedBranch}
             />
           </div>
         </div>

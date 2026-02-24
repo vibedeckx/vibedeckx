@@ -143,3 +143,38 @@ export async function proxyToRemote(
 
   return result;
 }
+
+export interface RawProxyResult {
+  ok: boolean;
+  status: number;
+  body: ReadableStream<Uint8Array> | null;
+}
+
+export async function proxyToRemoteRaw(
+  remoteUrl: string,
+  apiKey: string,
+  apiPath: string,
+  options?: { timeoutMs?: number }
+): Promise<RawProxyResult> {
+  const baseUrl = remoteUrl.replace(/\/+$/, "");
+  const timeoutMs = options?.timeoutMs ?? 30_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${baseUrl}${apiPath}`, {
+      method: "GET",
+      headers: {
+        "X-Vibedeckx-Api-Key": apiKey,
+        "User-Agent": "Vibedeckx/1.0",
+      },
+      signal: controller.signal,
+    });
+
+    return { ok: response.ok, status: response.status, body: response.body };
+  } catch {
+    return { ok: false, status: 0, body: null };
+  } finally {
+    clearTimeout(timer);
+  }
+}

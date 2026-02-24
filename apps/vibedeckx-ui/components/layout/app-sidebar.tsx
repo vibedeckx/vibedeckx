@@ -1,11 +1,11 @@
 "use client";
 
-import { Columns3, ListTodo, GitBranch, Plus } from "lucide-react";
+import { Columns3, ListTodo, FolderOpen, GitBranch, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Worktree, Project } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 
-export type ActiveView = "workspace" | "tasks";
+export type ActiveView = "workspace" | "tasks" | "files";
 
 interface AppSidebarProps {
   activeView: ActiveView;
@@ -58,6 +58,19 @@ export function AppSidebar({
       >
         <ListTodo className="h-4 w-4 shrink-0" />
         <span>Tasks</span>
+      </button>
+
+      {/* Files */}
+      <button
+        onClick={() => onViewChange("files")}
+        className={cn(
+          "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+          "hover:bg-accent hover:text-accent-foreground",
+          activeView === "files" && "bg-accent text-accent-foreground"
+        )}
+      >
+        <FolderOpen className="h-4 w-4 shrink-0" />
+        <span>Files</span>
       </button>
 
       {/* Workspace + create button */}
