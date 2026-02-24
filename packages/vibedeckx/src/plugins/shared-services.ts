@@ -24,6 +24,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("remoteExecutorMap", remoteExecutorMap);
   fastify.decorate("remoteSessionMap", remoteSessionMap);
   fastify.decorate("eventBus", eventBus);
+  agentSessionManager.setEventBus(eventBus);
 };
 
 export default fp(sharedServices, { name: "shared-services" });

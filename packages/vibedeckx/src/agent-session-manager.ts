@@ -11,6 +11,7 @@ import type {
   ClaudeContentBlock,
 } from "./agent-types.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
+import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider } from "./entry-index-provider.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
@@ -44,9 +45,14 @@ export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
   private storage: Storage;
   private claudeBinaryPath: string | null | undefined = undefined; // undefined = not yet checked
+  private eventBus: EventBus | null = null;
 
   constructor(storage: Storage) {
     this.storage = storage;
+  }
+
+  setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
   }
 
   private detectClaudeBinary(): string | null {
@@ -182,6 +188,7 @@ export class AgentSessionManager {
         timestamp: Date.now(),
       });
       this.broadcastPatch(session.id, ConversationPatch.updateStatus("error"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "error" });
       this.broadcastRaw(session.id, { finished: true });
       return;
     }
@@ -250,6 +257,7 @@ export class AgentSessionManager {
 
       // Send status patch and finished signal
       this.broadcastPatch(session.id, ConversationPatch.updateStatus(session.status));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: session.status });
       this.broadcastRaw(session.id, { finished: true });
     });
 
@@ -600,6 +608,7 @@ export class AgentSessionManager {
       session.status = "stopped";
       if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
       this.broadcastRaw(sessionId, { finished: true });
       return true;
     } catch (error) {
@@ -654,6 +663,7 @@ export class AgentSessionManager {
     session.status = "running";
     if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
     this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
+    this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
     // 5. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
@@ -698,6 +708,7 @@ export class AgentSessionManager {
     session.status = "running";
     if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
     this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
+    this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
     // 5. Respawn Claude Code with new mode flags
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
