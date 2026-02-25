@@ -40,23 +40,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
         .getTerminals(req.params.projectId, branch)
         .map((t) => ({ ...t, location: "local" as const }));
 
-      // Remote terminals from remoteExecutorMap
+      // Remote terminals from remoteExecutorMap (filtered by project and branch)
       const remoteTerminals: Array<{
         id: string;
         name: string;
         projectId: string;
         cwd?: string;
+        branch?: string | null;
         location: "remote";
       }> = [];
-      for (const key of fastify.remoteExecutorMap.keys()) {
-        if (key.startsWith("remote-terminal-")) {
-          remoteTerminals.push({
-            id: key,
-            name: key,
-            projectId: req.params.projectId,
-            location: "remote",
-          });
-        }
+      for (const [key, info] of fastify.remoteExecutorMap.entries()) {
+        if (!key.startsWith("remote-terminal-")) continue;
+        if (info.projectId && info.projectId !== req.params.projectId) continue;
+        if (branch !== undefined && (info.branch ?? null) !== branch) continue;
+        remoteTerminals.push({
+          id: key,
+          name: key,
+          projectId: req.params.projectId,
+          branch: info.branch,
+          location: "remote",
+        });
       }
 
       const terminals = [...localTerminals, ...remoteTerminals];
@@ -114,6 +117,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
           remoteUrl: project.remote_url!,
           remoteApiKey: project.remote_api_key!,
           remoteProcessId: remoteId,
+          projectId: req.params.projectId,
+          branch: branch ?? null,
         });
 
         return reply.code(201).send({

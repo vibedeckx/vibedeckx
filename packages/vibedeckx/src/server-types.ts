@@ -7,6 +7,8 @@ export interface RemoteExecutorInfo {
   remoteUrl: string;
   remoteApiKey: string;
   remoteProcessId: string;
+  projectId?: string;
+  branch?: string | null;
 }
 
 export interface RemoteSessionInfo {
