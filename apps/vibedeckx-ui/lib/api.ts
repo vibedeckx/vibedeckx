@@ -145,6 +145,7 @@ export interface TerminalSession {
   projectId: string;
   name: string;
   cwd: string;
+  location?: "local" | "remote";
 }
 
 export type LogMessage =
@@ -781,11 +782,11 @@ export const api = {
     return data.terminals;
   },
 
-  async createTerminal(projectId: string, branch?: string | null): Promise<TerminalSession> {
+  async createTerminal(projectId: string, branch?: string | null, location?: "local" | "remote"): Promise<TerminalSession> {
     const res = await fetch(`${getApiBase()}/api/projects/${projectId}/terminals`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ branch }),
+      body: JSON.stringify({ branch, location }),
     });
     if (!res.ok) {
       const error = await res.json();

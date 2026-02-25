@@ -46,7 +46,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         cwd?: string;
         location: "remote";
       }> = [];
-      for (const [key, info] of fastify.remoteExecutorMap) {
+      for (const key of fastify.remoteExecutorMap.keys()) {
         if (key.startsWith("remote-terminal-")) {
           remoteTerminals.push({
             id: key,

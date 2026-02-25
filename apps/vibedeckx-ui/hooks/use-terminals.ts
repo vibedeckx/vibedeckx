@@ -6,7 +6,7 @@ import { api, type TerminalSession } from "@/lib/api";
 export interface UseTerminalsResult {
   terminals: TerminalSession[];
   activeTerminalId: string | null;
-  createTerminal: () => Promise<void>;
+  createTerminal: (location?: "local" | "remote") => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   setActiveTerminal: (id: string) => void;
   removeTerminal: (id: string) => void;
@@ -36,9 +36,9 @@ export function useTerminals(
     });
   }, [projectId]);
 
-  const createTerminal = useCallback(async () => {
+  const createTerminal = useCallback(async (location?: "local" | "remote") => {
     if (!projectId) return;
-    const terminal = await api.createTerminal(projectId, branch);
+    const terminal = await api.createTerminal(projectId, branch, location);
     setTerminals((prev) => [...prev, terminal]);
     setActiveTerminalId(terminal.id);
   }, [projectId, branch]);
