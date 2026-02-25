@@ -21,6 +21,7 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [isPty, setIsPty] = useState<boolean>(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const pendingResizeRef = useRef<{ cols: number; rows: number } | null>(null);
 
   const clearLogs = useCallback(() => {
     setLogs([]);
@@ -39,6 +40,10 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       const message: InputMessage = { type: "resize", cols, rows };
       wsRef.current.send(JSON.stringify(message));
+    } else {
+      // Queue resize for when WebSocket connects — FitAddon often
+      // calculates dimensions before the connection is established
+      pendingResizeRef.current = { cols, rows };
     }
   }, []);
 
@@ -62,6 +67,14 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
     ws.onopen = () => {
       console.log(`[useExecutorLogs] WebSocket connected`);
       setStatus("connected");
+
+      // Send any resize that was queued before the connection opened
+      if (pendingResizeRef.current) {
+        const { cols, rows } = pendingResizeRef.current;
+        const message: InputMessage = { type: "resize", cols, rows };
+        ws.send(JSON.stringify(message));
+        pendingResizeRef.current = null;
+      }
     };
 
     ws.onmessage = (event) => {

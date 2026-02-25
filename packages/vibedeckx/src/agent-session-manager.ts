@@ -12,7 +12,7 @@ import type {
 } from "./agent-types.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
-import { EntryIndexProvider } from "./entry-index-provider.js";
+import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
 // ============ Session Store Types ============
@@ -24,6 +24,8 @@ interface MessageStore {
   entries: AgentMessage[];
   /** Index provider for monotonic indices */
   indexProvider: EntryIndexProvider;
+  /** Tracks tool_use/tool_result blocks by ID to prevent duplicates from streaming replays */
+  toolTracker: EntryTracker;
   /** Index of the current streaming assistant message, or null if not streaming */
   currentAssistantIndex: number | null;
 }
@@ -146,6 +148,7 @@ export class AgentSessionManager {
       patches: [],
       entries: [],
       indexProvider,
+      toolTracker: new EntryTracker(indexProvider),
       currentAssistantIndex: null,
     };
 
@@ -388,29 +391,61 @@ export class AgentSessionManager {
         this.updateAssistantMessage(sessionId, block.text, timestamp);
         break;
 
-      case "tool_use":
+      case "tool_use": {
         // Tool use breaks the assistant streaming
         session.store.currentAssistantIndex = null;
-        this.pushEntry(sessionId, {
+        // Deduplicate by block ID — streaming can replay the same assistant message
+        const tuKey = `tool_use:${block.id}`;
+        const { index: tuIndex, isNew: tuIsNew } = session.store.toolTracker.getOrCreate(tuKey);
+        const tuMessage: AgentMessage = {
           type: "tool_use",
           tool: block.name,
           input: block.input,
           toolUseId: block.id,
           timestamp,
-        }, true);
+        };
+        if (tuIsNew) {
+          // First time seeing this tool_use — add entry
+          session.store.entries[tuIndex] = tuMessage;
+          const patch = ConversationPatch.addEntry(tuIndex, tuMessage);
+          session.store.patches.push(patch);
+          this.broadcastPatch(sessionId, patch);
+        } else {
+          // Already seen — replace (input may have been updated during streaming)
+          session.store.entries[tuIndex] = tuMessage;
+          const patch = ConversationPatch.replaceEntry(tuIndex, tuMessage);
+          session.store.patches.push(patch);
+          this.broadcastPatch(sessionId, patch);
+        }
         break;
+      }
 
-      case "tool_result":
-        // Tool result is always new
+      case "tool_result": {
+        // Tool result breaks the assistant streaming
         session.store.currentAssistantIndex = null;
-        this.pushEntry(sessionId, {
+        // Deduplicate by tool_use_id
+        const trKey = `tool_result:${block.tool_use_id}`;
+        const { index: trIndex, isNew: trIsNew } = session.store.toolTracker.getOrCreate(trKey);
+        const trMessage: AgentMessage = {
           type: "tool_result",
           tool: "",
           output: typeof block.content === "string" ? block.content : JSON.stringify(block.content),
           toolUseId: block.tool_use_id,
           timestamp,
-        }, true);
+        };
+        if (trIsNew) {
+          session.store.entries[trIndex] = trMessage;
+          const patch = ConversationPatch.addEntry(trIndex, trMessage);
+          session.store.patches.push(patch);
+          this.broadcastPatch(sessionId, patch);
+        } else {
+          session.store.entries[trIndex] = trMessage;
+          const patch = ConversationPatch.replaceEntry(trIndex, trMessage);
+          session.store.patches.push(patch);
+          this.broadcastPatch(sessionId, patch);
+        }
         break;
+      }
 
       case "thinking":
         // Thinking is always new
@@ -651,6 +686,7 @@ export class AgentSessionManager {
     session.store.patches = [];
     session.store.entries = [];
     session.store.indexProvider.reset();
+    session.store.toolTracker.clear();
     session.store.currentAssistantIndex = null;
     session.buffer = "";
 
