@@ -19,7 +19,7 @@ export function useTerminals(
   const [terminals, setTerminals] = useState<TerminalSession[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
 
-  // Fetch existing terminals when projectId changes
+  // Fetch existing terminals when projectId or branch changes
   useEffect(() => {
     if (!projectId) {
       setTerminals([]);
@@ -27,14 +27,11 @@ export function useTerminals(
       return;
     }
 
-    api.getTerminals(projectId).then((list) => {
+    api.getTerminals(projectId, branch).then((list) => {
       setTerminals(list);
-      setActiveTerminalId((prev) => {
-        if (prev === null && list.length > 0) return list[0].id;
-        return prev;
-      });
+      setActiveTerminalId(list.length > 0 ? list[0].id : null);
     });
-  }, [projectId]);
+  }, [projectId, branch]);
 
   const createTerminal = useCallback(async (location?: "local" | "remote") => {
     if (!projectId) return;

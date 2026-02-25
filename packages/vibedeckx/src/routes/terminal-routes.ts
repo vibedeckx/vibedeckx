@@ -25,7 +25,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   });
 
   // List terminals for a project (local + remote)
-  fastify.get<{ Params: { projectId: string } }>(
+  fastify.get<{ Params: { projectId: string }; Querystring: { branch?: string } }>(
     "/api/projects/:projectId/terminals",
     async (req, reply) => {
       const project = fastify.storage.projects.getById(req.params.projectId);
@@ -33,9 +33,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
-      // Local terminals
+      const branch = req.query.branch !== undefined ? (req.query.branch || null) : undefined;
+
+      // Local terminals (filtered by branch)
       const localTerminals = fastify.processManager
-        .getTerminals(req.params.projectId)
+        .getTerminals(req.params.projectId, branch)
         .map((t) => ({ ...t, location: "local" as const }));
 
       // Remote terminals from remoteExecutorMap
@@ -136,8 +138,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const cwd = req.body?.cwd || basePath;
 
     try {
-      const terminal = fastify.processManager.startTerminal(req.params.projectId, cwd);
-      return reply.code(201).send({ terminal: { ...terminal, cwd, location: "local" } });
+      const terminal = fastify.processManager.startTerminal(req.params.projectId, cwd, branch ?? null);
+      return reply.code(201).send({ terminal: { ...terminal, cwd, branch: branch ?? null, location: "local" } });
     } catch (error) {
       return reply.code(500).send({ error: String(error) });
     }

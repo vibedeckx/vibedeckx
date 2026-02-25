@@ -19,6 +19,7 @@ export interface TerminalInfo {
   projectId: string;
   name: string;
   cwd: string;
+  branch: string | null;
 }
 
 type LogSubscriber = (msg: LogMessage) => void;
@@ -33,6 +34,7 @@ interface RunningProcess {
   executorId: string;
   projectId: string;
   projectPath: string;
+  branch: string | null;
   skipDb: boolean;
 }
 
@@ -97,7 +99,7 @@ export class ProcessManager {
    * Start an interactive terminal session (persistent shell, no command)
    * Returns the process ID and name
    */
-  startTerminal(projectId: string, cwd: string): { id: string; name: string } {
+  startTerminal(projectId: string, cwd: string, branch: string | null = null): { id: string; name: string } {
     const processId = crypto.randomUUID();
     this.terminalCounter++;
     const name = `Terminal ${this.terminalCounter}`;
@@ -132,6 +134,7 @@ export class ProcessManager {
       executorId: "",
       projectId,
       projectPath: cwd,
+      branch,
       skipDb: true,
     };
 
@@ -195,6 +198,7 @@ export class ProcessManager {
       executorId: executor.id,
       projectId: executor.project_id,
       projectPath: cwd,
+      branch: null,
       skipDb,
     };
 
@@ -252,6 +256,7 @@ export class ProcessManager {
       executorId: executor.id,
       projectId: executor.project_id,
       projectPath: cwd,
+      branch: null,
       skipDb,
     };
 
@@ -435,13 +440,15 @@ export class ProcessManager {
   /**
    * Get all running terminal sessions for a project
    */
-  getTerminals(projectId: string): TerminalInfo[] {
+  getTerminals(projectId: string, branch?: string | null): TerminalInfo[] {
     const terminals: TerminalInfo[] = [];
+    const filterBranch = branch === undefined ? undefined : (branch ?? null);
     for (const [id, proc] of this.processes) {
       if (proc.isTerminal && proc.projectId === projectId) {
+        if (filterBranch !== undefined && proc.branch !== filterBranch) continue;
         const lastLog = proc.logs[proc.logs.length - 1];
         if (lastLog?.type !== "finished") {
-          terminals.push({ id, projectId: proc.projectId, name: proc.name, cwd: proc.projectPath });
+          terminals.push({ id, projectId: proc.projectId, name: proc.name, cwd: proc.projectPath, branch: proc.branch });
         }
       }
     }
