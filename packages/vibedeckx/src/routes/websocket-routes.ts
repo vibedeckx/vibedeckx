@@ -34,7 +34,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           console.log(`[WebSocket] Proxying to remote: ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
 
-          const remoteWs = new WebSocket(remoteWsUrl);
+          const remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
 
           remoteWs.on("open", () => {
             console.log(`[WebSocket] Connected to remote process ${remoteInfo.remoteProcessId}`);
@@ -163,7 +163,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           console.log(`[AgentWS] Proxying to remote: ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
 
-          const remoteWs = new WebSocket(remoteWsUrl);
+          const remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
 
           remoteWs.on("open", () => {
             console.log(`[AgentWS] Connected to remote session ${remoteInfo.remoteSessionId}`);

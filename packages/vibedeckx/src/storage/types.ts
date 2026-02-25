@@ -141,6 +141,11 @@ export interface Storage {
     updateStatus: (id: string, status: AgentSessionStatus) => void;
     delete: (id: string) => void;
   };
+  settings: {
+    get: (key: string) => string | undefined;
+    set: (key: string, value: string) => void;
+    delete: (key: string) => void;
+  };
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Task;
     getByProjectId: (projectId: string) => Task[];

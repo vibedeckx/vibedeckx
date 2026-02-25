@@ -4,6 +4,9 @@ import type { Storage } from "../storage/types.js";
 import { ProcessManager } from "../process-manager.js";
 import { AgentSessionManager } from "../agent-session-manager.js";
 import { EventBus } from "../event-bus.js";
+import { ProxyManager } from "../utils/proxy-manager.js";
+import type { ProxyConfig } from "../utils/proxy-manager.js";
+import { setGlobalProxyManager } from "../utils/remote-proxy.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -18,12 +21,29 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const remoteSessionMap = new Map<string, RemoteSessionInfo>();
   const eventBus = new EventBus();
 
+  // Initialize proxy manager from stored settings
+  const proxyManager = new ProxyManager();
+  const savedProxy = opts.storage.settings.get("proxy");
+  if (savedProxy) {
+    try {
+      const config = JSON.parse(savedProxy) as ProxyConfig;
+      proxyManager.updateConfig(config);
+      if (config.type !== "none") {
+        console.log(`[ProxyManager] Loaded ${config.type} proxy: ${config.host}:${config.port}`);
+      }
+    } catch {
+      console.warn("[ProxyManager] Failed to parse saved proxy config, using direct connection");
+    }
+  }
+  setGlobalProxyManager(proxyManager);
+
   fastify.decorate("storage", opts.storage);
   fastify.decorate("processManager", processManager);
   fastify.decorate("agentSessionManager", agentSessionManager);
   fastify.decorate("remoteExecutorMap", remoteExecutorMap);
   fastify.decorate("remoteSessionMap", remoteSessionMap);
   fastify.decorate("eventBus", eventBus);
+  fastify.decorate("proxyManager", proxyManager);
   agentSessionManager.setEventBus(eventBus);
   processManager.setEventBus(eventBus);
 };

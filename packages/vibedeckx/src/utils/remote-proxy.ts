@@ -1,4 +1,12 @@
 import { randomUUID } from "crypto";
+import type { Dispatcher } from "undici";
+import type { ProxyManager } from "./proxy-manager.js";
+
+let globalProxyManager: ProxyManager | undefined;
+
+export function setGlobalProxyManager(pm: ProxyManager): void {
+  globalProxyManager = pm;
+}
 
 export interface ProxyResult {
   ok: boolean;
@@ -16,6 +24,8 @@ export interface ProxyResult {
 export interface ProxyOptions {
   requestId?: string;
   timeoutMs?: number;
+  /** Optional undici dispatcher for proxy support */
+  dispatcher?: Dispatcher;
 }
 
 const TRANSIENT_STATUS_CODES = new Set([502, 503, 504]);
@@ -39,6 +49,7 @@ async function proxyOnce(
   body: unknown | undefined,
   requestId: string,
   timeoutMs: number,
+  dispatcher?: Dispatcher,
 ): Promise<ProxyResult> {
   const start = Date.now();
   const controller = new AbortController();
@@ -53,12 +64,17 @@ async function proxyOnce(
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
     }
-    const response = await fetch(`${baseUrl}${apiPath}`, {
+    const effectiveDispatcher = dispatcher ?? globalProxyManager?.getFetchDispatcher();
+    const fetchOptions: RequestInit & { dispatcher?: Dispatcher } = {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
-    });
+    };
+    if (effectiveDispatcher) {
+      fetchOptions.dispatcher = effectiveDispatcher;
+    }
+    const response = await fetch(`${baseUrl}${apiPath}`, fetchOptions as RequestInit);
 
     const durationMs = Date.now() - start;
     console.log(`[proxyToRemote] ${requestId} -> ${response.status} (${durationMs}ms)`);
@@ -115,7 +131,7 @@ export async function proxyToRemote(
   const totalStart = Date.now();
   console.log(`[proxyToRemote] ${requestId} ${method} ${baseUrl}${apiPath}`);
 
-  let result = await proxyOnce(baseUrl, apiKey, method, apiPath, body, requestId, timeoutMs);
+  let result = await proxyOnce(baseUrl, apiKey, method, apiPath, body, requestId, timeoutMs, options?.dispatcher);
   let attempts = 1;
 
   for (let attempt = 1; attempt <= MAX_RETRIES && isTransientError(result); attempt++) {
@@ -125,7 +141,7 @@ export async function proxyToRemote(
       ` (last error: ${result.errorCode}, status: ${result.status})`
     );
     await new Promise((resolve) => setTimeout(resolve, delay));
-    result = await proxyOnce(baseUrl, apiKey, method, apiPath, body, requestId, timeoutMs);
+    result = await proxyOnce(baseUrl, apiKey, method, apiPath, body, requestId, timeoutMs, options?.dispatcher);
     attempts++;
   }
 
@@ -154,7 +170,7 @@ export async function proxyToRemoteRaw(
   remoteUrl: string,
   apiKey: string,
   apiPath: string,
-  options?: { timeoutMs?: number }
+  options?: { timeoutMs?: number; dispatcher?: Dispatcher }
 ): Promise<RawProxyResult> {
   const baseUrl = remoteUrl.replace(/\/+$/, "");
   const timeoutMs = options?.timeoutMs ?? 30_000;
@@ -162,14 +178,19 @@ export async function proxyToRemoteRaw(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${baseUrl}${apiPath}`, {
+    const effectiveDispatcher = options?.dispatcher ?? globalProxyManager?.getFetchDispatcher();
+    const fetchOptions: RequestInit & { dispatcher?: Dispatcher } = {
       method: "GET",
       headers: {
         "X-Vibedeckx-Api-Key": apiKey,
         "User-Agent": "Vibedeckx/1.0",
       },
       signal: controller.signal,
-    });
+    };
+    if (effectiveDispatcher) {
+      fetchOptions.dispatcher = effectiveDispatcher;
+    }
+    const response = await fetch(`${baseUrl}${apiPath}`, fetchOptions as RequestInit);
 
     return { ok: response.ok, status: response.status, body: response.body };
   } catch {

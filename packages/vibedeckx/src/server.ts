@@ -15,6 +15,7 @@ import diffRoutes from "./routes/diff-routes.js";
 import fileRoutes from "./routes/file-routes.js";
 import agentSessionRoutes from "./routes/agent-session-routes.js";
 import taskRoutes from "./routes/task-routes.js";
+import settingsRoutes from "./routes/settings-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
 import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
@@ -92,6 +93,7 @@ export const createServer = (opts: { storage: Storage }) => {
   server.register(fileRoutes);
   server.register(agentSessionRoutes);
   server.register(taskRoutes);
+  server.register(settingsRoutes);
   server.register(eventRoutes);
   server.register(terminalRoutes);
 

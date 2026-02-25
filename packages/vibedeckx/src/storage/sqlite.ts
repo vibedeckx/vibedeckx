@@ -75,6 +75,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS global_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 
   // Migration: add pty column to existing executors table if not present
@@ -541,6 +546,26 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
       delete: (id: string) => {
         db.prepare(`DELETE FROM agent_sessions WHERE id = @id`).run({ id });
+      },
+    },
+
+    settings: {
+      get: (key: string) => {
+        const row = db
+          .prepare<{ key: string }, { value: string }>(`SELECT value FROM global_settings WHERE key = @key`)
+          .get({ key });
+        return row?.value;
+      },
+
+      set: (key: string, value: string) => {
+        db.prepare(
+          `INSERT INTO global_settings (key, value) VALUES (@key, @value)
+           ON CONFLICT(key) DO UPDATE SET value = @value`
+        ).run({ key, value });
+      },
+
+      delete: (key: string) => {
+        db.prepare(`DELETE FROM global_settings WHERE key = @key`).run({ key });
       },
     },
 

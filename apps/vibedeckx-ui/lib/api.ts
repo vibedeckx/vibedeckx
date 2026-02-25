@@ -230,6 +230,12 @@ export interface FileContentResponse {
   size: number;
 }
 
+export interface ProxyConfig {
+  type: 'none' | 'http' | 'socks5';
+  host: string;
+  port: number;
+}
+
 export const api = {
   async getProjects(): Promise<Project[]> {
     const res = await fetch(`${getApiBase()}/api/projects`);
@@ -804,5 +810,40 @@ export const api = {
     await fetch(`${getApiBase()}/api/terminals/${terminalId}`, {
       method: "DELETE",
     });
+  },
+
+  // Settings API
+  async getProxySettings(): Promise<ProxyConfig> {
+    const res = await fetch(`${getApiBase()}/api/settings/proxy`);
+    if (!res.ok) {
+      return { type: 'none', host: '', port: 0 };
+    }
+    return res.json();
+  },
+
+  async updateProxySettings(config: ProxyConfig): Promise<ProxyConfig> {
+    const res = await fetch(`${getApiBase()}/api/settings/proxy`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async testProxyConnection(config: ProxyConfig): Promise<{ success: boolean; message?: string }> {
+    const res = await fetch(`${getApiBase()}/api/settings/proxy/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
   },
 };
