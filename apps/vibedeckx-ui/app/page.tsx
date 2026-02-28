@@ -20,8 +20,17 @@ import type { ExecutionMode, Task } from '@/lib/api';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
+import {
+  type WorkspaceStatus,
+  toBranchKey,
+  computeWorkspaceStatuses,
+  applyStatusWorking,
+  applyStatusCompleted,
+  clearRealtimeStatus,
+  applyGlobalSessionStatus,
+} from '@/lib/workspace-status';
 
-export type WorkspaceStatus = 'idle' | 'assigned' | 'working' | 'completed';
+export type { WorkspaceStatus } from '@/lib/workspace-status';
 
 export default function Home() {
   const { projectId: urlProject, tab: urlTab, branch: urlBranch } = useUrlState();
@@ -63,60 +72,19 @@ export default function Home() {
   const [realtimeWorkspaceStatuses, setRealtimeWorkspaceStatuses] = useState<Map<string, WorkspaceStatus>>(new Map());
 
   // Compute workspace statuses for all worktrees
-  const workspaceStatuses = useMemo(() => {
-    const map = new Map<string, WorkspaceStatus>();
-    if (!worktrees) return map;
-
-    const selectedKey = selectedBranch === null ? "" : selectedBranch;
-
-    for (const wt of worktrees) {
-      const branchKey = wt.branch === null ? "" : wt.branch;
-
-      // 1. Event-driven status (user has interacted with this branch)
-      const realtimeStatus = realtimeWorkspaceStatuses.get(branchKey);
-      if (realtimeStatus !== undefined) {
-        map.set(branchKey, realtimeStatus);
-        continue;
-      }
-
-      // 2. Fallback: polling + task data
-      //    Ignore polling for selected branch (auto-start creates idle "running" sessions)
-      const sessionStatus = branchKey === selectedKey
-        ? undefined
-        : sessionStatuses.get(branchKey);
-      const assignedTaskForBranch = tasks.find(t => t.assigned_branch === branchKey);
-
-      if (assignedTaskForBranch && assignedTaskForBranch.status === "done") {
-        map.set(branchKey, "completed");
-      } else if (sessionStatus === "running") {
-        map.set(branchKey, "working");
-      } else if (assignedTaskForBranch) {
-        map.set(branchKey, "assigned");
-      } else {
-        map.set(branchKey, "idle");
-      }
-    }
-    return map;
-  }, [worktrees, sessionStatuses, tasks, selectedBranch, realtimeWorkspaceStatuses]);
+  const workspaceStatuses = useMemo(
+    () => computeWorkspaceStatuses(worktrees, realtimeWorkspaceStatuses, sessionStatuses, tasks, selectedBranch),
+    [worktrees, sessionStatuses, tasks, selectedBranch, realtimeWorkspaceStatuses]
+  );
 
   // Agent started working → blue
   const handleStatusChange = useCallback(() => {
-    const branchKey = selectedBranch === null ? "" : selectedBranch;
-    setRealtimeWorkspaceStatuses(prev => {
-      const next = new Map(prev);
-      next.set(branchKey, "working");
-      return next;
-    });
+    setRealtimeWorkspaceStatuses(prev => applyStatusWorking(prev, selectedBranch));
   }, [selectedBranch]);
 
   // Task completed → green (+ sync DB data in background)
   const handleTaskCompleted = useCallback(() => {
-    const branchKey = selectedBranch === null ? "" : selectedBranch;
-    setRealtimeWorkspaceStatuses(prev => {
-      const next = new Map(prev);
-      next.set(branchKey, "completed");
-      return next;
-    });
+    setRealtimeWorkspaceStatuses(prev => applyStatusCompleted(prev, selectedBranch));
     refetchTasks();
     refetchSessionStatuses();
   }, [selectedBranch, refetchTasks, refetchSessionStatuses]);
@@ -127,34 +95,19 @@ export default function Home() {
 
   // Global SSE events — updates sidebar status for non-selected workspaces
   const handleGlobalSessionStatus = useCallback((branch: string | null, status: "running" | "stopped" | "error") => {
-    const branchKey = branch === null ? "" : branch;
-    if (status === "running") {
-      setRealtimeWorkspaceStatuses(prev => {
-        const next = new Map(prev);
-        next.set(branchKey, "working");
-        return next;
-      });
-    } else {
-      // "stopped" or "error" — delete realtime entry so polling/task fallback takes over
-      setRealtimeWorkspaceStatuses(prev => {
-        const next = new Map(prev);
-        next.delete(branchKey);
-        return next;
-      });
-      // Refetch tasks so fallback logic can detect task.status === "done" → "completed"
-      refetchTasks();
-    }
+    setRealtimeWorkspaceStatuses(prev => {
+      const result = applyGlobalSessionStatus(prev, branch, status);
+      if (result.shouldRefetchTasks) {
+        refetchTasks();
+      }
+      return result.realtimeStatuses;
+    });
     refetchSessionStatuses();
   }, [refetchSessionStatuses, refetchTasks]);
 
   const handleGlobalSessionFinished = useCallback((branch: string | null) => {
-    const branchKey = branch === null ? "" : branch;
     // Clear realtime entry and refetch so fallback picks up task completion
-    setRealtimeWorkspaceStatuses(prev => {
-      const next = new Map(prev);
-      next.delete(branchKey);
-      return next;
-    });
+    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, branch));
     refetchTasks();
     refetchSessionStatuses();
   }, [refetchTasks, refetchSessionStatuses]);
@@ -171,8 +124,7 @@ export default function Home() {
 
   // Compute assigned task for the currently selected branch
   const assignedTask = useMemo(() => {
-    // Map selectedBranch (null = main) to assigned_branch value ("" = main)
-    const branchKey = selectedBranch === null ? "" : selectedBranch;
+    const branchKey = toBranchKey(selectedBranch);
     return tasks.find((t) => t.assigned_branch === branchKey) ?? null;
   }, [tasks, selectedBranch]);
 
@@ -184,12 +136,7 @@ export default function Home() {
 
   const handleResetTask = useCallback((taskId: string) => {
     // Clear realtime status so the branch falls back to polling/task-derived (idle)
-    const branchKey = selectedBranch === null ? "" : selectedBranch;
-    setRealtimeWorkspaceStatuses(prev => {
-      const next = new Map(prev);
-      next.delete(branchKey);
-      return next;
-    });
+    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, selectedBranch));
     updateTask(taskId, { assigned_branch: null });
   }, [selectedBranch, updateTask]);
 
