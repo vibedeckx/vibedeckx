@@ -7,6 +7,7 @@ import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
 import { setGlobalProxyManager } from "../utils/remote-proxy.js";
+import { RemotePatchCache } from "../remote-patch-cache.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -20,6 +21,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
   const remoteSessionMap = new Map<string, RemoteSessionInfo>();
   const eventBus = new EventBus();
+  const remotePatchCache = new RemotePatchCache();
 
   // Initialize proxy manager from stored settings
   const proxyManager = new ProxyManager();
@@ -44,6 +46,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("remoteSessionMap", remoteSessionMap);
   fastify.decorate("eventBus", eventBus);
   fastify.decorate("proxyManager", proxyManager);
+  fastify.decorate("remotePatchCache", remotePatchCache);
   agentSessionManager.setEventBus(eventBus);
   processManager.setEventBus(eventBus);
 };

@@ -301,6 +301,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/restart`
         );
+        fastify.remotePatchCache.delete(req.params.sessionId);
         return reply.code(result.status || 200).send(result.data);
       }
 
@@ -432,6 +433,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
         fastify.remoteSessionMap.delete(req.params.sessionId);
+        fastify.remotePatchCache.delete(req.params.sessionId);
         return reply.code(result.status || 200).send(result.data);
       }
 

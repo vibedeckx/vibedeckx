@@ -3,6 +3,7 @@ import type { ProcessManager } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import type { EventBus } from "./event-bus.js";
 import type { ProxyManager } from "./utils/proxy-manager.js";
+import type { RemotePatchCache } from "./remote-patch-cache.js";
 
 export interface RemoteExecutorInfo {
   remoteUrl: string;
@@ -27,5 +28,6 @@ declare module "fastify" {
     remoteSessionMap: Map<string, RemoteSessionInfo>;
     eventBus: EventBus;
     proxyManager: ProxyManager;
+    remotePatchCache: RemotePatchCache;
   }
 }
