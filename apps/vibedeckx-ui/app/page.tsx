@@ -295,29 +295,27 @@ Please proceed step by step and let me know if there are any issues or conflicts
               </div>
             </div>
 
-            {/* Right Panel: Executors/Diff (top) + Agent Conversation (bottom) */}
+            {/* Right Panel: Agent/Executors/Diff/Terminal as tabs */}
             <div className="w-1/2 flex flex-col overflow-hidden">
-              <div className="flex-[3] min-h-0 overflow-hidden">
-                <RightPanel
-                  projectId={currentProject?.id ?? null}
-                  selectedBranch={selectedBranch}
-                  onMergeRequest={handleMergeRequest}
-                  project={currentProject}
-                  onExecutorModeChange={handleExecutorModeChange}
-                />
-              </div>
-              <div className="flex-[2] min-h-0 overflow-hidden border-t">
-                <AgentConversation
-                  ref={agentRef}
-                  projectId={currentProject?.id ?? null}
-                  branch={selectedBranch}
-                  project={currentProject}
-                  onAgentModeChange={handleAgentModeChange}
-                  onTaskCompleted={handleTaskCompleted}
-                  onSessionStarted={handleSessionStarted}
-                  onStatusChange={handleStatusChange}
-                />
-              </div>
+              <RightPanel
+                projectId={currentProject?.id ?? null}
+                selectedBranch={selectedBranch}
+                onMergeRequest={handleMergeRequest}
+                project={currentProject}
+                onExecutorModeChange={handleExecutorModeChange}
+                agentSlot={
+                  <AgentConversation
+                    ref={agentRef}
+                    projectId={currentProject?.id ?? null}
+                    branch={selectedBranch}
+                    project={currentProject}
+                    onAgentModeChange={handleAgentModeChange}
+                    onTaskCompleted={handleTaskCompleted}
+                    onSessionStarted={handleSessionStarted}
+                    onStatusChange={handleStatusChange}
+                  />
+                }
+              />
             </div>
           </div>
 
