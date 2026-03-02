@@ -3,6 +3,7 @@ import fp from "fastify-plugin";
 import type { Storage } from "../storage/types.js";
 import { ProcessManager } from "../process-manager.js";
 import { AgentSessionManager } from "../agent-session-manager.js";
+import { ChatSessionManager } from "../chat-session-manager.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
@@ -18,6 +19,7 @@ interface SharedServicesOptions {
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
   const processManager = new ProcessManager(opts.storage);
   const agentSessionManager = new AgentSessionManager(opts.storage);
+  const chatSessionManager = new ChatSessionManager();
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
   const remoteSessionMap = new Map<string, RemoteSessionInfo>();
   const eventBus = new EventBus();
@@ -42,6 +44,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("storage", opts.storage);
   fastify.decorate("processManager", processManager);
   fastify.decorate("agentSessionManager", agentSessionManager);
+  fastify.decorate("chatSessionManager", chatSessionManager);
   fastify.decorate("remoteExecutorMap", remoteExecutorMap);
   fastify.decorate("remoteSessionMap", remoteSessionMap);
   fastify.decorate("eventBus", eventBus);

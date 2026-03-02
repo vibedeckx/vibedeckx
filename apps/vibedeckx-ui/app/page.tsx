@@ -291,7 +291,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 </div>
               )}
               <div className="flex-1 overflow-hidden">
-                <MainConversation projectId={currentProject?.id ?? null} />
+                <MainConversation projectId={currentProject?.id ?? null} branch={selectedBranch} />
               </div>
             </div>
 

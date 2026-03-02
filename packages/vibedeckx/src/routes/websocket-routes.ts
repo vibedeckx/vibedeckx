@@ -459,6 +459,50 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
       }
     );
+    // Chat Session WebSocket
+    fastify.get<{ Params: { sessionId: string } }>(
+      "/api/chat-sessions/:sessionId/stream",
+      { websocket: true },
+      (socket, req) => {
+        const { sessionId } = req.params;
+
+        console.log(`[ChatWS] Client connected for session ${sessionId}`);
+
+        // Ping/pong keepalive
+        const pingInterval = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.ping();
+          }
+        }, 30000);
+
+        const unsubscribe = fastify.chatSessionManager.subscribe(sessionId, socket);
+
+        if (!unsubscribe) {
+          console.log(`[ChatWS] Session ${sessionId} not found`);
+          clearInterval(pingInterval);
+          socket.send(JSON.stringify({ error: "Session not found" }));
+          socket.close();
+          return;
+        }
+
+        socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
+          try {
+            const message = JSON.parse(data.toString()) as AgentWsInput;
+            if (message.type === "user_message") {
+              fastify.chatSessionManager.sendMessage(sessionId, message.content);
+            }
+          } catch (error) {
+            console.error("[ChatWS] Failed to parse message:", error);
+          }
+        });
+
+        socket.on("close", () => {
+          console.log(`[ChatWS] Client disconnected from session ${sessionId}`);
+          clearInterval(pingInterval);
+          unsubscribe?.();
+        });
+      }
+    );
   });
 };
 
