@@ -405,7 +405,6 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     sessionGenerationRef.current += 1;
 
     setSession(null);
-    setMessages([]);
     setStatus("stopped");
     setIsConnected(false);
     setIsInitialized(false);

@@ -662,7 +662,6 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     // Reset all state
     setSession(null);
-    setMessages([]);
     setStatus("stopped");
     setIsConnected(false);
     setIsInitialized(false);
