@@ -176,6 +176,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   const connectionStartTimeRef = useRef<number | null>(null);
   const stabilityTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const shortLivedConnectionsRef = useRef(0);
+  const lastStartFailedRef = useRef(false);
 
   const MIN_STABLE_CONNECTION_MS = 5000;
   const MAX_RECONNECT_DELAY_MS = 30000;
@@ -270,6 +271,10 @@ export function useChatSession(projectId: string | null, branch: string | null) 
       if (connectionDuration > 0 && connectionDuration < MIN_STABLE_CONNECTION_MS) {
         shortLivedConnectionsRef.current++;
         if (shortLivedConnectionsRef.current >= MAX_SHORT_LIVED_CONNECTIONS) {
+          if (lastStartFailedRef.current) {
+            setError("Unable to connect to remote server. Please check the server configuration.");
+            return;
+          }
           if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
           setSession(null);
           setError(null);
@@ -310,6 +315,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     const generation = sessionGenerationRef.current;
     setError(null);
     setIsInitialized(false);
+    lastStartFailedRef.current = false;
 
     const cacheKey = getCacheKey(projectId, branch);
     const cached = sessionCache.get(cacheKey);
@@ -342,6 +348,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
       if (sessionGenerationRef.current !== generation) return null;
       const errorMsg = e instanceof Error ? e.message : "Failed to start session";
       setError(errorMsg);
+      lastStartFailedRef.current = true;
       return null;
     } finally {
       if (sessionGenerationRef.current === generation) {
@@ -415,13 +422,14 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;
     shortLivedConnectionsRef.current = 0;
+    lastStartFailedRef.current = false;
 
     shouldAutoStartRef.current = true;
   }, [projectId, branch]);
 
   // Auto-start session
   useEffect(() => {
-    if (shouldAutoStartRef.current && projectId && !session && !isLoading) {
+    if (shouldAutoStartRef.current && projectId && !session && !isLoading && !lastStartFailedRef.current) {
       shouldAutoStartRef.current = false;
       startSession();
     }

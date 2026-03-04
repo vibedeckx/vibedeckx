@@ -271,6 +271,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const shortLivedConnectionsRef = useRef(0);
   const isReplayingRef = useRef(false); // True during history replay (before Ready signal)
   const sessionGenerationRef = useRef(0); // Incremented on branch/project change to discard stale API responses
+  const lastStartFailedRef = useRef(false); // Prevents auto-restart loop after session creation failure
   const onTaskCompletedRef = useRef(options?.onTaskCompleted);
   const onSessionStartedRef = useRef(options?.onSessionStarted);
 
@@ -434,6 +435,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // If we've had multiple short-lived connections, the session is likely invalid
         if (shortLivedConnectionsRef.current >= MAX_SHORT_LIVED_CONNECTIONS) {
           console.log("[AgentSession] Multiple short-lived connections detected, session likely invalid - will recreate");
+          // Don't auto-restart if the last session creation failed (prevents infinite loop)
+          if (lastStartFailedRef.current) {
+            console.log("[AgentSession] Skipping auto-restart: last session creation failed");
+            setError("Unable to connect to remote server. Please check the server configuration.");
+            return;
+          }
           // Invalidate cache so auto-start does a full REST call
           if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
           // Clear current session to trigger new session creation
@@ -487,6 +494,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     setError(null);
     setIsInitialized(false);
+    lastStartFailedRef.current = false;
 
     // Try cached session first — skip the slow REST call if we already know the session ID
     const cacheKey = getCacheKey(projectId, branch);
@@ -539,6 +547,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
       const errorMsg = e instanceof Error ? e.message : "Failed to start session";
       setError(errorMsg);
+      lastStartFailedRef.current = true;
       console.error("[AgentSession] Failed to start session:", e);
       return null;
     } finally {
@@ -673,6 +682,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;
     shortLivedConnectionsRef.current = 0;
+    lastStartFailedRef.current = false;
 
     // Mark that we need to auto-start session after reset
     shouldAutoStartRef.current = true;
@@ -680,7 +690,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
-    if (shouldAutoStartRef.current && projectId && !session && !isLoading) {
+    if (shouldAutoStartRef.current && projectId && !session && !isLoading && !lastStartFailedRef.current) {
       shouldAutoStartRef.current = false;
       startSession();
     }
