@@ -243,38 +243,86 @@ export class ChatSessionManager {
         abortSignal: abortController.signal,
       });
 
-      for await (const chunk of result.textStream) {
+      for await (const part of result.fullStream) {
         if (abortController.signal.aborted) break;
 
-        accumulatedText += chunk;
+        switch (part.type) {
+          case "text-delta": {
+            accumulatedText += part.text;
 
-        if (assistantIndex === null) {
-          // First chunk — create the assistant entry
-          const assistantMsg: AgentMessage = {
-            type: "assistant",
-            content: accumulatedText,
-            partial: true,
-            timestamp: Date.now(),
-          };
-          assistantIndex = session.store.nextIndex;
-          session.store.nextIndex++;
+            if (assistantIndex === null) {
+              // First chunk — create the assistant entry
+              const assistantMsg: AgentMessage = {
+                type: "assistant",
+                content: accumulatedText,
+                partial: true,
+                timestamp: Date.now(),
+              };
+              assistantIndex = session.store.nextIndex;
+              session.store.nextIndex++;
 
-          const patch = ConversationPatch.addEntry(assistantIndex, assistantMsg);
-          session.store.patches.push(patch);
-          session.store.entries[assistantIndex] = assistantMsg;
-          this.broadcastPatch(session, patch);
-        } else {
-          // Subsequent chunks — replace entry
-          const assistantMsg: AgentMessage = {
-            type: "assistant",
-            content: accumulatedText,
-            partial: true,
-            timestamp: Date.now(),
-          };
-          const patch = ConversationPatch.replaceEntry(assistantIndex, assistantMsg);
-          session.store.patches.push(patch);
-          session.store.entries[assistantIndex] = assistantMsg;
-          this.broadcastPatch(session, patch);
+              const patch = ConversationPatch.addEntry(assistantIndex, assistantMsg);
+              session.store.patches.push(patch);
+              session.store.entries[assistantIndex] = assistantMsg;
+              this.broadcastPatch(session, patch);
+            } else {
+              // Subsequent chunks — replace entry
+              const assistantMsg: AgentMessage = {
+                type: "assistant",
+                content: accumulatedText,
+                partial: true,
+                timestamp: Date.now(),
+              };
+              const patch = ConversationPatch.replaceEntry(assistantIndex, assistantMsg);
+              session.store.patches.push(patch);
+              session.store.entries[assistantIndex] = assistantMsg;
+              this.broadcastPatch(session, patch);
+            }
+            break;
+          }
+
+          case "tool-call": {
+            // Finalize any partial assistant message before the tool call
+            if (assistantIndex !== null && accumulatedText) {
+              const finalMsg: AgentMessage = {
+                type: "assistant",
+                content: accumulatedText,
+                partial: false,
+                timestamp: Date.now(),
+              };
+              const patch = ConversationPatch.replaceEntry(assistantIndex, finalMsg);
+              session.store.patches.push(patch);
+              session.store.entries[assistantIndex] = finalMsg;
+              this.broadcastPatch(session, patch);
+            }
+
+            const toolUseMsg: AgentMessage = {
+              type: "tool_use",
+              tool: part.toolName,
+              input: part.input,
+              toolUseId: part.toolCallId,
+              timestamp: Date.now(),
+            };
+            this.pushEntry(session, toolUseMsg);
+
+            // Reset so next text starts a new assistant message
+            assistantIndex = null;
+            accumulatedText = "";
+            break;
+          }
+
+          case "tool-result": {
+            const output = part.output;
+            const toolResultMsg: AgentMessage = {
+              type: "tool_result",
+              tool: part.toolName,
+              output: typeof output === "string" ? output : JSON.stringify(output),
+              toolUseId: part.toolCallId,
+              timestamp: Date.now(),
+            };
+            this.pushEntry(session, toolResultMsg);
+            break;
+          }
         }
       }
 

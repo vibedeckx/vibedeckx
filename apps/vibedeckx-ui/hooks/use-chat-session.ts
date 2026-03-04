@@ -10,6 +10,8 @@ import { getWebSocketUrl } from "@/lib/api";
 export type AgentMessage =
   | { type: "user"; content: string; timestamp: number }
   | { type: "assistant"; content: string; partial?: boolean; timestamp: number }
+  | { type: "tool_use"; tool: string; input: unknown; toolUseId?: string; timestamp: number }
+  | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }
   | { type: "error"; message: string; timestamp: number }
   | { type: "system"; content: string; timestamp: number };
 

@@ -17,8 +17,17 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { useChatSession } from "@/hooks/use-chat-session";
-import { MessageSquare, Loader2, Square } from "lucide-react";
+import { MessageSquare, Loader2, Square, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+
+function getToolLabel(tool: string): string {
+  switch (tool) {
+    case "getExecutorStatus":
+      return "Checking executor status...";
+    default:
+      return `Running ${tool}...`;
+  }
+}
 
 interface MainConversationProps {
   projectId: string | null;
@@ -109,6 +118,30 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
                     <MessageResponse>{msg.content}</MessageResponse>
                   </MessageContent>
                 </Message>
+              );
+            }
+
+            if (msg.type === "tool_use") {
+              return (
+                <div key={index} className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground">
+                  <Search className="w-3.5 h-3.5 animate-pulse" />
+                  <span>{getToolLabel(msg.tool)}</span>
+                </div>
+              );
+            }
+
+            if (msg.type === "tool_result") {
+              return (
+                <div key={index} className="px-4 py-2">
+                  <details className="text-xs text-muted-foreground">
+                    <summary className="cursor-pointer hover:text-foreground">
+                      Tool result
+                    </summary>
+                    <pre className="mt-1 p-2 bg-muted/50 rounded text-xs overflow-x-auto whitespace-pre-wrap">
+                      {msg.output}
+                    </pre>
+                  </details>
+                </div>
               );
             }
 
