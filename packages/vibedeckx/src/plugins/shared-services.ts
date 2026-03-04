@@ -20,7 +20,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const processManager = new ProcessManager(opts.storage);
   const agentSessionManager = new AgentSessionManager(opts.storage);
   agentSessionManager.restoreSessionsFromDb();
-  const chatSessionManager = new ChatSessionManager();
+  const chatSessionManager = new ChatSessionManager(opts.storage, processManager);
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
   const remoteSessionMap = new Map<string, RemoteSessionInfo>();
   const eventBus = new EventBus();

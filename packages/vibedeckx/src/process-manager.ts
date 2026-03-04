@@ -456,6 +456,27 @@ export class ProcessManager {
   }
 
   /**
+   * Get all processes for a given executor ID with their status and logs
+   */
+  getProcessesByExecutorId(executorId: string): Array<{
+    processId: string;
+    isRunning: boolean;
+    logs: LogMessage[];
+  }> {
+    const results: Array<{ processId: string; isRunning: boolean; logs: LogMessage[] }> = [];
+    for (const [processId, proc] of this.processes) {
+      if (proc.executorId === executorId) {
+        results.push({
+          processId,
+          isRunning: this.isRunning(processId),
+          logs: proc.logs,
+        });
+      }
+    }
+    return results;
+  }
+
+  /**
    * Kill all running processes and clear state for graceful shutdown
    */
   shutdown(): void {
