@@ -607,14 +607,19 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     try {
       await switchModeApi(session.id, mode);
-      // Update session locally - history is preserved, new messages come via WebSocket
-      setSession((prev) => prev ? { ...prev, permissionMode: mode } : prev);
+      // Update session locally and cache - history is preserved, new messages come via WebSocket
+      setSession((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev, permissionMode: mode };
+        if (projectId) sessionCache.set(getCacheKey(projectId, branch), updated);
+        return updated;
+      });
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : "Failed to switch mode";
       setError(errorMsg);
       console.error("[AgentSession] Failed to switch mode:", e);
     }
-  }, [session?.id]);
+  }, [session?.id, projectId, branch]);
 
   // Accept plan and restart in edit mode
   const acceptPlan = useCallback(async (planContent: string) => {
@@ -624,14 +629,19 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     try {
       await acceptPlanApi(session.id, planContent);
-      // Update session locally - mode switches to edit
-      setSession((prev) => prev ? { ...prev, permissionMode: "edit" } : prev);
+      // Update session locally and cache - mode switches to edit
+      setSession((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev, permissionMode: "edit" as const };
+        if (projectId) sessionCache.set(getCacheKey(projectId, branch), updated);
+        return updated;
+      });
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : "Failed to accept plan";
       setError(errorMsg);
       console.error("[AgentSession] Failed to accept plan:", e);
     }
-  }, [session?.id]);
+  }, [session?.id, projectId, branch]);
 
   // Cleanup on unmount
   useEffect(() => {

@@ -66,6 +66,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     acceptPlan,
   } = useAgentSession(projectId, branch, project?.agent_mode, { onTaskCompleted, onSessionStarted });
 
+  // Sync local permissionMode from session (e.g. after workspace switch restores cached session)
+  useEffect(() => {
+    if (session?.permissionMode) {
+      setPermissionMode(session.permissionMode);
+    }
+  }, [session?.permissionMode]);
+
   // Notify parent when agent starts working (status "running" + user has sent messages).
   // Skips auto-started idle sessions that have no messages yet.
   const prevWorkingRef = useRef(false);
