@@ -60,6 +60,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: branch ?? null,
           status: session?.status || "running",
           permissionMode: session?.permissionMode || "edit",
+          agentType: session?.agentType || "claude-code",
         },
         messages,
       });
@@ -182,6 +183,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: branch ?? null,
           status: session?.status || "running",
           permissionMode: session?.permissionMode || "edit",
+          agentType: session?.agentType || "claude-code",
         },
         messages,
       });
@@ -223,6 +225,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: session.branch,
           status: session.status,
           permissionMode: session.permissionMode,
+          agentType: session.agentType || "claude-code",
         },
         messages,
       });
