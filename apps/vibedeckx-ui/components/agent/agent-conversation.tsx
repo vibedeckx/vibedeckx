@@ -15,7 +15,8 @@ import { Loader } from "@/components/ai-elements/loader";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw } from "lucide-react";
 import { ExecutionModeToggle } from "@/components/ui/execution-mode-toggle";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
-import type { Project, ExecutionMode, AgentType } from "@/lib/api";
+import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
+import { getAgentProviders } from "@/lib/api";
 
 interface AgentConversationContextValue {
   sendMessage: (content: string, sessionId?: string) => Promise<void>;
@@ -51,6 +52,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   function AgentConversation({ projectId, branch, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange }, ref) {
   const [input, setInput] = useState("");
   const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
+  const [agentType, setAgentType] = useState<AgentType>("claude-code");
+  const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
 
   const {
     session,
@@ -66,7 +69,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     restartSession,
     switchMode,
     acceptPlan,
-  } = useAgentSession(projectId, branch, project?.agent_mode, undefined, { onTaskCompleted, onSessionStarted });
+  } = useAgentSession(projectId, branch, project?.agent_mode, agentType, { onTaskCompleted, onSessionStarted });
+
+  // Fetch available agent providers on mount
+  useEffect(() => {
+    getAgentProviders().then(setProviders).catch(() => {});
+  }, []);
 
   // Sync local permissionMode from session (e.g. after workspace switch restores cached session)
   useEffect(() => {
@@ -150,8 +158,25 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       {/* Header */}
       <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b bg-muted/30">
         <div className="flex items-center gap-2">
-          <Bot className="h-4 w-4 text-violet-500" />
-          <span className="text-sm font-medium">Claude Code</span>
+          <Bot className={`h-4 w-4 ${agentType === "codex" ? "text-green-500" : "text-violet-500"}`} />
+          {providers.length > 1 ? (
+            <select
+              className="text-sm font-medium bg-transparent border border-border rounded px-1.5 py-0.5 outline-none"
+              value={agentType}
+              onChange={(e) => setAgentType(e.target.value as AgentType)}
+              disabled={session !== null}
+            >
+              {providers.map((p) => (
+                <option key={p.type} value={p.type} disabled={!p.available}>
+                  {p.displayName}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-sm font-medium">
+              {agentType === "codex" ? "Codex" : "Claude Code"}
+            </span>
+          )}
           <PermissionModeToggle
             mode={permissionMode}
             onModeChange={handlePermissionModeChange}
@@ -250,7 +275,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               )}
             </div>
           ) : (
-            <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode, agentType: "claude-code" }}>
+            <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode, agentType }}>
               <div className="space-y-1">
                 {messages.map((msg, index) => (
                   <AgentMessageItem key={index} message={msg} messageIndex={index} />
