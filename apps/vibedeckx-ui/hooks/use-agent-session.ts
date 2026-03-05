@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
 import { getWebSocketUrl } from "@/lib/api";
+import type { AgentType } from "@/lib/api";
 
 // ============ Types ============
 
@@ -14,7 +15,8 @@ export type AgentMessage =
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }
   | { type: "thinking"; content: string; timestamp: number }
   | { type: "error"; message: string; timestamp: number }
-  | { type: "system"; content: string; timestamp: number };
+  | { type: "system"; content: string; timestamp: number }
+  | { type: "approval_request"; requestType: "command" | "fileChange"; requestId: string; command?: string; cwd?: string; changes?: Array<{path: string; diff?: string; kind: string}>; timestamp: number };
 
 export type AgentSessionStatus = "running" | "stopped" | "error";
 
@@ -24,6 +26,7 @@ export interface AgentSession {
   branch: string | null;
   status: AgentSessionStatus;
   permissionMode?: "plan" | "edit";
+  agentType?: AgentType;
 }
 
 // ============ JSON Patch Types (RFC 6902) ============
