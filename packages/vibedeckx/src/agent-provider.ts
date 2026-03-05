@@ -6,8 +6,8 @@
  * stdout parsing, and stdin formatting.
  */
 
-// Temporary AgentType until task 1.4 adds it to agent-types.ts
-export type AgentType = "claude-code" | "codex";
+import type { AgentType } from "./agent-types.js";
+export type { AgentType };
 
 // ============ SpawnConfig (task 1.3) ============
 

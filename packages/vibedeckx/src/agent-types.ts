@@ -2,6 +2,10 @@
  * Agent Session Types for Claude Code Integration
  */
 
+// ============ Agent Type ============
+
+export type AgentType = "claude-code" | "codex";
+
 // ============ Agent Message Types ============
 
 export type AgentMessage =
