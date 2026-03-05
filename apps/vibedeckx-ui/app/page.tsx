@@ -284,12 +284,9 @@ Please proceed step by step and let me know if there are any issues or conflicts
                   <ProjectCard
                     project={currentProject}
                     selectedBranch={selectedBranch}
-                    onBranchChange={setSelectedBranch}
                     onUpdateProject={updateProject}
                     onDeleteProject={deleteProject}
                     onSyncPrompt={handleSyncPrompt}
-                    worktrees={worktrees}
-                    onWorktreesRefetch={refetchWorktrees}
                     assignedTask={assignedTask}
                     onStartTask={handleStartTask}
                     onResetTask={handleResetTask}

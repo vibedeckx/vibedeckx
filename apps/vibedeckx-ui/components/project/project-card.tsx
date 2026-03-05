@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,17 +9,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { FolderOpen, Calendar, GitBranch, Plus, ChevronDown, Trash2, Globe, MoreVertical, Pencil, ArrowUp, ArrowDown, Play, RotateCcw, Copy, Check, Loader2 } from "lucide-react";
-import { api, type Project, type Worktree, type Task, type SyncButtonConfig, type SyncExecutionResult, type ExecutionMode } from "@/lib/api";
-import { CreateWorktreeDialog } from "./create-worktree-dialog";
-import { DeleteWorktreeDialog } from "./delete-worktree-dialog";
+import { FolderOpen, Calendar, Trash2, Globe, MoreVertical, Pencil, ArrowUp, ArrowDown, Play, RotateCcw, Copy, Check, Loader2 } from "lucide-react";
+import { api, type Project, type Task, type SyncButtonConfig, type SyncExecutionResult, type ExecutionMode } from "@/lib/api";
 import { EditProjectDialog } from "./edit-project-dialog";
 import { SyncOutputDialog } from "./sync-output-dialog";
 
 interface ProjectCardProps {
   project: Project;
   selectedBranch: string | null;
-  onBranchChange: (branch: string | null) => void;
   onUpdateProject: (id: string, opts: {
     name?: string;
     path?: string | null;
@@ -31,20 +28,13 @@ interface ProjectCardProps {
   }) => Promise<void> | Promise<unknown>;
   onDeleteProject: (id: string) => Promise<void>;
   onSyncPrompt?: (prompt: string, executionMode: ExecutionMode) => void;
-  worktrees?: Worktree[];
-  onWorktreesRefetch?: () => void;
   assignedTask?: Task | null;
   onStartTask?: (task: Task) => void;
   onResetTask?: (taskId: string) => void;
   startingTask?: boolean;
 }
 
-export function ProjectCard({ project, selectedBranch, onBranchChange, onUpdateProject, onDeleteProject, onSyncPrompt, worktrees: externalWorktrees, onWorktreesRefetch, assignedTask, onStartTask, onResetTask, startingTask }: ProjectCardProps) {
-  const [internalWorktrees, setInternalWorktrees] = useState<Worktree[]>([]);
-  const [internalLoading, setInternalLoading] = useState(true);
-  const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [worktreeToDelete, setWorktreeToDelete] = useState<Worktree | null>(null);
+export function ProjectCard({ project, selectedBranch, onUpdateProject, onDeleteProject, onSyncPrompt, assignedTask, onStartTask, onResetTask, startingTask }: ProjectCardProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [syncOutputOpen, setSyncOutputOpen] = useState(false);
   const [syncOutput, setSyncOutput] = useState<{
@@ -59,43 +49,6 @@ export function ProjectCard({ project, selectedBranch, onBranchChange, onUpdateP
     navigator.clipboard.writeText(text);
     setCopiedPath(text);
     setTimeout(() => setCopiedPath(null), 2000);
-  };
-
-  const useExternal = externalWorktrees !== undefined;
-  const worktrees = useExternal ? externalWorktrees : internalWorktrees;
-  const loading = useExternal ? false : internalLoading;
-
-  const fetchWorktrees = useCallback(() => {
-    if (useExternal) return;
-    api.getProjectWorktrees(project.id)
-      .then((wts) => {
-        setInternalWorktrees(wts);
-      })
-      .catch(() => setInternalWorktrees([{ branch: null }]))
-      .finally(() => setInternalLoading(false));
-  }, [project.id, useExternal]);
-
-  useEffect(() => {
-    if (!useExternal) fetchWorktrees();
-  }, [fetchWorktrees, useExternal]);
-
-  const handleWorktreeCreated = (branch: string) => {
-    if (onWorktreesRefetch) onWorktreesRefetch();
-    else fetchWorktrees();
-    onBranchChange(branch);
-  };
-
-  const handleDeleteClick = (e: React.MouseEvent, worktree: Worktree) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setWorktreeToDelete(worktree);
-    setDeleteDialogOpen(true);
-  };
-
-  const handleWorktreeDeleted = () => {
-    onBranchChange(null);
-    if (onWorktreesRefetch) onWorktreesRefetch();
-    else fetchWorktrees();
   };
 
   const handleSyncButton = async (syncType: 'up' | 'down') => {
@@ -127,8 +80,6 @@ export function ProjectCard({ project, selectedBranch, onBranchChange, onUpdateP
       });
     }
   };
-
-  const selectedWorktreeData = worktrees.find(w => w.branch === selectedBranch);
 
   const showSyncUp = !!project.sync_up_config;
   const showSyncDown = !!project.sync_down_config;
@@ -231,69 +182,6 @@ export function ProjectCard({ project, selectedBranch, onBranchChange, onUpdateP
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Calendar className="h-4 w-4" />
           <span>{createdDate}</span>
-        </div>
-        <div className="border-t pt-2">
-          {loading ? (
-            <div className="text-sm text-muted-foreground">Loading worktrees...</div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <GitBranch className="h-4 w-4 text-muted-foreground" />
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="flex-1 justify-between">
-                    <span className="truncate">
-                      {selectedBranch ?? "main"}
-                    </span>
-                    <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-[var(--radix-dropdown-menu-trigger-width)]">
-                  {worktrees.map((wt) => (
-                    <DropdownMenuItem
-                      key={wt.branch ?? "__main__"}
-                      className="flex items-center justify-between gap-2"
-                      onSelect={() => onBranchChange(wt.branch)}
-                    >
-                      <span className="truncate">
-                        {wt.branch ?? "main"}
-                      </span>
-                      {wt.branch !== null && (
-                        <button
-                          onClick={(e) => handleDeleteClick(e, wt)}
-                          className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
-                          title="Delete worktree"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      )}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                onClick={() => setCreateDialogOpen(true)}
-                title="Create new worktree"
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-          )}
-          <CreateWorktreeDialog
-            projectId={project.id}
-            project={project}
-            open={createDialogOpen}
-            onOpenChange={setCreateDialogOpen}
-            onWorktreeCreated={handleWorktreeCreated}
-          />
-          <DeleteWorktreeDialog
-            projectId={project.id}
-            worktree={worktreeToDelete}
-            open={deleteDialogOpen}
-            onOpenChange={setDeleteDialogOpen}
-            onWorktreeDeleted={handleWorktreeDeleted}
-          />
         </div>
         {assignedTask && (
           <div className="border-t pt-2 space-y-2">
