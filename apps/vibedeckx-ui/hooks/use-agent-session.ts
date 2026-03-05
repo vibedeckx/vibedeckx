@@ -81,12 +81,13 @@ function getApiBase(): string {
 async function createOrGetSession(
   projectId: string,
   branch: string | null,
-  permissionMode?: "plan" | "edit"
+  permissionMode?: "plan" | "edit",
+  agentType?: AgentType
 ): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
   const response = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ branch, permissionMode }),
+    body: JSON.stringify({ branch, permissionMode, agentType }),
   });
 
   if (!response.ok) {
@@ -253,7 +254,7 @@ interface UseAgentSessionOptions {
   onSessionStarted?: () => void;
 }
 
-export function useAgentSession(projectId: string | null, branch: string | null, agentMode?: string, options?: UseAgentSessionOptions) {
+export function useAgentSession(projectId: string | null, branch: string | null, agentMode?: string, agentType?: AgentType, options?: UseAgentSessionOptions) {
   const [session, setSession] = useState<AgentSession | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [status, setStatus] = useState<AgentSessionStatus>("stopped");
@@ -520,7 +521,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     try {
       const { session: newSession, messages: initialMessages } =
-        await createOrGetSession(projectId, branch, permissionMode);
+        await createOrGetSession(projectId, branch, permissionMode, agentType);
 
       // If branch/project changed while the API call was in flight, discard the result
       if (sessionGenerationRef.current !== generation) {

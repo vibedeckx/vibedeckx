@@ -65,7 +65,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     restartSession,
     switchMode,
     acceptPlan,
-  } = useAgentSession(projectId, branch, project?.agent_mode, { onTaskCompleted, onSessionStarted });
+  } = useAgentSession(projectId, branch, project?.agent_mode, undefined, { onTaskCompleted, onSessionStarted });
 
   // Sync local permissionMode from session (e.g. after workspace switch restores cached session)
   useEffect(() => {
