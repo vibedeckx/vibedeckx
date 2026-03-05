@@ -191,6 +191,9 @@ export class AgentSessionManager {
 
     this.sessions.set(sessionId, runningSession);
 
+    // Notify provider of session creation (for per-session state init)
+    getProvider(agentType).onSessionCreated?.(sessionId);
+
     // Spawn Claude Code process
     this.spawnAgent(runningSession, absoluteWorktreePath);
 
@@ -915,6 +918,9 @@ export class AgentSessionManager {
    */
   deleteSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
+    if (session) {
+      getProvider(session.agentType).onSessionDestroyed?.(sessionId);
+    }
     this.stopSession(sessionId);
     this.sessions.delete(sessionId);
     if (!session?.skipDb) this.storage.agentSessions.delete(sessionId);
@@ -1228,6 +1234,9 @@ export class AgentSessionManager {
    */
   shutdown(): void {
     for (const [id, session] of this.sessions) {
+      try {
+        getProvider(session.agentType).onSessionDestroyed?.(id);
+      } catch { /* ignore - provider cleanup is best-effort */ }
       try {
         session.process?.kill("SIGTERM");
       } catch { /* ignore - process may already be dead */ }
