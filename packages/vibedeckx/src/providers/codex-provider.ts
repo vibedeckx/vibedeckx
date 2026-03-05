@@ -235,12 +235,44 @@ export class CodexProvider implements AgentProvider {
     }
   }
 
-  // ============ Stubs for tasks 5.10-5.12 ============
+  // ============ Task 5.10: formatUserInput — JSON-RPC message construction ============
 
-  formatUserInput(_content: string, _sessionId: string): string {
-    // Stub — implemented in task 5.10
-    return "";
+  formatUserInput(content: string, sessionId: string): string {
+    const state = this.getSessionState(sessionId);
+    const input = [{ type: "text", text: content }];
+
+    if (!state.initialized) {
+      // First call: pipeline initialize + thread/start + turn/start
+      const id1 = state.rpcIdCounter++;
+      const id2 = state.rpcIdCounter++;
+      const id3 = state.rpcIdCounter++;
+
+      state.pendingRequests.set(id1, "initialize");
+      state.pendingRequests.set(id2, "thread/start");
+      state.pendingRequests.set(id3, "turn/start");
+      state.initialized = true;
+
+      const msgs = [
+        JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: {} }),
+        JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: {} }),
+        JSON.stringify({ jsonrpc: "2.0", id: id3, method: "turn/start", params: { input } }),
+      ];
+      return msgs.join("\n") + "\n";
+    }
+
+    // Subsequent calls: single turn/start with threadId
+    const id = state.rpcIdCounter++;
+    state.pendingRequests.set(id, "turn/start");
+
+    return JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "turn/start",
+      params: { threadId: state.threadId, input },
+    }) + "\n";
   }
+
+  // ============ Task 5.11: formatApprovalResponse ============
 
   formatApprovalResponse(_requestId: string, _decision: string, _sessionId: string): string {
     // Stub — implemented in task 5.11
