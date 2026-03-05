@@ -125,9 +125,8 @@ export class ClaudeCodeProvider implements AgentProvider {
     return [];
   }
 
-  formatUserInput(_content: string, _sessionId: string): string {
-    // TODO: task 2.5
-    return "";
+  formatUserInput(content: string, _sessionId: string): string {
+    return JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
   }
 
   // Lifecycle hooks are no-ops for Claude (stateless per-session)
