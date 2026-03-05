@@ -1,7 +1,15 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type Executor, type ExecutorProcess } from "@/lib/api";
+
+function getApiBase(): string {
+  if (typeof window === "undefined") return "";
+  if (window.location.hostname === "localhost" && window.location.port === "3000") {
+    return "http://localhost:5173";
+  }
+  return "";
+}
 
 export interface ExecutorWithProcess extends Executor {
   currentProcessId: string | null;
@@ -51,6 +59,57 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     fetchExecutors();
     fetchRunningProcesses();
   }, [fetchExecutors, fetchRunningProcesses]);
+
+  // Keep a ref of current executor IDs for the SSE handler
+  const executorIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    executorIdsRef.current = new Set(executors.map((e) => e.id));
+  }, [executors]);
+
+  // Subscribe to global executor lifecycle events (SSE)
+  // This syncs state when executors are started/stopped externally (e.g. from chat)
+  useEffect(() => {
+    if (!projectId) return;
+
+    const url = `${getApiBase()}/api/events`;
+    const es = new EventSource(url);
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as {
+          type: string;
+          projectId: string;
+          executorId: string;
+          processId: string;
+        };
+
+        if (data.projectId !== projectId) return;
+        if (!executorIdsRef.current.has(data.executorId)) return;
+
+        if (data.type === "executor:started") {
+          setRunningProcesses((prev) => {
+            if (prev.get(data.executorId) === data.processId) return prev;
+            const newMap = new Map(prev);
+            newMap.set(data.executorId, data.processId);
+            return newMap;
+          });
+        } else if (data.type === "executor:stopped") {
+          setRunningProcesses((prev) => {
+            if (!prev.has(data.executorId)) return prev;
+            const newMap = new Map(prev);
+            newMap.delete(data.executorId);
+            return newMap;
+          });
+        }
+      } catch {
+        // Ignore parse errors (e.g. keepalive comments)
+      }
+    };
+
+    return () => {
+      es.close();
+    };
+  }, [projectId]);
 
   // Create executor in the active group
   const createExecutor = useCallback(
