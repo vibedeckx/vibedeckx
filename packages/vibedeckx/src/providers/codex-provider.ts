@@ -274,9 +274,12 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Task 5.11: formatApprovalResponse ============
 
-  formatApprovalResponse(_requestId: string, _decision: string, _sessionId: string): string {
-    // Stub — implemented in task 5.11
-    return "";
+  formatApprovalResponse(requestId: string, decision: string, _sessionId: string): string {
+    return JSON.stringify({
+      jsonrpc: "2.0",
+      id: Number(requestId),
+      result: { decision },
+    }) + "\n";
   }
 
   // ============ Lifecycle hooks ============
