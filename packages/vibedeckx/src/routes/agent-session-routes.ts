@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
+import type { AgentType } from "../agent-types.js";
 import { proxyToRemote } from "../utils/remote-proxy.js";
 import "../server-types.js";
 
@@ -99,14 +100,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 创建或获取 Agent Session
   fastify.post<{
     Params: { projectId: string };
-    Body: { branch?: string | null; permissionMode?: "plan" | "edit" };
+    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
   }>("/api/projects/:projectId/agent-sessions", async (req, reply) => {
     const project = fastify.storage.projects.getById(req.params.projectId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { branch, permissionMode } = req.body;
+    const { branch, permissionMode, agentType } = req.body;
 
     const useRemoteAgent = project.remote_url && project.remote_api_key && project.remote_path &&
       (!project.path || project.agent_mode === 'remote');
@@ -123,7 +124,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           project.remote_api_key!,
           "POST",
           `/api/path/agent-sessions`,
-          { path: project.remote_path, branch, permissionMode }
+          { path: project.remote_path, branch, permissionMode, agentType }
         );
 
         console.log(`[API] Remote proxy result: ok=${result.ok}, status=${result.status}, ` +
@@ -166,7 +167,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         branch ?? null,
         project.path,
         false,
-        permissionMode || "edit"
+        permissionMode || "edit",
+        (agentType as AgentType) || "claude-code"
       );
 
       const session = fastify.agentSessionManager.getSession(sessionId);
