@@ -236,6 +236,22 @@ export interface ProxyConfig {
   port: number;
 }
 
+// ============ Agent Provider Types ============
+
+export type AgentType = "claude-code" | "codex";
+
+export interface AgentProviderInfo {
+  type: AgentType;
+  displayName: string;
+  available: boolean;
+}
+
+export async function getAgentProviders(): Promise<AgentProviderInfo[]> {
+  const res = await fetch(`${getApiBase()}/api/agent-providers`);
+  const data = await res.json();
+  return data.providers;
+}
+
 export const api = {
   async getProjects(): Promise<Project[]> {
     const res = await fetch(`${getApiBase()}/api/projects`);
