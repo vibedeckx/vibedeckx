@@ -8,7 +8,6 @@ import type {
   AgentSessionStatus,
   AgentType,
   ClaudeOutputMessage,
-  ClaudeUserInput,
   ClaudeContentBlock,
 } from "./agent-types.js";
 import { getProvider } from "./providers/index.js";
@@ -1006,15 +1005,10 @@ export class AgentSessionManager {
       if (context) {
         setTimeout(() => {
           // Send context without adding to visible messages
-          const input: ClaudeUserInput = {
-            type: "user",
-            message: {
-              role: "user",
-              content: context,
-            },
-          };
+          const provider = getProvider(session.agentType);
+          const formatted = provider.formatUserInput(context, session.id);
           try {
-            session.process?.stdin?.write(JSON.stringify(input) + "\n");
+            session.process?.stdin?.write(formatted);
           } catch (error) {
             console.error(`[AgentSession] Failed to send conversation context:`, error);
           }
@@ -1108,15 +1102,10 @@ export class AgentSessionManager {
     setTimeout(() => {
       const context = this.buildFullConversationContext(session.store.entries);
       if (context) {
-        const input: ClaudeUserInput = {
-          type: "user",
-          message: {
-            role: "user",
-            content: context,
-          },
-        };
+        const provider = getProvider(session.agentType);
+        const formatted = provider.formatUserInput(context, session.id);
         try {
-          session.process?.stdin?.write(JSON.stringify(input) + "\n");
+          session.process?.stdin?.write(formatted);
         } catch (error) {
           console.error(`[AgentSession] Failed to send context to woken session:`, error);
         }
