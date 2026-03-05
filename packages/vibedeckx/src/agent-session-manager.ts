@@ -6,10 +6,12 @@ import type { Storage } from "./storage/types.js";
 import type {
   AgentMessage,
   AgentSessionStatus,
+  AgentType,
   ClaudeOutputMessage,
   ClaudeUserInput,
   ClaudeContentBlock,
 } from "./agent-types.js";
+import { getProvider } from "./providers/index.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
@@ -42,6 +44,7 @@ interface RunningSession {
   buffer: string; // Buffer for incomplete JSON lines
   skipDb: boolean; // Skip DB operations for remote path-based sessions
   permissionMode: "plan" | "edit"; // Claude Code permission mode
+  agentType: AgentType; // Which agent provider to use
 }
 
 export class AgentSessionManager {
@@ -181,6 +184,7 @@ export class AgentSessionManager {
       buffer: "",
       skipDb,
       permissionMode,
+      agentType: "claude-code",
     };
 
     this.sessions.set(sessionId, runningSession);
@@ -1050,6 +1054,7 @@ export class AgentSessionManager {
         buffer: "",
         skipDb: false,
         permissionMode,
+        agentType: "claude-code",
       };
 
       this.sessions.set(dbSession.id, runningSession);
