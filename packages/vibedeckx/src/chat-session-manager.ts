@@ -16,6 +16,7 @@ import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage } from "./conversation-patch.js";
 import type { Storage } from "./storage/types.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
+import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
 // ============ Types ============
@@ -62,14 +63,16 @@ export class ChatSessionManager {
 
   private storage: Storage;
   private processManager: ProcessManager;
+  private agentSessionManager: AgentSessionManager;
 
   private deepseek = createDeepSeek({
     apiKey: process.env.DEEPSEEK_API_KEY ?? "",
   });
 
-  constructor(storage: Storage, processManager: ProcessManager) {
+  constructor(storage: Storage, processManager: ProcessManager, agentSessionManager: AgentSessionManager) {
     this.storage = storage;
     this.processManager = processManager;
+    this.agentSessionManager = agentSessionManager;
   }
 
   // ---- Session lifecycle ----
@@ -153,6 +156,8 @@ export class ChatSessionManager {
       "You can start executors using the runExecutor tool and stop them using the stopExecutor tool.",
       "When the user asks about running processes, errors, build status, or dev server status, use the getExecutorStatus tool.",
       "When the user asks to start, run, or launch a process, use runExecutor. When they ask to stop or kill a process, use stopExecutor.",
+      "You can view the coding agent's conversation history using the getAgentConversation tool.",
+      "When the user asks about what the agent is doing, has done, or references agent activities, use this tool.",
       `Current workspace: project=${projectId}, branch=${branch ?? "default"}.`,
     ].join("\n");
   }
@@ -160,8 +165,73 @@ export class ChatSessionManager {
   private createTools(projectId: string, branch: string | null) {
     const storage = this.storage;
     const processManager = this.processManager;
+    const agentSessionManager = this.agentSessionManager;
 
     return {
+      getAgentConversation: tool({
+        description:
+          "Get the conversation history of the coding agent in the current workspace. " +
+          "Use this when the user asks about what the coding agent is doing, what it has done, " +
+          "or needs context about the agent's work. Returns recent messages from the agent session.",
+        inputSchema: z.object({
+          tailMessages: z
+            .number()
+            .min(1)
+            .max(50)
+            .default(20)
+            .describe("Number of recent messages to return"),
+        }),
+        execute: async ({ tailMessages }) => {
+          const agentSession = agentSessionManager.getSessionByBranch(projectId, branch);
+          if (!agentSession) {
+            return { messages: [], status: "no_session", message: "No coding agent session found for this workspace." };
+          }
+
+          const allMessages = agentSessionManager.getMessages(agentSession.id);
+          const recent = allMessages.slice(-tailMessages);
+
+          const summarized = recent.map((msg) => {
+            switch (msg.type) {
+              case "user":
+                return { type: "user", content: msg.content };
+              case "assistant":
+                return { type: "assistant", content: msg.content };
+              case "tool_use": {
+                const inputStr = typeof msg.input === "string"
+                  ? msg.input
+                  : JSON.stringify(msg.input);
+                return {
+                  type: "tool_use",
+                  tool: msg.tool,
+                  input: inputStr.length > 500 ? inputStr.substring(0, 500) + "..." : inputStr,
+                };
+              }
+              case "tool_result":
+                return {
+                  type: "tool_result",
+                  tool: msg.tool,
+                  output: msg.output.length > 500 ? msg.output.substring(0, 500) + "..." : msg.output,
+                };
+              case "error":
+                return { type: "error", message: msg.message };
+              case "system":
+                return { type: "system", content: msg.content };
+              case "thinking":
+                return { type: "thinking", content: msg.content };
+              default:
+                return { type: (msg as AgentMessage).type };
+            }
+          });
+
+          return {
+            sessionId: agentSession.id,
+            status: agentSession.status,
+            totalMessages: allMessages.length,
+            messages: summarized,
+          };
+        },
+      }),
+
       getExecutorStatus: tool({
         description:
           "Get the status of all executors (dev servers, build processes, etc.) in the current workspace. " +
