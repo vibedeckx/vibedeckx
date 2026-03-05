@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert } from "lucide-react";
 import type { AgentMessage } from "@/hooks/use-agent-session";
 import { MessageResponse } from "@/components/ai-elements/message";
+import { useAgentConversation } from "./agent-conversation";
 import { AskUserQuestion } from "./ask-user-question";
 import { ExitPlanModeUI } from "./exit-plan-mode";
 import { CommandApprovalUI, FileChangeApprovalUI } from "./approval-request";
@@ -104,14 +105,29 @@ function UserMessage({ content }: { content: string }) {
   );
 }
 
+function useAgentType(): string {
+  try {
+    return useAgentConversation().agentType;
+  } catch {
+    return "claude-code";
+  }
+}
+
 function AssistantMessage({ content }: { content: string }) {
+  const agentType = useAgentType();
+  const isCodex = agentType === "codex";
+  const label = isCodex ? "Codex" : "Claude";
+  const iconBg = isCodex ? "bg-green-500/10" : "bg-violet-500/10";
+  const iconColor = isCodex ? "text-green-500" : "text-violet-500";
+  const textColor = isCodex ? "text-green-500" : "text-violet-500";
+
   return (
     <div className="flex gap-3 py-4">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-violet-500/10 flex items-center justify-center">
-        <Bot className="w-4 h-4 text-violet-500" />
+      <div className={`flex-shrink-0 w-8 h-8 rounded-full ${iconBg} flex items-center justify-center`}>
+        <Bot className={`w-4 h-4 ${iconColor}`} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-sm font-medium text-violet-500 mb-1">Claude</p>
+        <p className={`text-sm font-medium ${textColor} mb-1`}>{label}</p>
         <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
           <MessageResponse>{content}</MessageResponse>
         </div>
