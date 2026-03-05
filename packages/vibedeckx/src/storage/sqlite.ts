@@ -527,15 +527,15 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     agentSessions: {
-      create: ({ id, project_id, branch, permission_mode }) => {
+      create: ({ id, project_id, branch, permission_mode, agent_type }) => {
         // Delete any existing session for this branch (one-to-one binding)
         db.prepare(
           `DELETE FROM agent_sessions WHERE project_id = @project_id AND branch = @branch`
         ).run({ project_id, branch });
 
         db.prepare(
-          `INSERT INTO agent_sessions (id, project_id, branch, status, permission_mode) VALUES (@id, @project_id, @branch, 'running', @permission_mode)`
-        ).run({ id, project_id, branch, permission_mode: permission_mode ?? 'edit' });
+          `INSERT INTO agent_sessions (id, project_id, branch, status, permission_mode, agent_type) VALUES (@id, @project_id, @branch, 'running', @permission_mode, @agent_type)`
+        ).run({ id, project_id, branch, permission_mode: permission_mode ?? 'edit', agent_type: agent_type ?? 'claude-code' });
 
         return db
           .prepare<{ id: string }, AgentSession>(`SELECT * FROM agent_sessions WHERE id = @id`)
