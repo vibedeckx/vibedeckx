@@ -454,6 +454,53 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Approve or deny an agent action (Codex approval flow)
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { requestId: string; decision: string };
+  }>(
+    "/api/agent-sessions/:sessionId/approve",
+    async (req, reply) => {
+      const { requestId, decision } = req.body;
+      if (!requestId || typeof requestId !== "string") {
+        return reply.code(400).send({ error: "requestId is required" });
+      }
+      if (!decision || typeof decision !== "string") {
+        return reply.code(400).send({ error: "decision is required" });
+      }
+
+      if (req.params.sessionId.startsWith("remote-")) {
+        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        const result = await proxyToRemote(
+          remoteInfo.remoteUrl,
+          remoteInfo.remoteApiKey,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/approve`,
+          { requestId, decision }
+        );
+        return reply.code(result.status || 200).send(result.data);
+      }
+
+      const session = fastify.agentSessionManager.getSession(req.params.sessionId);
+      if (!session) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      const success = fastify.agentSessionManager.sendApprovalResponse(
+        req.params.sessionId,
+        requestId,
+        decision
+      );
+      if (!success) {
+        return reply.code(400).send({ error: "Provider does not support approvals or session is not running" });
+      }
+      return reply.code(200).send({ success: true });
+    }
+  );
+
   // 删除 Agent Session
   fastify.delete<{ Params: { sessionId: string } }>(
     "/api/agent-sessions/:sessionId",
