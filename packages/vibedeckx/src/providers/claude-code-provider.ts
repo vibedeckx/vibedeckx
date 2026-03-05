@@ -1,3 +1,4 @@
+import { execFileSync } from "child_process";
 import type { AgentType } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 
@@ -13,8 +14,22 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   detectBinary(): string | null {
-    // TODO: task 2.2 — extract from agent-session-manager.ts
-    return null;
+    if (this.binaryPath !== undefined) {
+      return this.binaryPath;
+    }
+    try {
+      const cmd = process.platform === "win32" ? "where" : "which";
+      const result = execFileSync(cmd, ["claude"], {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "ignore"],
+      }).trim();
+      this.binaryPath = result || null;
+      console.log(`[ClaudeCodeProvider] Native claude binary found: ${result}`);
+    } catch {
+      this.binaryPath = null;
+      console.log(`[ClaudeCodeProvider] Native claude binary not found, will use npx`);
+    }
+    return this.binaryPath;
   }
 
   buildSpawnConfig(_cwd: string, _permissionMode: "plan" | "edit"): SpawnConfig {
