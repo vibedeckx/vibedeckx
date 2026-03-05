@@ -88,7 +88,8 @@ export class AgentSessionManager {
     branch: string | null,
     projectPath: string,
     skipDb = false,
-    permissionMode: "plan" | "edit" = "edit"
+    permissionMode: "plan" | "edit" = "edit",
+    agentType: AgentType = "claude-code"
   ): string {
     // Check if session already exists in memory (including dormant)
     for (const [id, session] of this.sessions) {
@@ -157,6 +158,7 @@ export class AgentSessionManager {
         project_id: projectId,
         branch: branch ?? "",
         permission_mode: permissionMode,
+        // agent_type passed to storage after Phase 4 migration (task 4.2/4.3)
       });
     }
 
@@ -184,7 +186,7 @@ export class AgentSessionManager {
       buffer: "",
       skipDb,
       permissionMode,
-      agentType: "claude-code",
+      agentType,
     };
 
     this.sessions.set(sessionId, runningSession);
