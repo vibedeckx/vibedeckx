@@ -699,6 +699,19 @@ export class AgentSessionManager {
   }
 
   /**
+   * Get all sessions for a project regardless of branch
+   */
+  getSessionsByProject(projectId: string): RunningSession[] {
+    const results: RunningSession[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.projectId === projectId) {
+        results.push(session);
+      }
+    }
+    return results;
+  }
+
+  /**
    * Check if a session is running
    */
   isRunning(sessionId: string): boolean {

@@ -182,7 +182,20 @@ export class ChatSessionManager {
             .describe("Number of recent messages to return"),
         }),
         execute: async ({ tailMessages }) => {
-          const agentSession = agentSessionManager.getSessionByBranch(projectId, branch);
+          // Try exact branch match first
+          let agentSession = agentSessionManager.getSessionByBranch(projectId, branch);
+
+          // Fallback: find any session for this project (prefer running)
+          if (!agentSession) {
+            const projectSessions = agentSessionManager.getSessionsByProject(projectId);
+            agentSession = projectSessions.find(s => s.status === "running")
+              ?? projectSessions[0]
+              ?? null;
+            if (agentSession) {
+              console.log(`[ChatSession] getAgentConversation: exact branch match failed (project=${projectId}, branch=${branch}), fell back to session ${agentSession.id} (branch=${agentSession.branch})`);
+            }
+          }
+
           if (!agentSession) {
             return { messages: [], status: "no_session", message: "No coding agent session found for this workspace." };
           }
