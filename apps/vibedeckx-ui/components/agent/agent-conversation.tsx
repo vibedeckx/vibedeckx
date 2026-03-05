@@ -15,13 +15,14 @@ import { Loader } from "@/components/ai-elements/loader";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw } from "lucide-react";
 import { ExecutionModeToggle } from "@/components/ui/execution-mode-toggle";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
-import type { Project, ExecutionMode } from "@/lib/api";
+import type { Project, ExecutionMode, AgentType } from "@/lib/api";
 
 interface AgentConversationContextValue {
   sendMessage: (content: string, sessionId?: string) => Promise<void>;
   messages: AgentMessage[];
   acceptPlan: (planContent: string) => Promise<void>;
   permissionMode: "plan" | "edit";
+  agentType: AgentType;
 }
 
 const AgentConversationContext = createContext<AgentConversationContextValue | null>(null);
@@ -249,7 +250,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               )}
             </div>
           ) : (
-            <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode }}>
+            <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode, agentType: "claude-code" }}>
               <div className="space-y-1">
                 {messages.map((msg, index) => (
                   <AgentMessageItem key={index} message={msg} messageIndex={index} />
