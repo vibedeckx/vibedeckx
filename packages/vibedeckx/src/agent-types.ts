@@ -15,7 +15,8 @@ export type AgentMessage =
   | { type: 'tool_result'; tool: string; output: string; toolUseId?: string; timestamp: number }
   | { type: 'thinking'; content: string; timestamp: number }
   | { type: 'error'; message: string; timestamp: number }
-  | { type: 'system'; content: string; timestamp: number };
+  | { type: 'system'; content: string; timestamp: number }
+  | { type: 'approval_request'; requestType: 'command' | 'fileChange'; requestId: string; command?: string; cwd?: string; changes?: Array<{path: string; diff?: string; kind: string}>; timestamp: number };
 
 // ============ Claude Code JSON Protocol Types ============
 
