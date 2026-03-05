@@ -56,6 +56,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     messages,
     status,
     isConnected,
+    isInitialized,
     isLoading,
     error,
     remoteStatus,
@@ -229,7 +230,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         <ConversationContent className="gap-1 p-4">
           {!session && messages.length === 0 ? (
             <div className="text-center py-12">
-              {isLoading ? (
+              {isLoading || (projectId && !isInitialized) ? (
                 <>
                   <Loader className="h-8 w-8 mx-auto mb-4" />
                   <h3 className="text-lg font-semibold mb-2">Connecting to agent...</h3>

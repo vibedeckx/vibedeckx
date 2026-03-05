@@ -687,6 +687,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setError(null);
     setIsLoading(false);
     setRemoteStatus(null);
+    setMessages([]); // Clear stale messages to prevent scroll jump on workspace switch
     containerRef.current = { entries: [], status: "stopped" };
     finishedRef.current = false;
     reconnectAttemptRef.current = 0;
