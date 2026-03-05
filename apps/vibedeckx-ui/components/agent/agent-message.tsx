@@ -1,11 +1,12 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2 } from "lucide-react";
+import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert } from "lucide-react";
 import type { AgentMessage } from "@/hooks/use-agent-session";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { AskUserQuestion } from "./ask-user-question";
 import { ExitPlanModeUI } from "./exit-plan-mode";
+import { CommandApprovalUI, FileChangeApprovalUI } from "./approval-request";
 import {
   TodoWriteUI,
   TaskCreateUI,
@@ -52,6 +53,34 @@ export function AgentMessageItem({ message, messageIndex }: AgentMessageProps) {
 
     case "system":
       return <SystemMessage content={message.content} />;
+
+    case "approval_request":
+      return (
+        <div className="flex gap-3 py-3">
+          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center">
+            <ShieldAlert className="w-4 h-4 text-amber-500" />
+          </div>
+          <div className="flex-1 min-w-0 overflow-hidden">
+            <p className="text-sm font-medium text-amber-500 mb-1">
+              {message.requestType === "command" ? "Command Approval" : "File Change Approval"}
+            </p>
+            {message.requestType === "command" ? (
+              <CommandApprovalUI
+                requestId={message.requestId}
+                command={message.command}
+                cwd={message.cwd}
+                messageIndex={messageIndex}
+              />
+            ) : (
+              <FileChangeApprovalUI
+                requestId={message.requestId}
+                changes={message.changes}
+                messageIndex={messageIndex}
+              />
+            )}
+          </div>
+        </div>
+      );
 
     default:
       return null;
