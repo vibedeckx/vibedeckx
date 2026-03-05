@@ -40,13 +40,19 @@ export interface AgentProvider {
   buildSpawnConfig(cwd: string, permissionMode: "plan" | "edit"): SpawnConfig;
 
   /** Parse a single stdout line into zero or more agent events. */
-  parseStdoutLine(line: string): ParsedAgentEvent[];
+  parseStdoutLine(line: string, sessionId: string): ParsedAgentEvent[];
 
   /** Format user input for writing to the agent's stdin. */
-  formatUserInput(content: string): string;
+  formatUserInput(content: string, sessionId: string): string;
 
   /** Format an approval response (optional — only needed for agents with approval flow). */
-  formatApprovalResponse?(requestId: string, approved: boolean): string;
+  formatApprovalResponse?(requestId: string, decision: string, sessionId: string): string;
+
+  /** Called when a new session is created for this agent type. */
+  onSessionCreated?(sessionId: string): void;
+
+  /** Called when a session is destroyed/deleted for this agent type. */
+  onSessionDestroyed?(sessionId: string): void;
 
   /** Human-readable display name for this agent. */
   getDisplayName(): string;
