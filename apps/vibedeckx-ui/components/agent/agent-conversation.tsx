@@ -147,7 +147,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       <div className="h-full flex items-center justify-center text-muted-foreground">
         <div className="text-center">
           <Bot className="h-12 w-12 mx-auto mb-4 opacity-50" />
-          <p>Select a project to start coding with Claude</p>
+          <p>Select a project to start coding</p>
         </div>
       </div>
     );
@@ -269,7 +269,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   <Bot className="h-16 w-16 mx-auto mb-4 text-violet-500/30" />
                   <h3 className="text-lg font-semibold mb-2">Start a conversation</h3>
                   <p className="text-sm text-muted-foreground mb-4">
-                    Ask Claude to help you with coding tasks in this worktree
+                    Ask the agent to help you with coding tasks in this worktree
                   </p>
                 </>
               )}
@@ -283,7 +283,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 {isLoading && (
                   <div className="flex items-center gap-2 py-4 text-muted-foreground">
                     <Loader className="h-4 w-4" />
-                    <span className="text-sm">Claude is thinking...</span>
+                    <span className="text-sm">Connecting to agent...</span>
                   </div>
                 )}
               </div>
@@ -311,7 +311,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             onChange={(e) => setInput(e.target.value)}
             placeholder={
               session
-                ? "Ask Claude to help with your code..."
+                ? "Ask the agent to help with your code..."
                 : "Type your first message to start..."
             }
             className="pr-12"
