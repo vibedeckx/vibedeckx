@@ -2,8 +2,8 @@ import { EventEmitter } from "events";
 
 // Event payload types
 export type GlobalEvent =
-  | { type: "session:status"; projectId: string; branch: string | null; sessionId: string; status: "running" | "stopped" | "error" }
-  | { type: "session:finished"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number }
+  | { type: "session:status"; projectId: string; branch: string | null; sessionId: string; status: "running" | "stopped" | "error"; agentType?: string }
+  | { type: "session:finished"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number; agentType?: string }
   | { type: "task:created"; projectId: string; task: Record<string, unknown> }
   | { type: "task:updated"; projectId: string; task: Record<string, unknown> }
   | { type: "task:deleted"; projectId: string; taskId: string }
