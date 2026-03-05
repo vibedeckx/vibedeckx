@@ -30,6 +30,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const pseudoProjectId = `path:${projectPath}`;
       console.log(`[API] POST /api/path/agent-sessions: path=${projectPath}, branch=${branch}, pseudoProjectId=${pseudoProjectId}`);
 
+      // Ensure a project row exists for the pseudo project ID so the FK constraint is satisfied
+      if (!fastify.storage.projects.getById(pseudoProjectId)) {
+        const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
+        fastify.storage.projects.create({
+          id: pseudoProjectId,
+          name,
+          path: projectPath,
+        });
+      }
+
       const sessionId = fastify.agentSessionManager.getOrCreateSession(
         pseudoProjectId,
         branch ?? null,
