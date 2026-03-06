@@ -236,24 +236,19 @@ export class ChatSessionManager {
             .describe("Number of recent messages to return"),
         }),
         execute: async ({ tailMessages }) => {
-          // Try exact branch match first
+          // Collect local session
+          let localResult: { sessionId: string; status: string; totalMessages: number; messages: unknown[] } | null = null;
           let agentSession = agentSessionManager.getSessionByBranch(projectId, branch);
-
-          // Fallback: find any session for this project (prefer running)
           if (!agentSession) {
             const projectSessions = agentSessionManager.getSessionsByProject(projectId);
             agentSession = projectSessions.find(s => s.status === "running")
               ?? projectSessions[0]
               ?? null;
-            if (agentSession) {
-              console.log(`[ChatSession] getAgentConversation: exact branch match failed (project=${projectId}, branch=${branch}), fell back to session ${agentSession.id} (branch=${agentSession.branch})`);
-            }
           }
-
           if (agentSession) {
             const allMessages = agentSessionManager.getMessages(agentSession.id);
             const recent = allMessages.slice(-tailMessages);
-            return {
+            localResult = {
               sessionId: agentSession.id,
               status: agentSession.status,
               totalMessages: allMessages.length,
@@ -261,7 +256,8 @@ export class ChatSessionManager {
             };
           }
 
-          // Fallback: check remote sessions
+          // Collect remote session
+          let remoteResult: { sessionId: string; status: string; totalMessages: number; messages: unknown[] } | null = null;
           const remote = this.findRemoteSessionForProject(projectId);
           if (remote) {
             try {
@@ -275,20 +271,25 @@ export class ChatSessionManager {
                 const data = result.data as { session: { status: string }; messages: AgentMessage[] };
                 const allMessages = data.messages ?? [];
                 const recent = allMessages.slice(-tailMessages);
-                return {
+                remoteResult = {
                   sessionId: remote.localSessionId,
                   status: data.session?.status ?? "unknown",
                   totalMessages: allMessages.length,
                   messages: this.summarizeMessages(recent),
                 };
+              } else {
+                console.error(`[ChatSession] getAgentConversation: remote proxy failed status=${result.status}`);
               }
-              console.error(`[ChatSession] getAgentConversation: remote proxy failed status=${result.status}`);
             } catch (err) {
               console.error(`[ChatSession] getAgentConversation: remote proxy error:`, err);
             }
           }
 
-          return { messages: [], status: "no_session", message: "No coding agent session found for this workspace." };
+          if (!localResult && !remoteResult) {
+            return { local: null, remote: null, message: "No coding agent session found for this workspace." };
+          }
+
+          return { local: localResult, remote: remoteResult };
         },
       }),
 
