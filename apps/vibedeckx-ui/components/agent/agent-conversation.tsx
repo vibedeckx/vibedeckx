@@ -165,7 +165,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               className="text-sm font-medium bg-transparent border border-border rounded px-1.5 py-0.5 outline-none"
               value={agentType}
               onChange={(e) => setAgentType(e.target.value as AgentType)}
-              disabled={session !== null}
+              disabled={session !== null && messages.length > 0}
             >
               {providers.map((p) => (
                 <option key={p.type} value={p.type} disabled={!p.available}>

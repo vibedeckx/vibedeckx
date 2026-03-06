@@ -564,7 +564,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         setIsLoading(false);
       }
     }
-  }, [projectId, branch, connectWebSocket]);
+  }, [projectId, branch, agentType, connectWebSocket]);
 
   // Send user message - optionally accepts sessionId for immediate use after session creation
   const sendMessage = useCallback(
@@ -705,7 +705,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     // Mark that we need to auto-start session after reset
     shouldAutoStartRef.current = true;
-  }, [projectId, branch, agentMode]);
+    // Invalidate session cache — agent type or branch changed, cached session is stale
+    if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+  }, [projectId, branch, agentMode, agentType]);
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
