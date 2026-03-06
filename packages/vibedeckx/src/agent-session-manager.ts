@@ -445,6 +445,11 @@ export class AgentSessionManager {
           }, true);
         }
         break;
+
+      case "stdin_write":
+        // Provider needs to send deferred data to the agent's stdin
+        session.process?.stdin?.write(event.content);
+        break;
     }
   }
 

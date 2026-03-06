@@ -8,6 +8,8 @@ interface CodexSessionState {
   initialized: boolean;
   pendingRequests: Map<number, string>;
   permissionMode: "plan" | "edit";
+  /** Buffered first-turn content, sent after thread/start response provides threadId */
+  pendingTurnContent: string | null;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -78,6 +80,20 @@ export class CodexProvider implements AgentProvider {
       // Extract threadId from thread/start response
       if (reqMethod === "thread/start" && msg.result?.thread?.id) {
         state.threadId = msg.result.thread.id;
+        // Send buffered first turn now that we have threadId
+        if (state.pendingTurnContent !== null) {
+          const content = state.pendingTurnContent;
+          state.pendingTurnContent = null;
+          const id = state.rpcIdCounter++;
+          state.pendingRequests.set(id, "turn/start");
+          const turnMsg = JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "turn/start",
+            params: { threadId: state.threadId, input: [{ type: "text", text: content }] },
+          }) + "\n";
+          return [{ type: "stdin_write", content: turnMsg }];
+        }
       }
       return [];
     }
@@ -245,24 +261,23 @@ export class CodexProvider implements AgentProvider {
     const state = this.getSessionState(sessionId);
     // Sync permissionMode from last buildSpawnConfig call
     state.permissionMode = this.lastPermissionMode;
-    const input = [{ type: "text", text: content }];
-    const permissionParams = this.buildPermissionParams(state.permissionMode);
 
     if (!state.initialized) {
-      // First call: pipeline initialize + thread/start + turn/start
+      // First call: send initialize + thread/start, buffer turn content
+      // turn/start requires threadId which we only get from thread/start response
       const id1 = state.rpcIdCounter++;
       const id2 = state.rpcIdCounter++;
-      const id3 = state.rpcIdCounter++;
 
       state.pendingRequests.set(id1, "initialize");
       state.pendingRequests.set(id2, "thread/start");
-      state.pendingRequests.set(id3, "turn/start");
       state.initialized = true;
+      state.pendingTurnContent = content;
+
+      const threadStartParams = this.buildThreadStartParams(state.permissionMode);
 
       const msgs = [
-        JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: {} }),
-        JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: {} }),
-        JSON.stringify({ jsonrpc: "2.0", id: id3, method: "turn/start", params: { input, ...permissionParams } }),
+        JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: { clientInfo: { name: "vibedeckx", version: "1.0.0" } } }),
+        JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: threadStartParams }),
       ];
       return msgs.join("\n") + "\n";
     }
@@ -275,21 +290,22 @@ export class CodexProvider implements AgentProvider {
       jsonrpc: "2.0",
       id,
       method: "turn/start",
-      params: { threadId: state.threadId, input, ...permissionParams },
+      params: { threadId: state.threadId, input: [{ type: "text", text: content }] },
     }) + "\n";
   }
 
   // ============ Task 5.12: Permission mode mapping ============
 
-  private buildPermissionParams(mode: "plan" | "edit"): Record<string, unknown> {
+  /** Build params for thread/start — uses `sandbox` (string enum) per ThreadStartParams schema */
+  private buildThreadStartParams(mode: "plan" | "edit"): Record<string, unknown> {
     if (mode === "plan") {
       return {
-        sandboxPolicy: { type: "readOnly" },
+        sandbox: "read-only",
       };
     }
     // edit mode
     return {
-      sandboxPolicy: { type: "workspaceWrite" },
+      sandbox: "workspace-write",
       approvalPolicy: "on-request",
     };
   }
@@ -313,6 +329,7 @@ export class CodexProvider implements AgentProvider {
       initialized: false,
       pendingRequests: new Map(),
       permissionMode: "edit",
+      pendingTurnContent: null,
     });
   }
 
@@ -330,6 +347,7 @@ export class CodexProvider implements AgentProvider {
         initialized: false,
         pendingRequests: new Map(),
         permissionMode: "edit",
+        pendingTurnContent: null,
       };
       this.sessions.set(sessionId, state);
     }
