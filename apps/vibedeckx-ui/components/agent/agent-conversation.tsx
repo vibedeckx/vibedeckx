@@ -84,6 +84,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
   }, [session?.permissionMode]);
 
+  // Sync local agentType from session (e.g. after workspace switch restores cached session)
+  useEffect(() => {
+    if (session?.agentType) {
+      setAgentType(session.agentType);
+    }
+  }, [session?.agentType]);
+
   // Notify parent when agent starts working (status "running" + user has sent messages).
   // Skips auto-started idle sessions that have no messages yet.
   const prevWorkingRef = useRef(false);
