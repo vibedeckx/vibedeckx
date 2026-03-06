@@ -56,6 +56,9 @@ export interface AgentProvider {
   /** Called when a session is destroyed/deleted for this agent type. */
   onSessionDestroyed?(sessionId: string): void;
 
+  /** Return initialization messages to write to stdin immediately after spawn (optional). */
+  getInitializationMessages?(sessionId: string): string | null;
+
   /** Human-readable display name for this agent. */
   getDisplayName(): string;
 

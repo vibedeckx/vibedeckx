@@ -214,6 +214,14 @@ export class AgentSessionManager {
 
     console.log(`[AgentSession] Process ${session.id} started, PID: ${childProcess.pid}`);
 
+    // Pre-initialize provider protocol (e.g. Codex needs initialize + thread/start handshake)
+    if (provider.getInitializationMessages) {
+      const initMsgs = provider.getInitializationMessages(session.id);
+      if (initMsgs) {
+        childProcess.stdin?.write(initMsgs);
+      }
+    }
+
     // Handle stdout (JSON messages from Claude)
     childProcess.stdout?.on("data", (data: Buffer) => {
       this.handleStdout(session, data.toString());

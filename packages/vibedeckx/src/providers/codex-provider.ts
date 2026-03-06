@@ -261,6 +261,26 @@ export class CodexProvider implements AgentProvider {
     }
   }
 
+  // ============ Pre-initialization: send initialize + thread/start right after spawn ============
+
+  getInitializationMessages(sessionId: string): string | null {
+    const state = this.getSessionState(sessionId);
+    if (state.initialized) return null;
+
+    const id1 = state.rpcIdCounter++;
+    const id2 = state.rpcIdCounter++;
+    state.pendingRequests.set(id1, "initialize");
+    state.pendingRequests.set(id2, "thread/start");
+    state.initialized = true;
+
+    const threadStartParams = this.buildThreadStartParams(state.permissionMode);
+
+    return [
+      JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: { clientInfo: { name: "vibedeckx", version: "1.0.0" } } }),
+      JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: threadStartParams }),
+    ].join("\n") + "\n";
+  }
+
   // ============ Task 5.10: formatUserInput — JSON-RPC message construction ============
 
   formatUserInput(content: string, sessionId: string): string {
@@ -268,12 +288,22 @@ export class CodexProvider implements AgentProvider {
     // Sync permissionMode from last buildSpawnConfig call
     state.permissionMode = this.lastPermissionMode;
 
+    // Fast path: threadId already available (pre-initialization completed)
+    if (state.threadId) {
+      const id = state.rpcIdCounter++;
+      state.pendingRequests.set(id, "turn/start");
+      return JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "turn/start",
+        params: { threadId: state.threadId, input: [{ type: "text", text: content }] },
+      }) + "\n";
+    }
+
+    // Edge case: getInitializationMessages wasn't called (e.g. dormant session wake)
     if (!state.initialized) {
-      // First call: send initialize + thread/start, buffer turn content
-      // turn/start requires threadId which we only get from thread/start response
       const id1 = state.rpcIdCounter++;
       const id2 = state.rpcIdCounter++;
-
       state.pendingRequests.set(id1, "initialize");
       state.pendingRequests.set(id2, "thread/start");
       state.initialized = true;
@@ -281,23 +311,16 @@ export class CodexProvider implements AgentProvider {
 
       const threadStartParams = this.buildThreadStartParams(state.permissionMode);
 
-      const msgs = [
+      return [
         JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: { clientInfo: { name: "vibedeckx", version: "1.0.0" } } }),
         JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: threadStartParams }),
-      ];
-      return msgs.join("\n") + "\n";
+      ].join("\n") + "\n";
     }
 
-    // Subsequent calls: single turn/start with threadId
-    const id = state.rpcIdCounter++;
-    state.pendingRequests.set(id, "turn/start");
-
-    return JSON.stringify({
-      jsonrpc: "2.0",
-      id,
-      method: "turn/start",
-      params: { threadId: state.threadId, input: [{ type: "text", text: content }] },
-    }) + "\n";
+    // Initialized but threadId not yet available (race: user sent message before thread/start responded)
+    // Buffer content — will be sent when parseStdoutLine receives thread/start response
+    state.pendingTurnContent = content;
+    return "";
   }
 
   // ============ Task 5.12: Permission mode mapping ============
