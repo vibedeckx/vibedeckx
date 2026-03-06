@@ -138,8 +138,14 @@ export class CodexProvider implements AgentProvider {
 
       case "reasoning": {
         const parts: string[] = item.summary ?? item.content ?? [];
-        return [{ type: "thinking", content: parts.join("\n") }];
+        const text = parts.join("\n");
+        if (!text) return [];
+        return [{ type: "thinking", content: text }];
       }
+
+      case "userMessage":
+        // Codex echoes the user's input — already rendered by sendUserMessage, skip
+        return [];
 
       case "commandExecution": {
         const id = item.id ?? this.generateId();
