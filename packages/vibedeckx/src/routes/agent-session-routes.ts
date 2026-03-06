@@ -324,7 +324,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   );
 
   // 重启 Agent Session
-  fastify.post<{ Params: { sessionId: string } }>(
+  fastify.post<{ Params: { sessionId: string }; Body: { agentType?: string } }>(
     "/api/agent-sessions/:sessionId/restart",
     async (req, reply) => {
       if (req.params.sessionId.startsWith("remote-")) {
@@ -352,7 +352,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found or has no local path" });
       }
 
-      const restarted = fastify.agentSessionManager.restartSession(req.params.sessionId, projectPath);
+      const { agentType } = (req.body || {}) as { agentType?: string };
+      const restarted = fastify.agentSessionManager.restartSession(req.params.sessionId, projectPath, agentType as AgentType | undefined);
       if (!restarted) {
         return reply.code(500).send({ error: "Failed to restart session" });
       }

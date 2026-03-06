@@ -733,7 +733,7 @@ export class AgentSessionManager {
    * Restart a session (stop process, clear history, respawn)
    * Returns the same session ID with a fresh conversation
    */
-  restartSession(sessionId: string, projectPath: string): boolean {
+  restartSession(sessionId: string, projectPath: string, agentType?: AgentType): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -772,7 +772,12 @@ export class AgentSessionManager {
     this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
-    // 6. Calculate absolute worktree path and respawn
+    // 6. Update agent type if specified
+    if (agentType) {
+      session.agentType = agentType;
+    }
+
+    // 7. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
     this.spawnAgent(session, absoluteWorktreePath);

@@ -121,9 +121,11 @@ async function sendMessageToSession(sessionId: string, content: string): Promise
   }
 }
 
-async function restartSessionApi(sessionId: string): Promise<void> {
+async function restartSessionApi(sessionId: string, agentType?: AgentType): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/restart`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentType }),
   });
 
   if (!response.ok) {
@@ -586,7 +588,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   );
 
   // Restart session - clears conversation and respawns Claude Code process
-  const restartSession = useCallback(async () => {
+  const restartSession = useCallback(async (agentType?: AgentType) => {
     if (!session?.id) return;
 
     // Invalidate cache — session will get new state after restart
@@ -596,7 +598,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setError(null);
 
     try {
-      await restartSessionApi(session.id);
+      await restartSessionApi(session.id, agentType);
       // The WebSocket will receive the clearAll patch and status update
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : "Failed to restart session";

@@ -164,7 +164,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             <select
               className="text-sm font-medium bg-transparent border border-border rounded px-1.5 py-0.5 outline-none"
               value={agentType}
-              onChange={(e) => setAgentType(e.target.value as AgentType)}
+              onChange={(e) => {
+                const newType = e.target.value as AgentType;
+                setAgentType(newType);
+                if (session) {
+                  restartSession(newType);
+                }
+              }}
               disabled={session !== null && messages.length > 0}
             >
               {providers.map((p) => (
@@ -228,7 +234,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             <Button
               variant="ghost"
               size="icon"
-              onClick={restartSession}
+              onClick={() => restartSession()}
               disabled={isLoading}
               className="h-7 w-7"
               title="New Conversation"
