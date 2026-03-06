@@ -772,10 +772,12 @@ export class AgentSessionManager {
     this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
-    // 6. Update agent type if specified
+    // 6. Reset provider state and update agent type if specified
+    getProvider(session.agentType).onSessionDestroyed?.(sessionId);
     if (agentType) {
       session.agentType = agentType;
     }
+    getProvider(session.agentType).onSessionCreated?.(sessionId);
 
     // 7. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
