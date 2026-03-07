@@ -345,7 +345,8 @@ export class ProcessManager {
   stop(processId: string): boolean {
     const runningProcess = this.processes.get(processId);
     if (!runningProcess) {
-      // Process not in memory (e.g., server was restarted) — try to kill by PID from DB
+      console.log(`[ProcessManager] Process ${processId} not found in memory map. Map has ${this.processes.size} entries: [${Array.from(this.processes.keys()).join(", ")}]`);
+      // Process not in memory (e.g., server was restarted or PTY exited early) — try to kill by PID from DB
       return this.stopByPid(processId);
     }
 
@@ -396,11 +397,12 @@ export class ProcessManager {
    */
   private stopByPid(processId: string): boolean {
     const dbProcess = this.storage.executorProcesses.getById(processId);
-    if (!dbProcess || !dbProcess.pid || dbProcess.status !== "running") {
+    if (!dbProcess || !dbProcess.pid) {
+      console.log(`[ProcessManager] Process ${processId} not found in DB or has no PID (status=${dbProcess?.status})`);
       return false;
     }
 
-    console.log(`[ProcessManager] Process ${processId} not in memory, attempting to kill by PID ${dbProcess.pid}`);
+    console.log(`[ProcessManager] Process ${processId} not in memory (db status=${dbProcess.status}), attempting to kill by PID ${dbProcess.pid}`);
 
     let killed = false;
     // Try process group kill first
