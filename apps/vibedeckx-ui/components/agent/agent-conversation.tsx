@@ -288,7 +288,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               )}
             </div>
           ) : (
-            <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode, agentType, sessionId: session?.id ?? null }}>
+            <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null }}>
               <div className="space-y-1">
                 {messages.map((msg, index) => (
                   <AgentMessageItem key={index} message={msg} messageIndex={index} />
