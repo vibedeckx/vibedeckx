@@ -1,6 +1,6 @@
 'use client';
 
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useState, useEffect, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { Terminal, GitBranch, SquareTerminal, Bot } from 'lucide-react';
 import { ExecutorPanel } from '@/components/executor';
@@ -19,8 +19,28 @@ interface RightPanelProps {
 
 type TabType = 'agent' | 'executors' | 'diff' | 'terminal';
 
+function usePersistedTab(projectId: string | null, branch: string | null | undefined): [TabType, (tab: TabType) => void] {
+  const key = `vibedeckx:activeTab:${projectId ?? 'none'}:${branch ?? 'main'}`;
+  const [activeTab, setActiveTabState] = useState<TabType>(() => {
+    if (typeof window === 'undefined') return 'agent';
+    return (localStorage.getItem(key) as TabType) ?? 'agent';
+  });
+
+  useEffect(() => {
+    const saved = localStorage.getItem(key) as TabType | null;
+    setActiveTabState(saved ?? 'agent');
+  }, [key]);
+
+  const setActiveTab = useCallback((tab: TabType) => {
+    setActiveTabState(tab);
+    localStorage.setItem(key, tab);
+  }, [key]);
+
+  return [activeTab, setActiveTab];
+}
+
 export function RightPanel({ projectId, selectedBranch, onMergeRequest, project, onExecutorModeChange, agentSlot }: RightPanelProps) {
-  const [activeTab, setActiveTab] = useState<TabType>('agent');
+  const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
 
   return (
     <div className="h-full flex flex-col">
