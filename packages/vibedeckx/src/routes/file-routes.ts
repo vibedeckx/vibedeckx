@@ -18,8 +18,9 @@ interface BrowseEntry {
 const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB
 
 function isPathSafe(basePath: string, relativePath: string): boolean {
-  const resolved = path.resolve(basePath, relativePath);
-  return resolved.startsWith(basePath + path.sep) || resolved === basePath;
+  const normalizedBase = path.resolve(basePath);
+  const resolved = path.resolve(normalizedBase, relativePath);
+  return resolved.startsWith(normalizedBase + path.sep) || resolved === normalizedBase;
 }
 
 async function isBinaryFile(filePath: string): Promise<boolean> {

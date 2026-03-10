@@ -98,7 +98,7 @@ function UserMessage({ content }: { content: string }) {
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-sm font-medium text-foreground mb-1">You</p>
         <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
-          <MessageResponse>{content}</MessageResponse>
+          <MessageResponse>{content ?? ""}</MessageResponse>
         </div>
       </div>
     </div>
@@ -129,7 +129,7 @@ function AssistantMessage({ content }: { content: string }) {
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className={`text-sm font-medium ${textColor} mb-1`}>{label}</p>
         <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
-          <MessageResponse>{content}</MessageResponse>
+          <MessageResponse>{content ?? ""}</MessageResponse>
         </div>
       </div>
     </div>
@@ -554,7 +554,7 @@ function ThinkingMessage({ content }: { content: string }) {
             Thinking...
           </summary>
           <div className="mt-2 text-xs text-muted-foreground whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded overflow-hidden">
-            {content.length > 500 ? content.substring(0, 500) + "..." : content}
+            {(content ?? "").length > 500 ? (content ?? "").substring(0, 500) + "..." : content ?? ""}
           </div>
         </details>
       </div>
@@ -583,7 +583,7 @@ function SystemMessage({ content }: { content: string }) {
         <Info className="w-4 h-4 text-gray-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-xs text-muted-foreground break-words">{content}</p>
+        <p className="text-xs text-muted-foreground break-words">{content ?? ""}</p>
       </div>
     </div>
   );
