@@ -365,25 +365,27 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           {/* Attachment thumbnails — only rendered when images are attached */}
           <AttachmentHeader />
           {/* Single row: [+ button] [textarea] [submit button] */}
-          <PromptInputActionMenu>
-            <PromptInputActionMenuTrigger />
-            <PromptInputActionMenuContent>
-              <PromptInputActionAddAttachments label="Add images" />
-            </PromptInputActionMenuContent>
-          </PromptInputActionMenu>
-          <PromptInputTextarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={
-              session
-                ? "Ask the agent to help with your code..."
-                : "Type your first message to start..."
-            }
-          />
-          <PromptInputSubmit
-            disabled={!input.trim() && !isLoading}
-            status={isLoading ? "streaming" : "ready"}
-          />
+          <div className="flex w-full items-center">
+            <PromptInputActionMenu>
+              <PromptInputActionMenuTrigger />
+              <PromptInputActionMenuContent>
+                <PromptInputActionAddAttachments label="Add images" />
+              </PromptInputActionMenuContent>
+            </PromptInputActionMenu>
+            <PromptInputTextarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={
+                session
+                  ? "Ask the agent to help with your code..."
+                  : "Type your first message to start..."
+              }
+            />
+            <PromptInputSubmit
+              disabled={!input.trim() && !isLoading}
+              status={isLoading ? "streaming" : "ready"}
+            />
+          </div>
         </PromptInput>
       </div>
     </div>
