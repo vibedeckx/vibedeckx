@@ -123,22 +123,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const { branch, permissionMode, agentType } = req.body;
 
-    const useRemoteAgent = project.remote_url && project.remote_api_key && project.remote_path &&
-      (!project.path || project.agent_mode === 'remote');
+    const agentMode = project.agent_mode;
+    const useRemoteAgent = agentMode !== 'local';
+
+    // When remote, resolve connection info from project_remotes table
+    const remoteConfig = useRemoteAgent
+      ? fastify.storage.projectRemotes.getByProjectAndServer(project.id, agentMode)
+      : undefined;
 
     console.log(`[API] POST agent-sessions: projectId=${req.params.projectId}, ` +
-      `path=${project.path}, remote_url=${project.remote_url}, ` +
-      `remote_path=${project.remote_path}, agent_mode=${project.agent_mode}, ` +
-      `useRemoteAgent=${useRemoteAgent}`);
+      `path=${project.path}, agent_mode=${agentMode}, ` +
+      `useRemoteAgent=${useRemoteAgent}, remoteConfig=${remoteConfig ? `url=${remoteConfig.server_url}, path=${remoteConfig.remote_path}` : 'none'}`);
 
     if (useRemoteAgent) {
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: `Remote server configuration not found for agent_mode="${agentMode}"` });
+      }
+
       try {
         const result = await proxyToRemote(
-          project.remote_url!,
-          project.remote_api_key!,
+          remoteConfig.server_url,
+          remoteConfig.server_api_key || "",
           "POST",
           `/api/path/agent-sessions`,
-          { path: project.remote_path, branch, permissionMode, agentType }
+          { path: remoteConfig.remote_path, branch, permissionMode, agentType }
         );
 
         console.log(`[API] Remote proxy result: ok=${result.ok}, status=${result.status}, ` +
@@ -146,10 +154,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         if (result.ok) {
           const remoteData = result.data as { session: { id: string }; messages: unknown[] };
-          const localSessionId = `remote-${project.id}-${remoteData.session.id}`;
+          const localSessionId = `remote-${agentMode}-${project.id}-${remoteData.session.id}`;
           fastify.remoteSessionMap.set(localSessionId, {
-            remoteUrl: project.remote_url!,
-            remoteApiKey: project.remote_api_key!,
+            remoteServerId: agentMode,
+            remoteUrl: remoteConfig.server_url,
+            remoteApiKey: remoteConfig.server_api_key || "",
             remoteSessionId: remoteData.session.id,
             branch: branch ?? null,
           });

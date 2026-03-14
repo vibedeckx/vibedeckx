@@ -114,6 +114,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const localId = `remote-terminal-${remoteId}`;
 
         fastify.remoteExecutorMap.set(localId, {
+          remoteServerId: String(project.executor_mode),
           remoteUrl: project.remote_url!,
           remoteApiKey: project.remote_api_key!,
           remoteProcessId: remoteId,

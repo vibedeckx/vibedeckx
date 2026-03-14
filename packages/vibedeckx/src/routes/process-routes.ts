@@ -77,6 +77,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const remoteData = result.data as { processId: string };
         const localProcessId = `remote-${executor.id}-${remoteData.processId}`;
         fastify.remoteExecutorMap.set(localProcessId, {
+          remoteServerId: String(project.executor_mode),
           remoteUrl: project.remote_url!,
           remoteApiKey: project.remote_api_key!,
           remoteProcessId: remoteData.processId,

@@ -89,11 +89,13 @@ export class ChatSessionManager {
   }
 
   private findRemoteSessionForProject(projectId: string, branch?: string | null): { localSessionId: string; info: RemoteSessionInfo } | null {
-    const prefix = `remote-${projectId}-`;
+    // Session IDs use format: remote-{serverId}-{projectId}-{remoteSessionId}
+    // Match any session that contains the projectId segment
+    const projectSegment = `-${projectId}-`;
     let fallback: { localSessionId: string; info: RemoteSessionInfo } | null = null;
 
     for (const [key, info] of this.remoteSessionMap) {
-      if (key.startsWith(prefix)) {
+      if (key.startsWith("remote-") && key.includes(projectSegment)) {
         // Exact branch match
         if (info.branch === (branch ?? null)) {
           return { localSessionId: key, info };
