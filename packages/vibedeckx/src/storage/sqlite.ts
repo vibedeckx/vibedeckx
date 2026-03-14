@@ -3,7 +3,7 @@ import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Storage, ExecutionMode, SyncButtonConfig, RemoteServer } from "./types.js";
+import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, ProjectRemote, ProjectRemoteWithServer } from "./types.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -90,6 +90,17 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       api_key TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS project_remotes (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      remote_server_id TEXT NOT NULL REFERENCES remote_servers(id),
+      remote_path TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      sync_up_config TEXT,
+      sync_down_config TEXT,
+      UNIQUE(project_id, remote_server_id)
     );
   `);
 
@@ -442,6 +453,198 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
       delete: (id: string): boolean => {
         const result = db.prepare(`DELETE FROM remote_servers WHERE id = @id`).run({ id });
+        return result.changes > 0;
+      },
+    },
+
+    projectRemotes: {
+      getByProject: (projectId: string): ProjectRemoteWithServer[] => {
+        type ProjectRemoteRow = {
+          id: string;
+          project_id: string;
+          remote_server_id: string;
+          remote_path: string;
+          sort_order: number;
+          sync_up_config: string | null;
+          sync_down_config: string | null;
+          server_name: string;
+          server_url: string;
+          server_api_key: string | null;
+        };
+        const rows = db
+          .prepare<{ project_id: string }, ProjectRemoteRow>(
+            `SELECT pr.id, pr.project_id, pr.remote_server_id, pr.remote_path, pr.sort_order,
+                    pr.sync_up_config, pr.sync_down_config,
+                    rs.name as server_name, rs.url as server_url, rs.api_key as server_api_key
+             FROM project_remotes pr
+             JOIN remote_servers rs ON pr.remote_server_id = rs.id
+             WHERE pr.project_id = @project_id
+             ORDER BY pr.sort_order ASC`
+          )
+          .all({ project_id: projectId });
+        return rows.map((row) => ({
+          id: row.id,
+          project_id: row.project_id,
+          remote_server_id: row.remote_server_id,
+          remote_path: row.remote_path,
+          sort_order: row.sort_order,
+          sync_up_config: row.sync_up_config ? JSON.parse(row.sync_up_config) as SyncButtonConfig : undefined,
+          sync_down_config: row.sync_down_config ? JSON.parse(row.sync_down_config) as SyncButtonConfig : undefined,
+          server_name: row.server_name,
+          server_url: row.server_url,
+          server_api_key: row.server_api_key ?? undefined,
+        }));
+      },
+
+      getByProjectAndServer: (projectId: string, remoteServerId: string): ProjectRemoteWithServer | undefined => {
+        type ProjectRemoteRow = {
+          id: string;
+          project_id: string;
+          remote_server_id: string;
+          remote_path: string;
+          sort_order: number;
+          sync_up_config: string | null;
+          sync_down_config: string | null;
+          server_name: string;
+          server_url: string;
+          server_api_key: string | null;
+        };
+        const row = db
+          .prepare<{ project_id: string; remote_server_id: string }, ProjectRemoteRow>(
+            `SELECT pr.id, pr.project_id, pr.remote_server_id, pr.remote_path, pr.sort_order,
+                    pr.sync_up_config, pr.sync_down_config,
+                    rs.name as server_name, rs.url as server_url, rs.api_key as server_api_key
+             FROM project_remotes pr
+             JOIN remote_servers rs ON pr.remote_server_id = rs.id
+             WHERE pr.project_id = @project_id AND pr.remote_server_id = @remote_server_id`
+          )
+          .get({ project_id: projectId, remote_server_id: remoteServerId });
+        if (!row) return undefined;
+        return {
+          id: row.id,
+          project_id: row.project_id,
+          remote_server_id: row.remote_server_id,
+          remote_path: row.remote_path,
+          sort_order: row.sort_order,
+          sync_up_config: row.sync_up_config ? JSON.parse(row.sync_up_config) as SyncButtonConfig : undefined,
+          sync_down_config: row.sync_down_config ? JSON.parse(row.sync_down_config) as SyncButtonConfig : undefined,
+          server_name: row.server_name,
+          server_url: row.server_url,
+          server_api_key: row.server_api_key ?? undefined,
+        };
+      },
+
+      add: (opts: {
+        project_id: string;
+        remote_server_id: string;
+        remote_path: string;
+        sort_order?: number;
+        sync_up_config?: SyncButtonConfig;
+        sync_down_config?: SyncButtonConfig;
+      }): ProjectRemote => {
+        const id = crypto.randomUUID();
+        db.prepare(
+          `INSERT INTO project_remotes (id, project_id, remote_server_id, remote_path, sort_order, sync_up_config, sync_down_config)
+           VALUES (@id, @project_id, @remote_server_id, @remote_path, @sort_order, @sync_up_config, @sync_down_config)`
+        ).run({
+          id,
+          project_id: opts.project_id,
+          remote_server_id: opts.remote_server_id,
+          remote_path: opts.remote_path,
+          sort_order: opts.sort_order ?? 0,
+          sync_up_config: opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null,
+          sync_down_config: opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null,
+        });
+
+        type ProjectRemoteDbRow = {
+          id: string;
+          project_id: string;
+          remote_server_id: string;
+          remote_path: string;
+          sort_order: number;
+          sync_up_config: string | null;
+          sync_down_config: string | null;
+        };
+        const row = db
+          .prepare<{ id: string }, ProjectRemoteDbRow>(`SELECT * FROM project_remotes WHERE id = @id`)
+          .get({ id })!;
+        return {
+          id: row.id,
+          project_id: row.project_id,
+          remote_server_id: row.remote_server_id,
+          remote_path: row.remote_path,
+          sort_order: row.sort_order,
+          sync_up_config: row.sync_up_config ? JSON.parse(row.sync_up_config) as SyncButtonConfig : undefined,
+          sync_down_config: row.sync_down_config ? JSON.parse(row.sync_down_config) as SyncButtonConfig : undefined,
+        };
+      },
+
+      update: (id: string, opts: {
+        remote_path?: string;
+        sort_order?: number;
+        sync_up_config?: SyncButtonConfig | null;
+        sync_down_config?: SyncButtonConfig | null;
+      }): ProjectRemote | undefined => {
+        const updates: string[] = [];
+        const params: Record<string, unknown> = { id };
+
+        if (opts.remote_path !== undefined) {
+          updates.push('remote_path = @remote_path');
+          params.remote_path = opts.remote_path;
+        }
+        if (opts.sort_order !== undefined) {
+          updates.push('sort_order = @sort_order');
+          params.sort_order = opts.sort_order;
+        }
+        if (opts.sync_up_config !== undefined) {
+          updates.push('sync_up_config = @sync_up_config');
+          params.sync_up_config = opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null;
+        }
+        if (opts.sync_down_config !== undefined) {
+          updates.push('sync_down_config = @sync_down_config');
+          params.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
+        }
+
+        type ProjectRemoteDbRow = {
+          id: string;
+          project_id: string;
+          remote_server_id: string;
+          remote_path: string;
+          sort_order: number;
+          sync_up_config: string | null;
+          sync_down_config: string | null;
+        };
+
+        if (updates.length === 0) {
+          const row = db.prepare<{ id: string }, ProjectRemoteDbRow>(`SELECT * FROM project_remotes WHERE id = @id`).get({ id });
+          if (!row) return undefined;
+          return {
+            id: row.id,
+            project_id: row.project_id,
+            remote_server_id: row.remote_server_id,
+            remote_path: row.remote_path,
+            sort_order: row.sort_order,
+            sync_up_config: row.sync_up_config ? JSON.parse(row.sync_up_config) as SyncButtonConfig : undefined,
+            sync_down_config: row.sync_down_config ? JSON.parse(row.sync_down_config) as SyncButtonConfig : undefined,
+          };
+        }
+
+        db.prepare(`UPDATE project_remotes SET ${updates.join(', ')} WHERE id = @id`).run(params);
+        const row = db.prepare<{ id: string }, ProjectRemoteDbRow>(`SELECT * FROM project_remotes WHERE id = @id`).get({ id });
+        if (!row) return undefined;
+        return {
+          id: row.id,
+          project_id: row.project_id,
+          remote_server_id: row.remote_server_id,
+          remote_path: row.remote_path,
+          sort_order: row.sort_order,
+          sync_up_config: row.sync_up_config ? JSON.parse(row.sync_up_config) as SyncButtonConfig : undefined,
+          sync_down_config: row.sync_down_config ? JSON.parse(row.sync_down_config) as SyncButtonConfig : undefined,
+        };
+      },
+
+      remove: (id: string): boolean => {
+        const result = db.prepare(`DELETE FROM project_remotes WHERE id = @id`).run({ id });
         return result.changes > 0;
       },
     },
