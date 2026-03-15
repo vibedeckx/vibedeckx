@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ClerkProvider, SignIn, useAuth } from "@clerk/clerk-react";
+import { ArrowLeft } from "lucide-react";
 import { setAuthToken } from "@/lib/api";
 import { useAppConfig } from "@/hooks/use-app-config";
+import { Button } from "@/components/ui/button";
+import { LandingPage } from "./landing-page";
 
 function AuthTokenSync({ children }: { children: React.ReactNode }) {
   const { getToken, isSignedIn } = useAuth();
@@ -31,6 +34,15 @@ function AuthTokenSync({ children }: { children: React.ReactNode }) {
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { isSignedIn, isLoaded } = useAuth();
+  const [showSignIn, setShowSignIn] = useState(false);
+
+  // Auto-detect Clerk OAuth callback hash fragments to skip landing page
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash.includes("/sso-callback") || hash.includes("/factor")) {
+      setShowSignIn(true);
+    }
+  }, []);
 
   if (!isLoaded) {
     return (
@@ -41,9 +53,21 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   if (!isSignedIn) {
+    if (!showSignIn) {
+      return <LandingPage onSignIn={() => setShowSignIn(true)} />;
+    }
+
     return (
-      <div className="h-screen flex items-center justify-center bg-muted/40">
+      <div className="h-screen flex flex-col items-center justify-center bg-muted/40">
         <div className="w-full max-w-md">
+          <Button
+            variant="ghost"
+            className="mb-4"
+            onClick={() => setShowSignIn(false)}
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back
+          </Button>
           <SignIn
             routing="hash"
             appearance={{
