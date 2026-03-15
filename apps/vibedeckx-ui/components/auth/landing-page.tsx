@@ -1,27 +1,37 @@
 "use client";
 
-import { ArrowRight, Sparkles, FolderKanban, Bot } from "lucide-react";
+import {
+  ArrowRight,
+  Gauge,
+  Layers,
+  Radio,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
 
 const features = [
   {
-    icon: Sparkles,
-    title: "AI-Powered Generation",
+    icon: Gauge,
+    title: "自动驾驶模式",
     description:
-      "Generate full applications from natural language descriptions using state-of-the-art AI agents.",
+      "描述你的想法，AI 代理全程接管——从架构设计到代码生成，一键启动，全程自动。",
   },
   {
-    icon: FolderKanban,
-    title: "Project Management",
+    icon: Layers,
+    title: "任务编排中心",
     description:
-      "Organize, track, and manage your AI-generated projects with built-in project management tools.",
+      "可视化管理每一个构建任务，实时追踪进度，像驾驶舱仪表盘一样掌控全局。",
   },
   {
-    icon: Bot,
-    title: "Multi-Agent Workflows",
+    icon: Radio,
+    title: "多代理协同",
     description:
-      "Orchestrate multiple AI agents working together to build, test, and refine your applications.",
+      "多个 AI 代理并行工作、协同调度，自动完成构建、测试与迭代，效率倍增。",
   },
 ];
 
@@ -31,13 +41,16 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
       {/* Hero */}
       <div className="flex-1 flex flex-col items-center justify-center px-4 py-16">
         <h1 className="text-5xl sm:text-6xl font-bold tracking-tight text-center">
-          Vibedeckx
+          VibeDeckX
         </h1>
-        <p className="mt-4 text-lg sm:text-xl text-muted-foreground text-center max-w-xl">
-          AI-Powered App Generator &amp; Project Management
+        <p className="mt-4 text-lg sm:text-xl text-muted-foreground text-center max-w-2xl">
+          AI 应用构建的自动驾驶舱——描述想法，坐享其成
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground/70 text-center max-w-lg">
+          The Autopilot Cockpit for AI App Development
         </p>
         <Button size="lg" className="mt-8 text-base" onClick={onSignIn}>
-          Get Started
+          进入驾驶舱
           <ArrowRight className="ml-2 h-5 w-5" />
         </Button>
       </div>
