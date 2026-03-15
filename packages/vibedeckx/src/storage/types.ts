@@ -147,16 +147,16 @@ export interface Storage {
     delete: (id: string, userId?: string) => void;
   };
   remoteServers: {
-    create(server: { name: string; url: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer;
-    getAll(): RemoteServer[];
-    getById(id: string): RemoteServer | undefined;
+    create(server: { name: string; url: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer;
+    getAll(userId?: string): RemoteServer[];
+    getById(id: string, userId?: string): RemoteServer | undefined;
     getByUrl(url: string): RemoteServer | undefined;
     getByToken(token: string): RemoteServer | undefined;
-    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer | undefined;
+    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer | undefined;
     updateStatus(id: string, status: RemoteServerStatus): void;
-    generateToken(id: string): string | undefined;
-    revokeToken(id: string): boolean;
-    delete(id: string): boolean;
+    generateToken(id: string, userId?: string): string | undefined;
+    revokeToken(id: string, userId?: string): boolean;
+    delete(id: string, userId?: string): boolean;
   };
   projectRemotes: {
     getByProject(projectId: string): ProjectRemoteWithServer[];
