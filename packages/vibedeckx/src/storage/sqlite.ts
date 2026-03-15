@@ -543,26 +543,38 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     remoteServers: {
-      create: (server: { name: string; url: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer => {
+      create: (server: { name: string; url: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer => {
         const id = crypto.randomUUID();
         const connectionMode = server.connection_mode ?? 'outbound';
         db.prepare(
-          `INSERT INTO remote_servers (id, name, url, api_key, connection_mode) VALUES (@id, @name, @url, @api_key, @connection_mode)`
-        ).run({ id, name: server.name, url: server.url, api_key: server.api_key ?? null, connection_mode: connectionMode });
+          `INSERT INTO remote_servers (id, name, url, api_key, connection_mode, user_id) VALUES (@id, @name, @url, @api_key, @connection_mode, @user_id)`
+        ).run({ id, name: server.name, url: server.url, api_key: server.api_key ?? null, connection_mode: connectionMode, user_id: userId ?? '' });
 
         return toRemoteServer(db
           .prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`)
           .get({ id })!);
       },
 
-      getAll: (): RemoteServer[] => {
+      getAll: (userId?: string): RemoteServer[] => {
+        if (userId) {
+          return db
+            .prepare<{ user_id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE user_id = @user_id ORDER BY created_at DESC`)
+            .all({ user_id: userId })
+            .map(toRemoteServer);
+        }
         return db
           .prepare<{}, RemoteServerRow>(`SELECT * FROM remote_servers ORDER BY created_at DESC`)
           .all({})
           .map(toRemoteServer);
       },
 
-      getById: (id: string): RemoteServer | undefined => {
+      getById: (id: string, userId?: string): RemoteServer | undefined => {
+        if (userId) {
+          const row = db
+            .prepare<{ id: string; user_id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id AND user_id = @user_id`)
+            .get({ id, user_id: userId });
+          return row ? toRemoteServer(row) : undefined;
+        }
         const row = db
           .prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`)
           .get({ id });
@@ -583,7 +595,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? toRemoteServer(row) : undefined;
       },
 
-      update: (id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer | undefined => {
+      update: (id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer | undefined => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -604,14 +616,17 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           params.connection_mode = opts.connection_mode;
         }
 
+        const ownerFilter = userId ? ' AND user_id = @user_id' : '';
+        if (userId) params.user_id = userId;
+
         if (updates.length === 0) {
-          const row = db.prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+          const row = db.prepare<Record<string, unknown>, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id${ownerFilter}`).get(params);
           return row ? toRemoteServer(row) : undefined;
         }
 
         updates.push("updated_at = datetime('now')");
-        db.prepare(`UPDATE remote_servers SET ${updates.join(', ')} WHERE id = @id`).run(params);
-        const row = db.prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+        db.prepare(`UPDATE remote_servers SET ${updates.join(', ')} WHERE id = @id${ownerFilter}`).run(params);
+        const row = db.prepare<Record<string, unknown>, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id${ownerFilter}`).get(params);
         return row ? toRemoteServer(row) : undefined;
       },
 
@@ -622,24 +637,36 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         db.prepare(`UPDATE remote_servers SET ${updates} WHERE id = @id`).run({ id, status });
       },
 
-      generateToken: (id: string): string | undefined => {
-        const existing = db.prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+      generateToken: (id: string, userId?: string): string | undefined => {
+        const ownerFilter = userId ? ' AND user_id = @user_id' : '';
+        const params: Record<string, unknown> = { id };
+        if (userId) params.user_id = userId;
+
+        const existing = db.prepare<Record<string, unknown>, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id${ownerFilter}`).get(params);
         if (!existing) return undefined;
         const token = crypto.randomBytes(32).toString('hex');
         db.prepare(
-          `UPDATE remote_servers SET connect_token = @token, connect_token_created_at = datetime('now'), updated_at = datetime('now') WHERE id = @id`
-        ).run({ id, token });
+          `UPDATE remote_servers SET connect_token = @token, connect_token_created_at = datetime('now'), updated_at = datetime('now') WHERE id = @id${ownerFilter}`
+        ).run({ ...params, token });
         return token;
       },
 
-      revokeToken: (id: string): boolean => {
+      revokeToken: (id: string, userId?: string): boolean => {
+        const ownerFilter = userId ? ' AND user_id = @user_id' : '';
+        const params: Record<string, unknown> = { id };
+        if (userId) params.user_id = userId;
+
         const result = db.prepare(
-          `UPDATE remote_servers SET connect_token = NULL, connect_token_created_at = NULL, updated_at = datetime('now') WHERE id = @id`
-        ).run({ id });
+          `UPDATE remote_servers SET connect_token = NULL, connect_token_created_at = NULL, updated_at = datetime('now') WHERE id = @id${ownerFilter}`
+        ).run(params);
         return result.changes > 0;
       },
 
-      delete: (id: string): boolean => {
+      delete: (id: string, userId?: string): boolean => {
+        if (userId) {
+          const result = db.prepare(`DELETE FROM remote_servers WHERE id = @id AND user_id = @user_id`).run({ id, user_id: userId });
+          return result.changes > 0;
+        }
         const result = db.prepare(`DELETE FROM remote_servers WHERE id = @id`).run({ id });
         return result.changes > 0;
       },
