@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { RemoteServer } from "../storage/types.js";
-import { proxyToRemote } from "../utils/remote-proxy.js";
+import { proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import "../server-types.js";
 
 function sanitizeServer(server: RemoteServer) {
@@ -132,6 +132,37 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const serverUrl = `${proto}://${host}`;
       const connectCommand = `vibedeckx connect --connect-to ${serverUrl} --token ${token}`;
       return reply.send({ token, connectCommand });
+    }
+  );
+
+  // POST /api/remote-servers/:id/browse — browse directories on remote server
+  fastify.post<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/browse",
+    async (request, reply) => {
+      const { id } = request.params;
+      const { path: browsePath } = (request.body as { path?: string }) ?? {};
+      const server = fastify.storage.remoteServers.getById(id);
+      if (!server)
+        return reply.code(404).send({ error: "Server not found" });
+
+      try {
+        const queryPath = browsePath ? `?path=${encodeURIComponent(browsePath)}` : "";
+        const result = await proxyToRemoteAuto(
+          id,
+          server.url,
+          server.api_key ?? "",
+          "GET",
+          `/api/browse${queryPath}`,
+          undefined,
+          { reverseConnectManager: fastify.reverseConnectManager }
+        );
+        if (result.ok) {
+          return reply.send(result.data);
+        }
+        return reply.code(502).send({ error: "Failed to browse remote directory", details: result.data });
+      } catch (err) {
+        return reply.code(502).send({ error: "Failed to browse remote directory" });
+      }
     }
   );
 

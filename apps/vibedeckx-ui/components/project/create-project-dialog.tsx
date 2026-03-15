@@ -433,8 +433,7 @@ export function CreateProjectDialog({
                   </Button>
                 </div>
                 <RemoteDirectoryBrowser
-                  remoteUrl={selectedServer.url}
-                  apiKey="server-stored"
+                  serverId={selectedServer.id}
                   onSelect={handleRemotePathSelect}
                   selectedPath={selectedRemotePath}
                 />

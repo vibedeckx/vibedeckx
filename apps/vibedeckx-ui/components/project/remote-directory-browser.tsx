@@ -7,15 +7,13 @@ import { Folder, ChevronRight, ChevronUp, Loader2 } from "lucide-react";
 import { api, type RemoteBrowseItem } from "@/lib/api";
 
 interface RemoteDirectoryBrowserProps {
-  remoteUrl: string;
-  apiKey: string;
+  serverId: string;
   onSelect: (path: string) => void;
   selectedPath?: string;
 }
 
 export function RemoteDirectoryBrowser({
-  remoteUrl,
-  apiKey,
+  serverId,
   onSelect,
   selectedPath,
 }: RemoteDirectoryBrowserProps) {
@@ -25,7 +23,7 @@ export function RemoteDirectoryBrowser({
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!remoteUrl || !apiKey) {
+    if (!serverId) {
       setItems([]);
       return;
     }
@@ -34,7 +32,7 @@ export function RemoteDirectoryBrowser({
       setLoading(true);
       setError("");
       try {
-        const result = await api.browseRemoteDirectory(remoteUrl, apiKey, currentPath);
+        const result = await api.browseRemoteServerDirectory(serverId, currentPath);
         setItems(result.items ?? []);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load directory");
@@ -45,7 +43,7 @@ export function RemoteDirectoryBrowser({
     };
 
     fetchDirectory();
-  }, [remoteUrl, apiKey, currentPath]);
+  }, [serverId, currentPath]);
 
   const handleNavigate = (path: string) => {
     setCurrentPath(path);
@@ -60,10 +58,10 @@ export function RemoteDirectoryBrowser({
     onSelect(item.path);
   };
 
-  if (!remoteUrl || !apiKey) {
+  if (!serverId) {
     return (
       <div className="text-sm text-muted-foreground p-4 text-center border rounded-md">
-        Enter remote URL and API key to browse directories
+        Select a remote server to browse directories
       </div>
     );
   }

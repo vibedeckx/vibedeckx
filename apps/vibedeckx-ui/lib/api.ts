@@ -734,6 +734,19 @@ export const api = {
     return res.json();
   },
 
+  async browseRemoteServerDirectory(serverId: string, path?: string): Promise<RemoteBrowseResponse> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${serverId}/browse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || "Failed to browse directory");
+    }
+    return res.json();
+  },
+
   async createRemoteProject(
     name: string,
     remotePath: string,
