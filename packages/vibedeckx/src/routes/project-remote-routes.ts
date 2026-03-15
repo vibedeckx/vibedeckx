@@ -52,7 +52,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!project)
         return reply.code(404).send({ error: "Project not found" });
 
-      const server = fastify.storage.remoteServers.getById(remoteServerId);
+      const server = fastify.storage.remoteServers.getById(remoteServerId, userId);
       if (!server)
         return reply.code(404).send({ error: "Remote server not found" });
 
