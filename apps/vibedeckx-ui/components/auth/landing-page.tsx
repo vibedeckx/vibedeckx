@@ -17,21 +17,21 @@ import {
 const features = [
   {
     icon: Gauge,
-    title: "自动驾驶模式",
+    title: "Autopilot Mode",
     description:
-      "描述你的想法，AI 代理全程接管——从架构设计到代码生成，一键启动，全程自动。",
+      "Describe your idea and let AI agents take the wheel — from architecture to code, fully automated from launch to landing.",
   },
   {
     icon: Layers,
-    title: "任务编排中心",
+    title: "Mission Control",
     description:
-      "可视化管理每一个构建任务，实时追踪进度，像驾驶舱仪表盘一样掌控全局。",
+      "A cockpit dashboard for every build task. Track progress in real time and stay in command of the entire operation.",
   },
   {
     icon: Radio,
-    title: "多代理协同",
+    title: "Multi-Agent Fleet",
     description:
-      "多个 AI 代理并行工作、协同调度，自动完成构建、测试与迭代，效率倍增。",
+      "Deploy multiple AI agents in parallel — building, testing, and iterating simultaneously at autopilot speed.",
   },
 ];
 
@@ -44,13 +44,13 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
           VibeDeckX
         </h1>
         <p className="mt-4 text-lg sm:text-xl text-muted-foreground text-center max-w-2xl">
-          AI 应用构建的自动驾驶舱——描述想法，坐享其成
+          The Autopilot Cockpit for Building Apps with AI
         </p>
         <p className="mt-2 text-sm text-muted-foreground/70 text-center max-w-lg">
-          The Autopilot Cockpit for AI App Development
+          Describe your vision. We handle the rest.
         </p>
         <Button size="lg" className="mt-8 text-base" onClick={onSignIn}>
-          进入驾驶舱
+          Enter the Cockpit
           <ArrowRight className="ml-2 h-5 w-5" />
         </Button>
       </div>
