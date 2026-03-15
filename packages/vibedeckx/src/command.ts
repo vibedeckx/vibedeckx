@@ -1,3 +1,4 @@
+import path from "node:path";
 import { buildApplication, buildCommand, buildRouteMap } from "@stricli/core";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import { createServer } from "./server.js";
@@ -18,15 +19,24 @@ const startCommand = buildCommand({
         brief: "Enable Clerk authentication (requires CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY env vars)",
         optional: true,
       },
+      "data-dir": {
+        kind: "parsed",
+        parse: String,
+        brief: "Directory for storing database file (default: ~/.vibedeckx)",
+        optional: true,
+      },
     },
   },
-  func: async (flags: { port: number | undefined; auth: boolean | undefined }) => {
+  func: async (flags: { port: number | undefined; auth: boolean | undefined; "data-dir": string | undefined }) => {
     const port = flags.port ?? DEFAULT_PORT;
     const authEnabled = flags.auth ?? false;
 
     console.log("Starting vibedeckx...");
 
-    const storage = await createSqliteStorage(DB_PATH);
+    const dbPath = flags["data-dir"]
+      ? path.join(flags["data-dir"], "data.sqlite")
+      : DB_PATH;
+    const storage = await createSqliteStorage(dbPath);
     const server = await createServer({ storage, authEnabled });
 
     const url = await server.start(port);
