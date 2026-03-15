@@ -18,8 +18,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       remote_url TEXT,
       remote_api_key TEXT,
       remote_project_id TEXT,
+      user_id TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
 
     CREATE TABLE IF NOT EXISTS executor_groups (
       id TEXT PRIMARY KEY,
@@ -157,6 +160,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!hasSyncUpConfigColumn) {
     db.exec("ALTER TABLE projects ADD COLUMN sync_up_config TEXT");
     db.exec("ALTER TABLE projects ADD COLUMN sync_down_config TEXT");
+  }
+
+  // Migration: add user_id column for Clerk authentication
+  const hasUserIdColumn = projectTableInfo.some((col) => col.name === "user_id");
+  if (!hasUserIdColumn) {
+    db.exec("ALTER TABLE projects ADD COLUMN user_id TEXT NOT NULL DEFAULT ''");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id)");
   }
 
   // Migration: add executor_groups table and group_id column to executors
@@ -330,16 +340,17 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     executor_mode: string | null;
     sync_up_config: string | null;
     sync_down_config: string | null;
+    user_id: string;
     created_at: string;
   };
 
   return {
     projects: {
-      create: ({ id, name, path: projectPath, remote_path, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config }) => {
+      create: ({ id, name, path: projectPath, remote_path, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config }, userId?: string) => {
         const is_remote = remote_url ? 1 : 0;
         db.prepare(
-          `INSERT INTO projects (id, name, path, remote_path, is_remote, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config)
-           VALUES (@id, @name, @path, @remote_path, @is_remote, @remote_url, @remote_api_key, @agent_mode, @executor_mode, @sync_up_config, @sync_down_config)`
+          `INSERT INTO projects (id, name, path, remote_path, is_remote, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config, user_id)
+           VALUES (@id, @name, @path, @remote_path, @is_remote, @remote_url, @remote_api_key, @agent_mode, @executor_mode, @sync_up_config, @sync_down_config, @user_id)`
         ).run({
           id,
           name,
@@ -352,6 +363,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           executor_mode: executor_mode ?? 'local',
           sync_up_config: sync_up_config ? JSON.stringify(sync_up_config) : null,
           sync_down_config: sync_down_config ? JSON.stringify(sync_down_config) : null,
+          user_id: userId ?? '',
         });
 
         const row = db
@@ -360,14 +372,26 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return toProject(row);
       },
 
-      getAll: () => {
+      getAll: (userId?: string) => {
+        if (userId) {
+          const rows = db
+            .prepare<{ user_id: string }, ProjectRow>(`SELECT * FROM projects WHERE user_id = @user_id ORDER BY created_at DESC`)
+            .all({ user_id: userId });
+          return rows.map(toProject);
+        }
         const rows = db
           .prepare<{}, ProjectRow>(`SELECT * FROM projects ORDER BY created_at DESC`)
           .all({});
         return rows.map(toProject);
       },
 
-      getById: (id: string) => {
+      getById: (id: string, userId?: string) => {
+        if (userId) {
+          const row = db
+            .prepare<{ id: string; user_id: string }, ProjectRow>(`SELECT * FROM projects WHERE id = @id AND user_id = @user_id`)
+            .get({ id, user_id: userId });
+          return row ? toProject(row) : undefined;
+        }
         const row = db
           .prepare<{ id: string }, ProjectRow>(`SELECT * FROM projects WHERE id = @id`)
           .get({ id });
@@ -381,7 +405,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? toProject(row) : undefined;
       },
 
-      update: (id: string, opts: { name?: string; path?: string | null; remote_path?: string | null; remote_url?: string | null; remote_api_key?: string | null; agent_mode?: ExecutionMode; executor_mode?: ExecutionMode; sync_up_config?: SyncButtonConfig | null; sync_down_config?: SyncButtonConfig | null }) => {
+      update: (id: string, opts: { name?: string; path?: string | null; remote_path?: string | null; remote_url?: string | null; remote_api_key?: string | null; agent_mode?: ExecutionMode; executor_mode?: ExecutionMode; sync_up_config?: SyncButtonConfig | null; sync_down_config?: SyncButtonConfig | null }, userId?: string) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -428,18 +452,25 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           params.is_remote = opts.remote_url ? 1 : 0;
         }
 
+        const ownerFilter = userId ? ' AND user_id = @user_id' : '';
+        if (userId) params.user_id = userId;
+
         if (updates.length === 0) {
-          const row = db.prepare<{ id: string }, ProjectRow>(`SELECT * FROM projects WHERE id = @id`).get({ id });
+          const row = db.prepare<Record<string, unknown>, ProjectRow>(`SELECT * FROM projects WHERE id = @id${ownerFilter}`).get(params);
           return row ? toProject(row) : undefined;
         }
 
-        db.prepare(`UPDATE projects SET ${updates.join(', ')} WHERE id = @id`).run(params);
-        const row = db.prepare<{ id: string }, ProjectRow>(`SELECT * FROM projects WHERE id = @id`).get({ id });
+        db.prepare(`UPDATE projects SET ${updates.join(', ')} WHERE id = @id${ownerFilter}`).run(params);
+        const row = db.prepare<Record<string, unknown>, ProjectRow>(`SELECT * FROM projects WHERE id = @id${ownerFilter}`).get(params);
         return row ? toProject(row) : undefined;
       },
 
-      delete: (id: string) => {
-        db.prepare(`DELETE FROM projects WHERE id = @id`).run({ id });
+      delete: (id: string, userId?: string) => {
+        if (userId) {
+          db.prepare(`DELETE FROM projects WHERE id = @id AND user_id = @user_id`).run({ id, user_id: userId });
+        } else {
+          db.prepare(`DELETE FROM projects WHERE id = @id`).run({ id });
+        }
       },
     },
 

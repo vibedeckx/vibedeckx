@@ -4,6 +4,7 @@
 
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -12,6 +13,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { branch?: string | null };
   }>("/api/projects/:projectId/chat-sessions", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
     const { projectId } = req.params;
     const branch = req.body?.branch ?? null;
 

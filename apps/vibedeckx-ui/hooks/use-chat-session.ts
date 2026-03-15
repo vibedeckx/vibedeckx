@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl } from "@/lib/api";
+import { getWebSocketUrl, getAuthToken } from "@/lib/api";
 
 // ============ Types (reused from agent session) ============
 
@@ -63,13 +63,21 @@ function getApiBase(): string {
   return "";
 }
 
+function getAuthHeaders(contentType?: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (contentType) headers["Content-Type"] = contentType;
+  const token = getAuthToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
 async function createOrGetChatSession(
   projectId: string,
   branch: string | null
 ): Promise<{ session: ChatSession; messages: AgentMessage[] }> {
   const response = await fetch(`${getApiBase()}/api/projects/${projectId}/chat-sessions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ branch }),
   });
 
@@ -83,7 +91,7 @@ async function createOrGetChatSession(
 async function sendMessageToChat(sessionId: string, content: string): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/chat-sessions/${sessionId}/message`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ content }),
   });
 
@@ -95,6 +103,7 @@ async function sendMessageToChat(sessionId: string, content: string): Promise<vo
 async function stopGenerationApi(sessionId: string): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/chat-sessions/${sessionId}/stop`, {
     method: "POST",
+    headers: getAuthHeaders(),
   });
 
   if (!response.ok) {

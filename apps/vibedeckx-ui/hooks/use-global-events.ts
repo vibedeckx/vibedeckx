@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { getAuthToken } from "@/lib/api";
 
 function getApiBase(): string {
   if (typeof window === "undefined") return "";
@@ -56,7 +57,9 @@ export function useGlobalEvents(
   useEffect(() => {
     if (!projectId) return;
 
-    const url = `${getApiBase()}/api/events`;
+    const token = getAuthToken();
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
+    const url = `${getApiBase()}/api/events${tokenParam}`;
     const es = new EventSource(url);
 
     es.onmessage = (event) => {

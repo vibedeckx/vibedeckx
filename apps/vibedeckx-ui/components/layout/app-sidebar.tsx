@@ -3,6 +3,7 @@
 import { Columns3, ListTodo, FolderOpen, GitBranch, Plus, Trash2, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { UserMenu } from "@/components/auth/user-menu";
 import type { Worktree, Project } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 
@@ -148,7 +149,7 @@ export function AppSidebar({
         </TooltipProvider>
       )}
 
-      {/* Settings — pinned to bottom */}
+      {/* Settings + User — pinned to bottom */}
       <div className="mt-auto">
         <button
           onClick={() => onViewChange("settings")}
@@ -161,6 +162,7 @@ export function AppSidebar({
           <Settings className="h-4 w-4 shrink-0" />
           <span>Settings</span>
         </button>
+        <UserMenu />
       </div>
     </nav>
   );

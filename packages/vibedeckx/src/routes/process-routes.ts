@@ -4,6 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { proxyToRemote } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -41,12 +42,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // 启动 Executor
   fastify.post<{ Params: { id: string }; Body: { branch?: string | null } }>("/api/executors/:id/start", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
     const executor = fastify.storage.executors.getById(req.params.id);
     if (!executor) {
       return reply.code(404).send({ error: "Executor not found" });
     }
 
-    const project = fastify.storage.projects.getById(executor.project_id);
+    const project = fastify.storage.projects.getById(executor.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

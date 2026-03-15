@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -8,7 +9,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { projectId: string }; Querystring: { groupId?: string } }>(
     "/api/projects/:projectId/executors",
     async (req, reply) => {
-      const project = fastify.storage.projects.getById(req.params.projectId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const project = fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -25,7 +29,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { name: string; command: string; cwd?: string; pty?: boolean; group_id: string };
   }>("/api/projects/:projectId/executors", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -79,7 +86,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { orderedIds: string[]; groupId: string };
   }>("/api/projects/:projectId/executors/reorder", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

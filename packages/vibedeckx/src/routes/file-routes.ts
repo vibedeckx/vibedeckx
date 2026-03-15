@@ -6,6 +6,7 @@ import { createReadStream } from "fs";
 import { Readable } from "stream";
 import { proxyToRemote, proxyToRemoteRaw } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 interface BrowseEntry {
@@ -167,7 +168,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Querystring: { path?: string; branch?: string; target?: "local" | "remote" };
   }>("/api/projects/:id/browse", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.id);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -221,7 +225,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Querystring: { path: string; branch?: string; target?: "local" | "remote" };
   }>("/api/projects/:id/file-content", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.id);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -291,7 +298,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Querystring: { path: string; branch?: string; target?: "local" | "remote" };
   }>("/api/projects/:id/file-download", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.id);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

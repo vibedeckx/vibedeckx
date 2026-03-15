@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { getAuthToken } from "@/lib/api";
 import type { AgentSessionStatus } from "./use-agent-session";
 
 function getApiBase(): string {
@@ -32,7 +33,10 @@ export function useSessionStatuses(projectId: string | null) {
     }
 
     try {
-      const res = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`);
+      const headers: Record<string, string> = {};
+      const token = getAuthToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`, { headers });
       if (!res.ok) return;
       const data = await res.json() as { sessions: SessionRecord[] };
       const map = new Map<string, AgentSessionStatus>();

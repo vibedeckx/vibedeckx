@@ -3,6 +3,7 @@ import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import { generateText } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -10,7 +11,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/tasks",
     async (req, reply) => {
-      const project = fastify.storage.projects.getById(req.params.projectId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const project = fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -25,7 +28,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { title?: string; description: string; status?: string; priority?: string; assigned_branch?: string | null };
   }>("/api/projects/:projectId/tasks", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -100,7 +105,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { orderedIds: string[] };
   }>("/api/projects/:projectId/tasks/reorder", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
