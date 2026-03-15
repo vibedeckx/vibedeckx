@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Plus } from 'lucide-react';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
 import { SettingsView } from '@/components/settings/settings-view';
+import { RemoteServersSettings } from '@/components/settings/remote-servers-settings';
 import { CreateWorktreeDialog } from '@/components/project/create-worktree-dialog';
 import { DeleteWorktreeDialog } from '@/components/project/delete-worktree-dialog';
 import { RightPanel } from '@/components/right-panel';
@@ -336,6 +337,18 @@ Please proceed step by step and let me know if there are any issues or conflicts
               project={currentProject}
               selectedBranch={selectedBranch}
             />
+          </div>
+
+          {/* Remote Servers View — kept mounted, hidden via CSS */}
+          <div className={activeView !== 'remote-servers' ? 'hidden' : 'flex-1 overflow-hidden'}>
+            <div className="h-full flex flex-col overflow-auto">
+              <div className="border-b px-6 py-4 flex-shrink-0">
+                <h2 className="text-lg font-semibold">Remote Servers</h2>
+              </div>
+              <div className="flex-1 px-6 py-4 max-w-lg">
+                <RemoteServersSettings />
+              </div>
+            </div>
           </div>
 
           {/* Settings View — kept mounted, hidden via CSS */}

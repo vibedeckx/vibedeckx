@@ -1,12 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api, type ProxyConfig } from '@/lib/api';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
-import { RemoteServersSettings } from './remote-servers-settings';
 
 type ProxyType = ProxyConfig['type'];
 
@@ -75,131 +73,119 @@ export function SettingsView() {
       </div>
 
       <div className="flex-1 px-6 py-4 max-w-lg">
-        <Tabs defaultValue="remote-servers">
-          <TabsList className="w-full">
-            <TabsTrigger value="remote-servers" className="flex-1">Remote Servers</TabsTrigger>
-            <TabsTrigger value="proxy" className="flex-1">Proxy</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="remote-servers">
-            <RemoteServersSettings />
-          </TabsContent>
-
-          <TabsContent value="proxy">
-            {loading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <h3 className="text-sm font-semibold">Proxy</h3>
+            <div>
+              <label className="text-sm font-medium mb-2 block">Proxy Type</label>
+              <div className="space-y-2">
+                {([
+                  ['none', 'No Proxy', 'Direct connection'],
+                  ['http', 'HTTP Proxy', 'Route through HTTP/HTTPS proxy'],
+                  ['socks5', 'SOCKS5 Proxy', 'Route through SOCKS5 proxy'],
+                ] as const).map(([value, label, desc]) => (
+                  <label
+                    key={value}
+                    className={`flex items-start gap-3 p-2.5 rounded-md border cursor-pointer transition-colors ${
+                      proxyType === value
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border hover:border-muted-foreground/30'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="proxyType"
+                      value={value}
+                      checked={proxyType === value}
+                      onChange={() => {
+                        setProxyType(value);
+                        setTestResult(null);
+                        setSaveMessage(null);
+                      }}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <div className="text-sm font-medium">{label}</div>
+                      <div className="text-xs text-muted-foreground">{desc}</div>
+                    </div>
+                  </label>
+                ))}
               </div>
-            ) : (
-              <div className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium mb-2 block">Proxy Type</label>
-                  <div className="space-y-2">
-                    {([
-                      ['none', 'No Proxy', 'Direct connection'],
-                      ['http', 'HTTP Proxy', 'Route through HTTP/HTTPS proxy'],
-                      ['socks5', 'SOCKS5 Proxy', 'Route through SOCKS5 proxy'],
-                    ] as const).map(([value, label, desc]) => (
-                      <label
-                        key={value}
-                        className={`flex items-start gap-3 p-2.5 rounded-md border cursor-pointer transition-colors ${
-                          proxyType === value
-                            ? 'border-primary bg-primary/5'
-                            : 'border-border hover:border-muted-foreground/30'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="proxyType"
-                          value={value}
-                          checked={proxyType === value}
-                          onChange={() => {
-                            setProxyType(value);
-                            setTestResult(null);
-                            setSaveMessage(null);
-                          }}
-                          className="mt-0.5"
-                        />
-                        <div>
-                          <div className="text-sm font-medium">{label}</div>
-                          <div className="text-xs text-muted-foreground">{desc}</div>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
+            </div>
+
+            {proxyEnabled && (
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="text-sm font-medium mb-1 block">Host</label>
+                  <Input
+                    placeholder="127.0.0.1"
+                    value={host}
+                    onChange={(e) => {
+                      setHost(e.target.value);
+                      setTestResult(null);
+                      setSaveMessage(null);
+                    }}
+                  />
                 </div>
-
-                {proxyEnabled && (
-                  <div className="flex gap-3">
-                    <div className="flex-1">
-                      <label className="text-sm font-medium mb-1 block">Host</label>
-                      <Input
-                        placeholder="127.0.0.1"
-                        value={host}
-                        onChange={(e) => {
-                          setHost(e.target.value);
-                          setTestResult(null);
-                          setSaveMessage(null);
-                        }}
-                      />
-                    </div>
-                    <div className="w-24">
-                      <label className="text-sm font-medium mb-1 block">Port</label>
-                      <Input
-                        type="number"
-                        placeholder="1080"
-                        value={port}
-                        onChange={(e) => {
-                          setPort(e.target.value);
-                          setTestResult(null);
-                          setSaveMessage(null);
-                        }}
-                        min={1}
-                        max={65535}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {testResult && (
-                  <div className={`flex items-center gap-2 text-sm p-2 rounded-md ${
-                    testResult.success
-                      ? 'text-green-600 bg-green-50 dark:text-green-400 dark:bg-green-950/30'
-                      : 'text-red-600 bg-red-50 dark:text-red-400 dark:bg-red-950/30'
-                  }`}>
-                    {testResult.success ? (
-                      <CheckCircle2 className="h-4 w-4 shrink-0" />
-                    ) : (
-                      <XCircle className="h-4 w-4 shrink-0" />
-                    )}
-                    <span className="truncate">{testResult.message}</span>
-                  </div>
-                )}
-
-                {saveMessage && !testResult && (
-                  <div className="text-sm text-muted-foreground text-center">{saveMessage}</div>
-                )}
-
-                <div className="flex justify-end gap-2 pt-2">
-                  {proxyEnabled && (
-                    <Button
-                      variant="outline"
-                      onClick={handleTest}
-                      disabled={testing || !host.trim() || !port}
-                    >
-                      {testing && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
-                      Test Connection
-                    </Button>
-                  )}
-                  <Button onClick={handleSave} disabled={saving}>
-                    {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
-                    Save
-                  </Button>
+                <div className="w-24">
+                  <label className="text-sm font-medium mb-1 block">Port</label>
+                  <Input
+                    type="number"
+                    placeholder="1080"
+                    value={port}
+                    onChange={(e) => {
+                      setPort(e.target.value);
+                      setTestResult(null);
+                      setSaveMessage(null);
+                    }}
+                    min={1}
+                    max={65535}
+                  />
                 </div>
               </div>
             )}
-          </TabsContent>
-        </Tabs>
+
+            {testResult && (
+              <div className={`flex items-center gap-2 text-sm p-2 rounded-md ${
+                testResult.success
+                  ? 'text-green-600 bg-green-50 dark:text-green-400 dark:bg-green-950/30'
+                  : 'text-red-600 bg-red-50 dark:text-red-400 dark:bg-red-950/30'
+              }`}>
+                {testResult.success ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                ) : (
+                  <XCircle className="h-4 w-4 shrink-0" />
+                )}
+                <span className="truncate">{testResult.message}</span>
+              </div>
+            )}
+
+            {saveMessage && !testResult && (
+              <div className="text-sm text-muted-foreground text-center">{saveMessage}</div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              {proxyEnabled && (
+                <Button
+                  variant="outline"
+                  onClick={handleTest}
+                  disabled={testing || !host.trim() || !port}
+                >
+                  {testing && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+                  Test Connection
+                </Button>
+              )}
+              <Button onClick={handleSave} disabled={saving}>
+                {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+                Save
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
