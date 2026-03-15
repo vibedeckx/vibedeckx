@@ -1,0 +1,153 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: darwin-arm64
+          - os: macos-13
+            platform: darwin-x64
+          - os: windows-latest
+            platform: win32-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE_NAME="vibedeckx-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "staging/${ARCHIVE_NAME}"
+
+          # Copy dist (backend + bundled UI)
+          cp -r packages/vibedeckx/dist "staging/${ARCHIVE_NAME}/"
+
+          # Copy package.json for dependency info
+          cp packages/vibedeckx/package.json "staging/${ARCHIVE_NAME}/"
+
+          # Install production dependencies into staging
+          cd "staging/${ARCHIVE_NAME}"
+          npm install --omit=dev --ignore-scripts
+          npm rebuild better-sqlite3 node-pty
+          cd ../..
+
+          # Create tarball
+          tar -czf "${ARCHIVE_NAME}.tar.gz" -C staging "${ARCHIVE_NAME}"
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $archiveName = "vibedeckx-${version}-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path "staging/${archiveName}"
+
+          # Copy dist (backend + bundled UI)
+          Copy-Item -Recurse packages/vibedeckx/dist "staging/${archiveName}/"
+
+          # Copy package.json for dependency info
+          Copy-Item packages/vibedeckx/package.json "staging/${archiveName}/"
+
+          # Install production dependencies into staging
+          Set-Location "staging/${archiveName}"
+          npm install --omit=dev --ignore-scripts
+          npm rebuild better-sqlite3 node-pty
+          Set-Location ../..
+
+          # Create zip
+          Compress-Archive -Path "staging/${archiveName}" -DestinationPath "${archiveName}.zip"
+
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibedeckx-${{ matrix.platform }}
+          path: "*.tar.gz"
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibedeckx-${{ matrix.platform }}
+          path: "*.zip"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > release-notes.md << 'NOTES_EOF'
+          ## Installation
+
+          ### From npm (recommended)
+          ```bash
+          npm install -g vibedeckx
+          ```
+
+          ### From release archive
+          1. Download the archive for your platform
+          2. Extract it
+          3. Run with Node.js 22+:
+          ```bash
+          node dist/bin.js
+          ```
+
+          ### Platform archives
+          | Platform | File |
+          |----------|------|
+          NOTES_EOF
+
+          for f in artifacts/*; do
+            fname=$(basename "$f")
+            echo "| $(echo $fname | sed 's/vibedeckx-[0-9.]*-//' | sed 's/\.tar\.gz//' | sed 's/\.zip//') | \`${fname}\` |" >> release-notes.md
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: artifacts/*
+          generate_release_notes: true
+          append_body: true
