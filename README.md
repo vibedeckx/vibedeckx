@@ -212,7 +212,6 @@ git push origin v0.1.0
 |------|---------|
 | Linux x64 | `.tar.gz` |
 | macOS ARM (Apple Silicon) | `.tar.gz` |
-| macOS x64 (Intel) | `.tar.gz` |
 | Windows x64 | `.zip` |
 
 下载解压后使用 Node.js 22+ 运行：
