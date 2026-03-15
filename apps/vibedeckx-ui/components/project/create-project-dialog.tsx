@@ -10,8 +10,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { FolderOpen, Loader2, Check, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { FolderOpen, Loader2, Check, X, Plus, Trash2, Server, Globe } from "lucide-react";
+import { api, type RemoteServer, type Project } from "@/lib/api";
 import { RemoteDirectoryBrowser } from "./remote-directory-browser";
 
 interface CreateProjectDialogProps {
@@ -28,6 +28,15 @@ interface CreateProjectDialogProps {
 
 type ConnectionStatus = "idle" | "testing" | "success" | "error";
 
+interface PendingRemote {
+  serverId: string;
+  serverName: string;
+  serverUrl: string;
+  remotePath: string;
+}
+
+type AddRemoteStep = "closed" | "pick-server" | "new-server" | "pick-path";
+
 export function CreateProjectDialog({
   open,
   onOpenChange,
@@ -39,12 +48,21 @@ export function CreateProjectDialog({
   // Local project state
   const [path, setPath] = useState("");
 
-  // Remote project state
-  const [remoteUrl, setRemoteUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [remotePath, setRemotePath] = useState("");
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
-  const [connectionError, setConnectionError] = useState("");
+  // Multi-remote state
+  const [pendingRemotes, setPendingRemotes] = useState<PendingRemote[]>([]);
+
+  // "Add Remote" flow state
+  const [addRemoteStep, setAddRemoteStep] = useState<AddRemoteStep>("closed");
+  const [existingServers, setExistingServers] = useState<RemoteServer[]>([]);
+  const [selectedServer, setSelectedServer] = useState<RemoteServer | null>(null);
+  const [selectedRemotePath, setSelectedRemotePath] = useState("");
+
+  // New server creation
+  const [newServerName, setNewServerName] = useState("");
+  const [newServerUrl, setNewServerUrl] = useState("");
+  const [newServerApiKey, setNewServerApiKey] = useState("");
+  const [newServerStatus, setNewServerStatus] = useState<ConnectionStatus>("idle");
+  const [newServerError, setNewServerError] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -52,19 +70,27 @@ export function CreateProjectDialog({
   const resetForm = () => {
     setName("");
     setPath("");
-    setRemoteUrl("");
-    setApiKey("");
-    setRemotePath("");
-    setConnectionStatus("idle");
-    setConnectionError("");
+    setPendingRemotes([]);
+    resetAddRemoteFlow();
     setError("");
   };
 
-  const handleOpenChange = (open: boolean) => {
-    if (!open) {
+  const resetAddRemoteFlow = () => {
+    setAddRemoteStep("closed");
+    setSelectedServer(null);
+    setSelectedRemotePath("");
+    setNewServerName("");
+    setNewServerUrl("");
+    setNewServerApiKey("");
+    setNewServerStatus("idle");
+    setNewServerError("");
+  };
+
+  const handleOpenChange = (newOpen: boolean) => {
+    if (!newOpen) {
       resetForm();
     }
-    onOpenChange(open);
+    onOpenChange(newOpen);
   };
 
   const handleSelectFolder = async () => {
@@ -78,34 +104,100 @@ export function CreateProjectDialog({
     }
   };
 
-  const handleTestConnection = async () => {
-    if (!remoteUrl || !apiKey) {
-      setConnectionError("URL and API key are required");
-      return;
-    }
-
-    setConnectionStatus("testing");
-    setConnectionError("");
-
+  // Fetch existing servers when opening the picker
+  const handleOpenAddRemote = async () => {
+    setAddRemoteStep("pick-server");
     try {
-      await api.testRemoteConnection(remoteUrl, apiKey);
-      setConnectionStatus("success");
-    } catch (e) {
-      setConnectionStatus("error");
-      setConnectionError(e instanceof Error ? e.message : "Connection failed");
+      const servers = await api.getRemoteServers();
+      setExistingServers(servers);
+    } catch {
+      setExistingServers([]);
     }
   };
 
-  const handleRemotePathSelect = (selectedPath: string) => {
-    setRemotePath(selectedPath);
+  const handleSelectExistingServer = (server: RemoteServer) => {
+    setSelectedServer(server);
+    setSelectedRemotePath("");
+    setAddRemoteStep("pick-path");
+  };
+
+  const handleStartNewServer = () => {
+    setAddRemoteStep("new-server");
+    setNewServerName("");
+    setNewServerUrl("");
+    setNewServerApiKey("");
+    setNewServerStatus("idle");
+    setNewServerError("");
+  };
+
+  const handleTestNewServer = async () => {
+    if (!newServerUrl || !newServerApiKey) {
+      setNewServerError("URL and API key are required");
+      return;
+    }
+    setNewServerStatus("testing");
+    setNewServerError("");
+    try {
+      await api.testRemoteConnection(newServerUrl, newServerApiKey);
+      setNewServerStatus("success");
+    } catch (e) {
+      setNewServerStatus("error");
+      setNewServerError(e instanceof Error ? e.message : "Connection failed");
+    }
+  };
+
+  const handleCreateAndSelectServer = async () => {
+    if (!newServerName.trim() || !newServerUrl.trim()) return;
+    try {
+      const server = await api.createRemoteServer({
+        name: newServerName.trim(),
+        url: newServerUrl.trim(),
+        apiKey: newServerApiKey.trim() || undefined,
+      });
+      setSelectedServer(server);
+      setSelectedRemotePath("");
+      setAddRemoteStep("pick-path");
+    } catch (e) {
+      setNewServerError(e instanceof Error ? e.message : "Failed to create server");
+    }
+  };
+
+  const handleRemotePathSelect = (remPath: string) => {
+    setSelectedRemotePath(remPath);
+  };
+
+  const handleConfirmAddRemote = () => {
+    if (!selectedServer || !selectedRemotePath) return;
+    // Don't add duplicates
+    const alreadyAdded = pendingRemotes.some(
+      r => r.serverId === selectedServer.id && r.remotePath === selectedRemotePath
+    );
+    if (alreadyAdded) {
+      resetAddRemoteFlow();
+      return;
+    }
+    setPendingRemotes(prev => [
+      ...prev,
+      {
+        serverId: selectedServer.id,
+        serverName: selectedServer.name,
+        serverUrl: selectedServer.url,
+        remotePath: selectedRemotePath,
+      },
+    ]);
     if (!name) {
-      const folderName = selectedPath.split("/").pop() || "";
+      const folderName = selectedRemotePath.split("/").pop() || "";
       setName(folderName);
     }
+    resetAddRemoteFlow();
+  };
+
+  const handleRemoveRemote = (index: number) => {
+    setPendingRemotes(prev => prev.filter((_, i) => i !== index));
   };
 
   const hasLocalPath = path.trim().length > 0;
-  const hasRemote = remotePath.trim().length > 0 && remoteUrl.trim().length > 0 && apiKey.trim().length > 0;
+  const hasRemotes = pendingRemotes.length > 0;
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -113,28 +205,31 @@ export function CreateProjectDialog({
       return;
     }
 
-    if (!hasLocalPath && !hasRemote) {
+    if (!hasLocalPath && !hasRemotes) {
       setError("Please provide a local folder, remote server, or both");
-      return;
-    }
-
-    if (remotePath.trim() && connectionStatus !== "success") {
-      setError("Please test the remote connection first");
       return;
     }
 
     setLoading(true);
     setError("");
     try {
-      await onProjectCreated({
+      // Call the parent callback which creates the project and returns it
+      const result = await onProjectCreated({
         name: name.trim(),
         ...(hasLocalPath ? { path: path.trim() } : {}),
-        ...(hasRemote ? {
-          remotePath: remotePath.trim(),
-          remoteUrl: remoteUrl.trim(),
-          remoteApiKey: apiKey.trim(),
-        } : {}),
       });
+
+      // If we have remotes to add, we need the project ID
+      if (hasRemotes && result && typeof result === "object" && "id" in result) {
+        const project = result as Project;
+        for (const remote of pendingRemotes) {
+          await api.addProjectRemote(project.id, {
+            remoteServerId: remote.serverId,
+            remotePath: remote.remotePath,
+          });
+        }
+      }
+
       resetForm();
       onOpenChange(false);
     } catch (e) {
@@ -178,75 +273,182 @@ export function CreateProjectDialog({
             </div>
           </div>
 
-          {/* Remote Server Section */}
+          {/* Remote Servers Section */}
           <div className="space-y-3">
-            <label className="text-sm font-medium">Remote Server</label>
-            <div className="space-y-2">
-              <Input
-                value={remoteUrl}
-                onChange={(e) => {
-                  setRemoteUrl(e.target.value);
-                  setConnectionStatus("idle");
-                }}
-                placeholder="http://remote-server:5173 (optional)"
-              />
-            </div>
-            {remoteUrl && (
-              <>
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">API Key</label>
-                  <div className="flex gap-2">
-                    <Input
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => {
-                        setApiKey(e.target.value);
-                        setConnectionStatus("idle");
-                      }}
-                      placeholder="Enter API key"
-                      className="flex-1"
-                    />
+            <label className="text-sm font-medium">Remote Servers</label>
+
+            {/* List of added remotes */}
+            {pendingRemotes.length > 0 && (
+              <div className="space-y-2">
+                {pendingRemotes.map((remote, index) => (
+                  <div
+                    key={`${remote.serverId}-${remote.remotePath}`}
+                    className="flex items-center gap-2 rounded-md border p-2 text-sm"
+                  >
+                    <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium truncate">{remote.serverName}</p>
+                      <p className="text-xs text-muted-foreground font-mono truncate">
+                        {remote.remotePath}
+                      </p>
+                    </div>
                     <Button
-                      variant="outline"
-                      onClick={handleTestConnection}
-                      disabled={connectionStatus === "testing" || !remoteUrl || !apiKey}
+                      variant="ghost"
+                      size="icon-sm"
+                      className="h-7 w-7 shrink-0"
+                      onClick={() => handleRemoveRemote(index)}
                     >
-                      {connectionStatus === "testing" ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : connectionStatus === "success" ? (
-                        <Check className="h-4 w-4 text-green-500" />
-                      ) : connectionStatus === "error" ? (
-                        <X className="h-4 w-4 text-red-500" />
-                      ) : (
-                        "Test"
-                      )}
+                      <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
                     </Button>
                   </div>
-                  {connectionError && (
-                    <p className="text-xs text-red-500">{connectionError}</p>
-                  )}
-                  {connectionStatus === "success" && (
-                    <p className="text-xs text-green-500">Connection successful</p>
-                  )}
-                </div>
+                ))}
+              </div>
+            )}
 
-                {connectionStatus === "success" && (
-                  <div className="space-y-2">
-                    <label className="text-xs text-muted-foreground">Select Remote Directory</label>
-                    <RemoteDirectoryBrowser
-                      remoteUrl={remoteUrl}
-                      apiKey={apiKey}
-                      onSelect={handleRemotePathSelect}
-                      selectedPath={remotePath}
-                    />
-                    {remotePath && (
-                      <p className="text-xs text-muted-foreground">
-                        Selected: <span className="font-mono">{remotePath}</span>
-                      </p>
-                    )}
+            {/* Add Remote flow */}
+            {addRemoteStep === "closed" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleOpenAddRemote}
+                className="w-full"
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Add Remote
+              </Button>
+            )}
+
+            {addRemoteStep === "pick-server" && (
+              <div className="rounded-md border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium">Select a Remote Server</label>
+                  <Button variant="ghost" size="sm" onClick={resetAddRemoteFlow}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                {existingServers.length > 0 && (
+                  <div className="space-y-1">
+                    {existingServers.map((server) => (
+                      <button
+                        key={server.id}
+                        className="flex items-center gap-2 w-full rounded-md p-2 text-sm text-left hover:bg-muted"
+                        onClick={() => handleSelectExistingServer(server)}
+                      >
+                        <Server className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1 min-w-0">
+                          <p className="truncate">{server.name}</p>
+                          <p className="text-xs text-muted-foreground truncate">{server.url}</p>
+                        </div>
+                      </button>
+                    ))}
                   </div>
                 )}
-              </>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleStartNewServer}
+                  className="w-full"
+                >
+                  <Plus className="h-4 w-4 mr-1" />
+                  New Server
+                </Button>
+              </div>
+            )}
+
+            {addRemoteStep === "new-server" && (
+              <div className="rounded-md border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium">Create New Server</label>
+                  <Button variant="ghost" size="sm" onClick={resetAddRemoteFlow}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <Input
+                  value={newServerName}
+                  onChange={(e) => setNewServerName(e.target.value)}
+                  placeholder="Server name"
+                />
+                <Input
+                  value={newServerUrl}
+                  onChange={(e) => {
+                    setNewServerUrl(e.target.value);
+                    setNewServerStatus("idle");
+                  }}
+                  placeholder="http://remote-server:5173"
+                />
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    value={newServerApiKey}
+                    onChange={(e) => {
+                      setNewServerApiKey(e.target.value);
+                      setNewServerStatus("idle");
+                    }}
+                    placeholder="API key"
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleTestNewServer}
+                    disabled={newServerStatus === "testing" || !newServerUrl || !newServerApiKey}
+                  >
+                    {newServerStatus === "testing" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : newServerStatus === "success" ? (
+                      <Check className="h-4 w-4 text-green-500" />
+                    ) : newServerStatus === "error" ? (
+                      <X className="h-4 w-4 text-red-500" />
+                    ) : (
+                      "Test"
+                    )}
+                  </Button>
+                </div>
+                {newServerError && (
+                  <p className="text-xs text-red-500">{newServerError}</p>
+                )}
+                {newServerStatus === "success" && (
+                  <>
+                    <p className="text-xs text-green-500">Connection successful</p>
+                    <Button
+                      size="sm"
+                      onClick={handleCreateAndSelectServer}
+                      disabled={!newServerName.trim()}
+                    >
+                      Create &amp; Continue
+                    </Button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {addRemoteStep === "pick-path" && selectedServer && (
+              <div className="rounded-md border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium">
+                    Select Directory on {selectedServer.name}
+                  </label>
+                  <Button variant="ghost" size="sm" onClick={resetAddRemoteFlow}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <RemoteDirectoryBrowser
+                  remoteUrl={selectedServer.url}
+                  apiKey="server-stored"
+                  onSelect={handleRemotePathSelect}
+                  selectedPath={selectedRemotePath}
+                />
+                {selectedRemotePath && (
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-muted-foreground">
+                      Selected: <span className="font-mono">{selectedRemotePath}</span>
+                    </p>
+                    <Button size="sm" onClick={handleConfirmAddRemote}>
+                      Add
+                    </Button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

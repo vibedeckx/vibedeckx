@@ -699,12 +699,13 @@ export const api = {
   async executeSyncCommand(
     projectId: string,
     syncType: 'up' | 'down',
-    branch?: string | null
+    branch?: string | null,
+    remoteServerId?: string
   ): Promise<SyncExecutionResult> {
     const res = await fetch(`${getApiBase()}/api/projects/${projectId}/execute-sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ syncType, branch }),
+      body: JSON.stringify({ syncType, branch, remoteServerId }),
     });
     if (!res.ok) {
       const error = await res.json();

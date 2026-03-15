@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { FolderOpen, Calendar, Trash2, Globe, MoreVertical, Pencil, ArrowUp, ArrowDown, Play, RotateCcw, Copy, Check, Loader2 } from "lucide-react";
 import { api, type Project, type Task, type SyncButtonConfig, type SyncExecutionResult, type ExecutionMode } from "@/lib/api";
+import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import { EditProjectDialog } from "./edit-project-dialog";
 import { SyncOutputDialog } from "./sync-output-dialog";
 
@@ -35,6 +36,7 @@ interface ProjectCardProps {
 }
 
 export function ProjectCard({ project, selectedBranch, onUpdateProject, onDeleteProject, onSyncPrompt, assignedTask, onStartTask, onResetTask, startingTask }: ProjectCardProps) {
+  const { remotes } = useProjectRemotes(project.id);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [syncOutputOpen, setSyncOutputOpen] = useState(false);
   const [syncOutput, setSyncOutput] = useState<{
@@ -51,10 +53,37 @@ export function ProjectCard({ project, selectedBranch, onUpdateProject, onDelete
     setTimeout(() => setCopiedPath(null), 2000);
   };
 
-  const handleSyncButton = async (syncType: 'up' | 'down') => {
-    const config = syncType === 'up' ? project.sync_up_config : project.sync_down_config;
-    if (!config) return;
+  // Collect all sync configs: project-level (legacy) + per-remote
+  const syncUpSources: Array<{ label: string; config: SyncButtonConfig; remoteServerId?: string }> = [];
+  const syncDownSources: Array<{ label: string; config: SyncButtonConfig; remoteServerId?: string }> = [];
 
+  // Legacy project-level sync configs
+  if (project.sync_up_config) {
+    syncUpSources.push({ label: "Project", config: project.sync_up_config });
+  }
+  if (project.sync_down_config) {
+    syncDownSources.push({ label: "Project", config: project.sync_down_config });
+  }
+
+  // Per-remote sync configs
+  for (const remote of remotes) {
+    if (remote.sync_up_config) {
+      syncUpSources.push({
+        label: remote.server_name,
+        config: remote.sync_up_config,
+        remoteServerId: remote.remote_server_id,
+      });
+    }
+    if (remote.sync_down_config) {
+      syncDownSources.push({
+        label: remote.server_name,
+        config: remote.sync_down_config,
+        remoteServerId: remote.remote_server_id,
+      });
+    }
+  }
+
+  const handleSyncAction = async (syncType: 'up' | 'down', config: SyncButtonConfig, remoteServerId?: string) => {
     if (config.actionType === 'prompt') {
       onSyncPrompt?.(config.content, config.executionMode);
       return;
@@ -65,7 +94,7 @@ export function ProjectCard({ project, selectedBranch, onUpdateProject, onDelete
     setSyncOutputOpen(true);
 
     try {
-      const result = await api.executeSyncCommand(project.id, syncType, selectedBranch);
+      const result = await api.executeSyncCommand(project.id, syncType, selectedBranch, remoteServerId);
       setSyncOutput({ type: syncType, result, loading: false });
     } catch (e) {
       setSyncOutput({
@@ -81,47 +110,130 @@ export function ProjectCard({ project, selectedBranch, onUpdateProject, onDelete
     }
   };
 
-  const showSyncUp = !!project.sync_up_config;
-  const showSyncDown = !!project.sync_down_config;
+  const handleSyncButton = (syncType: 'up' | 'down') => {
+    const sources = syncType === 'up' ? syncUpSources : syncDownSources;
+    if (sources.length === 1) {
+      handleSyncAction(syncType, sources[0].config, sources[0].remoteServerId);
+    }
+    // If multiple sources, the dropdown handles it
+  };
+
+  const showSyncUp = syncUpSources.length > 0;
+  const showSyncDown = syncDownSources.length > 0;
+
+  // Badge logic based on remotes
+  const hasLocal = !!project.path;
+  const remoteCount = remotes.length;
+
+  const renderBadge = () => {
+    if (hasLocal && remoteCount > 1) {
+      return (
+        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500" title={`Local + ${remoteCount} remotes`}>
+          <Globe className="h-3 w-3" />
+          Local + {remoteCount} Remotes
+        </span>
+      );
+    }
+    if (hasLocal && remoteCount === 1) {
+      return (
+        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500" title={`Local + Remote: ${remotes[0].server_name}`}>
+          <Globe className="h-3 w-3" />
+          Local + Remote
+        </span>
+      );
+    }
+    if (!hasLocal && remoteCount > 1) {
+      return (
+        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500" title={`${remoteCount} remotes`}>
+          <Globe className="h-3 w-3" />
+          {remoteCount} Remotes
+        </span>
+      );
+    }
+    if (!hasLocal && remoteCount === 1) {
+      return (
+        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500" title={`Remote: ${remotes[0].server_name}`}>
+          <Globe className="h-3 w-3" />
+          Remote
+        </span>
+      );
+    }
+    // Legacy fallback: check old project.remote_path
+    if (hasLocal && project.remote_path) {
+      return (
+        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500" title={`Local + Remote: ${project.remote_url}`}>
+          <Globe className="h-3 w-3" />
+          Local + Remote
+        </span>
+      );
+    }
+    if (!hasLocal && project.remote_path) {
+      return (
+        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500" title={`Remote: ${project.remote_url}`}>
+          <Globe className="h-3 w-3" />
+          Remote
+        </span>
+      );
+    }
+    return null;
+  };
+
+  const renderSyncButton = (syncType: 'up' | 'down', sources: typeof syncUpSources) => {
+    const Icon = syncType === 'up' ? ArrowUp : ArrowDown;
+    const label = syncType === 'up' ? 'Sync Up' : 'Sync Down';
+
+    if (sources.length === 0) return null;
+
+    if (sources.length === 1) {
+      const source = sources[0];
+      return (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="h-7 w-7"
+          onClick={() => handleSyncAction(syncType, source.config, source.remoteServerId)}
+          title={`${label}: ${source.config.content.slice(0, 50)}${source.config.content.length > 50 ? '...' : ''}`}
+        >
+          <Icon className="h-4 w-4" />
+        </Button>
+      );
+    }
+
+    // Multiple sources: dropdown
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="h-7 w-7"
+            title={label}
+          >
+            <Icon className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {sources.map((source, index) => (
+            <DropdownMenuItem
+              key={`${source.remoteServerId ?? 'project'}-${index}`}
+              onSelect={() => handleSyncAction(syncType, source.config, source.remoteServerId)}
+            >
+              {source.label}: {source.config.content.slice(0, 40)}{source.config.content.length > 40 ? '...' : ''}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  };
 
   return (
     <Card>
       <CardHeader className="pb-2">
         <div className="flex items-center gap-2">
           <CardTitle className="text-lg flex-1">{project.name}</CardTitle>
-          {project.path && project.remote_path ? (
-            <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500" title={`Local + Remote: ${project.remote_url}`}>
-              <Globe className="h-3 w-3" />
-              Local + Remote
-            </span>
-          ) : project.remote_path ? (
-            <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500" title={`Remote: ${project.remote_url}`}>
-              <Globe className="h-3 w-3" />
-              Remote
-            </span>
-          ) : null}
-          {showSyncUp && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="h-7 w-7"
-              onClick={() => handleSyncButton('up')}
-              title={`Sync Up: ${project.sync_up_config!.content.slice(0, 50)}${project.sync_up_config!.content.length > 50 ? '...' : ''}`}
-            >
-              <ArrowUp className="h-4 w-4" />
-            </Button>
-          )}
-          {showSyncDown && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="h-7 w-7"
-              onClick={() => handleSyncButton('down')}
-              title={`Sync Down: ${project.sync_down_config!.content.slice(0, 50)}${project.sync_down_config!.content.length > 50 ? '...' : ''}`}
-            >
-              <ArrowDown className="h-4 w-4" />
-            </Button>
-          )}
+          {renderBadge()}
+          {showSyncUp && renderSyncButton('up', syncUpSources)}
+          {showSyncDown && renderSyncButton('down', syncDownSources)}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon-sm" className="h-7 w-7">
@@ -162,7 +274,28 @@ export function ProjectCard({ project, selectedBranch, onUpdateProject, onDelete
             </button>
           </div>
         )}
-        {project.remote_path && project.remote_url && (
+        {/* Show linked remotes */}
+        {remotes.map((remote) => (
+          <div key={remote.id} className="group/remote flex items-center gap-2 text-sm text-muted-foreground">
+            <Globe className="h-4 w-4 shrink-0" />
+            <span className="truncate flex-1" title={`${remote.server_name}: ${remote.remote_path}`}>
+              {remote.server_name}: {remote.remote_path}
+            </span>
+            <button
+              onClick={() => copyToClipboard(remote.remote_path)}
+              className="shrink-0 p-0.5 rounded hover:bg-muted opacity-0 group-hover/remote:opacity-100 transition-opacity"
+              title="Copy remote path"
+            >
+              {copiedPath === remote.remote_path ? (
+                <Check className="h-3.5 w-3.5 text-green-500" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </div>
+        ))}
+        {/* Legacy remote path fallback (for projects not yet migrated) */}
+        {remotes.length === 0 && project.remote_path && project.remote_url && (
           <div className="group/remote flex items-center gap-2 text-sm text-muted-foreground">
             <Globe className="h-4 w-4 shrink-0" />
             <span className="truncate flex-1" title={`${project.remote_url}:${project.remote_path}`}>{project.remote_url}:{project.remote_path}</span>
