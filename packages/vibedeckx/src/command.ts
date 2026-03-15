@@ -13,15 +13,21 @@ const startCommand = buildCommand({
         brief: "Port to run the server on",
         optional: true,
       },
+      auth: {
+        kind: "boolean",
+        brief: "Enable Clerk authentication (requires CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY env vars)",
+        optional: true,
+      },
     },
   },
-  func: async (flags: { port: number | undefined }) => {
+  func: async (flags: { port: number | undefined; auth: boolean | undefined }) => {
     const port = flags.port ?? DEFAULT_PORT;
+    const authEnabled = flags.auth ?? false;
 
     console.log("Starting vibedeckx...");
 
     const storage = await createSqliteStorage(DB_PATH);
-    const server = createServer({ storage });
+    const server = createServer({ storage, authEnabled });
 
     const url = await server.start(port);
     console.log(`Server running at ${url}`);

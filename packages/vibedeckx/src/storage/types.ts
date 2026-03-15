@@ -121,9 +121,9 @@ export interface Storage {
       executor_mode?: ExecutionMode;
       sync_up_config?: SyncButtonConfig;
       sync_down_config?: SyncButtonConfig;
-    }) => Project;
-    getAll: () => Project[];
-    getById: (id: string) => Project | undefined;
+    }, userId?: string) => Project;
+    getAll: (userId?: string) => Project[];
+    getById: (id: string, userId?: string) => Project | undefined;
     getByPath: (path: string) => Project | undefined;
     update: (id: string, opts: {
       name?: string;
@@ -135,8 +135,8 @@ export interface Storage {
       executor_mode?: ExecutionMode;
       sync_up_config?: SyncButtonConfig | null;
       sync_down_config?: SyncButtonConfig | null;
-    }) => Project | undefined;
-    delete: (id: string) => void;
+    }, userId?: string) => Project | undefined;
+    delete: (id: string, userId?: string) => void;
   };
   remoteServers: {
     create(server: { name: string; url: string; api_key?: string }): RemoteServer;

@@ -4,6 +4,7 @@ import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
 import { getAllProviders } from "../providers/index.js";
 import { proxyToRemote } from "../utils/remote-proxy.js";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 // Resolve project path from a session's projectId.
@@ -86,7 +87,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/agent-sessions",
     async (req, reply) => {
-      const project = fastify.storage.projects.getById(req.params.projectId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const project = fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -116,7 +119,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
   }>("/api/projects/:projectId/agent-sessions", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

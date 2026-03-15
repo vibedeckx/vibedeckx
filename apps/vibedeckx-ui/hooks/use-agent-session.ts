@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl } from "@/lib/api";
+import { getWebSocketUrl, getAuthToken } from "@/lib/api";
 import type { AgentType } from "@/lib/api";
 
 // ============ Content Part Types (for image attachments) ============
@@ -84,6 +84,14 @@ function getApiBase(): string {
   return "";
 }
 
+function getAuthHeaders(contentType?: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (contentType) headers["Content-Type"] = contentType;
+  const token = getAuthToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
 async function createOrGetSession(
   projectId: string,
   branch: string | null,
@@ -92,7 +100,7 @@ async function createOrGetSession(
 ): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
   const response = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ branch, permissionMode, agentType }),
   });
 
@@ -106,7 +114,7 @@ async function createOrGetSession(
 async function sendMessageToSession(sessionId: string, content: string | ContentPart[]): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ content }),
   });
 
@@ -130,7 +138,7 @@ async function sendMessageToSession(sessionId: string, content: string | Content
 async function restartSessionApi(sessionId: string, agentType?: AgentType): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/restart`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ agentType }),
   });
 
@@ -142,6 +150,7 @@ async function restartSessionApi(sessionId: string, agentType?: AgentType): Prom
 async function stopSessionApi(sessionId: string): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/stop`, {
     method: "POST",
+    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error("Failed to stop session");
@@ -151,7 +160,7 @@ async function stopSessionApi(sessionId: string): Promise<void> {
 async function switchModeApi(sessionId: string, mode: "plan" | "edit"): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/switch-mode`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ mode }),
   });
 
@@ -163,7 +172,7 @@ async function switchModeApi(sessionId: string, mode: "plan" | "edit"): Promise<
 async function acceptPlanApi(sessionId: string, planContent: string): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/accept-plan`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders("application/json"),
     body: JSON.stringify({ planContent }),
   });
 

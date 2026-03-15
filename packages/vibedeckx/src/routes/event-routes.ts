@@ -3,7 +3,29 @@ import fp from "fastify-plugin";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
-  fastify.get("/api/events", async (req, reply) => {
+  fastify.get<{ Querystring: { token?: string } }>("/api/events", async (req, reply) => {
+    // SSE doesn't support Authorization headers, so verify token from query param
+    if (fastify.authEnabled) {
+      const apiKey = req.headers["x-vibedeckx-api-key"];
+      if (!apiKey) {
+        const token = req.query.token;
+        if (!token) {
+          return reply.code(401).send({ error: "Unauthorized" });
+        }
+        try {
+          const { verifyToken } = await import("@clerk/backend");
+          const payload = await verifyToken(token, {
+            secretKey: process.env.CLERK_SECRET_KEY!,
+          });
+          if (!payload.sub) {
+            return reply.code(401).send({ error: "Unauthorized" });
+          }
+        } catch {
+          return reply.code(401).send({ error: "Unauthorized" });
+        }
+      }
+    }
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",

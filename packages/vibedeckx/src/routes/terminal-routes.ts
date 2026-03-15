@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { proxyToRemote } from "../utils/remote-proxy.js";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -28,7 +29,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { projectId: string }; Querystring: { branch?: string } }>(
     "/api/projects/:projectId/terminals",
     async (req, reply) => {
-      const project = fastify.storage.projects.getById(req.params.projectId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const project = fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -72,7 +76,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { cwd?: string; branch?: string | null; location?: "local" | "remote" };
   }>("/api/projects/:projectId/terminals", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

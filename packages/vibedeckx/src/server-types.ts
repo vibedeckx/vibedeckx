@@ -34,5 +34,6 @@ declare module "fastify" {
     eventBus: EventBus;
     proxyManager: ProxyManager;
     remotePatchCache: RemotePatchCache;
+    authEnabled: boolean;
   }
 }

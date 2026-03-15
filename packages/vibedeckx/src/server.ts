@@ -1,4 +1,5 @@
 import fastify from "fastify";
+import type { FastifyRequest, FastifyReply } from "fastify";
 import { fastifyStatic } from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import path from "path";
@@ -22,11 +23,45 @@ import settingsRoutes from "./routes/settings-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
 import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
+import { getAuth } from "@clerk/fastify";
+import "./server-types.js";
 
 // API Key from environment variable for remote access authentication
 const API_KEY = process.env.VIBEDECKX_API_KEY;
 
-export const createServer = (opts: { storage: Storage }) => {
+/**
+ * Check auth and send 401 if unauthorized. Returns userId (or undefined in no-auth mode).
+ * Returns null if reply was sent (caller should return early).
+ */
+export function requireAuth(req: FastifyRequest, reply: FastifyReply): string | undefined | null {
+  const server = req.server;
+  if (!server.authEnabled) return undefined;
+
+  // Skip Clerk auth if API key header is present (remote proxy)
+  const apiKeyHeader = req.headers["x-vibedeckx-api-key"];
+  if (apiKeyHeader) return undefined;
+
+  const { userId } = getAuth(req);
+  if (!userId) {
+    reply.code(401).send({ error: "Unauthorized" });
+    return null;
+  }
+  return userId;
+}
+
+export const createServer = (opts: { storage: Storage; authEnabled?: boolean }) => {
+  const authEnabled = opts.authEnabled ?? false;
+
+  // Validate Clerk env vars when auth is enabled
+  if (authEnabled) {
+    const secretKey = process.env.CLERK_SECRET_KEY;
+    const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
+    if (!secretKey || !publishableKey) {
+      console.error("Error: --auth requires CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY environment variables");
+      process.exit(1);
+    }
+  }
+
   const UI_ROOT = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "./ui"
@@ -34,11 +69,14 @@ export const createServer = (opts: { storage: Storage }) => {
 
   const server = fastify();
 
-  // CORS - 必须在所有路由之前设置
+  // Decorate authEnabled so routes can access it
+  server.decorate("authEnabled", authEnabled);
+
+  // CORS - must be set before all routes
   server.addHook("onRequest", (req, reply, done) => {
     reply.header("access-control-allow-origin", "*");
     reply.header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
-    reply.header("access-control-allow-headers", "Content-Type, Upgrade, Connection, X-Vibedeckx-Api-Key, X-Request-Id");
+    reply.header("access-control-allow-headers", "Content-Type, Upgrade, Connection, X-Vibedeckx-Api-Key, X-Request-Id, Authorization");
     done();
   });
 
@@ -48,8 +86,16 @@ export const createServer = (opts: { storage: Storage }) => {
     if (!req.url.startsWith("/api/")) return done();
     if (req.method === "OPTIONS") return done();
 
+    // When both API_KEY and Clerk auth are enabled, API key takes precedence
+    // (used by remote proxy). If no API key header present and Clerk is enabled,
+    // let Clerk handle auth.
     const providedKey = req.headers["x-vibedeckx-api-key"] ||
       (req.query as { apiKey?: string })?.apiKey;
+
+    if (!providedKey && authEnabled) {
+      // No API key provided but Clerk is enabled — let Clerk handle auth
+      return done();
+    }
 
     if (providedKey !== API_KEY) {
       return reply.code(401).send({ error: "Unauthorized" });
@@ -82,9 +128,24 @@ export const createServer = (opts: { storage: Storage }) => {
     return reply.code(204).send();
   });
 
+  // Public config endpoint — no auth required, must be before Clerk plugin
+  server.get("/api/config", async () => ({
+    authEnabled,
+    clerkPublishableKey: authEnabled ? process.env.CLERK_PUBLISHABLE_KEY : undefined,
+  }));
+
   // Register plugins and routes
   server.register(sharedServices, { storage: opts.storage });
   server.register(fastifyWebsocket);
+
+  // Conditionally register Clerk plugin for API routes when auth is enabled
+  if (authEnabled) {
+    server.register(async (instance) => {
+      const { clerkPlugin } = await import("@clerk/fastify");
+      await instance.register(clerkPlugin);
+    });
+  }
+
   server.register(websocketRoutes);
   server.register(projectRoutes);
   server.register(remoteRoutes);

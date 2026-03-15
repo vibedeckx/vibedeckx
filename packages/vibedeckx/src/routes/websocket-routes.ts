@@ -7,6 +7,22 @@ import type { RemoteSessionInfo } from "../server-types.js";
 import type { RemotePatchCache } from "../remote-patch-cache.js";
 import "../server-types.js";
 
+/**
+ * Verify a Clerk session token for WebSocket connections.
+ * Returns the userId if valid, null otherwise.
+ */
+async function verifyWsToken(token: string): Promise<string | null> {
+  try {
+    const { verifyToken } = await import("@clerk/backend");
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY!,
+    });
+    return payload.sub ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- Remote reconnection constants ----
 const REMOTE_RECONNECT_MAX_ATTEMPTS = 10;
 const REMOTE_RECONNECT_BASE_DELAY_MS = 1000;
@@ -374,11 +390,32 @@ const routes: FastifyPluginAsync = async (fastify) => {
     );
 
     // Agent Session WebSocket
-    fastify.get<{ Params: { sessionId: string }; Querystring: { apiKey?: string } }>(
+    fastify.get<{ Params: { sessionId: string }; Querystring: { apiKey?: string; token?: string } }>(
       "/api/agent-sessions/:sessionId/stream",
       { websocket: true },
-      (socket, req) => {
+      async (socket, req) => {
         const { sessionId } = req.params;
+
+        // Verify auth token for WebSocket when auth is enabled
+        if (fastify.authEnabled) {
+          const apiKey = req.query.apiKey;
+          const token = req.query.token;
+
+          // API key takes precedence (remote proxy connections)
+          if (!apiKey) {
+            if (!token) {
+              socket.send(JSON.stringify({ error: "Authentication required" }));
+              socket.close();
+              return;
+            }
+            const userId = await verifyWsToken(token);
+            if (!userId) {
+              socket.send(JSON.stringify({ error: "Invalid authentication token" }));
+              socket.close();
+              return;
+            }
+          }
+        }
 
         console.log(`[AgentWS] Client connected for session ${sessionId}`);
 

@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -8,7 +9,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/executor-groups",
     async (req, reply) => {
-      const project = fastify.storage.projects.getById(req.params.projectId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const project = fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -22,7 +26,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { projectId: string }; Querystring: { branch?: string } }>(
     "/api/projects/:projectId/executor-groups/by-branch",
     async (req, reply) => {
-      const project = fastify.storage.projects.getById(req.params.projectId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const project = fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -42,7 +49,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: { name: string; branch: string };
   }>("/api/projects/:projectId/executor-groups", async (req, reply) => {
-    const project = fastify.storage.projects.getById(req.params.projectId);
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
