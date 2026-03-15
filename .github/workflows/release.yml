@@ -116,21 +116,36 @@ jobs:
         id: notes
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          cat > release-notes.md << 'NOTES_EOF'
+          cat > release-notes.md << NOTES_EOF
           ## Installation
 
-          ### From npm (recommended)
-          ```bash
-          npm install -g vibedeckx
-          ```
+          ### macOS
 
-          ### From release archive
-          1. Download the archive for your platform
-          2. Extract it
-          3. Run with Node.js 22+:
-          ```bash
-          node dist/bin.js
-          ```
+          1. Download \`vibedeckx-${VERSION}-darwin-arm64.tar.gz\`
+          2. Install globally via npm:
+          \`\`\`bash
+          npm install -g ./vibedeckx-${VERSION}-darwin-arm64.tar.gz
+          \`\`\`
+          3. Run:
+          \`\`\`bash
+          vibedeckx
+          \`\`\`
+
+          ### Linux
+
+          1. Download \`vibedeckx-${VERSION}-linux-x64.tar.gz\`
+          2. Run directly with npx:
+          \`\`\`bash
+          npx -y ./vibedeckx-${VERSION}-linux-x64.tar.gz
+          \`\`\`
+
+          ### Windows
+
+          1. Download \`vibedeckx-${VERSION}-win32-x64.zip\`
+          2. Run directly with npx:
+          \`\`\`bash
+          npx -y ./vibedeckx-${VERSION}-win32-x64.zip
+          \`\`\`
 
           ### Platform archives
           | Platform | File |
