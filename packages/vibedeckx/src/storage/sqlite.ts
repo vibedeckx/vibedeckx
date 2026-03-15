@@ -313,6 +313,37 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE remote_servers ADD COLUMN last_connected_at TEXT");
   }
 
+  // Migration: add user_id column and change UNIQUE(url) to UNIQUE(url, user_id) for multi-user isolation
+  if (!remoteServerTableInfo.some(col => col.name === "user_id")) {
+    db.exec(`
+      BEGIN;
+      ALTER TABLE remote_servers ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+      CREATE TABLE remote_servers_new (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        api_key TEXT,
+        connection_mode TEXT NOT NULL DEFAULT 'outbound',
+        connect_token TEXT,
+        connect_token_created_at TEXT,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        last_connected_at TEXT,
+        user_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(url, user_id)
+      );
+      INSERT INTO remote_servers_new SELECT
+        id, name, url, api_key, connection_mode, connect_token, connect_token_created_at,
+        status, last_connected_at, user_id, created_at, updated_at
+      FROM remote_servers;
+      DROP TABLE remote_servers;
+      ALTER TABLE remote_servers_new RENAME TO remote_servers;
+      CREATE INDEX IF NOT EXISTS idx_remote_servers_user_id ON remote_servers(user_id);
+      COMMIT;
+    `);
+  }
+
   return db;
 };
 
@@ -362,6 +393,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     connect_token_created_at: string | null;
     status: string;
     last_connected_at: string | null;
+    user_id: string;
     created_at: string;
     updated_at: string;
   };
