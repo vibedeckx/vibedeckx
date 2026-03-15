@@ -22,8 +22,6 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
-
     CREATE TABLE IF NOT EXISTS executor_groups (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
