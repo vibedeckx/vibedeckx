@@ -190,6 +190,37 @@ Remote projects are visually distinguished in the UI:
 - A **Remote** badge appears next to the project name
 - The path shows the remote URL prefix (e.g., `http://server:5174:/path/to/project`)
 
+## Release
+
+项目使用 GitHub Actions 自动构建和发布。推送 `v*` 格式的 tag 即可触发，不限分支。
+
+```bash
+# 1. 确保代码已提交
+git add .
+git commit -m "release: v0.1.0"
+
+# 2. 创建 tag
+git tag v0.1.0
+
+# 3. 推送 tag 触发构建
+git push origin v0.1.0
+```
+
+构建完成后会自动在 GitHub Releases 页面创建 Release，附带以下平台的预编译包：
+
+| 平台 | 文件格式 |
+|------|---------|
+| Linux x64 | `.tar.gz` |
+| macOS ARM (Apple Silicon) | `.tar.gz` |
+| macOS x64 (Intel) | `.tar.gz` |
+| Windows x64 | `.zip` |
+
+下载解压后使用 Node.js 22+ 运行：
+
+```bash
+node dist/bin.js
+```
+
 ## CLI Commands
 
 ```
