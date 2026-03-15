@@ -527,7 +527,7 @@ export function RemoteServersSettings() {
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Run this command on the remote machine. Replace {'<server-url>'} with this server&apos;s public URL.
+                  Run this command on the remote machine to establish the reverse connection.
                 </p>
               </div>
             </div>

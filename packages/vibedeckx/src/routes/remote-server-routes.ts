@@ -126,8 +126,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!token)
         return reply.code(500).send({ error: "Failed to generate token" });
 
-      // Build connect command for convenience
-      const connectCommand = `vibedeckx connect --connect-to <server-url> --token ${token}`;
+      // Derive server URL from the incoming request
+      const proto = request.headers["x-forwarded-proto"] || request.protocol || "http";
+      const host = request.headers["x-forwarded-host"] || request.headers.host || "localhost";
+      const serverUrl = `${proto}://${host}`;
+      const connectCommand = `vibedeckx connect --connect-to ${serverUrl} --token ${token}`;
       return reply.send({ token, connectCommand });
     }
   );
