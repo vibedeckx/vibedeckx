@@ -7,9 +7,9 @@ import { useWorktrees } from '@/hooks/use-worktrees';
 import { useTasks } from '@/hooks/use-tasks';
 import { useSessionStatuses } from '@/hooks/use-session-statuses';
 import { Button } from '@/components/ui/button';
-import { Plus, Settings } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
-import { SettingsDialog } from '@/components/settings/settings-dialog';
+import { SettingsView } from '@/components/settings/settings-view';
 import { CreateWorktreeDialog } from '@/components/project/create-worktree-dialog';
 import { DeleteWorktreeDialog } from '@/components/project/delete-worktree-dialog';
 import { RightPanel } from '@/components/right-panel';
@@ -50,7 +50,6 @@ export default function Home() {
   const [createWorktreeDialogOpen, setCreateWorktreeDialogOpen] = useState(false);
   const [deleteWorktreeDialogOpen, setDeleteWorktreeDialogOpen] = useState(false);
   const [worktreeToDelete, setWorktreeToDelete] = useState<Worktree | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
   const agentRef = useRef<AgentConversationHandle>(null);
@@ -244,19 +243,13 @@ Please proceed step by step and let me know if there are any issues or conflicts
         {/* Header with Project Selector */}
         <div className="border-b p-3 h-14 flex items-center justify-between">
           <h1 className="text-lg font-semibold">Vibedeckx</h1>
-          <div className="flex items-center gap-2">
-            <ProjectSelector
-              projects={projects}
-              currentProject={currentProject}
-              onSelectProject={selectProject}
-              onCreateProject={createProject}
-            />
-            <Button variant="ghost" size="icon" onClick={() => setSettingsOpen(true)}>
-              <Settings className="h-4 w-4" />
-            </Button>
-          </div>
+          <ProjectSelector
+            projects={projects}
+            currentProject={currentProject}
+            onSelectProject={selectProject}
+            onCreateProject={createProject}
+          />
         </div>
-        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
         <div className="flex-1 flex overflow-hidden">
           {/* Sidebar Navigation */}
@@ -343,6 +336,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
               project={currentProject}
               selectedBranch={selectedBranch}
             />
+          </div>
+
+          {/* Settings View — kept mounted, hidden via CSS */}
+          <div className={activeView !== 'settings' ? 'hidden' : 'flex-1 overflow-hidden'}>
+            <SettingsView />
           </div>
         </div>
 

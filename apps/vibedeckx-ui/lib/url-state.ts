@@ -1,6 +1,6 @@
 import type { ActiveView } from "@/components/layout";
 
-const VALID_TABS = new Set<ActiveView>(["workspace", "tasks", "files"]);
+const VALID_TABS = new Set<ActiveView>(["workspace", "tasks", "files", "settings"]);
 const DEFAULT_TAB: ActiveView = "tasks";
 
 export interface UrlState {

@@ -1,12 +1,12 @@
 "use client";
 
-import { Columns3, ListTodo, FolderOpen, GitBranch, Plus, Trash2 } from "lucide-react";
+import { Columns3, ListTodo, FolderOpen, GitBranch, Plus, Trash2, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Worktree, Project } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 
-export type ActiveView = "workspace" | "tasks" | "files";
+export type ActiveView = "workspace" | "tasks" | "files" | "settings";
 
 interface AppSidebarProps {
   activeView: ActiveView;
@@ -147,6 +147,21 @@ export function AppSidebar({
           </div>
         </TooltipProvider>
       )}
+
+      {/* Settings — pinned to bottom */}
+      <div className="mt-auto">
+        <button
+          onClick={() => onViewChange("settings")}
+          className={cn(
+            "w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+            "hover:bg-accent hover:text-accent-foreground",
+            activeView === "settings" && "bg-primary/15 text-primary ring-1 ring-primary/20"
+          )}
+        >
+          <Settings className="h-4 w-4 shrink-0" />
+          <span>Settings</span>
+        </button>
+      </div>
     </nav>
   );
 }
