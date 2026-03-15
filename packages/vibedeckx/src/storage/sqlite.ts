@@ -314,7 +314,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   }
 
   // Migration: add user_id column and change UNIQUE(url) to UNIQUE(url, user_id) for multi-user isolation
-  if (!remoteServerTableInfo.some(col => col.name === "user_id")) {
+  const remoteServerTableInfoV2 = db.prepare("PRAGMA table_info(remote_servers)").all() as { name: string }[];
+  if (!remoteServerTableInfoV2.some(col => col.name === "user_id")) {
     db.exec(`
       BEGIN;
       ALTER TABLE remote_servers ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
