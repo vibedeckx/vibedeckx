@@ -8,11 +8,19 @@ export interface SyncButtonConfig {
   content: string;
 }
 
+export type RemoteServerConnectionMode = 'outbound' | 'inbound';
+export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
+
 export interface RemoteServer {
   id: string;
   name: string;
   url: string;
   api_key?: string;
+  connection_mode: RemoteServerConnectionMode;
+  connect_token?: string;
+  connect_token_created_at?: string;
+  status: RemoteServerStatus;
+  last_connected_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -139,11 +147,15 @@ export interface Storage {
     delete: (id: string, userId?: string) => void;
   };
   remoteServers: {
-    create(server: { name: string; url: string; api_key?: string }): RemoteServer;
+    create(server: { name: string; url: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer;
     getAll(): RemoteServer[];
     getById(id: string): RemoteServer | undefined;
     getByUrl(url: string): RemoteServer | undefined;
-    update(id: string, opts: { name?: string; url?: string; api_key?: string }): RemoteServer | undefined;
+    getByToken(token: string): RemoteServer | undefined;
+    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer | undefined;
+    updateStatus(id: string, status: RemoteServerStatus): void;
+    generateToken(id: string): string | undefined;
+    revokeToken(id: string): boolean;
     delete(id: string): boolean;
   };
   projectRemotes: {

@@ -21,6 +21,7 @@ import chatSessionRoutes from "./routes/chat-session-routes.js";
 import taskRoutes from "./routes/task-routes.js";
 import settingsRoutes from "./routes/settings-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
+import reverseConnectRoutes from "./routes/reverse-connect-routes.js";
 import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
 import { getAuth } from "@clerk/fastify";
@@ -151,6 +152,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   }
 
   server.register(websocketRoutes);
+  server.register(reverseConnectRoutes);
   server.register(projectRoutes);
   server.register(remoteRoutes);
   server.register(remoteServerRoutes);
@@ -186,6 +188,10 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     start: async (port: number) => {
       await server.listen({ port, host: "0.0.0.0" });
       return `http://localhost:${port}`;
+    },
+    startLocal: async (port: number) => {
+      await server.listen({ port, host: "127.0.0.1" });
+      return { url: `http://127.0.0.1:${port}`, instance: server };
     },
     close: async () => {
       await server.close();

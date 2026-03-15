@@ -19,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { api, type RemoteServer } from '@/lib/api';
+import { api, type RemoteServer, type RemoteServerConnectionMode } from '@/lib/api';
 import {
   Globe,
   Plus,
@@ -29,6 +29,8 @@ import {
   Check,
   X,
   Loader2,
+  KeyRound,
+  Copy,
 } from 'lucide-react';
 
 type TestStatus = 'idle' | 'testing' | 'success' | 'error';
@@ -37,9 +39,10 @@ interface ServerFormState {
   name: string;
   url: string;
   apiKey: string;
+  connectionMode: RemoteServerConnectionMode;
 }
 
-const emptyForm: ServerFormState = { name: '', url: '', apiKey: '' };
+const emptyForm: ServerFormState = { name: '', url: '', apiKey: '', connectionMode: 'outbound' };
 
 export function RemoteServersSettings() {
   const [servers, setServers] = useState<RemoteServer[]>([]);
@@ -61,6 +64,13 @@ export function RemoteServersSettings() {
   const [testStatuses, setTestStatuses] = useState<Record<string, TestStatus>>({});
   const [testErrors, setTestErrors] = useState<Record<string, string>>({});
 
+  // Token dialog
+  const [tokenDialogServer, setTokenDialogServer] = useState<RemoteServer | null>(null);
+  const [generatedToken, setGeneratedToken] = useState<string | null>(null);
+  const [connectCommand, setConnectCommand] = useState<string | null>(null);
+  const [generatingToken, setGeneratingToken] = useState(false);
+  const [tokenCopied, setTokenCopied] = useState(false);
+
   const loadServers = useCallback(async () => {
     try {
       const data = await api.getRemoteServers();
@@ -77,6 +87,17 @@ export function RemoteServersSettings() {
     loadServers();
   }, [loadServers]);
 
+  // Refresh servers periodically to update status
+  useEffect(() => {
+    const interval = setInterval(loadServers, 15000);
+    const onFocus = () => loadServers();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [loadServers]);
+
   // --- Add / Edit ---
 
   const openAddDialog = () => {
@@ -88,7 +109,7 @@ export function RemoteServersSettings() {
 
   const openEditDialog = (server: RemoteServer) => {
     setEditingServer(server);
-    setForm({ name: server.name, url: server.url, apiKey: '' });
+    setForm({ name: server.name, url: server.url, apiKey: '', connectionMode: server.connection_mode });
     setFormError('');
     setIsFormOpen(true);
   };
@@ -98,8 +119,8 @@ export function RemoteServersSettings() {
       setFormError('Name is required');
       return;
     }
-    if (!form.url.trim()) {
-      setFormError('URL is required');
+    if (form.connectionMode === 'outbound' && !form.url.trim()) {
+      setFormError('URL is required for outbound servers');
       return;
     }
 
@@ -117,6 +138,7 @@ export function RemoteServersSettings() {
           name: form.name.trim(),
           url: form.url.trim(),
           ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
+          connectionMode: form.connectionMode,
         });
       }
       setIsFormOpen(false);
@@ -169,6 +191,54 @@ export function RemoteServersSettings() {
         [server.id]: e instanceof Error ? e.message : 'Test failed',
       }));
     }
+  };
+
+  // --- Token Generation ---
+
+  const handleGenerateToken = async (server: RemoteServer) => {
+    setTokenDialogServer(server);
+    setGeneratedToken(null);
+    setConnectCommand(null);
+    setTokenCopied(false);
+    setGeneratingToken(true);
+    try {
+      const result = await api.generateRemoteServerToken(server.id);
+      setGeneratedToken(result.token);
+      setConnectCommand(result.connectCommand);
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : 'Failed to generate token');
+      setTokenDialogServer(null);
+    } finally {
+      setGeneratingToken(false);
+    }
+  };
+
+  const handleRevokeToken = async (server: RemoteServer) => {
+    try {
+      await api.revokeRemoteServerToken(server.id);
+      await loadServers();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to revoke token');
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setTokenCopied(true);
+    setTimeout(() => setTokenCopied(false), 2000);
+  };
+
+  const renderStatusDot = (server: RemoteServer) => {
+    if (server.connection_mode !== 'inbound') return null;
+    const isOnline = server.status === 'online';
+    return (
+      <span
+        className={`inline-block h-2.5 w-2.5 rounded-full mr-2 ${
+          isOnline ? 'bg-green-500' : 'bg-gray-400'
+        }`}
+        title={isOnline ? 'Online' : 'Offline'}
+      />
+    );
   };
 
   const renderTestButton = (server: RemoteServer) => {
@@ -234,19 +304,47 @@ export function RemoteServersSettings() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>URL</TableHead>
-              <TableHead className="w-[140px] text-right">Actions</TableHead>
+              <TableHead>Mode</TableHead>
+              <TableHead>URL / Status</TableHead>
+              <TableHead className="w-[180px] text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {servers.map((server) => (
               <TableRow key={server.id}>
-                <TableCell className="font-medium">{server.name}</TableCell>
+                <TableCell className="font-medium">
+                  <div className="flex items-center">
+                    {renderStatusDot(server)}
+                    {server.name}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                    server.connection_mode === 'inbound'
+                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400'
+                      : 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400'
+                  }`}>
+                    {server.connection_mode === 'inbound' ? 'Inbound' : 'Outbound'}
+                  </span>
+                </TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
-                  {server.url}
+                  {server.connection_mode === 'inbound'
+                    ? (server.status === 'online' ? 'Connected' : 'Waiting for connection...')
+                    : server.url}
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
+                    {server.connection_mode === 'inbound' && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleGenerateToken(server)}
+                        title="Generate connect token"
+                        className="h-8 w-8"
+                      >
+                        <KeyRound className="h-4 w-4" />
+                      </Button>
+                    )}
                     {renderTestButton(server)}
                     <Button
                       variant="ghost"
@@ -294,6 +392,35 @@ export function RemoteServersSettings() {
           </DialogHeader>
 
           <div className="space-y-4">
+            {!editingServer && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Connection Mode</label>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant={form.connectionMode === 'outbound' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setForm((f) => ({ ...f, connectionMode: 'outbound' }))}
+                  >
+                    Outbound
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={form.connectionMode === 'inbound' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setForm((f) => ({ ...f, connectionMode: 'inbound' }))}
+                  >
+                    Inbound
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {form.connectionMode === 'outbound'
+                    ? 'Server connects outbound to the remote node (remote must have a public URL).'
+                    : 'Remote node connects inbound to this server (no public URL needed on remote).'}
+                </p>
+              </div>
+            )}
+
             <div className="space-y-2">
               <label className="text-sm font-medium">Name</label>
               <Input
@@ -306,30 +433,36 @@ export function RemoteServersSettings() {
               />
             </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">URL</label>
-              <Input
-                value={form.url}
-                onChange={(e) => {
-                  setForm((f) => ({ ...f, url: e.target.value }));
-                  setFormError('');
-                }}
-                placeholder="http://remote-server:5173"
-              />
-            </div>
+            {(form.connectionMode === 'outbound' || editingServer) && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">
+                  URL{form.connectionMode === 'inbound' && !editingServer ? ' (optional)' : ''}
+                </label>
+                <Input
+                  value={form.url}
+                  onChange={(e) => {
+                    setForm((f) => ({ ...f, url: e.target.value }));
+                    setFormError('');
+                  }}
+                  placeholder="http://remote-server:5173"
+                />
+              </div>
+            )}
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">API Key</label>
-              <Input
-                type="password"
-                value={form.apiKey}
-                onChange={(e) => {
-                  setForm((f) => ({ ...f, apiKey: e.target.value }));
-                  setFormError('');
-                }}
-                placeholder={editingServer ? '(unchanged)' : 'Optional'}
-              />
-            </div>
+            {form.connectionMode === 'outbound' && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">API Key</label>
+                <Input
+                  type="password"
+                  value={form.apiKey}
+                  onChange={(e) => {
+                    setForm((f) => ({ ...f, apiKey: e.target.value }));
+                    setFormError('');
+                  }}
+                  placeholder={editingServer ? '(unchanged)' : 'Optional'}
+                />
+              </div>
+            )}
 
             {formError && (
               <p className="text-sm text-red-500">{formError}</p>
@@ -343,6 +476,86 @@ export function RemoteServersSettings() {
             <Button onClick={handleFormSubmit} disabled={saving}>
               {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
               {editingServer ? 'Save Changes' : 'Add Server'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Token Generation Dialog */}
+      <Dialog
+        open={tokenDialogServer !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setTokenDialogServer(null);
+            setGeneratedToken(null);
+            setConnectCommand(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Connect Token</DialogTitle>
+            <DialogDescription>
+              Use this token to connect a remote node to{' '}
+              <span className="font-semibold">{tokenDialogServer?.name}</span>.
+              The token is shown only once.
+            </DialogDescription>
+          </DialogHeader>
+
+          {generatingToken ? (
+            <div className="flex items-center justify-center py-4">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : generatedToken ? (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Connect Command</label>
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={connectCommand || ''}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0"
+                    onClick={() => copyToClipboard(connectCommand || '')}
+                    title="Copy command"
+                  >
+                    {tokenCopied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Run this command on the remote machine. Replace {'<server-url>'} with this server&apos;s public URL.
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            {generatedToken && tokenDialogServer && (
+              <Button
+                variant="outline"
+                className="mr-auto text-destructive hover:text-destructive"
+                onClick={() => {
+                  handleRevokeToken(tokenDialogServer);
+                  setTokenDialogServer(null);
+                  setGeneratedToken(null);
+                }}
+              >
+                Revoke Token
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              onClick={() => {
+                setTokenDialogServer(null);
+                setGeneratedToken(null);
+                setConnectCommand(null);
+              }}
+            >
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

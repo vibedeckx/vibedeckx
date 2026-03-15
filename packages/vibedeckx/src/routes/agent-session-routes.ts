@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
 import { getAllProviders } from "../providers/index.js";
-import { proxyToRemote } from "../utils/remote-proxy.js";
+import { proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
@@ -21,6 +21,20 @@ function resolveProjectPath(
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  // Helper: proxy to remote via reverse-connect if available, else outbound
+  function proxyAuto(
+    remoteServerId: string,
+    remoteUrl: string,
+    remoteApiKey: string,
+    method: string,
+    apiPath: string,
+    body?: unknown
+  ) {
+    return proxyToRemoteAuto(remoteServerId, remoteUrl, remoteApiKey, method, apiPath, body, {
+      reverseConnectManager: fastify.reverseConnectManager,
+    });
+  }
+
   // List available agent providers
   fastify.get("/api/agent-providers", async (_req, reply) => {
     const providers = getAllProviders().map((provider) => ({
@@ -146,7 +160,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       try {
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          agentMode,
           remoteConfig.server_url,
           remoteConfig.server_api_key || "",
           "POST",
@@ -240,7 +255,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "GET",
@@ -336,7 +352,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
@@ -362,7 +379,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
@@ -409,7 +427,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
@@ -454,7 +473,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
@@ -506,7 +526,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
@@ -542,7 +563,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "DELETE",

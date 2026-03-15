@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { randomUUID } from "crypto";
-import { proxyToRemote } from "../utils/remote-proxy.js";
+import { proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
@@ -78,7 +78,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       `remoteConfig=${remoteConfig ? `url=${remoteConfig.server_url}, path=${remoteConfig.remote_path}` : 'legacy'}`);
 
     if (shouldUseRemote) {
-      const result = await proxyToRemote(
+      const result = await proxyToRemoteAuto(
+        executorMode,
         effectiveRemoteUrl!,
         effectiveRemoteApiKey!,
         "POST",
@@ -89,7 +90,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: branch ?? undefined,
           cwd: executor.cwd || undefined,
           pty: executor.pty,
-        }
+        },
+        { reverseConnectManager: fastify.reverseConnectManager }
       );
       if (result.ok) {
         const remoteData = result.data as { processId: string };
@@ -131,11 +133,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote process not found" });
         }
-        const result = await proxyToRemote(
+        const result = await proxyToRemoteAuto(
+          remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
-          `/api/executor-processes/${remoteInfo.remoteProcessId}/stop`
+          `/api/executor-processes/${remoteInfo.remoteProcessId}/stop`,
+          undefined,
+          { reverseConnectManager: fastify.reverseConnectManager }
         );
         return reply.code(result.status || 200).send(result.data);
       }

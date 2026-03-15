@@ -3,7 +3,7 @@ import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, ProjectRemote, ProjectRemoteWithServer } from "./types.js";
+import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer } from "./types.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -303,6 +303,16 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     }
   }
 
+  // Migration: add reverse-connect columns to remote_servers
+  const remoteServerTableInfo = db.prepare("PRAGMA table_info(remote_servers)").all() as { name: string }[];
+  if (!remoteServerTableInfo.some(col => col.name === "connection_mode")) {
+    db.exec("ALTER TABLE remote_servers ADD COLUMN connection_mode TEXT NOT NULL DEFAULT 'outbound'");
+    db.exec("ALTER TABLE remote_servers ADD COLUMN connect_token TEXT");
+    db.exec("ALTER TABLE remote_servers ADD COLUMN connect_token_created_at TEXT");
+    db.exec("ALTER TABLE remote_servers ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'");
+    db.exec("ALTER TABLE remote_servers ADD COLUMN last_connected_at TEXT");
+  }
+
   return db;
 };
 
@@ -341,6 +351,34 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     user_id: string;
     created_at: string;
   };
+
+  type RemoteServerRow = {
+    id: string;
+    name: string;
+    url: string;
+    api_key: string | null;
+    connection_mode: string;
+    connect_token: string | null;
+    connect_token_created_at: string | null;
+    status: string;
+    last_connected_at: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+
+  const toRemoteServer = (row: RemoteServerRow): RemoteServer => ({
+    id: row.id,
+    name: row.name,
+    url: row.url,
+    api_key: row.api_key ?? undefined,
+    connection_mode: (row.connection_mode as RemoteServer["connection_mode"]) ?? 'outbound',
+    connect_token: row.connect_token ?? undefined,
+    connect_token_created_at: row.connect_token_created_at ?? undefined,
+    status: (row.status as RemoteServer["status"]) ?? 'unknown',
+    last_connected_at: row.last_connected_at ?? undefined,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
 
   return {
     projects: {
@@ -473,36 +511,47 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     remoteServers: {
-      create: (server: { name: string; url: string; api_key?: string }): RemoteServer => {
+      create: (server: { name: string; url: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer => {
         const id = crypto.randomUUID();
+        const connectionMode = server.connection_mode ?? 'outbound';
         db.prepare(
-          `INSERT INTO remote_servers (id, name, url, api_key) VALUES (@id, @name, @url, @api_key)`
-        ).run({ id, name: server.name, url: server.url, api_key: server.api_key ?? null });
+          `INSERT INTO remote_servers (id, name, url, api_key, connection_mode) VALUES (@id, @name, @url, @api_key, @connection_mode)`
+        ).run({ id, name: server.name, url: server.url, api_key: server.api_key ?? null, connection_mode: connectionMode });
 
-        return db
-          .prepare<{ id: string }, RemoteServer>(`SELECT * FROM remote_servers WHERE id = @id`)
-          .get({ id })!;
+        return toRemoteServer(db
+          .prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`)
+          .get({ id })!);
       },
 
       getAll: (): RemoteServer[] => {
         return db
-          .prepare<{}, RemoteServer>(`SELECT * FROM remote_servers ORDER BY created_at DESC`)
-          .all({});
+          .prepare<{}, RemoteServerRow>(`SELECT * FROM remote_servers ORDER BY created_at DESC`)
+          .all({})
+          .map(toRemoteServer);
       },
 
       getById: (id: string): RemoteServer | undefined => {
-        return db
-          .prepare<{ id: string }, RemoteServer>(`SELECT * FROM remote_servers WHERE id = @id`)
+        const row = db
+          .prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`)
           .get({ id });
+        return row ? toRemoteServer(row) : undefined;
       },
 
       getByUrl: (url: string): RemoteServer | undefined => {
-        return db
-          .prepare<{ url: string }, RemoteServer>(`SELECT * FROM remote_servers WHERE url = @url`)
+        const row = db
+          .prepare<{ url: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE url = @url`)
           .get({ url });
+        return row ? toRemoteServer(row) : undefined;
       },
 
-      update: (id: string, opts: { name?: string; url?: string; api_key?: string }): RemoteServer | undefined => {
+      getByToken: (token: string): RemoteServer | undefined => {
+        const row = db
+          .prepare<{ token: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE connect_token = @token`)
+          .get({ token });
+        return row ? toRemoteServer(row) : undefined;
+      },
+
+      update: (id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }): RemoteServer | undefined => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -518,14 +567,44 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           updates.push('api_key = @api_key');
           params.api_key = opts.api_key;
         }
+        if (opts.connection_mode !== undefined) {
+          updates.push('connection_mode = @connection_mode');
+          params.connection_mode = opts.connection_mode;
+        }
 
         if (updates.length === 0) {
-          return db.prepare<{ id: string }, RemoteServer>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+          const row = db.prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+          return row ? toRemoteServer(row) : undefined;
         }
 
         updates.push("updated_at = datetime('now')");
         db.prepare(`UPDATE remote_servers SET ${updates.join(', ')} WHERE id = @id`).run(params);
-        return db.prepare<{ id: string }, RemoteServer>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+        const row = db.prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+        return row ? toRemoteServer(row) : undefined;
+      },
+
+      updateStatus: (id: string, status: RemoteServerStatus): void => {
+        const updates = status === 'online'
+          ? "status = @status, last_connected_at = datetime('now'), updated_at = datetime('now')"
+          : "status = @status, updated_at = datetime('now')";
+        db.prepare(`UPDATE remote_servers SET ${updates} WHERE id = @id`).run({ id, status });
+      },
+
+      generateToken: (id: string): string | undefined => {
+        const existing = db.prepare<{ id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id`).get({ id });
+        if (!existing) return undefined;
+        const token = crypto.randomBytes(32).toString('hex');
+        db.prepare(
+          `UPDATE remote_servers SET connect_token = @token, connect_token_created_at = datetime('now'), updated_at = datetime('now') WHERE id = @id`
+        ).run({ id, token });
+        return token;
+      },
+
+      revokeToken: (id: string): boolean => {
+        const result = db.prepare(
+          `UPDATE remote_servers SET connect_token = NULL, connect_token_created_at = NULL, updated_at = datetime('now') WHERE id = @id`
+        ).run({ id });
+        return result.changes > 0;
       },
 
       delete: (id: string): boolean => {

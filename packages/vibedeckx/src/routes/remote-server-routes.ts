@@ -5,7 +5,7 @@ import { proxyToRemote } from "../utils/remote-proxy.js";
 import "../server-types.js";
 
 function sanitizeServer(server: RemoteServer) {
-  const { api_key: _, ...safe } = server;
+  const { api_key: _, connect_token: _t, ...safe } = server;
   return safe;
 }
 
@@ -18,22 +18,29 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // POST /api/remote-servers — create
   fastify.post("/api/remote-servers", async (request, reply) => {
-    const { name, url, apiKey } = request.body as {
+    const { name, url, apiKey, connectionMode } = request.body as {
       name: string;
       url: string;
       apiKey?: string;
+      connectionMode?: "outbound" | "inbound";
     };
-    if (!name || !url)
-      return reply.code(400).send({ error: "name and url are required" });
-    const existing = fastify.storage.remoteServers.getByUrl(url);
-    if (existing)
-      return reply
-        .code(409)
-        .send({ error: "A server with this URL already exists" });
+    if (!name)
+      return reply.code(400).send({ error: "name is required" });
+    // URL is required for outbound, optional for inbound
+    if (connectionMode !== "inbound" && !url)
+      return reply.code(400).send({ error: "url is required for outbound servers" });
+    if (url) {
+      const existing = fastify.storage.remoteServers.getByUrl(url);
+      if (existing)
+        return reply
+          .code(409)
+          .send({ error: "A server with this URL already exists" });
+    }
     const server = fastify.storage.remoteServers.create({
       name,
-      url,
+      url: url || "",
       api_key: apiKey,
+      connection_mode: connectionMode,
     });
     return reply.code(201).send(sanitizeServer(server));
   });
@@ -79,6 +86,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const server = fastify.storage.remoteServers.getById(id);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
+
+      // For inbound servers, check if reverse-connected
+      if (server.connection_mode === "inbound") {
+        const connected = fastify.reverseConnectManager.isConnected(id);
+        return reply.send({ success: connected, status: connected ? "online" : "offline" });
+      }
+
       try {
         const result = await proxyToRemote(
           server.url,
@@ -94,6 +108,47 @@ const routes: FastifyPluginAsync = async (fastify) => {
       } catch (err) {
         return reply.code(502).send({ error: "Connection failed" });
       }
+    }
+  );
+
+  // POST /api/remote-servers/:id/generate-token — generate a connect token for inbound servers
+  fastify.post<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/generate-token",
+    async (request, reply) => {
+      const { id } = request.params;
+      const server = fastify.storage.remoteServers.getById(id);
+      if (!server)
+        return reply.code(404).send({ error: "Server not found" });
+      if (server.connection_mode !== "inbound")
+        return reply.code(400).send({ error: "Token generation is only available for inbound servers" });
+
+      const token = fastify.storage.remoteServers.generateToken(id);
+      if (!token)
+        return reply.code(500).send({ error: "Failed to generate token" });
+
+      // Build connect command for convenience
+      const connectCommand = `vibedeckx connect --connect-to <server-url> --token ${token}`;
+      return reply.send({ token, connectCommand });
+    }
+  );
+
+  // POST /api/remote-servers/:id/revoke-token — revoke connect token and disconnect
+  fastify.post<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/revoke-token",
+    async (request, reply) => {
+      const { id } = request.params;
+      const server = fastify.storage.remoteServers.getById(id);
+      if (!server)
+        return reply.code(404).send({ error: "Server not found" });
+
+      // Disconnect active reverse connection
+      if (fastify.reverseConnectManager.isConnected(id)) {
+        fastify.reverseConnectManager.unregisterConnection(id);
+        fastify.storage.remoteServers.updateStatus(id, "offline");
+      }
+
+      const revoked = fastify.storage.remoteServers.revokeToken(id);
+      return reply.send({ success: revoked });
     }
   );
 };

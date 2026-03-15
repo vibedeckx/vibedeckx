@@ -105,10 +105,16 @@ export interface Project {
   created_at: string;
 }
 
+export type RemoteServerConnectionMode = 'outbound' | 'inbound';
+export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
+
 export interface RemoteServer {
   id: string;
   name: string;
   url: string;
+  connection_mode: RemoteServerConnectionMode;
+  status: RemoteServerStatus;
+  last_connected_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -956,7 +962,7 @@ export const api = {
     return data;
   },
 
-  async createRemoteServer(opts: { name: string; url: string; apiKey?: string }): Promise<RemoteServer> {
+  async createRemoteServer(opts: { name: string; url: string; apiKey?: string; connectionMode?: RemoteServerConnectionMode }): Promise<RemoteServer> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -994,8 +1000,30 @@ export const api = {
     }
   },
 
-  async testRemoteServer(id: string): Promise<{ success: boolean }> {
+  async testRemoteServer(id: string): Promise<{ success: boolean; status?: string }> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/test`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async generateRemoteServerToken(id: string): Promise<{ token: string; connectCommand: string }> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/generate-token`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async revokeRemoteServerToken(id: string): Promise<{ success: boolean }> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/revoke-token`, {
       method: "POST",
     });
     if (!res.ok) {

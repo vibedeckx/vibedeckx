@@ -5,6 +5,7 @@ import type { ChatSessionManager } from "./chat-session-manager.js";
 import type { EventBus } from "./event-bus.js";
 import type { ProxyManager } from "./utils/proxy-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
+import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -34,6 +35,7 @@ declare module "fastify" {
     eventBus: EventBus;
     proxyManager: ProxyManager;
     remotePatchCache: RemotePatchCache;
+    reverseConnectManager: ReverseConnectManager;
     authEnabled: boolean;
   }
 }

@@ -9,6 +9,7 @@ import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
 import { setGlobalProxyManager } from "../utils/remote-proxy.js";
 import { RemotePatchCache } from "../remote-patch-cache.js";
+import { ReverseConnectManager } from "../reverse-connect-manager.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -42,6 +43,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   }
   setGlobalProxyManager(proxyManager);
 
+  const reverseConnectManager = new ReverseConnectManager();
+  reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
+    opts.storage.remoteServers.updateStatus(remoteServerId, status);
+  });
+
   fastify.decorate("storage", opts.storage);
   fastify.decorate("processManager", processManager);
   fastify.decorate("agentSessionManager", agentSessionManager);
@@ -51,6 +57,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("eventBus", eventBus);
   fastify.decorate("proxyManager", proxyManager);
   fastify.decorate("remotePatchCache", remotePatchCache);
+  fastify.decorate("reverseConnectManager", reverseConnectManager);
   agentSessionManager.setEventBus(eventBus);
   processManager.setEventBus(eventBus);
 
@@ -59,6 +66,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     agentSessionManager.shutdown();
     processManager.shutdown();
     remotePatchCache.shutdown();
+    reverseConnectManager.shutdown();
   });
 };
 

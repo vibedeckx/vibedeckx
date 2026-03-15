@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import type { Dispatcher } from "undici";
 import type { ProxyManager } from "./proxy-manager.js";
+import type { ReverseConnectManager } from "../reverse-connect-manager.js";
 
 let globalProxyManager: ProxyManager | undefined;
 
@@ -164,6 +165,27 @@ export interface RawProxyResult {
   ok: boolean;
   status: number;
   body: ReadableStream<Uint8Array> | null;
+}
+
+/**
+ * Auto-routing proxy: if a ReverseConnectManager is provided and the remote
+ * is connected via reverse-connect, routes through the control channel.
+ * Otherwise falls back to the standard outbound HTTP proxy.
+ */
+export async function proxyToRemoteAuto(
+  remoteServerId: string,
+  remoteUrl: string,
+  apiKey: string,
+  method: string,
+  apiPath: string,
+  body?: unknown,
+  options?: ProxyOptions & { reverseConnectManager?: ReverseConnectManager }
+): Promise<ProxyResult> {
+  const rcm = options?.reverseConnectManager;
+  if (rcm && rcm.isConnected(remoteServerId)) {
+    return rcm.sendHttpRequest(remoteServerId, method, apiPath, body, options?.timeoutMs);
+  }
+  return proxyToRemote(remoteUrl, apiKey, method, apiPath, body, options);
 }
 
 export async function proxyToRemoteRaw(

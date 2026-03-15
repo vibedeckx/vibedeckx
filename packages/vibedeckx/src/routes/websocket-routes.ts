@@ -1,10 +1,12 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
+import { randomUUID } from "crypto";
 import WebSocket from "ws";
 import type { LogMessage, InputMessage } from "../process-manager.js";
 import type { AgentWsInput } from "../agent-types.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import type { RemotePatchCache } from "../remote-patch-cache.js";
+import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
 import "../server-types.js";
 
 /**
@@ -58,13 +60,36 @@ function connectPersistentRemoteWs(
   remoteInfo: RemoteSessionInfo,
   cache: RemotePatchCache,
   wsOptions: Record<string, unknown>,
+  reverseConnectManager?: import("../reverse-connect-manager.js").ReverseConnectManager,
 ): void {
-  const remoteWsUrl = buildRemoteWsUrl(remoteInfo);
   const hasCachedData = cache.hasData(sessionId);
-  console.log(`[AgentWS] Opening persistent remote WS for ${sessionId} (cached=${hasCachedData})`);
+  const useVirtual = reverseConnectManager && reverseConnectManager.isConnected(remoteInfo.remoteServerId);
+  console.log(`[AgentWS] Opening persistent remote WS for ${sessionId} (cached=${hasCachedData}, virtual=${!!useVirtual})`);
 
-  const remoteWs = new WebSocket(remoteWsUrl, undefined, wsOptions);
-  cache.setRemoteWs(sessionId, remoteWs);
+  let remoteWs: WebSocket | VirtualWsAdapter;
+
+  if (useVirtual) {
+    const channelId = randomUUID();
+    const wsPath = `/api/agent-sessions/${remoteInfo.remoteSessionId}/stream`;
+    const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
+
+    const adapter = new VirtualWsAdapter(
+      (data) => reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),
+      () => reverseConnectManager.closeChannel(remoteInfo.remoteServerId, channelId),
+    );
+
+    reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
+    reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
+
+    remoteWs = adapter;
+    // Simulate open event on next tick
+    setTimeout(() => adapter.emit("open"), 0);
+  } else {
+    const remoteWsUrl = buildRemoteWsUrl(remoteInfo);
+    remoteWs = new WebSocket(remoteWsUrl, undefined, wsOptions);
+  }
+
+  cache.setRemoteWs(sessionId, remoteWs as WebSocket);
   cache.setReconnecting(sessionId, false);
   cache.clearReconnectTimer(sessionId);
 
@@ -206,7 +231,7 @@ function connectPersistentRemoteWs(
     const entry = cache.get(sessionId);
     if (!entry || entry.finished) return;
 
-    scheduleRemoteReconnect(sessionId, remoteInfo, cache, wsOptions);
+    scheduleRemoteReconnect(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager);
   });
 }
 
@@ -219,6 +244,7 @@ function scheduleRemoteReconnect(
   remoteInfo: RemoteSessionInfo,
   cache: RemotePatchCache,
   wsOptions: Record<string, unknown>,
+  reverseConnectManager?: import("../reverse-connect-manager.js").ReverseConnectManager,
 ): void {
   const entry = cache.get(sessionId);
   if (!entry || entry.finished) return;
@@ -247,7 +273,7 @@ function scheduleRemoteReconnect(
       cache.setReconnecting(sessionId, false);
       return;
     }
-    connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions);
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager);
   }, totalDelay);
 
   cache.setReconnectTimer(sessionId, timer);
@@ -275,14 +301,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
             return;
           }
 
-          const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
-          const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-          const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-          const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
+          const useVirtualExec = fastify.reverseConnectManager.isConnected(remoteInfo.remoteServerId);
+          let remoteWs: WebSocket | VirtualWsAdapter;
 
-          console.log(`[WebSocket] Proxying to remote: ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
-
-          const remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
+          if (useVirtualExec) {
+            const channelId = randomUUID();
+            const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
+            const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
+            const adapter = new VirtualWsAdapter(
+              (data) => fastify.reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),
+              () => fastify.reverseConnectManager.closeChannel(remoteInfo.remoteServerId, channelId),
+            );
+            fastify.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
+            fastify.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
+            remoteWs = adapter;
+            console.log(`[WebSocket] Virtual channel opened for remote process ${remoteInfo.remoteProcessId}`);
+            setTimeout(() => adapter.emit("open"), 0);
+          } else {
+            const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
+            const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
+            const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
+            const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
+            console.log(`[WebSocket] Proxying to remote: ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
+            remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
+          }
 
           remoteWs.on("open", () => {
             console.log(`[WebSocket] Connected to remote process ${remoteInfo.remoteProcessId}`);
@@ -464,7 +506,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const existingRemoteWs = cache.getRemoteWs(sessionId);
           if (!existingRemoteWs && !cache.isReconnecting(sessionId)) {
             // Need to open a new persistent remote WS
-            connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions);
+            connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, fastify.reverseConnectManager);
           }
 
           // Send current remote connection status to the newly connected frontend
