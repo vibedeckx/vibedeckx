@@ -333,6 +333,9 @@ export const api = {
 
   async getProjects(): Promise<Project[]> {
     const res = await authFetch(`${getApiBase()}/api/projects`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch projects: ${res.status}`);
+    }
     const data = await res.json();
     return data.projects;
   },

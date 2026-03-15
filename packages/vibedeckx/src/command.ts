@@ -27,7 +27,7 @@ const startCommand = buildCommand({
     console.log("Starting vibedeckx...");
 
     const storage = await createSqliteStorage(DB_PATH);
-    const server = createServer({ storage, authEnabled });
+    const server = await createServer({ storage, authEnabled });
 
     const url = await server.start(port);
     console.log(`Server running at ${url}`);

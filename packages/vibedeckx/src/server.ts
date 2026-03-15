@@ -41,15 +41,21 @@ export function requireAuth(req: FastifyRequest, reply: FastifyReply): string | 
   const apiKeyHeader = req.headers["x-vibedeckx-api-key"];
   if (apiKeyHeader) return undefined;
 
-  const { userId } = getAuth(req);
-  if (!userId) {
-    reply.code(401).send({ error: "Unauthorized" });
+  try {
+    const { userId } = getAuth(req);
+    if (!userId) {
+      reply.code(401).send({ error: "Unauthorized" });
+      return null;
+    }
+    return userId;
+  } catch (error) {
+    console.error("Auth error:", error);
+    reply.code(401).send({ error: "Authentication failed" });
     return null;
   }
-  return userId;
 }
 
-export const createServer = (opts: { storage: Storage; authEnabled?: boolean }) => {
+export const createServer = async (opts: { storage: Storage; authEnabled?: boolean }) => {
   const authEnabled = opts.authEnabled ?? false;
 
   // Validate Clerk env vars when auth is enabled
@@ -140,10 +146,8 @@ export const createServer = (opts: { storage: Storage; authEnabled?: boolean }) 
 
   // Conditionally register Clerk plugin for API routes when auth is enabled
   if (authEnabled) {
-    server.register(async (instance) => {
-      const { clerkPlugin } = await import("@clerk/fastify");
-      await instance.register(clerkPlugin);
-    });
+    const { clerkPlugin } = await import("@clerk/fastify");
+    await server.register(clerkPlugin);
   }
 
   server.register(websocketRoutes);
