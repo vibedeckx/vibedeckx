@@ -45,8 +45,13 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
 
   if (!projectId) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-        Select a project to browse files.
+      <div className="flex items-center justify-center h-full text-muted-foreground">
+        <div className="text-center">
+          <div className="mx-auto w-10 h-10 rounded-xl bg-muted flex items-center justify-center mb-3">
+            <RefreshCw className="h-5 w-5 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm">Select a project to browse files.</p>
+        </div>
       </div>
     );
   }
@@ -58,17 +63,20 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b flex-shrink-0">
-        <h2 className="text-sm font-semibold">Files</h2>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={fetchRoot} title="Refresh">
-          <RefreshCw className={`h-4 w-4 ${rootLoading ? "animate-spin" : ""}`} />
+      <div className="flex items-center justify-between px-5 py-3 border-b border-border/60 flex-shrink-0">
+        <div>
+          <h2 className="text-sm font-semibold text-foreground">Files</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">Browse and preview project files</p>
+        </div>
+        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={fetchRoot} title="Refresh">
+          <RefreshCw className={`h-3.5 w-3.5 ${rootLoading ? "animate-spin" : ""}`} />
         </Button>
       </div>
 
       {/* Split content */}
       <div className="flex-1 flex overflow-hidden">
         {/* File tree (left) */}
-        <ScrollArea className="w-2/5 border-r">
+        <ScrollArea className="w-2/5 border-r border-border/60">
           {rootLoading && rootEntries.length === 0 ? (
             <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
               Loading files...

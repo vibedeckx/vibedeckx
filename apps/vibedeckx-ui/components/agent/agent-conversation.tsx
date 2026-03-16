@@ -206,8 +206,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
         <div className="text-center">
-          <Bot className="h-12 w-12 mx-auto mb-4 opacity-50" />
-          <p>Select a project to start coding</p>
+          <div className="mx-auto w-10 h-10 rounded-xl bg-muted flex items-center justify-center mb-3">
+            <Bot className="h-5 w-5 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm">Select a project to start coding</p>
         </div>
       </div>
     );
@@ -216,7 +218,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b bg-muted/30">
+      <div className="flex-shrink-0 flex items-center justify-between px-4 h-10 border-b border-border/60 bg-muted/20">
         <div className="flex items-center gap-2">
           <Bot className={`h-4 w-4 ${agentType === "codex" ? "text-green-500" : "text-violet-500"}`} />
           {providers.length > 1 ? (
@@ -320,20 +322,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       <Conversation className="flex-1 min-h-0" initial="instant">
         <ConversationContent className="gap-1 p-4">
           {!session && messages.length === 0 ? (
-            <div className="text-center py-12">
+            <div className="text-center py-16">
               {isLoading || (projectId && !isInitialized) ? (
                 <>
-                  <Loader className="h-8 w-8 mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold mb-2">Connecting to agent...</h3>
-                  <p className="text-sm text-muted-foreground mb-4">
+                  <Loader className="h-6 w-6 mx-auto mb-4" />
+                  <h3 className="text-sm font-semibold mb-1 text-foreground">Connecting to agent...</h3>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
                     Setting up the session for this worktree
                   </p>
                 </>
               ) : (
                 <>
-                  <Bot className="h-16 w-16 mx-auto mb-4 text-violet-500/30" />
-                  <h3 className="text-lg font-semibold mb-2">Start a conversation</h3>
-                  <p className="text-sm text-muted-foreground mb-4">
+                  <div className="mx-auto w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+                    <Bot className="h-6 w-6 text-primary/60" />
+                  </div>
+                  <h3 className="text-sm font-semibold mb-1 text-foreground">Start a conversation</h3>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
                     Ask the agent to help you with coding tasks in this worktree
                   </p>
                 </>

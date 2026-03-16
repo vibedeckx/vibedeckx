@@ -58,11 +58,11 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     }
 
     return (
-      <div className="h-screen flex flex-col items-center justify-center bg-muted/40">
+      <div className="h-screen flex flex-col items-center justify-center bg-background">
         <div className="w-full max-w-md">
           <Button
             variant="ghost"
-            className="mb-4"
+            className="mb-4 text-muted-foreground hover:text-foreground"
             onClick={() => setShowSignIn(false)}
           >
             <ArrowLeft className="mr-2 h-4 w-4" />
