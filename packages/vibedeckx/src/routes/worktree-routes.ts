@@ -1,10 +1,33 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { mkdir } from "fs/promises";
 import { proxyToRemote } from "../utils/remote-proxy.js";
 import { resolveWorktreePath, getWorktreeBaseForProject, getWorktreeBranches, parseGitWorktreeList } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
+import type { Project } from "../storage/types.js";
+
+function getRemoteConfig(fastify: FastifyInstance, project: Project) {
+  // Check project_remotes table first (new approach)
+  const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+  if (remotes.length > 0) {
+    const primary = remotes[0]; // sorted by sort_order
+    return {
+      url: primary.server_url,
+      apiKey: primary.server_api_key,
+      remotePath: primary.remote_path,
+    };
+  }
+  // Fallback to legacy project fields
+  if (project.remote_url && project.remote_api_key && project.remote_path) {
+    return {
+      url: project.remote_url,
+      apiKey: project.remote_api_key,
+      remotePath: project.remote_path,
+    };
+  }
+  return null;
+}
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // ==================== Path-based worktree API ====================
@@ -189,12 +212,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Proxy to remote if this is a remote-only project
-    if (!project.path && project.remote_url && project.remote_api_key && project.remote_path) {
+    const remoteConfig = getRemoteConfig(fastify, project);
+    if (!project.path && remoteConfig?.url && remoteConfig.remotePath) {
       const result = await proxyToRemote(
-        project.remote_url,
-        project.remote_api_key,
+        remoteConfig.url,
+        remoteConfig.apiKey ?? "",
         "GET",
-        `/api/path/worktrees?path=${encodeURIComponent(project.remote_path)}`
+        `/api/path/worktrees?path=${encodeURIComponent(remoteConfig.remotePath)}`
       );
       return reply.code(result.status || 200).send(result.data);
     }
@@ -227,17 +251,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const target = req.query.target || "local";
     const hasLocal = !!project.path;
-    const hasRemote = !!(project.remote_url && project.remote_api_key && project.remote_path);
+    const remoteConfig = getRemoteConfig(fastify, project);
+    const hasRemote = !!(remoteConfig?.url && remoteConfig.remotePath);
 
     if (target === "remote") {
       if (!hasRemote) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
       const result = await proxyToRemote(
-        project.remote_url!,
-        project.remote_api_key!,
+        remoteConfig!.url!,
+        remoteConfig!.apiKey ?? "",
         "GET",
-        `/api/path/branches?path=${encodeURIComponent(project.remote_path!)}`
+        `/api/path/branches?path=${encodeURIComponent(remoteConfig!.remotePath)}`
       );
       return reply.code(result.status || 200).send(result.data);
     }
@@ -246,10 +271,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!hasLocal && hasRemote) {
       // Remote-only project: proxy to remote
       const result = await proxyToRemote(
-        project.remote_url!,
-        project.remote_api_key!,
+        remoteConfig!.url!,
+        remoteConfig!.apiKey ?? "",
         "GET",
-        `/api/path/branches?path=${encodeURIComponent(project.remote_path!)}`
+        `/api/path/branches?path=${encodeURIComponent(remoteConfig!.remotePath)}`
       );
       return reply.code(result.status || 200).send(result.data);
     }
@@ -296,16 +321,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const hasLocal = !!project.path;
-    const hasRemote = !!(project.remote_url && project.remote_api_key && project.remote_path);
+    const remoteConfig = getRemoteConfig(fastify, project);
+    const hasRemote = !!(remoteConfig?.url && remoteConfig.remotePath);
 
     // Remote-only project: proxy to remote
     if (!hasLocal && hasRemote) {
       const result = await proxyToRemote(
-        project.remote_url!,
-        project.remote_api_key!,
+        remoteConfig!.url!,
+        remoteConfig!.apiKey ?? "",
         "DELETE",
         `/api/path/worktrees`,
-        { path: project.remote_path, branch }
+        { path: remoteConfig!.remotePath, branch }
       );
       return reply.code(result.status || 200).send(result.data);
     }
@@ -392,11 +418,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Delete remote
     try {
       const remoteResult = await proxyToRemote(
-        project.remote_url!,
-        project.remote_api_key!,
+        remoteConfig!.url!,
+        remoteConfig!.apiKey ?? "",
         "DELETE",
         `/api/path/worktrees`,
-        { path: project.remote_path, branch }
+        { path: remoteConfig!.remotePath, branch }
       );
       if (remoteResult.ok) {
         results.remote = { success: true };
@@ -451,7 +477,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Determine targets
     const hasLocal = !!project.path;
-    const hasRemote = !!(project.remote_url && project.remote_api_key && project.remote_path);
+    const remoteConfig = getRemoteConfig(fastify, project);
+    const hasRemote = !!(remoteConfig?.url && remoteConfig.remotePath);
     let targets: ("local" | "remote")[];
 
     if (req.body.targets && req.body.targets.length > 0) {
@@ -473,11 +500,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Single-target: remote only (backward-compatible path)
     if (targets.length === 1 && targets[0] === "remote") {
       const result = await proxyToRemote(
-        project.remote_url!,
-        project.remote_api_key!,
+        remoteConfig!.url!,
+        remoteConfig!.apiKey ?? "",
         "POST",
         `/api/path/worktrees`,
-        { path: project.remote_path, branchName: trimmedBranch, baseBranch: remoteStartPoint }
+        { path: remoteConfig!.remotePath, branchName: trimmedBranch, baseBranch: remoteStartPoint }
       );
       return reply.code(result.status || 201).send(result.data);
     }
@@ -541,14 +568,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Remote second
-    console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, url=${project.remote_url}`);
+    console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, url=${remoteConfig!.url}`);
     try {
       const remoteResult = await proxyToRemote(
-        project.remote_url!,
-        project.remote_api_key!,
+        remoteConfig!.url!,
+        remoteConfig!.apiKey ?? "",
         "POST",
         `/api/path/worktrees`,
-        { path: project.remote_path, branchName: trimmedBranch, baseBranch: remoteStartPoint }
+        { path: remoteConfig!.remotePath, branchName: trimmedBranch, baseBranch: remoteStartPoint }
       );
       if (remoteResult.ok) {
         const remoteData = remoteResult.data as { worktree?: { branch: string } };
