@@ -365,6 +365,7 @@ export const api = {
     remotePath?: string;
     remoteUrl?: string;
     remoteApiKey?: string;
+    agentMode?: ExecutionMode;
   }): Promise<Project> {
     const res = await authFetch(`${getApiBase()}/api/projects`, {
       method: "POST",

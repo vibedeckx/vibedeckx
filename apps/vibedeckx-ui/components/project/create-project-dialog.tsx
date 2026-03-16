@@ -207,10 +207,11 @@ export function CreateProjectDialog({
     setLoading(true);
     setError("");
     try {
-      // Step 1: Create project in DB (does NOT touch React state)
+      // Step 1: Create project in DB with correct agent_mode upfront
       const project = await api.createProject({
         name: name.trim(),
         ...(hasLocalPath ? { path: path.trim() } : {}),
+        ...(hasRemotes && !hasLocalPath ? { agentMode: pendingRemotes[0].serverId } : {}),
       });
 
       // Step 2: Add all pending remotes to DB
@@ -221,17 +222,9 @@ export function CreateProjectDialog({
         });
       }
 
-      // Step 3: Set agent_mode to first remote when remote-only
-      let finalProject = project;
-      if (hasRemotes && !hasLocalPath) {
-        finalProject = await api.updateProject(project.id, {
-          agentMode: pendingRemotes[0].serverId,
-        });
-      }
-
-      // Step 4: NOW notify parent — DB is fully configured
+      // Step 3: NOW notify parent — DB is fully configured
       // This triggers setCurrentProject → re-render → auto-start
-      onProjectCreated(finalProject);
+      onProjectCreated(project);
 
       resetForm();
       onOpenChange(false);

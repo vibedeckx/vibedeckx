@@ -145,7 +145,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const effectiveRemoteApiKey = remoteApiKey !== undefined ? remoteApiKey : (project.remote_api_key ?? null);
 
     if (!effectivePath && !effectiveRemotePath) {
-      return reply.code(400).send({ error: "Project must have at least one of local path or remote path" });
+      // Also check project_remotes table — multi-remote projects use it instead of legacy remote_path
+      const remotes = fastify.storage.projectRemotes.getByProject(req.params.id);
+      if (remotes.length === 0) {
+        return reply.code(400).send({ error: "Project must have at least one of local path or remote path" });
+      }
     }
 
     if (effectiveRemotePath && (!effectiveRemoteUrl || !effectiveRemoteApiKey)) {
