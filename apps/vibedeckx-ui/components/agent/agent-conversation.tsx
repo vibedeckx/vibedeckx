@@ -191,12 +191,15 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
 
     if (!session || status !== "running") {
+      console.log(`[AgentConversation] handleSubmit: no session or not running (session=${session?.id}, status=${status}), starting new session...`);
       onStatusChange?.();
       const newSession = await startSession(permissionMode);
+      console.log(`[AgentConversation] handleSubmit: startSession returned`, newSession?.id ?? 'null');
       if (newSession) {
         sendMessage(content, newSession.id);
       }
     } else {
+      console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
       sendMessage(content);
     }
   };

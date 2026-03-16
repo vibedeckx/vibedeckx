@@ -127,11 +127,14 @@ async function sendMessageToSession(sessionId: string, content: string | Content
         if (body.attempts) parts.push(`${body.attempts} attempts`);
         if (body.totalDurationMs) parts.push(`${(body.totalDurationMs / 1000).toFixed(1)}s`);
         detail = ` (${parts.join(", ")})`;
+      } else if (body.error) {
+        detail = ` — ${body.error}`;
       }
     } catch {
       // ignore parse errors
     }
-    throw new Error(`Failed to send message${detail}`);
+    console.error(`[AgentSession] /message failed: status=${response.status}, sessionId=${sessionId}, detail=${detail}`);
+    throw new Error(`Failed to send message [${response.status}]${detail}`);
   }
 }
 
@@ -599,11 +602,15 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const sendMessage = useCallback(
     async (content: string | ContentPart[], sessionId?: string) => {
       const targetSessionId = sessionId || session?.id;
-      if (!targetSessionId) return;
+      if (!targetSessionId) {
+        console.warn("[AgentSession] sendMessage: no session ID available (sessionId param:", sessionId, ", session?.id:", session?.id, ")");
+        return;
+      }
       // Validate: non-empty string or non-empty array
       if (typeof content === "string" && !content.trim()) return;
       if (Array.isArray(content) && content.length === 0) return;
 
+      console.log(`[AgentSession] sendMessage: targetSessionId=${targetSessionId}, source=${sessionId ? 'explicit' : 'state'}`);
       try {
         // Send via REST API (more reliable than WebSocket for important actions)
         const trimmed = typeof content === "string" ? content.trim() : content;
@@ -763,6 +770,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   useEffect(() => {
     if (shouldAutoStartRef.current && projectId && !session && !isLoading && !lastStartFailedRef.current) {
       shouldAutoStartRef.current = false;
+      console.log(`[AgentSession] Auto-start: projectId=${projectId}, branch=${branch}, agentMode=${agentMode}`);
       startSession();
     }
   }, [projectId, session, isLoading, startSession]);

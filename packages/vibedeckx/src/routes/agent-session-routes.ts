@@ -306,6 +306,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/agent-sessions/:sessionId/message", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
     const { content } = req.body;
 
+    console.log(`[API] POST /message: sessionId=${req.params.sessionId}, isRemote=${req.params.sessionId.startsWith("remote-")}, remoteMapSize=${fastify.remoteSessionMap.size}`);
+
     // Validate: must be a non-empty string or non-empty array
     const isValidString = typeof content === "string" && content.trim().length > 0;
     const isValidArray = Array.isArray(content) && content.length > 0;
@@ -316,6 +318,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (req.params.sessionId.startsWith("remote-")) {
       const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
       if (!remoteInfo) {
+        console.log(`[API] /message 404: remote session not found. Known keys: [${[...fastify.remoteSessionMap.keys()].join(', ')}]`);
         return reply.code(404).send({ error: "Remote session not found" });
       }
       const result = await proxyToRemote(
@@ -350,6 +353,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const success = fastify.agentSessionManager.sendUserMessage(req.params.sessionId, content, projectPathForWake);
     if (!success) {
+      console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!session}, dormant=${session?.dormant}`);
       return reply.code(404).send({ error: "Session not found or not running" });
     }
 
