@@ -59,7 +59,7 @@ export function AgentMessageItem({ message, messageIndex }: AgentMessageProps) {
     case "approval_request":
       return (
         <div className="flex gap-3 py-3">
-          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center">
+          <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center">
             <ShieldAlert className="w-4 h-4 text-amber-500" />
           </div>
           <div className="flex-1 min-w-0 overflow-hidden">
@@ -91,9 +91,9 @@ export function AgentMessageItem({ message, messageIndex }: AgentMessageProps) {
 
 function UserMessage({ content }: { content: string | ContentPart[] }) {
   return (
-    <div className="flex gap-3 py-4">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-        <User className="w-4 h-4 text-primary" />
+    <div className="flex gap-3 py-3">
+      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center">
+        <User className="w-3.5 h-3.5 text-primary" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-sm font-medium text-foreground mb-1">You</p>
@@ -137,9 +137,9 @@ function AssistantMessage({ content }: { content: string }) {
   const textColor = isCodex ? "text-green-500" : "text-violet-500";
 
   return (
-    <div className="flex gap-3 py-4">
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full ${iconBg} flex items-center justify-center`}>
-        <Bot className={`w-4 h-4 ${iconColor}`} />
+    <div className="flex gap-3 py-3">
+      <div className={`flex-shrink-0 w-7 h-7 rounded-lg ${iconBg} flex items-center justify-center`}>
+        <Bot className={`w-3.5 h-3.5 ${iconColor}`} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className={`text-sm font-medium ${textColor} mb-1`}>{label}</p>
@@ -155,7 +155,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "AskUserQuestion") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-violet-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-violet-500/10 flex items-center justify-center">
           <HelpCircle className="w-4 h-4 text-violet-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -169,7 +169,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "ExitPlanMode") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-green-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-green-500/10 flex items-center justify-center">
           <FileCheck className="w-4 h-4 text-green-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -193,7 +193,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (taskTool) {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-cyan-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-cyan-500/10 flex items-center justify-center">
           <ListTodo className="w-4 h-4 text-cyan-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -207,7 +207,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Read") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sky-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
           <FileText className="w-4 h-4 text-sky-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -221,7 +221,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Edit") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sky-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
           <FilePenLine className="w-4 h-4 text-sky-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -235,7 +235,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Write") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sky-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
           <FilePlus2 className="w-4 h-4 text-sky-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -249,7 +249,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Bash") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center">
           <Terminal className="w-4 h-4 text-emerald-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -263,7 +263,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Grep") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-orange-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center">
           <Search className="w-4 h-4 text-orange-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -277,7 +277,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Glob") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-teal-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-teal-500/10 flex items-center justify-center">
           <FolderSearch className="w-4 h-4 text-teal-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -291,7 +291,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Task" || tool === "Agent") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-purple-500/10 flex items-center justify-center">
           <Workflow className="w-4 h-4 text-purple-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -305,7 +305,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "TaskOutput") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-purple-500/10 flex items-center justify-center">
           <Workflow className="w-4 h-4 text-purple-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -319,7 +319,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "WebFetch") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-blue-500/10 flex items-center justify-center">
           <Globe className="w-4 h-4 text-blue-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -333,7 +333,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "WebSearch") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-indigo-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-indigo-500/10 flex items-center justify-center">
           <Globe2 className="w-4 h-4 text-indigo-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -347,7 +347,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "Skill") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-pink-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-pink-500/10 flex items-center justify-center">
           <Sparkles className="w-4 h-4 text-pink-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -361,7 +361,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
   if (tool === "FileChange") {
     return (
       <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sky-500/10 flex items-center justify-center">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
           <FilePenLine className="w-4 h-4 text-sky-500" />
         </div>
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -376,7 +376,7 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
 
   return (
     <div className="flex gap-3 py-3">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center">
+      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center">
         <Wrench className="w-4 h-4 text-amber-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
@@ -560,15 +560,15 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
 function ThinkingMessage({ content }: { content: string }) {
   return (
     <div className="flex gap-3 py-3">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center">
-        <Brain className="w-4 h-4 text-blue-500" />
+      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-blue-500/10 flex items-center justify-center">
+        <Brain className="w-3.5 h-3.5 text-blue-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <details>
-          <summary className="text-sm font-medium text-blue-500 cursor-pointer hover:underline">
+          <summary className="text-xs font-medium text-blue-500 cursor-pointer hover:underline">
             Thinking...
           </summary>
-          <div className="mt-2 text-xs text-muted-foreground whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded overflow-hidden">
+          <div className="mt-2 text-xs text-muted-foreground whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded-md overflow-hidden">
             {(content ?? "").length > 500 ? (content ?? "").substring(0, 500) + "..." : content ?? ""}
           </div>
         </details>
@@ -580,8 +580,8 @@ function ThinkingMessage({ content }: { content: string }) {
 function ErrorMessage({ message }: { message: string }) {
   return (
     <div className="flex gap-3 py-3">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-red-500/10 flex items-center justify-center">
-        <AlertCircle className="w-4 h-4 text-red-500" />
+      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-red-500/10 flex items-center justify-center">
+        <AlertCircle className="w-3.5 h-3.5 text-red-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-sm font-medium text-red-500 mb-1">Error</p>
@@ -594,8 +594,8 @@ function ErrorMessage({ message }: { message: string }) {
 function SystemMessage({ content }: { content: string }) {
   return (
     <div className="flex gap-3 py-2">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gray-500/10 flex items-center justify-center">
-        <Info className="w-4 h-4 text-gray-500" />
+      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-gray-500/10 flex items-center justify-center">
+        <Info className="w-3.5 h-3.5 text-gray-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-xs text-muted-foreground break-words">{content ?? ""}</p>

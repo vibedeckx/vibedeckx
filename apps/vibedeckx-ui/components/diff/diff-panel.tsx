@@ -79,7 +79,7 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
         <div className="flex items-center gap-4">
           {fileCount > 0 && (
             <>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-xs text-muted-foreground">
                 {fileCount} file{fileCount !== 1 ? 's' : ''} changed
               </span>
               <Button
