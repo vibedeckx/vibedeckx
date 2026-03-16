@@ -345,7 +345,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               <div className="border-b px-6 py-4 flex-shrink-0">
                 <h2 className="text-lg font-semibold">Remote Servers</h2>
               </div>
-              <div className="flex-1 px-6 py-4 max-w-lg">
+              <div className="flex-1 px-6 py-4">
                 <RemoteServersSettings />
               </div>
             </div>
