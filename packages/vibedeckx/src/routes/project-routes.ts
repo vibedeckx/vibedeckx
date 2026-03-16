@@ -88,9 +88,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Project name is required" });
     }
 
-    if (!projectPath && !remotePath) {
-      return reply.code(400).send({ error: "At least one of local path or remote path is required" });
-    }
 
     if (remotePath && (!remoteUrl || !remoteApiKey)) {
       return reply.code(400).send({ error: "Remote URL and API key are required when remote path is provided" });
