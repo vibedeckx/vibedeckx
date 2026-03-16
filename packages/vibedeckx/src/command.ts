@@ -109,7 +109,7 @@ const connectCommand = buildCommand({
     },
   },
   func: async (flags: { "connect-to": string; token: string; port: number | undefined; "data-dir": string | undefined }) => {
-    const localPort = flags.port ?? DEFAULT_PORT;
+    const requestedPort = flags.port ?? 0;
 
     console.log("Starting vibedeckx in reverse-connect mode...");
 
@@ -120,7 +120,8 @@ const connectCommand = buildCommand({
     const server = await createServer({ storage });
 
     // Start local server on localhost only (not publicly exposed)
-    const { instance } = await server.startLocal(localPort);
+    // Port 0 lets the OS pick a random available port
+    const { instance, port: localPort } = await server.startLocal(requestedPort);
     console.log(`Local server running on 127.0.0.1:${localPort}`);
 
     // Create and start the reverse-connect client

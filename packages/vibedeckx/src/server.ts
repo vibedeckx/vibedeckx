@@ -191,7 +191,9 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     },
     startLocal: async (port: number) => {
       await server.listen({ port, host: "127.0.0.1" });
-      return { url: `http://127.0.0.1:${port}`, instance: server };
+      const addr = server.server.address();
+      const actualPort = typeof addr === "object" && addr ? addr.port : port;
+      return { url: `http://127.0.0.1:${actualPort}`, port: actualPort, instance: server };
     },
     close: async () => {
       await server.close();
