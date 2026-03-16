@@ -35,7 +35,7 @@ export function ProjectSelector({
   const [dialogOpen, setDialogOpen] = useState(false);
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1.5">
       <Select
         value={currentProject?.id}
         onValueChange={(id) => {
@@ -43,7 +43,7 @@ export function ProjectSelector({
           if (project) onSelectProject(project);
         }}
       >
-        <SelectTrigger className="w-[200px]">
+        <SelectTrigger className="w-[180px] h-8 text-xs">
           <SelectValue placeholder="Select a project" />
         </SelectTrigger>
         <SelectContent>
@@ -54,8 +54,8 @@ export function ProjectSelector({
           ))}
         </SelectContent>
       </Select>
-      <Button variant="outline" size="icon" onClick={() => setDialogOpen(true)}>
-        <Plus className="h-4 w-4" />
+      <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setDialogOpen(true)}>
+        <Plus className="h-3.5 w-3.5" />
       </Button>
       <CreateProjectDialog
         open={dialogOpen}

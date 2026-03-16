@@ -98,7 +98,12 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
   if (!projectId) {
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
-        Select a project to use the terminal
+        <div className="text-center">
+          <div className="mx-auto w-10 h-10 rounded-xl bg-muted flex items-center justify-center mb-3">
+            <Terminal className="h-5 w-5 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm">Select a project to use the terminal</p>
+        </div>
       </div>
     );
   }
@@ -106,7 +111,7 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="flex items-center h-10 border-b px-2 gap-1 shrink-0">
+      <div className="flex items-center h-10 border-b border-border/60 px-2 gap-1 shrink-0 bg-muted/20">
         <ScrollArea className="flex-1">
           <div className="flex items-center gap-1">
             {terminals.map((t) => {
@@ -122,10 +127,10 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
                   key={t.id}
                   onClick={() => setActiveTerminal(t.id)}
                   className={cn(
-                    "flex items-center gap-1.5 px-2.5 py-1 rounded text-xs whitespace-nowrap transition-colors",
+                    "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs whitespace-nowrap transition-all duration-150",
                     activeTerminalId === t.id
-                      ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground hover:bg-background/50"
                   )}
                 >
                   <TabIcon className="h-3 w-3" />
@@ -213,10 +218,12 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
           />
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3">
-            <Terminal className="h-8 w-8" />
-            <p className="text-sm">No terminal open</p>
-            <Button variant="outline" size="sm" onClick={handleCreateDefault}>
-              <Plus className="h-3.5 w-3.5 mr-1.5" />
+            <div className="w-10 h-10 rounded-xl bg-muted/50 flex items-center justify-center">
+              <Terminal className="h-5 w-5 text-muted-foreground/50" />
+            </div>
+            <p className="text-xs">No terminal open</p>
+            <Button variant="outline" size="sm" className="text-xs" onClick={handleCreateDefault}>
+              <Plus className="h-3 w-3 mr-1.5" />
               New Terminal
             </Button>
           </div>
