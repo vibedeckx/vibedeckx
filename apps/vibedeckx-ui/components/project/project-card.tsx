@@ -227,10 +227,10 @@ export function ProjectCard({ project, selectedBranch, onUpdateProject, onDelete
   };
 
   return (
-    <Card>
+    <Card className="border-border/60 shadow-sm">
       <CardHeader className="pb-2">
         <div className="flex items-center gap-2">
-          <CardTitle className="text-lg flex-1">{project.name}</CardTitle>
+          <CardTitle className="text-sm font-semibold flex-1">{project.name}</CardTitle>
           {renderBadge()}
           {showSyncUp && renderSyncButton('up', syncUpSources)}
           {showSyncDown && renderSyncButton('down', syncDownSources)}
@@ -317,7 +317,7 @@ export function ProjectCard({ project, selectedBranch, onUpdateProject, onDelete
           <span>{createdDate}</span>
         </div>
         {assignedTask && (
-          <div className="border-t pt-2 space-y-2">
+          <div className="border-t border-border/40 pt-3 space-y-2">
             <div className="flex items-center gap-2 text-sm">
               <span className="text-muted-foreground text-xs font-medium">Assigned Task:</span>
               <span className="text-sm truncate flex-1">{assignedTask.title}</span>

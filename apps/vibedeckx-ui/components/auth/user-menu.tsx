@@ -9,11 +9,11 @@ export function UserMenu() {
   if (!config?.authEnabled) return null;
 
   return (
-    <div className="flex items-center justify-center py-2">
+    <div className="flex items-center justify-center pt-2">
       <UserButton
         appearance={{
           elements: {
-            avatarBox: "h-7 w-7",
+            avatarBox: "h-7 w-7 ring-1 ring-border/60",
           },
         }}
       />

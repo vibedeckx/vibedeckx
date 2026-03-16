@@ -62,8 +62,10 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
         <div className="text-center">
-          <GitBranch className="h-12 w-12 mx-auto mb-4 opacity-50" />
-          <p>Select a project to view changes</p>
+          <div className="mx-auto w-10 h-10 rounded-xl bg-muted flex items-center justify-center mb-3">
+            <GitBranch className="h-5 w-5 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm">Select a project to view changes</p>
         </div>
       </div>
     );
@@ -73,11 +75,11 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between p-4 border-b h-14">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 h-10">
         <div className="flex items-center gap-4">
           {fileCount > 0 && (
             <>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-xs text-muted-foreground">
                 {fileCount} file{fileCount !== 1 ? 's' : ''} changed
               </span>
               <Button

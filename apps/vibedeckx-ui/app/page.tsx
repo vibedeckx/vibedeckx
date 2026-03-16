@@ -219,13 +219,16 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
   if (!projectsLoading && projects.length === 0) {
     return (
-      <div className="h-screen flex items-center justify-center">
+      <div className="h-screen flex items-center justify-center bg-background">
         <div className="text-center space-y-6">
-          <h1 className="text-4xl font-bold">Welcome to Vibedeckx</h1>
-          <p className="text-muted-foreground">
-            Create your first project to get started
+          <div className="mx-auto w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
+            <Plus className="h-8 w-8 text-primary" />
+          </div>
+          <h1 className="text-3xl font-bold tracking-tight text-foreground">Welcome to VibeDeckX</h1>
+          <p className="text-muted-foreground max-w-sm mx-auto leading-relaxed">
+            Create your first project to get started with AI-powered development.
           </p>
-          <Button size="lg" onClick={() => setCreateDialogOpen(true)}>
+          <Button size="lg" onClick={() => setCreateDialogOpen(true)} className="shadow-md">
             <Plus className="h-5 w-5 mr-2" />
             Create Project
           </Button>
@@ -242,8 +245,13 @@ Please proceed step by step and let me know if there are any issues or conflicts
   return (
     <div className="h-screen flex flex-col w-full">
         {/* Header with Project Selector */}
-        <div className="border-b p-3 h-14 flex items-center justify-between">
-          <h1 className="text-lg font-semibold">Vibedeckx</h1>
+        <div className="border-b border-border/60 bg-card/80 backdrop-blur-sm px-4 h-12 flex items-center justify-between sticky top-0 z-10">
+          <div className="flex items-center gap-2">
+            <div className="h-6 w-6 rounded-md bg-primary flex items-center justify-center">
+              <span className="text-[10px] font-bold text-primary-foreground tracking-tighter">VD</span>
+            </div>
+            <h1 className="text-sm font-semibold tracking-tight text-foreground">VibeDeckX</h1>
+          </div>
           <ProjectSelector
             projects={projects}
             currentProject={currentProject}
@@ -272,9 +280,9 @@ Please proceed step by step and let me know if there are any issues or conflicts
           {/* Workspace View — kept mounted, hidden via CSS to preserve WebSocket */}
           <div className={activeView !== 'workspace' ? 'hidden' : 'contents'}>
             {/* Left Panel: Project Card + Main Chat */}
-            <div className="w-1/2 flex flex-col border-r overflow-hidden">
+            <div className="w-1/2 flex flex-col border-r border-border/60 overflow-hidden">
               {currentProject && (
-                <div className="p-4 border-b flex-shrink-0">
+                <div className="px-4 py-3 border-b border-border/60 flex-shrink-0">
                   <ProjectCard
                     project={currentProject}
                     selectedBranch={selectedBranch}
@@ -342,10 +350,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
           {/* Remote Servers View — kept mounted, hidden via CSS */}
           <div className={activeView !== 'remote-servers' ? 'hidden' : 'flex-1 overflow-hidden'}>
             <div className="h-full flex flex-col overflow-auto">
-              <div className="border-b px-6 py-4 flex-shrink-0">
-                <h2 className="text-lg font-semibold">Remote Servers</h2>
+              <div className="border-b border-border/60 px-6 py-4 flex-shrink-0">
+                <h2 className="text-sm font-semibold text-foreground">Remote Servers</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Manage your remote server connections</p>
               </div>
-              <div className="flex-1 px-6 py-4">
+              <div className="flex-1 px-6 py-5">
                 <RemoteServersSettings />
               </div>
             </div>

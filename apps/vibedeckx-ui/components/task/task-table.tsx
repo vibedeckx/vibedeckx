@@ -107,8 +107,11 @@ export function TaskTable({ tasks, onUpdate, onDelete, worktrees, onAssign }: Ta
         ))}
         {tasks.length === 0 && (
           <TableRow>
-            <td colSpan={7} className="text-center text-muted-foreground py-8 text-sm">
-              No tasks yet. Create one to get started.
+            <td colSpan={7} className="text-center text-muted-foreground py-12 text-sm">
+              <div className="flex flex-col items-center gap-1">
+                <p className="text-sm font-medium text-foreground/60">No tasks yet</p>
+                <p className="text-xs text-muted-foreground">Create one to get started.</p>
+              </div>
             </td>
           </TableRow>
         )}

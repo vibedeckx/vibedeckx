@@ -152,8 +152,10 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
         <div className="text-center">
-          <Terminal className="h-12 w-12 mx-auto mb-4 opacity-50" />
-          <p>Select a project to manage executors</p>
+          <div className="mx-auto w-10 h-10 rounded-xl bg-muted flex items-center justify-center mb-3">
+            <Terminal className="h-5 w-5 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm">Select a project to manage executors</p>
         </div>
       </div>
     );
@@ -161,10 +163,10 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center justify-between p-4 border-b h-14">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 h-10">
         <div className="flex items-center gap-2">
-          <h2 className="font-semibold flex items-center gap-2">
-            <Terminal className="h-5 w-5" />
+          <h2 className="text-xs font-semibold flex items-center gap-2 text-foreground">
+            <Terminal className="h-3.5 w-3.5" />
             {activeGroup ? activeGroup.name : "Executors"}
           </h2>
           {executorTargets.length > 1 && onExecutorModeChange && (

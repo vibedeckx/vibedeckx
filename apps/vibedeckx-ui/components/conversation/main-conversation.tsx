@@ -65,8 +65,10 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
         <div className="text-center">
-          <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
-          <p>Select a project to start chatting</p>
+          <div className="mx-auto w-10 h-10 rounded-xl bg-muted flex items-center justify-center mb-3">
+            <MessageSquare className="h-5 w-5 text-muted-foreground/50" />
+          </div>
+          <p className="text-sm">Select a project to start chatting</p>
         </div>
       </div>
     );
@@ -75,12 +77,12 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center px-4 py-2 border-b bg-muted/30">
+      <div className="flex-shrink-0 flex items-center px-4 h-10 border-b border-border/60 bg-muted/20">
         <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-blue-500" />
-          <span className="text-sm font-medium">Main Chat</span>
+          <MessageSquare className="h-3.5 w-3.5 text-primary" />
+          <span className="text-xs font-medium text-foreground">Main Chat</span>
           {isGenerating && (
-            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+            <Loader2 className="h-3 w-3 animate-spin text-primary/60" />
           )}
         </div>
       </div>
@@ -95,10 +97,12 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
           )}
 
           {!isLoading && isInitialized && messages.length === 0 && (
-            <div className="text-center py-12">
-              <MessageSquare className="h-16 w-16 mx-auto mb-4 text-blue-500/30" />
-              <h3 className="text-lg font-semibold mb-2">Start a conversation</h3>
-              <p className="text-sm text-muted-foreground mb-4">
+            <div className="text-center py-16">
+              <div className="mx-auto w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+                <MessageSquare className="h-6 w-6 text-primary/60" />
+              </div>
+              <h3 className="text-sm font-semibold mb-1 text-foreground">Start a conversation</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
                 Chat with the AI assistant about your project
               </p>
             </div>
@@ -171,7 +175,7 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
       </Conversation>
 
       {/* Input area */}
-      <div className="flex-shrink-0 border-t p-4">
+      <div className="flex-shrink-0 border-t border-border/60 p-3">
         {isGenerating && (
           <div className="flex justify-center mb-2">
             <Button

@@ -68,11 +68,12 @@ export function SettingsView() {
 
   return (
     <div className="h-full flex flex-col overflow-auto">
-      <div className="border-b px-6 py-4 flex-shrink-0">
-        <h2 className="text-lg font-semibold">Settings</h2>
+      <div className="border-b border-border/60 px-6 py-4 flex-shrink-0">
+        <h2 className="text-sm font-semibold text-foreground">Settings</h2>
+        <p className="text-xs text-muted-foreground mt-0.5">Configure proxy and network settings</p>
       </div>
 
-      <div className="flex-1 px-6 py-4 max-w-lg">
+      <div className="flex-1 px-6 py-5 max-w-lg">
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -90,10 +91,10 @@ export function SettingsView() {
                 ] as const).map(([value, label, desc]) => (
                   <label
                     key={value}
-                    className={`flex items-start gap-3 p-2.5 rounded-md border cursor-pointer transition-colors ${
+                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all duration-150 ${
                       proxyType === value
-                        ? 'border-primary bg-primary/5'
-                        : 'border-border hover:border-muted-foreground/30'
+                        ? 'border-primary/40 bg-primary/5 shadow-sm'
+                        : 'border-border/60 hover:border-border hover:bg-accent/30'
                     }`}
                   >
                     <input
