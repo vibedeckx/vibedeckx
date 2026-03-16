@@ -62,44 +62,58 @@ node packages/vibedeckx/dist/bin.js --port 8080
 
 ## Distribution
 
-### Option 1: Publish to npm
+### 本地打包
+
+使用 `scripts/pack.sh` 一键构建分发包，产物输出到 `dist-out/` 目录：
+
+```bash
+./scripts/pack.sh              # 构建两种包（npm + 平台归档）
+./scripts/pack.sh npm          # 只构建 npm 包
+./scripts/pack.sh platform     # 只构建平台归档
+./scripts/pack.sh --skip-build # 跳过 pnpm build（复用已有的 dist/）
+```
+
+参数可组合使用，例如 `./scripts/pack.sh platform --skip-build`。
+
+产出两种包：
+
+| 类型 | 文件示例 | 说明 |
+|------|---------|------|
+| npm 包 | `vibedeckx-0.1.0.tgz` | 轻量包，用户安装时编译 native 模块 |
+| 平台归档 | `vibedeckx-0.1.0-linux-x64.tar.gz` | 预编译依赖，开箱即用 |
+
+#### npm 包使用方式
+
+```bash
+# 直接运行
+npx /path/to/vibedeckx-0.1.0.tgz
+
+# 或全局安装后运行
+npm install -g /path/to/vibedeckx-0.1.0.tgz
+vibedeckx
+```
+
+> 注意：npm 包方式需要用户机器上有 C++ 编译工具链（用于编译 better-sqlite3、node-pty）。
+
+#### 平台归档使用方式
+
+```bash
+# 解压后直接运行
+tar -xzf vibedeckx-0.1.0-linux-x64.tar.gz
+node vibedeckx-0.1.0-linux-x64/dist/bin.js
+```
+
+### 发布到 npm
 
 ```bash
 cd packages/vibedeckx
 npm publish
 ```
 
-Users can then run:
+用户可直接运行：
 
 ```bash
 npx vibedeckx
-```
-
-### Option 2: Local tgz package
-
-Create a local package file:
-
-```bash
-cd packages/vibedeckx
-npm pack
-```
-
-This creates `vibedeckx-0.1.0.tgz`. Users can run it via:
-
-```bash
-# Run directly with npx
-npx /path/to/vibedeckx-0.1.0.tgz
-
-# Or install globally first
-npm install -g /path/to/vibedeckx-0.1.0.tgz
-vibedeckx
-```
-
-### Option 3: Install from local path
-
-```bash
-npm install -g /path/to/vibedeckx/packages/vibedeckx
-vibedeckx
 ```
 
 ## Features
