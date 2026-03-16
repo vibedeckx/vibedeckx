@@ -228,6 +228,10 @@ export function CreateProjectDialog({
             remotePath: remote.remotePath,
           });
         }
+        // Auto-set agent_mode to first remote when no local path
+        if (!hasLocalPath) {
+          await api.updateProject(project.id, { agentMode: pendingRemotes[0].serverId });
+        }
       }
 
       resetForm();

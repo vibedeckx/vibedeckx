@@ -250,7 +250,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             onModeChange={handlePermissionModeChange}
             disabled={isLoading}
           />
-          {agentTargets.length > 1 && onAgentModeChange && (
+          {agentTargets.length >= 1 && onAgentModeChange && (
             <ExecutionModeToggle
               targets={agentTargets}
               activeTarget={project?.agent_mode ?? "local"}

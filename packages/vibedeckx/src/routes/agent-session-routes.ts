@@ -142,8 +142,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const { branch, permissionMode, agentType } = req.body;
 
-    const agentMode = project.agent_mode;
-    const useRemoteAgent = agentMode !== 'local';
+    let agentMode = project.agent_mode;
+    let useRemoteAgent = agentMode !== 'local';
+
+    // Fallback: if local mode but no local path, try to find a remote to use
+    if (!useRemoteAgent && !project.path) {
+      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      if (remotes.length > 0) {
+        const fallback = remotes[0];
+        useRemoteAgent = true;
+        agentMode = fallback.remote_server_id;
+        // Fix the persisted agent_mode so future requests use the correct mode
+        fastify.storage.projects.update(project.id, { agent_mode: fallback.remote_server_id });
+        console.log(`[API] Auto-resolved agent_mode from 'local' to '${fallback.remote_server_id}' (no local path)`);
+      }
+    }
 
     // When remote, resolve connection info from project_remotes table
     const remoteConfig = useRemoteAgent
