@@ -438,6 +438,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       async (socket, req) => {
         const { sessionId } = req.params;
 
+        // Log before auth check for visibility
+        console.log(`[AgentWS] Connection attempt for session ${sessionId} (auth=${fastify.authEnabled})`);
+
         // Verify auth token for WebSocket when auth is enabled
         if (fastify.authEnabled) {
           const apiKey = req.query.apiKey;
@@ -446,12 +449,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // API key takes precedence (remote proxy connections)
           if (!apiKey) {
             if (!token) {
+              console.log(`[AgentWS] Auth rejected: no token (session=${sessionId})`);
               socket.send(JSON.stringify({ error: "Authentication required" }));
               socket.close();
               return;
             }
             const userId = await verifyWsToken(token);
             if (!userId) {
+              console.log(`[AgentWS] Auth rejected: invalid token (session=${sessionId})`);
               socket.send(JSON.stringify({ error: "Invalid authentication token" }));
               socket.close();
               return;

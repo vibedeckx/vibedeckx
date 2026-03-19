@@ -294,6 +294,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const [remoteStatus, setRemoteStatus] = useState<RemoteConnectionStatus | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const wsSessionIdRef = useRef<string | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
   const containerRef = useRef<PatchContainer>({ entries: [], status: "stopped" });
@@ -329,7 +330,15 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   // Connect WebSocket to session
   const connectWebSocket = useCallback((sessionId: string) => {
-    // Prevent duplicate connections
+    // If WS is open/connecting for a DIFFERENT session, close it first
+    if (wsRef.current && wsSessionIdRef.current !== sessionId) {
+      console.log(`[AgentSession] Closing stale WS for ${wsSessionIdRef.current}, switching to ${sessionId}`);
+      wsRef.current.close(1000, "session-switch");
+      wsRef.current = null;
+      wsSessionIdRef.current = null;
+    }
+
+    // Prevent duplicate connections to the SAME session
     if (wsRef.current?.readyState === WebSocket.OPEN ||
         wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
@@ -347,11 +356,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+    wsSessionIdRef.current = sessionId;
 
     ws.onopen = () => {
       console.log("[AgentSession] WebSocket connected");
       setIsConnected(true);
       setError(null);
+      setRemoteStatus(null);
 
       // Track connection start time
       connectionStartTimeRef.current = Date.now();
@@ -542,6 +553,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const generation = sessionGenerationRef.current;
 
     setError(null);
+    setRemoteStatus(null);
     setIsInitialized(false);
     lastStartFailedRef.current = false;
 
@@ -734,6 +746,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       if (wsRef.current) {
         finishedRef.current = true; // Prevent reconnect on unmount
         wsRef.current.close();
+        wsSessionIdRef.current = null;
       }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -751,6 +764,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     if (wsRef.current) {
       wsRef.current.close(1000, "branch-switch");
       wsRef.current = null;
+      wsSessionIdRef.current = null;
     }
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
