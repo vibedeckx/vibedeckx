@@ -76,6 +76,12 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
 
   const server = fastify();
 
+  // Diagnostic: log raw HTTP upgrade events to confirm they reach the server
+  // This fires at the Node.js level, before @fastify/websocket or any Fastify routing
+  server.server.on("upgrade", (req) => {
+    console.log(`[WS-RAW] HTTP upgrade event: ${req.url}`);
+  });
+
   // Decorate authEnabled so routes can access it
   server.decorate("authEnabled", authEnabled);
 
@@ -209,12 +215,28 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     wildcard: false,
   });
 
+  // Catch errors in hooks/handlers (Fastify default logger is disabled, so errors are silent)
+  server.addHook("onError", (req, _reply, error, done) => {
+    console.error(`[Server] onError: ${req.method} ${req.url}:`, error);
+    done();
+  });
+
   // SPA 路由支持 - 只对非 API 路径返回 index.html
   server.setNotFoundHandler(async (req, reply) => {
+    // Detect WebSocket upgrade requests that didn't match any route
+    if (req.headers.upgrade?.toLowerCase() === "websocket") {
+      console.error(`[WS] 404 - No matching WebSocket route for: ${req.method} ${req.url}`);
+    }
     if (req.url.startsWith("/api/")) {
       return reply.code(404).send({ error: "Not found" });
     }
     return reply.status(200).sendFile("index.html");
+  });
+
+  // Print registered routes on ready (diagnostic: confirms WS routes are registered)
+  server.addHook("onReady", (done) => {
+    console.log("[Server] Route table:\n" + server.printRoutes({ commonPrefix: false }));
+    done();
   });
 
   return {
