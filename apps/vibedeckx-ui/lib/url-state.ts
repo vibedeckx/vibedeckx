@@ -64,8 +64,10 @@ export function parseUrlState(): UrlState {
 export function buildUrl(state: { projectId?: string | null; tab?: ActiveView; branch?: string | null }): string {
   const { projectId, tab, branch } = state;
 
+  // Project-independent views always get clean URLs
+  if (tab === "remote-servers" || tab === "settings") return `/${tab}`;
+
   if (!projectId) {
-    if (tab === "remote-servers" || tab === "settings") return `/${tab}`;
     return "/";
   }
 
