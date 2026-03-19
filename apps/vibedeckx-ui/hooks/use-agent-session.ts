@@ -582,8 +582,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsLoading(true);
 
     try {
+      console.log(`[AgentSession] Starting REST call: projectId=${projectId}, branch=${branch}, agentType=${agentType}, generation=${generation}`);
       const { session: newSession, messages: initialMessages } =
         await createOrGetSession(projectId, branch, permissionMode, agentType);
+
+      console.log(`[AgentSession] REST response: sessionId=${newSession.id}, msgCount=${initialMessages?.length ?? 0}`);
 
       // If branch/project changed while the API call was in flight, discard the result
       if (sessionGenerationRef.current !== generation) {
@@ -613,13 +616,18 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // Return session for immediate use (avoids React state timing issues)
       return newSession;
     } catch (e) {
+      // Always log the error, even if the request was invalidated
+      console.error("[AgentSession] startSession error:", e);
+
       // Don't set error if the request was invalidated by a branch switch
-      if (sessionGenerationRef.current !== generation) return null;
+      if (sessionGenerationRef.current !== generation) {
+        console.log("[AgentSession] Discarding error (generation mismatch)");
+        return null;
+      }
 
       const errorMsg = e instanceof Error ? e.message : "Failed to start session";
       setError(errorMsg);
       lastStartFailedRef.current = true;
-      console.error("[AgentSession] Failed to start session:", e);
       return null;
     } finally {
       startingRef.current = false;

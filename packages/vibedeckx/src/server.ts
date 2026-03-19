@@ -24,7 +24,7 @@ import websocketRoutes from "./routes/websocket-routes.js";
 import reverseConnectRoutes from "./routes/reverse-connect-routes.js";
 import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
-import { getAuth } from "@clerk/fastify";
+import { getAuth, clerkClient } from "@clerk/fastify";
 import "./server-types.js";
 
 // API Key from environment variable for remote access authentication
@@ -153,10 +153,35 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.register(sharedServices, { storage: opts.storage });
   server.register(fastifyWebsocket);
 
-  // Conditionally register Clerk plugin for API routes when auth is enabled
+  // Conditionally register Clerk auth for API routes when auth is enabled.
+  // We use a manual preHandler instead of clerkPlugin because clerkPlugin uses fp()
+  // (escapes encapsulation) and registers a global preHandler that calls
+  // authenticateRequest() on ALL requests — including WebSocket upgrades.
+  // For WS upgrades (no Authorization header), Clerk returns a 307 redirect or throws,
+  // killing the connection before the route handler runs.
   if (authEnabled) {
-    const { clerkPlugin } = await import("@clerk/fastify");
-    await server.register(clerkPlugin);
+    server.decorateRequest("auth", null);
+    server.addHook("preHandler", async (req, reply) => {
+      // Skip WebSocket upgrades — they handle auth via query param token
+      if (req.headers.upgrade?.toLowerCase() === "websocket") return;
+
+      // Convert Fastify request to standard Request (same as clerkPlugin does)
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (value) headers.set(key, Array.isArray(value) ? value.join(",") : String(value));
+      }
+      const url = new URL(req.url || "", `${req.protocol}://clerk-dummy`);
+      const request = new Request(url, { method: req.method, headers });
+
+      const requestState = await clerkClient.authenticateRequest(request, {
+        acceptsToken: "any",
+      });
+      requestState.headers.forEach((value: string, key: string) => reply.header(key, value));
+      if (requestState.headers.get("location")) {
+        return reply.code(307).send();
+      }
+      (req as unknown as Record<string, unknown>).auth = requestState.toAuth();
+    });
   }
 
   server.register(websocketRoutes);
