@@ -80,12 +80,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
 
+      // Dormant sessions will wake on first message, so report them as "running"
+      const effectiveStatus = session?.dormant ? "running" : (session?.status || "running");
+
       return reply.code(200).send({
         session: {
           id: sessionId,
           projectId: pseudoProjectId,
           branch: branch ?? null,
-          status: session?.status || "running",
+          status: effectiveStatus,
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
         },
@@ -242,12 +245,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
 
+      // Dormant sessions will wake on first message, so report them as "running"
+      const effectiveStatus = session?.dormant ? "running" : (session?.status || "running");
+
       return reply.code(200).send({
         session: {
           id: sessionId,
           projectId: req.params.projectId,
           branch: branch ?? null,
-          status: session?.status || "running",
+          status: effectiveStatus,
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
         },

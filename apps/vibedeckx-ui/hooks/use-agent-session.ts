@@ -438,11 +438,15 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           console.error("[AgentSession] Server error:", msg.error);
           setError(msg.error);
 
-          // If session not found, invalidate cache and prevent reconnection attempts
+          // If session not found, invalidate cache and clear state so auto-start creates a fresh session
           if (msg.error === "Session not found") {
             console.log("[AgentSession] Session invalid, invalidating cache, will create new session");
             if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
             finishedRef.current = true;
+            setSession(null);
+            setStatus("stopped");
+            setIsInitialized(false);
+            shouldAutoStartRef.current = true;
           }
           return;
         }
@@ -618,6 +622,16 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : "Failed to send message";
         console.error("[AgentSession] Failed to send message:", errorMsg);
+
+        // If 404, the session is gone — invalidate cache and clear state for auto-recovery
+        if (errorMsg.includes("[404]")) {
+          if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+          setSession(null);
+          setStatus("stopped");
+          setIsInitialized(false);
+          shouldAutoStartRef.current = true;
+        }
+
         setError(errorMsg);
         toast.error("Failed to send message", { description: errorMsg });
       }
