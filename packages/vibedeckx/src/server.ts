@@ -20,6 +20,7 @@ import agentSessionRoutes from "./routes/agent-session-routes.js";
 import chatSessionRoutes from "./routes/chat-session-routes.js";
 import taskRoutes from "./routes/task-routes.js";
 import settingsRoutes from "./routes/settings-routes.js";
+import translateRoutes from "./routes/translate-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
 import reverseConnectRoutes from "./routes/reverse-connect-routes.js";
 import eventRoutes from "./routes/event-routes.js";
@@ -208,6 +209,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.register(chatSessionRoutes);
   server.register(taskRoutes);
   server.register(settingsRoutes);
+  server.register(translateRoutes);
   server.register(eventRoutes);
   server.register(terminalRoutes);
 

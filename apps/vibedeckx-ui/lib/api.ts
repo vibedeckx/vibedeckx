@@ -328,6 +328,20 @@ export async function sendApprovalResponse(sessionId: string, requestId: string,
   }
 }
 
+export async function translateText(text: string): Promise<{ translatedText: string; error?: string }> {
+  try {
+    const res = await authFetch(`${getApiBase()}/api/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) return { translatedText: text, error: "Translation failed" };
+    return res.json();
+  } catch {
+    return { translatedText: text, error: "Translation failed" };
+  }
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     if (_cachedConfig) return _cachedConfig;

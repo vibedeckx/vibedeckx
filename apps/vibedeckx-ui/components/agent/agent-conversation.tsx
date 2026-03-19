@@ -16,17 +16,19 @@ import {
   PromptInputActionMenuTrigger,
   PromptInputActionMenuContent,
   PromptInputActionAddAttachments,
+  PromptInputActionMenuItem,
   PromptInputHeader,
   usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw, Monitor, Cloud } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw, Monitor, Cloud, Languages, X } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
-import { getAgentProviders } from "@/lib/api";
+import { getAgentProviders, translateText } from "@/lib/api";
+import { toast } from "sonner";
 
 /** Only renders the attachment header when there are files attached */
 function AttachmentHeader() {
@@ -76,6 +78,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   function AgentConversation({ projectId, branch, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange }, ref) {
   const [input, setInput] = useState("");
   const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
+  const [translateEnabled, setTranslateEnabled] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   const [agentType, setAgentType] = useState<AgentType>("claude-code");
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
@@ -190,6 +194,37 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         }
       }
       content = parts;
+    }
+
+    if (translateEnabled) {
+      const textToTranslate = typeof content === "string"
+        ? content
+        : content.filter(p => p.type === "text").map(p => (p as { type: "text"; text: string }).text).join("\n");
+
+      if (textToTranslate.trim()) {
+        setIsTranslating(true);
+        try {
+          const result = await translateText(textToTranslate);
+          if (result.error) {
+            setInput(text);
+            toast.error("Translation failed", { description: "Disable translation to send the original text." });
+            return;
+          }
+          if (typeof content === "string") {
+            content = result.translatedText;
+          } else {
+            content = content.map(p =>
+              p.type === "text" ? { ...p, text: result.translatedText } : p
+            );
+          }
+        } catch {
+          setInput(text);
+          toast.error("Translation failed", { description: "Disable translation to send the original text." });
+          return;
+        } finally {
+          setIsTranslating(false);
+        }
+      }
     }
 
     if (!session || status !== "running") {
@@ -385,12 +420,34 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         >
           {/* Attachment thumbnails — only rendered when images are attached */}
           <AttachmentHeader />
+          {translateEnabled && (
+            <div className="flex items-center px-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setTranslateEnabled(false)}
+                className="inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium hover:bg-blue-500/20 transition-colors"
+              >
+                <Languages className="size-3" />
+                Translate to English
+                <X className="size-3" />
+              </button>
+            </div>
+          )}
           {/* Single row: [+ button] [textarea] [submit button] */}
           <div className="relative flex w-full items-start">
             <PromptInputActionMenu>
               <PromptInputActionMenuTrigger className="mt-1.5 ml-1" />
               <PromptInputActionMenuContent>
                 <PromptInputActionAddAttachments label="Add images" />
+                <PromptInputActionMenuItem
+                  onSelect={(e) => {
+                    e.preventDefault();
+                    setTranslateEnabled(!translateEnabled);
+                  }}
+                >
+                  <Languages className="mr-2 size-4" />
+                  {translateEnabled ? "Disable translation" : "Translate to English"}
+                </PromptInputActionMenuItem>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             <PromptInputTextarea
@@ -405,8 +462,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             />
             <PromptInputSubmit
               className="absolute bottom-1 right-1"
-              disabled={!input.trim() && !isLoading}
-              status={isLoading ? "streaming" : "ready"}
+              disabled={(!input.trim() && !isLoading) || isTranslating}
+              status={isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
             />
           </div>
         </PromptInput>
