@@ -420,10 +420,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         >
           {/* Attachment thumbnails — only rendered when images are attached */}
           <AttachmentHeader />
-          <div className="flex w-full flex-col">
+          <div className="relative flex w-full flex-col">
             {/* Translate badge row — only when enabled */}
             {translateEnabled && (
-              <div className="flex items-center px-2 pt-1.5 pb-0.5">
+              <div className="flex items-center pl-12 pr-2 pt-1.5 pb-0.5">
                 <button
                   type="button"
                   onClick={() => setTranslateEnabled(false)}
@@ -436,7 +436,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               </div>
             )}
             {/* Input row: [+ button] [textarea] [submit button] */}
-            <div className="relative flex w-full items-center">
+            <div className="flex w-full items-center">
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger className="ml-1" />
 
