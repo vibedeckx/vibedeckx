@@ -420,50 +420,55 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         >
           {/* Attachment thumbnails — only rendered when images are attached */}
           <AttachmentHeader />
-          {/* Single row: [+ button] [translate badge] [textarea] [submit button] */}
-          <div className="relative flex w-full items-center">
-            <PromptInputActionMenu>
-              <PromptInputActionMenuTrigger className="ml-1" />
-
-              <PromptInputActionMenuContent>
-                <PromptInputActionAddAttachments label="Add images" />
-                <PromptInputActionMenuItem
-                  onSelect={(e) => {
-                    e.preventDefault();
-                    setTranslateEnabled(!translateEnabled);
-                  }}
-                >
-                  <Languages className="mr-2 size-4" />
-                  {translateEnabled ? "Disable translation" : "Translate"}
-                </PromptInputActionMenuItem>
-              </PromptInputActionMenuContent>
-            </PromptInputActionMenu>
+          <div className="flex w-full flex-col">
+            {/* Translate badge row — only when enabled */}
             {translateEnabled && (
-              <button
-                type="button"
-                onClick={() => setTranslateEnabled(false)}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium hover:bg-blue-500/20 transition-colors"
-              >
-                <Languages className="size-3" />
-                Translate
-                <X className="size-3" />
-              </button>
+              <div className="flex items-center px-2 pt-1.5 pb-0.5">
+                <button
+                  type="button"
+                  onClick={() => setTranslateEnabled(false)}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium hover:bg-blue-500/20 transition-colors"
+                >
+                  <Languages className="size-3" />
+                  Translate
+                  <X className="size-3" />
+                </button>
+              </div>
             )}
-            <PromptInputTextarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={
-                session
-                  ? "Ask the agent to help with your code..."
-                  : "Type your first message to start..."
-              }
-              className="pr-12"
-            />
-            <PromptInputSubmit
-              className="absolute bottom-1 right-1"
-              disabled={(!input.trim() && !isLoading) || isTranslating}
-              status={isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
-            />
+            {/* Input row: [+ button] [textarea] [submit button] */}
+            <div className="relative flex w-full items-center">
+              <PromptInputActionMenu>
+                <PromptInputActionMenuTrigger className="ml-1" />
+
+                <PromptInputActionMenuContent>
+                  <PromptInputActionAddAttachments label="Add images" />
+                  <PromptInputActionMenuItem
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      setTranslateEnabled(!translateEnabled);
+                    }}
+                  >
+                    <Languages className="mr-2 size-4" />
+                    {translateEnabled ? "Disable translation" : "Translate"}
+                  </PromptInputActionMenuItem>
+                </PromptInputActionMenuContent>
+              </PromptInputActionMenu>
+              <PromptInputTextarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={
+                  session
+                    ? "Ask the agent to help with your code..."
+                    : "Type your first message to start..."
+                }
+                className="pr-12"
+              />
+              <PromptInputSubmit
+                className="absolute bottom-1 right-1"
+                disabled={(!input.trim() && !isLoading) || isTranslating}
+                status={isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
+              />
+            </div>
           </div>
         </PromptInput>
       </div>
