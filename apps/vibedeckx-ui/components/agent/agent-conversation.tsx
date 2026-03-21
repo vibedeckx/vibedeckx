@@ -25,6 +25,7 @@ import { Loader } from "@/components/ai-elements/loader";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw, Monitor, Cloud, Languages, X } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
+import { useInputHistory } from "@/hooks/use-input-history";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText } from "@/lib/api";
@@ -82,6 +83,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const [isTranslating, setIsTranslating] = useState(false);
   const [agentType, setAgentType] = useState<AgentType>("claude-code");
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
+  const inputHistory = useInputHistory(setInput);
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
 
   // Build execution mode targets from local path + project remotes
@@ -174,6 +176,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     if (!text && !hasFiles) return;
 
     setInput("");
+    inputHistory.push(text);
 
     // Build content: plain string when no files, ContentPart[] when files are attached
     let content: string | ContentPart[];
@@ -455,6 +458,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               <PromptInputTextarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={inputHistory.handleKeyDown}
                 placeholder={
                   session
                     ? "Ask the agent to help with your code..."
