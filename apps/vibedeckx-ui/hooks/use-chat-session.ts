@@ -22,6 +22,7 @@ export interface ChatSession {
   projectId: string;
   branch: string | null;
   status: AgentSessionStatus;
+  eventListeningEnabled?: boolean;
 }
 
 // ============ JSON Patch Types (RFC 6902) ============
@@ -454,6 +455,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   }, [session?.id, isConnected, connectWebSocket]);
 
   return {
+    session,
     messages,
     status,
     isConnected,

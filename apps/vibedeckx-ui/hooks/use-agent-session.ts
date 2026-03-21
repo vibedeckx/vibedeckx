@@ -33,7 +33,6 @@ export interface AgentSession {
   status: AgentSessionStatus;
   permissionMode?: "plan" | "edit";
   agentType?: AgentType;
-  eventListeningEnabled?: boolean;
 }
 
 // ============ JSON Patch Types (RFC 6902) ============

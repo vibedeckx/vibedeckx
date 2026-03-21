@@ -944,9 +944,9 @@ export const api = {
     });
   },
 
-  // Agent Session Event Listening
-  async setEventListening(sessionId: string, enabled: boolean): Promise<boolean> {
-    const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/event-listening`, {
+  // Chat Session Event Listening
+  async setChatEventListening(sessionId: string, enabled: boolean): Promise<boolean> {
+    const res = await authFetch(`${getApiBase()}/api/chat-sessions/${sessionId}/event-listening`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),

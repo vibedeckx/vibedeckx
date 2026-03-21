@@ -15,6 +15,7 @@ import type { AgentMessage, AgentSessionStatus } from "./agent-types.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage } from "./conversation-patch.js";
 import type { Storage } from "./storage/types.js";
+import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
@@ -38,6 +39,7 @@ interface ChatSession {
   subscribers: Set<WebSocket>;
   status: AgentSessionStatus;
   abortController: AbortController | null;
+  eventListeningEnabled: boolean;
 }
 
 // ============ Helpers ============
@@ -65,6 +67,7 @@ export class ChatSessionManager {
   private sessionIndex = new Map<string, string>();
 
   private storage: Storage;
+  private eventBus: EventBus | null = null;
   private processManager: ProcessManager;
   private agentSessionManager: AgentSessionManager;
   private remoteSessionMap: Map<string, RemoteSessionInfo>;
@@ -86,6 +89,86 @@ export class ChatSessionManager {
     this.agentSessionManager = agentSessionManager;
     this.remoteSessionMap = remoteSessionMap;
     this.remotePatchCache = remotePatchCache;
+  }
+
+  setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
+    this.setupEventListeners();
+  }
+
+  setEventListening(sessionId: string, enabled: boolean): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.eventListeningEnabled = enabled;
+    return true;
+  }
+
+  getEventListening(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return session?.eventListeningEnabled ?? false;
+  }
+
+  private setupEventListeners(): void {
+    if (!this.eventBus) return;
+    this.eventBus.subscribe((event: GlobalEvent) => {
+      if (event.type === "executor:stopped") {
+        this.handleExecutorFinished(event);
+      }
+    });
+  }
+
+  private handleExecutorFinished(event: Extract<GlobalEvent, { type: "executor:stopped" }>): void {
+    try {
+      // Look up executor metadata
+      const executor = this.storage.executors.getById(event.executorId);
+      if (!executor) return;
+
+      // Look up group to get branch
+      const group = this.storage.executorGroups.getById(executor.group_id);
+      if (!group) return;
+
+      const branch = group.branch || null;
+
+      // Find a chat session for this project+branch that has event listening enabled
+      const key = `${event.projectId}:${branch ?? ""}`;
+      const sessionId = this.sessionIndex.get(key);
+      if (!sessionId) return;
+
+      const session = this.sessions.get(sessionId);
+      if (!session || !session.eventListeningEnabled) return;
+
+      // Get tail output from process manager
+      const logs = this.processManager.getLogs(event.processId);
+      const outputLogs = logs.filter(
+        (l) => l.type === "pty" || l.type === "stdout" || l.type === "stderr"
+      );
+      const tail = outputLogs.slice(-100);
+      let raw = tail.map((l) => (l as { data: string }).data).join("");
+      raw = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
+      const tailOutput = raw.length > 10000 ? raw.slice(-10000) : raw;
+
+      const exitStatus = event.exitCode === 0 ? "success" : "failed";
+      const message = [
+        `[Executor Event: Process Finished]`,
+        `Executor: "${executor.name}"`,
+        `Command: ${executor.command}`,
+        `Exit Code: ${event.exitCode} (${exitStatus})`,
+        ``,
+        `Last output:`,
+        `---`,
+        tailOutput || "(no output captured)",
+        `---`,
+        ``,
+        `Please briefly summarize what happened with this executor.`,
+      ].join("\n");
+
+      // Send as a user message into the main chat — triggers DeepSeek AI response
+      this.sendMessage(sessionId, message).catch((err) => {
+        console.error(`[ChatSession] handleExecutorFinished sendMessage error:`, err);
+      });
+    } catch (error) {
+      console.error(`[ChatSession] handleExecutorFinished error:`, error);
+    }
   }
 
   private findRemoteSessionForProject(projectId: string, branch?: string | null): { localSessionId: string; info: RemoteSessionInfo } | null {
@@ -221,6 +304,7 @@ export class ChatSessionManager {
       subscribers: new Set(),
       status: "stopped",
       abortController: null,
+      eventListeningEnabled: false,
     };
 
     this.sessions.set(id, session);

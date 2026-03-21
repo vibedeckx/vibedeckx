@@ -12,8 +12,7 @@ import type {
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
-import type { EventBus, GlobalEvent } from "./event-bus.js";
-import type { ProcessManager } from "./process-manager.js";
+import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
@@ -45,14 +44,12 @@ interface RunningSession {
   skipDb: boolean; // Skip DB operations for remote path-based sessions
   permissionMode: "plan" | "edit"; // Claude Code permission mode
   agentType: AgentType; // Which agent provider to use
-  eventListeningEnabled: boolean; // Whether to auto-inject executor events
 }
 
 export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
   private storage: Storage;
   private eventBus: EventBus | null = null;
-  private processManager: ProcessManager | null = null;
 
   constructor(storage: Storage) {
     this.storage = storage;
@@ -60,11 +57,6 @@ export class AgentSessionManager {
 
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
-    this.setupEventListeners();
-  }
-
-  setProcessManager(pm: ProcessManager): void {
-    this.processManager = pm;
   }
 
   /**
@@ -174,7 +166,6 @@ export class AgentSessionManager {
       skipDb,
       permissionMode,
       agentType,
-      eventListeningEnabled: false,
     };
 
     this.sessions.set(sessionId, runningSession);
@@ -1051,7 +1042,6 @@ export class AgentSessionManager {
         skipDb: false,
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
-        eventListeningEnabled: false,
       };
 
       this.sessions.set(dbSession.id, runningSession);
@@ -1064,94 +1054,6 @@ export class AgentSessionManager {
 
     if (restoredCount > 0) {
       console.log(`[AgentSession] Restored ${restoredCount} dormant session(s) from database`);
-    }
-  }
-
-  /**
-   * Set event listening flag for a session
-   */
-  setEventListening(sessionId: string, enabled: boolean): boolean {
-    const session = this.sessions.get(sessionId);
-    if (!session) return false;
-    session.eventListeningEnabled = enabled;
-    return true;
-  }
-
-  /**
-   * Get event listening flag for a session
-   */
-  getEventListening(sessionId: string): boolean {
-    const session = this.sessions.get(sessionId);
-    return session?.eventListeningEnabled ?? false;
-  }
-
-  /**
-   * Subscribe to EventBus events for auto-injecting executor context into agent sessions
-   */
-  private setupEventListeners(): void {
-    if (!this.eventBus) return;
-    this.eventBus.subscribe((event: GlobalEvent) => {
-      if (event.type === "executor:stopped") {
-        this.handleExecutorFinished(event);
-      }
-    });
-  }
-
-  /**
-   * Handle an executor finish event: look up context, inject message into matching agent session
-   */
-  private handleExecutorFinished(event: Extract<GlobalEvent, { type: "executor:stopped" }>): void {
-    try {
-      // Look up executor metadata
-      const executor = this.storage.executors.getById(event.executorId);
-      if (!executor) return;
-
-      // Look up group to get branch
-      const group = this.storage.executorGroups.getById(executor.group_id);
-      if (!group) return;
-
-      // Find matching agent session by project + branch
-      const session = this.getSessionByBranch(event.projectId, group.branch || null);
-      if (!session) return;
-
-      // Guards: session must be running, event listening enabled, not dormant
-      if (session.status !== "running" || !session.eventListeningEnabled || session.dormant) return;
-
-      // Get tail output from process manager
-      let tailOutput = "";
-      if (this.processManager) {
-        const logs = this.processManager.getLogs(event.processId);
-        // Filter to only output types (skip init/finished)
-        const outputLogs = logs.filter(
-          (l) => l.type === "pty" || l.type === "stdout" || l.type === "stderr"
-        );
-        // Take last ~100 entries
-        const tail = outputLogs.slice(-100);
-        // Concatenate data and strip ANSI escape codes
-        let raw = tail.map((l) => (l as { data: string }).data).join("");
-        raw = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
-        // Truncate to 10000 chars
-        tailOutput = raw.length > 10000 ? raw.slice(-10000) : raw;
-      }
-
-      const exitStatus = event.exitCode === 0 ? "success" : "failed";
-      const message = [
-        `[Executor Event: Process Finished]`,
-        `Executor: "${executor.name}"`,
-        `Command: ${executor.command}`,
-        `Exit Code: ${event.exitCode} (${exitStatus})`,
-        ``,
-        `Last output:`,
-        `---`,
-        tailOutput || "(no output captured)",
-        `---`,
-        ``,
-        `Please briefly summarize what happened with this executor.`,
-      ].join("\n");
-
-      this.sendUserMessage(session.id, message);
-    } catch (error) {
-      console.error(`[AgentSession] handleExecutorFinished error:`, error);
     }
   }
 

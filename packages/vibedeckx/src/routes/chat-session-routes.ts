@@ -29,6 +29,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         projectId: session!.projectId,
         branch: session!.branch,
         status: session!.status,
+        eventListeningEnabled: session!.eventListeningEnabled,
       },
       messages,
     });
@@ -57,6 +58,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
     });
 
     return reply.send({ ok: true });
+  });
+
+  // Toggle event listening for a chat session
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { enabled: boolean };
+  }>("/api/chat-sessions/:sessionId/event-listening", async (req, reply) => {
+    const { sessionId } = req.params;
+    const { enabled } = req.body;
+
+    if (typeof enabled !== "boolean") {
+      return reply.code(400).send({ error: "enabled must be a boolean" });
+    }
+
+    const success = fastify.chatSessionManager.setEventListening(sessionId, enabled);
+    if (!success) {
+      return reply.code(404).send({ error: "Session not found" });
+    }
+
+    return reply.send({ enabled });
   });
 
   // Stop current generation

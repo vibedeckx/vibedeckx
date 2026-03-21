@@ -22,13 +22,13 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw, Monitor, Cloud, Languages, X, Loader2, Radio } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, RotateCcw, Monitor, Cloud, Languages, X, Loader2 } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
-import { api, getAgentProviders, translateText } from "@/lib/api";
+import { getAgentProviders, translateText } from "@/lib/api";
 import { toast } from "sonner";
 
 /** Only renders the attachment header when there are files attached */
@@ -82,7 +82,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [agentType, setAgentType] = useState<AgentType>("claude-code");
-  const [eventListeningEnabled, setEventListeningEnabled] = useState(false);
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
   const inputHistory = useInputHistory(setInput);
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
@@ -129,13 +128,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       setAgentType(session.agentType);
     }
   }, [session?.agentType]);
-
-  // Sync eventListeningEnabled from session metadata
-  useEffect(() => {
-    if (session?.eventListeningEnabled !== undefined) {
-      setEventListeningEnabled(session.eventListeningEnabled);
-    }
-  }, [session?.eventListeningEnabled]);
 
   // Notify parent when agent starts working (status "running" + user has sent messages).
   // Skips auto-started idle sessions that have no messages yet.
@@ -346,23 +338,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         </div>
         {session && (
           <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={async () => {
-                const newVal = !eventListeningEnabled;
-                try {
-                  await api.setEventListening(session.id, newVal);
-                  setEventListeningEnabled(newVal);
-                } catch {
-                  toast.error("Failed to toggle event listening");
-                }
-              }}
-              className={`h-7 w-7 ${eventListeningEnabled ? "text-amber-500" : ""}`}
-              title={eventListeningEnabled ? "Listening to executor events (click to disable)" : "Listen to executor events (click to enable)"}
-            >
-              <Radio className="h-3.5 w-3.5" />
-            </Button>
             <Button
               variant="ghost"
               size="icon"

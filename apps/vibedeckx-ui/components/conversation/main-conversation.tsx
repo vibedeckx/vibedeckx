@@ -17,8 +17,10 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { useChatSession } from "@/hooks/use-chat-session";
-import { MessageSquare, Loader2, Square, Search } from "lucide-react";
+import { MessageSquare, Loader2, Square, Search, Radio } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 function getToolLabel(tool: string): string {
   switch (tool) {
@@ -38,6 +40,7 @@ interface MainConversationProps {
 
 export function MainConversation({ projectId, branch }: MainConversationProps) {
   const {
+    session,
     messages,
     status,
     isInitialized,
@@ -48,6 +51,7 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
   } = useChatSession(projectId, branch);
 
   const [inputValue, setInputValue] = useState("");
+  const [eventListeningEnabled, setEventListeningEnabled] = useState(false);
 
   const isGenerating = status === "running";
 
@@ -77,7 +81,7 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center px-4 h-10 border-b border-border/60 bg-muted/20">
+      <div className="flex-shrink-0 flex items-center justify-between px-4 h-10 border-b border-border/60 bg-muted/20">
         <div className="flex items-center gap-2">
           <MessageSquare className="h-3.5 w-3.5 text-primary" />
           <span className="text-xs font-medium text-foreground">Main Chat</span>
@@ -85,6 +89,25 @@ export function MainConversation({ projectId, branch }: MainConversationProps) {
             <Loader2 className="h-3 w-3 animate-spin text-primary/60" />
           )}
         </div>
+        {session && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={async () => {
+              const newVal = !eventListeningEnabled;
+              try {
+                await api.setChatEventListening(session.id, newVal);
+                setEventListeningEnabled(newVal);
+              } catch {
+                toast.error("Failed to toggle event listening");
+              }
+            }}
+            className={`h-7 w-7 ${eventListeningEnabled ? "text-amber-500" : ""}`}
+            title={eventListeningEnabled ? "Listening to executor events (click to disable)" : "Listen to executor events (click to enable)"}
+          >
+            <Radio className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
 
       {/* Messages area */}
