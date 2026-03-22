@@ -155,7 +155,7 @@ export class ChatSessionManager {
         tailOutput || "(no output captured)",
         `---`,
         ``,
-        `Please briefly summarize what happened with this executor.`,
+        `Summarize in 1-2 sentences.`,
       ].join("\n");
 
       // Send as a user message into the main chat — triggers DeepSeek AI response
@@ -366,6 +366,7 @@ export class ChatSessionManager {
       "When the user asks to start, run, or launch a process, use runExecutor. When they ask to stop or kill a process, use stopExecutor.",
       "You can view the coding agent's conversation history using the getAgentConversation tool.",
       "When the user asks about what the agent is doing, has done, or references agent activities, use this tool.",
+      "When you receive an [Executor Event] message, respond in 1-2 sentences only. State what finished, whether it succeeded or failed, and the key detail (e.g. error message) if it failed. Do not repeat the output logs.",
       `Current workspace: project=${projectId}, branch=${branch ?? "default"}.`,
     ].join("\n");
   }
