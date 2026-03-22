@@ -7,7 +7,7 @@ import { UserMenu } from "@/components/auth/user-menu";
 import type { Worktree, Project } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 
-export type ActiveView = "workspace" | "tasks" | "files" | "remote-servers" | "settings";
+export type ActiveView = "workspace" | "tasks" | "files" | "remote-servers" | "settings" | "project-info";
 
 interface AppSidebarProps {
   activeView: ActiveView;
@@ -20,6 +20,9 @@ interface AppSidebarProps {
   onDeleteWorktree?: (worktree: Worktree) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
   hasProject?: boolean;
+  projects?: Project[];
+  onSelectProject?: (project: Project) => void;
+  onCreateProjectOpen?: () => void;
 }
 
 function StatusDot({ status }: { status?: WorkspaceStatus }) {
@@ -36,6 +39,18 @@ function StatusDot({ status }: { status?: WorkspaceStatus }) {
   return <span className="h-2 w-2 rounded-full bg-green-500 shrink-0" />;
 }
 
+function ProjectStatusDot({ project }: { project: Project }) {
+  const hasLocal = !!project.path;
+  const hasRemote = project.is_remote || !!project.remote_path;
+  if (hasLocal && hasRemote) {
+    return <span className="h-2 w-2 rounded-full bg-purple-500 shrink-0" />;
+  }
+  if (hasRemote) {
+    return <span className="h-2 w-2 rounded-full bg-blue-500 shrink-0" />;
+  }
+  return <span className="h-2 w-2 rounded-full bg-muted-foreground/30 shrink-0" />;
+}
+
 export function AppSidebar({
   activeView,
   onViewChange,
@@ -47,11 +62,65 @@ export function AppSidebar({
   onDeleteWorktree,
   workspaceStatuses,
   hasProject = true,
+  projects,
+  onSelectProject,
+  onCreateProjectOpen,
 }: AppSidebarProps) {
   return (
     <nav className="w-52 border-r border-border/60 bg-sidebar flex flex-col p-3">
-      {/* Navigation Section */}
+      {/* Projects Section */}
       <div className="space-y-0.5">
+        <div className="flex items-center justify-between px-3 mb-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">Projects</span>
+          <button
+            onClick={onCreateProjectOpen}
+            className="p-0.5 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors text-muted-foreground"
+            title="Create new project"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        </div>
+        {projects && projects.length > 0 ? (
+          <TooltipProvider delayDuration={300}>
+            <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto">
+              {projects.map((project) => {
+                const isSelected = currentProject?.id === project.id;
+                const isActiveInfo = isSelected && activeView === "project-info";
+                return (
+                  <Tooltip key={project.id}>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={() => {
+                          onSelectProject?.(project);
+                          onViewChange("project-info");
+                        }}
+                        className={cn(
+                          "w-full flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-all duration-150 min-w-0",
+                          "hover:bg-accent/80 hover:text-accent-foreground",
+                          isActiveInfo
+                            ? "bg-primary/10 text-primary font-medium shadow-sm"
+                            : isSelected
+                              ? "font-medium text-foreground"
+                              : "text-muted-foreground"
+                        )}
+                      >
+                        <ProjectStatusDot project={project} />
+                        <span className="truncate">{project.name}</span>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">{project.name}</TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+          </TooltipProvider>
+        ) : (
+          <span className="px-3 text-xs text-muted-foreground/60">No projects yet</span>
+        )}
+      </div>
+
+      {/* Navigation Section */}
+      <div className="mt-4 space-y-0.5">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70 px-3 mb-2 block">Navigation</span>
         {/* Tasks */}
         <button

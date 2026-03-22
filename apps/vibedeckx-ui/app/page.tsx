@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect, useRef, useCallback, useMemo, useTransition } from 'react';
-import { ProjectSelector } from '@/components/project/project-selector';
 import { ProjectCard } from '@/components/project/project-card';
+import { ProjectInfoView } from '@/components/project/project-info-view';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
 import { useTasks } from '@/hooks/use-tasks';
@@ -230,12 +230,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
             </div>
             <h1 className="text-sm font-semibold tracking-tight text-foreground">VibeDeckX</h1>
           </div>
-          <ProjectSelector
-            projects={projects}
-            currentProject={currentProject}
-            onSelectProject={selectProject}
-            onCreateProject={addProject}
-          />
         </div>
 
         <div className="flex-1 flex overflow-hidden">
@@ -254,11 +248,14 @@ Please proceed step by step and let me know if there are any issues or conflicts
             }}
             workspaceStatuses={workspaceStatuses}
             hasProject={!needsProject}
+            projects={projects}
+            onSelectProject={selectProject}
+            onCreateProjectOpen={() => setCreateDialogOpen(true)}
           />
 
           {/* Welcome state — shown for project-dependent views when no project exists */}
           <div className={
-            needsProject && (activeView === 'workspace' || activeView === 'tasks' || activeView === 'files')
+            needsProject && (activeView === 'workspace' || activeView === 'tasks' || activeView === 'files' || activeView === 'project-info')
               ? 'flex-1 overflow-hidden'
               : 'hidden'
           }>
@@ -349,6 +346,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
             />
           </div>
 
+          {/* Project Info View */}
+          <div className={(activeView !== 'project-info' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden'}>
+            {currentProject && <ProjectInfoView project={currentProject} />}
+          </div>
+
           {/* Remote Servers View — kept mounted, hidden via CSS */}
           <div className={activeView !== 'remote-servers' ? 'hidden' : 'flex-1 overflow-hidden'}>
             <div className="h-full flex flex-col overflow-auto">
@@ -380,13 +382,14 @@ Please proceed step by step and let me know if there are any issues or conflicts
             onWorktreeCreated={handleWorktreeCreated}
           />
         )}
-        {needsProject && (
-          <CreateProjectDialog
-            open={createDialogOpen}
-            onOpenChange={setCreateDialogOpen}
-            onProjectCreated={addProject}
-          />
-        )}
+        <CreateProjectDialog
+          open={createDialogOpen}
+          onOpenChange={setCreateDialogOpen}
+          onProjectCreated={(project) => {
+            addProject(project);
+            setActiveView("project-info");
+          }}
+        />
         {currentProject && (
           <DeleteWorktreeDialog
             projectId={currentProject.id}
