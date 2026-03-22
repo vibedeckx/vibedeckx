@@ -383,6 +383,44 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     }
   }
 
+  // Migration: drop old UNIQUE(path, is_remote, remote_url) constraint on projects
+  // Commit b4ef7b5 removed it from CREATE TABLE but existing databases still have it,
+  // causing UNIQUE constraint failures when creating pseudo-project rows.
+  {
+    const oldIndex = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='projects' AND sql LIKE '%path%is_remote%remote_url%'`
+    ).get() as { name: string } | undefined;
+    if (oldIndex) {
+      db.exec(`
+        BEGIN;
+        CREATE TABLE projects_new (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          path TEXT,
+          remote_path TEXT,
+          is_remote INTEGER DEFAULT 0,
+          remote_url TEXT,
+          remote_api_key TEXT,
+          remote_project_id TEXT,
+          user_id TEXT NOT NULL DEFAULT '',
+          agent_mode TEXT DEFAULT 'local',
+          executor_mode TEXT DEFAULT 'local',
+          sync_up_config TEXT,
+          sync_down_config TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO projects_new SELECT
+          id, name, path, remote_path, is_remote, remote_url, remote_api_key, remote_project_id,
+          user_id, agent_mode, executor_mode, sync_up_config, sync_down_config, created_at
+        FROM projects;
+        DROP TABLE projects;
+        ALTER TABLE projects_new RENAME TO projects;
+        CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
+        COMMIT;
+      `);
+    }
+  }
+
   // Re-enable FK enforcement for runtime operations
   db.pragma("foreign_keys = ON");
 

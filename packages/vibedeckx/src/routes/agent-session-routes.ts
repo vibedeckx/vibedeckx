@@ -60,12 +60,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       // Ensure a project row exists for the pseudo project ID so the FK constraint is satisfied
       if (!fastify.storage.projects.getById(pseudoProjectId)) {
-        const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
-        fastify.storage.projects.create({
-          id: pseudoProjectId,
-          name,
-          path: projectPath,
-        });
+        // Check if a project with this path already exists (avoids UNIQUE constraint on path)
+        const existingByPath = fastify.storage.projects.getByPath(projectPath);
+        if (!existingByPath) {
+          const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
+          try {
+            fastify.storage.projects.create({
+              id: pseudoProjectId,
+              name,
+              path: projectPath,
+            });
+          } catch (err: unknown) {
+            // Safety net: if UNIQUE constraint still fires, ignore — the row exists
+            if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) {
+              throw err;
+            }
+          }
+        }
       }
 
       const sessionId = fastify.agentSessionManager.getOrCreateSession(
