@@ -132,7 +132,7 @@ export function AppSidebar({
           }}
           disabled={!hasProject}
           className={cn(
-            "w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-all duration-150",
+            "w-full flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-150",
             !hasProject
               ? "text-muted-foreground/40 cursor-not-allowed"
               : "hover:bg-accent/80 hover:text-accent-foreground",
@@ -141,7 +141,7 @@ export function AppSidebar({
               : !hasProject ? "" : "text-muted-foreground"
           )}
         >
-          <ListTodo className="h-4 w-4 shrink-0" />
+          <ListTodo className="h-3 w-3 shrink-0" />
           <span>Tasks</span>
         </button>
 
@@ -150,7 +150,7 @@ export function AppSidebar({
           onClick={() => { if (!hasProject) return; onViewChange("files"); }}
           disabled={!hasProject}
           className={cn(
-            "w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-all duration-150",
+            "w-full flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-150",
             !hasProject
               ? "text-muted-foreground/40 cursor-not-allowed"
               : "hover:bg-accent/80 hover:text-accent-foreground",
@@ -159,7 +159,7 @@ export function AppSidebar({
               : !hasProject ? "" : "text-muted-foreground"
           )}
         >
-          <FolderOpen className="h-4 w-4 shrink-0" />
+          <FolderOpen className="h-3 w-3 shrink-0" />
           <span>Files</span>
         </button>
       </div>
