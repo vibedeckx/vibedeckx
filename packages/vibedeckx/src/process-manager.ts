@@ -95,9 +95,9 @@ export class ProcessManager {
     // Default: claude
     const binary = this.detectBinary('claude');
     if (binary) {
-      return `${binary} -p '${escapedPrompt}' --dangerously-skip-permissions`;
+      return `${binary} -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
     }
-    return `npx -y @anthropic-ai/claude-code -p '${escapedPrompt}' --dangerously-skip-permissions`;
+    return `npx -y @anthropic-ai/claude-code -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
   }
 
   setEventBus(eventBus: EventBus): void {
