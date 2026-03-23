@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
-import type { ExecutorType } from "../storage/types.js";
+import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
@@ -28,7 +28,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create Executor
   fastify.post<{
     Params: { projectId: string };
-    Body: { name: string; command: string; executor_type?: string; cwd?: string; pty?: boolean; group_id: string };
+    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; group_id: string };
   }>("/api/projects/:projectId/executors", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -38,10 +38,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { name, command, executor_type, cwd, pty, group_id } = req.body;
+    const { name, command, executor_type, prompt_provider, cwd, pty, group_id } = req.body;
     if (!group_id) {
       return reply.code(400).send({ error: "group_id is required" });
     }
+
+    const parsedType = (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType;
+    const parsedProvider = (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider;
 
     const id = randomUUID();
     const executor = fastify.storage.executors.create({
@@ -50,7 +53,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       group_id,
       name,
       command,
-      executor_type: (executor_type === 'prompt' ? 'prompt' : 'command'),
+      executor_type: parsedType,
+      prompt_provider: parsedType === 'prompt' ? parsedProvider : null,
       cwd,
       pty,
     });
@@ -61,17 +65,24 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 更新 Executor
   fastify.put<{
     Params: { id: string };
-    Body: { name?: string; command?: string; executor_type?: string; cwd?: string | null; pty?: boolean };
+    Body: { name?: string; command?: string; executor_type?: string; prompt_provider?: string; cwd?: string | null; pty?: boolean };
   }>("/api/executors/:id", async (req, reply) => {
     const existing = fastify.storage.executors.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Executor not found" });
     }
 
-    const { executor_type, ...rest } = req.body;
+    const { executor_type, prompt_provider, ...rest } = req.body;
+    const parsedType = executor_type !== undefined
+      ? (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType
+      : undefined;
+    const parsedProvider = prompt_provider !== undefined
+      ? (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider
+      : undefined;
     const updateOpts = {
       ...rest,
-      ...(executor_type !== undefined ? { executor_type: (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType } : {}),
+      ...(parsedType !== undefined ? { executor_type: parsedType } : {}),
+      ...(parsedProvider !== undefined ? { prompt_provider: parsedProvider } : {}),
     };
     const executor = fastify.storage.executors.update(req.params.id, updateOpts);
     return reply.code(200).send({ executor });

@@ -28,7 +28,7 @@ import { ExecutorOutput } from "./executor-output";
 import { ExecutorForm } from "./executor-form";
 import { useExecutorLogs } from "@/hooks/use-executor-logs";
 import type { ExecutorWithProcess } from "@/hooks/use-executors";
-import type { ExecutorType } from "@/lib/api";
+import type { ExecutorType, PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -37,7 +37,7 @@ interface ExecutorItemProps {
   executor: ExecutorWithProcess;
   onStart: () => Promise<string | null>;
   onStop: (processId?: string) => Promise<void>;
-  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; cwd?: string | null }) => Promise<unknown>;
+  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null }) => Promise<unknown>;
   onDelete: () => Promise<void>;
   onProcessFinished: () => void;
 }

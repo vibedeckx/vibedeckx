@@ -1,7 +1,7 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
-import type { Executor, ExecutorProcessStatus, Storage } from "./storage/types.js";
+import type { Executor, ExecutorProcessStatus, PromptProvider, Storage } from "./storage/types.js";
 import type { EventBus } from "./event-bus.js";
 
 export type LogMessage =
@@ -46,42 +46,53 @@ export class ProcessManager {
   private storage: Storage;
   private eventBus: EventBus | null = null;
   private terminalCounter = 0;
-  private claudeBinaryPath: string | null | undefined = undefined;
+  private binaryCache = new Map<string, string | null>();
 
   constructor(storage: Storage) {
     this.storage = storage;
   }
 
   /**
-   * Detect the claude CLI binary, caching the result.
+   * Detect a CLI binary by name, caching the result.
    */
-  private detectClaudeBinary(): string | null {
-    if (this.claudeBinaryPath !== undefined) {
-      return this.claudeBinaryPath;
+  private detectBinary(name: string): string | null {
+    if (this.binaryCache.has(name)) {
+      return this.binaryCache.get(name)!;
     }
     try {
       const cmd = process.platform === "win32" ? "where" : "which";
-      const result = execFileSync(cmd, ["claude"], {
+      const result = execFileSync(cmd, [name], {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "ignore"],
       }).trim();
-      this.claudeBinaryPath = result || null;
-      console.log(`[ProcessManager] Claude binary found: ${result}`);
+      const path = result || null;
+      this.binaryCache.set(name, path);
+      console.log(`[ProcessManager] ${name} binary found: ${result}`);
+      return path;
     } catch {
-      this.claudeBinaryPath = null;
-      console.log(`[ProcessManager] Claude binary not found, will use npx`);
+      this.binaryCache.set(name, null);
+      console.log(`[ProcessManager] ${name} binary not found, will use npx`);
+      return null;
     }
-    return this.claudeBinaryPath;
   }
 
   /**
    * Build the shell command string for a prompt executor.
-   * Runs `claude -p "prompt" --dangerously-skip-permissions` in the project directory.
+   * Supports claude and codex providers.
    */
-  private buildPromptCommand(prompt: string): string {
-    const binary = this.detectClaudeBinary();
-    // Escape single quotes in the prompt for safe shell embedding
+  private buildPromptCommand(prompt: string, provider: PromptProvider): string {
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
+
+    if (provider === 'codex') {
+      const binary = this.detectBinary('codex');
+      if (binary) {
+        return `${binary} --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'`;
+      }
+      return `npx -y @openai/codex --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'`;
+    }
+
+    // Default: claude
+    const binary = this.detectBinary('claude');
     if (binary) {
       return `${binary} -p '${escapedPrompt}' --dangerously-skip-permissions`;
     }
@@ -112,13 +123,13 @@ export class ProcessManager {
     // Determine working directory
     const cwd = executor.cwd || projectPath;
 
-    // For prompt executors, build the claude -p command
+    // For prompt executors, build the provider-specific command
     const effectiveExecutor = executor.executor_type === 'prompt'
-      ? { ...executor, command: this.buildPromptCommand(executor.command) }
+      ? { ...executor, command: this.buildPromptCommand(executor.command, executor.prompt_provider ?? 'claude') }
       : executor;
 
     console.log(`[ProcessManager] Starting process ${processId}`);
-    console.log(`[ProcessManager] Type: ${executor.executor_type || 'command'}`);
+    console.log(`[ProcessManager] Type: ${executor.executor_type || 'command'}${executor.executor_type === 'prompt' ? ` (${executor.prompt_provider ?? 'claude'})` : ''}`);
     console.log(`[ProcessManager] Command: ${effectiveExecutor.command}`);
     console.log(`[ProcessManager] CWD: ${cwd}`);
     console.log(`[ProcessManager] Forcing PTY mode for ANSI color support`);

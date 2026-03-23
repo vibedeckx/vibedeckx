@@ -4,16 +4,16 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
-import type { ExecutorType } from "../storage/types.js";
+import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // Execute command at a path (for remote executor)
   fastify.post<{
-    Body: { path: string; command: string; executor_type?: string; cwd?: string; branch?: string | null; pty?: boolean };
+    Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean };
   }>("/api/path/execute", async (req, reply) => {
-    const { path: projectPath, command, executor_type, cwd, branch, pty } = req.body;
+    const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty } = req.body;
     if (!projectPath || !command) {
       return reply.code(400).send({ error: "Path and command are required" });
     }
@@ -28,6 +28,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       name: "remote-command",
       command,
       executor_type: (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType,
+      prompt_provider: (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider | null,
       cwd: resolvedCwd,
       pty: pty !== false,
       position: 0,
@@ -90,6 +91,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           path: effectiveRemotePath,
           command: executor.command,
           executor_type: executor.executor_type,
+          prompt_provider: executor.prompt_provider,
           branch: branch ?? undefined,
           cwd: executor.cwd || undefined,
           pty: executor.pty,

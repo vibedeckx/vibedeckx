@@ -10,14 +10,14 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { Executor, ExecutorType } from "@/lib/api";
+import type { Executor, ExecutorType, PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface ExecutorFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   executor?: Executor;
-  onSubmit: (data: { name: string; command: string; executor_type?: ExecutorType; cwd?: string; pty?: boolean }) => Promise<void>;
+  onSubmit: (data: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<void>;
 }
 
 export function ExecutorForm({
@@ -28,6 +28,7 @@ export function ExecutorForm({
 }: ExecutorFormProps) {
   const [name, setName] = useState(executor?.name ?? "");
   const [executorType, setExecutorType] = useState<ExecutorType>(executor?.executor_type ?? "command");
+  const [promptProvider, setPromptProvider] = useState<PromptProvider>(executor?.prompt_provider ?? "claude");
   const [command, setCommand] = useState(executor?.command ?? "");
   const [cwd, setCwd] = useState(executor?.cwd ?? "");
   const [pty, setPty] = useState(executor?.pty ?? true);
@@ -40,6 +41,7 @@ export function ExecutorForm({
     if (open && executor) {
       setName(executor.name);
       setExecutorType(executor.executor_type ?? "command");
+      setPromptProvider(executor.prompt_provider ?? "claude");
       setCommand(executor.command);
       setCwd(executor.cwd ?? "");
       setPty(executor.pty);
@@ -56,6 +58,7 @@ export function ExecutorForm({
         name: name.trim(),
         command: command.trim(),
         executor_type: executorType,
+        prompt_provider: executorType === "prompt" ? promptProvider : null,
         cwd: cwd.trim() || undefined,
         pty: executorType === "prompt" ? true : pty,
       });
@@ -63,6 +66,7 @@ export function ExecutorForm({
       if (!isEdit) {
         setName("");
         setExecutorType("command");
+        setPromptProvider("claude");
         setCommand("");
         setCwd("");
         setPty(true);
@@ -117,6 +121,37 @@ export function ExecutorForm({
               </button>
             </div>
           </div>
+          {executorType === "prompt" && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Provider</label>
+              <div className="flex rounded-md border border-input overflow-hidden">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex-1 px-3 py-1.5 text-sm font-medium transition-colors",
+                    promptProvider === "claude"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-background text-muted-foreground hover:bg-muted"
+                  )}
+                  onClick={() => setPromptProvider("claude")}
+                >
+                  Claude
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "flex-1 px-3 py-1.5 text-sm font-medium transition-colors border-l border-input",
+                    promptProvider === "codex"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-background text-muted-foreground hover:bg-muted"
+                  )}
+                  onClick={() => setPromptProvider("codex")}
+                >
+                  Codex
+                </button>
+              </div>
+            </div>
+          )}
           <div className="space-y-2">
             <label className="text-sm font-medium">
               {executorType === "prompt" ? "Prompt" : "Command"}
