@@ -179,7 +179,7 @@ export function ExecutorForm({
               <span className="text-muted-foreground">(optional)</span>
             </label>
             <Input
-              placeholder="Leave empty to use project path"
+              placeholder="Relative to worktree root (leave empty for root)"
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}
             />

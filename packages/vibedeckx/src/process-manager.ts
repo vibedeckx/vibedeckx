@@ -1,4 +1,5 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
+import path from "path";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { Executor, ExecutorProcessStatus, PromptProvider, Storage } from "./storage/types.js";
@@ -121,7 +122,11 @@ export class ProcessManager {
     }
 
     // Determine working directory
-    const cwd = executor.cwd || projectPath;
+    // If executor.cwd is set, resolve it relative to the worktree/project path
+    // so that sub-directory paths work correctly across worktrees
+    const cwd = executor.cwd
+      ? (path.isAbsolute(executor.cwd) ? executor.cwd : path.join(projectPath, executor.cwd))
+      : projectPath;
 
     // For prompt executors, build the provider-specific command
     const effectiveExecutor = executor.executor_type === 'prompt'
