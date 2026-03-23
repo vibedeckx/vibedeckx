@@ -41,8 +41,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       group_id TEXT,
       name TEXT NOT NULL,
       command TEXT NOT NULL,
+      executor_type TEXT DEFAULT 'command',
+      prompt_provider TEXT,
       cwd TEXT,
       pty INTEGER DEFAULT 1,
+      position INTEGER DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (group_id) REFERENCES executor_groups(id) ON DELETE CASCADE
