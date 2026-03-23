@@ -105,8 +105,8 @@ export function AppSidebar({
                         )}
                       >
                         <ProjectStatusDot project={project} />
-                        <span className="truncate flex-1">{project.name}</span>
-                        {isSelected && <FolderOpen className="h-3 w-3 shrink-0 text-primary" />}
+                        <span className="truncate flex-1 text-left">{project.name}</span>
+                        {isSelected && <FolderOpen className="h-3 w-3 shrink-0 text-primary ml-auto" />}
                       </button>
                     </TooltipTrigger>
                     <TooltipContent side="right">{project.name}</TooltipContent>
