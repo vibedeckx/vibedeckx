@@ -35,8 +35,10 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
   const [allExpanded, setAllExpanded] = useState(true);
   const [expandKey, setExpandKey] = useState(0);
 
-  // Map diffTarget to 'local' | 'remote' for hooks that still use old API
-  const hookTarget: 'local' | 'remote' = diffTarget === 'local' ? 'local' : 'remote';
+  // Map diffTarget to 'local' | 'remote' for hooks that still use old API.
+  // When the project has no local path, omit target so the backend auto-detects remote.
+  const hookTarget: 'local' | 'remote' | undefined =
+    diffTarget === 'local' ? (project?.path ? 'local' : undefined) : 'remote';
   const { diff, loading, error, refresh } = useDiff(projectId, selectedBranch, sinceCommit, hookTarget);
   const { commits, loading: commitsLoading, refetch: refetchCommits } = useCommits(projectId, selectedBranch, undefined, hookTarget);
 
