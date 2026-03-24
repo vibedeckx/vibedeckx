@@ -359,7 +359,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Project Info View */}
           <div className={(activeView !== 'project-info' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden'}>
-            {currentProject && <ProjectInfoView project={currentProject} />}
+            {currentProject && <ProjectInfoView project={currentProject} onProjectUpdated={updateProject} />}
           </div>
 
           {/* Remote Servers View — kept mounted, hidden via CSS */}
