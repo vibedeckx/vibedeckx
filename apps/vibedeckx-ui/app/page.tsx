@@ -281,7 +281,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Workspace View — kept mounted, hidden via CSS to preserve WebSocket */}
           <div className={(activeView !== 'workspace' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden flex'}>
-            <ResizablePanelGroup direction="horizontal">
+            <ResizablePanelGroup direction="horizontal" autoSaveId="workspace-panels">
               {/* Left Panel: Project Card + Main Chat */}
               <ResizablePanel defaultSize={50} minSize={25}>
                 <div className="h-full flex flex-col overflow-hidden">
