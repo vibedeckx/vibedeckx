@@ -85,8 +85,23 @@ function connectPersistentRemoteWs(
     // Simulate open event on next tick
     setTimeout(() => adapter.emit("open"), 0);
   } else {
-    const remoteWsUrl = buildRemoteWsUrl(remoteInfo);
-    remoteWs = new WebSocket(remoteWsUrl, undefined, wsOptions);
+    if (!remoteInfo.remoteUrl) {
+      // No direct URL available (reverse-connect only) — cannot fall back to direct WS
+      console.log(`[AgentWS] No direct URL for ${sessionId}, skipping reconnect (reverse-connect only)`);
+      cache.setReconnecting(sessionId, false);
+      cache.broadcast(sessionId, JSON.stringify({ remoteStatus: "disconnected" }));
+      return;
+    }
+    let remoteWsUrl: string;
+    try {
+      remoteWsUrl = buildRemoteWsUrl(remoteInfo);
+      remoteWs = new WebSocket(remoteWsUrl, undefined, wsOptions);
+    } catch (err) {
+      console.error(`[AgentWS] Failed to open remote WS for ${sessionId}:`, err);
+      cache.setReconnecting(sessionId, false);
+      cache.broadcast(sessionId, JSON.stringify({ remoteStatus: "disconnected" }));
+      return;
+    }
   }
 
   cache.setRemoteWs(sessionId, remoteWs as WebSocket);
