@@ -352,7 +352,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         console.log(`[API] /message 404: remote session not found. Known keys: [${[...fastify.remoteSessionMap.keys()].join(', ')}]`);
         return reply.code(404).send({ error: "Remote session not found" });
       }
-      const result = await proxyToRemote(
+      const result = await proxyAuto(
+        remoteInfo.remoteServerId,
         remoteInfo.remoteUrl,
         remoteInfo.remoteApiKey,
         "POST",
