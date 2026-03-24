@@ -17,6 +17,7 @@ import { UserMenu } from '@/components/auth/user-menu';
 import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
 import { MainConversation } from '@/components/conversation';
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import { FilesView } from '@/components/files';
@@ -280,50 +281,58 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Workspace View — kept mounted, hidden via CSS to preserve WebSocket */}
           <div className={(activeView !== 'workspace' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden flex'}>
-            {/* Left Panel: Project Card + Main Chat */}
-            <div className="w-1/2 flex flex-col border-r border-border/60 overflow-hidden">
-              {currentProject && (
-                <div className="px-4 py-3 border-b border-border/60 flex-shrink-0">
-                  <ProjectCard
-                    project={currentProject}
+            <ResizablePanelGroup direction="horizontal">
+              {/* Left Panel: Project Card + Main Chat */}
+              <ResizablePanel defaultSize={50} minSize={25}>
+                <div className="h-full flex flex-col overflow-hidden">
+                  {currentProject && (
+                    <div className="px-4 py-3 border-b border-border/60 flex-shrink-0">
+                      <ProjectCard
+                        project={currentProject}
+                        selectedBranch={selectedBranch}
+                        onUpdateProject={updateProject}
+                        onDeleteProject={deleteProject}
+                        onSyncPrompt={handleSyncPrompt}
+                        assignedTask={assignedTask}
+                        onStartTask={handleStartTask}
+                        onResetTask={handleResetTask}
+                        startingTask={startingTask}
+                      />
+                    </div>
+                  )}
+                  <div className="flex-1 overflow-hidden">
+                    <MainConversation projectId={currentProject?.id ?? null} branch={selectedBranch} />
+                  </div>
+                </div>
+              </ResizablePanel>
+
+              <ResizableHandle withHandle />
+
+              {/* Right Panel: Agent/Executors/Diff/Terminal as tabs */}
+              <ResizablePanel defaultSize={50} minSize={25}>
+                <div className="h-full flex flex-col overflow-hidden">
+                  <RightPanel
+                    projectId={currentProject?.id ?? null}
                     selectedBranch={selectedBranch}
-                    onUpdateProject={updateProject}
-                    onDeleteProject={deleteProject}
-                    onSyncPrompt={handleSyncPrompt}
-                    assignedTask={assignedTask}
-                    onStartTask={handleStartTask}
-                    onResetTask={handleResetTask}
-                    startingTask={startingTask}
+                    onMergeRequest={handleMergeRequest}
+                    project={currentProject}
+                    onExecutorModeChange={handleExecutorModeChange}
+                    agentSlot={
+                      <AgentConversation
+                        ref={agentRef}
+                        projectId={currentProject?.id ?? null}
+                        branch={selectedBranch}
+                        project={currentProject}
+                        onAgentModeChange={handleAgentModeChange}
+                        onTaskCompleted={handleTaskCompleted}
+                        onSessionStarted={handleSessionStarted}
+                        onStatusChange={handleStatusChange}
+                      />
+                    }
                   />
                 </div>
-              )}
-              <div className="flex-1 overflow-hidden">
-                <MainConversation projectId={currentProject?.id ?? null} branch={selectedBranch} />
-              </div>
-            </div>
-
-            {/* Right Panel: Agent/Executors/Diff/Terminal as tabs */}
-            <div className="w-1/2 flex flex-col overflow-hidden">
-              <RightPanel
-                projectId={currentProject?.id ?? null}
-                selectedBranch={selectedBranch}
-                onMergeRequest={handleMergeRequest}
-                project={currentProject}
-                onExecutorModeChange={handleExecutorModeChange}
-                agentSlot={
-                  <AgentConversation
-                    ref={agentRef}
-                    projectId={currentProject?.id ?? null}
-                    branch={selectedBranch}
-                    project={currentProject}
-                    onAgentModeChange={handleAgentModeChange}
-                    onTaskCompleted={handleTaskCompleted}
-                    onSessionStarted={handleSessionStarted}
-                    onStatusChange={handleStatusChange}
-                  />
-                }
-              />
-            </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
           </div>
 
           {/* Tasks View — kept mounted, hidden via CSS */}
