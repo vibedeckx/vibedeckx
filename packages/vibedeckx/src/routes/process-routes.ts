@@ -60,8 +60,31 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const branch = req.body?.branch;
 
-    const executorMode = project.executor_mode;
-    const useRemoteExecutor = executorMode !== 'local';
+    let executorMode = project.executor_mode;
+    let useRemoteExecutor = executorMode !== 'local';
+
+    // Fallback: legacy "remote" value → resolve to actual remote server ID
+    if (useRemoteExecutor && executorMode === 'remote') {
+      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      if (remotes.length > 0) {
+        const fallback = remotes[0];
+        executorMode = fallback.remote_server_id;
+        fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
+        console.log(`[API] Auto-resolved executor_mode from 'remote' to '${fallback.remote_server_id}' (legacy value)`);
+      }
+    }
+
+    // Fallback: if local mode but no local path, try to find a remote to use
+    if (!useRemoteExecutor && !project.path) {
+      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      if (remotes.length > 0) {
+        const fallback = remotes[0];
+        useRemoteExecutor = true;
+        executorMode = fallback.remote_server_id;
+        fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
+        console.log(`[API] Auto-resolved executor_mode from 'local' to '${fallback.remote_server_id}' (no local path)`);
+      }
+    }
 
     // When remote, resolve connection info from project_remotes table
     const remoteConfig = useRemoteExecutor
