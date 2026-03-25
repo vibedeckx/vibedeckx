@@ -91,27 +91,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
       ? fastify.storage.projectRemotes.getByProjectAndServer(project.id, executorMode)
       : undefined;
 
-    // Fallback to legacy project fields if no project_remote found
-    const effectiveRemoteUrl = remoteConfig?.server_url ?? project.remote_url;
-    const effectiveRemoteApiKey = remoteConfig?.server_api_key ?? project.remote_api_key;
-    const effectiveRemotePath = remoteConfig?.remote_path ?? project.remote_path;
-
-    const hasRemoteConfig = !!(effectiveRemoteUrl && effectiveRemoteApiKey && effectiveRemotePath);
-    const shouldUseRemote = useRemoteExecutor && hasRemoteConfig;
-
     console.log(`[API] POST executors/${req.params.id}/start: ` +
-      `executor_mode=${executorMode}, useRemoteExecutor=${shouldUseRemote}, ` +
-      `remoteConfig=${remoteConfig ? `url=${remoteConfig.server_url}, path=${remoteConfig.remote_path}` : 'legacy'}`);
+      `executor_mode=${executorMode}, useRemoteExecutor=${useRemoteExecutor}, ` +
+      `remoteConfig=${remoteConfig ? `url=${remoteConfig.server_url}, path=${remoteConfig.remote_path}` : 'none'}`);
 
-    if (shouldUseRemote) {
+    if (useRemoteExecutor) {
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: `Remote server configuration not found for executor_mode="${executorMode}"` });
+      }
+
       const result = await proxyToRemoteAuto(
         executorMode,
-        effectiveRemoteUrl!,
-        effectiveRemoteApiKey!,
+        remoteConfig.server_url ?? "",
+        remoteConfig.server_api_key || "",
         "POST",
         `/api/path/execute`,
         {
-          path: effectiveRemotePath,
+          path: remoteConfig.remote_path,
           command: executor.command,
           executor_type: executor.executor_type,
           prompt_provider: executor.prompt_provider,
@@ -126,8 +122,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const localProcessId = `remote-${executor.id}-${remoteData.processId}`;
         fastify.remoteExecutorMap.set(localProcessId, {
           remoteServerId: executorMode,
-          remoteUrl: effectiveRemoteUrl!,
-          remoteApiKey: effectiveRemoteApiKey!,
+          remoteUrl: remoteConfig.server_url ?? "",
+          remoteApiKey: remoteConfig.server_api_key || "",
           remoteProcessId: remoteData.processId,
         });
         return reply.code(200).send({ processId: localProcessId });
