@@ -41,7 +41,6 @@ export class ClaudeCodeProvider implements AgentProvider {
       : "--dangerously-skip-permissions";
 
     const claudeArgs = [
-      "-p",
       "--output-format=stream-json",
       "--input-format=stream-json",
       permissionFlag,
