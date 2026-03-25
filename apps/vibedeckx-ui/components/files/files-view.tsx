@@ -75,7 +75,7 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
       {/* Split content */}
       <ResizablePanelGroup direction="horizontal" autoSaveId="files-panels" className="flex-1">
         {/* File tree (left) */}
-        <ResizablePanel defaultSize={35} minSize={20}>
+        <ResizablePanel defaultSize={33} minSize={20}>
           <ScrollArea className="h-full">
             {rootLoading && rootEntries.length === 0 ? (
               <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
@@ -98,7 +98,7 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
         <ResizableHandle withHandle />
 
         {/* File preview (right) */}
-        <ResizablePanel defaultSize={65} minSize={25}>
+        <ResizablePanel defaultSize={67} minSize={25}>
           <div className="h-full overflow-hidden">
             <FilePreview
               filePath={selectedFile}
