@@ -815,9 +815,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     // Mark that we need to auto-start session after reset
     shouldAutoStartRef.current = true;
-    // Invalidate session cache — agent type or branch changed, cached session is stale
+    // Invalidate session cache — branch or mode changed, cached session is stale
     if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
-  }, [projectId, branch, agentMode, agentType]);
+    // Note: agentType is intentionally NOT in this dependency array.
+    // Agent type changes are handled by restartSession() which keeps the WebSocket
+    // connected so it can receive the clearAll patch and new messages from the backend.
+    // Including agentType here would close the WebSocket and race with restartSession.
+  }, [projectId, branch, agentMode]);
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
