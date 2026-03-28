@@ -128,25 +128,34 @@ export class ProcessManager {
       ? (path.isAbsolute(executor.cwd) ? executor.cwd : path.join(projectPath, executor.cwd))
       : projectPath;
 
-    // For prompt executors, build the provider-specific command
-    const effectiveExecutor = executor.executor_type === 'prompt'
-      ? { ...executor, command: this.buildPromptCommand(executor.command, executor.prompt_provider ?? 'claude') }
-      : executor;
+    // For claude prompt executors, use stream-json mode for real-time streaming
+    if (executor.executor_type === 'prompt' && (executor.prompt_provider ?? 'claude') === 'claude') {
+      console.log(`[ProcessManager] Starting stream-json process ${processId}`);
+      console.log(`[ProcessManager] Type: prompt (claude stream-json)`);
+      console.log(`[ProcessManager] Prompt: ${executor.command.slice(0, 100)}${executor.command.length > 100 ? '...' : ''}`);
+      console.log(`[ProcessManager] CWD: ${cwd}`);
+      this.startClaudeStreamProcess(processId, executor, cwd, skipDb);
+    } else {
+      // For non-claude prompt executors, build the provider-specific command
+      const effectiveExecutor = executor.executor_type === 'prompt'
+        ? { ...executor, command: this.buildPromptCommand(executor.command, executor.prompt_provider ?? 'claude') }
+        : executor;
 
-    console.log(`[ProcessManager] Starting process ${processId}`);
-    console.log(`[ProcessManager] Type: ${executor.executor_type || 'command'}${executor.executor_type === 'prompt' ? ` (${executor.prompt_provider ?? 'claude'})` : ''}`);
-    console.log(`[ProcessManager] Command: ${effectiveExecutor.command}`);
-    console.log(`[ProcessManager] CWD: ${cwd}`);
-    console.log(`[ProcessManager] Forcing PTY mode for ANSI color support`);
+      console.log(`[ProcessManager] Starting process ${processId}`);
+      console.log(`[ProcessManager] Type: ${executor.executor_type || 'command'}${executor.executor_type === 'prompt' ? ` (${executor.prompt_provider ?? 'claude'})` : ''}`);
+      console.log(`[ProcessManager] Command: ${effectiveExecutor.command}`);
+      console.log(`[ProcessManager] CWD: ${cwd}`);
+      console.log(`[ProcessManager] Forcing PTY mode for ANSI color support`);
 
-    // Always use PTY mode for proper ANSI color support
-    try {
-      this.startPtyProcess(processId, effectiveExecutor, cwd, skipDb);
-      console.log(`[ProcessManager] PTY mode started successfully`);
-    } catch (error) {
-      // PTY failed (e.g., native module not compiled), fallback to regular process
-      console.warn(`[ProcessManager] PTY spawn failed, falling back to regular process: ${error}`);
-      this.startRegularProcess(processId, effectiveExecutor, cwd, skipDb);
+      // Always use PTY mode for proper ANSI color support
+      try {
+        this.startPtyProcess(processId, effectiveExecutor, cwd, skipDb);
+        console.log(`[ProcessManager] PTY mode started successfully`);
+      } catch (error) {
+        // PTY failed (e.g., native module not compiled), fallback to regular process
+        console.warn(`[ProcessManager] PTY spawn failed, falling back to regular process: ${error}`);
+        this.startRegularProcess(processId, effectiveExecutor, cwd, skipDb);
+      }
     }
 
     // Store PID in database for recovery after server restart
@@ -397,6 +406,203 @@ export class ProcessManager {
       runningProcess.logs.push(finishMsg);
       this.broadcast(processId, finishMsg);
       this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1 });
+    });
+  }
+
+  /**
+   * Start a Claude prompt executor using stream-json mode for real-time output.
+   * Spawns claude with --output-format=stream-json --input-format=stream-json,
+   * sends the prompt via stdin, and parses JSON output into formatted terminal text.
+   */
+  private startClaudeStreamProcess(processId: string, executor: Executor, cwd: string, skipDb: boolean): void {
+    const binary = this.detectBinary('claude');
+    const args = [
+      '--output-format=stream-json',
+      '--input-format=stream-json',
+      '--dangerously-skip-permissions',
+      '--verbose',
+    ];
+
+    const command = binary || 'npx';
+    const fullArgs = binary ? args : ['-y', '@anthropic-ai/claude-code', ...args];
+
+    const childProcess = spawn(command, fullArgs, {
+      cwd,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, FORCE_COLOR: '1' },
+    });
+
+    const runningProcess: RunningProcess = {
+      process: childProcess,
+      isPty: false,
+      isTerminal: false,
+      name: '',
+      logs: [],
+      subscribers: new Set(),
+      executorId: executor.id,
+      projectId: executor.project_id,
+      projectPath: cwd,
+      branch: null,
+      skipDb,
+    };
+
+    this.processes.set(processId, runningProcess);
+    console.log(`[ProcessManager] Stream process ${processId} added to map, PID: ${childProcess.pid}`);
+
+    // Send prompt via stdin and close to signal single-turn
+    const userMessage = JSON.stringify({ type: 'user', message: { role: 'user', content: executor.command } }) + '\n';
+    childProcess.stdin?.write(userMessage, () => {
+      childProcess.stdin?.end();
+    });
+
+    // Stream-JSON parsing state
+    let stdoutBuffer = '';
+    const prevTextByIndex = new Map<number, string>();
+    const seenToolUseIds = new Set<string>();
+
+    const RESET = '\x1b[0m';
+    const DIM = '\x1b[2m';
+    const CYAN = '\x1b[36m';
+    const GREEN = '\x1b[32m';
+    const RED = '\x1b[31m';
+    const BOLD = '\x1b[1m';
+
+    const pushLog = (data: string) => {
+      const msg: LogMessage = { type: 'stdout', data };
+      runningProcess.logs.push(msg);
+      if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
+        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
+      }
+      this.broadcast(processId, msg);
+    };
+
+    // Parse stream-json stdout into formatted terminal output
+    childProcess.stdout?.on('data', (data: Buffer) => {
+      stdoutBuffer += data.toString();
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          pushLog(line + '\n');
+          continue;
+        }
+
+        if (parsed.type === 'assistant') {
+          const message = parsed.message as Record<string, unknown> | undefined;
+          const content = message?.content as Array<Record<string, unknown>> | undefined;
+          if (!content || !Array.isArray(content)) continue;
+
+          let output = '';
+          for (let i = 0; i < content.length; i++) {
+            const block = content[i];
+
+            if (block.type === 'text') {
+              const fullText = (block.text as string) || '';
+              const prev = prevTextByIndex.get(i) || '';
+              if (fullText.length > prev.length && fullText.startsWith(prev)) {
+                output += fullText.slice(prev.length);
+              } else if (fullText !== prev) {
+                output += fullText;
+              }
+              prevTextByIndex.set(i, fullText);
+            } else if (block.type === 'tool_use' && block.id && !seenToolUseIds.has(block.id as string)) {
+              seenToolUseIds.add(block.id as string);
+              output += `\n${CYAN}${BOLD}> ${block.name}${RESET}\n`;
+              const input = block.input as Record<string, unknown> | undefined;
+              if (input && Object.keys(input).length > 0) {
+                const inputStr = JSON.stringify(input, null, 2);
+                const truncated = inputStr.length > 500 ? inputStr.slice(0, 500) + '...' : inputStr;
+                output += `${DIM}${truncated}${RESET}\n`;
+              }
+            }
+          }
+
+          if (output) pushLog(output);
+
+        } else if (parsed.type === 'user') {
+          const message = parsed.message as Record<string, unknown> | undefined;
+          const content = message?.content as Array<Record<string, unknown>> | undefined;
+          if (!content || !Array.isArray(content)) continue;
+
+          for (const block of content) {
+            if (block.type === 'tool_result') {
+              const resultStr = typeof block.content === 'string'
+                ? block.content
+                : JSON.stringify(block.content);
+              if (resultStr && resultStr.length > 0) {
+                const truncated = resultStr.length > 2000 ? resultStr.slice(0, 2000) + '...' : resultStr;
+                pushLog(`${DIM}${truncated}${RESET}\n`);
+              }
+            }
+          }
+
+        } else if (parsed.type === 'system') {
+          const msg = parsed.message || parsed.subtype;
+          if (msg) {
+            pushLog(`${DIM}${msg}${RESET}\n`);
+          }
+
+        } else if (parsed.type === 'result') {
+          if (parsed.subtype === 'error') {
+            pushLog(`\n${RED}Error: ${parsed.error || 'Unknown error'}${RESET}\n`);
+          } else {
+            const parts: string[] = [];
+            if (parsed.duration_ms) parts.push(`${((parsed.duration_ms as number) / 1000).toFixed(1)}s`);
+            if (parsed.cost_usd) parts.push(`$${(parsed.cost_usd as number).toFixed(4)}`);
+            const info = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+            pushLog(`\n${GREEN}Done${info}${RESET}\n`);
+          }
+        }
+      }
+    });
+
+    // Ignore stderr (Claude Code uses it for progress/debug info)
+    childProcess.stderr?.on('data', () => {});
+
+    // Handle process exit
+    childProcess.on('close', (code) => {
+      const exitCode = code ?? 0;
+      const status: ExecutorProcessStatus = exitCode === 0 ? 'completed' : 'failed';
+
+      console.log(`[ProcessManager] Stream process ${processId} exited with code ${exitCode}`);
+
+      if (!skipDb) {
+        this.storage.executorProcesses.updateStatus(processId, status, exitCode);
+      }
+
+      const msg: LogMessage = { type: 'finished', exitCode };
+      runningProcess.logs.push(msg);
+      this.broadcast(processId, msg);
+      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode });
+
+      // Schedule cleanup after retention period
+      setTimeout(() => {
+        console.log(`[ProcessManager] Cleaning up process ${processId}`);
+        this.processes.delete(processId);
+      }, LOG_RETENTION_MS);
+    });
+
+    // Handle spawn errors
+    childProcess.on('error', (error) => {
+      const msg: LogMessage = { type: 'stderr', data: `Error: ${error.message}` };
+      runningProcess.logs.push(msg);
+      this.broadcast(processId, msg);
+
+      if (!skipDb) {
+        this.storage.executorProcesses.updateStatus(processId, 'failed', 1);
+      }
+
+      const finishMsg: LogMessage = { type: 'finished', exitCode: 1 };
+      runningProcess.logs.push(finishMsg);
+      this.broadcast(processId, finishMsg);
+      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1 });
     });
   }
 
