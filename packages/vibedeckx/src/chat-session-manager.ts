@@ -20,7 +20,7 @@ import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { proxyToRemote } from "./utils/remote-proxy.js";
-import type { RemoteSessionInfo } from "./server-types.js";
+import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 
 // ============ Types ============
@@ -71,6 +71,7 @@ export class ChatSessionManager {
   private processManager: ProcessManager;
   private agentSessionManager: AgentSessionManager;
   private remoteSessionMap: Map<string, RemoteSessionInfo>;
+  private remoteExecutorMap: Map<string, RemoteExecutorInfo>;
   private remotePatchCache: RemotePatchCache;
 
   constructor(
@@ -78,12 +79,14 @@ export class ChatSessionManager {
     processManager: ProcessManager,
     agentSessionManager: AgentSessionManager,
     remoteSessionMap: Map<string, RemoteSessionInfo>,
+    remoteExecutorMap: Map<string, RemoteExecutorInfo>,
     remotePatchCache: RemotePatchCache,
   ) {
     this.storage = storage;
     this.processManager = processManager;
     this.agentSessionManager = agentSessionManager;
     this.remoteSessionMap = remoteSessionMap;
+    this.remoteExecutorMap = remoteExecutorMap;
     this.remotePatchCache = remotePatchCache;
   }
 
@@ -379,6 +382,7 @@ export class ChatSessionManager {
     const storage = this.storage;
     const processManager = this.processManager;
     const agentSessionManager = this.agentSessionManager;
+    const remoteExecutorMap = this.remoteExecutorMap;
 
     return {
       getAgentConversation: tool({
@@ -669,25 +673,42 @@ export class ChatSessionManager {
           "Use this to discover available terminals before running commands with runInTerminal.",
         inputSchema: z.object({}),
         execute: async () => {
-          console.log(`[listTerminals] projectId=${projectId}, branch=${branch}, totalProcesses=${(processManager as any).processes?.size ?? "?"}`);
-          for (const [id, proc] of (processManager as any).processes ?? []) {
-            console.log(`[listTerminals]   process=${id} isTerminal=${proc.isTerminal} projectId=${proc.projectId} branch=${proc.branch}`);
+          // Local terminals
+          const localTerminals = processManager.getTerminals(projectId).map((t) => ({
+            id: t.id,
+            name: t.name,
+            cwd: t.cwd,
+            branch: t.branch,
+            location: "local" as const,
+          }));
+
+          // Remote terminals from remoteExecutorMap
+          const remoteTerminals: Array<{
+            id: string;
+            name: string;
+            cwd?: string;
+            branch?: string | null;
+            location: "remote";
+          }> = [];
+          for (const [key, info] of remoteExecutorMap.entries()) {
+            if (!key.startsWith("remote-terminal-")) continue;
+            if (info.projectId && info.projectId !== projectId) continue;
+            remoteTerminals.push({
+              id: key,
+              name: key,
+              branch: info.branch,
+              location: "remote",
+            });
           }
-          const terminals = processManager.getTerminals(projectId);
+
+          const terminals = [...localTerminals, ...remoteTerminals];
           if (terminals.length === 0) {
             return {
               terminals: [],
               message: "No active terminals. The user should open a terminal in the Terminal tab first.",
             };
           }
-          return {
-            terminals: terminals.map((t) => ({
-              id: t.id,
-              name: t.name,
-              cwd: t.cwd,
-              branch: t.branch,
-            })),
-          };
+          return { terminals };
         },
       }),
 
@@ -708,6 +729,33 @@ export class ChatSessionManager {
         }),
         execute: async ({ terminalId, command, timeout }) => {
           try {
+            // Remote terminal — proxy to remote server
+            if (terminalId.startsWith("remote-terminal-")) {
+              const remoteInfo = remoteExecutorMap.get(terminalId);
+              if (!remoteInfo) {
+                return { success: false, output: "", message: `Remote terminal ${terminalId} not found.` };
+              }
+              const result = await proxyToRemote(
+                remoteInfo.remoteUrl,
+                remoteInfo.remoteApiKey,
+                "POST",
+                `/api/path/terminals/${remoteInfo.remoteProcessId}/execute`,
+                { command, timeout },
+                { timeoutMs: (timeout + 5) * 1000 },
+              );
+              if (!result.ok) {
+                return { success: false, output: "", message: `Remote execution failed: ${JSON.stringify(result.data)}` };
+              }
+              const data = result.data as { exitCode: number; output: string; timedOut: boolean };
+              return {
+                success: !data.timedOut,
+                exitCode: data.exitCode,
+                output: data.output,
+                timedOut: data.timedOut,
+              };
+            }
+
+            // Local terminal
             const result = await processManager.executeInTerminal(terminalId, command, timeout);
             return {
               success: !result.timedOut,
