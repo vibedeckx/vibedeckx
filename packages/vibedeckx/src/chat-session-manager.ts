@@ -363,6 +363,8 @@ export class ChatSessionManager {
     };
 
     const unsubscribe = this.processManager.subscribe(terminalId, (msg) => {
+      console.log(`[ChatSession] watcher subscriber fired: terminal=${terminalId} type=${msg.type} bufferLen=${state.outputBuffer.length}`);
+
       if (msg.type === "finished") {
         // Terminal exited — flush what we have
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -376,7 +378,10 @@ export class ChatSessionManager {
 
         // Reset debounce timer
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
-        state.debounceTimer = setTimeout(flush, DEBOUNCE_MS);
+        state.debounceTimer = setTimeout(() => {
+          console.log(`[ChatSession] debounce timer fired for terminal=${terminalId}, bufferLen=${state.outputBuffer.length}`);
+          flush();
+        }, DEBOUNCE_MS);
 
         // Reset idle timer
         clearTimeout(state.idleTimer);
@@ -875,12 +880,16 @@ export class ChatSessionManager {
 
             // Local terminal — send command and start watcher
             processManager.sendToTerminal(terminalId, command);
+            console.log(`[runInTerminal] Command sent to PTY for terminal=${terminalId}`);
 
             // Find the chat session that called this tool so we can inject the [Terminal Event] later
             const sessionKey = `${projectId}:${branch ?? ""}`;
             const chatSessionId = this.sessionIndex.get(sessionKey);
+            console.log(`[runInTerminal] sessionKey=${sessionKey}, chatSessionId=${chatSessionId ?? "NOT FOUND"}`);
             if (chatSessionId) {
               this.startTerminalWatcher(chatSessionId, terminalId);
+            } else {
+              console.log(`[runInTerminal] WARNING: No chat session found — terminal watcher NOT started`);
             }
 
             return { sent: true, message: "Command sent to terminal. Output will arrive as a [Terminal Event]." };
@@ -915,6 +924,7 @@ export class ChatSessionManager {
     }
 
     // No active stream — send immediately
+    console.log(`[ChatSession] enqueueOrSend: sending immediately for session ${sessionId} (abortController=null)`);
     this.sendMessage(sessionId, content).catch((err) => {
       console.error(`[ChatSession] enqueueOrSend sendMessage error:`, err);
     });
@@ -940,7 +950,11 @@ export class ChatSessionManager {
 
   async sendMessage(sessionId: string, content: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
+    if (!session) {
+      console.log(`[ChatSession] sendMessage: session ${sessionId} not found`);
+      return false;
+    }
+    console.log(`[ChatSession] sendMessage called: session=${sessionId}, contentLen=${content.length}, isTerminalEvent=${content.includes("[Terminal Event]")}`);
 
     // 1. Push user message
     const userMsg: AgentMessage = { type: "user", content, timestamp: Date.now() };
