@@ -70,6 +70,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Remote-side endpoint: get recent terminal output and running status
+  fastify.get<{
+    Params: { terminalId: string };
+    Querystring: { lines?: string };
+  }>("/api/path/terminals/:terminalId/output", async (req, reply) => {
+    const { terminalId } = req.params;
+    const maxLines = Math.min(Number(req.query.lines) || 100, 500);
+
+    const running = fastify.processManager.isRunning(terminalId);
+    const output = fastify.processManager.getRecentOutput(terminalId, maxLines);
+
+    return reply.send({ running, output });
+  });
+
   // List terminals for a project (local + remote)
   fastify.get<{ Params: { projectId: string }; Querystring: { branch?: string } }>(
     "/api/projects/:projectId/terminals",
