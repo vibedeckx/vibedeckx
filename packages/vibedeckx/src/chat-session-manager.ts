@@ -10,6 +10,7 @@ import { randomUUID } from "crypto";
 import { streamText, tool, stepCountIs } from "ai";
 import { z } from "zod";
 import { resolveChatModel } from "./utils/chat-model.js";
+import WsWebSocket from "ws";
 import type WebSocket from "ws";
 import type { AgentMessage, AgentSessionStatus } from "./agent-types.js";
 import { ConversationPatch } from "./conversation-patch.js";
@@ -23,6 +24,7 @@ import { proxyToRemote, proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
+import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 
 // ============ Types ============
 
@@ -415,7 +417,192 @@ export class ChatSessionManager {
     console.log(`[ChatSession] Stopped terminal watcher for terminal=${terminalId}`);
   }
 
+  /**
+   * Start a watcher for a remote terminal by opening a virtual channel over
+   * the existing reverse-connect WebSocket (or a direct WebSocket as fallback).
+   * Mirrors the local startTerminalWatcher() — accumulates output with
+   * debounce, flushes on "finished" or idle timeout, and feeds the result
+   * into enqueueOrSend().
+   */
+  private startRemoteTerminalWatcher(
+    sessionId: string,
+    terminalId: string,
+    remoteInfo: RemoteExecutorInfo,
+  ): void {
+    // Clean up any existing watcher for this terminal
+    this.stopTerminalWatcher(terminalId);
 
+    const DEBOUNCE_MS = 3000;
+    const IDLE_TIMEOUT_MS = 60000;
+    const MAX_LINES = 100;
+    const MAX_BYTES = 8192;
+
+    const state = {
+      debounceTimer: null as ReturnType<typeof setTimeout> | null,
+      idleTimer: setTimeout(() => this.stopTerminalWatcher(terminalId), IDLE_TIMEOUT_MS),
+      outputBuffer: "",
+    };
+
+    // Track whether the initial history replay is done.
+    // The remote side sends all historical logs synchronously on connect,
+    // then subscribes for live updates. We skip historical output so we
+    // only capture output from the command we just sent.
+    let historyDone = false;
+    let historyTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = () => {
+      if (!state.outputBuffer.trim()) {
+        console.log(`[ChatSession] remote terminal watcher flush: empty buffer, skipping (terminal=${terminalId})`);
+        return;
+      }
+
+      console.log(`[ChatSession] remote terminal watcher flush: ${state.outputBuffer.length} bytes (terminal=${terminalId})`);
+
+      // Strip ANSI codes
+      let output = state.outputBuffer.replace(
+        /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]/g,
+        "",
+      );
+
+      const lines = output.split("\n");
+      if (lines.length > MAX_LINES) {
+        output = lines.slice(-MAX_LINES).join("\n");
+      }
+      if (output.length > MAX_BYTES) {
+        output = output.slice(-MAX_BYTES);
+      }
+
+      const message = [
+        `[Terminal Event: Output]`,
+        `Terminal: ${terminalId}`,
+        ``,
+        `Output:`,
+        `---`,
+        output,
+        `---`,
+        ``,
+        `Summarize what happened in 1-2 sentences.`,
+      ].join("\n");
+
+      // Clean up watcher before sending (prevents duplicate flushes)
+      this.stopTerminalWatcher(terminalId);
+
+      // Inject into chat session
+      this.enqueueOrSend(sessionId, message);
+    };
+
+    // Open a virtual channel over the existing reverse-connect WebSocket,
+    // or fall back to a direct WebSocket connection.
+    let remoteWs: WsWebSocket | VirtualWsAdapter;
+
+    const useVirtual = this.reverseConnectManager?.isConnected(remoteInfo.remoteServerId);
+
+    if (useVirtual && this.reverseConnectManager) {
+      const channelId = randomUUID();
+      const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
+      const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
+      const adapter = new VirtualWsAdapter(
+        (data) => this.reverseConnectManager!.sendChannelData(remoteInfo.remoteServerId, channelId, data),
+        () => this.reverseConnectManager!.closeChannel(remoteInfo.remoteServerId, channelId),
+      );
+      this.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
+      this.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
+      remoteWs = adapter;
+      console.log(`[ChatSession] Remote terminal watcher: virtual channel opened for ${remoteInfo.remoteProcessId}`);
+      setTimeout(() => adapter.emit("open"), 0);
+    } else {
+      const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
+      const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
+      const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
+      const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
+      console.log(`[ChatSession] Remote terminal watcher: connecting to ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
+      remoteWs = new WsWebSocket(remoteWsUrl);
+    }
+
+    const closeWs = () => {
+      try {
+        remoteWs.close();
+      } catch {
+        // already closed
+      }
+    };
+
+    remoteWs.on("message", (data) => {
+      let msg: { type: string; data?: string; exitCode?: number };
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+
+      // Skip non-log messages (init, error, etc.)
+      if (msg.type !== "pty" && msg.type !== "stdout" && msg.type !== "stderr" && msg.type !== "finished") return;
+
+      // Mark history as done after a short gap — the remote side sends
+      // all historical logs synchronously, then subscribes for live updates.
+      // Any messages arriving after the gap are live.
+      if (!historyDone && !historyTimer) {
+        historyTimer = setTimeout(() => {
+          historyDone = true;
+          historyTimer = null;
+        }, 100);
+      }
+
+      if (msg.type === "finished") {
+        if (state.debounceTimer) clearTimeout(state.debounceTimer);
+        state.debounceTimer = null;
+        flush();
+        closeWs();
+        return;
+      }
+
+      // Only accumulate live output (after history replay)
+      if (!historyDone) return;
+
+      if (msg.type === "pty" || msg.type === "stdout" || msg.type === "stderr") {
+        state.outputBuffer += msg.data ?? "";
+
+        // Reset debounce timer
+        if (state.debounceTimer) clearTimeout(state.debounceTimer);
+        state.debounceTimer = setTimeout(() => {
+          console.log(`[ChatSession] remote debounce timer fired for terminal=${terminalId}, bufferLen=${state.outputBuffer.length}`);
+          flush();
+          closeWs();
+        }, DEBOUNCE_MS);
+
+        // Reset idle timer
+        clearTimeout(state.idleTimer);
+        state.idleTimer = setTimeout(() => this.stopTerminalWatcher(terminalId), IDLE_TIMEOUT_MS);
+      }
+    });
+
+    remoteWs.on("close", () => {
+      console.log(`[ChatSession] Remote terminal watcher: connection closed for terminal=${terminalId}`);
+      // If we still have buffered output, flush it
+      if (state.outputBuffer.trim() && this.terminalWatchers.has(terminalId)) {
+        if (state.debounceTimer) clearTimeout(state.debounceTimer);
+        state.debounceTimer = null;
+        flush();
+      }
+    });
+
+    remoteWs.on("error", (error) => {
+      console.error(`[ChatSession] Remote terminal watcher error for terminal=${terminalId}:`, error);
+    });
+
+    const unsubscribe = () => {
+      closeWs();
+      if (historyTimer) clearTimeout(historyTimer);
+    };
+
+    this.terminalWatchers.set(terminalId, {
+      unsubscribe,
+      state,
+      sessionId,
+    });
+
+    console.log(`[ChatSession] Started remote terminal watcher for terminal=${terminalId} session=${sessionId}`);
+  }
 
   // ---- Session lifecycle ----
 
@@ -877,7 +1064,18 @@ export class ChatSessionManager {
               if (!result.ok) {
                 return { sent: false, message: `Remote send failed: ${JSON.stringify(result.data)}` };
               }
-              return { sent: true, message: `Command sent to remote terminal. Output will appear in the terminal.` };
+
+              // Start a remote terminal watcher so output flows back as a [Terminal Event]
+              const sessionKey = `${projectId}:${branch ?? ""}`;
+              const chatSessionId = this.sessionIndex.get(sessionKey);
+              console.log(`[runInTerminal] remote: sessionKey=${sessionKey}, chatSessionId=${chatSessionId ?? "NOT FOUND"}`);
+              if (chatSessionId) {
+                this.startRemoteTerminalWatcher(chatSessionId, terminalId, remoteInfo);
+              } else {
+                console.log(`[runInTerminal] WARNING: No chat session found — remote terminal watcher NOT started`);
+              }
+
+              return { sent: true, message: "Command sent to remote terminal. Output will arrive as a [Terminal Event]." };
             }
 
             // Local terminal — send command and start watcher
