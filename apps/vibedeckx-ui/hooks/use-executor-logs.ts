@@ -82,6 +82,10 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
       ws.onopen = () => {
         console.log(`[useExecutorLogs] WebSocket connected`);
         setStatus("connected");
+
+        // Clear stale logs before historical replay to prevent duplicates
+        setLogs([]);
+
         reconnectAttemptRef.current = 0;
 
         // Send any resize that was queued before the connection opened

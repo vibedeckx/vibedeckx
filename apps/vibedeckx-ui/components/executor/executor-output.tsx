@@ -115,6 +115,12 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
   useEffect(() => {
     if (!terminalRef.current) return;
 
+    // Logs were cleared (e.g., on WebSocket reconnect) — reset terminal
+    if (logs.length < lastLogIndexRef.current) {
+      terminalRef.current.reset();
+      lastLogIndexRef.current = 0;
+    }
+
     // Only write new logs since last update
     for (let i = lastLogIndexRef.current; i < logs.length; i++) {
       const log = logs[i];
