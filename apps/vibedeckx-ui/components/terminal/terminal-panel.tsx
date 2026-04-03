@@ -156,24 +156,14 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
 
         {hasMultipleTargets ? (
           <div className="relative shrink-0" ref={menuRef}>
-            <div className="flex items-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 rounded-r-none"
-                onClick={handleCreateDefault}
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-4 rounded-l-none border-l border-border/50"
-                onClick={() => setShowLocationMenu((v) => !v)}
-              >
-                <ChevronDown className="h-3 w-3" />
-              </Button>
-            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => setShowLocationMenu((v) => !v)}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
             {showLocationMenu && (
               <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border bg-popover p-1 shadow-md">
                 {hasLocal && (
@@ -224,7 +214,7 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
               <Terminal className="h-5 w-5 text-muted-foreground/50" />
             </div>
             <p className="text-xs">No terminal open</p>
-            <Button variant="outline" size="sm" className="text-xs" onClick={handleCreateDefault}>
+            <Button variant="outline" size="sm" className="text-xs" onClick={hasMultipleTargets ? () => setShowLocationMenu(true) : handleCreateDefault}>
               <Plus className="h-3 w-3 mr-1.5" />
               New Terminal
             </Button>
