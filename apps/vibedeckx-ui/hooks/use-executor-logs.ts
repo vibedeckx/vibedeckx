@@ -19,7 +19,7 @@ export interface UseExecutorLogsResult {
   sendResize: (cols: number, rows: number) => void;
 }
 
-export function useExecutorLogs(processId: string | null): UseExecutorLogsResult {
+export function useExecutorLogs(processId: string | null, resetKey?: string): UseExecutorLogsResult {
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [status, setStatus] = useState<ConnectionStatus>("closed");
   const [exitCode, setExitCode] = useState<number | null>(null);
@@ -180,7 +180,7 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
         wsRef.current = null;
       }
     };
-  }, [processId]);
+  }, [processId, resetKey]);
 
   return { logs, status, exitCode, isPty, clearLogs, sendInput, sendResize };
 }

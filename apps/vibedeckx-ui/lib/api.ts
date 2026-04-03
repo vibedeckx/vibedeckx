@@ -662,11 +662,11 @@ export const api = {
   },
 
   // Process Control API
-  async startExecutor(executorId: string, branch?: string | null): Promise<string> {
+  async startExecutor(executorId: string, branch?: string | null, target?: string): Promise<string> {
     const res = await authFetch(`${getApiBase()}/api/executors/${executorId}/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ branch }),
+      body: JSON.stringify({ branch, target }),
     });
     if (!res.ok) {
       const error = await res.json();

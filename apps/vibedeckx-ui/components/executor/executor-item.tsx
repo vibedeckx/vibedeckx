@@ -35,6 +35,7 @@ import { CSS } from "@dnd-kit/utilities";
 
 interface ExecutorItemProps {
   executor: ExecutorWithProcess;
+  executorMode?: string;
   onStart: () => Promise<string | null>;
   onStop: (processId?: string) => Promise<void>;
   onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null }) => Promise<unknown>;
@@ -44,6 +45,7 @@ interface ExecutorItemProps {
 
 export function ExecutorItem({
   executor,
+  executorMode,
   onStart,
   onStop,
   onUpdate,
@@ -74,7 +76,7 @@ export function ExecutorItem({
     opacity: isDragging ? 1 : undefined,
   };
 
-  const { logs, status, exitCode, isPty, sendInput, sendResize } = useExecutorLogs(localProcessId);
+  const { logs, status, exitCode, isPty, sendInput, sendResize } = useExecutorLogs(localProcessId, executorMode);
 
   // Sync local process ID with executor's current process
   useEffect(() => {

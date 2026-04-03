@@ -175,7 +175,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   // Start executor
   const startExecutor = useCallback(async (executorId: string, branch?: string | null) => {
     try {
-      const processId = await api.startExecutor(executorId, branch);
+      const processId = await api.startExecutor(executorId, branch, executorMode);
       setRunningProcesses((prev) => {
         const entries = prev.get(executorId) ?? [];
         const newMap = new Map(prev);

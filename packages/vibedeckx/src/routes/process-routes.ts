@@ -44,7 +44,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   });
 
   // 启动 Executor
-  fastify.post<{ Params: { id: string }; Body: { branch?: string | null } }>("/api/executors/:id/start", async (req, reply) => {
+  fastify.post<{ Params: { id: string }; Body: { branch?: string | null; target?: string } }>("/api/executors/:id/start", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
@@ -60,7 +60,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const branch = req.body?.branch;
 
-    let executorMode = project.executor_mode;
+    // Use explicit target from request if provided, otherwise fall back to project setting
+    let executorMode = req.body?.target || project.executor_mode;
     let useRemoteExecutor = executorMode !== 'local';
 
     // Fallback: legacy "remote" value → resolve to actual remote server ID
