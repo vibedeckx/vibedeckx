@@ -71,9 +71,9 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
   }, [createTerminal, defaultLocation]);
 
   const handleCreateAt = useCallback(
-    (location: "local" | "remote") => {
+    (location: "local" | "remote", remoteServerId?: string) => {
       setShowLocationMenu(false);
-      createTerminal(location);
+      createTerminal(location, remoteServerId);
     },
     [createTerminal]
   );
@@ -189,7 +189,7 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
                   <button
                     key={r.remote_server_id}
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
-                    onClick={() => handleCreateAt("remote")}
+                    onClick={() => handleCreateAt("remote", r.remote_server_id)}
                   >
                     <Cloud className="h-3.5 w-3.5" />
                     {r.server_name} Terminal

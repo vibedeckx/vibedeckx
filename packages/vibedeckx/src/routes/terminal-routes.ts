@@ -6,17 +6,21 @@ import { requireAuth } from "../server.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 
-function getRemoteConfig(fastify: FastifyInstance, project: Project) {
+function getRemoteConfig(fastify: FastifyInstance, project: Project, remoteServerId?: string) {
   // Check project_remotes table first (new approach)
   const remotes = fastify.storage.projectRemotes.getByProject(project.id);
   if (remotes.length > 0) {
-    const primary = remotes[0]; // sorted by sort_order
-    return {
-      serverId: primary.remote_server_id,
-      url: primary.server_url ?? "",
-      apiKey: primary.server_api_key ?? "",
-      remotePath: primary.remote_path,
-    };
+    const target = remoteServerId
+      ? remotes.find((r) => r.remote_server_id === remoteServerId)
+      : remotes[0]; // sorted by sort_order
+    if (target) {
+      return {
+        serverId: target.remote_server_id,
+        url: target.server_url ?? "",
+        apiKey: target.server_api_key ?? "",
+        remotePath: target.remote_path,
+      };
+    }
   }
   // Fallback to legacy project fields
   if (project.remote_url && project.remote_api_key && project.remote_path) {
@@ -119,7 +123,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create a new terminal (local or remote)
   fastify.post<{
     Params: { projectId: string };
-    Body: { cwd?: string; branch?: string | null; location?: "local" | "remote" };
+    Body: { cwd?: string; branch?: string | null; location?: "local" | "remote"; remote_server_id?: string };
   }>("/api/projects/:projectId/terminals", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -133,7 +137,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const explicitLocation = req.body?.location;
 
     const executorMode = project.executor_mode;
-    const remoteConfig = getRemoteConfig(fastify, project);
+    const remoteConfig = getRemoteConfig(fastify, project, req.body?.remote_server_id);
 
     const useRemote =
       explicitLocation === "remote" ||

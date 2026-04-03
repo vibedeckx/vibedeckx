@@ -938,11 +938,11 @@ export const api = {
     return data.terminals;
   },
 
-  async createTerminal(projectId: string, branch?: string | null, location?: "local" | "remote"): Promise<TerminalSession> {
+  async createTerminal(projectId: string, branch?: string | null, location?: "local" | "remote", remoteServerId?: string): Promise<TerminalSession> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/terminals`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ branch, location }),
+      body: JSON.stringify({ branch, location, remote_server_id: remoteServerId }),
     });
     if (!res.ok) {
       const error = await res.json();
