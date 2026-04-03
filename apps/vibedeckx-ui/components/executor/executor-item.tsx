@@ -36,6 +36,8 @@ import { CSS } from "@dnd-kit/utilities";
 interface ExecutorItemProps {
   executor: ExecutorWithProcess;
   executorMode?: string;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
   onStart: () => Promise<string | null>;
   onStop: (processId?: string) => Promise<void>;
   onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null }) => Promise<unknown>;
@@ -46,13 +48,14 @@ interface ExecutorItemProps {
 export function ExecutorItem({
   executor,
   executorMode,
+  isOpen,
+  onOpenChange,
   onStart,
   onStop,
   onUpdate,
   onDelete,
   onProcessFinished,
 }: ExecutorItemProps) {
-  const [isOpen, setIsOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [localProcessId, setLocalProcessId] = useState<string | null>(
     executor.currentProcessId
@@ -101,7 +104,7 @@ export function ExecutorItem({
     console.log(`[ExecutorItem] Got processId: ${processId}`);
     if (processId) {
       setLocalProcessId(processId);
-      setIsOpen(true); // Auto-expand on start
+      onOpenChange(true); // Auto-expand on start
     }
   };
 
@@ -113,7 +116,7 @@ export function ExecutorItem({
 
   return (
     <>
-      <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <Collapsible open={isOpen} onOpenChange={onOpenChange}>
         <div
           ref={setNodeRef}
           style={style}

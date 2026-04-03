@@ -101,6 +101,7 @@ const headerOnlyCollision: CollisionDetection = (args) => {
 
 export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorModeChange }: ExecutorPanelProps) {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [openExecutors, setOpenExecutors] = useState<Set<string>>(new Set());
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
 
   // Build execution mode targets from local path + project remotes
@@ -227,6 +228,12 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
                     key={`${executor.id}-${project?.executor_mode ?? "local"}`}
                     executor={executor}
                     executorMode={project?.executor_mode ?? "local"}
+                    isOpen={openExecutors.has(executor.id)}
+                    onOpenChange={(open) => setOpenExecutors(prev => {
+                      const next = new Set(prev);
+                      if (open) next.add(executor.id); else next.delete(executor.id);
+                      return next;
+                    })}
                     onStart={() => startExecutor(executor.id, selectedBranch)}
                     onStop={(processId) => stopExecutor(executor.id, processId || executor.currentProcessId || undefined)}
                     onUpdate={(data) => updateExecutor(executor.id, data)}
