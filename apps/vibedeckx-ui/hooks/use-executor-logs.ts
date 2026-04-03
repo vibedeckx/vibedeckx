@@ -29,7 +29,6 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finishedRef = useRef(false);
-  const unmountedRef = useRef(false);
 
   const clearLogs = useCallback(() => {
     setLogs([]);
@@ -69,11 +68,13 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
     setExitCode(null);
     setIsPty(false);
     finishedRef.current = false;
-    unmountedRef.current = false;
     reconnectAttemptRef.current = 0;
 
+    // Per-effect cancellation flag — avoids stale reconnections when processId changes
+    let cancelled = false;
+
     function connect() {
-      if (unmountedRef.current || finishedRef.current) return;
+      if (cancelled || finishedRef.current) return;
 
       setStatus("connecting");
 
@@ -131,7 +132,7 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
         // Don't reconnect if the process finished normally, component unmounted,
         // or this is a local process (reconnection only helps remote terminals
         // where the process survives independently)
-        if (finishedRef.current || unmountedRef.current || !processId?.startsWith("remote-")) {
+        if (finishedRef.current || cancelled || !processId?.startsWith("remote-")) {
           setStatus("closed");
           return;
         }
@@ -154,7 +155,7 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
 
           reconnectTimerRef.current = setTimeout(() => {
             reconnectTimerRef.current = null;
-            connect();
+            if (!cancelled) connect();
           }, totalDelay);
         } else {
           console.log(`[useExecutorLogs] Max reconnect attempts reached`);
@@ -166,7 +167,7 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
     connect();
 
     return () => {
-      unmountedRef.current = true;
+      cancelled = true;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
