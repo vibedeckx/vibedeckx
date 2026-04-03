@@ -154,50 +154,51 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
           <ScrollBar orientation="horizontal" />
         </ScrollArea>
 
-        {hasMultipleTargets ? (
-          <div className="relative shrink-0" ref={menuRef}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => setShowLocationMenu((v) => !v)}
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </Button>
-            {showLocationMenu && (
-              <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border bg-popover p-1 shadow-md">
-                {hasLocal && (
-                  <button
-                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
-                    onClick={() => handleCreateAt("local")}
-                  >
-                    <Monitor className="h-3.5 w-3.5" />
-                    Local Terminal
-                  </button>
-                )}
-                {remotes.map((r) => (
-                  <button
-                    key={r.remote_server_id}
-                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
-                    onClick={() => handleCreateAt("remote", r.remote_server_id)}
-                  >
-                    <Cloud className="h-3.5 w-3.5" />
-                    {r.server_name} Terminal
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
+        <div className="relative shrink-0 flex items-center" ref={menuRef}>
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 shrink-0"
+            className="h-6 w-6"
             onClick={handleCreateDefault}
           >
             <Plus className="h-3.5 w-3.5" />
           </Button>
-        )}
+          {hasMultipleTargets && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-4 px-0"
+                onClick={() => setShowLocationMenu((v) => !v)}
+              >
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+              {showLocationMenu && (
+                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border bg-popover p-1 shadow-md">
+                  {hasLocal && (
+                    <button
+                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+                      onClick={() => handleCreateAt("local")}
+                    >
+                      <Monitor className="h-3.5 w-3.5" />
+                      Local Terminal
+                    </button>
+                  )}
+                  {remotes.map((r) => (
+                    <button
+                      key={r.remote_server_id}
+                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+                      onClick={() => handleCreateAt("remote", r.remote_server_id)}
+                    >
+                      <Cloud className="h-3.5 w-3.5" />
+                      {r.server_name} Terminal
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* Terminal content */}
@@ -209,15 +210,8 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
             onExit={handleExit}
           />
         ) : (
-          <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3">
-            <div className="w-10 h-10 rounded-xl bg-muted/50 flex items-center justify-center">
-              <Terminal className="h-5 w-5 text-muted-foreground/50" />
-            </div>
-            <p className="text-xs">No terminal open</p>
-            <Button variant="outline" size="sm" className="text-xs" onClick={hasMultipleTargets ? () => setShowLocationMenu(true) : handleCreateDefault}>
-              <Plus className="h-3 w-3 mr-1.5" />
-              New Terminal
-            </Button>
+          <div className="h-full flex items-center justify-center text-muted-foreground">
+            <Terminal className="h-10 w-10 text-muted-foreground/30" />
           </div>
         )}
       </div>
