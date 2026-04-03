@@ -224,7 +224,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
               >
                 {executors.map((executor) => (
                   <ExecutorItem
-                    key={executor.id}
+                    key={`${executor.id}-${project?.executor_mode ?? "local"}`}
                     executor={executor}
                     onStart={() => startExecutor(executor.id, selectedBranch)}
                     onStop={(processId) => stopExecutor(executor.id, processId || executor.currentProcessId || undefined)}
