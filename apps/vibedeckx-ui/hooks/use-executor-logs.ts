@@ -56,10 +56,7 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
 
   useEffect(() => {
     if (!processId) {
-      setStatus("closed");
-      setLogs([]);
-      setExitCode(null);
-      setIsPty(false);
+      // Don't clear logs — keep previous output visible until next run
       return;
     }
 
