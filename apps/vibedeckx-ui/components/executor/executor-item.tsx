@@ -78,8 +78,8 @@ export function ExecutorItem({
 
   // Sync local process ID with executor's current process
   useEffect(() => {
+    setLocalProcessId(executor.currentProcessId);
     if (executor.currentProcessId) {
-      setLocalProcessId(executor.currentProcessId);
       processFinishedCalledRef.current = false; // Reset when new process starts
     }
   }, [executor.currentProcessId]);
