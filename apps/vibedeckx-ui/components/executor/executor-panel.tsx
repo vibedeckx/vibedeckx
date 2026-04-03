@@ -179,8 +179,8 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
           )}
         </div>
         {activeGroup && (
-          <Button size="sm" onClick={() => setCreateDialogOpen(true)}>
-            <Plus className="h-4 w-4 mr-1" />
+          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setCreateDialogOpen(true)}>
+            <Plus className="h-3 w-3 mr-1" />
             Add
           </Button>
         )}
