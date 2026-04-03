@@ -39,7 +39,7 @@ interface ExecutorItemProps {
   onStop: (processId?: string) => Promise<void>;
   onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null }) => Promise<unknown>;
   onDelete: () => Promise<void>;
-  onProcessFinished: () => void;
+  onProcessFinished: (processId: string | null) => void;
 }
 
 export function ExecutorItem({
@@ -88,9 +88,9 @@ export function ExecutorItem({
   useEffect(() => {
     if (status === "closed" && exitCode !== null && !processFinishedCalledRef.current) {
       processFinishedCalledRef.current = true;
-      onProcessFinished();
+      onProcessFinished(localProcessId);
     }
-  }, [status, exitCode, onProcessFinished]);
+  }, [status, exitCode, localProcessId, onProcessFinished]);
 
   const handleStart = async () => {
     console.log(`[ExecutorItem] Starting executor ${executor.id}`);

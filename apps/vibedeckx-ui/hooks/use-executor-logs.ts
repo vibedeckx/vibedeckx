@@ -58,6 +58,9 @@ export function useExecutorLogs(processId: string | null): UseExecutorLogsResult
   useEffect(() => {
     if (!processId) {
       setStatus("closed");
+      setLogs([]);
+      setExitCode(null);
+      setIsPty(false);
       return;
     }
 

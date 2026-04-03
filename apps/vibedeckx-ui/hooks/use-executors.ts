@@ -18,9 +18,9 @@ export interface ExecutorWithProcess extends Executor {
 
 export function useExecutors(projectId: string | null, groupId: string | null | undefined, executorMode?: string) {
   const [executors, setExecutors] = useState<Executor[]>([]);
-  const [runningProcesses, setRunningProcesses] = useState<Map<string, { processId: string; target: string }>>(
+  const [runningProcesses, setRunningProcesses] = useState<Map<string, Array<{ processId: string; target: string }>>>(
     new Map()
-  ); // executorId -> { processId, target }
+  ); // executorId -> [{ processId, target }]
   const [loading, setLoading] = useState(true);
 
   // Fetch executors scoped to group
@@ -45,9 +45,15 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   const fetchRunningProcesses = useCallback(async () => {
     try {
       const processes = await api.getRunningProcesses();
-      const processMap = new Map<string, { processId: string; target: string }>();
+      const processMap = new Map<string, Array<{ processId: string; target: string }>>();
       for (const proc of processes) {
-        processMap.set(proc.executor_id, { processId: proc.id, target: proc.target ?? "local" });
+        const entry = { processId: proc.id, target: proc.target ?? "local" };
+        const existing = processMap.get(proc.executor_id);
+        if (existing) {
+          existing.push(entry);
+        } else {
+          processMap.set(proc.executor_id, [entry]);
+        }
       }
       setRunningProcesses(processMap);
     } catch (error) {
@@ -89,17 +95,23 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
 
         if (data.type === "executor:started") {
           setRunningProcesses((prev) => {
-            const existing = prev.get(data.executorId);
-            if (existing?.processId === data.processId) return prev;
+            const entries = prev.get(data.executorId) ?? [];
+            if (entries.some(e => e.processId === data.processId)) return prev;
             const newMap = new Map(prev);
-            newMap.set(data.executorId, { processId: data.processId, target: data.target ?? "local" });
+            newMap.set(data.executorId, [...entries, { processId: data.processId, target: data.target ?? "local" }]);
             return newMap;
           });
         } else if (data.type === "executor:stopped") {
           setRunningProcesses((prev) => {
-            if (!prev.has(data.executorId)) return prev;
+            const entries = prev.get(data.executorId);
+            if (!entries) return prev;
+            const filtered = entries.filter(e => e.processId !== data.processId);
             const newMap = new Map(prev);
-            newMap.delete(data.executorId);
+            if (filtered.length === 0) {
+              newMap.delete(data.executorId);
+            } else {
+              newMap.set(data.executorId, filtered);
+            }
             return newMap;
           });
         }
@@ -165,8 +177,9 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     try {
       const processId = await api.startExecutor(executorId, branch);
       setRunningProcesses((prev) => {
+        const entries = prev.get(executorId) ?? [];
         const newMap = new Map(prev);
-        newMap.set(executorId, { processId, target: executorMode ?? "local" });
+        newMap.set(executorId, [...entries, { processId, target: executorMode ?? "local" }]);
         return newMap;
       });
       return processId;
@@ -178,24 +191,46 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
 
   // Stop executor
   const stopExecutor = useCallback(async (executorId: string, processId?: string) => {
-    const targetProcessId = processId || runningProcesses.get(executorId)?.processId;
+    const entries = runningProcesses.get(executorId);
+    const targetEntry = entries?.find(e => e.target === (executorMode ?? "local"));
+    const targetProcessId = processId || targetEntry?.processId;
     if (!targetProcessId) return;
 
     try {
       await api.stopProcess(targetProcessId);
       setRunningProcesses((prev) => {
+        const entries = prev.get(executorId);
+        if (!entries) return prev;
+        const filtered = entries.filter(e => e.processId !== targetProcessId);
         const newMap = new Map(prev);
-        newMap.delete(executorId);
+        if (filtered.length === 0) {
+          newMap.delete(executorId);
+        } else {
+          newMap.set(executorId, filtered);
+        }
         return newMap;
       });
     } catch (error) {
       console.error("Failed to stop executor:", error);
     }
-  }, [runningProcesses]);
+  }, [runningProcesses, executorMode]);
 
   // Mark process as finished (called when WebSocket receives finished message)
-  const markProcessFinished = useCallback((executorId: string) => {
+  const markProcessFinished = useCallback((executorId: string, processId?: string | null) => {
     setRunningProcesses((prev) => {
+      const entries = prev.get(executorId);
+      if (!entries) return prev;
+      if (processId) {
+        const filtered = entries.filter(e => e.processId !== processId);
+        if (filtered.length === entries.length) return prev;
+        const newMap = new Map(prev);
+        if (filtered.length === 0) {
+          newMap.delete(executorId);
+        } else {
+          newMap.set(executorId, filtered);
+        }
+        return newMap;
+      }
       const newMap = new Map(prev);
       newMap.delete(executorId);
       return newMap;
@@ -227,12 +262,13 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
 
   // Get executor with process info, filtered by current executor mode
   const executorsWithProcess: ExecutorWithProcess[] = executors.map((executor) => {
-    const entry = runningProcesses.get(executor.id);
-    const matchesTarget = entry && (!executorMode || entry.target === executorMode);
+    const entries = runningProcesses.get(executor.id);
+    const targetMode = executorMode ?? "local";
+    const match = entries?.find(e => e.target === targetMode);
     return {
       ...executor,
-      currentProcessId: matchesTarget ? entry.processId : null,
-      isRunning: !!matchesTarget,
+      currentProcessId: match?.processId ?? null,
+      isRunning: !!match,
     };
   });
 

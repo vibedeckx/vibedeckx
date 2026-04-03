@@ -230,7 +230,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
                     onStop={(processId) => stopExecutor(executor.id, processId || executor.currentProcessId || undefined)}
                     onUpdate={(data) => updateExecutor(executor.id, data)}
                     onDelete={() => deleteExecutor(executor.id)}
-                    onProcessFinished={() => markProcessFinished(executor.id)}
+                    onProcessFinished={(processId) => markProcessFinished(executor.id, processId)}
                   />
                 ))}
               </SortableContext>
