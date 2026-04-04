@@ -707,9 +707,10 @@ export class AgentSessionManager {
   }
 
   /**
-   * Stop a session — kills the process and updates status so the frontend
-   * gets immediate feedback. The WebSocket stays alive so the user can
-   * start a new conversation.
+   * Stop a session — kills the process but preserves conversation history
+   * (like pressing ESC in Claude Code). The session becomes dormant so the
+   * next user message will spawn a fresh process with full context replay.
+   * The WebSocket stays alive so the UI remains connected.
    */
   stopSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
@@ -724,13 +725,16 @@ export class AgentSessionManager {
       const proc = session.process;
       session.process = null;
       proc?.kill("SIGTERM");
-      session.dormant = false;
+
+      // Mark as dormant so the next message triggers wakeDormantSession
+      // (which spawns a new process and replays the full conversation context).
+      session.dormant = true;
       session.status = "stopped";
       if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
       // Don't send { finished: true } — keep the WebSocket connection alive
-      // so the UI stays "Connected" and the user can start a new conversation.
+      // so the UI stays "Connected" and the user can continue the conversation.
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to stop session:`, error);
