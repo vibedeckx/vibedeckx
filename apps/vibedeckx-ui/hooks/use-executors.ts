@@ -66,6 +66,18 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     fetchRunningProcesses();
   }, [fetchExecutors, fetchRunningProcesses]);
 
+  // Reconcile stale running-process state when the browser tab regains focus.
+  // SSE events emitted while the tab was backgrounded may have been lost.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        fetchRunningProcesses();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [fetchRunningProcesses]);
+
   // Keep a ref of current executor IDs for the SSE handler
   const executorIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -198,21 +210,24 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
 
     try {
       await api.stopProcess(targetProcessId);
-      setRunningProcesses((prev) => {
-        const entries = prev.get(executorId);
-        if (!entries) return prev;
-        const filtered = entries.filter(e => e.processId !== targetProcessId);
-        const newMap = new Map(prev);
-        if (filtered.length === 0) {
-          newMap.delete(executorId);
-        } else {
-          newMap.set(executorId, filtered);
-        }
-        return newMap;
-      });
     } catch (error) {
+      // Process already finished — still need to clear stale local state
       console.error("Failed to stop executor:", error);
     }
+    // Always clear from runningProcesses — if the stop call failed the
+    // process is already gone, so the entry is stale either way.
+    setRunningProcesses((prev) => {
+      const entries = prev.get(executorId);
+      if (!entries) return prev;
+      const filtered = entries.filter(e => e.processId !== targetProcessId);
+      const newMap = new Map(prev);
+      if (filtered.length === 0) {
+        newMap.delete(executorId);
+      } else {
+        newMap.set(executorId, filtered);
+      }
+      return newMap;
+    });
   }, [runningProcesses, executorMode]);
 
   // Mark process as finished (called when WebSocket receives finished message)
