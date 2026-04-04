@@ -118,19 +118,25 @@ export function BrowserFramesProvider({ children }: { children: React.ReactNode 
       const existing = prev.get(projectId);
       if (!existing) return prev;
       const next = new Map(prev);
-      next.set(projectId, { ...existing, url, iframeKey: existing.iframeKey + 1 });
+      next.set(projectId, { ...existing, url });
       return next;
     });
+    // Update src directly — the iframe may have been moved out of the hidden
+    // container by claimFrame, so changing iframeKey would cause React to fail
+    // on removeChild.
+    const iframe = iframeRefs.current.get(projectId);
+    if (iframe) {
+      iframe.src = api.getBrowserProxyUrl(projectId, url);
+    }
   }, []);
 
   const refreshFrame = useCallback((projectId: string) => {
-    setFrames((prev) => {
-      const existing = prev.get(projectId);
-      if (!existing) return prev;
-      const next = new Map(prev);
-      next.set(projectId, { ...existing, iframeKey: existing.iframeKey + 1 });
-      return next;
-    });
+    const iframe = iframeRefs.current.get(projectId);
+    if (iframe) {
+      const src = iframe.src;
+      iframe.src = "";
+      iframe.src = src;
+    }
   }, []);
 
   const hasFrame = useCallback((projectId: string) => {
