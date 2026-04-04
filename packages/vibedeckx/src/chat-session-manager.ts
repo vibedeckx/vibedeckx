@@ -192,6 +192,27 @@ export class ChatSessionManager {
     }
   }
 
+  private handleBrowserError(sessionId: string, error: BrowserError): void {
+    const typeLabels: Record<string, string> = {
+      js_error: "JS Error",
+      console_error: "Console Error",
+      network_error: "Network Error",
+      crash: "Browser Crash",
+    };
+
+    const label = typeLabels[error.type] ?? error.type;
+    const parts = [
+      `[Browser Event: ${label}]`,
+      error.url ? `URL: ${error.url}` : null,
+      `Error: ${error.message}`,
+      error.stack ? `Stack: ${error.stack}` : null,
+      ``,
+      `Summarize in 1-2 sentences.`,
+    ].filter(Boolean);
+
+    this.enqueueOrSend(sessionId, parts.join("\n"));
+  }
+
   private findRemoteSessionForProject(projectId: string, branch?: string | null): { localSessionId: string; info: RemoteSessionInfo } | null {
     // Session IDs use format: remote-{serverId}-{projectId}-{remoteSessionId}
     // Match any session that contains the projectId segment
@@ -680,16 +701,24 @@ export class ChatSessionManager {
       "After sending a command, terminal output will arrive as a [Terminal Event] message once the command finishes. Wait for it before commenting on results.",
       "When the user asks to run a command, check something in the terminal, or interact with a shell, use these tools.",
       "If no terminals are open, suggest the user open one in the Terminal tab first.",
+      "You can open web pages in the preview browser using the openPreview tool.",
+      "You can interact with pages: clickElement, fillInput, selectOption, pressKey.",
+      "You can inspect pages: screenshot (returns base64 image), getPageContent (returns text/HTML), waitForElement.",
+      "When you receive a [Browser Event] message, respond in 1-2 sentences. State what error occurred and suggest a fix if obvious.",
       `Current workspace: project=${projectId}, branch=${branch ?? "default"}.`,
     ].join("\n");
   }
 
-  private createTools(projectId: string, branch: string | null) {
+  private createTools(projectId: string, branch: string | null, sessionId?: string) {
     const storage = this.storage;
     const processManager = this.processManager;
     const agentSessionManager = this.agentSessionManager;
     const remoteExecutorMap = this.remoteExecutorMap;
     const reverseConnectManager = this.reverseConnectManager;
+    const browserManager = this.browserManager;
+    const onBrowserError = (error: BrowserError) => {
+      if (sessionId) this.handleBrowserError(sessionId, error);
+    };
 
     return {
       getAgentConversation: tool({
@@ -1085,6 +1114,176 @@ export class ChatSessionManager {
           }
         },
       }),
+
+      openPreview: tool({
+        description:
+          "Open a URL in the server-side preview browser (Playwright). " +
+          "Use this when the user asks to open, preview, or navigate to a web page. " +
+          "This starts a browser session if none exists and navigates to the URL.",
+        inputSchema: z.object({
+          url: z.string().describe("The URL to open (e.g. https://remote-server:3000)"),
+        }),
+        execute: async ({ url }) => {
+          if (!browserManager) {
+            return { success: false, message: "Browser preview not available." };
+          }
+          try {
+            let session = browserManager.getSession(projectId);
+            if (!session) {
+              session = await browserManager.startSession(projectId, branch, onBrowserError);
+            }
+            const result = await browserManager.navigate(projectId, url);
+            if (!result) {
+              return { success: false, message: "No browser session available." };
+            }
+            return { success: true, title: result.title, url: result.url };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Failed to open URL";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      clickElement: tool({
+        description:
+          "Click an element on the page in the preview browser. " +
+          "Accepts CSS selectors, text selectors (text=Submit), or role selectors (role=button[name='Submit']).",
+        inputSchema: z.object({
+          selector: z.string().describe("Selector for the element to click"),
+        }),
+        execute: async ({ selector }) => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            await page.click(selector, { timeout: 5000 });
+            return { success: true };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Click failed";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      fillInput: tool({
+        description:
+          "Fill an input or textarea on the page in the preview browser. " +
+          "Clears existing value before typing. Accepts CSS, text, or role selectors.",
+        inputSchema: z.object({
+          selector: z.string().describe("Selector for the input element"),
+          value: z.string().describe("Value to fill"),
+        }),
+        execute: async ({ selector, value }) => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            await page.fill(selector, value, { timeout: 5000 });
+            return { success: true };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Fill failed";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      selectOption: tool({
+        description: "Select an option from a <select> dropdown in the preview browser.",
+        inputSchema: z.object({
+          selector: z.string().describe("Selector for the <select> element"),
+          value: z.string().describe("Value or label of the option to select"),
+        }),
+        execute: async ({ selector, value }) => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            await page.selectOption(selector, value, { timeout: 5000 });
+            return { success: true };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Select failed";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      pressKey: tool({
+        description: "Press a keyboard key in the preview browser (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown').",
+        inputSchema: z.object({
+          key: z.string().describe("Key to press (e.g. 'Enter', 'Tab', 'Escape')"),
+        }),
+        execute: async ({ key }) => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            await page.keyboard.press(key);
+            return { success: true };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Key press failed";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      screenshot: tool({
+        description:
+          "Take a screenshot of the current page in the preview browser. " +
+          "Returns a base64 PNG image. Use this to see the current state of the page.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            const buffer = await page.screenshot({ type: "png", fullPage: false });
+            const base64 = buffer.toString("base64");
+            return { success: true, image: base64 };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Screenshot failed";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      getPageContent: tool({
+        description:
+          "Get the text content or HTML of the current page (or a specific element) in the preview browser. " +
+          "If no selector is provided, returns the full page text content.",
+        inputSchema: z.object({
+          selector: z.string().optional().describe("Optional CSS selector to get content of a specific element"),
+        }),
+        execute: async ({ selector }) => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            if (selector) {
+              const text = await page.textContent(selector, { timeout: 5000 });
+              return { success: true, content: text ?? "" };
+            }
+            const text = await page.evaluate(() => document.body.innerText);
+            const capped = text.length > 10000 ? text.slice(0, 10000) + "\n...(truncated)" : text;
+            return { success: true, content: capped };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Failed to get page content";
+            return { success: false, error: msg };
+          }
+        },
+      }),
+
+      waitForElement: tool({
+        description: "Wait for an element to appear on the page in the preview browser.",
+        inputSchema: z.object({
+          selector: z.string().describe("Selector to wait for"),
+          timeout: z.number().min(1000).max(30000).default(10000).describe("Timeout in milliseconds"),
+        }),
+        execute: async ({ selector, timeout }) => {
+          const page = browserManager?.getPage(projectId);
+          if (!page) return { success: false, error: "No browser session. Use openPreview first." };
+          try {
+            await page.waitForSelector(selector, { timeout });
+            return { success: true };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Wait timed out";
+            return { success: false, error: msg };
+          }
+        },
+      }),
     };
   }
 
@@ -1172,7 +1371,7 @@ export class ChatSessionManager {
         model: resolveChatModel(this.storage),
         system: this.getSystemPrompt(session.projectId, session.branch),
         messages,
-        tools: this.createTools(session.projectId, session.branch),
+        tools: this.createTools(session.projectId, session.branch, session.id),
         stopWhen: stepCountIs(3),
         abortSignal: abortController.signal,
       });
