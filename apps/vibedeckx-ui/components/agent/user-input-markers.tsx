@@ -122,7 +122,7 @@ export function UserInputMarkers({
     const elRect = el.getBoundingClientRect();
     const absoluteTop = elRect.top - scrollRect.top + scrollEl.scrollTop;
     scrollEl.scrollTo({
-      top: absoluteTop - scrollEl.clientHeight / 4,
+      top: absoluteTop,
       behavior: "smooth",
     });
   }, []);
