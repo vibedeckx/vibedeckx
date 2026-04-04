@@ -26,7 +26,7 @@ import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
-import { resolveTarget } from "./routes/browser-proxy-routes.js";
+
 
 // ============ Types ============
 
@@ -1130,33 +1130,24 @@ export class ChatSessionManager {
         description:
           "Open a URL in the preview browser. " +
           "Use this when the user asks to open, preview, or navigate to a web page. " +
-          "For remote servers, opens in the proxy iframe. Otherwise uses server-side Playwright.",
+          "This opens the page in the preview iframe (preferred) or falls back to server-side Playwright.",
         inputSchema: z.object({
           url: z.string().describe("The URL to open (e.g. https://remote-server:3000)"),
         }),
         execute: async ({ url }) => {
-          // Check if URL targets a reverse-connected remote server → use iframe proxy
-          if (reverseConnectManager) {
-            try {
-              const projectRemotes = storage.projectRemotes.getByProject(projectId);
-              const resolved = resolveTarget(url, projectRemotes, reverseConnectManager);
-              if (resolved.remoteServerId && reverseConnectManager.isConnected(resolved.remoteServerId)) {
-                // Broadcast to frontend to open iframe preview
-                if (sessionId) {
-                  const session = this.sessions.get(sessionId);
-                  if (session) {
-                    const raw = JSON.stringify({ openPreviewFrame: { projectId, url } } satisfies AgentWsMessage);
-                    for (const ws of session.subscribers) {
-                      try { ws.send(raw); } catch { /* ignore */ }
-                    }
-                  }
-                }
-                return { success: true, title: "Preview opened", url, mode: "iframe-proxy" };
+          // Prefer iframe preview — send WS message to frontend
+          if (sessionId) {
+            const session = this.sessions.get(sessionId);
+            if (session && session.subscribers.size > 0) {
+              const raw = JSON.stringify({ openPreviewFrame: { projectId, url } } satisfies AgentWsMessage);
+              for (const ws of session.subscribers) {
+                try { ws.send(raw); } catch { /* ignore */ }
               }
-            } catch { /* fall through to Playwright */ }
+              return { success: true, title: "Preview opened", url };
+            }
           }
 
-          // Local URL — use Playwright
+          // Fallback to Playwright (no frontend connected)
           if (!browserManager) {
             return { success: false, message: "Browser preview not available." };
           }
