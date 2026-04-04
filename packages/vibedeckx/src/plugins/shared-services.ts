@@ -10,6 +10,7 @@ import type { ProxyConfig } from "../utils/proxy-manager.js";
 import { setGlobalProxyManager } from "../utils/remote-proxy.js";
 import { RemotePatchCache } from "../remote-patch-cache.js";
 import { ReverseConnectManager } from "../reverse-connect-manager.js";
+import { BrowserManager } from "../browser-manager.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -43,7 +44,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   setGlobalProxyManager(proxyManager);
 
   const reverseConnectManager = new ReverseConnectManager();
-  const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager);
+  const browserManager = new BrowserManager();
+  const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
   reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
     opts.storage.remoteServers.updateStatus(remoteServerId, status);
   });
@@ -58,6 +60,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("proxyManager", proxyManager);
   fastify.decorate("remotePatchCache", remotePatchCache);
   fastify.decorate("reverseConnectManager", reverseConnectManager);
+  fastify.decorate("browserManager", browserManager);
   agentSessionManager.setEventBus(eventBus);
   chatSessionManager.setEventBus(eventBus);
   processManager.setEventBus(eventBus);
@@ -68,6 +71,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     processManager.shutdown();
     remotePatchCache.shutdown();
     reverseConnectManager.shutdown();
+    await browserManager.shutdown();
   });
 };
 

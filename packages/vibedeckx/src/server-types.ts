@@ -6,6 +6,7 @@ import type { EventBus } from "./event-bus.js";
 import type { ProxyManager } from "./utils/proxy-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
+import type { BrowserManager } from "./browser-manager.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -38,5 +39,6 @@ declare module "fastify" {
     remotePatchCache: RemotePatchCache;
     reverseConnectManager: ReverseConnectManager;
     authEnabled: boolean;
+    browserManager: BrowserManager;
   }
 }

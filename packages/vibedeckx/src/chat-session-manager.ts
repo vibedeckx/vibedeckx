@@ -25,6 +25,7 @@ import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
+import type { BrowserManager, BrowserError } from "./browser-manager.js";
 
 // ============ Types ============
 
@@ -91,6 +92,7 @@ export class ChatSessionManager {
   private remoteExecutorMap: Map<string, RemoteExecutorInfo>;
   private remotePatchCache: RemotePatchCache;
   private reverseConnectManager: ReverseConnectManager | null = null;
+  private browserManager: BrowserManager | null = null;
 
   constructor(
     storage: Storage,
@@ -100,6 +102,7 @@ export class ChatSessionManager {
     remoteExecutorMap: Map<string, RemoteExecutorInfo>,
     remotePatchCache: RemotePatchCache,
     reverseConnectManager?: ReverseConnectManager,
+    browserManager?: BrowserManager,
   ) {
     this.storage = storage;
     this.processManager = processManager;
@@ -108,6 +111,7 @@ export class ChatSessionManager {
     this.remoteExecutorMap = remoteExecutorMap;
     this.remotePatchCache = remotePatchCache;
     this.reverseConnectManager = reverseConnectManager ?? null;
+    this.browserManager = browserManager ?? null;
   }
 
   setEventBus(eventBus: EventBus): void {
