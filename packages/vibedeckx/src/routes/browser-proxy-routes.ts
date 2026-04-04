@@ -1,7 +1,47 @@
+import { randomUUID } from "crypto";
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import WsWebSocket from "ws";
+import type { ReverseConnectManager, RawHttpResponse } from "../reverse-connect-manager.js";
+import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
 import "../server-types.js";
+
+/**
+ * Fetch a URL either directly or via reverse-connect tunnel.
+ * Tries reverse-connect first if the project has a remote server connected.
+ */
+async function proxyFetch(
+  targetUrl: string,
+  requestHeaders: Record<string, string>,
+  reverseConnectManager: ReverseConnectManager | null,
+  remoteServerId: string | null,
+): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  // Try reverse-connect if available
+  if (remoteServerId && reverseConnectManager?.isConnected(remoteServerId)) {
+    const parsed = new URL(targetUrl);
+    const path = parsed.pathname + parsed.search;
+    const raw = await reverseConnectManager.sendRawHttpRequest(
+      remoteServerId,
+      "GET",
+      path,
+      requestHeaders,
+    );
+    return { status: raw.status, headers: raw.headers, body: raw.body };
+  }
+
+  // Direct fetch
+  const response = await fetch(targetUrl, {
+    headers: requestHeaders,
+    redirect: "follow",
+  });
+
+  const responseHeaders: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    responseHeaders[key] = value;
+  });
+  const body = await response.text();
+  return { status: response.status, headers: responseHeaders, body };
+}
 
 /**
  * Extracts the target URL from the proxy route path.
@@ -251,25 +291,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const proxyPrefix = `/api/projects/${projectId}/browser/proxy/`;
       const proxyWsPrefix = `/api/projects/${projectId}/browser/proxy-ws/`;
 
-      // Fetch from the remote server
-      const response = await fetch(targetUrl, {
-        headers: {
-          "User-Agent": req.headers["user-agent"] || "Vibedeckx-Proxy/1.0",
-          "Accept": req.headers.accept || "*/*",
-          "Accept-Language": req.headers["accept-language"] || "en",
-          "Cookie": req.headers.cookie || "",
+      // Look up remote server for this project (for reverse-connect routing)
+      const projectRemotes = fastify.storage.projectRemotes.getByProject(projectId);
+      const remoteServerId = projectRemotes.length > 0 ? projectRemotes[0].remote_server_id : null;
+
+      // Fetch from the remote server (via reverse-connect or direct)
+      const response = await proxyFetch(
+        targetUrl,
+        {
+          "User-Agent": (req.headers["user-agent"] as string) || "Vibedeckx-Proxy/1.0",
+          "Accept": (req.headers.accept as string) || "*/*",
+          "Accept-Language": (req.headers["accept-language"] as string) || "en",
+          "Cookie": (req.headers.cookie as string) || "",
         },
-        redirect: "follow",
-      });
+        fastify.reverseConnectManager,
+        remoteServerId,
+      );
 
-      const contentType = response.headers.get("content-type") || "";
+      const contentType = response.headers["content-type"] || "";
 
-      // Copy response headers (strip security headers)
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
-      });
-      const safeHeaders = stripSecurityHeaders(responseHeaders);
+      // Strip security headers
+      const safeHeaders = stripSecurityHeaders(response.headers);
 
       // Add proxy identifier
       safeHeaders["x-vibedeckx-proxy"] = "true";
@@ -285,7 +327,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       if (contentType.includes("text/html")) {
         // HTML response — rewrite URLs and inject script
-        let html = await response.text();
+        let html = response.body;
         html = rewriteHtml(html, targetOrigin, proxyPrefix);
 
         // Inject error capture script before </body> or at end
@@ -301,17 +343,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       if (contentType.includes("text/css")) {
         // CSS response — rewrite url() references
-        let css = await response.text();
+        let css = response.body;
         css = css.replace(/url\(\s*['"]?\//g, `url(${proxyPrefix}${targetOrigin}/`);
         return reply.code(response.status).type("text/css").send(css);
       }
 
       // Non-HTML/CSS — pass through as-is
-      const body = response.body;
-      if (body) {
-        return reply.code(response.status).send(Buffer.from(await response.arrayBuffer()));
-      }
-      return reply.code(response.status).send("");
+      return reply.code(response.status).send(response.body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Proxy request failed";
       console.error(`[BrowserProxy] Error proxying ${targetUrl}:`, msg);
@@ -335,6 +373,46 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     console.log(`[BrowserProxy] WS proxy: ${targetWsUrl}`);
 
+    // Check if we should route through reverse-connect
+    const projectRemotes = fastify.storage.projectRemotes.getByProject(projectId);
+    const remoteServerId = projectRemotes.length > 0 ? projectRemotes[0].remote_server_id : null;
+    const rcm = fastify.reverseConnectManager;
+
+    if (remoteServerId && rcm.isConnected(remoteServerId)) {
+      // Route via reverse-connect virtual channel
+      const channelId = randomUUID();
+      const parsed = new URL(targetWsUrl);
+      const wsPath = parsed.pathname;
+      const wsQuery = parsed.search ? parsed.search.slice(1) : undefined;
+
+      const adapter = new VirtualWsAdapter(
+        (data) => rcm.sendChannelData(remoteServerId, channelId, data),
+        () => rcm.closeChannel(remoteServerId, channelId),
+      );
+      rcm.setChannelAdapter(remoteServerId, channelId, adapter);
+      rcm.openVirtualChannel(remoteServerId, channelId, wsPath, wsQuery);
+
+      // Bidirectional pipe via virtual channel
+      socket.on("message", (data) => {
+        adapter.send(data.toString());
+      });
+
+      adapter.on("message", (data: string) => {
+        try { socket.send(data); } catch { /* client gone */ }
+      });
+
+      socket.on("close", () => {
+        adapter.close();
+      });
+
+      adapter.on("close", () => {
+        try { socket.close(); } catch { /* ignore */ }
+      });
+
+      return;
+    }
+
+    // Direct WebSocket connection
     const remote = new WsWebSocket(targetWsUrl);
 
     remote.on("open", () => {

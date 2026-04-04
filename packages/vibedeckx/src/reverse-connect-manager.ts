@@ -13,9 +13,22 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+export interface RawHttpResponse {
+  ok: boolean;
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+interface PendingRawRequest {
+  resolve: (result: RawHttpResponse) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface ReverseConnection {
   ws: WebSocket;
   pendingRequests: Map<string, PendingRequest>;
+  pendingRawRequests: Map<string, PendingRawRequest>;
   virtualChannels: Map<string, VirtualWsAdapter>;
   pingTimer: ReturnType<typeof setInterval>;
   pongTimer: ReturnType<typeof setTimeout> | null;
@@ -41,6 +54,7 @@ export class ReverseConnectManager {
     const conn: ReverseConnection = {
       ws,
       pendingRequests: new Map(),
+      pendingRawRequests: new Map(),
       virtualChannels: new Map(),
       pingTimer: setInterval(() => this.sendPing(remoteServerId), PING_INTERVAL_MS),
       pongTimer: null,
@@ -131,6 +145,44 @@ export class ReverseConnectManager {
     });
   }
 
+  /**
+   * Send an HTTP request and return the raw response (body as string, headers intact).
+   * Used by the browser proxy to forward HTML/CSS/JS without JSON parsing.
+   */
+  async sendRawHttpRequest(
+    remoteServerId: string,
+    method: string,
+    path: string,
+    headers?: Record<string, string>,
+    body?: string,
+    timeoutMs = DEFAULT_HTTP_TIMEOUT_MS,
+  ): Promise<RawHttpResponse> {
+    const conn = this.connections.get(remoteServerId);
+    if (!conn || conn.ws.readyState !== 1) {
+      return { ok: false, status: 0, headers: {}, body: "" };
+    }
+
+    const requestId = randomUUID();
+    const frame: HttpRequestFrame = {
+      type: "http_request",
+      requestId,
+      method,
+      path,
+      headers: headers ?? {},
+      body,
+    };
+
+    return new Promise<RawHttpResponse>((resolve) => {
+      const timer = setTimeout(() => {
+        conn.pendingRawRequests.delete(requestId);
+        resolve({ ok: false, status: 0, headers: {}, body: "" });
+      }, timeoutMs);
+
+      conn.pendingRawRequests.set(requestId, { resolve, timer });
+      conn.ws.send(JSON.stringify(frame));
+    });
+  }
+
   openVirtualChannel(remoteServerId: string, channelId: string, path: string, query?: string): void {
     const conn = this.connections.get(remoteServerId);
     if (!conn || conn.ws.readyState !== 1) return;
@@ -177,6 +229,21 @@ export class ReverseConnectManager {
 
     switch (frame.type) {
       case "http_response": {
+        // Check raw requests first (browser proxy)
+        const pendingRaw = conn.pendingRawRequests.get(frame.requestId);
+        if (pendingRaw) {
+          clearTimeout(pendingRaw.timer);
+          conn.pendingRawRequests.delete(frame.requestId);
+          pendingRaw.resolve({
+            ok: frame.status >= 200 && frame.status < 300,
+            status: frame.status,
+            headers: frame.headers ?? {},
+            body: frame.body ?? "",
+          });
+          break;
+        }
+
+        // Then check JSON requests (existing API proxy)
         const pending = conn.pendingRequests.get(frame.requestId);
         if (pending) {
           clearTimeout(pending.timer);
@@ -267,6 +334,12 @@ export class ReverseConnectManager {
       });
     }
     conn.pendingRequests.clear();
+
+    for (const [, pending] of conn.pendingRawRequests) {
+      clearTimeout(pending.timer);
+      pending.resolve({ ok: false, status: 0, headers: {}, body: "" });
+    }
+    conn.pendingRawRequests.clear();
 
     // Close all virtual channels
     for (const [, adapter] of conn.virtualChannels) {
