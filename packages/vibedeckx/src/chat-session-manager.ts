@@ -26,6 +26,7 @@ import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
+import { resolveTarget } from "./routes/browser-proxy-routes.js";
 
 // ============ Types ============
 
@@ -1141,6 +1142,51 @@ export class ChatSessionManager {
             let session = browserManager.getSession(projectId);
             if (!session) {
               session = await browserManager.startSession(projectId, branch, onBrowserError);
+
+              // Set up route interception for remote server hostnames so Playwright
+              // can reach dev servers on reverse-connected remotes
+              if (reverseConnectManager) {
+                const page = browserManager.getPage(projectId);
+                if (page) {
+                  const projectRemotes = storage.projectRemotes.getByProject(projectId);
+                  await page.route("**/*", async (route) => {
+                    const reqUrl = route.request().url();
+                    let resolved;
+                    try {
+                      resolved = resolveTarget(reqUrl, projectRemotes, reverseConnectManager);
+                    } catch {
+                      await route.continue();
+                      return;
+                    }
+                    if (resolved.remoteServerId && reverseConnectManager.isConnected(resolved.remoteServerId)) {
+                      const parsed = new URL(resolved.fetchUrl);
+                      const port = parsed.port ? parseInt(parsed.port, 10) : undefined;
+                      const path = parsed.pathname + parsed.search;
+                      const reqHeaders: Record<string, string> = {};
+                      const allHeaders = route.request().headers();
+                      for (const [k, v] of Object.entries(allHeaders)) {
+                        if (v) reqHeaders[k] = v;
+                      }
+                      const raw = await reverseConnectManager.sendRawHttpRequest(
+                        resolved.remoteServerId,
+                        route.request().method(),
+                        path,
+                        reqHeaders,
+                        route.request().postData() ?? undefined,
+                        undefined,
+                        port,
+                      );
+                      await route.fulfill({
+                        status: raw.status,
+                        headers: raw.headers,
+                        body: raw.body,
+                      });
+                    } else {
+                      await route.continue();
+                    }
+                  });
+                }
+              }
             }
             const result = await browserManager.navigate(projectId, url);
             if (!result) {

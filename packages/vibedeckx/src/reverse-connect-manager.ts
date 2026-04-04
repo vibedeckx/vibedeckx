@@ -156,6 +156,7 @@ export class ReverseConnectManager {
     headers?: Record<string, string>,
     body?: string,
     timeoutMs = DEFAULT_HTTP_TIMEOUT_MS,
+    port?: number,
   ): Promise<RawHttpResponse> {
     const conn = this.connections.get(remoteServerId);
     if (!conn || conn.ws.readyState !== 1) {
@@ -170,6 +171,7 @@ export class ReverseConnectManager {
       path,
       headers: headers ?? {},
       body,
+      port,
     };
 
     return new Promise<RawHttpResponse>((resolve) => {

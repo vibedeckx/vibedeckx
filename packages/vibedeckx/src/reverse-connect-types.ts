@@ -16,6 +16,8 @@ export interface HttpRequestFrame {
   path: string;
   headers: Record<string, string>;
   body?: string;
+  /** When set, request targets localhost:{port} directly instead of the Fastify server */
+  port?: number;
 }
 
 export interface WsOpenFrame {

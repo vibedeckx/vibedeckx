@@ -6,7 +6,7 @@ import type { ReverseConnectManager, RawHttpResponse } from "../reverse-connect-
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
 import "../server-types.js";
 
-interface ResolvedTarget {
+export interface ResolvedTarget {
   /** The remote server ID if routed via reverse-connect, null for direct fetch */
   remoteServerId: string | null;
   /** The URL to fetch — for reverse-connect this is http://localhost:{port}{path} on the remote */
@@ -23,7 +23,7 @@ interface ResolvedTarget {
  * If matched, the request is routed through the reverse-connect tunnel as
  * http://localhost:{port}/{path} on the remote side.
  */
-function resolveTarget(
+export function resolveTarget(
   targetUrl: string,
   projectRemotes: Array<{ remote_server_id: string; server_name: string }>,
   reverseConnectManager: ReverseConnectManager | null,
@@ -62,12 +62,16 @@ async function proxyFetch(
 ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
   if (resolved.remoteServerId && reverseConnectManager?.isConnected(resolved.remoteServerId)) {
     const parsed = new URL(resolved.fetchUrl);
+    const port = parsed.port ? parseInt(parsed.port, 10) : undefined;
     const path = parsed.pathname + parsed.search;
     const raw = await reverseConnectManager.sendRawHttpRequest(
       resolved.remoteServerId,
       "GET",
       path,
       requestHeaders,
+      undefined,
+      undefined,
+      port,
     );
     return { status: raw.status, headers: raw.headers, body: raw.body };
   }

@@ -112,39 +112,64 @@ export class ReverseConnectClient {
 
   private async handleHttpRequest(frame: HttpRequestFrame): Promise<void> {
     try {
-      const response = await (this.localServer.inject as Function)({
-        method: frame.method,
-        url: frame.path,
-        headers: frame.headers,
-        payload: frame.body,
-      }) as { statusCode: number; headers: Record<string, string | string[] | undefined>; payload: string };
+      let status: number;
+      let responseHeaders: Record<string, string> = {};
+      let body: string;
 
-      const responseHeaders: Record<string, string> = {};
-      for (const [key, val] of Object.entries(response.headers)) {
-        if (typeof val === "string") {
-          responseHeaders[key] = val;
-        } else if (Array.isArray(val)) {
-          responseHeaders[key] = val.join(", ");
+      if (frame.port) {
+        // Direct fetch to localhost:{port} — used by browser proxy to reach dev servers
+        const url = `http://127.0.0.1:${frame.port}${frame.path}`;
+        const fetchInit: RequestInit = {
+          method: frame.method,
+          headers: frame.headers,
+          redirect: "follow",
+        };
+        if (frame.body && frame.method !== "GET" && frame.method !== "HEAD") {
+          fetchInit.body = frame.body;
         }
+        const response = await fetch(url, fetchInit);
+        status = response.status;
+        response.headers.forEach((val, key) => {
+          responseHeaders[key] = val;
+        });
+        body = await response.text();
+      } else {
+        // Route through Fastify server — used for API proxy
+        const response = await (this.localServer.inject as Function)({
+          method: frame.method,
+          url: frame.path,
+          headers: frame.headers,
+          payload: frame.body,
+        }) as { statusCode: number; headers: Record<string, string | string[] | undefined>; payload: string };
+
+        status = response.statusCode;
+        for (const [key, val] of Object.entries(response.headers)) {
+          if (typeof val === "string") {
+            responseHeaders[key] = val;
+          } else if (Array.isArray(val)) {
+            responseHeaders[key] = val.join(", ");
+          }
+        }
+        body = response.payload;
       }
 
       const responseFrame: HttpResponseFrame = {
         type: "http_response",
         requestId: frame.requestId,
-        status: response.statusCode,
+        status,
         headers: responseHeaders,
-        body: response.payload,
+        body,
       };
 
       this.sendFrame(responseFrame);
     } catch (err) {
-      console.error(`[ReverseClient] inject error for ${frame.requestId}:`, err);
+      console.error(`[ReverseClient] request error for ${frame.requestId}:`, err);
       const errorFrame: HttpResponseFrame = {
         type: "http_response",
         requestId: frame.requestId,
-        status: 500,
+        status: 502,
         headers: {},
-        body: JSON.stringify({ error: "Internal server error" }),
+        body: JSON.stringify({ error: err instanceof Error ? err.message : "Request failed" }),
       };
       this.sendFrame(errorFrame);
     }
