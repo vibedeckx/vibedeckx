@@ -110,22 +110,16 @@ export function UserInputMarkers({
   }, [messages, updateMarkers, contentRef]);
 
   const handleClick = useCallback((markerIndex: number) => {
-    const scrollEl = scrollElRef.current;
-    if (!scrollEl) return;
+    const contentEl = contentRef.current;
+    if (!contentEl) return;
 
-    const el = scrollEl.querySelector<HTMLElement>(
+    const el = contentEl.querySelector<HTMLElement>(
       `[data-user-msg-idx="${markerIndex}"]`
     );
     if (!el) return;
 
-    const scrollRect = scrollEl.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const absoluteTop = elRect.top - scrollRect.top + scrollEl.scrollTop;
-    scrollEl.scrollTo({
-      top: absoluteTop,
-      behavior: "smooth",
-    });
-  }, []);
+    el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [contentRef]);
 
   if (!isOverflowing || markers.length === 0) return null;
 
