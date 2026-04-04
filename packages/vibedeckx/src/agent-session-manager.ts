@@ -707,8 +707,9 @@ export class AgentSessionManager {
   }
 
   /**
-   * Stop a session — interrupts the current execution without killing the process,
-   * so the user can continue the conversation.
+   * Stop a session — kills the process and updates status so the frontend
+   * gets immediate feedback. The WebSocket stays alive so the user can
+   * start a new conversation.
    */
   stopSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
@@ -717,16 +718,19 @@ export class AgentSessionManager {
     }
 
     try {
-      const provider = getProvider(session.agentType);
-
-      // Try provider-specific interrupt first (e.g. JSON-RPC $/cancelRequest for Codex)
-      const interruptMsg = provider.formatInterrupt?.(sessionId);
-      if (interruptMsg && session.process?.stdin) {
-        session.process.stdin.write(interruptMsg);
-      } else {
-        // Fall back to SIGINT (like Ctrl+C) — works for Claude Code CLI
-        session.process?.kill("SIGINT");
-      }
+      // Clear session.process before killing so the process close handler
+      // (which checks session.process !== childProcess) skips its cleanup —
+      // we handle status + broadcast here instead.
+      const proc = session.process;
+      session.process = null;
+      proc?.kill("SIGTERM");
+      session.dormant = false;
+      session.status = "stopped";
+      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
+      // Don't send { finished: true } — keep the WebSocket connection alive
+      // so the UI stays "Connected" and the user can start a new conversation.
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to stop session:`, error);

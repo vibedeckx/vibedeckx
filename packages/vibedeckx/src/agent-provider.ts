@@ -59,13 +59,6 @@ export interface AgentProvider {
   /** Return initialization messages to write to stdin immediately after spawn (optional). */
   getInitializationMessages?(sessionId: string): string | null;
 
-  /**
-   * Format an interrupt/cancel message to send via stdin (optional).
-   * Returns a string to write to stdin to cancel the current execution,
-   * or null to fall back to SIGINT.
-   */
-  formatInterrupt?(sessionId: string): string | null;
-
   /** Human-readable display name for this agent. */
   getDisplayName(): string;
 
