@@ -70,6 +70,8 @@ interface BrowserFramesContextValue {
   refreshFrame: (projectId: string) => void;
   /** Check if a frame is active for a project */
   hasFrame: (projectId: string) => boolean;
+  /** Get the current URL for a project's frame */
+  getFrameUrl: (projectId: string) => string | undefined;
   /** Get the iframe element for a project (for DOM reparenting or postMessage) */
   getIframeElement: (projectId: string) => HTMLIFrameElement | null;
   /**
@@ -135,6 +137,10 @@ export function BrowserFramesProvider({ children }: { children: React.ReactNode 
     return frames.has(projectId);
   }, [frames]);
 
+  const getFrameUrl = useCallback((projectId: string) => {
+    return frames.get(projectId)?.url;
+  }, [frames]);
+
   const getIframeElement = useCallback((projectId: string) => {
     return iframeRefs.current.get(projectId) ?? null;
   }, []);
@@ -189,6 +195,7 @@ export function BrowserFramesProvider({ children }: { children: React.ReactNode 
     updateFrameUrl,
     refreshFrame,
     hasFrame,
+    getFrameUrl,
     getIframeElement,
     claimFrame,
   };
