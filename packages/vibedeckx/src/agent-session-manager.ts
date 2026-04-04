@@ -930,7 +930,8 @@ export class AgentSessionManager {
 
   /**
    * Build full conversation context from message entries for context transfer.
-   * Includes tool information for generic agent compatibility.
+   * Uses XML-tagged format to prevent Claude from confusing historical context
+   * with actual tool executions in the current session.
    */
   private buildFullConversationContext(entries: AgentMessage[]): string | null {
     const lines: string[] = [];
@@ -943,30 +944,30 @@ export class AgentSessionManager {
           const text = typeof entry.content === "string"
             ? entry.content
             : entry.content.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n");
-          lines.push(`User: ${text}`);
+          lines.push(`<user_message>${text}</user_message>`);
           break;
         }
         case "assistant":
-          lines.push(`Assistant: ${entry.content}`);
+          lines.push(`<assistant_message>${entry.content}</assistant_message>`);
           break;
         case "tool_use": {
           const inputStr = typeof entry.input === "string"
             ? entry.input
             : JSON.stringify(entry.input);
           const truncatedInput = inputStr.length > 2000 ? inputStr.substring(0, 2000) + "..." : inputStr;
-          lines.push(`[Tool: ${entry.tool}] Input: ${truncatedInput}`);
+          lines.push(`<historical_tool_call tool="${entry.tool}">${truncatedInput}</historical_tool_call>`);
           break;
         }
         case "tool_result": {
           const truncatedOutput = entry.output.length > 2000 ? entry.output.substring(0, 2000) + "..." : entry.output;
-          lines.push(`[Tool Result]: ${truncatedOutput}`);
+          lines.push(`<historical_tool_result>${truncatedOutput}</historical_tool_result>`);
           break;
         }
         case "error":
-          lines.push(`[Error]: ${entry.message}`);
+          lines.push(`<error>${entry.message}</error>`);
           break;
         case "system":
-          lines.push(`[System]: ${entry.content}`);
+          // Skip system messages (session lifecycle noise)
           break;
         // Skip thinking blocks (internal)
       }
@@ -974,7 +975,19 @@ export class AgentSessionManager {
 
     if (lines.length === 0) return null;
 
-    return `[Previous conversation history - please continue from where this left off]\n\n${lines.join("\n")}\n\n[End of previous conversation history]\n\nContinue this conversation. The user will send a new message.`;
+    return [
+      `<conversation_summary>`,
+      `This is a READ-ONLY summary of a previous conversation session. The session was interrupted and you are now in a NEW process.`,
+      ``,
+      `IMPORTANT:`,
+      `- You did NOT execute any of the tool calls shown below in THIS session. They happened in a previous, now-terminated process.`,
+      `- Any file edits, reads, or other tool actions shown here may or may not have been applied. Do NOT assume they succeeded.`,
+      `- If you need to read or edit files, you MUST make new tool calls. Do not reference previous tool calls as if they are still in effect.`,
+      `- Respond naturally to the user's latest message below. Use your tools normally — do not format tool calls as text.`,
+      ``,
+      ...lines,
+      `</conversation_summary>`,
+    ].join("\n");
   }
 
   /**
