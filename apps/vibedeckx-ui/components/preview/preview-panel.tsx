@@ -1,16 +1,16 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Globe, RefreshCw, ExternalLink, Play, Square, Loader2 } from "lucide-react";
 import {
   WebPreview,
-  WebPreviewBody,
   WebPreviewNavigation,
   WebPreviewNavigationButton,
   WebPreviewUrl,
 } from "@/components/ai-elements/web-preview";
 import { api } from "@/lib/api";
 import type { Project } from "@/lib/api";
+import { useBrowserFrames } from "./browser-frames-provider";
 
 interface PreviewPanelProps {
   projectId: string | null;
@@ -45,9 +45,11 @@ function usePersistedUrl(projectId: string | null, branch: string | null | undef
 
 export function PreviewPanel({ projectId, selectedBranch }: PreviewPanelProps) {
   const [url, setUrl] = usePersistedUrl(projectId, selectedBranch);
-  const [iframeKey, setIframeKey] = useState(0);
   const [browserState, setBrowserState] = useState<BrowserState>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const iframeHostRef = useRef<HTMLDivElement>(null);
+  const releaseRef = useRef<(() => void) | null>(null);
+  const { addFrame, removeFrame, updateFrameUrl, refreshFrame, hasFrame, claimFrame } = useBrowserFrames();
 
   // Check for existing browser session on mount / project change
   useEffect(() => {
@@ -58,21 +60,35 @@ export function PreviewPanel({ projectId, selectedBranch }: PreviewPanelProps) {
         if (status.url && !url) {
           setUrl(status.url);
         }
+        // Ensure global frame exists
+        if (!hasFrame(projectId) && status.url) {
+          addFrame(projectId, status.url);
+        }
       }
     }).catch(() => { /* no session */ });
   }, [projectId]);
 
-  // Listen for error postMessages from the proxied iframe
+  // Claim/release the global iframe when state changes
   useEffect(() => {
-    if (!projectId) return;
-    const handler = (event: MessageEvent) => {
-      if (event.data?.type === "vibedeckx-browser-error" && event.data.projectId === projectId) {
-        api.reportBrowserError(projectId, event.data.error).catch(() => {});
-      }
+    if (browserState === "running" && projectId && iframeHostRef.current) {
+      // Small delay to let React render the global iframe first
+      const timer = setTimeout(() => {
+        if (iframeHostRef.current) {
+          releaseRef.current?.();
+          releaseRef.current = claimFrame(projectId, iframeHostRef.current);
+        }
+      }, 50);
+      return () => {
+        clearTimeout(timer);
+        releaseRef.current?.();
+        releaseRef.current = null;
+      };
+    }
+    return () => {
+      releaseRef.current?.();
+      releaseRef.current = null;
     };
-    window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
-  }, [projectId]);
+  }, [browserState, projectId, claimFrame]);
 
   const handleStart = useCallback(async () => {
     if (!projectId || !url) return;
@@ -80,25 +96,29 @@ export function PreviewPanel({ projectId, selectedBranch }: PreviewPanelProps) {
     setErrorMsg(null);
     try {
       await api.startBrowser(projectId, selectedBranch ?? undefined);
+      addFrame(projectId, url);
       setBrowserState("running");
-      setIframeKey((k) => k + 1);
     } catch (err) {
       setBrowserState("error");
       setErrorMsg(err instanceof Error ? err.message : "Failed to start browser");
     }
-  }, [projectId, url, selectedBranch]);
+  }, [projectId, url, selectedBranch, addFrame]);
 
   const handleStop = useCallback(async () => {
     if (!projectId) return;
+    releaseRef.current?.();
+    releaseRef.current = null;
+    removeFrame(projectId);
     try {
       await api.stopBrowser(projectId);
     } catch { /* ignore */ }
     setBrowserState("idle");
-  }, [projectId]);
+  }, [projectId, removeFrame]);
 
   const handleRefresh = useCallback(() => {
-    setIframeKey((k) => k + 1);
-  }, []);
+    if (!projectId) return;
+    refreshFrame(projectId);
+  }, [projectId, refreshFrame]);
 
   const handleOpenExternal = useCallback(() => {
     if (url) window.open(url, "_blank");
@@ -107,19 +127,12 @@ export function PreviewPanel({ projectId, selectedBranch }: PreviewPanelProps) {
   const handleUrlSubmit = useCallback(
     (newUrl: string) => {
       setUrl(newUrl);
-      if (browserState === "running") {
-        // Reload iframe with new URL
-        setIframeKey((k) => k + 1);
+      if (browserState === "running" && projectId) {
+        updateFrameUrl(projectId, newUrl);
       }
     },
-    [browserState, setUrl],
+    [browserState, projectId, setUrl, updateFrameUrl],
   );
-
-  // Build the proxied iframe src
-  const iframeSrc =
-    browserState === "running" && url && projectId
-      ? api.getBrowserProxyUrl(projectId, url)
-      : undefined;
 
   return (
     <div className="h-full flex flex-col">
@@ -151,8 +164,8 @@ export function PreviewPanel({ projectId, selectedBranch }: PreviewPanelProps) {
           <WebPreviewUrl className="h-7 text-xs" />
         </WebPreviewNavigation>
 
-        {browserState === "running" && iframeSrc ? (
-          <WebPreviewBody key={iframeKey} src={iframeSrc} className="bg-white" />
+        {browserState === "running" ? (
+          <div ref={iframeHostRef} className="flex-1 bg-white" />
         ) : browserState === "connecting" ? (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="flex flex-col items-center gap-2">
