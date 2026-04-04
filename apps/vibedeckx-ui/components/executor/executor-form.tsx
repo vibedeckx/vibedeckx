@@ -36,6 +36,8 @@ const EXECUTOR_PRESETS: ExecutorPreset[] = [
   { name: "Type Check", command: "npx tsc --noEmit", executor_type: "command", pty: true, description: "Run TypeScript type checking without emitting files" },
   { name: "Test", command: "pnpm test", executor_type: "command", pty: true, description: "Run the test suite" },
   { name: "Rebase on and merge into main", command: "Our goal is to sync the current local branch with the local branch/worktree `main`. The two branches may have diverged.\n\nPlease do the following in order. Only proceed to the next step if the previous step succeeds:\n\n1. Rebase the current local branch onto the local branch `main`, and resolve any conflicts if needed.\n2. If, after the rebase, `main` does not yet contain the current branch's commits, switch to the `main` branch/worktree and merge the current branch into `main` using `git merge`. Do not use `git branch -f`.\n3. If the current branch is already fully contained in `main`, and `main` has newer commits, update the current branch so it includes the latest commits from `main`.\n4. Push both the current local branch and the local branch `main` to the remote.", executor_type: "prompt", pty: false, description: "Rebase current branch onto main, merge into main, and push both branches" },
+  { name: "Reset to main", command: "git reset --hard main", executor_type: "command", pty: true, description: "Hard reset the current branch to match main" },
+  { name: "Push to remote", command: "git push --force-with-lease", executor_type: "command", pty: true, description: "Force push to remote with lease safety check" },
 ];
 
 interface ExecutorFormProps {
