@@ -1166,4 +1166,63 @@ export const api = {
       throw new Error(error.error);
     }
   },
+
+  // ---- Browser Preview ----
+
+  async startBrowser(projectId: string, branch?: string): Promise<{ id: string; status: string; url: string }> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch }),
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: "Failed to start browser" }));
+      throw new Error(error.error || "Failed to start browser");
+    }
+    return res.json();
+  },
+
+  async getBrowserStatus(projectId: string): Promise<{ id: string; status: string; url: string } | null> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser`);
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error("Failed to get browser status");
+    }
+    return res.json();
+  },
+
+  async stopBrowser(projectId: string): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser`, {
+      method: "DELETE",
+    });
+    if (!res.ok && res.status !== 404) {
+      const error = await res.json().catch(() => ({ error: "Failed to stop browser" }));
+      throw new Error(error.error || "Failed to stop browser");
+    }
+  },
+
+  async navigateBrowser(projectId: string, url: string): Promise<{ title: string; url: string }> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser/navigate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: "Navigation failed" }));
+      throw new Error(error.error || "Navigation failed");
+    }
+    return res.json();
+  },
+
+  async reportBrowserError(projectId: string, error: { type: string; data: Record<string, unknown> }): Promise<void> {
+    await authFetch(`${getApiBase()}/api/projects/${projectId}/browser/error`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(error),
+    }).catch(() => { /* best effort */ });
+  },
+
+  getBrowserProxyUrl(projectId: string, targetUrl: string): string {
+    return `${getApiBase()}/api/projects/${projectId}/browser/proxy/${encodeURIComponent(targetUrl)}`;
+  },
 };
