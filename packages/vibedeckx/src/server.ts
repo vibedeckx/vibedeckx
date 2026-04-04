@@ -26,6 +26,7 @@ import reverseConnectRoutes from "./routes/reverse-connect-routes.js";
 import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
 import browserRoutes from "./routes/browser-routes.js";
+import browserProxyRoutes from "./routes/browser-proxy-routes.js";
 import { getAuth, clerkClient } from "@clerk/fastify";
 import "./server-types.js";
 
@@ -214,6 +215,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.register(eventRoutes);
   server.register(terminalRoutes);
   server.register(browserRoutes);
+  server.register(browserProxyRoutes);
 
   // 提供静态 UI 文件
   server.register(fastifyStatic, {
