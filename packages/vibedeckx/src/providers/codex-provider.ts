@@ -349,6 +349,22 @@ export class CodexProvider implements AgentProvider {
     }) + "\n";
   }
 
+  // ============ Interrupt (cancel current turn) ============
+
+  formatInterrupt(sessionId: string): string | null {
+    const state = this.getSessionState(sessionId);
+    for (const [id, method] of state.pendingRequests) {
+      if (method === "turn/start") {
+        return JSON.stringify({
+          jsonrpc: "2.0",
+          method: "$/cancelRequest",
+          params: { id },
+        }) + "\n";
+      }
+    }
+    return null;
+  }
+
   // ============ Lifecycle hooks ============
 
   onSessionCreated(sessionId: string): void {

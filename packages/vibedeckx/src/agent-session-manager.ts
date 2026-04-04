@@ -719,10 +719,18 @@ export class AgentSessionManager {
     }
 
     try {
+      const proc = session.process;
+
+      // Try provider-specific interrupt first (e.g. $/cancelRequest for Codex)
+      const provider = getProvider(session.agentType);
+      const interruptMsg = provider.formatInterrupt?.(sessionId);
+      if (interruptMsg && proc?.stdin) {
+        proc.stdin.write(interruptMsg);
+      }
+
       // Clear session.process before killing so the process close handler
       // (which checks session.process !== childProcess) skips its cleanup —
       // we handle status + broadcast here instead.
-      const proc = session.process;
       session.process = null;
       proc?.kill("SIGTERM");
 
