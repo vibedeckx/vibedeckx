@@ -95,6 +95,9 @@ jobs:
             done
           fi
 
+          # Ensure node-pty spawn-helper is executable (fixes posix_spawnp on macOS)
+          find node_modules/node-pty -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
+
           # Remove node-pty build artifacts not needed at runtime
           rm -rf node_modules/node-pty/src node_modules/node-pty/deps \
                  node_modules/node-pty/third_party node_modules/node-pty/scripts \
