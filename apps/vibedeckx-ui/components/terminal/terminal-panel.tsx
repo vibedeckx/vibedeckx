@@ -198,9 +198,8 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
             onExit={handleExit}
           />
         ) : (
-          <div className="h-full flex flex-col items-center justify-center gap-3">
-            <Terminal className="h-16 w-16 text-muted-foreground/50" strokeWidth={1.5} />
-            <p className="text-sm text-muted-foreground/60">Click + to open a terminal</p>
+          <div className="h-full flex items-center justify-center text-muted-foreground">
+            <Terminal className="h-10 w-10 text-muted-foreground/70" />
           </div>
         )}
       </div>
