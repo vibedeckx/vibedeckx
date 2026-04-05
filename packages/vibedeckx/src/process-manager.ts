@@ -1,6 +1,7 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, chmodSync, readdirSync, statSync } from "fs";
 import path from "path";
+import { createRequire } from "module";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { Executor, ExecutorProcessStatus, PromptProvider, Storage } from "./storage/types.js";
@@ -42,6 +43,33 @@ interface RunningProcess {
 
 const LOG_RETENTION_MS = 5 * 60 * 1000; // 5 minutes
 const TERMINAL_MAX_LOG_ENTRIES = 5000;
+
+/**
+ * node-pty on macOS uses a `spawn-helper` binary in prebuilds/.
+ * pnpm strips execute bits from tarball entries, so posix_spawn fails
+ * with "Permission denied". Fix permissions at startup.
+ */
+function fixNodePtyPermissions(): void {
+  try {
+    const require_ = createRequire(import.meta.url);
+    const ptyDir = path.dirname(require_.resolve("node-pty/package.json"));
+    const prebuildsDir = path.join(ptyDir, "prebuilds");
+    if (!existsSync(prebuildsDir)) return;
+    for (const platform of readdirSync(prebuildsDir)) {
+      const helper = path.join(prebuildsDir, platform, "spawn-helper");
+      if (existsSync(helper)) {
+        const mode = statSync(helper).mode;
+        if (!(mode & 0o111)) {
+          chmodSync(helper, mode | 0o755);
+          console.log(`[ProcessManager] Fixed spawn-helper permissions: ${helper}`);
+        }
+      }
+    }
+  } catch {
+    // Non-critical — PTY will fall back to child_process if spawn fails
+  }
+}
+fixNodePtyPermissions();
 
 export class ProcessManager {
   private processes: Map<string, RunningProcess> = new Map();
