@@ -5,8 +5,5 @@
   "os": ["darwin"],
   "cpu": ["arm64"],
   "type": "module",
-  "bin": {
-    "vibedeckx": "./dist/bin.js"
-  },
   "bundleDependencies": true
 }
