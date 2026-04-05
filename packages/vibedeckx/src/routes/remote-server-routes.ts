@@ -142,7 +142,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const proto = request.headers["x-forwarded-proto"] || request.protocol || "http";
       const host = request.headers["x-forwarded-host"] || request.headers.host || "localhost";
       const serverUrl = `${proto}://${host}`;
-      const connectCommand = `vibedeckx connect --connect-to ${serverUrl} --token ${token}`;
+      const connectCommand = `npx vibedeckx@latest connect --connect-to ${serverUrl} --token ${token}`;
       return reply.send({ token, connectCommand });
     }
   );
