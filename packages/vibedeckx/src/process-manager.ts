@@ -190,49 +190,49 @@ export class ProcessManager {
       throw new Error(`Working directory does not exist: ${cwd}`);
     }
 
-    // Build ordered list of shells to try. On macOS, node-pty's posix_spawnp
-    // can fail for certain shells (e.g. /bin/bash on ARM64), so we fall back
-    // through alternatives.
-    const shells: string[] = [];
+    let shell: string;
     if (process.platform === "win32") {
-      shells.push("powershell.exe");
+      shell = "powershell.exe";
     } else {
-      const preferred = process.env.SHELL || "/bin/zsh";
-      shells.push(preferred.includes("/") ? preferred : `/bin/${preferred}`);
-      // Add fallbacks that aren't already in the list
-      for (const fallback of ["/bin/zsh", "/bin/bash", "/bin/sh"]) {
-        if (!shells.includes(fallback)) shells.push(fallback);
+      shell = process.env.SHELL || "/bin/zsh";
+      if (!shell.includes("/")) {
+        shell = `/bin/${shell}`;
       }
     }
 
-    console.log(`[ProcessManager] Starting terminal ${processId} (${name}) in ${cwd}, shells=${shells.join(", ")}`);
+    console.log(`[ProcessManager] Starting terminal ${processId} (${name}) in ${cwd}, shell=${shell}`);
 
     const ptyEnv = { ...process.env, TERM: "xterm-256color", FORCE_COLOR: "1" } as Record<string, string>;
-    let ptyProcess: IPty | undefined;
-    let lastError: unknown;
-    for (const shell of shells) {
-      try {
-        ptyProcess = pty.spawn(shell, [], {
-          name: "xterm-256color",
-          cols: 80,
-          rows: 24,
-          cwd,
-          env: ptyEnv,
-        });
-        console.log(`[ProcessManager] Terminal ${processId} spawned with ${shell}, PID: ${ptyProcess.pid}`);
-        break;
-      } catch (err) {
-        console.warn(`[ProcessManager] Failed to spawn terminal with ${shell}: ${err}`);
-        lastError = err;
-      }
-    }
-    if (!ptyProcess) {
-      throw lastError ?? new Error("All shell candidates failed");
+
+    // Try PTY first (proper interactive terminal). If node-pty's native module
+    // fails (e.g. posix_spawnp broken on macOS ARM64), fall back to a regular
+    // child process which still gives a usable shell, just without full PTY
+    // features like raw-mode input.
+    let usePty = true;
+    let proc: IPty | ChildProcess;
+    try {
+      proc = pty.spawn(shell, [], {
+        name: "xterm-256color",
+        cols: 80,
+        rows: 24,
+        cwd,
+        env: ptyEnv,
+      });
+      console.log(`[ProcessManager] Terminal ${processId} spawned with PTY, PID: ${(proc as IPty).pid}`);
+    } catch (ptyErr) {
+      console.warn(`[ProcessManager] PTY spawn failed for terminal ${processId}, falling back to regular process: ${ptyErr}`);
+      usePty = false;
+      proc = spawn(shell, ["-i"], {
+        cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: ptyEnv,
+      });
+      console.log(`[ProcessManager] Terminal ${processId} spawned with regular process, PID: ${(proc as ChildProcess).pid}`);
     }
 
     const runningProcess: RunningProcess = {
-      process: ptyProcess,
-      isPty: true,
+      process: proc,
+      isPty: usePty,
       isTerminal: true,
       name,
       logs: [],
@@ -246,28 +246,56 @@ export class ProcessManager {
 
     this.processes.set(processId, runningProcess);
 
-    ptyProcess.onData((data: string) => {
-      const msg: LogMessage = { type: "pty", data };
-      runningProcess.logs.push(msg);
-      if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-      }
-      this.broadcast(processId, msg);
-    });
+    if (usePty) {
+      const ptyProc = proc as IPty;
+      ptyProc.onData((data: string) => {
+        const msg: LogMessage = { type: "pty", data };
+        runningProcess.logs.push(msg);
+        if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
+          runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
+        }
+        this.broadcast(processId, msg);
+      });
 
-    ptyProcess.onExit(({ exitCode }) => {
-      const code = exitCode ?? 0;
-      console.log(`[ProcessManager] Terminal ${processId} exited with code ${code}`);
-      const msg: LogMessage = { type: "finished", exitCode: code };
-      runningProcess.logs.push(msg);
-      this.broadcast(processId, msg);
-      // Keep terminal in the map briefly so late WebSocket connections
-      // (e.g. remote proxy) can still retrieve logs and the finished status
-      // instead of getting "Process not found".
-      setTimeout(() => {
-        this.processes.delete(processId);
-      }, LOG_RETENTION_MS);
-    });
+      ptyProc.onExit(({ exitCode }) => {
+        const code = exitCode ?? 0;
+        console.log(`[ProcessManager] Terminal ${processId} exited with code ${code}`);
+        const msg: LogMessage = { type: "finished", exitCode: code };
+        runningProcess.logs.push(msg);
+        this.broadcast(processId, msg);
+        setTimeout(() => {
+          this.processes.delete(processId);
+        }, LOG_RETENTION_MS);
+      });
+    } else {
+      const childProc = proc as ChildProcess;
+      childProc.stdout?.on("data", (data: Buffer) => {
+        const msg: LogMessage = { type: "pty", data: data.toString() };
+        runningProcess.logs.push(msg);
+        if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
+          runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
+        }
+        this.broadcast(processId, msg);
+      });
+      childProc.stderr?.on("data", (data: Buffer) => {
+        const msg: LogMessage = { type: "pty", data: data.toString() };
+        runningProcess.logs.push(msg);
+        if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
+          runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
+        }
+        this.broadcast(processId, msg);
+      });
+      childProc.on("close", (code) => {
+        const exitCode = code ?? 0;
+        console.log(`[ProcessManager] Terminal ${processId} exited with code ${exitCode}`);
+        const msg: LogMessage = { type: "finished", exitCode };
+        runningProcess.logs.push(msg);
+        this.broadcast(processId, msg);
+        setTimeout(() => {
+          this.processes.delete(processId);
+        }, LOG_RETENTION_MS);
+      });
+    }
 
     return { id: processId, name };
   }
@@ -724,22 +752,31 @@ export class ProcessManager {
   }
 
   /**
-   * Handle input from the client (for PTY processes)
+   * Handle input from the client (for PTY or terminal processes)
    */
   handleInput(processId: string, message: InputMessage): boolean {
     const runningProcess = this.processes.get(processId);
-    if (!runningProcess || !runningProcess.isPty) {
+    if (!runningProcess) {
       return false;
     }
 
-    const ptyProcess = runningProcess.process as IPty;
-
-    if (message.type === "input") {
-      ptyProcess.write(message.data);
-      return true;
-    } else if (message.type === "resize") {
-      ptyProcess.resize(message.cols, message.rows);
-      return true;
+    if (runningProcess.isPty) {
+      const ptyProcess = runningProcess.process as IPty;
+      if (message.type === "input") {
+        ptyProcess.write(message.data);
+        return true;
+      } else if (message.type === "resize") {
+        ptyProcess.resize(message.cols, message.rows);
+        return true;
+      }
+    } else if (runningProcess.isTerminal) {
+      // Non-PTY terminal fallback: write to stdin
+      const childProcess = runningProcess.process as ChildProcess;
+      if (message.type === "input") {
+        childProcess.stdin?.write(message.data);
+        return true;
+      }
+      // resize is not supported for non-PTY processes
     }
 
     return false;
@@ -754,7 +791,7 @@ export class ProcessManager {
     if (!runningProcess) {
       throw new Error(`Terminal ${processId} not found`);
     }
-    if (!runningProcess.isPty || !runningProcess.isTerminal) {
+    if (!runningProcess.isTerminal) {
       throw new Error(`Process ${processId} is not an interactive terminal`);
     }
     const lastLog = runningProcess.logs[runningProcess.logs.length - 1];
@@ -762,8 +799,11 @@ export class ProcessManager {
       throw new Error(`Terminal ${processId} has already exited`);
     }
 
-    const ptyProcess = runningProcess.process as IPty;
-    ptyProcess.write(`${command}\n`);
+    if (runningProcess.isPty) {
+      (runningProcess.process as IPty).write(`${command}\n`);
+    } else {
+      (runningProcess.process as ChildProcess).stdin?.write(`${command}\n`);
+    }
   }
 
   /**
