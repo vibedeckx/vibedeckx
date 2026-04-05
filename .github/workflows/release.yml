@@ -120,12 +120,14 @@ jobs:
                -exec rm -rf {} + 2>/dev/null || true
 
           # Remove TypeScript declarations, source maps, and misc files
+          # Note: no dist/ exclusion — .map, .ts, .mts files inside dist/ are source maps
+          # and TypeScript source, not runtime code. Safe to remove everywhere.
           find node_modules -type f \( -name "*.d.ts" -o -name "*.d.mts" -o -name "*.d.cts" \
-               -o -name "*.map" -o -name "*.md" -o -name "*.flow" \
+               -o -name "*.map" -o -name "*.md" -o -name "*.flow" -o -name "*.ts" -o -name "*.mts" \
                -o -name "CHANGELOG*" -o -name "HISTORY*" -o -name "LICENSE*" \
-               -o -name "*.ts" -o -name "Makefile" -o -name "*.gyp" \
+               -o -name "Makefile" -o -name "*.gyp" \
                -o -name "*.gypi" -o -name "binding.cc" -o -name "*.c" -o -name "*.h" \) \
-               ! -path "*/dist/*" -delete 2>/dev/null || true
+               -delete 2>/dev/null || true
 
           cd ../..
 
@@ -206,8 +208,8 @@ jobs:
           }
 
           # Remove TypeScript declarations, source maps, and misc files
-          Get-ChildItem "node_modules" -Recurse -File -Include @("*.d.ts", "*.d.mts", "*.d.cts", "*.map", "*.md", "*.flow", "LICENSE*", "Makefile", "*.gyp", "*.gypi", "binding.cc", "*.c", "*.h") -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notlike "*\dist\*" } |
+          # Note: no dist\ exclusion — .map, .ts, .mts inside dist\ are source maps and TS source, not runtime code
+          Get-ChildItem "node_modules" -Recurse -File -Include @("*.d.ts", "*.d.mts", "*.d.cts", "*.map", "*.md", "*.flow", "*.ts", "*.mts", "LICENSE*", "Makefile", "*.gyp", "*.gypi", "binding.cc", "*.c", "*.h") -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
 
           Set-Location ../..
