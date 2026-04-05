@@ -58,6 +58,30 @@ jobs:
           npm install --omit=dev --ignore-scripts --legacy-peer-deps
           npm rebuild better-sqlite3 node-pty
 
+          # Patch native module package.json files:
+          # 1. Remove install scripts (already compiled, source files will be stripped)
+          # 2. Remove gypfile flag and binding.gyp (prevents npm from auto-running node-gyp)
+          # 3. Add build/ to files whitelist (npm publish respects each bundled package's files filter)
+          node -e "
+            const fs = require('fs');
+            for (const pkg of ['node-pty', 'better-sqlite3']) {
+              const p = 'node_modules/' + pkg + '/package.json';
+              if (fs.existsSync(p)) {
+                const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+                delete j.scripts;
+                delete j.gypfile;
+                if (Array.isArray(j.files)) {
+                  j.files = j.files.filter(f => f !== 'binding.gyp');
+                  if (!j.files.includes('build/')) j.files.push('build/');
+                }
+                fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+              }
+              // Delete binding.gyp to prevent npm auto-gyp detection
+              const gyp = 'node_modules/' + pkg + '/binding.gyp';
+              if (fs.existsSync(gyp)) fs.unlinkSync(gyp);
+            }
+          "
+
           # Trim node_modules to reduce package size
           CURRENT_PLATFORM="${{ matrix.platform }}"
 
@@ -126,6 +150,30 @@ jobs:
           Set-Location "staging/${archiveName}"
           npm install --omit=dev --ignore-scripts --legacy-peer-deps
           npm rebuild better-sqlite3 node-pty
+
+          # Patch native module package.json files:
+          # 1. Remove install scripts (already compiled, source files will be stripped)
+          # 2. Remove gypfile flag and binding.gyp (prevents npm from auto-running node-gyp)
+          # 3. Add build/ to files whitelist (npm publish respects each bundled package's files filter)
+          node -e "
+            const fs = require('fs');
+            for (const pkg of ['node-pty', 'better-sqlite3']) {
+              const p = 'node_modules/' + pkg + '/package.json';
+              if (fs.existsSync(p)) {
+                const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+                delete j.scripts;
+                delete j.gypfile;
+                if (Array.isArray(j.files)) {
+                  j.files = j.files.filter(f => f !== 'binding.gyp');
+                  if (!j.files.includes('build/')) j.files.push('build/');
+                }
+                fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+              }
+              // Delete binding.gyp to prevent npm auto-gyp detection
+              const gyp = 'node_modules/' + pkg + '/binding.gyp';
+              if (fs.existsSync(gyp)) fs.unlinkSync(gyp);
+            }
+          "
 
           # Trim node_modules to reduce package size
           $currentPlatform = "${{ matrix.platform }}" -split "-"
