@@ -64,46 +64,61 @@ node packages/vibedeckx/dist/bin.js --port 8080
 
 ### 本地打包
 
-使用 `scripts/pack.sh` 一键构建分发包，产物输出到 `dist-out/` 目录：
+使用 `scripts/pack.sh` 构建分发包，产物输出到 `dist-out/` 目录：
 
 ```bash
-./scripts/pack.sh              # 构建两种包（npm + 平台归档）
-./scripts/pack.sh npm          # 只构建 npm 包
-./scripts/pack.sh platform     # 只构建平台归档
-./scripts/pack.sh --skip-build # 跳过 pnpm build（复用已有的 dist/）
+./scripts/pack.sh                  # 构建 npm 包 + 平台归档
+./scripts/pack.sh npm              # 只构建主包 npm tarball
+./scripts/pack.sh platform         # 只构建平台归档（用于 npx / 直接下载）
+./scripts/pack.sh npm-platform     # 构建 npm 平台包（与 npmjs 发布版本一致）
+./scripts/pack.sh <mode> --skip-build  # 跳过 pnpm build（复用已有的 dist/）
 ```
 
-参数可组合使用，例如 `./scripts/pack.sh platform --skip-build`。
-
-产出两种包：
+产出三种包：
 
 | 类型 | 文件示例 | 说明 |
 |------|---------|------|
-| npm 包 | `vibedeckx-0.1.0.tgz` | 轻量包，用户安装时编译 native 模块 |
-| 平台归档 | `vibedeckx-0.1.0-linux-x64.tar.gz` | 预编译依赖，开箱即用 |
+| npm 主包 | `vibedeckx-0.1.0.tgz` | 轻量 wrapper（仅 `bin/vibedeckx.mjs`） |
+| 平台归档 | `vibedeckx-0.1.0-linux-x64.tar.gz` | 预编译依赖，开箱即用，用于 GitHub Release |
+| npm 平台包 | `vibedeckx-linux-x64-0.1.0.tgz` | 与 npmjs 上 `@vibedeckx/linux-x64` 一致 |
 
-#### npm 包使用方式
+#### platform vs npm-platform
+
+两者都包含 esbuild bundle（`dist/bin.js` + `dist/ui/`）和预编译 native 模块（`node-pty`、`better-sqlite3`），区别如下：
+
+|  | `platform` | `npm-platform` |
+|---|---|---|
+| 包名 | `vibedeckx`（无 scope） | `@vibedeckx/linux-x64`（scoped） |
+| `bin` 字段 | 有（`vibedeckx` -> `./dist/bin.js`） | 无 |
+| Sourcemap | 包含 | 不包含 |
+| 用途 | 直接下载运行，`npx -y ./file.tar.gz` | 本地测试 npm 安装流程 |
+| 对应 | GitHub Release 资产 | npmjs.com 发布的包 |
+
+**`platform`** 是面向终端用户的独立归档，包名为无 scope 的 `vibedeckx` 并带有 `bin` 入口，可通过 `npx -y ./vibedeckx-0.1.0-linux-x64.tar.gz` 直接运行。
+
+**`npm-platform`** 复现 CI 发布到 npmjs 的 `@vibedeckx/linux-x64` 包，用于在发布前本地验证 npm 安装流程：
 
 ```bash
-# 直接运行
-npx /path/to/vibedeckx-0.1.0.tgz
+# 构建 npm 平台包
+./scripts/pack.sh npm-platform --skip-build
 
-# 或全局安装后运行
-npm install -g /path/to/vibedeckx-0.1.0.tgz
-vibedeckx
+# 本地安装测试
+npm install ./dist-out/vibedeckx-linux-x64-0.1.0.tgz
 ```
 
-> 注意：npm 包方式需要用户机器上有 C++ 编译工具链（用于编译 better-sqlite3、node-pty）。
+#### 安装时包的关系
 
-#### 平台归档使用方式
-
-```bash
-# 解压后直接运行
-tar -xzf vibedeckx-0.1.0-linux-x64.tar.gz
-node vibedeckx-0.1.0-linux-x64/dist/bin.js
+```
+npx vibedeckx
+  -> 安装 vibedeckx（轻量 wrapper，几 KB）
+     -> optionalDependencies 触发安装 @vibedeckx/linux-x64
+        -> 包含 dist/bin.js（esbuild bundle）+ dist/ui/ + native node_modules/
+  -> bin/vibedeckx.mjs 定位平台包并运行 dist/bin.js
 ```
 
 ### 发布到 npm
+
+通过推送 `v*` tag 触发 CI 自动发布（见下方 Release 章节），或手动发布：
 
 ```bash
 cd packages/vibedeckx
@@ -226,7 +241,7 @@ git push origin v0.1.0
 |------|---------|
 | Linux x64 | `.tar.gz` |
 | macOS ARM (Apple Silicon) | `.tar.gz` |
-| Windows x64 | `.zip` |
+| Windows x64 | `.tar.gz` |
 
 下载解压后使用 Node.js 22+ 运行：
 
