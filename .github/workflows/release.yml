@@ -40,11 +40,11 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Package archive (Unix)
-        if: runner.os != 'Windows'
+      - name: Package and prepare platform artifacts
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           ARCHIVE_NAME="vibedeckx-${VERSION}-${{ matrix.platform }}"
+          CURRENT_PLATFORM="${{ matrix.platform }}"
           mkdir -p "staging/${ARCHIVE_NAME}"
 
           # Copy dist (esbuild bundle + bundled UI)
@@ -53,160 +53,50 @@ jobs:
           # Copy platform package.json (has native module dependencies)
           cp "packages/vibedeckx-${{ matrix.platform }}/package.json" "staging/${ARCHIVE_NAME}/"
 
-          # Inject bin entry and package name for npx compatibility
-          node -e "
-            const fs = require('fs');
-            const p = 'staging/${ARCHIVE_NAME}/package.json';
-            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
-            pkg.name = 'vibedeckx';
-            pkg.bin = { vibedeckx: './dist/bin.js' };
-            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
-          "
-
-          # Install only native module dependencies and rebuild for target platform
+          # Install native module dependencies and rebuild for target platform
           cd "staging/${ARCHIVE_NAME}"
           npm install --ignore-scripts --legacy-peer-deps
           npm rebuild better-sqlite3 node-pty
 
-          # Allowlist: copy only runtime files into a clean node_modules
-          CURRENT_PLATFORM="${{ matrix.platform }}"
-          mv node_modules node_modules_full
-          mkdir -p node_modules
-
-          # Patch native module package.json files (remove scripts/gypfile, add build/ to files)
+          # Patch native module package.json: remove scripts/gypfile, set files to runtime-only
+          # npm pack and npm publish (via bundleDependencies) respect each package's files field
           node -e "
             const fs = require('fs');
-            for (const pkg of ['node-pty', 'better-sqlite3']) {
-              const p = 'node_modules_full/' + pkg + '/package.json';
-              if (fs.existsSync(p)) {
-                const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-                delete j.scripts;
-                delete j.gypfile;
-                if (Array.isArray(j.files)) {
-                  j.files = j.files.filter(f => f !== 'binding.gyp');
-                  if (!j.files.includes('build/')) j.files.push('build/');
-                  if (!j.files.includes('lib/')) j.files.push('lib/');
-                  if (!j.files.includes('prebuilds/')) j.files.push('prebuilds/');
-                }
-                fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
-              }
-            }
+            const platform = '${CURRENT_PLATFORM}';
+
+            const pty = JSON.parse(fs.readFileSync('node_modules/node-pty/package.json', 'utf8'));
+            delete pty.scripts;
+            delete pty.gypfile;
+            pty.files = ['lib/', 'prebuilds/' + platform + '/'];
+            fs.writeFileSync('node_modules/node-pty/package.json', JSON.stringify(pty, null, 2) + '\n');
+
+            const bs3 = JSON.parse(fs.readFileSync('node_modules/better-sqlite3/package.json', 'utf8'));
+            delete bs3.scripts;
+            delete bs3.gypfile;
+            bs3.files = ['lib/', 'build/Release/better_sqlite3.node'];
+            fs.writeFileSync('node_modules/better-sqlite3/package.json', JSON.stringify(bs3, null, 2) + '\n');
           "
 
-          # node-pty: package.json + lib/ (JS runtime) + platform prebuild (includes spawn-helper on macOS)
-          mkdir -p "node_modules/node-pty/prebuilds/${CURRENT_PLATFORM}"
-          cp node_modules_full/node-pty/package.json node_modules/node-pty/
-          cp -r node_modules_full/node-pty/lib node_modules/node-pty/
-          cp -r "node_modules_full/node-pty/prebuilds/${CURRENT_PLATFORM}/." "node_modules/node-pty/prebuilds/${CURRENT_PLATFORM}/"
+          # Ensure spawn-helper is executable (macOS)
           find node_modules/node-pty -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
 
-          # better-sqlite3: package.json + lib/ (JS runtime) + compiled .node binary
-          mkdir -p node_modules/better-sqlite3/build/Release
-          cp node_modules_full/better-sqlite3/package.json node_modules/better-sqlite3/
-          cp -r node_modules_full/better-sqlite3/lib node_modules/better-sqlite3/
-          cp node_modules_full/better-sqlite3/build/Release/better_sqlite3.node node_modules/better-sqlite3/build/Release/
-
-          # Transitive runtime deps (better-sqlite3 uses 'bindings' to locate .node files)
-          cp -r node_modules_full/bindings node_modules/
-          cp -r node_modules_full/file-uri-to-path node_modules/
-
-          rm -rf node_modules_full
-
-          cd ../..
-
-          # Create tarball
-          tar -czf "${ARCHIVE_NAME}.tar.gz" -C staging "${ARCHIVE_NAME}"
-
-      - name: Package archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v',''
-          $archiveName = "vibedeckx-${version}-${{ matrix.platform }}"
-          New-Item -ItemType Directory -Force -Path "staging/${archiveName}"
-
-          # Copy dist (esbuild bundle + bundled UI)
-          Copy-Item -Recurse packages/vibedeckx/dist "staging/${archiveName}/"
-
-          # Copy platform package.json (has native module dependencies)
-          Copy-Item "packages/vibedeckx-${{ matrix.platform }}/package.json" "staging/${archiveName}/"
-
-          # Inject bin entry and package name for npx compatibility
+          # --- Archive: inject bin for npx, create via npm pack ---
           node -e "
             const fs = require('fs');
-            const p = 'staging/${archiveName}/package.json';
-            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             pkg.name = 'vibedeckx';
+            pkg.version = '${VERSION}';
             pkg.bin = { vibedeckx: './dist/bin.js' };
-            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
+          npm pack --pack-destination ../../
+          mv "../../vibedeckx-${VERSION}.tgz" "../../${ARCHIVE_NAME}.tar.gz"
 
-          # Install only native module dependencies and rebuild for target platform
-          Set-Location "staging/${archiveName}"
-          npm install --ignore-scripts --legacy-peer-deps
-          npm rebuild better-sqlite3 node-pty
-
-          # Allowlist: copy only runtime files into a clean node_modules
-          $currentPlatform = "${{ matrix.platform }}"
-          Rename-Item node_modules node_modules_full
-          New-Item -ItemType Directory -Force -Path node_modules
-
-          # Patch native module package.json files (remove scripts/gypfile, add build/ to files)
-          node -e "
-            const fs = require('fs');
-            for (const pkg of ['node-pty', 'better-sqlite3']) {
-              const p = 'node_modules_full/' + pkg + '/package.json';
-              if (fs.existsSync(p)) {
-                const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-                delete j.scripts;
-                delete j.gypfile;
-                if (Array.isArray(j.files)) {
-                  j.files = j.files.filter(f => f !== 'binding.gyp');
-                  if (!j.files.includes('build/')) j.files.push('build/');
-                  if (!j.files.includes('lib/')) j.files.push('lib/');
-                  if (!j.files.includes('prebuilds/')) j.files.push('prebuilds/');
-                }
-                fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
-              }
-            }
-          "
-
-          # node-pty: package.json + lib/ (JS runtime) + platform prebuild (includes conpty dir on Windows)
-          New-Item -ItemType Directory -Force -Path "node_modules/node-pty/prebuilds/${currentPlatform}"
-          Copy-Item node_modules_full/node-pty/package.json node_modules/node-pty/
-          Copy-Item -Recurse node_modules_full/node-pty/lib node_modules/node-pty/
-          Copy-Item -Recurse "node_modules_full/node-pty/prebuilds/${currentPlatform}/*" "node_modules/node-pty/prebuilds/${currentPlatform}/"
-
-          # better-sqlite3: package.json + lib/ (JS runtime) + compiled .node binary
-          New-Item -ItemType Directory -Force -Path node_modules/better-sqlite3/build/Release
-          Copy-Item node_modules_full/better-sqlite3/package.json node_modules/better-sqlite3/
-          Copy-Item -Recurse node_modules_full/better-sqlite3/lib node_modules/better-sqlite3/
-          Copy-Item node_modules_full/better-sqlite3/build/Release/better_sqlite3.node node_modules/better-sqlite3/build/Release/
-
-          # Transitive runtime deps (better-sqlite3 uses 'bindings' to locate .node files)
-          Copy-Item -Recurse node_modules_full/bindings node_modules/
-          Copy-Item -Recurse node_modules_full/file-uri-to-path node_modules/
-
-          Remove-Item -Recurse -Force node_modules_full
-
-          Set-Location ../..
-
-          # Create zip
-          Compress-Archive -Path "staging/${archiveName}" -DestinationPath "${archiveName}.zip"
-
-      # Prepare platform npm package from the staged build
-      - name: Prepare platform npm package (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          ARCHIVE_NAME="vibedeckx-${VERSION}-${{ matrix.platform }}"
+          # --- npm package: use platform template (scoped name, no bin) ---
+          cd ../..
           mkdir -p npm-package
-
-          # Copy dist (esbuild bundle + UI) and trimmed native node_modules from staging
           cp -r "staging/${ARCHIVE_NAME}/dist" npm-package/
           cp -r "staging/${ARCHIVE_NAME}/node_modules" npm-package/
-
-          # Use platform template package.json and set version
           cp "packages/vibedeckx-${{ matrix.platform }}/package.json" npm-package/
           node -e "
             const fs = require('fs');
@@ -214,41 +104,13 @@ jobs:
             pkg.version = '${VERSION}';
             fs.writeFileSync('npm-package/package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
+        shell: bash
 
-      - name: Prepare platform npm package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v',''
-          $archiveName = "vibedeckx-${version}-${{ matrix.platform }}"
-          New-Item -ItemType Directory -Force -Path npm-package
-
-          # Copy dist (esbuild bundle + UI) and trimmed native node_modules from staging
-          Copy-Item -Recurse "staging/${archiveName}/dist" npm-package/
-          Copy-Item -Recurse "staging/${archiveName}/node_modules" npm-package/
-
-          # Use platform template package.json and set version
-          Copy-Item "packages/vibedeckx-${{ matrix.platform }}/package.json" npm-package/
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('npm-package/package.json', 'utf8'));
-            pkg.version = '$version';
-            fs.writeFileSync('npm-package/package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-
-      - name: Upload release artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: vibedeckx-${{ matrix.platform }}
           path: "*.tar.gz"
-
-      - name: Upload release artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vibedeckx-${{ matrix.platform }}
-          path: "*.zip"
 
       - name: Upload npm platform package
         uses: actions/upload-artifact@v4
@@ -305,10 +167,10 @@ jobs:
 
           ### Windows
 
-          1. Download \`vibedeckx-${VERSION}-win32-x64.zip\`
+          1. Download \`vibedeckx-${VERSION}-win32-x64.tar.gz\`
           2. Run directly with npx:
           \`\`\`bash
-          npx -y ./vibedeckx-${VERSION}-win32-x64.zip
+          npx -y ./vibedeckx-${VERSION}-win32-x64.tar.gz
           \`\`\`
 
           ### Platform archives
@@ -318,7 +180,7 @@ jobs:
 
           for f in artifacts/*; do
             fname=$(basename "$f")
-            echo "| $(echo $fname | sed 's/vibedeckx-[0-9.]*-//' | sed 's/\.tar\.gz//' | sed 's/\.zip//') | \`${fname}\` |" >> release-notes.md
+            echo "| $(echo $fname | sed 's/vibedeckx-[0-9.]*-//' | sed 's/\.tar\.gz//') | \`${fname}\` |" >> release-notes.md
           done
 
       - name: Create GitHub Release

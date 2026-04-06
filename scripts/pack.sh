@@ -86,28 +86,43 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "platform" ]; then
   # Copy platform package.json (has native module dependencies)
   cp "$ROOT_DIR/packages/vibedeckx-${PLATFORM}/package.json" "$STAGING/"
 
-  # Inject bin entry and package name for npx compatibility
-  node -e "
-    const fs = require('fs');
-    const pkg = JSON.parse(fs.readFileSync('$STAGING/package.json', 'utf8'));
-    pkg.name = 'vibedeckx';
-    pkg.bin = { vibedeckx: './dist/bin.js' };
-    fs.writeFileSync('$STAGING/package.json', JSON.stringify(pkg, null, 2) + '\n');
-  "
-
-  # Install only native module dependencies and rebuild
+  # Install native module dependencies and rebuild
   echo "    Installing native module dependencies..."
   cd "$STAGING"
   npm install --ignore-scripts --legacy-peer-deps 2>&1 | tail -3
   echo "    Rebuilding native modules (better-sqlite3, node-pty)..."
   npm rebuild better-sqlite3 node-pty 2>&1 | tail -5
 
-  # Note: CI trims native modules (removes cross-platform prebuilds, source files, etc.)
-  # This local script skips trimming for speed. The archive will be larger than CI output.
+  # Patch native module package.json: set files to runtime-only, inject bin for npx
+  node -e "
+    const fs = require('fs');
+    const platform = '${PLATFORM}';
 
-  # Create tarball
-  cd "$OUT_DIR/staging"
-  tar -czf "$OUT_DIR/${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+    const pty = JSON.parse(fs.readFileSync('node_modules/node-pty/package.json', 'utf8'));
+    delete pty.scripts;
+    delete pty.gypfile;
+    pty.files = ['lib/', 'prebuilds/' + platform + '/'];
+    fs.writeFileSync('node_modules/node-pty/package.json', JSON.stringify(pty, null, 2) + '\n');
+
+    const bs3 = JSON.parse(fs.readFileSync('node_modules/better-sqlite3/package.json', 'utf8'));
+    delete bs3.scripts;
+    delete bs3.gypfile;
+    bs3.files = ['lib/', 'build/Release/better_sqlite3.node'];
+    fs.writeFileSync('node_modules/better-sqlite3/package.json', JSON.stringify(bs3, null, 2) + '\n');
+
+    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    pkg.name = 'vibedeckx';
+    pkg.version = '${VERSION}';
+    pkg.bin = { vibedeckx: './dist/bin.js' };
+    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+  "
+
+  # Ensure spawn-helper is executable (macOS)
+  find node_modules/node-pty -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
+
+  # Create archive via npm pack (respects files fields via bundleDependencies)
+  npm pack --pack-destination "$OUT_DIR" 2>&1 | tail -1
+  mv "$OUT_DIR/vibedeckx-${VERSION}.tgz" "$OUT_DIR/${ARCHIVE_NAME}.tar.gz"
 
   # Cleanup staging
   rm -rf "$OUT_DIR/staging"
