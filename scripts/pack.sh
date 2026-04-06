@@ -93,6 +93,9 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "platform" ]; then
   echo "    Rebuilding native modules (better-sqlite3, node-pty)..."
   npm rebuild better-sqlite3 node-pty 2>&1 | tail -5
 
+  # Note: CI trims native modules (removes cross-platform prebuilds, source files, etc.)
+  # This local script skips trimming for speed. The archive will be larger than CI output.
+
   # Create tarball
   cd "$OUT_DIR/staging"
   tar -czf "$OUT_DIR/${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
