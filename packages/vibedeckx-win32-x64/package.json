@@ -5,5 +5,9 @@
   "os": ["win32"],
   "cpu": ["x64"],
   "type": "module",
-  "bundleDependencies": true
+  "bundleDependencies": true,
+  "dependencies": {
+    "node-pty": "^1.2.0-beta.12",
+    "better-sqlite3": "^11.6.0"
+  }
 }
