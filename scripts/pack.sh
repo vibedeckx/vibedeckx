@@ -80,14 +80,16 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "platform" ]; then
   rm -rf "$OUT_DIR/staging"
   mkdir -p "$STAGING"
 
-  # Copy dist + package.json
+  # Copy dist (esbuild bundle + UI)
   cp -r "$PKG_DIR/dist" "$STAGING/"
-  cp "$PKG_DIR/package.json" "$STAGING/"
 
-  # Install production deps and rebuild native modules
-  echo "    Installing production dependencies..."
+  # Copy platform package.json (has native module dependencies)
+  cp "$ROOT_DIR/packages/vibedeckx-${PLATFORM}/package.json" "$STAGING/"
+
+  # Install only native module dependencies and rebuild
+  echo "    Installing native module dependencies..."
   cd "$STAGING"
-  npm install --omit=dev --ignore-scripts --legacy-peer-deps 2>&1 | tail -3
+  npm install --ignore-scripts --legacy-peer-deps 2>&1 | tail -3
   echo "    Rebuilding native modules (better-sqlite3, node-pty)..."
   npm rebuild better-sqlite3 node-pty 2>&1 | tail -5
 
