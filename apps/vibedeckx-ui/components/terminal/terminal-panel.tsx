@@ -24,7 +24,7 @@ function TerminalInstance({
   terminalId: string;
   onExit: (id: string) => void;
 }) {
-  const { logs, sendInput, sendResize, exitCode } = useExecutorLogs(terminalId);
+  const { logs, sendInput, sendResize, exitCode, replayingHistory } = useExecutorLogs(terminalId);
 
   // When shell exits, notify parent
   useEffect(() => {
@@ -40,6 +40,7 @@ function TerminalInstance({
       className="h-full rounded-none border-0"
       onInput={sendInput}
       onResize={sendResize}
+      muteInput={replayingHistory}
     />
   );
 }

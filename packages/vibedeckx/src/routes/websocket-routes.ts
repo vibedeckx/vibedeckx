@@ -447,6 +447,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         for (const log of logs) {
           socket.send(JSON.stringify(log));
         }
+        socket.send(JSON.stringify({ type: "history_end" }));
 
         const isRunning = fastify.processManager.isRunning(processId);
         console.log(`[WebSocket] Process running: ${isRunning}`);

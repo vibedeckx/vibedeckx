@@ -226,7 +226,8 @@ export type LogMessage =
   | { type: "pty"; data: string }
   | { type: "finished"; exitCode: number }
   | { type: "init"; isPty: boolean }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "history_end" };
 
 export type InputMessage =
   | { type: "input"; data: string }

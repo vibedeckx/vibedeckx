@@ -14,6 +14,7 @@ interface ExecutorOutputProps {
   className?: string;
   onInput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
+  muteInput?: boolean;
 }
 
 // Always use xterm.js for rendering to properly interpret ANSI escape codes
@@ -23,11 +24,14 @@ export function ExecutorOutput({
   className,
   onInput,
   onResize,
+  muteInput,
 }: ExecutorOutputProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const lastLogIndexRef = useRef(0);
+  const muteInputRef = useRef(muteInput);
+  muteInputRef.current = muteInput;
 
   // Initialize terminal
   useEffect(() => {
@@ -92,7 +96,9 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // Handle user input (only in PTY mode)
     if (isPty && onInput) {
       terminal.onData((data) => {
-        onInput(data);
+        if (!muteInputRef.current) {
+          onInput(data);
+        }
       });
     }
 

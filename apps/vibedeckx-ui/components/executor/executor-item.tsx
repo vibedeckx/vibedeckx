@@ -79,7 +79,7 @@ export function ExecutorItem({
     opacity: isDragging ? 1 : undefined,
   };
 
-  const { logs, status, exitCode, isPty, sendInput, sendResize } = useExecutorLogs(localProcessId, executorMode);
+  const { logs, status, exitCode, isPty, replayingHistory, sendInput, sendResize } = useExecutorLogs(localProcessId, executorMode);
 
   // Sync local process ID with executor's current process
   useEffect(() => {
@@ -206,6 +206,7 @@ export function ExecutorItem({
                 isPty={isPty}
                 onInput={sendInput}
                 onResize={sendResize}
+                muteInput={replayingHistory}
               />
             </div>
           </CollapsibleContent>

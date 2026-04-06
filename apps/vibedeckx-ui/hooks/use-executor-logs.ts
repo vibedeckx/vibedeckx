@@ -14,6 +14,7 @@ export interface UseExecutorLogsResult {
   status: ConnectionStatus;
   exitCode: number | null;
   isPty: boolean;
+  replayingHistory: boolean;
   clearLogs: () => void;
   sendInput: (data: string) => void;
   sendResize: (cols: number, rows: number) => void;
@@ -24,6 +25,7 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
   const [status, setStatus] = useState<ConnectionStatus>("closed");
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [isPty, setIsPty] = useState<boolean>(false);
+  const [replayingHistory, setReplayingHistory] = useState<boolean>(true);
   const wsRef = useRef<WebSocket | null>(null);
   const pendingResizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -106,6 +108,9 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
 
           if (msg.type === "init") {
             setIsPty(msg.isPty);
+            setReplayingHistory(true);
+          } else if (msg.type === "history_end") {
+            setReplayingHistory(false);
           } else if (msg.type === "finished") {
             finishedRef.current = true;
             setExitCode(msg.exitCode);
@@ -179,5 +184,5 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
     };
   }, [processId, resetKey]);
 
-  return { logs, status, exitCode, isPty, clearLogs, sendInput, sendResize };
+  return { logs, status, exitCode, isPty, replayingHistory, clearLogs, sendInput, sendResize };
 }
