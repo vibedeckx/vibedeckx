@@ -101,12 +101,14 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "platform" ]; then
     const pty = JSON.parse(fs.readFileSync('node_modules/node-pty/package.json', 'utf8'));
     delete pty.scripts;
     delete pty.gypfile;
+    delete pty.dependencies;
     pty.files = ['lib/', 'prebuilds/' + platform + '/'];
     fs.writeFileSync('node_modules/node-pty/package.json', JSON.stringify(pty, null, 2) + '\n');
 
     const bs3 = JSON.parse(fs.readFileSync('node_modules/better-sqlite3/package.json', 'utf8'));
     delete bs3.scripts;
     delete bs3.gypfile;
+    delete bs3.dependencies;
     bs3.files = ['lib/', 'build/Release/better_sqlite3.node'];
     fs.writeFileSync('node_modules/better-sqlite3/package.json', JSON.stringify(bs3, null, 2) + '\n');
 

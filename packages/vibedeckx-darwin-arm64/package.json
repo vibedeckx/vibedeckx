@@ -6,7 +6,7 @@
   "cpu": ["arm64"],
   "type": "module",
   "bundleDependencies": true,
-  "files": ["dist", "node_modules"],
+  "files": ["dist/bin.js", "dist/ui", "node_modules"],
   "dependencies": {
     "node-pty": "^1.2.0-beta.12",
     "better-sqlite3": "^11.6.0"
