@@ -159,6 +159,44 @@ if [ "$MODE" = "npm-platform" ]; then
   rm -rf "$OUT_DIR/staging"
 
   echo "    Output: $OUT_DIR/vibedeckx-${PLATFORM}-${VERSION}.tgz"
+
+  # Also build the main thin wrapper package (identical to what CI publishes as 'vibedeckx')
+  echo ""
+  echo "==> Creating main wrapper package..."
+  WRAPPER_DIR="$OUT_DIR/staging/wrapper"
+  mkdir -p "$WRAPPER_DIR/bin"
+  cp "$PKG_DIR/bin/vibedeckx.mjs" "$WRAPPER_DIR/bin/"
+
+  # Rewrite package.json as thin wrapper (same as CI)
+  node -e "
+    const fs = require('fs');
+    const wrapper = {
+      name: 'vibedeckx',
+      version: '${VERSION}',
+      type: 'module',
+      description: 'AI-powered app generator with project management',
+      bin: { vibedeckx: './bin/vibedeckx.mjs' },
+      files: ['bin'],
+      engines: { node: '>=20' },
+      optionalDependencies: {
+        '@vibedeckx/linux-x64': '${VERSION}',
+        '@vibedeckx/darwin-arm64': '${VERSION}',
+        '@vibedeckx/win32-x64': '${VERSION}'
+      }
+    };
+    fs.writeFileSync('${WRAPPER_DIR}/package.json', JSON.stringify(wrapper, null, 2) + '\n');
+  "
+
+  cd "$WRAPPER_DIR"
+  npm pack --pack-destination "$OUT_DIR" 2>&1 | tail -1
+  rm -rf "$OUT_DIR/staging"
+
+  echo "    Output: $OUT_DIR/vibedeckx-${VERSION}.tgz"
+
+  echo ""
+  echo "==> To test the full npm install flow locally:"
+  echo "    npm install $OUT_DIR/vibedeckx-${VERSION}.tgz $OUT_DIR/vibedeckx-${PLATFORM}-${VERSION}.tgz"
+  echo "    npx vibedeckx"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────
