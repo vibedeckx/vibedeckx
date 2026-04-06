@@ -126,6 +126,7 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "platform" ]; then
     pkg.name = 'vibedeckx';
     pkg.version = '${VERSION}';
     pkg.bin = { vibedeckx: './dist/bin.js' };
+    pkg.files = ['dist', 'node_modules'];
     fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
   "
 
