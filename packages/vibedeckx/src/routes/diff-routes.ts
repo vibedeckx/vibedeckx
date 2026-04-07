@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
-import { parseDiffOutput } from "../utils/diff-parser.js";
+import { readFileSync } from "fs";
+import { parseDiffOutput, type DiffFile, type DiffLine } from "../utils/diff-parser.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
@@ -70,6 +71,70 @@ function buildDiffFallbackCommand(commit: string): string {
   return `git show ${commit} --format="" --no-color`;
 }
 
+async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
+  let untrackedOutput: string;
+  try {
+    const { execSync } = await import("child_process");
+    untrackedOutput = execSync(
+      "git ls-files --others --exclude-standard",
+      { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
+    ).trim();
+  } catch {
+    return [];
+  }
+
+  if (!untrackedOutput) return [];
+
+  const untrackedPaths = untrackedOutput.split("\n");
+  const files: DiffFile[] = [];
+
+  for (const filePath of untrackedPaths) {
+    try {
+      const fullPath = path.join(cwd, filePath);
+      const buffer = readFileSync(fullPath);
+
+      // Skip binary files (contain null bytes)
+      if (buffer.includes(0)) {
+        files.push({ path: filePath, status: "added", hunks: [] });
+        continue;
+      }
+
+      const content = buffer.toString("utf-8");
+      const lines = content.split("\n");
+      if (lines.length > 0 && lines[lines.length - 1] === "") {
+        lines.pop();
+      }
+
+      const diffLines: DiffLine[] = lines.map((line, i) => ({
+        type: "add" as const,
+        content: line,
+        newLineNo: i + 1,
+      }));
+
+      files.push({
+        path: filePath,
+        status: "added",
+        hunks:
+          diffLines.length > 0
+            ? [
+                {
+                  oldStart: 0,
+                  oldLines: 0,
+                  newStart: 1,
+                  newLines: diffLines.length,
+                  lines: diffLines,
+                },
+              ]
+            : [],
+      });
+    } catch {
+      // Skip files that can't be read (permission issues, etc.)
+    }
+  }
+
+  return files;
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get diff for a path (path-based, for remote execution)
   fastify.get<{
@@ -88,6 +153,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const cwd = resolveWorktreePath(projectPath, branch ?? null);
+    const untrackedFiles = !commit ? await getUntrackedFiles(cwd) : [];
 
     try {
       const { execSync } = await import("child_process");
@@ -97,7 +163,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         maxBuffer: 10 * 1024 * 1024,
       });
       const files = parseDiffOutput(diffOutput);
-      return reply.code(200).send({ files });
+      return reply.code(200).send({ files: [...files, ...untrackedFiles] });
     } catch {
       try {
         const { execSync } = await import("child_process");
@@ -106,9 +172,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
           { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
         );
         const files = parseDiffOutput(diffOutput);
-        return reply.code(200).send({ files });
+        return reply.code(200).send({ files: [...files, ...untrackedFiles] });
       } catch {
-        return reply.code(200).send({ files: [] });
+        return reply.code(200).send({ files: untrackedFiles });
       }
     }
   });
@@ -188,6 +254,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const cwd = resolveWorktreePath(project.path, branch ?? null);
+    const untrackedFiles = !commit ? await getUntrackedFiles(cwd) : [];
 
     try {
       const { execSync } = await import("child_process");
@@ -197,7 +264,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         maxBuffer: 10 * 1024 * 1024,
       });
       const files = parseDiffOutput(diffOutput);
-      return reply.code(200).send({ files });
+      return reply.code(200).send({ files: [...files, ...untrackedFiles] });
     } catch {
       try {
         const { execSync } = await import("child_process");
@@ -206,9 +273,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
           { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
         );
         const files = parseDiffOutput(diffOutput);
-        return reply.code(200).send({ files });
+        return reply.code(200).send({ files: [...files, ...untrackedFiles] });
       } catch {
-        return reply.code(200).send({ files: [] });
+        return reply.code(200).send({ files: untrackedFiles });
       }
     }
   });
