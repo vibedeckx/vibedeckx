@@ -109,6 +109,18 @@ export interface Task {
   updated_at: string;
 }
 
+export interface Rule {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  name: string;
+  content: string;
+  enabled: number;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export type AgentSessionStatus = 'running' | 'stopped' | 'error';
 
 export interface AgentSession {
@@ -231,6 +243,14 @@ export interface Storage {
     update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => Task | undefined;
     delete: (id: string) => void;
     reorder: (projectId: string, orderedIds: string[]) => void;
+  };
+  rules: {
+    create: (opts: { id: string; project_id: string; branch: string | null; name: string; content: string; enabled?: boolean }) => Rule;
+    getByWorkspace: (projectId: string, branch: string | null) => Rule[];
+    getById: (id: string) => Rule | undefined;
+    update: (id: string, opts: { name?: string; content?: string; enabled?: boolean; position?: number }) => Rule | undefined;
+    delete: (id: string) => void;
+    reorder: (projectId: string, branch: string | null, orderedIds: string[]) => void;
   };
   close: () => void;
 }
