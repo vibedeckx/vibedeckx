@@ -20,7 +20,7 @@ interface DiffPanelProps {
 }
 
 export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }: DiffPanelProps) {
-  const [sinceCommit, setSinceCommit] = useState<string | null>(null);
+  const [selectedCommit, setSinceCommit] = useState<string | null>(null);
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
 
   // Build execution mode targets from local path + project remotes
@@ -39,7 +39,7 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
   // When the project has no local path, omit target so the backend auto-detects remote.
   const hookTarget: 'local' | 'remote' | undefined =
     diffTarget === 'local' ? (project?.path ? 'local' : undefined) : 'remote';
-  const { diff, loading, error, refresh } = useDiff(projectId, selectedBranch, sinceCommit, hookTarget);
+  const { diff, loading, error, refresh } = useDiff(projectId, selectedBranch, selectedCommit, hookTarget);
   const { commits, loading: commitsLoading, refetch: refetchCommits } = useCommits(projectId, selectedBranch, undefined, hookTarget);
 
   useEffect(() => {
@@ -50,7 +50,7 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
     refetchCommits();
   }, [refetchCommits]);
 
-  // Reset sinceCommit when branch changes
+  // Reset selectedCommit when branch changes
   useEffect(() => {
     setSinceCommit(null);
   }, [selectedBranch]);
@@ -108,10 +108,10 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
               disabled={loading}
             />
           )}
-          <span className="text-sm text-muted-foreground whitespace-nowrap">Changes since:</span>
+          <span className="text-sm text-muted-foreground whitespace-nowrap">Commit:</span>
           <CommitSelector
             commits={commits}
-            selectedCommit={sinceCommit}
+            selectedCommit={selectedCommit}
             onSelectCommit={setSinceCommit}
             loading={commitsLoading}
             disabled={loading}
@@ -139,10 +139,7 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
             </div>
           ) : fileCount === 0 ? (
             <div className="text-center text-muted-foreground py-8">
-              <p>{sinceCommit ? 'No changes since this commit' : 'No changes'}</p>
-              {sinceCommit && (
-                <p className="text-sm mt-1">Try selecting an earlier commit</p>
-              )}
+              <p>{selectedCommit ? 'No changes in this commit' : 'No uncommitted changes'}</p>
             </div>
           ) : (
             diff?.files.map((file, index) => (

@@ -56,15 +56,24 @@ function parseGitLogOutput(output: string): CommitEntry[] {
   return commits;
 }
 
-function buildDiffCommand(since?: string): string {
-  const ref = since || "HEAD";
-  return `git diff ${ref} --no-color`;
+function buildDiffCommand(commit?: string): string {
+  if (!commit) {
+    // Uncommitted changes: working tree vs HEAD
+    return `git diff HEAD --no-color`;
+  }
+  // Changes made by a specific commit (compare with its parent)
+  return `git diff ${commit}^ ${commit} --no-color`;
+}
+
+function buildDiffFallbackCommand(commit: string): string {
+  // Fallback for root commits that have no parent
+  return `git show ${commit} --format="" --no-color`;
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get diff for a path (path-based, for remote execution)
   fastify.get<{
-    Querystring: { path: string; branch?: string; since?: string };
+    Querystring: { path: string; branch?: string; commit?: string };
   }>("/api/path/diff", async (req, reply) => {
     const projectPath = req.query.path;
     if (!projectPath) {
@@ -72,9 +81,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const branch = req.query.branch;
-    const since = req.query.since;
+    const commit = req.query.commit;
 
-    if (since && !/^[0-9a-f]+$/i.test(since)) {
+    if (commit && !/^[0-9a-f]+$/i.test(commit)) {
       return reply.code(400).send({ error: "Invalid commit hash" });
     }
 
@@ -82,7 +91,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const { execSync } = await import("child_process");
-      const diffOutput = execSync(buildDiffCommand(since), {
+      const diffOutput = execSync(buildDiffCommand(commit), {
         cwd,
         encoding: "utf-8",
         maxBuffer: 10 * 1024 * 1024,
@@ -92,11 +101,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     } catch {
       try {
         const { execSync } = await import("child_process");
-        const diffOutput = execSync("git diff --no-color", {
-          cwd,
-          encoding: "utf-8",
-          maxBuffer: 10 * 1024 * 1024,
-        });
+        const diffOutput = execSync(
+          commit ? buildDiffFallbackCommand(commit) : "git diff --no-color",
+          { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
+        );
         const files = parseDiffOutput(diffOutput);
         return reply.code(200).send({ files });
       } catch {
@@ -131,10 +139,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
-  // Get git diff for uncommitted changes (project-based)
+  // Get git diff for a project (uncommitted changes or single commit)
   fastify.get<{
     Params: { id: string };
-    Querystring: { branch?: string; since?: string; target?: 'local' | 'remote' };
+    Querystring: { branch?: string; commit?: string; target?: 'local' | 'remote' };
   }>("/api/projects/:id/diff", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -145,10 +153,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const branch = req.query.branch;
-    const since = req.query.since;
+    const commit = req.query.commit;
     const target = req.query.target;
 
-    if (since && !/^[0-9a-f]+$/i.test(since)) {
+    if (commit && !/^[0-9a-f]+$/i.test(commit)) {
       return reply.code(400).send({ error: "Invalid commit hash" });
     }
 
@@ -162,7 +170,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       const params = [`path=${encodeURIComponent(remoteConfig.remotePath)}`];
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
-      if (since) params.push(`since=${encodeURIComponent(since)}`);
+      if (commit) params.push(`commit=${encodeURIComponent(commit)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
         remoteConfig.url,
@@ -183,7 +191,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const { execSync } = await import("child_process");
-      const diffOutput = execSync(buildDiffCommand(since), {
+      const diffOutput = execSync(buildDiffCommand(commit), {
         cwd,
         encoding: "utf-8",
         maxBuffer: 10 * 1024 * 1024,
@@ -193,11 +201,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     } catch {
       try {
         const { execSync } = await import("child_process");
-        const diffOutput = execSync("git diff --no-color", {
-          cwd,
-          encoding: "utf-8",
-          maxBuffer: 10 * 1024 * 1024,
-        });
+        const diffOutput = execSync(
+          commit ? buildDiffFallbackCommand(commit) : "git diff --no-color",
+          { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
+        );
         const files = parseDiffOutput(diffOutput);
         return reply.code(200).send({ files });
       } catch {

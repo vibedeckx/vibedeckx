@@ -37,7 +37,7 @@ export function CommitSelector({
     >
       <SelectTrigger size="sm" className="w-[200px]">
         <GitCommitHorizontal className="h-3.5 w-3.5 shrink-0" />
-        <SelectValue placeholder="Compare from..." />
+        <SelectValue placeholder="Select commit..." />
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={HEAD_SENTINEL}>HEAD (uncommitted)</SelectItem>

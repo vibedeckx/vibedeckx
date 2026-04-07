@@ -697,13 +697,13 @@ export const api = {
     return data.processes;
   },
 
-  async getDiff(projectId: string, branch?: string | null, sinceCommit?: string | null, target?: 'local' | 'remote'): Promise<DiffResponse> {
+  async getDiff(projectId: string, branch?: string | null, commit?: string | null, target?: 'local' | 'remote'): Promise<DiffResponse> {
     const params = new URLSearchParams();
     if (branch) {
       params.set('branch', branch);
     }
-    if (sinceCommit) {
-      params.set('since', sinceCommit);
+    if (commit) {
+      params.set('commit', commit);
     }
     if (target) {
       params.set('target', target);
