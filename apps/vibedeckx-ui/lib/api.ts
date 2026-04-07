@@ -249,6 +249,18 @@ export interface Task {
   updated_at: string;
 }
 
+export interface Rule {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  name: string;
+  content: string;
+  enabled: number;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DiffLine {
   type: 'context' | 'add' | 'delete';
   content: string;
@@ -872,6 +884,63 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderedIds }),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+  },
+
+  async getRules(projectId: string, branch: string | null): Promise<Rule[]> {
+    const params = new URLSearchParams();
+    if (branch) params.set("branch", branch);
+    const qs = params.toString();
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/rules${qs ? `?${qs}` : ""}`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.rules;
+  },
+
+  async createRule(
+    projectId: string,
+    opts: { branch: string | null; name: string; content: string; enabled?: boolean }
+  ): Promise<Rule> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/rules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.rule;
+  },
+
+  async updateRule(
+    id: string,
+    opts: { name?: string; content?: string; enabled?: boolean; position?: number }
+  ): Promise<Rule> {
+    const res = await authFetch(`${getApiBase()}/api/rules/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.rule;
+  },
+
+  async deleteRule(id: string): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/rules/${id}`, {
+      method: "DELETE",
     });
     if (!res.ok) {
       const error = await res.json();
