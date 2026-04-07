@@ -144,6 +144,7 @@ export class ChatSessionManager {
       if (event.type === "executor:stopped") {
         this.handleExecutorFinished(event);
       } else if (event.type === "session:taskCompleted") {
+        console.log(`[ChatSession] EventBus received session:taskCompleted for project=${event.projectId} branch=${event.branch}`);
         this.handleSessionTaskCompleted(event);
       }
     });
@@ -153,11 +154,22 @@ export class ChatSessionManager {
     try {
       // Find a chat session for this project+branch that has event listening enabled
       const key = `${event.projectId}:${event.branch ?? ""}`;
+      console.log(`[ChatSession] handleSessionTaskCompleted: key=${key}, sessionIndex keys=[${[...this.sessionIndex.keys()].join(", ")}]`);
       const sessionId = this.sessionIndex.get(key);
-      if (!sessionId) return;
+      if (!sessionId) {
+        console.log(`[ChatSession] handleSessionTaskCompleted: no chat session found for key=${key}`);
+        return;
+      }
 
       const session = this.sessions.get(sessionId);
-      if (!session || !session.eventListeningEnabled) return;
+      if (!session) {
+        console.log(`[ChatSession] handleSessionTaskCompleted: session object not found for id=${sessionId}`);
+        return;
+      }
+      if (!session.eventListeningEnabled) {
+        console.log(`[ChatSession] handleSessionTaskCompleted: eventListening disabled for session ${sessionId}`);
+        return;
+      }
 
       // Format stats
       const stats: string[] = [];
