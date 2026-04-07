@@ -66,8 +66,9 @@ echo "==> Verifying installation..."
 echo "    Wrapper:  $(ls node_modules/vibedeckx/bin/vibedeckx.mjs 2>/dev/null && echo 'OK' || echo 'MISSING')"
 echo "    Platform: $(ls node_modules/@vibedeckx/${PLATFORM}/dist/bin.js 2>/dev/null && echo 'OK' || echo 'MISSING')"
 
-# ─── Cleanup ──────────────────────────────────────────────────────────
+# Save test dir path for cleanup script
+echo "$TEST_DIR" > "$ROOT_DIR/.test-install-dir"
 echo ""
-echo "==> Cleaning up $TEST_DIR ..."
-rm -rf "$TEST_DIR"
-echo "==> Done."
+echo "==> Test directory preserved at: $TEST_DIR"
+echo "    Run ./scripts/test-npm-uninstall.sh to clean up."
+
