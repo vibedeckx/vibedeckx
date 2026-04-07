@@ -427,6 +427,7 @@ export class AgentSessionManager {
         }
 
         if (event.subtype === "success") {
+          console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
           this.broadcastRaw(sessionId, {
             taskCompleted: {
               duration_ms: event.duration_ms,
