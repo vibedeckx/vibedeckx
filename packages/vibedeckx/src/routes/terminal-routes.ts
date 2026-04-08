@@ -187,6 +187,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
           projectId: req.params.projectId,
           branch: branch ?? null,
         });
+        fastify.storage.remoteExecutorProcesses.insert(localId, {
+          remoteServerId: remoteConfig.serverId,
+          remoteUrl: remoteConfig.url,
+          remoteApiKey: remoteConfig.apiKey,
+          remoteProcessId: remoteId,
+          executorId: "",
+          projectId: req.params.projectId,
+          branch: branch ?? null,
+        });
 
         return reply.code(201).send({
           terminal: {

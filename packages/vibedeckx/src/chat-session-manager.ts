@@ -1180,6 +1180,15 @@ export class ChatSessionManager {
               projectId,
               branch,
             });
+            this.storage.remoteExecutorProcesses.insert(localProcessId, {
+              remoteServerId: resolvedRemote,
+              remoteUrl: remoteConfig.server_url ?? "",
+              remoteApiKey: remoteConfig.server_api_key || "",
+              remoteProcessId: remoteData.processId,
+              executorId: executor.id,
+              projectId,
+              branch,
+            });
 
             // Emit SSE event so the Executor panel learns about the new process
             // (matches process-routes.ts behavior for UI-started executors)
