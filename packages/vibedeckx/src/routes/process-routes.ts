@@ -129,6 +129,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
           executorId: executor.id,
           projectId: project.id,
         });
+        fastify.storage.remoteExecutorProcesses.insert(localProcessId, {
+          remoteServerId: executorMode,
+          remoteUrl: remoteConfig.server_url ?? "",
+          remoteApiKey: remoteConfig.server_api_key || "",
+          remoteProcessId: remoteData.processId,
+          executorId: executor.id,
+          projectId: project.id,
+          branch: branch ?? undefined,
+        });
         fastify.eventBus.emit({
           type: "executor:started",
           projectId: project.id,
@@ -186,6 +195,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             target: remoteInfo.remoteServerId,
           });
           fastify.remoteExecutorMap.delete(req.params.processId);
+          fastify.storage.remoteExecutorProcesses.delete(req.params.processId);
         }
         return reply.code(result.status || 200).send(result.data);
       }
