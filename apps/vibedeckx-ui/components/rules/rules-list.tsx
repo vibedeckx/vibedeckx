@@ -53,7 +53,7 @@ export const RulesList = forwardRef<RulesListHandle, RulesListProps>(function Ru
   };
 
   return (
-    <div className="space-y-1">
+    <div className={hideHeader ? undefined : "space-y-1"}>
       {!hideHeader && (
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Rules</span>
