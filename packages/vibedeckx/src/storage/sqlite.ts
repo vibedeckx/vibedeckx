@@ -62,6 +62,18 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       FOREIGN KEY (executor_id) REFERENCES executors(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS remote_executor_processes (
+      local_process_id TEXT PRIMARY KEY,
+      remote_server_id TEXT NOT NULL,
+      remote_url TEXT NOT NULL,
+      remote_api_key TEXT NOT NULL,
+      remote_process_id TEXT NOT NULL,
+      executor_id TEXT NOT NULL,
+      project_id TEXT,
+      branch TEXT,
+      started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS agent_sessions (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -1154,6 +1166,35 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         db.prepare(
           `UPDATE executor_processes SET pid = @pid WHERE id = @id`
         ).run({ id, pid });
+      },
+    },
+
+    remoteExecutorProcesses: {
+      insert: (localProcessId, info) => {
+        db.prepare(
+          `INSERT OR REPLACE INTO remote_executor_processes (local_process_id, remote_server_id, remote_url, remote_api_key, remote_process_id, executor_id, project_id, branch) VALUES (@local_process_id, @remote_server_id, @remote_url, @remote_api_key, @remote_process_id, @executor_id, @project_id, @branch)`
+        ).run({
+          local_process_id: localProcessId,
+          remote_server_id: info.remoteServerId,
+          remote_url: info.remoteUrl,
+          remote_api_key: info.remoteApiKey,
+          remote_process_id: info.remoteProcessId,
+          executor_id: info.executorId,
+          project_id: info.projectId ?? null,
+          branch: info.branch ?? null,
+        });
+      },
+
+      delete: (localProcessId) => {
+        db.prepare(`DELETE FROM remote_executor_processes WHERE local_process_id = @id`).run({ id: localProcessId });
+      },
+
+      getAll: () => {
+        return db
+          .prepare<{}, { local_process_id: string; remote_server_id: string; remote_url: string; remote_api_key: string; remote_process_id: string; executor_id: string; project_id: string | null; branch: string | null }>(
+            `SELECT * FROM remote_executor_processes`
+          )
+          .all({});
       },
     },
 

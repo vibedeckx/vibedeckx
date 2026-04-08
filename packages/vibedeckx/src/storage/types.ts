@@ -218,6 +218,11 @@ export interface Storage {
     updateStatus: (id: string, status: ExecutorProcessStatus, exitCode?: number) => void;
     updatePid: (id: string, pid: number) => void;
   };
+  remoteExecutorProcesses: {
+    insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null }): void;
+    delete(localProcessId: string): void;
+    getAll(): Array<{ local_process_id: string; remote_server_id: string; remote_url: string; remote_api_key: string; remote_process_id: string; executor_id: string; project_id: string | null; branch: string | null }>;
+  };
   agentSessions: {
     create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => AgentSession;
     getAll: () => AgentSession[];
