@@ -1,7 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { RulesList } from "@/components/rules/rules-list";
+import type { RulesListHandle } from "@/components/rules/rules-list";
+import { Button } from "@/components/ui/button";
+import { Plus } from "lucide-react";
 import type { Rule, Task } from "@/lib/api";
 
 type Tab = "task" | "rules";
@@ -22,11 +25,12 @@ export function WorkspaceTabs({
   onDeleteRule,
 }: WorkspaceTabsProps) {
   const [activeTab, setActiveTab] = useState<Tab>("task");
+  const rulesListRef = useRef<RulesListHandle>(null);
 
   return (
     <div className="space-y-2">
       {/* Tab bar */}
-      <div className="flex gap-4">
+      <div className="flex items-center gap-4">
         <button
           onClick={() => setActiveTab("task")}
           className={`text-xs font-medium uppercase tracking-wider pb-1 border-b-2 transition-colors ${
@@ -47,6 +51,17 @@ export function WorkspaceTabs({
         >
           Rules
         </button>
+        {activeTab === "rules" && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="h-6 w-6 ml-auto"
+            onClick={() => rulesListRef.current?.openAdd()}
+            title="Add rule"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
 
       {/* Tab content */}
@@ -64,6 +79,8 @@ export function WorkspaceTabs({
         </div>
       ) : (
         <RulesList
+          ref={rulesListRef}
+          hideHeader
           rules={rules}
           onCreateRule={onCreateRule}
           onUpdateRule={onUpdateRule}

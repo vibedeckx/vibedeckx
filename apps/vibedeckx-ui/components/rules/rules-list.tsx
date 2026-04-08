@@ -1,22 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useImperativeHandle, forwardRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Plus } from "lucide-react";
 import { RuleDialog } from "./rule-dialog";
 import type { Rule } from "@/lib/api";
 
+export interface RulesListHandle {
+  openAdd: () => void;
+}
+
 interface RulesListProps {
   rules: Rule[];
+  hideHeader?: boolean;
   onCreateRule: (opts: { name: string; content: string; enabled?: boolean }) => Promise<Rule | null>;
   onUpdateRule: (id: string, opts: { name?: string; content?: string; enabled?: boolean }) => Promise<Rule | null>;
   onDeleteRule: (id: string) => Promise<void>;
 }
 
-export function RulesList({ rules, onCreateRule, onUpdateRule, onDeleteRule }: RulesListProps) {
+export const RulesList = forwardRef<RulesListHandle, RulesListProps>(function RulesList({ rules, hideHeader, onCreateRule, onUpdateRule, onDeleteRule }, ref) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    openAdd: () => {
+      setEditingRule(null);
+      setDialogOpen(true);
+    },
+  }));
 
   const handleAdd = () => {
     setEditingRule(null);
@@ -42,12 +54,14 @@ export function RulesList({ rules, onCreateRule, onUpdateRule, onDeleteRule }: R
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Rules</span>
-        <Button variant="ghost" size="icon-sm" className="h-6 w-6" onClick={handleAdd} title="Add rule">
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+      {!hideHeader && (
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Rules</span>
+          <Button variant="ghost" size="icon-sm" className="h-6 w-6" onClick={handleAdd} title="Add rule">
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
       {rules.length === 0 ? (
         <button
           onClick={handleAdd}
@@ -91,4 +105,4 @@ export function RulesList({ rules, onCreateRule, onUpdateRule, onDeleteRule }: R
       />
     </div>
   );
-}
+});
