@@ -732,7 +732,8 @@ export class ChatSessionManager {
         const parsed = JSON.parse(data.toString());
         if (parsed.type === "finished") {
           const info = this.remoteExecutorMap.get(localProcessId);
-          if (info) {
+          if (info && !info.stoppedEmitted) {
+            info.stoppedEmitted = true;
             this.eventBus?.emit({
               type: "executor:stopped",
               projectId: info.projectId ?? "",
@@ -741,8 +742,6 @@ export class ChatSessionManager {
               exitCode: parsed.exitCode ?? 0,
               target: info.remoteServerId,
             });
-            // Don't delete from remoteExecutorMap — the frontend log proxy
-            // may still need it to replay history.
           }
           cleanup();
         }

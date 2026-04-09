@@ -16,6 +16,8 @@ export interface RemoteExecutorInfo {
   executorId: string;
   projectId?: string;
   branch?: string | null;
+  /** Set to true after executor:stopped has been emitted to prevent double emission */
+  stoppedEmitted?: boolean;
 }
 
 export interface RemoteSessionInfo {

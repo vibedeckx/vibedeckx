@@ -414,7 +414,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
                 }
                 if (parsed.type === "finished") {
                   const info = fastify.remoteExecutorMap.get(processId);
-                  if (info) {
+                  if (info && !info.stoppedEmitted) {
+                    info.stoppedEmitted = true;
                     fastify.eventBus.emit({
                       type: "executor:stopped",
                       projectId: info.projectId ?? "",
@@ -423,6 +424,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
                       exitCode: parsed.exitCode ?? 0,
                       target: info.remoteServerId,
                     });
+                  }
+                  if (info) {
                     fastify.remoteExecutorMap.delete(processId);
                     fastify.storage.remoteExecutorProcesses.delete(processId);
                   }
