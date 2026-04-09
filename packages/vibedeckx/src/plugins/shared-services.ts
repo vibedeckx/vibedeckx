@@ -24,9 +24,55 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   agentSessionManager.restoreSessionsFromDb();
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
 
-  // Restore remote executor processes from DB
-  const savedRemoteExecutors = opts.storage.remoteExecutorProcesses.getAll();
-  if (savedRemoteExecutors.length > 0) {
+  const remoteSessionMap = new Map<string, RemoteSessionInfo>();
+  const remotePatchCache = new RemotePatchCache();
+  const eventBus = new EventBus();
+
+  // Initialize proxy manager from stored settings
+  const proxyManager = new ProxyManager();
+  const savedProxy = opts.storage.settings.get("proxy");
+  if (savedProxy) {
+    try {
+      const config = JSON.parse(savedProxy) as ProxyConfig;
+      proxyManager.updateConfig(config);
+      if (config.type !== "none") {
+        console.log(`[ProxyManager] Loaded ${config.type} proxy: ${config.host}:${config.port}`);
+      }
+    } catch {
+      console.warn("[ProxyManager] Failed to parse saved proxy config, using direct connection");
+    }
+  }
+  setGlobalProxyManager(proxyManager);
+
+  const reverseConnectManager = new ReverseConnectManager();
+  const browserManager = new BrowserManager();
+  const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
+  reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
+    opts.storage.remoteServers.updateStatus(remoteServerId, status);
+  });
+
+  fastify.decorate("storage", opts.storage);
+  fastify.decorate("processManager", processManager);
+  fastify.decorate("agentSessionManager", agentSessionManager);
+  fastify.decorate("chatSessionManager", chatSessionManager);
+  fastify.decorate("remoteExecutorMap", remoteExecutorMap);
+  fastify.decorate("remoteSessionMap", remoteSessionMap);
+  fastify.decorate("eventBus", eventBus);
+  fastify.decorate("proxyManager", proxyManager);
+  fastify.decorate("remotePatchCache", remotePatchCache);
+  fastify.decorate("reverseConnectManager", reverseConnectManager);
+  fastify.decorate("browserManager", browserManager);
+  agentSessionManager.setEventBus(eventBus);
+  chatSessionManager.setEventBus(eventBus);
+  processManager.setEventBus(eventBus);
+
+  // Restore remote executor processes from DB in the background.
+  // This is intentionally fire-and-forget to avoid blocking plugin
+  // registration (proxyToRemote retries can exceed Fastify's plugin timeout).
+  void (async () => {
+    const savedRemoteExecutors = opts.storage.remoteExecutorProcesses.getAll();
+    if (savedRemoteExecutors.length === 0) return;
+
     console.log(`[SharedServices] Found ${savedRemoteExecutors.length} persisted remote executor(s), verifying...`);
 
     // Group by remote server ID to batch verification calls
@@ -77,49 +123,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
         console.warn(`[SharedServices] Failed to verify remote executors on ${serverId}: ${err}`);
       }
     }
-  }
-
-  const remoteSessionMap = new Map<string, RemoteSessionInfo>();
-  const remotePatchCache = new RemotePatchCache();
-  const eventBus = new EventBus();
-
-  // Initialize proxy manager from stored settings
-  const proxyManager = new ProxyManager();
-  const savedProxy = opts.storage.settings.get("proxy");
-  if (savedProxy) {
-    try {
-      const config = JSON.parse(savedProxy) as ProxyConfig;
-      proxyManager.updateConfig(config);
-      if (config.type !== "none") {
-        console.log(`[ProxyManager] Loaded ${config.type} proxy: ${config.host}:${config.port}`);
-      }
-    } catch {
-      console.warn("[ProxyManager] Failed to parse saved proxy config, using direct connection");
-    }
-  }
-  setGlobalProxyManager(proxyManager);
-
-  const reverseConnectManager = new ReverseConnectManager();
-  const browserManager = new BrowserManager();
-  const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
-  reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
-    opts.storage.remoteServers.updateStatus(remoteServerId, status);
-  });
-
-  fastify.decorate("storage", opts.storage);
-  fastify.decorate("processManager", processManager);
-  fastify.decorate("agentSessionManager", agentSessionManager);
-  fastify.decorate("chatSessionManager", chatSessionManager);
-  fastify.decorate("remoteExecutorMap", remoteExecutorMap);
-  fastify.decorate("remoteSessionMap", remoteSessionMap);
-  fastify.decorate("eventBus", eventBus);
-  fastify.decorate("proxyManager", proxyManager);
-  fastify.decorate("remotePatchCache", remotePatchCache);
-  fastify.decorate("reverseConnectManager", reverseConnectManager);
-  fastify.decorate("browserManager", browserManager);
-  agentSessionManager.setEventBus(eventBus);
-  chatSessionManager.setEventBus(eventBus);
-  processManager.setEventBus(eventBus);
+  })();
 
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {
