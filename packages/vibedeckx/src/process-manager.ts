@@ -384,7 +384,9 @@ export class ProcessManager {
       const { code } = exitPending;
       exitPending = null;
       drainHandle = null;
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
+      const tailOutput = this.snapshotTailOutput(runningProcess.logs);
+      console.log(`[ProcessManager] emitStopped: processId=${processId}, logs.length=${runningProcess.logs.length}, logTypes=[${runningProcess.logs.map(l => l.type).join(",")}], tailOutput.length=${tailOutput.length}, tailOutput=${JSON.stringify(tailOutput.slice(0, 200))}`);
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local", tailOutput });
     };
 
     const scheduleDrain = () => {
@@ -401,6 +403,8 @@ export class ProcessManager {
       }
       this.broadcast(processId, msg);
 
+      console.log(`[ProcessManager] onData: processId=${processId}, exitPending=${!!exitPending}, data=${JSON.stringify(data.slice(0, 100))}`);
+
       // If exit is pending, reset drain — more data may follow
       if (exitPending) {
         scheduleDrain();
@@ -412,7 +416,7 @@ export class ProcessManager {
       const code = exitCode ?? 0;
       const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
 
-      console.log(`[ProcessManager] PTY process ${processId} exited with code ${code}`);
+      console.log(`[ProcessManager] PTY onExit: processId=${processId}, code=${code}, logs.length=${runningProcess.logs.length}, logTypes=[${runningProcess.logs.map(l => l.type).join(",")}]`);
 
       if (!skipDb) {
         this.storage.executorProcesses.updateStatus(processId, status, code);
