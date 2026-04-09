@@ -64,9 +64,9 @@ export function WorkspaceTabs({
         )}
       </div>
 
-      {/* Tab content */}
-      {activeTab === "task" ? (
-        <div>
+      {/* Tab content — both panels share the same grid cell so height stays consistent */}
+      <div className="grid [&>*]:col-start-1 [&>*]:row-start-1">
+        <div className={activeTab !== "task" ? "invisible" : undefined}>
           {assignedTask ? (
             <p className="text-sm text-foreground truncate" title={assignedTask.title}>
               {assignedTask.title}
@@ -77,16 +77,17 @@ export function WorkspaceTabs({
             </p>
           )}
         </div>
-      ) : (
-        <RulesList
-          ref={rulesListRef}
-          hideHeader
-          rules={rules}
-          onCreateRule={onCreateRule}
-          onUpdateRule={onUpdateRule}
-          onDeleteRule={onDeleteRule}
-        />
-      )}
+        <div className={activeTab !== "rules" ? "invisible" : undefined}>
+          <RulesList
+            ref={rulesListRef}
+            hideHeader
+            rules={rules}
+            onCreateRule={onCreateRule}
+            onUpdateRule={onUpdateRule}
+            onDeleteRule={onDeleteRule}
+          />
+        </div>
+      </div>
     </div>
   );
 }
