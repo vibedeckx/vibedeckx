@@ -372,6 +372,26 @@ export class ProcessManager {
     this.processes.set(processId, runningProcess);
     console.log(`[ProcessManager] PTY process ${processId} added to map, PID: ${ptyProcess.pid}`);
 
+    // Drain mechanism: node-pty can fire onExit before all onData callbacks
+    // have delivered buffered output. We track exit state and use setImmediate
+    // to let pending I/O flush. Each new onData after exit resets the drain,
+    // so we only emit once output has settled.
+    let exitPending: { code: number } | null = null;
+    let drainHandle: ReturnType<typeof setImmediate> | null = null;
+
+    const emitStopped = () => {
+      if (!exitPending) return;
+      const { code } = exitPending;
+      exitPending = null;
+      drainHandle = null;
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
+    };
+
+    const scheduleDrain = () => {
+      if (drainHandle) clearImmediate(drainHandle);
+      drainHandle = setImmediate(emitStopped);
+    };
+
     // Handle PTY data output
     ptyProcess.onData((data: string) => {
       const msg: LogMessage = { type: "pty", data };
@@ -380,6 +400,11 @@ export class ProcessManager {
         runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
       }
       this.broadcast(processId, msg);
+
+      // If exit is pending, reset drain — more data may follow
+      if (exitPending) {
+        scheduleDrain();
+      }
     });
 
     // Handle PTY exit
@@ -396,7 +421,10 @@ export class ProcessManager {
       const msg: LogMessage = { type: "finished", exitCode: code };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local" });
+
+      // Start drain — will emit once no more onData callbacks arrive
+      exitPending = { code };
+      scheduleDrain();
 
       // Schedule cleanup after retention period
       setTimeout(() => {
@@ -469,7 +497,8 @@ export class ProcessManager {
       const msg: LogMessage = { type: "finished", exitCode };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local" });
+      // close event guarantees all stdio is flushed — safe to snapshot now
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
 
       // Schedule cleanup after retention period
       setTimeout(() => {
@@ -491,7 +520,7 @@ export class ProcessManager {
       const finishMsg: LogMessage = { type: "finished", exitCode: 1 };
       runningProcess.logs.push(finishMsg);
       this.broadcast(processId, finishMsg);
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1, target: "local" });
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
     });
   }
 
@@ -666,7 +695,8 @@ export class ProcessManager {
       const msg: LogMessage = { type: 'finished', exitCode };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
-      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local" });
+      // close event guarantees all stdio is flushed — safe to snapshot now
+      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
 
       // Schedule cleanup after retention period
       setTimeout(() => {
@@ -688,7 +718,7 @@ export class ProcessManager {
       const finishMsg: LogMessage = { type: 'finished', exitCode: 1 };
       runningProcess.logs.push(finishMsg);
       this.broadcast(processId, finishMsg);
-      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1, target: "local" });
+      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
     });
   }
 
@@ -886,6 +916,20 @@ export class ProcessManager {
   getLogs(processId: string): LogMessage[] {
     const runningProcess = this.processes.get(processId);
     return runningProcess?.logs ?? [];
+  }
+
+  /**
+   * Snapshot the tail output from a process's logs, stripping ANSI codes.
+   * Used to include output in executor:stopped events.
+   */
+  private snapshotTailOutput(logs: LogMessage[]): string {
+    const outputLogs = logs.filter(
+      (l) => l.type === "pty" || l.type === "stdout" || l.type === "stderr"
+    );
+    const tail = outputLogs.slice(-100);
+    let raw = tail.map((l) => (l as { data: string }).data).join("");
+    raw = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
+    return raw.length > 10000 ? raw.slice(-10000) : raw;
   }
 
   /**

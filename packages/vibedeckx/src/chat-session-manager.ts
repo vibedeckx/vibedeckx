@@ -233,15 +233,8 @@ export class ChatSessionManager {
 
       console.log(`[ChatSession] handleExecutorFinished: processing event, session=${sessionId}, subscribers=${session.subscribers.size}`);
 
-      // Get tail output from process manager
-      const logs = this.processManager.getLogs(event.processId);
-      const outputLogs = logs.filter(
-        (l) => l.type === "pty" || l.type === "stdout" || l.type === "stderr"
-      );
-      const tail = outputLogs.slice(-100);
-      let raw = tail.map((l) => (l as { data: string }).data).join("");
-      raw = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
-      const tailOutput = raw.length > 10000 ? raw.slice(-10000) : raw;
+      // Use tail output included in the event (snapshotted by process-manager at emit time)
+      const tailOutput = event.tailOutput ?? "";
 
       const exitStatus = event.exitCode === 0 ? "success" : "failed";
       const message = [
