@@ -115,6 +115,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
                 projectId: row.project_id ?? undefined,
                 branch: row.branch,
               });
+              eventBus.emit({
+                type: "executor:started",
+                projectId: row.project_id ?? "",
+                executorId: row.executor_id,
+                processId: row.local_process_id,
+                target: row.remote_server_id,
+              });
               console.log(`[SharedServices] Restored remote executor: ${row.local_process_id}`);
             } else {
               opts.storage.remoteExecutorProcesses.delete(row.local_process_id);
