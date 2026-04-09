@@ -86,6 +86,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     for (const [serverId, rows] of byServer) {
       try {
         const { remote_url, remote_api_key } = rows[0];
+        // Skip verification if no URL and no active reverse connection
+        if (!remote_url && !reverseConnectManager.isConnected(serverId)) {
+          console.log(`[SharedServices] Remote server ${serverId} has no URL and no reverse connection, keeping DB rows for later`);
+          continue;
+        }
         const result = await proxyToRemoteAuto(
           serverId,
           remote_url,
@@ -93,7 +98,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
           "GET",
           "/api/executor-processes/running",
           undefined,
-          { timeoutMs: 5000 },
+          { timeoutMs: 5000, reverseConnectManager },
         );
         if (result.ok) {
           const data = result.data as { processes?: Array<{ id: string }> };
