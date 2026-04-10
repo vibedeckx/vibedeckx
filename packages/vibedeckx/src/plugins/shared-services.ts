@@ -51,8 +51,12 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // against the remote's running process list and repopulating remoteExecutorMap.
   async function restoreRemoteExecutorsForServer(serverId: string): Promise<void> {
     const allRows = opts.storage.remoteExecutorProcesses.getAll();
+    console.log(`[DEBUG restoreForServer] serverId=${serverId}, allRows=${allRows.length}, allServerIds=${JSON.stringify([...new Set(allRows.map(r => r.remote_server_id))])}`);
     const rows = allRows.filter(r => r.remote_server_id === serverId);
-    if (rows.length === 0) return;
+    if (rows.length === 0) {
+      console.log(`[DEBUG restoreForServer] No rows match serverId=${serverId}, skipping`);
+      return;
+    }
 
     // Skip if already restored
     if (rows.every(r => remoteExecutorMap.has(r.local_process_id))) return;
@@ -102,6 +106,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   }
 
   reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
+    console.log(`[DEBUG statusChange] remoteServerId=${remoteServerId}, status=${status}`);
     opts.storage.remoteServers.updateStatus(remoteServerId, status);
     // When a reverse connection comes online, restore any persisted remote executors
     if (status === "online") {
