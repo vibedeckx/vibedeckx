@@ -212,11 +212,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 获取所有运行中的进程
   fastify.get("/api/executor-processes/running", async (req, reply) => {
     const runningProcessIds = fastify.processManager.getRunningProcessIds();
-    // Local processes
+    // Local processes (includes temp processes started via /api/path/execute
+    // which have no DB record — skipDb=true)
     const processes: Array<Record<string, unknown>> = runningProcessIds.map((id) => {
       const dbProcess = fastify.storage.executorProcesses.getById(id);
-      return dbProcess ? { ...dbProcess, target: "local" } : null;
-    }).filter(Boolean) as Array<Record<string, unknown>>;
+      return dbProcess
+        ? { ...dbProcess, target: "local" }
+        : { id, executor_id: "", status: "running", exit_code: null, started_at: null, finished_at: null, target: "local" };
+    });
 
     // Remote processes (tracked in remoteExecutorMap)
     for (const [localProcessId, info] of fastify.remoteExecutorMap) {
