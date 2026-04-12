@@ -34,6 +34,33 @@ export function ExecutionModeToggle({
   onAddRemote,
   disabled,
 }: ExecutionModeToggleProps) {
+  if (targets.length <= 2) {
+    return (
+      <div className="inline-flex items-center rounded-md border bg-muted/50 px-0.5 text-xs">
+        {targets.map((target) => {
+          const Icon = target.icon;
+          return (
+            <button
+              key={target.id}
+              onClick={() => onTargetChange(target.id)}
+              disabled={disabled}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-sm px-2 py-0.5 transition-colors",
+                activeTarget === target.id
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+                disabled && "opacity-50 cursor-not-allowed"
+              )}
+            >
+              {Icon && <Icon className="h-3 w-3" />}
+              {target.label}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
   const active = targets.find((t) => t.id === activeTarget) ?? targets[0];
   const ActiveIcon = active?.icon;
 
