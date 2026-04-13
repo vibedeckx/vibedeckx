@@ -58,7 +58,7 @@ export function RightPanel({ projectId, selectedBranch, onMergeRequest, project,
             key={id}
             onClick={() => setActiveTab(id)}
             className={cn(
-              'flex items-center gap-1 py-2.5 text-xs font-medium border-b-2 transition-colors',
+              'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
               activeTab === id
                 ? 'text-foreground border-foreground'
                 : 'text-muted-foreground border-transparent hover:text-foreground/70'
