@@ -225,6 +225,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     const wsUrl = getWebSocketUrl(`/api/chat-sessions/${sessionId}/stream`);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+    const wsGeneration = sessionGenerationRef.current;
 
     ws.onopen = () => {
       setIsConnected(true);
@@ -239,6 +240,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     };
 
     ws.onmessage = (event) => {
+      if (wsGeneration !== sessionGenerationRef.current) return;
       try {
         const msg = JSON.parse(event.data) as AgentWsMessage;
 
@@ -320,6 +322,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     };
 
     ws.onclose = (event) => {
+      if (wsGeneration !== sessionGenerationRef.current) return;
       setIsConnected(false);
       wsRef.current = null;
 
