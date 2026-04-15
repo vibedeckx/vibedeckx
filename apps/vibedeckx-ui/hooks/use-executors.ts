@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
+import { api, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
 
 function getApiBase(): string {
   if (typeof window === "undefined") return "";
@@ -11,6 +11,53 @@ function getApiBase(): string {
   return "";
 }
 
+type RunningProcessEntry = { processId: string; target: string };
+
+export function buildExecutorEventsUrl(): string {
+  const token = getAuthToken();
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${getApiBase()}/api/events${tokenParam}`;
+}
+
+export function buildRunningProcessMaps(processes: ExecutorProcess[]): {
+  runningProcesses: Map<string, RunningProcessEntry[]>;
+  lastStartedProcess: Map<string, RunningProcessEntry>;
+} {
+  const runningProcesses = new Map<string, RunningProcessEntry[]>();
+  const lastStartedProcess = new Map<string, RunningProcessEntry>();
+
+  for (const proc of processes) {
+    const entry = { processId: proc.id, target: proc.target ?? "local" };
+    const existing = runningProcesses.get(proc.executor_id);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      runningProcesses.set(proc.executor_id, [entry]);
+    }
+    lastStartedProcess.set(proc.executor_id, entry);
+  }
+
+  return { runningProcesses, lastStartedProcess };
+}
+
+export function pruneLastStartedProcess(
+  previous: Map<string, RunningProcessEntry>,
+  runningProcesses: Map<string, RunningProcessEntry[]>,
+): Map<string, RunningProcessEntry> {
+  const next = new Map<string, RunningProcessEntry>();
+
+  for (const [executorId, entry] of previous) {
+    const stillRunning = runningProcesses.get(executorId)?.some(
+      (running) => running.processId === entry.processId && running.target === entry.target,
+    );
+    if (stillRunning) {
+      next.set(executorId, entry);
+    }
+  }
+
+  return next;
+}
+
 export interface ExecutorWithProcess extends Executor {
   currentProcessId: string | null;
   isRunning: boolean;
@@ -18,14 +65,14 @@ export interface ExecutorWithProcess extends Executor {
 
 export function useExecutors(projectId: string | null, groupId: string | null | undefined, executorMode?: string) {
   const [executors, setExecutors] = useState<Executor[]>([]);
-  const [runningProcesses, setRunningProcesses] = useState<Map<string, Array<{ processId: string; target: string }>>>(
+  const [runningProcesses, setRunningProcesses] = useState<Map<string, RunningProcessEntry[]>>(
     new Map()
   ); // executorId -> [{ processId, target }]
   // Tracks the most recent processId per executor+target, persists after the
   // process stops.  This prevents a React-batching race where executor:started
   // and executor:stopped SSE events arrive in the same render frame, causing
   // currentProcessId to never be seen as non-null by child components.
-  const [lastStartedProcess, setLastStartedProcess] = useState<Map<string, { processId: string; target: string }>>(
+  const [lastStartedProcess, setLastStartedProcess] = useState<Map<string, RunningProcessEntry>>(
     new Map()
   );
   const [loading, setLoading] = useState(true);
@@ -52,24 +99,14 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   const fetchRunningProcesses = useCallback(async () => {
     try {
       const processes = await api.getRunningProcesses();
-      const processMap = new Map<string, Array<{ processId: string; target: string }>>();
-      const lastStartedMap = new Map<string, { processId: string; target: string }>();
-      for (const proc of processes) {
-        const entry = { processId: proc.id, target: proc.target ?? "local" };
-        const existing = processMap.get(proc.executor_id);
-        if (existing) {
-          existing.push(entry);
-        } else {
-          processMap.set(proc.executor_id, [entry]);
-        }
-        lastStartedMap.set(proc.executor_id, entry);
-      }
+      const { runningProcesses: processMap, lastStartedProcess: lastStartedMap } = buildRunningProcessMaps(processes);
       setRunningProcesses(processMap);
       setLastStartedProcess((prev) => {
-        // Merge — don't overwrite entries for executors that aren't currently running
-        const merged = new Map(prev);
-        for (const [k, v] of lastStartedMap) merged.set(k, v);
-        return merged;
+        const pruned = pruneLastStartedProcess(prev, processMap);
+        for (const [executorId, entry] of lastStartedMap) {
+          pruned.set(executorId, entry);
+        }
+        return pruned;
       });
     } catch (error) {
       console.error("Failed to fetch running processes:", error);
@@ -104,7 +141,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   useEffect(() => {
     if (!projectId) return;
 
-    const url = `${getApiBase()}/api/events`;
+    const url = buildExecutorEventsUrl();
     const es = new EventSource(url);
 
     es.onmessage = (event) => {
@@ -144,6 +181,13 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
             } else {
               newMap.set(data.executorId, filtered);
             }
+            return newMap;
+          });
+          setLastStartedProcess((prev) => {
+            const entry = prev.get(data.executorId);
+            if (!entry || entry.processId !== data.processId) return prev;
+            const newMap = new Map(prev);
+            newMap.delete(data.executorId);
             return newMap;
           });
         }
@@ -254,6 +298,13 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
       }
       return newMap;
     });
+    setLastStartedProcess((prev) => {
+      const entry = prev.get(executorId);
+      if (!entry || entry.processId !== targetProcessId) return prev;
+      const newMap = new Map(prev);
+      newMap.delete(executorId);
+      return newMap;
+    });
   }, [runningProcesses, executorMode]);
 
   // Mark process as finished (called when WebSocket receives finished message)
@@ -272,6 +323,19 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
         }
         return newMap;
       }
+      const newMap = new Map(prev);
+      newMap.delete(executorId);
+      return newMap;
+    });
+    setLastStartedProcess((prev) => {
+      if (!processId) {
+        if (!prev.has(executorId)) return prev;
+        const newMap = new Map(prev);
+        newMap.delete(executorId);
+        return newMap;
+      }
+      const entry = prev.get(executorId);
+      if (!entry || entry.processId !== processId) return prev;
       const newMap = new Map(prev);
       newMap.delete(executorId);
       return newMap;
