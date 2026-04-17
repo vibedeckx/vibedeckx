@@ -851,6 +851,7 @@ export class ChatSessionManager {
       "You can start executors using the runExecutor tool and stop them using the stopExecutor tool.",
       "When the user asks about running processes, errors, build status, or dev server status, use the getExecutorStatus tool.",
       "When the user asks to start, run, or launch a process, use runExecutor. When they ask to stop or kill a process, use stopExecutor.",
+      "CRITICAL — runExecutor is ASYNCHRONOUS: a successful return from runExecutor means the executor was *started*, NOT that it has finished. The process is still running in the background. Do NOT tell the user the task is done, the build succeeded, tests passed, or the command completed based on runExecutor's return value. The executor is only finished when you receive an `[Executor Event: Process Finished]` message — that message (and only that message) carries the exit code and final output. If the user is waiting on the result of a one-shot executor (build, test, script), wait for the Process Finished event before reporting outcome. For long-running executors (dev servers), it is fine to report that it was started.",
       ...(() => {
         const project = this.storage.projects.getById(projectId);
         const remotes = this.storage.projectRemotes.getByProject(projectId);
@@ -1087,7 +1088,9 @@ export class ChatSessionManager {
         description:
           "Start an executor (dev server, build process, etc.) by name. " +
           "Use this when the user asks to start, run, or launch a process. " +
-          "Optionally specify a remote server ID to run the executor on a remote machine.",
+          "Optionally specify a remote server ID to run the executor on a remote machine. " +
+          "ASYNCHRONOUS: this tool returns as soon as the process is spawned; it does NOT wait for the process to finish. " +
+          "A successful return only means the executor was started. Completion is signaled later by an `[Executor Event: Process Finished]` message, which carries the exit code. Do not claim the task/build/test is complete based on this tool's return value.",
         inputSchema: z.object({
           executorName: z
             .string()
