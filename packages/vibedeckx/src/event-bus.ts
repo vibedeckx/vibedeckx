@@ -19,6 +19,9 @@ export class EventBus {
   }
 
   emit(event: GlobalEvent): void {
+    if (event.type === "executor:started" || event.type === "executor:stopped") {
+      console.log(`[EventBus] ${event.type} executor=${event.executorId} process=${event.processId} target=${event.target ?? "local"} project=${event.projectId}${event.type === "executor:stopped" ? ` exitCode=${event.exitCode}` : ""}`);
+    }
     this.emitter.emit("event", event);
   }
 

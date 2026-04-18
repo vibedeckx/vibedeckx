@@ -99,6 +99,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   const fetchRunningProcesses = useCallback(async () => {
     try {
       const processes = await api.getRunningProcesses();
+      console.log(`[useExecutors] fetchRunningProcesses: ${processes.length} running`, processes.map(p => `${p.executor_id}/${p.id}/${(p as unknown as Record<string, unknown>).target ?? "local"}`));
       const { runningProcesses: processMap, lastStartedProcess: lastStartedMap } = buildRunningProcessMaps(processes);
       setRunningProcesses(processMap);
       setLastStartedProcess((prev) => {
@@ -154,10 +155,25 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
           target?: string;
         };
 
-        if (data.projectId !== projectId) return;
-        if (!executorIdsRef.current.has(data.executorId)) return;
+        if (data.type === "executor:started" || data.type === "executor:stopped") {
+          console.log(`[useExecutors] SSE received: ${data.type} executor=${data.executorId} process=${data.processId} target=${data.target ?? "local"} project=${data.projectId}`);
+        }
+
+        if (data.projectId !== projectId) {
+          if (data.type === "executor:started" || data.type === "executor:stopped") {
+            console.log(`[useExecutors] SSE filtered: projectId mismatch (event=${data.projectId}, hook=${projectId})`);
+          }
+          return;
+        }
+        if (!executorIdsRef.current.has(data.executorId)) {
+          if (data.type === "executor:started" || data.type === "executor:stopped") {
+            console.log(`[useExecutors] SSE filtered: executorId ${data.executorId} not in current group (known: ${Array.from(executorIdsRef.current).join(",")})`);
+          }
+          return;
+        }
 
         if (data.type === "executor:started") {
+          console.log(`[useExecutors] Processing executor:started, adding to runningProcesses`);
           setRunningProcesses((prev) => {
             const entries = prev.get(data.executorId) ?? [];
             if (entries.some(e => e.processId === data.processId)) return prev;
@@ -171,6 +187,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
             return newMap;
           });
         } else if (data.type === "executor:stopped") {
+          console.log(`[useExecutors] Processing executor:stopped, removing from runningProcesses`);
           setRunningProcesses((prev) => {
             const entries = prev.get(data.executorId);
             if (!entries) return prev;
