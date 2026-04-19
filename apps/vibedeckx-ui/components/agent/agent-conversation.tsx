@@ -34,6 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
+import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText } from "@/lib/api";
@@ -86,7 +87,7 @@ export interface AgentConversationHandle {
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
   function AgentConversation({ projectId, branch, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange }, ref) {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
