@@ -180,6 +180,74 @@ export class AgentSessionManager {
   }
 
   /**
+   * Always create a brand-new session row and spawn a process.
+   * Unlike getOrCreateSession, this never reuses an existing row for the branch.
+   * Used by "New Conversation" flow where the user explicitly wants a fresh conversation.
+   */
+  createNewSession(
+    projectId: string,
+    branch: string | null,
+    projectPath: string,
+    skipDb: boolean = false,
+    permissionMode: "plan" | "edit" = "edit",
+    agentType: AgentType = "claude-code",
+  ): string {
+    const sessionId = randomUUID();
+    const branchKey = branch ?? "";
+
+    // Calculate absolute worktree path
+    const absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
+
+    if (!skipDb) {
+      this.storage.agentSessions.create({
+        id: sessionId,
+        project_id: projectId,
+        branch: branchKey,
+        permission_mode: permissionMode,
+        // agent_type passed to storage after Phase 4 migration (task 4.2/4.3)
+      });
+    }
+
+    // Initialize message store with EntryIndexProvider
+    const indexProvider = new EntryIndexProvider();
+
+    const store: MessageStore = {
+      patches: [],
+      entries: [],
+      indexProvider,
+      toolTracker: new EntryTracker(indexProvider),
+      currentAssistantIndex: null,
+    };
+
+    // Initialize running session
+    const session: RunningSession = {
+      id: sessionId,
+      projectId,
+      branch,
+      process: null,
+      dormant: false,
+      store,
+      subscribers: new Set(),
+      status: "running",
+      buffer: "",
+      skipDb,
+      permissionMode,
+      agentType,
+    };
+
+    this.sessions.set(sessionId, session);
+
+    // Notify provider of session creation (for per-session state init)
+    const provider = getProvider(agentType);
+    provider.onSessionCreated?.(sessionId);
+
+    // Spawn agent process
+    this.spawnAgent(session, absoluteWorktreePath);
+    console.log(`[AgentSession] createNewSession: id=${sessionId}, projectId=${projectId}, branch=${branchKey}`);
+    return sessionId;
+  }
+
+  /**
    * Kill an agent process and its entire process tree.
    * Uses negative PID to signal the process group (requires detached: true at spawn).
    */
@@ -571,6 +639,7 @@ export class AgentSessionManager {
   private persistEntry(session: RunningSession, index: number, message: AgentMessage): void {
     try {
       this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
+      this.storage.agentSessions.touchUpdatedAt(session.id);
     } catch (error) {
       console.error(`[AgentSession] Failed to persist entry ${index}:`, error);
     }
