@@ -379,6 +379,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
             remoteSessionId: remoteData.session.id,
             branch: branch ?? null,
           });
+
+          // Seed remotePatchCache with REST messages so WS replay has data immediately
+          if (remoteData.messages && remoteData.messages.length > 0) {
+            const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
+            if (cacheEntry.messages.length === 0) {
+              for (let i = 0; i < remoteData.messages.length; i++) {
+                const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
+                fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
+              }
+            }
+          }
+
           return reply.code(200).send({
             session: { ...remoteData.session, id: localSessionId, projectId: req.params.projectId },
             messages: remoteData.messages,
@@ -386,6 +398,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         return reply.code(result.status || 502).send(result.data);
       } catch (error) {
+        console.error("[API] Remote agent session proxy error (new):", error);
         return reply.code(502).send({ error: `Remote agent error: ${String(error)}` });
       }
     }
