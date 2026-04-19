@@ -114,8 +114,54 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Path-based: always create a new session (for remote `/new` proxy target)
+  fastify.post<{
+    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
+  }>("/api/path/agent-sessions/new", async (req, reply) => {
+    const { path: projectPath, branch, permissionMode, agentType } = req.body;
+    if (!projectPath) {
+      return reply.code(400).send({ error: "Path is required" });
+    }
+
+    let pseudoProjectId = `path:${projectPath}`;
+    if (!fastify.storage.projects.getById(pseudoProjectId)) {
+      const existingByPath = fastify.storage.projects.getByPath(projectPath);
+      if (existingByPath) {
+        pseudoProjectId = existingByPath.id;
+      } else {
+        const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
+        try {
+          fastify.storage.projects.create({ id: pseudoProjectId, name, path: projectPath });
+        } catch (err: unknown) {
+          if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
+        }
+      }
+    }
+
+    const sessionId = fastify.agentSessionManager.createNewSession(
+      pseudoProjectId,
+      branch ?? null,
+      projectPath,
+      false,
+      permissionMode || "edit",
+      (agentType as AgentType) || "claude-code"
+    );
+    const session = fastify.agentSessionManager.getSession(sessionId);
+    return reply.code(200).send({
+      session: {
+        id: sessionId,
+        projectId: pseudoProjectId,
+        branch: branch ?? null,
+        status: session?.status || "running",
+        permissionMode: session?.permissionMode || "edit",
+        agentType: session?.agentType || "claude-code",
+      },
+      messages: [],
+    });
+  });
+
   // 获取项目的所有 Agent Sessions
-  fastify.get<{ Params: { projectId: string } }>(
+  fastify.get<{ Params: { projectId: string }; Querystring: { branch?: string } }>(
     "/api/projects/:projectId/agent-sessions",
     async (req, reply) => {
       const userId = requireAuth(req, reply);
@@ -125,11 +171,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
-      if (!project.path) {
+      if (!project.path && project.agent_mode === 'local') {
         return reply.code(200).send({ sessions: [] });
       }
 
-      const dbSessions = fastify.storage.agentSessions.getByProjectId(req.params.projectId);
+      const dbSessions = typeof req.query.branch === "string"
+        ? fastify.storage.agentSessions.listByBranch(req.params.projectId, req.query.branch)
+        : fastify.storage.agentSessions.getByProjectId(req.params.projectId);
+
       const sessions = dbSessions.map(s => {
         const inMemory = fastify.agentSessionManager.getSession(s.id);
         if (inMemory) {
@@ -286,6 +335,88 @@ const routes: FastifyPluginAsync = async (fastify) => {
       });
     } catch (error) {
       console.error("[API] Failed to create agent session:", error);
+      return reply.code(500).send({ error: String(error) });
+    }
+  });
+
+  // Create a brand-new Agent Session (explicit, always creates)
+  fastify.post<{
+    Params: { projectId: string };
+    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
+  }>("/api/projects/:projectId/agent-sessions/new", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const { branch, permissionMode, agentType } = req.body;
+    const agentMode = project.agent_mode;
+    const useRemoteAgent = agentMode !== 'local';
+
+    if (useRemoteAgent) {
+      const remoteConfig = fastify.storage.projectRemotes.getByProjectAndServer(project.id, agentMode);
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: `Remote server configuration not found for agent_mode="${agentMode}"` });
+      }
+      try {
+        const result = await proxyAuto(
+          agentMode,
+          remoteConfig.server_url ?? "",
+          remoteConfig.server_api_key || "",
+          "POST",
+          `/api/path/agent-sessions/new`,
+          { path: remoteConfig.remote_path, branch, permissionMode, agentType }
+        );
+        if (result.ok) {
+          const remoteData = result.data as { session: { id: string }; messages: unknown[] };
+          const localSessionId = `remote-${agentMode}-${project.id}-${remoteData.session.id}`;
+          fastify.remoteSessionMap.set(localSessionId, {
+            remoteServerId: agentMode,
+            remoteUrl: remoteConfig.server_url ?? "",
+            remoteApiKey: remoteConfig.server_api_key || "",
+            remoteSessionId: remoteData.session.id,
+            branch: branch ?? null,
+          });
+          return reply.code(200).send({
+            session: { ...remoteData.session, id: localSessionId, projectId: req.params.projectId },
+            messages: remoteData.messages,
+          });
+        }
+        return reply.code(result.status || 502).send(result.data);
+      } catch (error) {
+        return reply.code(502).send({ error: `Remote agent error: ${String(error)}` });
+      }
+    }
+
+    if (!project.path) {
+      return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    try {
+      const sessionId = fastify.agentSessionManager.createNewSession(
+        req.params.projectId,
+        branch ?? null,
+        project.path,
+        false,
+        permissionMode || "edit",
+        (agentType as AgentType) || "claude-code"
+      );
+      const session = fastify.agentSessionManager.getSession(sessionId);
+      return reply.code(200).send({
+        session: {
+          id: sessionId,
+          projectId: req.params.projectId,
+          branch: branch ?? null,
+          status: session?.status || "running",
+          permissionMode: session?.permissionMode || "edit",
+          agentType: session?.agentType || "claude-code",
+        },
+        messages: [],
+      });
+    } catch (error) {
+      console.error("[API] Failed to create new agent session:", error);
       return reply.code(500).send({ error: String(error) });
     }
   });
