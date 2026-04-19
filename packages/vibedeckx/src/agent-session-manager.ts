@@ -637,6 +637,7 @@ export class AgentSessionManager {
    * Persist a single entry to the database
    */
   private persistEntry(session: RunningSession, index: number, message: AgentMessage): void {
+    if (session.skipDb) return;
     try {
       this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
       this.storage.agentSessions.touchUpdatedAt(session.id);
