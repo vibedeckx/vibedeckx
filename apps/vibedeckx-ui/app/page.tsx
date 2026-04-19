@@ -42,6 +42,22 @@ export type { WorkspaceStatus } from '@/lib/workspace-status';
 export default function Home() {
   const { projectId: urlProject, tab: urlTab, branch: urlBranch } = useUrlState();
 
+  // ?session=<id> param is orthogonal to the path-based URL state (projectId/tab/branch).
+  // We keep it here as reactive state so changes via setSessionUrlParam propagate to children.
+  const [urlSessionId, setUrlSessionIdState] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return new URLSearchParams(window.location.search).get('session');
+  });
+
+  const setSessionUrlParam = useCallback((sessionId: string | null) => {
+    setUrlSessionIdState(sessionId);
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (sessionId) url.searchParams.set('session', sessionId);
+    else url.searchParams.delete('session');
+    window.history.replaceState(null, '', url.toString());
+  }, []);
+
   // Redirect legacy ?project= URLs to new path format
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -176,8 +192,15 @@ export default function Home() {
       tab: activeView,
       branch: selectedBranch,
     });
-    window.history.replaceState(null, '', url);
-  }, [currentProject?.id, activeView, selectedBranch, projectsLoading]);
+    // Preserve ?session=<id> on path/branch/tab changes (buildUrl only knows about branch param)
+    if (urlSessionId) {
+      const u = new URL(url, window.location.origin);
+      u.searchParams.set('session', urlSessionId);
+      window.history.replaceState(null, '', u.pathname + u.search);
+    } else {
+      window.history.replaceState(null, '', url);
+    }
+  }, [currentProject?.id, activeView, selectedBranch, projectsLoading, urlSessionId]);
 
   const handleWorktreeCreated = useCallback((branch: string) => {
     refetchWorktrees();
@@ -337,6 +360,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         ref={agentRef}
                         projectId={currentProject?.id ?? null}
                         branch={selectedBranch}
+                        sessionId={urlSessionId}
+                        setSessionUrlParam={setSessionUrlParam}
                         project={currentProject}
                         onAgentModeChange={handleAgentModeChange}
                         onTaskCompleted={handleTaskCompleted}

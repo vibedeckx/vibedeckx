@@ -380,6 +380,48 @@ export async function translateText(text: string): Promise<{ translatedText: str
   }
 }
 
+// ============ Agent Session Multi-Session Helpers ============
+
+export interface BranchSessionSummary {
+  id: string;
+  status: string;
+  title?: string | null;
+  created_at: string;
+  updated_at?: string;
+  permission_mode?: string;
+  agent_type?: string;
+}
+
+// List all sessions for a (projectId, branch) pair
+export async function listBranchSessions(
+  projectId: string,
+  branch: string | null
+): Promise<{ sessions: BranchSessionSummary[] }> {
+  const qs = branch != null ? `?branch=${encodeURIComponent(branch)}` : "";
+  const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions${qs}`);
+  if (!res.ok) throw new Error(`listBranchSessions failed: ${res.status}`);
+  return res.json();
+}
+
+// Explicitly create a new agent session (never reuses an existing one)
+export async function createNewAgentSession(
+  projectId: string,
+  branch: string | null,
+  permissionMode?: "plan" | "edit",
+  agentType?: string
+): Promise<{
+  session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string };
+  messages: unknown[];
+}> {
+  const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions/new`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ branch, permissionMode, agentType }),
+  });
+  if (!res.ok) throw new Error(`createNewAgentSession failed: ${res.status}`);
+  return res.json();
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     if (_cachedConfig) return _cachedConfig;

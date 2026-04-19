@@ -186,11 +186,39 @@ async function acceptPlanApi(sessionId: string, planContent: string): Promise<vo
 
 // ============ Session Cache ============
 // Module-level cache: avoids 14s remote proxy call when switching back to a previously visited workspace.
-// Key: "projectId:branch", Value: session object from last successful REST response.
+// Key: "projectId:branch:sessionId" (sessionId = "latest" when caller hasn't specified an explicit id),
+// Value: session object from last successful REST response.
 const sessionCache = new Map<string, AgentSession>();
 
-function getCacheKey(projectId: string, branch: string | null): string {
-  return `${projectId}:${branch ?? ""}`;
+function getCacheKey(projectId: string, branch: string | null, sessionId?: string | null): string {
+  return `${projectId}:${branch ?? ""}:${sessionId ?? "latest"}`;
+}
+
+async function getSessionById(sessionId: string): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
+  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(`Session ${sessionId} not found`);
+  }
+  return response.json();
+}
+
+async function createNewSessionApi(
+  projectId: string,
+  branch: string | null,
+  permissionMode?: "plan" | "edit",
+  agentType?: AgentType
+): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
+  const response = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions/new`, {
+    method: "POST",
+    headers: getAuthHeaders("application/json"),
+    body: JSON.stringify({ branch, permissionMode, agentType }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to create new session");
+  }
+  return response.json();
 }
 
 // ============ Patch Application ============
@@ -279,11 +307,13 @@ function deduplicatePatches(patches: Patch[]): Patch {
 // ============ Hook ============
 
 interface UseAgentSessionOptions {
+  sessionId?: string | null; // Explicit session to load; when undefined/null -> latest-for-branch behavior
   onTaskCompleted?: () => void;
   onSessionStarted?: () => void;
 }
 
 export function useAgentSession(projectId: string | null, branch: string | null, agentMode?: string, agentType?: AgentType, options?: UseAgentSessionOptions) {
+  const explicitSessionId = options?.sessionId ?? null;
   const [session, setSession] = useState<AgentSession | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [status, setStatus] = useState<AgentSessionStatus>("stopped");
@@ -397,7 +427,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
             // Invalidate cache when session becomes stopped/error so next startSession does a fresh REST call
             if (containerRef.current.status === "stopped" || containerRef.current.status === "error") {
-              if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+              if (projectId) {
+                sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+                const sid = wsSessionIdRef.current;
+                if (sid) sessionCache.delete(getCacheKey(projectId, branch, sid));
+              }
             }
           }
           return;
@@ -418,7 +452,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         if ("finished" in msg) {
           console.log("[AgentSession] Received finished signal, invalidating cache");
           finishedRef.current = true;
-          if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+          if (projectId) {
+            sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+            const sid = wsSessionIdRef.current;
+            if (sid) sessionCache.delete(getCacheKey(projectId, branch, sid));
+          }
           ws.close(1000, "finished");
           return;
         }
@@ -459,7 +497,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           // If session not found, invalidate cache and clear state so auto-start creates a fresh session
           if (msg.error === "Session not found") {
             console.log("[AgentSession] Session invalid, invalidating cache, will create new session");
-            if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+            if (projectId) {
+              sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+              const sid = wsSessionIdRef.current;
+              if (sid) sessionCache.delete(getCacheKey(projectId, branch, sid));
+            }
             finishedRef.current = true;
             setSession(null);
             setStatus("stopped");
@@ -503,7 +545,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
             return;
           }
           // Invalidate cache so auto-start does a full REST call
-          if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+          if (projectId) {
+            sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+            const sid = wsSessionIdRef.current;
+            if (sid) sessionCache.delete(getCacheKey(projectId, branch, sid));
+          }
           // Clear current session to trigger new session creation
           setSession(null);
           setError(null);
@@ -566,7 +612,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     lastStartFailedRef.current = false;
 
     // Try cached session first — skip the slow REST call if we already know the session ID
-    const cacheKey = getCacheKey(projectId, branch);
+    const cacheKey = getCacheKey(projectId, branch, explicitSessionId);
     const cached = sessionCache.get(cacheKey);
     if (cached) {
       console.log(`[AgentSession] Cache hit for ${cacheKey}, reconnecting WebSocket directly`);
@@ -582,9 +628,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsLoading(true);
 
     try {
-      console.log(`[AgentSession] Starting REST call: projectId=${projectId}, branch=${branch}, agentType=${agentType}, generation=${generation}`);
-      const { session: newSession, messages: initialMessages } =
-        await createOrGetSession(projectId, branch, permissionMode, agentType);
+      console.log(`[AgentSession] Starting REST call: projectId=${projectId}, branch=${branch}, sessionId=${explicitSessionId ?? "latest"}, agentType=${agentType}, generation=${generation}`);
+      const { session: newSession, messages: initialMessages } = explicitSessionId
+        ? await getSessionById(explicitSessionId)
+        : await createOrGetSession(projectId, branch, permissionMode, agentType);
 
       console.log(`[AgentSession] REST response: sessionId=${newSession.id}, msgCount=${initialMessages?.length ?? 0}`);
 
@@ -594,8 +641,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         return null;
       }
 
-      // Cache the session for future workspace switches
+      // Cache the session for future workspace switches (cache under both the explicit id key and the latest key)
       sessionCache.set(cacheKey, newSession);
+      if (explicitSessionId) {
+        sessionCache.set(getCacheKey(projectId, branch, newSession.id), newSession);
+      }
 
       setSession(newSession);
       setStatus(newSession.status);
@@ -636,7 +686,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         setIsLoading(false);
       }
     }
-  }, [projectId, branch, agentType, connectWebSocket]);
+  }, [projectId, branch, agentType, explicitSessionId, connectWebSocket]);
 
   // Send user message - optionally accepts sessionId for immediate use after session creation
   const sendMessage = useCallback(
@@ -661,7 +711,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
         // If 404, the session is gone — invalidate cache and clear state for auto-recovery
         if (errorMsg.includes("[404]")) {
-          if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+          if (projectId) {
+            sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+            if (session?.id) sessionCache.delete(getCacheKey(projectId, branch, session.id));
+          }
           setSession(null);
           setStatus("stopped");
           setIsInitialized(false);
@@ -672,7 +725,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         toast.error("Failed to send message", { description: errorMsg });
       }
     },
-    [session?.id]
+    [session?.id, projectId, branch, explicitSessionId]
   );
 
   // Stop session - sends stop signal to the running agent process
@@ -693,7 +746,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     if (!session?.id) return;
 
     // Invalidate cache — session will get new state after restart
-    if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+    if (projectId) {
+      sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+      sessionCache.delete(getCacheKey(projectId, branch, session.id));
+    }
 
     setIsLoading(true);
     setError(null);
@@ -712,7 +768,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     } finally {
       setIsLoading(false);
     }
-  }, [session?.id]);
+  }, [session?.id, projectId, branch, explicitSessionId]);
 
   // Switch permission mode (preserves conversation history)
   const switchMode = useCallback(async (mode: "plan" | "edit") => {
@@ -726,7 +782,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setSession((prev) => {
         if (!prev) return prev;
         const updated = { ...prev, permissionMode: mode };
-        if (projectId) sessionCache.set(getCacheKey(projectId, branch), updated);
+        if (projectId) {
+          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
+          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+        }
         return updated;
       });
     } catch (e) {
@@ -734,7 +793,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setError(errorMsg);
       console.error("[AgentSession] Failed to switch mode:", e);
     }
-  }, [session?.id, projectId, branch]);
+  }, [session?.id, projectId, branch, explicitSessionId]);
 
   // Accept plan and restart in edit mode
   const acceptPlan = useCallback(async (planContent: string) => {
@@ -748,7 +807,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setSession((prev) => {
         if (!prev) return prev;
         const updated = { ...prev, permissionMode: "edit" as const };
-        if (projectId) sessionCache.set(getCacheKey(projectId, branch), updated);
+        if (projectId) {
+          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
+          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+        }
         return updated;
       });
     } catch (e) {
@@ -756,7 +818,40 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setError(errorMsg);
       console.error("[AgentSession] Failed to accept plan:", e);
     }
-  }, [session?.id, projectId, branch]);
+  }, [session?.id, projectId, branch, explicitSessionId]);
+
+  // Start a brand-new conversation: stops the current (if running) and creates a fresh session
+  // via POST /api/projects/:projectId/agent-sessions/new. Returns the new session id so the
+  // caller can reflect it in the URL.
+  const startNewConversation = useCallback(async (overrideAgentType?: AgentType): Promise<string | null> => {
+    if (!projectId) return null;
+    // Best-effort stop — we don't want to leave an orphan running in the background.
+    if (session?.status === "running" && session.id) {
+      try {
+        await stopSessionApi(session.id);
+      } catch {
+        // Swallow — if stop fails we still want to try creating the new one.
+      }
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await createNewSessionApi(
+        projectId,
+        branch,
+        session?.permissionMode,
+        overrideAgentType ?? session?.agentType ?? agentType
+      );
+      return data.session.id;
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : "Failed to start new conversation";
+      setError(errorMsg);
+      console.error("[AgentSession] startNewConversation:", e);
+      return null;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [projectId, branch, session?.id, session?.status, session?.permissionMode, session?.agentType, agentType]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -816,12 +911,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Mark that we need to auto-start session after reset
     shouldAutoStartRef.current = true;
     // Invalidate session cache — branch or mode changed, cached session is stale
-    if (projectId) sessionCache.delete(getCacheKey(projectId, branch));
+    if (projectId) sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
     // Note: agentType is intentionally NOT in this dependency array.
     // Agent type changes are handled by restartSession() which keeps the WebSocket
     // connected so it can receive the clearAll patch and new messages from the backend.
     // Including agentType here would close the WebSocket and race with restartSession.
-  }, [projectId, branch, agentMode]);
+  }, [projectId, branch, agentMode, explicitSessionId]);
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
@@ -875,6 +970,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     sendMessage,
     stopSession,
     restartSession,
+    startNewConversation,
     switchMode,
     acceptPlan,
   };

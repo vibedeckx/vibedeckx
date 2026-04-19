@@ -74,6 +74,8 @@ export function useAgentConversation() {
 interface AgentConversationProps {
   projectId: string | null;
   branch: string | null;
+  sessionId?: string | null;
+  setSessionUrlParam?: (id: string | null) => void;
   project?: Project | null;
   onAgentModeChange?: (mode: ExecutionMode) => void;
   onTaskCompleted?: () => void;
@@ -86,7 +88,7 @@ export interface AgentConversationHandle {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
   const [translateEnabled, setTranslateEnabled] = useState(false);
@@ -117,9 +119,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     sendMessage,
     stopSession,
     restartSession,
+    startNewConversation,
     switchMode,
     acceptPlan,
-  } = useAgentSession(projectId, branch, project?.agent_mode, agentType, { onTaskCompleted, onSessionStarted });
+  } = useAgentSession(projectId, branch, project?.agent_mode, agentType, { sessionId, onTaskCompleted, onSessionStarted });
 
   // Fetch available agent providers on mount
   useEffect(() => {
@@ -370,7 +373,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => restartSession()}
+              onClick={async () => {
+                if (session?.status === "running") {
+                  const ok = window.confirm("Current conversation is running. Stop it and start a new conversation?");
+                  if (!ok) return;
+                }
+                const newId = await startNewConversation();
+                if (newId && setSessionUrlParam) {
+                  setSessionUrlParam(newId);
+                }
+              }}
               disabled={isLoading}
               className="h-7 w-7"
               title="New Conversation"
