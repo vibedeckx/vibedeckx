@@ -880,12 +880,14 @@ export class AgentSessionManager {
   /**
    * Delete a session (stop and remove)
    *
-   * Steps (in order):
+   * Steps (in spec order):
    * 1. stopSession — kills the process and transitions to dormant (no-op if already stopped)
    * 2. deleteEntries — clear entry rows from DB (skipped for remote sessions)
    * 3. delete — delete the session row from DB (skipped for remote sessions)
-   * 4. sessions.delete — remove from in-memory map
-   * 5. broadcastRaw({finished: true}) — signal lingering subscribers to disconnect cleanly
+   * 4. broadcastRaw({finished: true}) — signal subscribers to disconnect cleanly
+   *    (must happen before sessions.delete because broadcastRaw looks up the
+   *    session by id to reach its subscriber set).
+   * 5. sessions.delete — remove from in-memory map
    */
   deleteSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
@@ -903,11 +905,12 @@ export class AgentSessionManager {
       this.storage.agentSessions.delete(sessionId);
     }
 
-    // 4. Remove from in-memory map
-    this.sessions.delete(sessionId);
-
-    // 5. Signal terminal state so lingering subscribers stop reconnecting
+    // 4. Signal terminal state so subscribers stop reconnecting — must run
+    //    before sessions.delete() since broadcastRaw reads this.sessions.
     this.broadcastRaw(sessionId, { finished: true });
+
+    // 5. Remove from in-memory map
+    this.sessions.delete(sessionId);
     return true;
   }
 
