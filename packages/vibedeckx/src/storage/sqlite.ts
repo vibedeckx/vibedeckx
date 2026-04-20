@@ -84,10 +84,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
-    CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_branch
-      ON agent_sessions(project_id, branch);
-    CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated_at
-      ON agent_sessions(updated_at DESC);
+    -- Note: idx_agent_sessions_project_branch and idx_agent_sessions_updated_at
+    -- are created AFTER the agent_sessions column migrations (see below), so
+    -- existing databases that predate the updated_at column don't fail here.
 
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
@@ -315,10 +314,6 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         FROM agent_sessions;
       DROP TABLE agent_sessions;
       ALTER TABLE agent_sessions_new RENAME TO agent_sessions;
-      CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_branch
-        ON agent_sessions(project_id, branch);
-      CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated_at
-        ON agent_sessions(updated_at DESC);
       COMMIT;
     `);
   }
@@ -328,6 +323,18 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!sessionInfoV4.some(col => col.name === "title")) {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN title TEXT DEFAULT NULL");
   }
+
+  // Ensure agent_sessions indexes exist. Safe to run here because either:
+  //  - the fresh-DDL path created the table with all columns, or
+  //  - the Task 1.1 rebuild migration above recreated the table with updated_at.
+  // Must run AFTER all agent_sessions column migrations so the referenced
+  // columns are guaranteed to exist. CREATE INDEX IF NOT EXISTS is idempotent.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_branch
+      ON agent_sessions(project_id, branch);
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated_at
+      ON agent_sessions(updated_at DESC);
+  `);
 
   // Migration: add pid column to executor_processes
   const processTableInfo = db.prepare("PRAGMA table_info(executor_processes)").all() as { name: string }[];
