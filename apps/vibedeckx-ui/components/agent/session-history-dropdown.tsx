@@ -150,8 +150,15 @@ export function SessionHistoryDropdown({
                       s.updated_at
                         ? new Date(s.updated_at).toLocaleString()
                         : new Date(s.created_at).toLocaleString()
-                    } • status: ${s.status}`}
+                    } • ${s.entry_count ?? 0} messages • status: ${s.status}`}
                   >
+                    {s.status === "running" && (
+                      <span
+                        className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 mr-1 align-middle"
+                        title="Running"
+                        aria-label="Running"
+                      />
+                    )}
                     {isCurrent ? "● " : ""}
                     {label(s)}
                   </div>

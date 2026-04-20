@@ -390,6 +390,7 @@ export interface BranchSessionSummary {
   updated_at?: string;
   permission_mode?: string;
   agent_type?: string;
+  entry_count?: number;
 }
 
 // List all sessions for a (projectId, branch) pair

@@ -253,6 +253,7 @@ export interface Storage {
     upsertEntry: (sessionId: string, entryIndex: number, data: string) => void;
     getEntries: (sessionId: string) => Array<{ entry_index: number; data: string }>;
     deleteEntries: (sessionId: string) => void;
+    countEntries: () => Array<{ session_id: string; cnt: number }>;
   };
   settings: {
     get: (key: string) => string | undefined;

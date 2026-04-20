@@ -134,11 +134,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         ? fastify.storage.agentSessions.listByBranch(existing.id, req.query.branch)
         : fastify.storage.agentSessions.getByProjectId(existing.id);
 
+      const countMap = new Map(
+        fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
+      );
       const sessions = dbSessions.map(s => {
         const inMemory = fastify.agentSessionManager.getSession(s.id);
-        if (inMemory) return { ...s, status: inMemory.status };
-        if (s.status === "running") return { ...s, status: "stopped" };
-        return s;
+        const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
+        return { ...s, status, entry_count: countMap.get(s.id) ?? 0 };
       });
       return reply.code(200).send({ sessions });
     }
@@ -225,10 +227,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
           console.error("[API] Remote agent-sessions list proxy error:", result.status, result.data);
           return reply.code(result.status || 502).send(result.data);
         }
-        const data = result.data as { sessions: Array<{ id: string; status: string; [k: string]: unknown }> };
+        const data = result.data as { sessions: Array<{ id: string; status: string; entry_count?: number; [k: string]: unknown }> };
         const mapped = data.sessions.map(s => ({
           ...s,
           id: `remote-${project.agent_mode}-${project.id}-${s.id}`,
+          entry_count: s.entry_count ?? 0,
         }));
         return reply.code(200).send({ sessions: mapped });
       }
@@ -241,16 +244,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         ? fastify.storage.agentSessions.listByBranch(req.params.projectId, req.query.branch)
         : fastify.storage.agentSessions.getByProjectId(req.params.projectId);
 
+      const countMap = new Map(
+        fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
+      );
       const sessions = dbSessions.map(s => {
         const inMemory = fastify.agentSessionManager.getSession(s.id);
-        if (inMemory) {
-          return { ...s, status: inMemory.status };
-        }
-        // Stale DB record — if it claims "running" but no in-memory session exists, it's orphaned
-        if (s.status === "running") {
-          return { ...s, status: "stopped" };
-        }
-        return s;
+        const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
+        return { ...s, status, entry_count: countMap.get(s.id) ?? 0 };
       });
       return reply.code(200).send({ sessions });
     }

@@ -1355,6 +1355,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       deleteEntries: (sessionId: string) => {
         db.prepare(`DELETE FROM agent_session_entries WHERE session_id = @id`).run({ id: sessionId });
       },
+
+      countEntries: () => {
+        return db.prepare<{}, { session_id: string; cnt: number }>(
+          `SELECT session_id, COUNT(*) as cnt FROM agent_session_entries GROUP BY session_id`
+        ).all({});
+      },
     },
 
     settings: {
