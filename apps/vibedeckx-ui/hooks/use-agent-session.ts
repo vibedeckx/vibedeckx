@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getAuthToken } from "@/lib/api";
+import { getWebSocketUrl, getAuthToken, createNewAgentSession } from "@/lib/api";
 import type { AgentType } from "@/lib/api";
 
 // ============ Content Part Types (for image attachments) ============
@@ -200,23 +200,6 @@ async function getSessionById(sessionId: string): Promise<{ session: AgentSessio
   });
   if (!response.ok) {
     throw new Error(`Session ${sessionId} not found`);
-  }
-  return response.json();
-}
-
-async function createNewSessionApi(
-  projectId: string,
-  branch: string | null,
-  permissionMode?: "plan" | "edit",
-  agentType?: AgentType
-): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
-  const response = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions/new`, {
-    method: "POST",
-    headers: getAuthHeaders("application/json"),
-    body: JSON.stringify({ branch, permissionMode, agentType }),
-  });
-  if (!response.ok) {
-    throw new Error("Failed to create new session");
   }
   return response.json();
 }
@@ -848,7 +831,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsLoading(true);
     setError(null);
     try {
-      const data = await createNewSessionApi(
+      const data = await createNewAgentSession(
         projectId,
         branch,
         session?.permissionMode,

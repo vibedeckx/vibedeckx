@@ -60,7 +60,17 @@ export class AgentSessionManager {
   }
 
   /**
-   * Get or create an agent session for a branch
+   * Get or create an agent session for a branch.
+   *
+   * Resolution order for "which session matches (projectId, branch)":
+   * 1. DB-first: query `getLatestByBranch` (ORDER BY updated_at DESC LIMIT 1)
+   *    so we always return the most-recently-updated session, not whichever
+   *    one happened to be inserted first into the in-memory Map. This is
+   *    the authoritative answer.
+   * 2. skipDb fallback (remote path-based pseudo-projects): no DB to query,
+   *    so fall back to a scan of `this.sessions`. Remote-only sessions
+   *    rarely have multiple entries per branch, so first-match is fine.
+   * 3. No match anywhere → create a brand new session.
    */
   getOrCreateSession(
     projectId: string,
@@ -70,54 +80,31 @@ export class AgentSessionManager {
     permissionMode: "plan" | "edit" = "edit",
     agentType: AgentType = "claude-code"
   ): string {
-    // Check if session already exists in memory (including dormant)
-    for (const [id, session] of this.sessions) {
-      if (
-        session.projectId === projectId &&
-        session.branch === branch
-      ) {
-        if (session.dormant) {
-          // Dormant session found — update permission mode if needed, return ID
-          // Don't spawn process yet (lazy — wait for user message)
-          if (session.permissionMode !== permissionMode) {
-            session.permissionMode = permissionMode;
-            if (!session.skipDb) {
-              this.storage.agentSessions.updatePermissionMode(id, permissionMode);
-            }
-          }
-          console.log(`[AgentSession] Returning dormant session ${id}`);
-          return id;
-        }
-
-        if (session.status === "running") {
-          // If permission mode differs, switch mode on existing session
-          if (session.permissionMode !== permissionMode) {
-            console.log(`[AgentSession] Session ${id} exists with mode ${session.permissionMode}, switching to ${permissionMode}`);
-            this.switchMode(id, projectPath, permissionMode);
-          }
-          console.log(`[AgentSession] Returning existing session ${id}`);
-          return id;
-        }
-      }
-    }
-
-    // Check database for existing session (skip for remote path-based sessions)
+    // 1. DB-first resolution (preferred path)
     if (!skipDb) {
-      const existingSession = this.storage.agentSessions.getByBranch(
+      const latestDbRow = this.storage.agentSessions.getLatestByBranch(
         projectId,
         branch ?? ""
       );
-      if (existingSession && this.sessions.has(existingSession.id)) {
-        const inMemory = this.sessions.get(existingSession.id)!;
-        if (inMemory.status !== "running") {
-          // Dead session — restart it so callers always get a running session
-          console.log(`[AgentSession] Session ${existingSession.id} is ${inMemory.status}, restarting`);
-          this.restartSession(existingSession.id, projectPath);
-        } else if (inMemory.permissionMode !== permissionMode) {
-          console.log(`[AgentSession] Session ${existingSession.id} mode ${inMemory.permissionMode} → ${permissionMode}`);
-          this.switchMode(existingSession.id, projectPath, permissionMode);
+      if (latestDbRow) {
+        const inMemory = this.sessions.get(latestDbRow.id);
+        if (inMemory) {
+          return this.reuseExistingSession(inMemory, projectPath, permissionMode);
         }
-        return existingSession.id;
+        // DB row exists but session isn't in memory. The restore path (called
+        // on startup) should have populated it; if we're here, either restore
+        // was skipped or the session has no entries yet. Fall through to
+        // create — same behavior as before.
+      }
+    } else {
+      // 2. skipDb fallback: in-memory scan for remote path-based sessions.
+      // These are pseudo-projects with no DB rows, so there's nothing more
+      // authoritative to consult. First-match is acceptable because remote
+      // pseudo-projects don't accumulate many sessions per branch.
+      for (const session of this.sessions.values()) {
+        if (session.projectId === projectId && session.branch === branch) {
+          return this.reuseExistingSession(session, projectPath, permissionMode);
+        }
       }
     }
 
@@ -245,6 +232,45 @@ export class AgentSessionManager {
     this.spawnAgent(session, absoluteWorktreePath);
     console.log(`[AgentSession] createNewSession: id=${sessionId}, projectId=${projectId}, branch=${branchKey}`);
     return sessionId;
+  }
+
+  /**
+   * Handle reuse of an existing in-memory session found by getOrCreateSession:
+   * - dormant: update permission mode if differs (no respawn — wakes lazily)
+   * - running: switchMode if permission mode differs
+   * - dead (status !== "running", not dormant): restart the process so callers
+   *   always get a running session
+   * Returns the session id.
+   */
+  private reuseExistingSession(
+    session: RunningSession,
+    projectPath: string,
+    permissionMode: "plan" | "edit"
+  ): string {
+    if (session.dormant) {
+      if (session.permissionMode !== permissionMode) {
+        session.permissionMode = permissionMode;
+        if (!session.skipDb) {
+          this.storage.agentSessions.updatePermissionMode(session.id, permissionMode);
+        }
+      }
+      console.log(`[AgentSession] Returning dormant session ${session.id}`);
+      return session.id;
+    }
+
+    if (session.status === "running") {
+      if (session.permissionMode !== permissionMode) {
+        console.log(`[AgentSession] Session ${session.id} exists with mode ${session.permissionMode}, switching to ${permissionMode}`);
+        this.switchMode(session.id, projectPath, permissionMode);
+      }
+      console.log(`[AgentSession] Returning existing session ${session.id}`);
+      return session.id;
+    }
+
+    // Dead session (not dormant, not running) — restart so callers always get a running session
+    console.log(`[AgentSession] Session ${session.id} is ${session.status}, restarting`);
+    this.restartSession(session.id, projectPath);
+    return session.id;
   }
 
   /**
