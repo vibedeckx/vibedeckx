@@ -94,8 +94,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
 
-      // Dormant sessions will wake on first message, so report them as "running"
-      const effectiveStatus = session?.dormant ? "running" : (session?.status || "running");
+      const effectiveStatus = session?.status || "stopped";
 
       return reply.code(200).send({
         session: {
@@ -399,8 +398,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
 
-      // Dormant sessions will wake on first message, so report them as "running"
-      const effectiveStatus = session?.dormant ? "running" : (session?.status || "running");
+      const effectiveStatus = session?.status || "stopped";
 
       return reply.code(200).send({
         session: {

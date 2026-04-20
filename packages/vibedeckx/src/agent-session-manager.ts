@@ -541,6 +541,16 @@ export class AgentSessionManager {
             output_tokens: event.output_tokens,
           });
 
+          // Turn finished — process stays alive (stream-json) waiting for next
+          // input, but status now reflects "between turns" so UI affordances
+          // like "New Conversation" don't prompt for a running confirmation.
+          if (session.status !== "stopped") {
+            session.status = "stopped";
+            if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+            this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+            this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
+          }
+
           // Auto-update task status to "done" for the branch's assigned task
           const tasks = this.storage.tasks.getByProjectId(session.projectId);
           const branchKey = session.branch ?? "";
@@ -718,8 +728,18 @@ export class AgentSessionManager {
       return true;
     }
 
-    if (session.status !== "running") {
+    if (!session.process?.stdin) {
       return false;
+    }
+
+    // Start-of-turn: if the previous turn ended (status="stopped" but process
+    // still alive in stream-json mode), flip back to "running" and broadcast
+    // so subscribers see the transition.
+    if (session.status !== "running") {
+      session.status = "running";
+      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
+      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
     }
 
     // Clear current assistant key - user message breaks streaming
@@ -737,7 +757,7 @@ export class AgentSessionManager {
     try {
       const provider = getProvider(session.agentType);
       const formatted = provider.formatUserInput(content, session.id);
-      session.process?.stdin?.write(formatted);
+      session.process.stdin.write(formatted);
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to send message:`, error);
@@ -789,9 +809,8 @@ export class AgentSessionManager {
     // Send Ready signal to indicate history is complete
     ws.send(JSON.stringify({ Ready: true }));
 
-    // Send current status (dormant sessions report "running" since they wake on first message)
-    const effectiveStatus = session.dormant ? "running" : session.status;
-    const statusPatch = ConversationPatch.updateStatus(effectiveStatus);
+    // Send current status
+    const statusPatch = ConversationPatch.updateStatus(session.status);
     ws.send(JSON.stringify({ JsonPatch: statusPatch }));
 
     // Return unsubscribe function
