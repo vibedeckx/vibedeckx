@@ -533,7 +533,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "GET",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
-        return reply.code(result.status || 200).send(result.data);
+        if (result.ok) {
+          // Rewrite session.id back to the local remote-prefixed id — otherwise
+          // the frontend would use the bare remote UUID for subsequent calls
+          // (notably the WebSocket URL), which local doesn't recognize and
+          // would 404 with "Session not found" in a reconnect loop.
+          const remoteData = result.data as { session: { id: string; [k: string]: unknown }; messages: unknown[] };
+          return reply.code(200).send({
+            ...remoteData,
+            session: { ...remoteData.session, id: req.params.sessionId },
+          });
+        }
+        return reply.code(result.status || 502).send(result.data);
       }
 
       const session = fastify.agentSessionManager.getSession(req.params.sessionId);
