@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { ChevronDown, Pencil, Trash2, Check, X } from "lucide-react";
 import {
   DropdownMenu,
@@ -23,6 +23,7 @@ interface SessionHistoryDropdownProps {
   projectId: string;
   branch: string | null;
   currentSessionId: string | null;
+  currentEntryCount?: number;
   onSwitch: (sessionId: string) => void;
   onDelete?: (sessionId: string, remaining: BranchSessionSummary[]) => void;
 }
@@ -31,6 +32,7 @@ export function SessionHistoryDropdown({
   projectId,
   branch,
   currentSessionId,
+  currentEntryCount,
   onSwitch,
   onDelete,
 }: SessionHistoryDropdownProps) {
@@ -57,6 +59,23 @@ export function SessionHistoryDropdown({
   useEffect(() => {
     void refresh();
   }, [refresh, currentSessionId]);
+
+  // Refresh once when the current session receives its first entry — the server
+  // auto-sets the session title from the first user message, but the dropdown
+  // state was fetched when the session was still untitled, so the button would
+  // keep showing the created-at timestamp until reopened.
+  const prevEntryRef = useRef<{ sessionId: string | null; count: number }>({
+    sessionId: null,
+    count: 0,
+  });
+  useEffect(() => {
+    const prev = prevEntryRef.current;
+    const count = currentEntryCount ?? 0;
+    if (prev.sessionId === currentSessionId && prev.count === 0 && count > 0) {
+      void refresh();
+    }
+    prevEntryRef.current = { sessionId: currentSessionId, count };
+  }, [currentSessionId, currentEntryCount, refresh]);
 
   const handleRename = async (id: string, next: string) => {
     const title = next.trim().length > 0 ? next.trim() : null;

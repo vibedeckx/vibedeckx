@@ -372,6 +372,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 projectId={projectId}
                 branch={branch}
                 currentSessionId={session?.id ?? null}
+                currentEntryCount={messages.length}
                 onSwitch={(id) => {
                   setSessionUrlParam?.(id);
                 }}
