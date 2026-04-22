@@ -203,15 +203,21 @@ export default function Home() {
   // into the new one (cross-workspace content bleed).
   const prevBranchRef = useRef(selectedBranch);
   const prevProjectIdRef = useRef(currentProject?.id);
+  // Distinguish the first post-loading effect pass from a real user switch.
+  // Without this, `undefined -> <real id>` on initial project load is treated
+  // as a project change and strips ?session= from the URL.
+  const hasInitializedUrlSyncRef = useRef(false);
 
   // Sync state to URL
   useEffect(() => {
     if (projectsLoading) return;
 
-    const branchChanged = prevBranchRef.current !== selectedBranch;
-    const projectChanged = prevProjectIdRef.current !== currentProject?.id;
+    const isInitial = !hasInitializedUrlSyncRef.current;
+    const branchChanged = !isInitial && prevBranchRef.current !== selectedBranch;
+    const projectChanged = !isInitial && prevProjectIdRef.current !== currentProject?.id;
     prevBranchRef.current = selectedBranch;
     prevProjectIdRef.current = currentProject?.id;
+    hasInitializedUrlSyncRef.current = true;
 
     if ((branchChanged || projectChanged) && urlSessionId) {
       // Clearing state re-triggers this effect; the URL update happens there.
