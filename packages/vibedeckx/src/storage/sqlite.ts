@@ -80,8 +80,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       branch TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'running',
       title TEXT DEFAULT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      -- Millisecond-precision timestamps. CURRENT_TIMESTAMP is seconds-only,
+      -- which lets two sessions tie on updated_at within the same second and
+      -- corrupts the ordering used by getLatestByBranch. The 'YYYY-MM-DD
+      -- HH:MM:SS.fff' format remains lex-sortable (and lex-comparable with
+      -- existing seconds-only rows, which correctly sort earlier).
+      created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
     -- Note: idx_agent_sessions_project_branch and idx_agent_sessions_updated_at
@@ -318,8 +323,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         status TEXT NOT NULL DEFAULT 'running',
         permission_mode TEXT DEFAULT 'edit',
         agent_type TEXT DEFAULT 'claude-code',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
         FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
       );
       INSERT INTO agent_sessions_new (id, project_id, branch, status, permission_mode, agent_type, created_at, updated_at)
@@ -1272,10 +1277,15 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     agentSessions: {
+      // Millisecond-precision timestamps are set explicitly here (and in the
+      // UPDATE statements below) so existing databases whose DEFAULTs still
+      // resolve to CURRENT_TIMESTAMP also get sub-second writes — this is
+      // what lets getLatestByBranch break ties deterministically.
       create: ({ id, project_id, branch, permission_mode, agent_type }) => {
         db.prepare(
-          `INSERT INTO agent_sessions (id, project_id, branch, status, permission_mode, agent_type)
-           VALUES (@id, @project_id, @branch, 'running', @permission_mode, @agent_type)`
+          `INSERT INTO agent_sessions (id, project_id, branch, status, permission_mode, agent_type, created_at, updated_at)
+           VALUES (@id, @project_id, @branch, 'running', @permission_mode, @agent_type,
+                   strftime('%Y-%m-%d %H:%M:%f', 'now'), strftime('%Y-%m-%d %H:%M:%f', 'now'))`
         ).run({ id, project_id, branch, permission_mode: permission_mode ?? 'edit', agent_type: agent_type ?? 'claude-code' });
         return db
           .prepare<{ id: string }, AgentSession>(`SELECT * FROM agent_sessions WHERE id = @id`)
@@ -1331,7 +1341,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
       updateStatus: (id: string, status: AgentSessionStatus) => {
         db.prepare(
-          `UPDATE agent_sessions SET status = @status, updated_at = CURRENT_TIMESTAMP WHERE id = @id`
+          `UPDATE agent_sessions SET status = @status, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, status });
       },
 
@@ -1343,18 +1353,18 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
       updatePermissionMode: (id: string, mode: string) => {
         db.prepare(
-          `UPDATE agent_sessions SET permission_mode = @mode, updated_at = CURRENT_TIMESTAMP WHERE id = @id`
+          `UPDATE agent_sessions SET permission_mode = @mode, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, mode });
       },
 
       updateTitle: (id: string, title: string | null) => {
         db.prepare(
-          `UPDATE agent_sessions SET title = @title, updated_at = CURRENT_TIMESTAMP WHERE id = @id`
+          `UPDATE agent_sessions SET title = @title, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, title });
       },
 
       touchUpdatedAt: (id: string) => {
-        db.prepare(`UPDATE agent_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
+        db.prepare(`UPDATE agent_sessions SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`)
           .run({ id });
       },
 
