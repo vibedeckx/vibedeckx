@@ -304,6 +304,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
 
     // Clear pastes state now that they've been materialized into the outgoing message.
+    const capturedPastes = pastes;
+    const capturedNextPasteId = nextPasteId;
     setPastes([]);
     setNextPasteId(1);
 
@@ -339,6 +341,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           const result = await translateText(textToTranslate);
           if (result.error) {
             setInput(rawText);
+            setPastes(capturedPastes);
+            setNextPasteId(capturedNextPasteId);
             toast.error("Translation failed", { description: "Disable translation to send the original text." });
             return;
           }
@@ -351,6 +355,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           }
         } catch {
           setInput(rawText);
+          setPastes(capturedPastes);
+          setNextPasteId(capturedNextPasteId);
           toast.error("Translation failed", { description: "Disable translation to send the original text." });
           return;
         } finally {
