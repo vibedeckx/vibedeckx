@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
 import { useAgentSession } from "@/hooks/use-agent-session";
-import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
+import type { AgentMessage, ContentPart, UploadedPaste, AgentSession } from "@/hooks/use-agent-session";
 import { AgentMessageItem } from "./agent-message";
 import { Conversation, ConversationContent, ConversationScrollButton } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
@@ -143,6 +143,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     remoteStatus,
     startSession,
     sendMessage,
+    uploadPaste,
     stopSession,
     restartSession,
     startNewConversation,
@@ -240,22 +241,80 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     [input, nextPasteId, setInput]
   );
 
+  async function materializePastes(
+    rawText: string,
+    pastes: PasteEntry[],
+    upload: (content: string, sessionId?: string) => Promise<UploadedPaste>,
+    sessionId?: string
+  ): Promise<string> {
+    const presentIds = new Set<number>();
+    for (const match of rawText.matchAll(PASTE_TOKEN_RE)) {
+      presentIds.add(Number(match[1]));
+    }
+    const surviving = pastes.filter((p) => presentIds.has(p.id));
+    if (surviving.length === 0) return rawText;
+
+    let result = rawText;
+    for (const paste of surviving) {
+      const uploaded = await upload(paste.content, sessionId);
+      const token = pasteTokenFor(paste.id, paste.size);
+      const marker = `<vpaste path="${uploaded.path}" size="${uploaded.size}" />`;
+      // Replace every occurrence of this token (should be exactly one, but be safe).
+      result = result.split(token).join(marker);
+    }
+    return result;
+  }
+
   const handleSubmit = async (message: PromptInputMessage) => {
-    const text = message.text.trim();
+    const rawText = message.text;
     const hasFiles = message.files.length > 0;
-    if (!text && !hasFiles) return;
+    const hasPastes = pastes.length > 0;
+    const trimmedRaw = rawText.trim();
+    if (!trimmedRaw && !hasFiles) return;
 
     setInput("");
-    inputHistory.push(text);
+    inputHistory.push(trimmedRaw);
+
+    // Resolve which session id to use. If no session yet, the session will be
+    // created below and materialization must happen against that new id.
+    let targetSessionId: string | undefined = session?.id;
+    let startedSession: AgentSession | null = null;
+    if (!session || status !== "running") {
+      onStatusChange?.();
+      startedSession = await startSession(permissionMode);
+      if (!startedSession) {
+        // Restore input on failure so the user doesn't lose their pastes.
+        setInput(rawText);
+        return;
+      }
+      targetSessionId = startedSession.id;
+    }
+
+    // Upload pastes (if any) and replace tokens with <vpaste/> markers.
+    let processedText = trimmedRaw;
+    if (hasPastes) {
+      try {
+        processedText = (await materializePastes(rawText, pastes, uploadPaste, targetSessionId)).trim();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Failed to upload paste";
+        toast.error("Paste upload failed", { description: msg });
+        setInput(rawText);
+        return;
+      }
+    }
+
+    // Clear pastes state now that they've been materialized into the outgoing message.
+    setPastes([]);
+    setNextPasteId(1);
 
     // Build content: plain string when no files, ContentPart[] when files are attached
     let content: string | ContentPart[];
     if (!hasFiles) {
-      content = text;
+      content = processedText;
     } else {
       const parts: ContentPart[] = [];
-      if (text) {
-        parts.push({ type: "text", text });
+      if (processedText) {
+        parts.push({ type: "text", text: processedText });
       }
       for (const file of message.files) {
         if (file.mediaType && file.url) {
@@ -279,7 +338,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         try {
           const result = await translateText(textToTranslate);
           if (result.error) {
-            setInput(text);
+            setInput(rawText);
             toast.error("Translation failed", { description: "Disable translation to send the original text." });
             return;
           }
@@ -291,7 +350,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             );
           }
         } catch {
-          setInput(text);
+          setInput(rawText);
           toast.error("Translation failed", { description: "Disable translation to send the original text." });
           return;
         } finally {
@@ -300,16 +359,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       }
     }
 
-    if (!session || status !== "running") {
-      console.log(`[AgentConversation] handleSubmit: no session or not running (session=${session?.id}, status=${status}), starting new session...`);
-      onStatusChange?.();
-      const newSession = await startSession(permissionMode);
-      console.log(`[AgentConversation] handleSubmit: startSession returned`, newSession?.id ?? 'null', newSession?.status);
-      if (newSession) {
-        sendMessage(content, newSession.id);
-      }
+    if (startedSession) {
+      console.log(`[AgentConversation] handleSubmit: using freshly started session ${startedSession.id}`);
+      sendMessage(content, startedSession.id);
     } else {
-      console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
+      console.log(`[AgentConversation] handleSubmit: existing session ${session!.id}, status=${status}`);
       sendMessage(content);
     }
   };
