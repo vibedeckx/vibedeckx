@@ -7,6 +7,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import type { LogMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useTerminalSettings } from "@/hooks/use-terminal-settings";
 
 interface ExecutorOutputProps {
   logs: LogMessage[];
@@ -36,17 +37,22 @@ export function ExecutorOutput({
   }
   muteInputRef.current = muteInput;
 
+  const { settings: terminalSettings } = useTerminalSettings();
+  const initialSettingsRef = useRef(terminalSettings);
+
   // Initialize terminal
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) return;
 
+    const initial = initialSettingsRef.current;
     const terminal = new Terminal({
       cursorBlink: isPty, // Only blink cursor in PTY mode
       cursorStyle: isPty ? "block" : "underline",
       disableStdin: !isPty, // Disable input in non-PTY mode
 convertEol: true, // Convert \n to \r\n for proper line handling on macOS
-      fontSize: 13,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      fontSize: initial.fontSize,
+      fontFamily: initial.fontFamily,
+      scrollback: initial.scrollback,
       theme: {
         background: "#09090b",
         foreground: "#fafafa",
@@ -153,6 +159,20 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     }
     lastLogIndexRef.current = logs.length;
   }, [logs]);
+
+  // Apply live terminal settings changes (font, scrollback) without remounting
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.fontSize = terminalSettings.fontSize;
+    terminal.options.fontFamily = terminalSettings.fontFamily;
+    terminal.options.scrollback = terminalSettings.scrollback;
+    try {
+      fitAddonRef.current?.fit();
+    } catch {
+      // Ignore fit errors
+    }
+  }, [terminalSettings.fontSize, terminalSettings.fontFamily, terminalSettings.scrollback]);
 
   // Handle container resize
   useEffect(() => {

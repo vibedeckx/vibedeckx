@@ -6,6 +6,23 @@ import "../server-types.js";
 
 const DEFAULT_PROXY_CONFIG: ProxyConfig = { type: "none", host: "", port: 0 };
 
+export interface TerminalSettings {
+  scrollback: number;
+  fontSize: number;
+  fontFamily: string;
+}
+
+const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
+  scrollback: 1000,
+  fontSize: 13,
+  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+};
+
+const SCROLLBACK_MIN = 500;
+const SCROLLBACK_MAX = 100000;
+const FONT_SIZE_MIN = 8;
+const FONT_SIZE_MAX = 32;
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get proxy settings
   fastify.get("/api/settings/proxy", async (_req, reply) => {
@@ -152,6 +169,77 @@ const routes: FastifyPluginAsync = async (fastify) => {
       openrouterApiKey: maskApiKey(updated.openrouterApiKey),
       openrouterModel: updated.openrouterModel,
     });
+  });
+
+  // ---- Terminal Settings ----
+
+  fastify.get("/api/settings/terminal", async (_req, reply) => {
+    const saved = fastify.storage.settings.get("terminal");
+    if (!saved) {
+      return reply.code(200).send(DEFAULT_TERMINAL_SETTINGS);
+    }
+    try {
+      const parsed = JSON.parse(saved) as Partial<TerminalSettings>;
+      return reply.code(200).send({
+        scrollback: typeof parsed.scrollback === "number" ? parsed.scrollback : DEFAULT_TERMINAL_SETTINGS.scrollback,
+        fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : DEFAULT_TERMINAL_SETTINGS.fontSize,
+        fontFamily: typeof parsed.fontFamily === "string" && parsed.fontFamily.trim()
+          ? parsed.fontFamily
+          : DEFAULT_TERMINAL_SETTINGS.fontFamily,
+      });
+    } catch {
+      return reply.code(200).send(DEFAULT_TERMINAL_SETTINGS);
+    }
+  });
+
+  fastify.put<{
+    Body: Partial<TerminalSettings>;
+  }>("/api/settings/terminal", async (req, reply) => {
+    const { scrollback, fontSize, fontFamily } = req.body;
+
+    if (scrollback !== undefined) {
+      if (typeof scrollback !== "number" || !Number.isFinite(scrollback) || scrollback < SCROLLBACK_MIN || scrollback > SCROLLBACK_MAX) {
+        return reply.code(400).send({ error: `scrollback must be a number between ${SCROLLBACK_MIN} and ${SCROLLBACK_MAX}` });
+      }
+    }
+    if (fontSize !== undefined) {
+      if (typeof fontSize !== "number" || !Number.isFinite(fontSize) || fontSize < FONT_SIZE_MIN || fontSize > FONT_SIZE_MAX) {
+        return reply.code(400).send({ error: `fontSize must be a number between ${FONT_SIZE_MIN} and ${FONT_SIZE_MAX}` });
+      }
+    }
+    if (fontFamily !== undefined) {
+      if (typeof fontFamily !== "string" || fontFamily.trim() === "") {
+        return reply.code(400).send({ error: "fontFamily must be a non-empty string" });
+      }
+    }
+
+    const saved = fastify.storage.settings.get("terminal");
+    const existing: TerminalSettings = (() => {
+      if (!saved) return DEFAULT_TERMINAL_SETTINGS;
+      try {
+        const parsed = JSON.parse(saved) as Partial<TerminalSettings>;
+        return {
+          scrollback: typeof parsed.scrollback === "number" ? parsed.scrollback : DEFAULT_TERMINAL_SETTINGS.scrollback,
+          fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : DEFAULT_TERMINAL_SETTINGS.fontSize,
+          fontFamily: typeof parsed.fontFamily === "string" && parsed.fontFamily.trim()
+            ? parsed.fontFamily
+            : DEFAULT_TERMINAL_SETTINGS.fontFamily,
+        };
+      } catch {
+        return DEFAULT_TERMINAL_SETTINGS;
+      }
+    })();
+
+    const updated: TerminalSettings = {
+      scrollback: Math.round(scrollback ?? existing.scrollback),
+      fontSize: fontSize ?? existing.fontSize,
+      fontFamily: (fontFamily ?? existing.fontFamily).trim(),
+    };
+
+    fastify.storage.settings.set("terminal", JSON.stringify(updated));
+    console.log(`[Settings] Terminal updated: scrollback=${updated.scrollback}, fontSize=${updated.fontSize}, fontFamily="${updated.fontFamily}"`);
+
+    return reply.code(200).send(updated);
   });
 };
 

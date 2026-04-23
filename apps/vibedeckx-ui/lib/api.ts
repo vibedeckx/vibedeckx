@@ -338,6 +338,25 @@ export interface ChatProviderConfig {
   openrouterModel: string;
 }
 
+export interface TerminalSettings {
+  scrollback: number;
+  fontSize: number;
+  fontFamily: string;
+}
+
+export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
+  scrollback: 1000,
+  fontSize: 13,
+  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+};
+
+export const TERMINAL_SETTINGS_LIMITS = {
+  scrollbackMin: 500,
+  scrollbackMax: 100000,
+  fontSizeMin: 8,
+  fontSizeMax: 32,
+} as const;
+
 // ============ Agent Provider Types ============
 
 export type AgentType = "claude-code" | "codex";
@@ -1223,6 +1242,28 @@ export const api = {
 
   async updateChatProviderSettings(config: Partial<ChatProviderConfig>): Promise<ChatProviderConfig> {
     const res = await authFetch(`${getApiBase()}/api/settings/chat-provider`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  // Terminal Settings
+  async getTerminalSettings(): Promise<TerminalSettings> {
+    const res = await authFetch(`${getApiBase()}/api/settings/terminal`);
+    if (!res.ok) {
+      return { ...DEFAULT_TERMINAL_SETTINGS };
+    }
+    return res.json();
+  },
+
+  async updateTerminalSettings(config: Partial<TerminalSettings>): Promise<TerminalSettings> {
+    const res = await authFetch(`${getApiBase()}/api/settings/terminal`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
