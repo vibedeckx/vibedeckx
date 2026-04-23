@@ -27,6 +27,8 @@ import { WebSearchToolUseUI, WebSearchToolResultUI } from "./web-search-tools";
 import { SkillToolUseUI, SkillToolResultUI } from "./skill-tools";
 import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools";
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
+import { VPasteChip, splitVPasteMarkers } from "./vpaste-chip";
+import { Fragment } from "react";
 
 interface AgentMessageProps {
   message: AgentMessage;
@@ -115,6 +117,26 @@ function renderBody(message: AgentMessage, messageIndex: number) {
   }
 }
 
+function renderTextWithVPaste(text: string) {
+  const segments = splitVPasteMarkers(text);
+  if (segments.length === 1 && segments[0].kind === "text") {
+    return <MessageResponse>{text ?? ""}</MessageResponse>;
+  }
+  return (
+    <div className="text-sm text-foreground break-words">
+      {segments.map((seg, i) =>
+        seg.kind === "text" ? (
+          <Fragment key={i}>
+            <MessageResponse>{seg.text}</MessageResponse>
+          </Fragment>
+        ) : (
+          <VPasteChip key={i} path={seg.path} size={seg.size} />
+        )
+      )}
+    </div>
+  );
+}
+
 function UserMessage({ content }: { content: string | ContentPart[] }) {
   return (
     <div className="flex gap-3 py-3">
@@ -125,11 +147,11 @@ function UserMessage({ content }: { content: string | ContentPart[] }) {
         <p className="text-sm font-medium text-foreground mb-1">You</p>
         <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
           {typeof content === "string" ? (
-            <MessageResponse>{content ?? ""}</MessageResponse>
+            renderTextWithVPaste(content)
           ) : (
             content.map((part, i) =>
               part.type === "text" ? (
-                <MessageResponse key={i}>{part.text}</MessageResponse>
+                <Fragment key={i}>{renderTextWithVPaste(part.text)}</Fragment>
               ) : (
                 <img
                   key={i}
