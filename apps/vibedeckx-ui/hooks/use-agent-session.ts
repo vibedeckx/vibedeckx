@@ -157,10 +157,18 @@ async function uploadPasteToSession(
     let detail = "";
     try {
       const body = await response.json();
-      if (body.error) detail = ` — ${body.error}`;
+      if (body.errorCode) {
+        const parts = [`${body.errorCode}`];
+        if (body.attempts) parts.push(`${body.attempts} attempts`);
+        if (body.totalDurationMs) parts.push(`${(body.totalDurationMs / 1000).toFixed(1)}s`);
+        detail = ` (${parts.join(", ")})`;
+      } else if (body.error) {
+        detail = ` — ${body.error}`;
+      }
     } catch {
       // ignore parse errors
     }
+    console.error(`[AgentSession] /paste failed: status=${response.status}, sessionId=${sessionId}, detail=${detail}`);
     throw new Error(`Failed to upload paste [${response.status}]${detail}`);
   }
 
