@@ -51,6 +51,7 @@ import {
   type ChangeEvent,
   type ChangeEventHandler,
   Children,
+  type ClipboardEvent,
   type ClipboardEventHandler,
   type ComponentProps,
   createContext,
@@ -812,13 +813,19 @@ export const PromptInputBody = ({
   <div className={cn("contents", className)} {...props} />
 );
 
-export type PromptInputTextareaProps = ComponentProps<
-  typeof InputGroupTextarea
->;
+export type PromptInputTextareaProps = ComponentProps<typeof InputGroupTextarea> & {
+  /**
+   * Optional handler invoked when the user pastes plain text (no files).
+   * Receives the clipboard text. If the handler calls `event.preventDefault()`,
+   * the textarea's default text insertion is suppressed.
+   */
+  onPasteText?: (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => void;
+};
 
 export const PromptInputTextarea = ({
   onChange,
   onKeyDown: onKeyDownProp,
+  onPasteText,
   className,
   placeholder = "What would you like to know?",
   ...props
@@ -869,13 +876,11 @@ export const PromptInputTextarea = ({
 
   const handlePaste: ClipboardEventHandler<HTMLTextAreaElement> = (event) => {
     const items = event.clipboardData?.items;
-
     if (!items) {
       return;
     }
 
     const files: File[] = [];
-
     for (const item of items) {
       if (item.kind === "file") {
         const file = item.getAsFile();
@@ -888,6 +893,14 @@ export const PromptInputTextarea = ({
     if (files.length > 0) {
       event.preventDefault();
       attachments.add(files);
+      return;
+    }
+
+    if (onPasteText) {
+      const text = event.clipboardData?.getData("text") ?? "";
+      if (text.length > 0) {
+        onPasteText(event, text);
+      }
     }
   };
 
