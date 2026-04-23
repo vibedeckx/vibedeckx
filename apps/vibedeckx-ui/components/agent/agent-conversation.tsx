@@ -170,6 +170,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
   }, [session?.agentType]);
 
+  // Reset paste state when workspace changes — pastes are scoped to a single draft.
+  useEffect(() => {
+    setPastes([]);
+    setNextPasteId(1);
+  }, [projectId, branch]);
+
   // Notify parent when agent starts working (status "running" + user has sent messages).
   // Skips auto-started idle sessions that have no messages yet.
   const prevWorkingRef = useRef(false);
