@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, forwardRef, useImperativeHandle, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
 import { useAgentSession } from "@/hooks/use-agent-session";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { AgentMessageItem } from "./agent-message";
@@ -88,9 +88,34 @@ export interface AgentConversationHandle {
   submitMessage: (content: string) => Promise<void>;
 }
 
+// TODO(paste): expose as configurable setting
+const PASTE_TO_FILE_THRESHOLD = 2000;
+// Match any size label inside the parens (e.g. "1.2KB", "42KB", "900B") so the
+// regex stays in sync with formatPasteSize without coupling the two.
+const PASTE_TOKEN_RE = /\[📎 paste #(\d+) \([^)]+\)\]/g;
+
+interface PasteEntry {
+  id: number;
+  content: string;
+  size: number; // bytes, UTF-8
+}
+
+function formatPasteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  const kb = bytes / 1024;
+  if (kb < 10) return `${kb.toFixed(1)}KB`;
+  return `${Math.round(kb)}KB`;
+}
+
+function pasteTokenFor(id: number, bytes: number): string {
+  return `[📎 paste #${id} (${formatPasteSize(bytes)})]`;
+}
+
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
   function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
+  const [pastes, setPastes] = useState<PasteEntry[]>([]);
+  const [nextPasteId, setNextPasteId] = useState(1);
   const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
@@ -182,6 +207,38 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       }
     }
   }), [session, status, startSession, sendMessage, permissionMode]);
+
+  const handlePasteText = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => {
+      if (text.length <= PASTE_TO_FILE_THRESHOLD) return;
+
+      event.preventDefault();
+
+      const textarea = event.currentTarget;
+      const start = textarea.selectionStart ?? input.length;
+      const end = textarea.selectionEnd ?? input.length;
+      const size = new Blob([text]).size;
+
+      const id = nextPasteId;
+      const token = pasteTokenFor(id, size);
+      const newValue = input.slice(0, start) + token + input.slice(end);
+
+      setInput(newValue);
+      setPastes((prev) => [...prev, { id, content: text, size }]);
+      setNextPasteId(id + 1);
+
+      // Restore caret after the inserted token.
+      const caret = start + token.length;
+      requestAnimationFrame(() => {
+        try {
+          textarea.setSelectionRange(caret, caret);
+        } catch {
+          // ignore — textarea may have been unmounted
+        }
+      });
+    },
+    [input, nextPasteId, setInput]
+  );
 
   const handleSubmit = async (message: PromptInputMessage) => {
     const text = message.text.trim();
@@ -523,6 +580,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               <PromptInputTextarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onPasteText={handlePasteText}
                 onKeyDown={inputHistory.handleKeyDown}
                 placeholder={
                   session
