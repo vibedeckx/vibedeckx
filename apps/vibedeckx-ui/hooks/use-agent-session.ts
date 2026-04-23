@@ -138,6 +138,35 @@ async function sendMessageToSession(sessionId: string, content: string | Content
   }
 }
 
+export interface UploadedPaste {
+  path: string;
+  size: number;
+}
+
+async function uploadPasteToSession(
+  sessionId: string,
+  content: string
+): Promise<UploadedPaste> {
+  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/paste`, {
+    method: "POST",
+    headers: getAuthHeaders("application/json"),
+    body: JSON.stringify({ content }),
+  });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.json();
+      if (body.error) detail = ` — ${body.error}`;
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(`Failed to upload paste [${response.status}]${detail}`);
+  }
+
+  return response.json();
+}
+
 async function restartSessionApi(sessionId: string, agentType?: AgentType): Promise<void> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/restart`, {
     method: "POST",
@@ -724,6 +753,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     [session?.id, projectId, branch, explicitSessionId]
   );
 
+  const uploadPaste = useCallback(
+    async (content: string, sessionId?: string): Promise<UploadedPaste> => {
+      const targetSessionId = sessionId || session?.id;
+      if (!targetSessionId) {
+        throw new Error("No session id available for paste upload");
+      }
+      return uploadPasteToSession(targetSessionId, content);
+    },
+    [session?.id]
+  );
+
   // Stop session - sends stop signal to the running agent process
   const stopSession = useCallback(async () => {
     if (!session?.id) return;
@@ -993,6 +1033,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     remoteStatus,
     startSession,
     sendMessage,
+    uploadPaste,
     stopSession,
     restartSession,
     startNewConversation,
