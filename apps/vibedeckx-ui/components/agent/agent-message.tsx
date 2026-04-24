@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { MessageResponse } from "@/components/ai-elements/message";
+import { defaultRemarkPlugins } from "streamdown";
 import { useAgentConversation } from "./agent-conversation";
 import { AskUserQuestion } from "./ask-user-question";
 import { ExitPlanModeUI } from "./exit-plan-mode";
@@ -117,17 +118,44 @@ function renderBody(message: AgentMessage, messageIndex: number) {
   }
 }
 
+// Convert single `\n` inside mdast text nodes into `break` nodes so user-typed
+// line breaks render as <br/>. Code/inlineCode nodes carry their value on the
+// node itself (no children), so they're naturally skipped by the recursion.
+function remarkLineBreaks() {
+  function walk(node: { children?: unknown[] }) {
+    if (!Array.isArray(node.children)) return;
+    const next: unknown[] = [];
+    for (const child of node.children) {
+      const c = child as { type?: string; value?: string; children?: unknown[] };
+      if (c.type === "text" && typeof c.value === "string" && /\r?\n/.test(c.value)) {
+        const parts = c.value.split(/\r?\n/);
+        parts.forEach((part, i) => {
+          if (i > 0) next.push({ type: "break" });
+          if (part) next.push({ type: "text", value: part });
+        });
+      } else {
+        walk(c as { children?: unknown[] });
+        next.push(child);
+      }
+    }
+    node.children = next;
+  }
+  return (tree: { children?: unknown[] }) => walk(tree);
+}
+
+const USER_REMARK_PLUGINS = [...Object.values(defaultRemarkPlugins), remarkLineBreaks];
+
 function renderTextWithVPaste(text: string) {
   const segments = splitVPasteMarkers(text);
   if (segments.length === 1 && segments[0].kind === "text") {
-    return <MessageResponse>{text ?? ""}</MessageResponse>;
+    return <MessageResponse remarkPlugins={USER_REMARK_PLUGINS}>{text ?? ""}</MessageResponse>;
   }
   return (
     <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
       {segments.map((seg, i) =>
         seg.kind === "text" ? (
           <Fragment key={i}>
-            <MessageResponse>{seg.text}</MessageResponse>
+            <MessageResponse remarkPlugins={USER_REMARK_PLUGINS}>{seg.text}</MessageResponse>
           </Fragment>
         ) : (
           <VPasteChip key={i} path={seg.path} size={seg.size} />
