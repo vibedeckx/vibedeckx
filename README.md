@@ -44,6 +44,27 @@ pnpm build:ui      # Build UI (static export)
 pnpm copy:ui       # Copy UI to CLI dist
 ```
 
+## Installation
+
+The fastest way to install is via npx (requires Node.js 22+):
+
+```bash
+npx vibedeckx@latest
+```
+
+Alternatively, download a precompiled archive for your platform from the [GitHub Releases page](https://github.com/vibedeckx/vibedeckx/releases) and run it directly with npx:
+
+```bash
+# Linux / Windows
+npx -y ./vibedeckx-<version>-<platform>.tar.gz
+
+# macOS — install globally first, then run
+npm install -g ./vibedeckx-<version>-darwin-arm64.tar.gz
+vibedeckx
+```
+
+See the [Release](#release) section below for the list of supported platforms.
+
 ## Usage
 
 ### Run from built files
@@ -209,10 +230,17 @@ Once the build completes, a Release is created automatically on the GitHub Relea
 | macOS ARM (Apple Silicon) | `.tar.gz` |
 | Windows x64 | `.tar.gz` |
 
-After downloading and extracting, run with Node.js 22+:
+After downloading, run directly with npx (Node.js 22+):
 
 ```bash
-node dist/bin.js
+npx -y ./vibedeckx-<version>-<platform>.tar.gz
+```
+
+On macOS, install globally first, then run `vibedeckx`:
+
+```bash
+npm install -g ./vibedeckx-<version>-darwin-arm64.tar.gz
+vibedeckx
 ```
 
 ## CLI Commands
