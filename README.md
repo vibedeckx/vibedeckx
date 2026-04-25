@@ -2,23 +2,6 @@
 
 AI-powered app generator with project management support.
 
-## Project Structure
-
-```
-vibedeckx/
-├── packages/vibedeckx/     # CLI package (publishable to npm)
-│   └── src/
-│       ├── bin.ts          # CLI entry point
-│       ├── command.ts      # CLI commands
-│       ├── server.ts       # Fastify server
-│       ├── dialog.ts       # Folder selection dialog
-│       └── storage/        # SQLite storage layer
-└── apps/vibedeckx-ui/      # Next.js frontend
-    ├── app/                # Next.js app router
-    ├── components/         # React components
-    └── hooks/              # React hooks
-```
-
 ## Development
 
 ```bash
