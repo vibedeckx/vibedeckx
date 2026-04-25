@@ -67,17 +67,54 @@ See the [Release](#release) section below for the list of supported platforms.
 
 ## Usage
 
-### Run from built files
+Once installed (see [Installation](#installation)), invoke the CLI directly:
 
 ```bash
-pnpm start
-# or
-node packages/vibedeckx/dist/bin.js
+vibedeckx              # same as `vibedeckx start`
+vibedeckx start        # start the server (default command)
+vibedeckx --help       # show help
+vibedeckx --version    # show version
 ```
 
-### Specify port
+The server opens in your browser automatically.
+
+### `vibedeckx start`
+
+Starts the local server. All flags are optional.
+
+| Flag | Description |
+|------|-------------|
+| `--port <number>` | Port to bind (default: `5173`) |
+| `--auth` | Enable Clerk authentication (requires `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`) |
+| `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
 
 ```bash
+vibedeckx start --port 8080
+vibedeckx start --data-dir /path/to/data    # database at /path/to/data/data.sqlite
+CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth
+```
+
+### `vibedeckx connect`
+
+Runs in reverse-connect mode: starts a local server bound to `127.0.0.1` and tunnels it to a remote vibedeckx instance. Useful when the remote machine can't be reached directly (e.g. behind NAT) but can dial out.
+
+| Flag | Description |
+|------|-------------|
+| `--connect-to <url>` | URL of the remote vibedeckx server (required) |
+| `--token <value>` | Authentication token for the reverse connection (required) |
+| `--port <number>` | Local port (default: random) |
+| `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
+
+```bash
+vibedeckx connect --connect-to https://example.com --token abc123
+```
+
+### Running from source
+
+For development against a local checkout:
+
+```bash
+pnpm start                              # runs the built CLI
 node packages/vibedeckx/dist/bin.js --port 8080
 ```
 
