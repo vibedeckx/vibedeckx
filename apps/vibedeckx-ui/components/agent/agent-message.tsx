@@ -634,6 +634,11 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
 }
 
 function ThinkingMessage({ content }: { content: string }) {
+  const text = content ?? "";
+  const hasContent = text.trim().length > 0;
+  const display = hasContent
+    ? (text.length > 500 ? text.substring(0, 500) + "..." : text)
+    : "Reasoning unavailable — this model does not expose its thinking content.";
   return (
     <div className="flex gap-3 py-3">
       <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-blue-500/10 flex items-center justify-center">
@@ -644,8 +649,12 @@ function ThinkingMessage({ content }: { content: string }) {
           <summary className="text-xs font-medium text-blue-500 cursor-pointer hover:underline">
             Thinking...
           </summary>
-          <div className="mt-2 text-xs text-muted-foreground whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded-md overflow-hidden">
-            {(content ?? "").length > 500 ? (content ?? "").substring(0, 500) + "..." : content ?? ""}
+          <div
+            className={`mt-2 text-xs whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded-md overflow-hidden ${
+              hasContent ? "text-muted-foreground" : "text-muted-foreground/70 italic"
+            }`}
+          >
+            {display}
           </div>
         </details>
       </div>
