@@ -62,82 +62,82 @@ node packages/vibedeckx/dist/bin.js --port 8080
 
 ## Distribution
 
-### 本地打包
+### Local Packaging
 
-使用 `scripts/pack.sh` 构建分发包，产物输出到 `dist-out/` 目录：
+Use `scripts/pack.sh` to build distribution packages. Output is written to the `dist-out/` directory:
 
 ```bash
-./scripts/pack.sh                  # 构建 npm 包 + 平台归档
-./scripts/pack.sh npm              # 只构建主包 npm tarball
-./scripts/pack.sh platform         # 只构建平台归档（用于 npx / 直接下载）
-./scripts/pack.sh npm-platform     # 构建 npm 平台包（与 npmjs 发布版本一致）
-./scripts/pack.sh <mode> --skip-build  # 跳过 pnpm build（复用已有的 dist/）
+./scripts/pack.sh                  # Build npm package + platform archives
+./scripts/pack.sh npm              # Build the main npm tarball only
+./scripts/pack.sh platform         # Build platform archives only (for npx / direct download)
+./scripts/pack.sh npm-platform     # Build npm platform packages (matches the npmjs release)
+./scripts/pack.sh <mode> --skip-build  # Skip pnpm build (reuse the existing dist/)
 ```
 
-产出三种包：
+Three kinds of packages are produced:
 
-| 类型 | 文件示例 | 说明 |
-|------|---------|------|
-| npm 主包 | `vibedeckx-0.1.0.tgz` | 轻量 wrapper（仅 `bin/vibedeckx.mjs`） |
-| 平台归档 | `vibedeckx-0.1.0-linux-x64.tar.gz` | 预编译依赖，开箱即用，用于 GitHub Release |
-| npm 平台包 | `vibedeckx-linux-x64-0.1.0.tgz` | 与 npmjs 上 `@vibedeckx/linux-x64` 一致 |
+| Type | Example file | Description |
+|------|-------------|-------------|
+| Main npm package | `vibedeckx-0.1.0.tgz` | Lightweight wrapper (only `bin/vibedeckx.mjs`) |
+| Platform archive | `vibedeckx-0.1.0-linux-x64.tar.gz` | Precompiled dependencies, ready to use, for GitHub Releases |
+| npm platform package | `vibedeckx-linux-x64-0.1.0.tgz` | Matches `@vibedeckx/linux-x64` published on npmjs |
 
 #### platform vs npm-platform
 
-两者内容相同（esbuild bundle + 预编译 native 模块），但打包方式不同：
+Both contain the same artifacts (esbuild bundle + precompiled native modules), but they are packaged differently:
 
-**`platform`** — 独立包（standalone package）
+**`platform`** — standalone package
 
-用户下载后即可直接运行，不依赖其他包。为此需要：
-- 无 scope 包名（`vibedeckx`），否则 `npx` 无法直接执行
-- `bin` 字段指向 `dist/bin.js`，让 npm/npx 知道入口
-- 包含 sourcemap，方便用户排查问题
+Users can run it directly after download without depending on any other package. To support this it needs:
+- An unscoped package name (`vibedeckx`); otherwise `npx` cannot execute it directly
+- A `bin` field pointing at `dist/bin.js` so npm/npx can find the entry point
+- Sourcemaps included to help users troubleshoot
 
 ```bash
-# 下载即运行
+# Download and run
 npx -y ./vibedeckx-0.1.0-linux-x64.tar.gz
 ```
 
-**`npm-platform`** — 依赖包（dependency package）
+**`npm-platform`** — dependency package
 
-不独立运行，而是作为主包 `vibedeckx` 的 `optionalDependency` 被安装。npm 根据 `os`/`cpu` 字段自动选择匹配当前平台的包。为此需要：
-- scoped 包名（`@vibedeckx/linux-x64`），与主包的 `optionalDependencies` 对应
-- 不需要 `bin` 字段 — 入口由主包的 `bin/vibedeckx.mjs` 提供
-- 不含 sourcemap，减小安装体积
+Not run on its own; installed as an `optionalDependency` of the main `vibedeckx` package. npm picks the package matching the current platform based on the `os`/`cpu` fields. To support this it needs:
+- A scoped package name (`@vibedeckx/linux-x64`) matching the main package's `optionalDependencies`
+- No `bin` field — the entry point is provided by the main package's `bin/vibedeckx.mjs`
+- No sourcemaps, to reduce install size
 
 ```
 npx vibedeckx
-  -> 安装 vibedeckx（轻量 wrapper，几 KB）
-     -> optionalDependencies 自动安装 @vibedeckx/linux-x64
-        -> 包含 dist/bin.js + dist/ui/ + native node_modules/
-  -> bin/vibedeckx.mjs 定位平台包并运行 dist/bin.js
+  -> Installs vibedeckx (lightweight wrapper, a few KB)
+     -> optionalDependencies automatically install @vibedeckx/linux-x64
+        -> Contains dist/bin.js + dist/ui/ + native node_modules/
+  -> bin/vibedeckx.mjs locates the platform package and runs dist/bin.js
 ```
 
 |  | `platform` | `npm-platform` |
 |---|---|---|
-| 打包方式 | 独立包，直接运行 | 依赖包，由主包间接安装 |
-| 包名 | `vibedeckx`（无 scope） | `@vibedeckx/linux-x64`（scoped） |
-| `bin` 字段 | 有 | 无（主包提供） |
-| Sourcemap | 包含 | 不包含 |
-| 对应产物 | GitHub Release 资产 | npmjs.com 发布的包 |
+| Packaging | Standalone package, runs directly | Dependency package, installed indirectly via the main package |
+| Package name | `vibedeckx` (unscoped) | `@vibedeckx/linux-x64` (scoped) |
+| `bin` field | Yes | No (provided by main package) |
+| Sourcemaps | Included | Not included |
+| Release target | GitHub Release assets | Packages published on npmjs.com |
 
-`npm-platform` 用于在发布前本地验证 npm 安装流程：
+`npm-platform` is used to verify the npm install flow locally before publishing:
 
 ```bash
 ./scripts/pack.sh npm-platform --skip-build
 npm install ./dist-out/vibedeckx-linux-x64-0.1.0.tgz
 ```
 
-### 发布到 npm
+### Publishing to npm
 
-通过推送 `v*` tag 触发 CI 自动发布（见下方 Release 章节），或手动发布：
+Push a `v*` tag to trigger an automated CI release (see the Release section below), or publish manually:
 
 ```bash
 cd packages/vibedeckx
 npm publish
 ```
 
-用户可直接运行：
+Users can then run it directly:
 
 ```bash
 npx vibedeckx
@@ -168,15 +168,15 @@ Vibedeckx supports connecting to remote vibedeckx servers, allowing you to manag
                     (all project data)           (execution only)
 ```
 
-**Data Storage** (本地管理，远程执行):
-- **Local SQLite**: 存储所有项目配置（本地是数据主源）
-  - 项目信息（名称、路径、远程连接配置）
-  - Executors 配置（命令、工作目录）
-  - 远程连接信息（URL、API Key）
-- **Remote Server**: 只负责执行
-  - 运行 Agent 会话（访问远程文件系统）
-  - 执行 Executor 命令
-  - 浏览远程目录
+**Data Storage** (managed locally, executed remotely):
+- **Local SQLite**: stores all project configuration (the local database is the source of truth)
+  - Project info (name, path, remote connection config)
+  - Executor config (command, working directory)
+  - Remote connection info (URL, API key)
+- **Remote Server**: handles execution only
+  - Runs agent sessions (accessing the remote filesystem)
+  - Executes Executor commands
+  - Browses remote directories
 
 ### Setting Up a Remote Server
 
@@ -233,29 +233,29 @@ Remote projects are visually distinguished in the UI:
 
 ## Release
 
-项目使用 GitHub Actions 自动构建和发布。推送 `v*` 格式的 tag 即可触发，不限分支。
+The project uses GitHub Actions for automated builds and releases. Pushing a tag in the `v*` format triggers a release from any branch.
 
 ```bash
-# 1. 确保代码已提交
+# 1. Make sure all changes are committed
 git add .
 git commit -m "release: v0.1.0"
 
-# 2. 创建 tag
+# 2. Create the tag
 git tag v0.1.0
 
-# 3. 推送 tag 触发构建
+# 3. Push the tag to trigger the build
 git push origin v0.1.0
 ```
 
-构建完成后会自动在 GitHub Releases 页面创建 Release，附带以下平台的预编译包：
+Once the build completes, a Release is created automatically on the GitHub Releases page, including precompiled packages for the following platforms:
 
-| 平台 | 文件格式 |
-|------|---------|
+| Platform | File format |
+|----------|-------------|
 | Linux x64 | `.tar.gz` |
 | macOS ARM (Apple Silicon) | `.tar.gz` |
 | Windows x64 | `.tar.gz` |
 
-下载解压后使用 Node.js 22+ 运行：
+After downloading and extracting, run with Node.js 22+:
 
 ```bash
 node dist/bin.js
