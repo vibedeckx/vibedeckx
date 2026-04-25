@@ -88,11 +88,27 @@ export function QuotePopover({ containerRef, onQuote }: QuotePopoverProps) {
       });
     }
 
-    document.addEventListener("selectionchange", recompute);
+    // Hide-only handler: collapses the popover the instant the user clears the
+    // selection (click elsewhere, etc.) without ever showing it mid-drag.
+    function maybeHide() {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !selection.toString().trim()) {
+        setSel(null);
+      }
+    }
+
+    // Show on selection finalization, not on every selectionchange tick.
+    document.addEventListener("mouseup", recompute);
+    document.addEventListener("keyup", recompute);
+    document.addEventListener("touchend", recompute);
+    document.addEventListener("selectionchange", maybeHide);
     window.addEventListener("scroll", recompute, true);
     window.addEventListener("resize", recompute);
     return () => {
-      document.removeEventListener("selectionchange", recompute);
+      document.removeEventListener("mouseup", recompute);
+      document.removeEventListener("keyup", recompute);
+      document.removeEventListener("touchend", recompute);
+      document.removeEventListener("selectionchange", maybeHide);
       window.removeEventListener("scroll", recompute, true);
       window.removeEventListener("resize", recompute);
     };
