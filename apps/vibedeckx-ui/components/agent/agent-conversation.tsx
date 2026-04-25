@@ -119,6 +119,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [agentType, setAgentType] = useState<AgentType>("claude-code");
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -278,6 +279,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     const trimmedRaw = rawText.trim();
     if (!trimmedRaw && !hasFiles) return;
 
+    setIsSubmitting(true);
+    try {
     setInput("");
     inputHistory.push(trimmedRaw);
 
@@ -388,10 +391,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
 
     if (startedSession) {
       console.log(`[AgentConversation] handleSubmit: using freshly started session ${startedSession.id}`);
-      sendMessage(content, startedSession.id);
+      await sendMessage(content, startedSession.id);
     } else {
       console.log(`[AgentConversation] handleSubmit: existing session ${session!.id}, status=${status}`);
-      sendMessage(content);
+      await sendMessage(content);
+    }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -672,8 +678,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               />
               <PromptInputSubmit
                 className="absolute bottom-1 right-1"
-                disabled={(!input.trim() && !isLoading) || isTranslating}
-                status={isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
+                disabled={(!input.trim() && !isLoading) || isTranslating || isSubmitting}
+                status={isSubmitting || isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
               />
             </div>
           </div>
