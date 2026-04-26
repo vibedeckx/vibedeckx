@@ -8,6 +8,7 @@ import type { RemoteSessionInfo } from "../server-types.js";
 import type { RemotePatchCache } from "../remote-patch-cache.js";
 import type { EventBus } from "../event-bus.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
+import { statusEventFromRemotePatch, projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import "../server-types.js";
 
 /**
@@ -138,6 +139,13 @@ function connectPersistentRemoteWs(
     if ("JsonPatch" in parsed) {
       cache.appendMessage(sessionId, raw, true);
       cache.broadcast(sessionId, raw);
+      if (eventBus) {
+        const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
+        if (statusEvent) {
+          console.log(`[AgentWS:remote→eventBus] ${sessionId} session:status=${statusEvent.status}`);
+          eventBus.emit(statusEvent);
+        }
+      }
     } else if ("finished" in parsed) {
       cache.setFinished(sessionId);
       cache.broadcast(sessionId, raw);
@@ -148,14 +156,9 @@ function connectPersistentRemoteWs(
       // (mirrors the executor:stopped pattern for remote executors)
       if (eventBus) {
         const tc = parsed.taskCompleted as Record<string, unknown> | undefined;
-        const prefix = `remote-${remoteInfo.remoteServerId}-`;
-        const suffix = `-${remoteInfo.remoteSessionId}`;
-        const projectId = sessionId.startsWith(prefix) && sessionId.endsWith(suffix)
-          ? sessionId.slice(prefix.length, sessionId.length - suffix.length)
-          : sessionId.split("-").slice(2, -1).join("-");
         eventBus.emit({
           type: "session:taskCompleted",
-          projectId,
+          projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),
           branch: remoteInfo.branch ?? null,
           sessionId,
           duration_ms: tc?.duration_ms as number | undefined,

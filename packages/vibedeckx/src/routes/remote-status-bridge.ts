@@ -9,8 +9,8 @@ import type { RemoteSessionInfo } from "../server-types.js";
  * The serverId and sessionId are known from `remoteInfo`, so we strip the
  * known prefix/suffix. Falls back to a heuristic split for malformed ids.
  *
- * Inline copy of the same logic at websocket-routes.ts:151-155 — kept in
- * sync there so behavior is consistent between status and taskCompleted.
+ * Single source of truth for this slicing. Both the status-bridge and the
+ * taskCompleted-bridge in `websocket-routes.ts` call this helper.
  */
 export function projectIdFromRemoteSessionId(
   sessionId: string,
