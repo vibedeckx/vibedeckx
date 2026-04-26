@@ -52,7 +52,7 @@ export function RightPanel({ projectId, selectedBranch, onMergeRequest, project,
           { id: 'executors' as const, icon: Terminal, label: 'Executors' },
           { id: 'diff' as const, icon: GitBranch, label: 'Diff' },
           { id: 'terminal' as const, icon: SquareTerminal, label: 'Terminal' },
-          { id: 'preview' as const, icon: Globe, label: 'Preview' },
+          { id: 'preview' as const, icon: Globe, label: 'Browser' },
         ]).map(({ id, icon: Icon, label }) => (
           <button
             key={id}
