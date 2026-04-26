@@ -4,6 +4,17 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getAuthToken } from "@/lib/api";
 import type { AgentSessionStatus } from "./use-agent-session";
 
+/**
+ * Drift-correction safety net for sidebar workspace status indicators.
+ *
+ * The primary status source is the SSE stream `/api/events` (see
+ * `useGlobalEvents`). This poll exists only to repair drift if SSE missed an
+ * event during a reconnect window or backend restart. Event-driven handlers in
+ * `app/page.tsx` also call `refetch()` on every status event, so the interval
+ * itself can be coarse.
+ */
+const POLL_INTERVAL_MS = 30_000;
+
 function getApiBase(): string {
   if (typeof window === "undefined") return "";
   if (window.location.hostname === "localhost" && window.location.port === "3000") {
@@ -19,8 +30,10 @@ interface SessionRecord {
 }
 
 /**
- * Polls agent session statuses for a project every 5 seconds.
- * Returns a Map<branch, AgentSessionStatus> for all sessions with status "running".
+ * Polls agent session statuses for a project at a coarse interval (see
+ * `POLL_INTERVAL_MS`). Returns a Map<branch, AgentSessionStatus> for all
+ * sessions on the project; when multiple sessions share a branch, "running"
+ * takes precedence over other statuses.
  */
 export function useSessionStatuses(projectId: string | null) {
   const [statuses, setStatuses] = useState<Map<string, AgentSessionStatus>>(new Map());
@@ -54,7 +67,7 @@ export function useSessionStatuses(projectId: string | null) {
   useEffect(() => {
     fetchStatuses();
 
-    intervalRef.current = setInterval(fetchStatuses, 5000);
+    intervalRef.current = setInterval(fetchStatuses, POLL_INTERVAL_MS);
 
     return () => {
       if (intervalRef.current) {
