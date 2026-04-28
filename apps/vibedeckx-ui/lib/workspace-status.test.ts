@@ -390,6 +390,20 @@ describe("applyGlobalSessionStatus", () => {
     expect(result.shouldRefetchTasks).toBe(true);
   });
 
+  it("stopped → preserves completed (taskCompleted-then-stopped race)", () => {
+    const prev = new Map<string, WorkspaceStatus>([["feat", "completed"]]);
+    const result = applyGlobalSessionStatus(prev, "feat", "stopped");
+    expect(result.realtimeStatuses.get("feat")).toBe("completed");
+    expect(result.shouldRefetchTasks).toBe(true);
+  });
+
+  it("error → clears entry even if completed", () => {
+    const prev = new Map<string, WorkspaceStatus>([["feat", "completed"]]);
+    const result = applyGlobalSessionStatus(prev, "feat", "error");
+    expect(result.realtimeStatuses.has("feat")).toBe(false);
+    expect(result.shouldRefetchTasks).toBe(true);
+  });
+
   it("error → clears entry, triggers refetch", () => {
     const prev = new Map<string, WorkspaceStatus>([["feat", "working"]]);
     const result = applyGlobalSessionStatus(prev, "feat", "error");
@@ -453,6 +467,31 @@ describe("event sequence simulations", () => {
       "feat-a" // selected is feat-a
     );
     expect(statuses.get("feat-b")).toBe("completed");
+  });
+
+  it("taskCompleted → stopped on selected branch with no assigned task → completed", () => {
+    // Reproduces the bug where backend emits session:status=stopped right
+    // after taskCompleted, previously erasing the green dot.
+
+    // 1. User sends a message → working
+    let realtime = applyStatusWorking(new Map(), "feat-a");
+
+    // 2. Agent finishes turn successfully → completed (via WS taskCompleted)
+    realtime = applyStatusCompleted(realtime, "feat-a");
+
+    // 3. Backend immediately emits session:status=stopped (post-taskCompleted)
+    const result = applyGlobalSessionStatus(realtime, "feat-a", "stopped");
+    realtime = result.realtimeStatuses;
+
+    // 4. Even with no assigned task, the dot must stay green
+    const statuses = computeWorkspaceStatuses(
+      worktrees,
+      realtime,
+      emptySessions,
+      noTasks,
+      "feat-a"
+    );
+    expect(statuses.get("feat-a")).toBe("completed");
   });
 
   it("session stops without task completion → assigned", () => {

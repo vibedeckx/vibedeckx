@@ -96,7 +96,10 @@ export function clearRealtimeStatus(
 /**
  * Apply a global session status event.
  * - "running" → set realtime "working"
- * - "stopped"/"error" → clear realtime entry, signal that tasks should be refetched
+ * - "stopped" → clear realtime entry, but preserve "completed" (the backend
+ *   emits session:status=stopped immediately after taskCompleted; clearing
+ *   would erase the green dot for projects without an assigned task)
+ * - "error" → clear realtime entry
  *
  * Returns the new realtime statuses map and whether tasks should be refetched.
  */
@@ -111,7 +114,9 @@ export function applyGlobalSessionStatus(
       shouldRefetchTasks: false,
     };
   }
-  // "stopped" or "error" — delete realtime entry so polling/task fallback takes over
+  if (status === "stopped" && prev.get(toBranchKey(branch)) === "completed") {
+    return { realtimeStatuses: prev, shouldRefetchTasks: true };
+  }
   return {
     realtimeStatuses: clearRealtimeStatus(prev, branch),
     shouldRefetchTasks: true,
