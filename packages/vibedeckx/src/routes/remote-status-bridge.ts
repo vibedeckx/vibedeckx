@@ -25,37 +25,17 @@ export function projectIdFromRemoteSessionId(
 }
 
 /**
- * Tracks the most-recent status emitted to the local EventBus for each remote
- * session. Used to suppress no-op status emissions — notably the trailing
- * status patch that the remote's `subscribe()` sends to every fresh subscriber
- * (which would otherwise re-emit "running" on every persistent-WS reconnect or
- * on a brand-new idle session and incorrectly turn the workspace dot blue).
- */
-const lastEmittedStatusBySession = new Map<string, AgentSessionStatus>();
-
-/** Test hook — clears tracked state. */
-export function _resetRemoteStatusTracker(): void {
-  lastEmittedStatusBySession.clear();
-}
-
-/**
  * If `parsed` is a JsonPatch message from a remote agent session that
  * contains a `/status` op with a valid status string, return the
  * `session:status` event payload to emit on the local EventBus.
  *
- * Returns `null` when:
- * - the message does not carry a status update
- * - this is the first status patch we've seen for the session (treated as
- *   "initial state" rather than a transition — the remote `subscribe()`
- *   handshake always sends a trailing status patch even when the session is
- *   idle, which would otherwise turn the workspace dot blue on every fresh
- *   New Conversation or persistent-WS reconnect)
- * - the status matches what we last recorded for this session
+ * Returns `null` when the message does not carry a status update.
  *
- * Polling (`useSessionStatuses`, every 30s with the entry_count=0 filter)
- * provides the absolute current state, so suppressing the initial event is
- * safe — we only delay realtime feedback for whatever state the remote was
- * already in when we first observed it.
+ * Note: the workspace dot is now driven by `branch:activity` events, not
+ * `session:status` — so the previous "first-emit suppression" hack to
+ * absorb the remote `subscribe()` handshake's trailing status patch is no
+ * longer needed. session:status events still flow for any legacy consumers
+ * (e.g. ChatSessionManager); the branch:activity stream is independent.
  */
 export function statusEventFromRemotePatch(
   parsed: Record<string, unknown>,
@@ -73,11 +53,6 @@ export function statusEventFromRemotePatch(
   if (!statusOp) return null;
   const content = statusOp.value?.content;
   if (content !== "running" && content !== "stopped" && content !== "error") {
-    return null;
-  }
-  const prev = lastEmittedStatusBySession.get(sessionId);
-  lastEmittedStatusBySession.set(sessionId, content);
-  if (prev === undefined || prev === content) {
     return null;
   }
   return {

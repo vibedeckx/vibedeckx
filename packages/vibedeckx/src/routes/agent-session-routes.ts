@@ -156,18 +156,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const countMap = new Map(
         fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
       );
-      const userCountMap = new Map(
-        fastify.storage.agentSessions.countUserEntries().map(r => [r.session_id, r.cnt])
-      );
       const sessions = dbSessions.map(s => {
         const inMemory = fastify.agentSessionManager.getSession(s.id);
         const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
-        return {
-          ...s,
-          status,
-          entry_count: countMap.get(s.id) ?? 0,
-          user_entry_count: userCountMap.get(s.id) ?? 0,
-        };
+        return { ...s, status, entry_count: countMap.get(s.id) ?? 0 };
       });
       return reply.code(200).send({ sessions });
     }
@@ -254,7 +246,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           console.error("[API] Remote agent-sessions list proxy error:", result.status, result.data);
           return reply.code(result.status || 502).send(result.data);
         }
-        const data = result.data as { sessions: Array<{ id: string; status: string; branch?: string | null; entry_count?: number; user_entry_count?: number; [k: string]: unknown }> };
+        const data = result.data as { sessions: Array<{ id: string; status: string; branch?: string | null; entry_count?: number; [k: string]: unknown }> };
         const mapped = data.sessions.map(s => {
           const localSessionId = `remote-${project.agent_mode}-${project.id}-${s.id}`;
           // Populate remoteSessionMap + persist so the user can navigate to ANY
@@ -273,12 +265,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           fastify.storage.remoteSessionMappings.upsert(
             localSessionId, project.id, project.agent_mode, s.id, s.branch ?? null,
           );
-          return {
-            ...s,
-            id: localSessionId,
-            entry_count: s.entry_count ?? 0,
-            user_entry_count: s.user_entry_count ?? 0,
-          };
+          return { ...s, id: localSessionId, entry_count: s.entry_count ?? 0 };
         });
         return reply.code(200).send({ sessions: mapped });
       }
@@ -294,18 +281,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const countMap = new Map(
         fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
       );
-      const userCountMap = new Map(
-        fastify.storage.agentSessions.countUserEntries().map(r => [r.session_id, r.cnt])
-      );
       const sessions = dbSessions.map(s => {
         const inMemory = fastify.agentSessionManager.getSession(s.id);
         const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
-        return {
-          ...s,
-          status,
-          entry_count: countMap.get(s.id) ?? 0,
-          user_entry_count: userCountMap.get(s.id) ?? 0,
-        };
+        return { ...s, status, entry_count: countMap.get(s.id) ?? 0 };
       });
       return reply.code(200).send({ sessions });
     }
