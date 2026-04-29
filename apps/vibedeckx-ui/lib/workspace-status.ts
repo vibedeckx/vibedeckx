@@ -14,30 +14,25 @@ export function toBranchKey(branch: string | null): string {
  * Compute workspace statuses for all worktrees.
  *
  * Two-tier fallback:
- * 1. Realtime statuses (event-driven, highest priority)
- * 2. Session polling status — idle "running" sessions are filtered upstream
- *    in `useSessionStatuses`, so anything that reaches here as "running"
- *    represents real activity.
+ * 1. Realtime overlay (optimistic, set by user actions like message-send /
+ *    New Conversation — for sub-50ms feedback before the SSE event lands)
+ * 2. Backend-derived activity (single source of truth, see
+ *    `useBranchActivity` and `plans/branch-activity-refactor.md`)
  */
 export function computeWorkspaceStatuses(
   worktrees: Worktree[] | undefined,
   realtimeStatuses: Map<string, WorkspaceStatus>,
-  sessionStatuses: Map<string, AgentSessionStatus>
+  backendStatuses: Map<string, WorkspaceStatus>
 ): Map<string, WorkspaceStatus> {
   const map = new Map<string, WorkspaceStatus>();
   if (!worktrees) return map;
 
   for (const wt of worktrees) {
     const branchKey = toBranchKey(wt.branch);
-
-    const realtimeStatus = realtimeStatuses.get(branchKey);
-    if (realtimeStatus !== undefined) {
-      map.set(branchKey, realtimeStatus);
-      continue;
-    }
-
-    const sessionStatus = sessionStatuses.get(branchKey);
-    map.set(branchKey, sessionStatus === "running" ? "working" : "idle");
+    map.set(
+      branchKey,
+      realtimeStatuses.get(branchKey) ?? backendStatuses.get(branchKey) ?? "idle"
+    );
   }
   return map;
 }

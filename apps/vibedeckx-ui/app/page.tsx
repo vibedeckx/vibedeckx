@@ -7,7 +7,7 @@ import { ProjectInfoView } from '@/components/project/project-info-view';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
 import { useTasks } from '@/hooks/use-tasks';
-import { useSessionStatuses } from '@/hooks/use-session-statuses';
+import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
 import { Plus } from 'lucide-react';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
@@ -32,9 +32,7 @@ import {
   toBranchKey,
   computeWorkspaceStatuses,
   applyStatusWorking,
-  applyStatusCompleted,
   clearRealtimeStatus,
-  applyGlobalSessionStatus,
 } from '@/lib/workspace-status';
 
 export type { WorkspaceStatus } from '@/lib/workspace-status';
@@ -103,7 +101,7 @@ export default function Home() {
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
-  const { statuses: sessionStatuses, refetch: refetchSessionStatuses } = useSessionStatuses(currentProject?.id ?? null);
+  const { activity: branchActivity, refetch: refetchBranchActivity } = useBranchActivity(currentProject?.id ?? null);
   const { rules, createRule, updateRule, deleteRule } = useRules(currentProject?.id ?? null, selectedBranch);
   const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
   const mainChatRef = useRef<MainConversationHandle>(null);
@@ -114,59 +112,61 @@ export default function Home() {
 
   // Compute workspace statuses for all worktrees
   const workspaceStatuses = useMemo(
-    () => computeWorkspaceStatuses(worktrees, realtimeWorkspaceStatuses, sessionStatuses),
-    [worktrees, sessionStatuses, realtimeWorkspaceStatuses]
+    () => computeWorkspaceStatuses(worktrees, realtimeWorkspaceStatuses, branchActivity),
+    [worktrees, branchActivity, realtimeWorkspaceStatuses]
   );
 
-  // Agent started working → blue
+  // User just hit send → optimistic working overlay (sub-50ms before the
+  // backend's branch:activity event lands).
   const handleStatusChange = useCallback(() => {
     setRealtimeWorkspaceStatuses(prev => applyStatusWorking(prev, selectedBranch));
   }, [selectedBranch]);
 
-  // WS taskCompleted → just sync DB data; the realtime "completed" write is
-  // driven by the global SSE handler below (uses the event's branch, not
-  // selectedBranch, so it stays correct if the user navigated away mid-turn).
+  // Sidebar status comes from useBranchActivity now (REST + SSE). These
+  // handlers stay only for non-status side effects (task table refresh).
   const handleTaskCompleted = useCallback(() => {
     refetchTasks();
-    refetchSessionStatuses();
-  }, [refetchTasks, refetchSessionStatuses]);
+    // Clear the optimistic overlay so the backend's "completed" wins.
+    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, selectedBranch));
+  }, [refetchTasks, selectedBranch]);
 
   const handleSessionStarted = useCallback(() => {
-    refetchSessionStatuses();
-  }, [refetchSessionStatuses]);
+    refetchBranchActivity();
+  }, [refetchBranchActivity]);
 
-  // New Conversation → reset to idle (agent isn't doing anything yet)
+  // New Conversation → optimistic idle overlay until backend's
+  // branch:activity:idle (createNewSession fires it) clears the realtime
+  // entry on the next tick. Note: storing "idle" in realtime explicitly
+  // because the backend may still report "completed" until its own SSE
+  // event reaches the consumer.
   const handleNewConversation = useCallback(() => {
-    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, selectedBranch));
+    setRealtimeWorkspaceStatuses(prev => {
+      const next = new Map(prev);
+      next.set(toBranchKey(selectedBranch), "idle");
+      return next;
+    });
   }, [selectedBranch]);
 
-  // Global SSE events — updates sidebar status for non-selected workspaces
-  const handleGlobalSessionStatus = useCallback((branch: string | null, status: "running" | "stopped" | "error") => {
-    setRealtimeWorkspaceStatuses(prev => applyGlobalSessionStatus(prev, branch, status));
-    refetchSessionStatuses();
+  // Legacy SSE handlers — phase 6 will drop them entirely. Phase 5 keeps
+  // them only for the task table refresh side effect; the workspace dot
+  // is no longer driven by these events.
+  const handleGlobalSessionStatus = useCallback((_branch: string | null, status: "running" | "stopped" | "error") => {
     if (status !== "running") {
       refetchTasks();
     }
-  }, [refetchSessionStatuses, refetchTasks]);
+  }, [refetchTasks]);
 
-  const handleGlobalSessionFinished = useCallback((branch: string | null) => {
-    // Clear realtime entry and refetch so fallback picks up task completion
-    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, branch));
+  const handleGlobalSessionFinished = useCallback(() => {
     refetchTasks();
-    refetchSessionStatuses();
-  }, [refetchTasks, refetchSessionStatuses]);
+  }, [refetchTasks]);
 
   const handleGlobalTaskChanged = useCallback(() => {
     refetchTasks();
   }, [refetchTasks]);
 
-  // Global taskCompleted → green for the event's branch (NOT selectedBranch).
-  // Fires for any project session, including non-selected workspaces.
-  const handleGlobalSessionTaskCompleted = useCallback((branch: string | null) => {
-    setRealtimeWorkspaceStatuses(prev => applyStatusCompleted(prev, branch));
+  const handleGlobalSessionTaskCompleted = useCallback(() => {
     refetchTasks();
-    refetchSessionStatuses();
-  }, [refetchTasks, refetchSessionStatuses]);
+  }, [refetchTasks]);
 
   useGlobalEvents(currentProject?.id ?? null, {
     onSessionStatus: handleGlobalSessionStatus,
