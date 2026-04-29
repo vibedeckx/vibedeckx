@@ -549,6 +549,10 @@ export class AgentSessionManager {
 
         if (event.subtype === "success") {
           console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
+          const completedAt = Date.now();
+          if (!session.skipDb) {
+            this.storage.agentSessions.markCompleted(sessionId, completedAt);
+          }
           this.broadcastRaw(sessionId, {
             taskCompleted: {
               duration_ms: event.duration_ms,
@@ -705,6 +709,7 @@ export class AgentSessionManager {
       this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
       this.storage.agentSessions.touchUpdatedAt(session.id);
       if (message.type === "user") {
+        this.storage.agentSessions.markUserMessage(session.id, Date.now());
         const dbRow = this.storage.agentSessions.getById(session.id);
         if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
           const text = typeof message.content === "string"

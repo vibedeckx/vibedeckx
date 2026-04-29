@@ -159,6 +159,10 @@ export interface AgentSession {
   title?: string | null;
   created_at: string;
   updated_at?: string;
+  /** Epoch ms of the most recent user-typed message, or null if none yet. */
+  last_user_message_at?: number | null;
+  /** Epoch ms of the most recent successful turn completion, or null if none yet. */
+  last_completed_at?: number | null;
 }
 
 export interface Storage {
@@ -284,6 +288,10 @@ export interface Storage {
     updatePermissionMode: (id: string, mode: string) => void;
     updateTitle: (id: string, title: string | null) => void;
     touchUpdatedAt: (id: string) => void;
+    /** Set last_user_message_at to the given epoch-ms timestamp. */
+    markUserMessage: (id: string, timestampMs: number) => void;
+    /** Set last_completed_at to the given epoch-ms timestamp. */
+    markCompleted: (id: string, timestampMs: number) => void;
     delete: (id: string) => void;
     upsertEntry: (sessionId: string, entryIndex: number, data: string) => void;
     getEntries: (sessionId: string) => Array<{ entry_index: number; data: string }>;

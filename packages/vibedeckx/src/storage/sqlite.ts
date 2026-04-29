@@ -87,6 +87,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       -- existing seconds-only rows, which correctly sort earlier).
       created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      -- Branch activity tracking (epoch ms). NULL = event has not occurred.
+      -- Drives the workspace-status derivation; see plans/branch-activity-refactor.md.
+      last_user_message_at INTEGER DEFAULT NULL,
+      last_completed_at INTEGER DEFAULT NULL,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
     -- Note: idx_agent_sessions_project_branch and idx_agent_sessions_updated_at
@@ -340,6 +344,16 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const sessionInfoV4 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   if (!sessionInfoV4.some(col => col.name === "title")) {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN title TEXT DEFAULT NULL");
+  }
+
+  // Migration: add branch-activity timestamp columns (epoch ms).
+  // See plans/branch-activity-refactor.md Phase 1.
+  const sessionInfoV5 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionInfoV5.some(col => col.name === "last_user_message_at")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN last_user_message_at INTEGER DEFAULT NULL");
+  }
+  if (!sessionInfoV5.some(col => col.name === "last_completed_at")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN last_completed_at INTEGER DEFAULT NULL");
   }
 
   // Ensure agent_sessions indexes exist. Safe to run here because either:
@@ -1442,6 +1456,16 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       touchUpdatedAt: (id: string) => {
         db.prepare(`UPDATE agent_sessions SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`)
           .run({ id });
+      },
+
+      markUserMessage: (id: string, timestampMs: number) => {
+        db.prepare(`UPDATE agent_sessions SET last_user_message_at = @ts WHERE id = @id`)
+          .run({ id, ts: timestampMs });
+      },
+
+      markCompleted: (id: string, timestampMs: number) => {
+        db.prepare(`UPDATE agent_sessions SET last_completed_at = @ts WHERE id = @id`)
+          .run({ id, ts: timestampMs });
       },
 
       delete: (id: string) => {
