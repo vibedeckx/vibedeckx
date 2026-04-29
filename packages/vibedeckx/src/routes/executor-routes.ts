@@ -22,15 +22,28 @@ const routes: FastifyPluginAsync = async (fastify) => {
         ? fastify.storage.executors.getByGroupId(req.query.groupId)
         : fastify.storage.executors.getByProjectId(req.params.projectId);
 
-      // Attach the most recent local process for each executor so the UI can
-      // reconnect to its log buffer (within retention) after a workspace
-      // switch unmounts the ExecutorItem.
+      // Attach the most recent process across local + remote tables so the UI
+      // can reconnect to its log buffer (within retention) after a workspace
+      // switch unmounts the ExecutorItem, and show "Last run" on hover.
+      // last_process_target distinguishes which target the row came from so
+      // the frontend only auto-reconnects when the current executor mode
+      // matches.
       const augmented = executors.map((executor) => {
-        const last = fastify.storage.executorProcesses.getLastByExecutorId(executor.id);
+        const local = fastify.storage.executorProcesses.getLastByExecutorId(executor.id);
+        const remote = fastify.storage.remoteExecutorProcesses.getLastByExecutorId(executor.id);
+        const localStarted = local?.started_at ?? null;
+        const remoteStarted = remote?.started_at ?? null;
+        // Pick whichever is more recent. Lex compare on ISO-8601 / SQLite
+        // TIMESTAMP literals is correct across both formats.
+        const pickRemote = !!remoteStarted && (!localStarted || remoteStarted > localStarted);
+        const last_process_id = pickRemote ? remote!.local_process_id : local?.id ?? null;
+        const last_process_started_at = pickRemote ? remoteStarted : localStarted;
+        const last_process_target = pickRemote ? remote!.remote_server_id : (local ? 'local' : null);
         return {
           ...executor,
-          last_process_id: last?.id ?? null,
-          last_process_started_at: last?.started_at ?? null,
+          last_process_id,
+          last_process_started_at,
+          last_process_target,
         };
       });
       return reply.code(200).send({ executors: augmented });

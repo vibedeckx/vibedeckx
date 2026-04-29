@@ -76,8 +76,10 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // For direct-URL servers: only checks rows matching the exact server ID.
   // For reverse-connect: checks ALL unrestored rows (handles server ID changes).
   async function restoreRemoteExecutorsForServer(connectedServerId: string, directUrl?: string): Promise<void> {
-    const allRows = opts.storage.remoteExecutorProcesses.getAll();
-    const unrestoredRows = allRows.filter(r => !remoteExecutorMap.has(r.local_process_id));
+    // Only inspect rows still flagged 'running'. Finished rows are kept for
+    // "Last run" lookup but should not be re-validated against the remote.
+    const runningRows = opts.storage.remoteExecutorProcesses.getRunning();
+    const unrestoredRows = runningRows.filter(r => !remoteExecutorMap.has(r.local_process_id));
     if (unrestoredRows.length === 0) return;
 
     // For direct-URL servers: only check rows with matching server ID.
@@ -126,9 +128,10 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             });
             console.log(`[SharedServices] Restored remote executor: ${row.local_process_id}`);
           } else if (row.remote_server_id === connectedServerId) {
-            // Only clean up rows that exactly match the connected server
-            opts.storage.remoteExecutorProcesses.delete(row.local_process_id);
-            console.log(`[SharedServices] Cleaned up stale remote executor: ${row.local_process_id}`);
+            // The remote no longer has this process — mark it finished so the
+            // row stays for "Last run" lookup but isn't re-validated next time.
+            opts.storage.remoteExecutorProcesses.markFinished(row.local_process_id, undefined, 'killed');
+            console.log(`[SharedServices] Marked stale remote executor as finished: ${row.local_process_id}`);
           }
         }
       } else {
@@ -168,7 +171,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // Only processes direct-URL servers here; reverse-connect servers are
   // restored when they reconnect (via the status change handler above).
   void (async () => {
-    const savedRows = opts.storage.remoteExecutorProcesses.getAll();
+    const savedRows = opts.storage.remoteExecutorProcesses.getRunning();
     // Only process rows with a direct URL — reverse-connect rows (empty URL)
     // will be restored when their connection comes online
     const directUrlRows = savedRows.filter(r => r.remote_url);

@@ -93,6 +93,21 @@ export interface ExecutorProcess {
   finished_at: string | null;
 }
 
+export interface RemoteExecutorProcessRow {
+  local_process_id: string;
+  remote_server_id: string;
+  remote_url: string;
+  remote_api_key: string;
+  remote_process_id: string;
+  executor_id: string;
+  project_id: string | null;
+  branch: string | null;
+  started_at: string;
+  status: ExecutorProcessStatus;
+  exit_code: number | null;
+  finished_at: string | null;
+}
+
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'cancelled';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
@@ -234,8 +249,21 @@ export interface Storage {
   };
   remoteExecutorProcesses: {
     insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null }): void;
+    /**
+     * Hard-delete a row. Use only for stale-row cleanup or transient sessions
+     * (e.g. terminals). Use markFinished() when an executor process exits so
+     * the row survives for "Last run" lookup and post-finish log replay.
+     */
     delete(localProcessId: string): void;
-    getAll(): Array<{ local_process_id: string; remote_server_id: string; remote_url: string; remote_api_key: string; remote_process_id: string; executor_id: string; project_id: string | null; branch: string | null }>;
+    /** Mark a row as no longer running while preserving it for history. */
+    markFinished(localProcessId: string, exitCode?: number, status?: ExecutorProcessStatus): void;
+    getById(localProcessId: string): RemoteExecutorProcessRow | undefined;
+    /** Most recent row for an executor, regardless of status — used for "Last run" lookup. */
+    getLastByExecutorId(executorId: string): RemoteExecutorProcessRow | undefined;
+    /** Only rows currently marked 'running' — used for restoration on startup/reconnect. */
+    getRunning(): RemoteExecutorProcessRow[];
+    /** All rows including finished — primarily for legacy callers. */
+    getAll(): RemoteExecutorProcessRow[];
   };
   agentSessions: {
     create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => AgentSession;

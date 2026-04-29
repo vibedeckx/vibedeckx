@@ -3,7 +3,7 @@ import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer } from "./types.js";
+import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer, RemoteExecutorProcessRow } from "./types.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -362,6 +362,25 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
   // Clean up stale "running" processes from previous server instances
   db.exec("UPDATE executor_processes SET status = 'killed', finished_at = CURRENT_TIMESTAMP WHERE status = 'running'");
+
+  // Migration: add status/exit_code/finished_at to remote_executor_processes so
+  // rows can survive past a process's lifecycle and back the "Last run" UI.
+  // Pre-existing rows default to 'running' and are then swept to 'killed' below
+  // (since their owning process can't outlive the previous server instance).
+  const remoteProcessTableInfo = db.prepare("PRAGMA table_info(remote_executor_processes)").all() as { name: string }[];
+  if (!remoteProcessTableInfo.some(col => col.name === "status")) {
+    db.exec("ALTER TABLE remote_executor_processes ADD COLUMN status TEXT NOT NULL DEFAULT 'running'");
+  }
+  if (!remoteProcessTableInfo.some(col => col.name === "exit_code")) {
+    db.exec("ALTER TABLE remote_executor_processes ADD COLUMN exit_code INTEGER");
+  }
+  if (!remoteProcessTableInfo.some(col => col.name === "finished_at")) {
+    db.exec("ALTER TABLE remote_executor_processes ADD COLUMN finished_at TIMESTAMP");
+  }
+  // Note: unlike executor_processes, we don't bulk-mark remote 'running' rows
+  // as killed here. Remote processes can outlive a local restart, so the
+  // shared-services restore logic verifies each row against the remote
+  // server's running list and calls markFinished() for those that aren't.
 
   // Create agent_session_entries table for conversation persistence
   db.exec(`
@@ -1281,9 +1300,52 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         db.prepare(`DELETE FROM remote_executor_processes WHERE local_process_id = @id`).run({ id: localProcessId });
       },
 
+      markFinished: (localProcessId, exitCode, status) => {
+        const finalStatus: ExecutorProcessStatus =
+          status ?? ((exitCode === undefined || exitCode === 0) ? 'completed' : 'failed');
+        db.prepare(
+          `UPDATE remote_executor_processes
+             SET status = @status, exit_code = @exit_code, finished_at = @finished_at
+             WHERE local_process_id = @id AND status = 'running'`
+        ).run({
+          id: localProcessId,
+          status: finalStatus,
+          exit_code: exitCode ?? null,
+          finished_at: new Date().toISOString(),
+        });
+      },
+
+      getById: (localProcessId) => {
+        return db
+          .prepare<{ id: string }, RemoteExecutorProcessRow>(
+            `SELECT * FROM remote_executor_processes WHERE local_process_id = @id`
+          )
+          .get({ id: localProcessId });
+      },
+
+      getLastByExecutorId: (executorId) => {
+        // Skip terminal rows (executor_id = '') and order by started_at DESC.
+        if (!executorId) return undefined;
+        return db
+          .prepare<{ executor_id: string }, RemoteExecutorProcessRow>(
+            `SELECT * FROM remote_executor_processes
+               WHERE executor_id = @executor_id
+               ORDER BY started_at DESC LIMIT 1`
+          )
+          .get({ executor_id: executorId });
+      },
+
+      getRunning: () => {
+        return db
+          .prepare<{}, RemoteExecutorProcessRow>(
+            `SELECT * FROM remote_executor_processes WHERE status = 'running'`
+          )
+          .all({});
+      },
+
       getAll: () => {
         return db
-          .prepare<{}, { local_process_id: string; remote_server_id: string; remote_url: string; remote_api_key: string; remote_process_id: string; executor_id: string; project_id: string | null; branch: string | null }>(
+          .prepare<{}, RemoteExecutorProcessRow>(
             `SELECT * FROM remote_executor_processes`
           )
           .all({});

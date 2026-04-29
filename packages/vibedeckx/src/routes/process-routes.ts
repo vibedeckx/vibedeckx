@@ -195,7 +195,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
             target: remoteInfo.remoteServerId,
           });
           fastify.remoteExecutorMap.delete(req.params.processId);
-          fastify.storage.remoteExecutorProcesses.delete(req.params.processId);
+          // Preserve the DB row so the UI can show "Last run" + reconnect to
+          // the buffered output via getById fallback in the WS route.
+          fastify.storage.remoteExecutorProcesses.markFinished(req.params.processId, 0, 'killed');
         }
         return reply.code(result.status || 200).send(result.data);
       }

@@ -374,9 +374,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         // Remote executor process proxy
         if (processId.startsWith("remote-")) {
-          const remoteInfo = fastify.remoteExecutorMap.get(processId);
+          let remoteInfo = fastify.remoteExecutorMap.get(processId);
+          // Fall back to the DB row when the in-memory map is empty (e.g. the
+          // process already finished). The remote may still hold the buffered
+          // output within its log retention window, letting us replay history
+          // for an executor whose ExecutorItem just remounted after a workspace
+          // switch.
           if (!remoteInfo) {
-            console.log(`[WebSocket] Remote process ${processId} not found in map`);
+            const row = fastify.storage.remoteExecutorProcesses.getById(processId);
+            if (row) {
+              console.log(`[WebSocket] Remote process ${processId} not in map; using DB row (status=${row.status})`);
+              remoteInfo = {
+                remoteServerId: row.remote_server_id,
+                remoteUrl: row.remote_url,
+                remoteApiKey: row.remote_api_key,
+                remoteProcessId: row.remote_process_id,
+                executorId: row.executor_id,
+                projectId: row.project_id ?? undefined,
+                branch: row.branch,
+                stoppedEmitted: row.status !== 'running',
+              };
+            }
+          }
+          if (!remoteInfo) {
+            console.log(`[WebSocket] Remote process ${processId} not found in map or DB`);
             socket.send(JSON.stringify({ type: "error", message: "Remote process not found" }));
             socket.close();
             return;
@@ -449,7 +470,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
                   }
                   if (info) {
                     fastify.remoteExecutorMap.delete(processId);
-                    fastify.storage.remoteExecutorProcesses.delete(processId);
+                    // Soft-delete only — the DB row keeps "Last run" alive and
+                    // lets the WS route reconnect to the buffered output via
+                    // getById() while the remote retains its log buffer.
+                    fastify.storage.remoteExecutorProcesses.markFinished(
+                      processId,
+                      typeof parsed.exitCode === 'number' ? parsed.exitCode : 0,
+                    );
                   }
                 }
               } catch { /* ignore parse errors */ }

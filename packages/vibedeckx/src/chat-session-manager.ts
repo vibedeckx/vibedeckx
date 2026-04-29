@@ -749,7 +749,12 @@ export class ChatSessionManager {
             });
           }
           this.remoteExecutorMap.delete(localProcessId);
-          this.storage.remoteExecutorProcesses.delete(localProcessId);
+          // Soft-delete: keep the DB row so "Last run" + post-finish log
+          // replay survive past the process's lifecycle.
+          this.storage.remoteExecutorProcesses.markFinished(
+            localProcessId,
+            typeof parsed.exitCode === 'number' ? parsed.exitCode : 0,
+          );
           cleanup();
         }
       } catch { /* ignore parse errors */ }
@@ -1383,7 +1388,8 @@ export class ChatSessionManager {
               }
 
               remoteExecutorMap.delete(remoteEntry.key);
-              this.storage.remoteExecutorProcesses.delete(remoteEntry.key);
+              // Soft-delete keeps the row available for "Last run" + log replay.
+              this.storage.remoteExecutorProcesses.markFinished(remoteEntry.key, 0, 'killed');
               return {
                 success: true,
                 executorName: executor.name,

@@ -397,15 +397,17 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     const match = entries?.find(e => e.target === targetMode);
     const lastStarted = lastStartedProcess.get(executor.id);
     const lastStartedMatch = lastStarted?.target === targetMode ? lastStarted : undefined;
-    // Persisted last-run only applies to local mode — the backend only tracks
-    // executor_processes rows for local processes.
-    const isLocal = targetMode === "local";
+    // Reconnect handle is only valid when the persisted last run targeted the
+    // same mode — connecting to a wrong-target processId would error out on
+    // the WS route. The display timestamp shows regardless so users see when
+    // the executor last ran in any mode.
+    const lastTargetMatches = executor.last_process_target === targetMode;
     return {
       ...executor,
       currentProcessId: match?.processId ?? lastStartedMatch?.processId ?? null,
       isRunning: !!match,
-      lastProcessId: isLocal ? executor.last_process_id ?? null : null,
-      lastStartedAt: isLocal ? executor.last_process_started_at ?? null : null,
+      lastProcessId: lastTargetMatches ? executor.last_process_id ?? null : null,
+      lastStartedAt: executor.last_process_started_at ?? null,
     };
   });
 
