@@ -289,6 +289,7 @@ export interface Storage {
     getEntries: (sessionId: string) => Array<{ entry_index: number; data: string }>;
     deleteEntries: (sessionId: string) => void;
     countEntries: () => Array<{ session_id: string; cnt: number }>;
+    countUserEntries: () => Array<{ session_id: string; cnt: number }>;
   };
   remoteSessionMappings: {
     upsert: (localSessionId: string, projectId: string, remoteServerId: string, remoteSessionId: string, branch: string | null) => void;

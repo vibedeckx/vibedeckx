@@ -27,7 +27,7 @@ interface SessionRecord {
   id: string;
   branch: string;
   status: AgentSessionStatus;
-  entry_count: number;
+  user_entry_count: number;
 }
 
 /**
@@ -36,9 +36,10 @@ interface SessionRecord {
  * sessions on the project; when multiple sessions share a branch, "running"
  * takes precedence over other statuses.
  *
- * Empty "running" sessions (auto-started or created via "New Conversation"
- * without any user input) are downgraded to "stopped" so the workspace dot
- * doesn't light up for an idle process.
+ * "running" sessions with no user-typed messages (auto-started or created via
+ * "New Conversation" — providers may push system init events that bump the
+ * total entry count even without user interaction) are downgraded to "stopped"
+ * so the workspace dot doesn't light up for an idle process.
  */
 export function useSessionStatuses(projectId: string | null) {
   const [statuses, setStatuses] = useState<Map<string, AgentSessionStatus>>(new Map());
@@ -60,7 +61,7 @@ export function useSessionStatuses(projectId: string | null) {
       const map = new Map<string, AgentSessionStatus>();
       for (const s of data.sessions) {
         const effective: AgentSessionStatus =
-          s.status === "running" && s.entry_count === 0 ? "stopped" : s.status;
+          s.status === "running" && (s.user_entry_count ?? 0) === 0 ? "stopped" : s.status;
         if (!map.has(s.branch) || effective === "running") {
           map.set(s.branch, effective);
         }

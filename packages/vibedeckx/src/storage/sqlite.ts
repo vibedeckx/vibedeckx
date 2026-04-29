@@ -1473,6 +1473,14 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           `SELECT session_id, COUNT(*) as cnt FROM agent_session_entries GROUP BY session_id`
         ).all({});
       },
+
+      countUserEntries: () => {
+        return db.prepare<{}, { session_id: string; cnt: number }>(
+          `SELECT session_id, COUNT(*) as cnt FROM agent_session_entries
+           WHERE json_extract(data, '$.type') = 'user'
+           GROUP BY session_id`
+        ).all({});
+      },
     },
 
     remoteSessionMappings: {
