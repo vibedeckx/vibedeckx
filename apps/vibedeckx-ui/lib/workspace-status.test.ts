@@ -5,9 +5,7 @@ import {
   toBranchKey,
   computeWorkspaceStatuses,
   applyStatusWorking,
-  applyStatusCompleted,
   clearRealtimeStatus,
-  applyGlobalSessionStatus,
 } from "./workspace-status";
 
 // ---------------------------------------------------------------------------
@@ -141,24 +139,6 @@ describe("applyStatusWorking", () => {
 });
 
 // ---------------------------------------------------------------------------
-// applyStatusCompleted
-// ---------------------------------------------------------------------------
-// (Phase 5: unused by page.tsx; phase 6 will delete the export.)
-
-describe("applyStatusCompleted", () => {
-  it("sets completed for a branch", () => {
-    const result = applyStatusCompleted(new Map(), "feat");
-    expect(result.get("feat")).toBe("completed");
-  });
-
-  it("overwrites existing status", () => {
-    const prev = new Map<string, WorkspaceStatus>([["feat", "working"]]);
-    const result = applyStatusCompleted(prev, "feat");
-    expect(result.get("feat")).toBe("completed");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // clearRealtimeStatus
 // ---------------------------------------------------------------------------
 
@@ -186,41 +166,6 @@ describe("clearRealtimeStatus", () => {
     const original = new Map<string, WorkspaceStatus>([["feat", "working"]]);
     clearRealtimeStatus(original, "feat");
     expect(original.get("feat")).toBe("working");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// applyGlobalSessionStatus (legacy — phase 6 will delete)
-// ---------------------------------------------------------------------------
-
-describe("applyGlobalSessionStatus (legacy)", () => {
-  it("running → sets working", () => {
-    const result = applyGlobalSessionStatus(new Map(), "feat", "running");
-    expect(result.get("feat")).toBe("working");
-  });
-
-  it("stopped → clears entry", () => {
-    const prev = new Map<string, WorkspaceStatus>([["feat", "working"]]);
-    const result = applyGlobalSessionStatus(prev, "feat", "stopped");
-    expect(result.has("feat")).toBe(false);
-  });
-
-  it("stopped → preserves completed (taskCompleted-then-stopped race)", () => {
-    const prev = new Map<string, WorkspaceStatus>([["feat", "completed"]]);
-    const result = applyGlobalSessionStatus(prev, "feat", "stopped");
-    expect(result.get("feat")).toBe("completed");
-  });
-
-  it("error → clears entry even if completed", () => {
-    const prev = new Map<string, WorkspaceStatus>([["feat", "completed"]]);
-    const result = applyGlobalSessionStatus(prev, "feat", "error");
-    expect(result.has("feat")).toBe(false);
-  });
-
-  it("error → clears entry", () => {
-    const prev = new Map<string, WorkspaceStatus>([["feat", "working"]]);
-    const result = applyGlobalSessionStatus(prev, "feat", "error");
-    expect(result.has("feat")).toBe(false);
   });
 });
 

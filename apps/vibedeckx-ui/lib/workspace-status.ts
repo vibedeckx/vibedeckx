@@ -2,9 +2,6 @@ import type { Worktree } from "@/lib/api";
 
 export type WorkspaceStatus = "idle" | "working" | "completed";
 
-/** Session status values from polling. Duplicated here to avoid importing from a React hook file. */
-export type AgentSessionStatus = "running" | "stopped" | "error";
-
 /** Normalize null branch (main worktree) to empty string for Map keys. */
 export function toBranchKey(branch: string | null): string {
   return branch === null ? "" : branch;
@@ -47,17 +44,7 @@ export function applyStatusWorking(
   return next;
 }
 
-/** Set a branch's realtime status to "completed". */
-export function applyStatusCompleted(
-  prev: Map<string, WorkspaceStatus>,
-  branch: string | null
-): Map<string, WorkspaceStatus> {
-  const next = new Map(prev);
-  next.set(toBranchKey(branch), "completed");
-  return next;
-}
-
-/** Remove a branch's realtime status so the session-polling fallback takes over. */
+/** Remove a branch's realtime status so the backend-derived value takes over. */
 export function clearRealtimeStatus(
   prev: Map<string, WorkspaceStatus>,
   branch: string | null
@@ -65,25 +52,4 @@ export function clearRealtimeStatus(
   const next = new Map(prev);
   next.delete(toBranchKey(branch));
   return next;
-}
-
-/**
- * Apply a global session status event.
- * - "running" → set realtime "working"
- * - "stopped" → preserve "completed" (backend emits stopped right after
- *   taskCompleted; clearing would erase the green dot), otherwise clear
- * - "error" → clear realtime entry
- */
-export function applyGlobalSessionStatus(
-  prev: Map<string, WorkspaceStatus>,
-  branch: string | null,
-  status: AgentSessionStatus
-): Map<string, WorkspaceStatus> {
-  if (status === "running") {
-    return applyStatusWorking(prev, branch);
-  }
-  if (status === "stopped" && prev.get(toBranchKey(branch)) === "completed") {
-    return prev;
-  }
-  return clearRealtimeStatus(prev, branch);
 }
