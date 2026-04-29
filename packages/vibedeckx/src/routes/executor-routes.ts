@@ -5,6 +5,19 @@ import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
+// SQLite's CURRENT_TIMESTAMP returns "YYYY-MM-DD HH:MM:SS" in UTC with no
+// timezone marker. JavaScript's Date constructor parses that as *local* wall
+// time (V8) or returns Invalid Date (Safari) — either way the UI ends up
+// displaying the UTC value as if it were local. Normalize to a proper ISO
+// 8601 UTC string so toLocaleString() converts to the user's local timezone.
+function normalizeSqlTimestamp(value: string | null | undefined): string | null {
+  if (!value) return null;
+  // Already ISO with 'T' separator and tz suffix (Z or +/-HH[:MM]) — pass through.
+  if (value.includes('T') && /(Z|[+-]\d{2}:?\d{2})$/.test(value)) return value;
+  // SQLite "YYYY-MM-DD HH:MM:SS[.SSS]" → ISO with explicit UTC marker.
+  return value.replace(' ', 'T') + 'Z';
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get executors — optionally scoped to a group
   fastify.get<{ Params: { projectId: string }; Querystring: { groupId?: string } }>(
@@ -37,12 +50,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // TIMESTAMP literals is correct across both formats.
         const pickRemote = !!remoteStarted && (!localStarted || remoteStarted > localStarted);
         const last_process_id = pickRemote ? remote!.local_process_id : local?.id ?? null;
-        const last_process_started_at = pickRemote ? remoteStarted : localStarted;
+        const rawStartedAt = pickRemote ? remoteStarted : localStarted;
         const last_process_target = pickRemote ? remote!.remote_server_id : (local ? 'local' : null);
         return {
           ...executor,
           last_process_id,
-          last_process_started_at,
+          last_process_started_at: normalizeSqlTimestamp(rawStartedAt),
           last_process_target,
         };
       });
