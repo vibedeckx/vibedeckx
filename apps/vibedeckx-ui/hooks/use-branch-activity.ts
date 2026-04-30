@@ -35,6 +35,15 @@ function toKey(branch: string | null): string {
   return branch ?? "";
 }
 
+interface UseBranchActivityOptions {
+  /**
+   * Fired whenever a backend update for `branch` is applied (REST refetch or
+   * SSE event). The consumer typically uses this to drop optimistic overlays
+   * for that branch — once the backend has spoken, realtime is stale.
+   */
+  onBackendUpdate?: (branch: string | null) => void;
+}
+
 /**
  * Reads the backend's derived per-branch activity state for the current
  * project. REST fetch on mount + SSE subscription for live updates. The
@@ -44,13 +53,22 @@ function toKey(branch: string | null): string {
  * `since` is tracked per branch so out-of-order SSE events (rare, but
  * possible during reconnect) don't overwrite a newer state with an older one.
  */
-export function useBranchActivity(projectId: string | null): {
+export function useBranchActivity(
+  projectId: string | null,
+  options?: UseBranchActivityOptions,
+): {
   activity: Map<string, BranchActivity>;
   refetch: () => Promise<void>;
 } {
   const [activity, setActivity] = useState<Map<string, BranchActivity>>(new Map());
   // Shadow map of `since` timestamps for stale-event guarding.
   const sinceRef = useRef<Map<string, number>>(new Map());
+  // Latest callback ref so the SSE handler closure reads the current one
+  // without resubscribing whenever the parent re-renders.
+  const onBackendUpdateRef = useRef(options?.onBackendUpdate);
+  useEffect(() => {
+    onBackendUpdateRef.current = options?.onBackendUpdate;
+  });
 
   const fetchActivity = useCallback(async () => {
     if (!projectId) {
@@ -78,6 +96,11 @@ export function useBranchActivity(projectId: string | null): {
       }
       setActivity(next);
       sinceRef.current = nextSince;
+      // Backend has spoken — drop any optimistic overlays for these branches.
+      const cb = onBackendUpdateRef.current;
+      if (cb) {
+        for (const entry of data.branches) cb(entry.branch);
+      }
     } catch {
       // Silently ignore — SSE will recover on reconnect.
     }
@@ -115,6 +138,10 @@ export function useBranchActivity(projectId: string | null): {
           next.set(key, evt.activity);
           return next;
         });
+        // Notify caller so it can clear optimistic overlays for this branch
+        // — including branches the user isn't currently viewing, which is
+        // how a non-selected workspace turns green when its agent finishes.
+        onBackendUpdateRef.current?.(evt.branch);
       } catch {
         // Ignore parse errors (e.g. keepalive comments)
       }

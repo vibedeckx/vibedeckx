@@ -101,14 +101,26 @@ export default function Home() {
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
-  const { activity: branchActivity, refetch: refetchBranchActivity } = useBranchActivity(currentProject?.id ?? null);
-  const { rules, createRule, updateRule, deleteRule } = useRules(currentProject?.id ?? null, selectedBranch);
-  const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
-  const mainChatRef = useRef<MainConversationHandle>(null);
 
   // Per-branch real-time workspace statuses, set directly from events.
   // Persists across branch switches so switching away doesn't lose status.
   const [realtimeWorkspaceStatuses, setRealtimeWorkspaceStatuses] = useState<Map<string, WorkspaceStatus>>(new Map());
+
+  // When the backend reports activity for a branch (REST or SSE), the
+  // optimistic overlay for that branch is now stale — clear it so the
+  // backend's status takes over. Without this, a "working" overlay set on
+  // send in workspace A would never clear while the user is on workspace B,
+  // masking the backend's "completed" event for A.
+  const handleBranchBackendUpdate = useCallback((branch: string | null) => {
+    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, branch));
+  }, []);
+  const { activity: branchActivity, refetch: refetchBranchActivity } = useBranchActivity(
+    currentProject?.id ?? null,
+    { onBackendUpdate: handleBranchBackendUpdate },
+  );
+  const { rules, createRule, updateRule, deleteRule } = useRules(currentProject?.id ?? null, selectedBranch);
+  const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
+  const mainChatRef = useRef<MainConversationHandle>(null);
 
   // Compute workspace statuses for all worktrees
   const workspaceStatuses = useMemo(
