@@ -40,6 +40,7 @@ export type AgentWsMessage =
   | { finished: true }
   | { error: string }
   | { taskCompleted: { duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number } }
+  | { branchActivity: { activity: "idle" | "working" | "completed" | "stopped"; since: number } }
   | { browserCommand: BrowserCommand }
   | { openPreviewFrame: { projectId: string; url: string } }
   | { titleUpdated: { title: string } };

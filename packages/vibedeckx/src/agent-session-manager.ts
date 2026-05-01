@@ -983,12 +983,20 @@ export class AgentSessionManager {
       // reached completion, so emit "stopped" (a distinct state from idle —
       // the workspace had work that was abandoned, surfaced as amber so the
       // user can come back to it).
+      const stoppedAt = Date.now();
       this.eventBus?.emit({
         type: "branch:activity",
         projectId: session.projectId,
         branch: session.branch,
         activity: "stopped",
-        since: Date.now(),
+        since: stoppedAt,
+      });
+      // Mirror over the per-session WS so the local-side bridge for remote
+      // sessions can re-emit on the local EventBus (parallel to how
+      // taskCompleted bridges into branch:activity:completed). Local-direct
+      // subscribers ignore unknown message types, so this is a no-op there.
+      this.broadcastRaw(sessionId, {
+        branchActivity: { activity: "stopped", since: stoppedAt },
       });
       // Don't send { finished: true } — keep the WebSocket connection alive
       // so the UI stays "Connected" and the user can continue the conversation.

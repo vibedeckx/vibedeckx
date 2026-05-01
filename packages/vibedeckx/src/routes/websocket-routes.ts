@@ -121,6 +121,7 @@ function connectPersistentRemoteWs(
     const kind = "JsonPatch" in parsed ? "JsonPatch"
       : "finished" in parsed ? "finished"
       : "taskCompleted" in parsed ? "taskCompleted"
+      : "branchActivity" in parsed ? "branchActivity"
       : "Ready" in parsed ? "Ready"
       : "error" in parsed ? "error"
       : "other";
@@ -175,6 +176,29 @@ function connectPersistentRemoteWs(
           activity: "completed",
           since: Date.now(),
         });
+      }
+    } else if ("branchActivity" in parsed) {
+      // Remote signaled a branch:activity transition outside the natural
+      // taskCompleted path (e.g. user clicked Stop). Forward to subscribers
+      // and re-emit on local EventBus so the local frontend's SSE listener
+      // (useBranchActivity) updates the workspace dot live without waiting
+      // for the next REST refetch.
+      cache.broadcast(sessionId, raw);
+      if (eventBus) {
+        const ba = parsed.branchActivity as { activity?: unknown; since?: unknown };
+        if (
+          (ba.activity === "idle" || ba.activity === "working" ||
+           ba.activity === "completed" || ba.activity === "stopped") &&
+          typeof ba.since === "number"
+        ) {
+          eventBus.emit({
+            type: "branch:activity",
+            projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),
+            branch: remoteInfo.branch ?? null,
+            activity: ba.activity,
+            since: ba.since,
+          });
+        }
       }
     } else if ("error" in parsed) {
       cache.appendMessage(sessionId, raw, false);
