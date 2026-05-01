@@ -454,6 +454,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
             }
           }, 30000);
 
+          // Track whether we've already delivered a terminal signal to the client
+          // so the close handler can synthesize one if the upstream omits it.
+          let terminalSignalSent = false;
+
           remoteWs.on("message", (data) => {
             try {
               const raw = data.toString();
@@ -463,6 +467,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
                 const parsed = JSON.parse(raw);
                 if (parsed.type === "init" || parsed.type === "history_end") {
                   console.log(`[WebSocket] Remote proxy forwarded: ${parsed.type} for ${processId}`);
+                }
+                if (parsed.type === "finished" || parsed.type === "error") {
+                  terminalSignalSent = true;
                 }
                 if (parsed.type === "finished") {
                   const info = fastify.remoteExecutorMap.get(processId);
@@ -507,6 +514,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
           remoteWs.on("close", () => {
             console.log(`[WebSocket] Remote connection closed for process ${processId}`);
             clearInterval(pingInterval);
+            // If the upstream closed without sending a terminal signal (e.g. the
+            // remote process was already purged and only replied with init +
+            // history_end), synthesize a `finished` event from the DB so the
+            // client treats this as terminal instead of reconnecting forever.
+            if (!terminalSignalSent) {
+              try {
+                const row = fastify.storage.remoteExecutorProcesses.getById(processId);
+                socket.send(JSON.stringify({
+                  type: "finished",
+                  exitCode: row?.exit_code ?? 0,
+                }));
+              } catch (error) {
+                console.error("[WebSocket] Failed to synthesize finished event:", error);
+              }
+            }
             socket.close();
           });
 
@@ -514,6 +536,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             console.error(`[WebSocket] Remote connection error:`, error);
             clearInterval(pingInterval);
             socket.send(JSON.stringify({ type: "error", message: "Remote connection error" }));
+            terminalSignalSent = true;
             socket.close();
           });
 

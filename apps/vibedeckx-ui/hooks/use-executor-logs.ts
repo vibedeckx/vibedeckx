@@ -82,6 +82,13 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
+      // Per-connection liveness tracking. We only reset the reconnect attempt
+      // counter once the server proves it has a live stream by sending data
+      // beyond history replay. Resetting on `open` alone caused infinite
+      // reconnects when the server kept closing immediately after history_end.
+      let receivedLiveData = false;
+      let historyEnded = false;
+
       ws.onopen = () => {
         if (cancelled) return;
         console.log(`[useExecutorLogs] WebSocket connected`);
@@ -89,8 +96,6 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
 
         // Clear stale logs before historical replay to prevent duplicates
         setLogs([]);
-
-        reconnectAttemptRef.current = 0;
 
         // Send any resize that was queued before the connection opened
         if (pendingResizeRef.current) {
@@ -111,6 +116,7 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
             setReplayingHistory(true);
             console.log(`[useExecutorLogs] init received, setReplayingHistory(true)`);
           } else if (msg.type === "history_end") {
+            historyEnded = true;
             setReplayingHistory(false);
             console.log(`[useExecutorLogs] history_end received, setReplayingHistory(false)`);
           } else if (msg.type === "finished") {
@@ -118,8 +124,18 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
             setExitCode(msg.exitCode);
             setStatus("closed");
           } else if (msg.type === "error") {
+            // Treat error as terminal — the server is telling us there's nothing
+            // to stream (e.g. remote process purged). Without this, onclose
+            // would trigger an endless reconnect loop.
+            finishedRef.current = true;
             setStatus("error");
           } else {
+            // Real log content — proves the server has a live stream worth
+            // reconnecting to. Safe to reset the reconnect counter now.
+            if (historyEnded) {
+              receivedLiveData = true;
+              reconnectAttemptRef.current = 0;
+            }
             setLogs((prev) => [...prev, msg]);
           }
         } catch (error) {
@@ -140,6 +156,15 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
         // or this is a local process (reconnection only helps remote terminals
         // where the process survives independently)
         if (finishedRef.current || cancelled || !processId?.startsWith("remote-")) {
+          setStatus("closed");
+          return;
+        }
+
+        // Server replayed history then closed without ever streaming live data.
+        // It has nothing more to give us — treat as terminal instead of looping.
+        if (historyEnded && !receivedLiveData) {
+          console.log(`[useExecutorLogs] Server closed after history with no live data — treating as terminal`);
+          finishedRef.current = true;
           setStatus("closed");
           return;
         }
