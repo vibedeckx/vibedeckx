@@ -233,7 +233,7 @@ export type LogMessage =
   | { type: "stdout"; data: string }
   | { type: "stderr"; data: string }
   | { type: "pty"; data: string }
-  | { type: "finished"; exitCode: number }
+  | { type: "finished"; exitCode: number | null }
   | { type: "init"; isPty: boolean }
   | { type: "error"; message: string }
   | { type: "history_end" };

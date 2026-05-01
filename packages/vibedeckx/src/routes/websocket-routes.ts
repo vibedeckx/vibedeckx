@@ -566,6 +566,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (logs.length === 0 && !isRunning) {
           console.log(`[WebSocket] Process not found or no logs, closing connection`);
           socket.send(JSON.stringify({ type: "error", message: "Process not found" }));
+          // Explicit terminal signal so clients (including the local proxy and
+          // backend watchers) treat this as done instead of reconnecting. Exit
+          // code is unknown — the process is already gone from processManager.
+          socket.send(JSON.stringify({ type: "finished", exitCode: null }));
           socket.close();
           return;
         }

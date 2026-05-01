@@ -11,7 +11,7 @@ export type LogMessage =
   | { type: "stdout"; data: string }
   | { type: "stderr"; data: string }
   | { type: "pty"; data: string }
-  | { type: "finished"; exitCode: number };
+  | { type: "finished"; exitCode: number | null };
 
 export type InputMessage =
   | { type: "input"; data: string }
