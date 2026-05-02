@@ -704,7 +704,8 @@ export class AgentSessionManager {
   private pushEntry(
     sessionId: string,
     message: AgentMessage,
-    broadcast: boolean = true
+    broadcast: boolean = true,
+    userId: string = "local",
   ): number {
     const session = this.sessions.get(sessionId);
     if (!session) return -1;
@@ -723,7 +724,7 @@ export class AgentSessionManager {
 
     // Persist to DB (skip streaming assistant text — those get finalized later)
     if (!session.skipDb && message.type !== "assistant") {
-      this.persistEntry(session, index, message);
+      this.persistEntry(session, index, message, userId);
     }
 
     if (broadcast) {
@@ -736,7 +737,12 @@ export class AgentSessionManager {
   /**
    * Persist a single entry to the database
    */
-  private persistEntry(session: RunningSession, index: number, message: AgentMessage): void {
+  private persistEntry(
+    session: RunningSession,
+    index: number,
+    message: AgentMessage,
+    userId: string = "local",
+  ): void {
     if (session.skipDb) return;
     try {
       this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
@@ -755,7 +761,7 @@ export class AgentSessionManager {
         if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
           const text = extractUserText(message.content);
           if (text.trim().length > 0 && this.markTitleResolved(session.id)) {
-            void this.ensureSessionTitle(session, text);
+            void this.ensureSessionTitle(session, text, userId);
           }
         }
       }
@@ -780,7 +786,12 @@ export class AgentSessionManager {
   /**
    * Send a user message to the agent
    */
-  sendUserMessage(sessionId: string, content: string | ContentPart[], projectPath?: string): boolean {
+  sendUserMessage(
+    sessionId: string,
+    content: string | ContentPart[],
+    projectPath?: string,
+    userId: string = "local",
+  ): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
 
@@ -790,7 +801,7 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Cannot wake dormant session ${sessionId} without projectPath`);
         return false;
       }
-      this.wakeDormantSession(session, projectPath, content);
+      this.wakeDormantSession(session, projectPath, content, userId);
       return true;
     }
 
@@ -817,7 +828,7 @@ export class AgentSessionManager {
       type: "user",
       content,
       timestamp: Date.now(),
-    }, true);
+    }, true, userId);
 
     // Send to agent stdin via provider
     try {
@@ -1250,7 +1261,12 @@ export class AgentSessionManager {
   /**
    * Wake a dormant session: spawn process, send full context + user message
    */
-  private wakeDormantSession(session: RunningSession, projectPath: string, userMessage: string | ContentPart[]): void {
+  private wakeDormantSession(
+    session: RunningSession,
+    projectPath: string,
+    userMessage: string | ContentPart[],
+    userId: string = "local",
+  ): void {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
     session.dormant = false;
@@ -1268,7 +1284,7 @@ export class AgentSessionManager {
       type: "user",
       content: userMessage,
       timestamp: Date.now(),
-    }, true);
+    }, true, userId);
 
     // After process ready: send full context + new message to stdin
     setTimeout(() => {
@@ -1395,11 +1411,15 @@ export class AgentSessionManager {
    * configured, falls back to a truncated snippet. Writes the title once and
    * notifies subscribers so the session list can refresh.
    */
-  private async ensureSessionTitle(session: RunningSession, userText: string): Promise<void> {
+  private async ensureSessionTitle(
+    session: RunningSession,
+    userText: string,
+    userId: string,
+  ): Promise<void> {
     const fallback = snippetTitle(userText);
     let title: string | null = null;
     try {
-      title = await generateSessionTitle(this.storage, userText);
+      title = await generateSessionTitle(this.storage, userText, userId);
     } catch (error) {
       console.warn(`[AgentSession] Title generation threw for ${session.id}:`, error);
     }

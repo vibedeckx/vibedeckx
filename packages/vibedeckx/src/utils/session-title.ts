@@ -64,6 +64,7 @@ function sanitizeTitle(raw: string): string {
 export async function generateSessionTitle(
   storage: Storage,
   userMessage: string,
+  userId: string,
 ): Promise<string | null> {
   if (!isChatModelConfigured(storage)) return null;
   const trimmed = userMessage.trim();
@@ -84,6 +85,14 @@ export async function generateSessionTitle(
           "Reply with the title only — no quotes, no trailing punctuation, no markdown, no prefixes like 'Title:'. " +
           "Use the same language as the user's message. Keep it under 8 words and 50 characters.",
         prompt: `Generate a title for a conversation that begins with this user message:\n\n${input}`,
+        experimental_telemetry: {
+          isEnabled: true,
+          functionId: "session-title",
+          metadata: {
+            userId,
+            tags: ["vibedeckx", "session-title"],
+          },
+        },
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("title generation timed out")), AI_TIMEOUT_MS),
