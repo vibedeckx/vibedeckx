@@ -5,6 +5,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth } from "../server.js";
+import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -19,7 +20,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const { projectId } = req.params;
     const branch = req.body?.branch ?? null;
 
-    const sessionId = fastify.chatSessionManager.getOrCreateSession(projectId, branch);
+    const sessionId = fastify.chatSessionManager.getOrCreateSession(
+      projectId,
+      branch,
+      resolveUserId(userId),
+    );
     const session = fastify.chatSessionManager.getSession(sessionId);
     const messages = fastify.chatSessionManager.getMessages(sessionId);
 
@@ -40,6 +45,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { sessionId: string };
     Body: { content: string };
   }>("/api/chat-sessions/:sessionId/message", async (req, reply) => {
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+
     const { sessionId } = req.params;
     const { content } = req.body;
 

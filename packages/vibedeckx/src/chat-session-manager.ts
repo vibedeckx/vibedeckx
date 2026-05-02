@@ -40,6 +40,7 @@ interface ChatSession {
   id: string;
   projectId: string;
   branch: string | null;
+  userId: string;
   store: ChatStore;
   subscribers: Set<WebSocket>;
   status: AgentSessionStatus;
@@ -775,7 +776,7 @@ export class ChatSessionManager {
 
   // ---- Session lifecycle ----
 
-  getOrCreateSession(projectId: string, branch: string | null): string {
+  getOrCreateSession(projectId: string, branch: string | null, userId: string): string {
     const key = `${projectId}:${branch ?? ""}`;
     const existing = this.sessionIndex.get(key);
     if (existing && this.sessions.has(existing)) {
@@ -787,6 +788,7 @@ export class ChatSessionManager {
       id,
       projectId,
       branch,
+      userId,
       store: { patches: [], entries: [], nextIndex: 0 },
       subscribers: new Set(),
       status: "stopped",
@@ -796,7 +798,7 @@ export class ChatSessionManager {
 
     this.sessions.set(id, session);
     this.sessionIndex.set(key, id);
-    console.log(`[ChatSession] Created session ${id} for project=${projectId} branch=${branch}`);
+    console.log(`[ChatSession] Created session ${id} for project=${projectId} branch=${branch} userId=${userId}`);
     return id;
   }
 
