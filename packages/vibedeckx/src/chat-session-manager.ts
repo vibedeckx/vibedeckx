@@ -1835,6 +1835,17 @@ export class ChatSessionManager {
         tools: this.createTools(session.projectId, session.branch, session.id),
         stopWhen: stepCountIs(3),
         abortSignal: abortController.signal,
+        experimental_telemetry: {
+          isEnabled: true,
+          functionId: "chat-session",
+          metadata: {
+            sessionId: session.id,
+            userId: session.userId,
+            tags: ["vibedeckx", "chat-session"],
+            projectId: session.projectId,
+            branch: session.branch ?? "(default)",
+          },
+        },
       });
 
       for await (const part of result.fullStream) {
