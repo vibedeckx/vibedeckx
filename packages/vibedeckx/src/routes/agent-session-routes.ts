@@ -14,6 +14,7 @@ import {
   snippetTitle,
 } from "../utils/session-title.js";
 import type { RemoteSessionInfo } from "../server-types.js";
+import { resolveUserId } from "../utils/resolve-user-id.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -72,6 +73,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     localSessionId: string,
     userText: string,
     remoteInfo: RemoteSessionInfo,
+    userId: string,
   ): Promise<void> {
     if (userText.trim().length === 0) return;
     // Cheap in-memory dedupe within this process lifetime.
@@ -83,7 +85,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     let aiTitle: string | null = null;
     try {
-      aiTitle = await generateSessionTitle(fastify.storage, userText);
+      aiTitle = await generateSessionTitle(fastify.storage, userText, userId);
     } catch (error) {
       console.warn(
         `[SessionTitle] AI title generation threw for ${localSessionId}:`,
@@ -669,6 +671,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { sessionId: string };
     Body: { content: string | ContentPart[] };
   }>("/api/agent-sessions/:sessionId/message", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const { content } = req.body;
 
     console.log(`[API] POST /message: sessionId=${req.params.sessionId}, isRemote=${req.params.sessionId.startsWith("remote-")}, remoteMapSize=${fastify.remoteSessionMap.size}`);
@@ -730,6 +735,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         req.params.sessionId,
         extractUserText(content),
         remoteInfo,
+        userId,
       );
       return reply.code(result.status || 200).send(result.data);
     }
@@ -744,7 +750,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const success = fastify.agentSessionManager.sendUserMessage(req.params.sessionId, content, projectPathForWake);
+    const success = fastify.agentSessionManager.sendUserMessage(
+      req.params.sessionId,
+      content,
+      projectPathForWake,
+      userId,
+    );
     if (!success) {
       console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!session}, dormant=${session?.dormant}`);
       return reply.code(404).send({ error: "Session not found or not running" });
