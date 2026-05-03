@@ -53,6 +53,14 @@ export class AgentSessionManager {
   private eventBus: EventBus | null = null;
   /** Sessions for which title generation is currently in flight or already done. */
   private titleResolved: Set<string> = new Set();
+  /**
+   * Reverse-connect (remote-node) mode disables local title generation. The
+   * upstream server runs `generateAndPushRemoteSessionTitle` and PATCHes the
+   * result back, so generating here would waste tokens and emit a duplicate
+   * Langfuse trace tagged `userId="local"` (the remote node has no Clerk auth).
+   * Set to true from `vibedeckx connect` after `createServer`.
+   */
+  suppressTitleGeneration: boolean = false;
 
   constructor(storage: Storage) {
     this.storage = storage;
@@ -757,11 +765,13 @@ export class AgentSessionManager {
           activity: "working",
           since: now,
         });
-        const dbRow = this.storage.agentSessions.getById(session.id);
-        if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
-          const text = extractUserText(message.content);
-          if (text.trim().length > 0 && this.markTitleResolved(session.id)) {
-            void this.ensureSessionTitle(session, text, userId);
+        if (!this.suppressTitleGeneration) {
+          const dbRow = this.storage.agentSessions.getById(session.id);
+          if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
+            const text = extractUserText(message.content);
+            if (text.trim().length > 0 && this.markTitleResolved(session.id)) {
+              void this.ensureSessionTitle(session, text, userId);
+            }
           }
         }
       }

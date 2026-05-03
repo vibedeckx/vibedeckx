@@ -133,6 +133,12 @@ const connectCommand = buildCommand({
     const { instance, port: localPort } = await server.startLocal(requestedPort);
     console.log(`Local server running on 127.0.0.1:${localPort}`);
 
+    // Reverse-connect mode: the upstream vibedeckx server runs
+    // generateAndPushRemoteSessionTitle and PATCHes the resulting title back
+    // here, so locally generating one would waste tokens and emit a
+    // duplicate Langfuse trace with userId="local".
+    instance.agentSessionManager.suppressTitleGeneration = true;
+
     // Create and start the reverse-connect client
     const client = new ReverseConnectClient(instance, flags["connect-to"], flags.token, localPort);
     client.connect();
