@@ -285,16 +285,47 @@ vibedeckx --data-dir /path/to/data
 
 ## Observability (optional)
 
-Set these environment variables to enable Langfuse tracing of all AI SDK calls
-(chat sessions, session-title generation, translate, task-suggest):
+Vibedeckx ships with Langfuse tracing for every Vercel AI SDK call —
+chat sessions, session-title generation, translate, and task-suggest.
+Each trace carries `sessionId` (chat-session only), `userId`, `tags`,
+`projectId`, and `branch` metadata.
 
-- `LANGFUSE_PUBLIC_KEY` — Langfuse project public key
-- `LANGFUSE_SECRET_KEY` — Langfuse project secret key
-- `LANGFUSE_BASE_URL` — defaults to `https://cloud.langfuse.com`
-- `LANGFUSE_TRACING_ENVIRONMENT` — e.g. `production`, `development`
+### Environment variables
 
-When the keys are unset, tracing is silently disabled at startup and AI SDK
-calls behave identically to a non-instrumented run.
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-...           # required
+LANGFUSE_SECRET_KEY=sk-lf-...           # required
+LANGFUSE_BASE_URL=https://cloud.langfuse.com   # optional; defaults to EU cloud
+LANGFUSE_TRACING_ENVIRONMENT=production # optional; e.g. production / staging / development
+```
+
+Regional `LANGFUSE_BASE_URL` options:
+
+- `https://cloud.langfuse.com` — EU (default)
+- `https://us.cloud.langfuse.com` — US
+- `https://hipaa.cloud.langfuse.com` — HIPAA
+- self-hosted: your own Langfuse base URL
+
+When the keys are unset, tracing is silently disabled at startup and AI
+SDK calls behave identically to a non-instrumented run. Look for
+`[Langfuse] tracing enabled` (or `tracing disabled (LANGFUSE_PUBLIC_KEY
+not set)`) in the server log on boot to confirm.
+
+### userId resolution
+
+- `vibedeckx start --auth` (Clerk enabled) → trace `userId` is the real
+  Clerk user id when the requestor is logged in
+- otherwise (no-auth CLI mode, or unauthenticated request paths) →
+  `userId` is the literal string `"local"`
+
+### Reverse-connect (`vibedeckx connect`) nodes
+
+Remote nodes started with `vibedeckx connect` automatically suppress
+local session-title generation. The upstream server (the one users
+actually open in a browser) handles title generation and pushes the
+result back, so the remote setting `LANGFUSE_*` keys would only produce
+duplicate traces tagged `userId="local"`. If you want title traces
+attributed to real users, set the keys on the upstream server only.
 
 ## Troubleshooting
 
