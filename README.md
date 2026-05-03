@@ -283,6 +283,19 @@ vibedeckx --data-dir /path/to/data
 # Database will be stored at /path/to/data/data.sqlite
 ```
 
+## Observability (optional)
+
+Set these environment variables to enable Langfuse tracing of all AI SDK calls
+(chat sessions, session-title generation, translate, task-suggest):
+
+- `LANGFUSE_PUBLIC_KEY` — Langfuse project public key
+- `LANGFUSE_SECRET_KEY` — Langfuse project secret key
+- `LANGFUSE_BASE_URL` — defaults to `https://cloud.langfuse.com`
+- `LANGFUSE_TRACING_ENVIRONMENT` — e.g. `production`, `development`
+
+When the keys are unset, tracing is silently disabled at startup and AI SDK
+calls behave identically to a non-instrumented run.
+
 ## Troubleshooting
 
 ### `ENOTEMPTY` error when running with npx
