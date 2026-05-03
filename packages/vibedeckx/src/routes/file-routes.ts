@@ -113,8 +113,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
     try {
       const result = await browseDirectory(cwd);
       return reply.code(200).send(result);
-    } catch {
-      return reply.code(500).send({ error: "Failed to browse directory" });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      fastify.log.warn({ err, dirPath: cwd, code }, "browseDirectory failed");
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return reply.code(404).send({ error: "Directory not found", code });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return reply.code(403).send({ error: "Permission denied", code });
+      }
+      return reply.code(500).send({ error: "Failed to browse directory", code });
     }
   });
 
@@ -244,8 +252,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
     try {
       const result = await browseDirectory(dirPath);
       return reply.code(200).send(result);
-    } catch {
-      return reply.code(500).send({ error: "Failed to browse directory" });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      fastify.log.warn({ err, dirPath, code }, "browseDirectory failed");
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return reply.code(404).send({ error: "Directory not found", code });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return reply.code(403).send({ error: "Permission denied", code });
+      }
+      return reply.code(500).send({ error: "Failed to browse directory", code });
     }
   });
 
