@@ -545,6 +545,12 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     }
   }
 
+  // Reset stale 'online' status for inbound remote_servers from previous server instances.
+  // status='online' is only flipped to 'offline' by the WS close handler; if the host crashes
+  // before the handler runs, the row stays online forever and the UI shows a green dot for an
+  // unreachable remote. Real connections will re-flip to 'online' on reconnect.
+  db.exec("UPDATE remote_servers SET status = 'offline' WHERE connection_mode = 'inbound' AND status = 'online'");
+
   // Migration: drop old UNIQUE(path, is_remote, remote_url) constraint on projects
   // Commit b4ef7b5 removed it from CREATE TABLE but existing databases still have it,
   // causing UNIQUE constraint failures when creating pseudo-project rows.
