@@ -1023,11 +1023,21 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Increment generation to invalidate any in-flight startSession API calls
     sessionGenerationRef.current += 1;
 
+    // Decide whether this reset is a "stay in placeholder" transition (the
+    // New Conversation button just dropped ?session=) vs a real workspace
+    // switch / URL-driven session pick. Placeholder must skip auto-start AND
+    // mark initialized=true so the empty-state UI shows instead of a spinner.
+    const prev = prevWorkspaceRef.current;
+    const workspaceChanged =
+      prev.projectId !== projectId || prev.branch !== branch || prev.agentMode !== agentMode;
+    const stayingInPlaceholder =
+      !workspaceChanged && !explicitSessionId && placeholderRef.current;
+
     // Reset all state
     setSession(null);
     setStatus("stopped");
     setIsConnected(false);
-    setIsInitialized(false);
+    setIsInitialized(stayingInPlaceholder);
     setError(null);
     setIsLoading(false);
     setRemoteStatus(null);
@@ -1039,20 +1049,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     shortLivedConnectionsRef.current = 0;
     lastStartFailedRef.current = false;
     startingRef.current = false;
-    // Clear placeholder intent only on workspace switch or when navigating to
-    // a specific session via URL. A pure URL-cleared transition (caused by
-    // the New Conversation button itself dropping ?session=) must preserve
-    // placeholderRef so auto-start doesn't immediately re-load the latest.
-    const prev = prevWorkspaceRef.current;
-    const workspaceChanged =
-      prev.projectId !== projectId || prev.branch !== branch || prev.agentMode !== agentMode;
-    if (workspaceChanged || explicitSessionId) {
+    if (!stayingInPlaceholder) {
       placeholderRef.current = false;
     }
     prevWorkspaceRef.current = { projectId, branch, agentMode };
 
-    // Mark that we need to auto-start session after reset
-    shouldAutoStartRef.current = true;
+    // Auto-start the session unless the user explicitly asked for an empty
+    // placeholder via New Conversation.
+    shouldAutoStartRef.current = !stayingInPlaceholder;
     // Invalidate session cache — branch or mode changed, cached session is stale
     if (projectId) sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
     // Note: agentType is intentionally NOT in this dependency array.
