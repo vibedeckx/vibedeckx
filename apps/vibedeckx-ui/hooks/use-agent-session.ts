@@ -959,6 +959,27 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       sessionCache.delete(getCacheKey(projectId, branch, session.id));
     }
     sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+    // Tear down the old session's WebSocket and any pending reconnect timer
+    // before clearing UI state. Otherwise the subscribe-replay path can
+    // re-populate `messages` with the prior session's history (now ending
+    // with "Session stopped by user.") while `session` stays null — leaving
+    // a "New Session" header above a fully restored old conversation.
+    if (wsRef.current) {
+      wsRef.current.close(1000, "new-conversation");
+      wsRef.current = null;
+      wsSessionIdRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (stabilityTimeoutRef.current) {
+      clearTimeout(stabilityTimeoutRef.current);
+      stabilityTimeoutRef.current = null;
+    }
+    finishedRef.current = false;
+    isReplayingRef.current = false;
+    setIsConnected(false);
     // Clear local UI state to the empty placeholder.
     setSession(null);
     setStatus("stopped");
