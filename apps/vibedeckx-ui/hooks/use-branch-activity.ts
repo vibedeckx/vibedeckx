@@ -63,6 +63,10 @@ export function useBranchActivity(
   const [activity, setActivity] = useState<Map<string, BranchActivity>>(new Map());
   // Shadow map of `since` timestamps for stale-event guarding.
   const sinceRef = useRef<Map<string, number>>(new Map());
+  // Mirror of `activity` state so REST refetch can diff against the prior
+  // value without going through React's render cycle. Required so we only
+  // notify on genuine transitions — see fetchActivity below.
+  const activityRef = useRef<Map<string, BranchActivity>>(new Map());
   // Latest callback ref so the SSE handler closure reads the current one
   // without resubscribing whenever the parent re-renders.
   const onBackendUpdateRef = useRef(options?.onBackendUpdate);
@@ -73,6 +77,7 @@ export function useBranchActivity(
   const fetchActivity = useCallback(async () => {
     if (!projectId) {
       setActivity(new Map());
+      activityRef.current = new Map();
       sinceRef.current = new Map();
       return;
     }
@@ -94,13 +99,23 @@ export function useBranchActivity(
         next.set(key, entry.activity);
         nextSince.set(key, entry.since);
       }
-      setActivity(next);
-      sinceRef.current = nextSince;
-      // Backend has spoken — drop any optimistic overlays for these branches.
+      // Only notify for branches whose activity actually transitioned. REST
+      // refetch is a snapshot, not a state-change event — firing onBackendUpdate
+      // unconditionally would clobber intentional optimistic overlays (e.g.
+      // the "idle" overlay set by New Conversation while the latest DB session
+      // is still "completed" because no new session has been created yet).
       const cb = onBackendUpdateRef.current;
       if (cb) {
-        for (const entry of data.branches) cb(entry.branch);
+        for (const entry of data.branches) {
+          const key = toKey(entry.branch);
+          if (activityRef.current.get(key) !== entry.activity) {
+            cb(entry.branch);
+          }
+        }
       }
+      setActivity(next);
+      activityRef.current = next;
+      sinceRef.current = nextSince;
     } catch {
       // Silently ignore — SSE will recover on reconnect.
     }
@@ -136,6 +151,7 @@ export function useBranchActivity(
           if (prev.get(key) === evt.activity) return prev;
           const next = new Map(prev);
           next.set(key, evt.activity);
+          activityRef.current = next;
           return next;
         });
         // Notify caller so it can clear optimistic overlays for this branch
