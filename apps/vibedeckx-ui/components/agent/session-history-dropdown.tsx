@@ -269,24 +269,6 @@ export function SessionHistoryDropdown({
               </div>
               {!editing && (
                 <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    aria-label={s.favorited_at != null ? "Unfavorite conversation" : "Favorite conversation"}
-                    title={s.favorited_at != null ? "Unfavorite" : "Favorite"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleToggleFavorite(s.id, s.favorited_at ?? null);
-                    }}
-                    className={`p-1 hover:bg-muted rounded ${
-                      s.favorited_at != null
-                        ? "opacity-100 text-yellow-500"
-                        : "opacity-0 group-hover:opacity-100 text-muted-foreground"
-                    }`}
-                  >
-                    <Star
-                      className={`h-3 w-3 ${s.favorited_at != null ? "fill-current" : ""}`}
-                    />
-                  </button>
                   <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
                     <button
                       type="button"
@@ -312,6 +294,24 @@ export function SessionHistoryDropdown({
                       <Trash2 className="h-3 w-3" />
                     </button>
                   </div>
+                  <button
+                    type="button"
+                    aria-label={s.favorited_at != null ? "Unfavorite conversation" : "Favorite conversation"}
+                    title={s.favorited_at != null ? "Unfavorite" : "Favorite"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleToggleFavorite(s.id, s.favorited_at ?? null);
+                    }}
+                    className={`p-1 hover:bg-muted rounded ${
+                      s.favorited_at != null
+                        ? "opacity-100 text-yellow-500"
+                        : "opacity-0 group-hover:opacity-100 text-muted-foreground"
+                    }`}
+                  >
+                    <Star
+                      className={`h-3 w-3 ${s.favorited_at != null ? "fill-current" : ""}`}
+                    />
+                  </button>
                 </div>
               )}
             </DropdownMenuItem>
