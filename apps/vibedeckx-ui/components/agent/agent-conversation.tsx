@@ -253,6 +253,32 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     return () => clearTimeout(timer);
   }, [aiTitleOverride]);
 
+  // Safety net for pendingTitleSessionId: cleared by `onTitleUpdated` in the
+  // happy path, but if /message ever fails (or the agent crashes before the
+  // title generator runs) we'd otherwise leave the trigger as a skeleton
+  // forever. 30s is well past the typical 1–2s generation latency.
+  useEffect(() => {
+    if (!pendingTitleSessionId) return;
+    const captured = pendingTitleSessionId;
+    const timer = setTimeout(() => {
+      setPendingTitleSessionId((prev) => (prev === captured ? null : prev));
+    }, 30000);
+    return () => clearTimeout(timer);
+  }, [pendingTitleSessionId]);
+
+  // "Connecting..." vs "Disconnected": isConnected starts false during the
+  // initial WS handshake (after ensureSession/startSession sets the session
+  // synchronously but before ws.onopen fires). Without this gate the status
+  // badge briefly flashes "Disconnected" on every fresh connect — most
+  // visibly when sending the first message after New Conversation.
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
+  useEffect(() => {
+    setHasConnectedOnce(false);
+  }, [session?.id]);
+  useEffect(() => {
+    if (isConnected) setHasConnectedOnce(true);
+  }, [isConnected]);
+
   const handlePermissionModeChange = async (newMode: "plan" | "edit") => {
     setPermissionMode(newMode);
     if (session) {
@@ -290,6 +316,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // No persisted session yet (placeholder). Create one via /new on first send.
         const newSession = await ensureSession(permissionMode);
         if (newSession) {
+          // Arm the title-pending loader before sendMessage so the dropdown
+          // never flashes the snippet/timestamp the server writes synchronously.
+          setPendingTitleSessionId(newSession.id);
           sendMessage(content, newSession.id);
         }
       } else {
@@ -383,6 +412,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         return;
       }
       targetSessionId = startedSession.id;
+      // Arm the title-pending loader the moment the session exists so the
+      // dropdown trigger goes straight from "New Session" to skeleton without
+      // flashing "History" or the snippet/created_at the server persists
+      // synchronously. Cleared by `onTitleUpdated` (or the 30s safety net).
+      setPendingTitleSessionId(startedSession.id);
     }
 
     // Upload pastes (if any) and replace tokens with <vpaste/> markers.
@@ -569,7 +603,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             let statusText = "Disconnected";
 
             if (!isConnected) {
-              // Frontend WS is down — always show disconnected
+              // Distinguish initial handshake from a lost connection: until the
+              // WS has opened at least once for this session, treat it as
+              // "Connecting..." instead of "Disconnected" so we don't flash a
+              // red status during the ~10–100ms WS open delay after every
+              // session creation/switch.
+              if (!hasConnectedOnce) {
+                statusColor = "text-amber-500";
+                statusIcon = <Wifi className="h-3 w-3 animate-pulse" />;
+                statusText = "Connecting...";
+              }
             } else if (!isRemote || remoteStatus === "connected" || remoteStatus === null) {
               // Local session connected, or remote session fully connected
               statusColor = "text-green-500";

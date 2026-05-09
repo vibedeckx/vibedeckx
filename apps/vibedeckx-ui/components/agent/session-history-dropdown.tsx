@@ -139,7 +139,13 @@ export function SessionHistoryDropdown({
     pendingTitleSessionId !== null && pendingTitleSessionId === sessionId;
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
-  const triggerPending = currentSessionId !== null && isTitlePending(currentSessionId);
+  // Treat "we have a session id but the local list hasn't caught up" as
+  // pending — covers the brief window after a freshly created or freshly
+  // switched-to session, where currentSession would otherwise be undefined
+  // and the trigger would fall through to "History".
+  const triggerPending =
+    currentSessionId !== null &&
+    (isTitlePending(currentSessionId) || !currentSession);
   // No currentSessionId → user is in the placeholder state after clicking
   // New Conversation; show "New Session" rather than "History".
   const triggerLabel = currentSession
