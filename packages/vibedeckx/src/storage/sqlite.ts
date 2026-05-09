@@ -367,6 +367,12 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN last_completed_at INTEGER DEFAULT NULL");
   }
 
+  // Migration: add favorited_at column for session bookmarking (epoch ms; NULL = not favorited).
+  const sessionInfoV6 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionInfoV6.some(col => col.name === "favorited_at")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN favorited_at INTEGER DEFAULT NULL");
+  }
+
   // Ensure agent_sessions indexes exist. Safe to run here because either:
   //  - the fresh-DDL path created the table with all columns, or
   //  - the Task 1.1 rebuild migration above recreated the table with updated_at.
@@ -1511,6 +1517,15 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         db.prepare(
           `UPDATE agent_sessions SET title = @title, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, title });
+      },
+
+      // Toggle favorite without touching updated_at — favoriting is a passive
+      // bookmark, not a "this session was active" signal, so it must not
+      // disturb the dropdown's recency ordering.
+      setFavorited: (id: string, favorited: boolean) => {
+        db.prepare(
+          `UPDATE agent_sessions SET favorited_at = @ts WHERE id = @id`
+        ).run({ id, ts: favorited ? Date.now() : null });
       },
 
       touchUpdatedAt: (id: string) => {

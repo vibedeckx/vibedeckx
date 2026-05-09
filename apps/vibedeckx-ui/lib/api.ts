@@ -416,6 +416,7 @@ export interface BranchSessionSummary {
   permission_mode?: string;
   agent_type?: string;
   entry_count?: number;
+  favorited_at?: number | null;
 }
 
 // List all sessions for a (projectId, branch) pair
@@ -464,6 +465,16 @@ export async function deleteSession(sessionId: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`deleteSession failed: ${res.status}`);
+}
+
+// Mark or unmark an agent session as favorited
+export async function setSessionFavorited(sessionId: string, favorited: boolean): Promise<void> {
+  const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/favorite`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ favorited }),
+  });
+  if (!res.ok) throw new Error(`setSessionFavorited failed: ${res.status}`);
 }
 
 export const api = {

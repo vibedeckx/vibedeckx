@@ -163,6 +163,8 @@ export interface AgentSession {
   last_user_message_at?: number | null;
   /** Epoch ms of the most recent successful turn completion, or null if none yet. */
   last_completed_at?: number | null;
+  /** Epoch ms when the user favorited this session, or null if not favorited. */
+  favorited_at?: number | null;
 }
 
 export interface Storage {
@@ -295,6 +297,8 @@ export interface Storage {
     updateStatusPreservingTimestamp: (id: string, status: AgentSessionStatus) => void;
     updatePermissionMode: (id: string, mode: string) => void;
     updateTitle: (id: string, title: string | null) => void;
+    /** Mark or unmark the session as favorited. Does not touch updated_at. */
+    setFavorited: (id: string, favorited: boolean) => void;
     touchUpdatedAt: (id: string) => void;
     /** Set last_user_message_at to the given epoch-ms timestamp. */
     markUserMessage: (id: string, timestampMs: number) => void;

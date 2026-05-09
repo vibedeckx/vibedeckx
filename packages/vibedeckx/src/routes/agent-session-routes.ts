@@ -1105,6 +1105,35 @@ const routes: FastifyPluginAsync = async (fastify) => {
     fastify.storage.agentSessions.updateTitle(req.params.sessionId, title);
     return reply.code(200).send({ success: true, title });
   });
+
+  fastify.patch<{
+    Params: { sessionId: string };
+    Body: { favorited: boolean };
+  }>("/api/agent-sessions/:sessionId/favorite", async (req, reply) => {
+    const { favorited } = req.body;
+    if (typeof favorited !== "boolean") {
+      return reply.code(400).send({ error: "favorited must be a boolean" });
+    }
+
+    if (req.params.sessionId.startsWith("remote-")) {
+      const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+      if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
+      const result = await proxyAuto(
+        remoteInfo.remoteServerId,
+        remoteInfo.remoteUrl,
+        remoteInfo.remoteApiKey,
+        "PATCH",
+        `/api/agent-sessions/${remoteInfo.remoteSessionId}/favorite`,
+        { favorited }
+      );
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    const session = fastify.storage.agentSessions.getById(req.params.sessionId);
+    if (!session) return reply.code(404).send({ error: "Session not found" });
+    fastify.storage.agentSessions.setFavorited(req.params.sessionId, favorited);
+    return reply.code(200).send({ success: true, favorited });
+  });
 };
 
 export default fp(routes, { name: "agent-session-routes" });

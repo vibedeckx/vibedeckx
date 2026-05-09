@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { ChevronDown, Pencil, Trash2, Check, X } from "lucide-react";
+import { ChevronDown, Pencil, Trash2, Check, X, Star } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,6 +16,7 @@ import {
   listBranchSessions,
   renameSession,
   deleteSession,
+  setSessionFavorited,
   type BranchSessionSummary,
 } from "@/lib/api";
 
@@ -107,6 +108,23 @@ export function SessionHistoryDropdown({
       toast.success("Renamed");
     } catch (e) {
       toast.error("Rename failed");
+      console.error(e);
+    }
+  };
+
+  const handleToggleFavorite = async (id: string, prevTs: number | null) => {
+    const next = prevTs == null;
+    const nextTs = next ? Date.now() : null;
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, favorited_at: nextTs } : s))
+    );
+    try {
+      await setSessionFavorited(id, next);
+    } catch (e) {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, favorited_at: prevTs } : s))
+      );
+      toast.error(next ? "Favorite failed" : "Unfavorite failed");
       console.error(e);
     }
   };
@@ -250,30 +268,50 @@ export function SessionHistoryDropdown({
                 )}
               </div>
               {!editing && (
-                <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+                <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    aria-label="Rename conversation"
+                    aria-label={s.favorited_at != null ? "Unfavorite conversation" : "Favorite conversation"}
+                    title={s.favorited_at != null ? "Unfavorite" : "Favorite"}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setEditingId(s.id);
-                      setEditingValue(s.title ?? "");
+                      void handleToggleFavorite(s.id, s.favorited_at ?? null);
                     }}
-                    className="p-1 hover:bg-muted rounded"
+                    className={`p-1 hover:bg-muted rounded ${
+                      s.favorited_at != null
+                        ? "opacity-100 text-yellow-500"
+                        : "opacity-0 group-hover:opacity-100 text-muted-foreground"
+                    }`}
                   >
-                    <Pencil className="h-3 w-3" />
+                    <Star
+                      className={`h-3 w-3 ${s.favorited_at != null ? "fill-current" : ""}`}
+                    />
                   </button>
-                  <button
-                    type="button"
-                    aria-label="Delete conversation"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleDelete(s.id);
-                    }}
-                    className="p-1 hover:bg-muted rounded text-destructive"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </button>
+                  <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+                    <button
+                      type="button"
+                      aria-label="Rename conversation"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingId(s.id);
+                        setEditingValue(s.title ?? "");
+                      }}
+                      className="p-1 hover:bg-muted rounded"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Delete conversation"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDelete(s.id);
+                      }}
+                      className="p-1 hover:bg-muted rounded text-destructive"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
                 </div>
               )}
             </DropdownMenuItem>
