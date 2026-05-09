@@ -67,6 +67,13 @@ export function useBranchActivity(
   // value without going through React's render cycle. Required so we only
   // notify on genuine transitions — see fetchActivity below.
   const activityRef = useRef<Map<string, BranchActivity>>(new Map());
+  // Tracks which projectId activityRef currently belongs to. When projectId
+  // changes (project switch), the next fetch is a fresh snapshot for the new
+  // project — diffing against the prior project's data would fire spurious
+  // onBackendUpdate calls that clobber valid optimistic overlays (e.g. the
+  // "idle" overlay set by New Conversation in project A would be cleared
+  // when the user switches B → A and the refetch sees A's "completed").
+  const activityProjectRef = useRef<string | null>(null);
   // Latest callback ref so the SSE handler closure reads the current one
   // without resubscribing whenever the parent re-renders.
   const onBackendUpdateRef = useRef(options?.onBackendUpdate);
@@ -78,6 +85,7 @@ export function useBranchActivity(
     if (!projectId) {
       setActivity(new Map());
       activityRef.current = new Map();
+      activityProjectRef.current = null;
       sinceRef.current = new Map();
       return;
     }
@@ -104,8 +112,14 @@ export function useBranchActivity(
       // unconditionally would clobber intentional optimistic overlays (e.g.
       // the "idle" overlay set by New Conversation while the latest DB session
       // is still "completed" because no new session has been created yet).
+      //
+      // Skip the diff entirely when activityRef belongs to a different
+      // project (or is empty on initial mount): comparing across projects
+      // produces meaningless transitions. The first fetch for a project is
+      // always a snapshot.
+      const isFreshProject = activityProjectRef.current !== projectId;
       const cb = onBackendUpdateRef.current;
-      if (cb) {
+      if (cb && !isFreshProject) {
         for (const entry of data.branches) {
           const key = toKey(entry.branch);
           if (activityRef.current.get(key) !== entry.activity) {
@@ -115,6 +129,7 @@ export function useBranchActivity(
       }
       setActivity(next);
       activityRef.current = next;
+      activityProjectRef.current = projectId;
       sinceRef.current = nextSince;
     } catch {
       // Silently ignore — SSE will recover on reconnect.
