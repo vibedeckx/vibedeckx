@@ -35,6 +35,68 @@ function toKey(branch: string | null): string {
   return branch ?? "";
 }
 
+export interface ActivitySnapshotEntry {
+  branch: string | null;
+  activity: BranchActivity;
+  since: number;
+}
+
+/**
+ * Reconcile a REST `/branches/activity` snapshot against the SSE-derived
+ * in-memory state. For each branch, the SSE wins iff its `since` is strictly
+ * newer than the snapshot — REST is a slow read, and a snapshot captured
+ * before a recent SSE event must not roll the state back.
+ *
+ * Concrete bug this guards against: on first send after New Conversation,
+ * `createNewSession` emits `branch:activity:idle` and `persistEntry` emits
+ * `branch:activity:working` back-to-back. The `onSessionStarted` refetch
+ * fired between the two HTTP calls can return a snapshot taken before
+ * `persistEntry` lands — without this check that stale "idle" would clobber
+ * the SSE "working" and leave the workspace dot gray until a workspace
+ * switch triggers another refetch.
+ *
+ * On a fresh project (initial mount or project switch) the in-memory state
+ * is meaningless, so the snapshot is trusted wholesale.
+ *
+ * Pure function — exported for tests.
+ */
+export function reconcileActivitySnapshot(
+  snapshot: ActivitySnapshotEntry[],
+  prevActivity: Map<string, BranchActivity>,
+  prevSince: Map<string, number>,
+  isFreshProject: boolean,
+): {
+  nextActivity: Map<string, BranchActivity>;
+  nextSince: Map<string, number>;
+  transitions: Array<string | null>;
+} {
+  const nextActivity = new Map<string, BranchActivity>();
+  const nextSince = new Map<string, number>();
+  const transitions: Array<string | null> = [];
+
+  for (const entry of snapshot) {
+    const key = toKey(entry.branch);
+    const seenSince = prevSince.get(key) ?? 0;
+    if (!isFreshProject && entry.since < seenSince) {
+      const kept = prevActivity.get(key);
+      if (kept !== undefined) {
+        nextActivity.set(key, kept);
+        nextSince.set(key, seenSince);
+        continue;
+      }
+      // Defensive: prevSince had a value but prevActivity didn't (desync).
+      // Fall through and accept the snapshot.
+    }
+    nextActivity.set(key, entry.activity);
+    nextSince.set(key, entry.since);
+    if (!isFreshProject && prevActivity.get(key) !== entry.activity) {
+      transitions.push(entry.branch);
+    }
+  }
+
+  return { nextActivity, nextSince, transitions };
+}
+
 interface UseBranchActivityOptions {
   /**
    * Fired whenever a backend update for `branch` is applied (REST refetch or
@@ -100,35 +162,29 @@ export function useBranchActivity(
       );
       if (!res.ok) return;
       const data = (await res.json()) as BranchActivityResponse;
-      const next = new Map<string, BranchActivity>();
-      const nextSince = new Map<string, number>();
-      for (const entry of data.branches) {
-        const key = toKey(entry.branch);
-        next.set(key, entry.activity);
-        nextSince.set(key, entry.since);
-      }
+
+      // Reconcile against the SSE-derived state, respecting per-branch
+      // `since` so a stale snapshot can't roll back a newer SSE update.
+      // See `reconcileActivitySnapshot` for the why.
+      const isFreshProject = activityProjectRef.current !== projectId;
+      const { nextActivity, nextSince, transitions } = reconcileActivitySnapshot(
+        data.branches,
+        activityRef.current,
+        sinceRef.current,
+        isFreshProject,
+      );
+
       // Only notify for branches whose activity actually transitioned. REST
       // refetch is a snapshot, not a state-change event — firing onBackendUpdate
       // unconditionally would clobber intentional optimistic overlays (e.g.
       // the "idle" overlay set by New Conversation while the latest DB session
       // is still "completed" because no new session has been created yet).
-      //
-      // Skip the diff entirely when activityRef belongs to a different
-      // project (or is empty on initial mount): comparing across projects
-      // produces meaningless transitions. The first fetch for a project is
-      // always a snapshot.
-      const isFreshProject = activityProjectRef.current !== projectId;
       const cb = onBackendUpdateRef.current;
-      if (cb && !isFreshProject) {
-        for (const entry of data.branches) {
-          const key = toKey(entry.branch);
-          if (activityRef.current.get(key) !== entry.activity) {
-            cb(entry.branch);
-          }
-        }
+      if (cb) {
+        for (const branch of transitions) cb(branch);
       }
-      setActivity(next);
-      activityRef.current = next;
+      setActivity(nextActivity);
+      activityRef.current = nextActivity;
       activityProjectRef.current = projectId;
       sinceRef.current = nextSince;
     } catch {
