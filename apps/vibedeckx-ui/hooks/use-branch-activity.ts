@@ -97,6 +97,40 @@ export function reconcileActivitySnapshot(
   return { nextActivity, nextSince, transitions };
 }
 
+/**
+ * Classify an incoming SSE `branch:activity` event against the in-memory
+ * state. Returns the outcome the SSE handler should apply.
+ *
+ * `kind`:
+ *   - "stale"      → event.since older than what we've seen; ignore entirely.
+ *   - "redundant"  → not stale, but activity matches what we already have.
+ *                    Bump `since` (so future stale checks work) but do NOT
+ *                    notify the caller — firing `onBackendUpdate` here would
+ *                    clobber legitimate optimistic overlays (e.g. the "idle"
+ *                    overlay set by New Conversation while the backend
+ *                    re-emits "stopped" from a redundant `stopSession` call
+ *                    on the already-stopped prior session).
+ *   - "transition" → activity actually changed; update state and notify.
+ *
+ * Mirrors `reconcileActivitySnapshot`'s "transitions only" contract for the
+ * REST path — both paths must agree that `onBackendUpdate` fires iff the
+ * state genuinely changed.
+ *
+ * Pure function — exported for tests.
+ */
+export function classifyActivityEvent(
+  event: { branch: string | null; activity: BranchActivity; since: number },
+  prevActivity: Map<string, BranchActivity>,
+  prevSince: Map<string, number>,
+): { kind: "stale" } | { kind: "redundant" | "transition"; key: string } {
+  const key = toKey(event.branch);
+  const seenSince = prevSince.get(key) ?? 0;
+  if (event.since < seenSince) return { kind: "stale" };
+  const prev = prevActivity.get(key);
+  if (prev === event.activity) return { kind: "redundant", key };
+  return { kind: "transition", key };
+}
+
 interface UseBranchActivityOptions {
   /**
    * Fired whenever a backend update for `branch` is applied (REST refetch or
@@ -213,21 +247,26 @@ export function useBranchActivity(
         const evt = data as BranchActivityEvent;
         if (evt.projectId !== projectId) return;
 
-        const key = toKey(evt.branch);
-        const prevSince = sinceRef.current.get(key) ?? 0;
-        if (evt.since < prevSince) return; // stale event, ignore
+        const outcome = classifyActivityEvent(
+          evt,
+          activityRef.current,
+          sinceRef.current,
+        );
+        if (outcome.kind === "stale") return;
 
-        sinceRef.current.set(key, evt.since);
+        sinceRef.current.set(outcome.key, evt.since);
+        if (outcome.kind === "redundant") return;
+
         setActivity((prev) => {
-          if (prev.get(key) === evt.activity) return prev;
           const next = new Map(prev);
-          next.set(key, evt.activity);
+          next.set(outcome.key, evt.activity);
           activityRef.current = next;
           return next;
         });
         // Notify caller so it can clear optimistic overlays for this branch
         // — including branches the user isn't currently viewing, which is
         // how a non-selected workspace turns green when its agent finishes.
+        // Only fires on actual transitions (see classifyActivityEvent).
         onBackendUpdateRef.current?.(evt.branch);
       } catch {
         // Ignore parse errors (e.g. keepalive comments)

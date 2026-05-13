@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyActivityEvent,
   reconcileActivitySnapshot,
   type ActivitySnapshotEntry,
   type BranchActivity,
@@ -181,5 +182,64 @@ describe("reconcileActivitySnapshot", () => {
     expect(transitions).toEqual([]);
     // Suppress unused-var warning for T1 (kept for narrative clarity above).
     expect(T1).toBeLessThan(T2);
+  });
+});
+
+describe("classifyActivityEvent", () => {
+  it("event older than seen since → stale", () => {
+    const outcome = classifyActivityEvent(
+      { branch: "feat-a", activity: "working", since: 100 },
+      new Map<string, BranchActivity>([["feat-a", "stopped"]]),
+      new Map<string, number>([["feat-a", 200]]),
+    );
+    expect(outcome.kind).toBe("stale");
+  });
+
+  it("event with new activity → transition", () => {
+    const outcome = classifyActivityEvent(
+      { branch: "feat-a", activity: "completed", since: 300 },
+      new Map<string, BranchActivity>([["feat-a", "working"]]),
+      new Map<string, number>([["feat-a", 200]]),
+    );
+    expect(outcome.kind).toBe("transition");
+  });
+
+  it("first event for a branch (no prior state) → transition", () => {
+    const outcome = classifyActivityEvent(
+      { branch: "feat-a", activity: "working", since: 100 },
+      new Map<string, BranchActivity>(),
+      new Map<string, number>(),
+    );
+    expect(outcome.kind).toBe("transition");
+  });
+
+  it("regression: stop then new conversation — redundant 'stopped' must not transition", () => {
+    // Bug scenario: user clicks Stop (dot turns amber), then clicks New
+    // Conversation. The frontend calls stopSessionApi again on the
+    // already-stopped session; backend's stopSession has no early-exit and
+    // re-emits branch:activity:stopped with a newer `since`. Without the
+    // "redundant" classification this would fire onBackendUpdate after the
+    // optimistic "idle" overlay was set, clobbering it and leaving the dot
+    // stuck on amber.
+    const T1 = 1_000_000;
+    const T2 = 1_000_500;
+    const outcome = classifyActivityEvent(
+      { branch: "feat-a", activity: "stopped", since: T2 },
+      new Map<string, BranchActivity>([["feat-a", "stopped"]]),
+      new Map<string, number>([["feat-a", T1]]),
+    );
+    expect(outcome.kind).toBe("redundant");
+  });
+
+  it("null branch maps to '' key", () => {
+    const outcome = classifyActivityEvent(
+      { branch: null, activity: "working", since: 100 },
+      new Map<string, BranchActivity>(),
+      new Map<string, number>(),
+    );
+    expect(outcome.kind).toBe("transition");
+    if (outcome.kind === "transition") {
+      expect(outcome.key).toBe("");
+    }
   });
 });
