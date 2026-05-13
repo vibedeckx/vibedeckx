@@ -31,8 +31,6 @@ import {
   type WorkspaceStatus,
   toBranchKey,
   computeWorkspaceStatuses,
-  applyStatusWorking,
-  clearRealtimeStatus,
 } from '@/lib/workspace-status';
 
 export type { WorkspaceStatus } from '@/lib/workspace-status';
@@ -102,62 +100,48 @@ export default function Home() {
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
 
-  // Per-branch real-time workspace statuses, set directly from events.
-  // Persists across branch switches so switching away doesn't lose status.
-  const [realtimeWorkspaceStatuses, setRealtimeWorkspaceStatuses] = useState<Map<string, WorkspaceStatus>>(new Map());
-
-  // When the backend reports activity for a branch (REST or SSE), the
-  // optimistic overlay for that branch is now stale — clear it so the
-  // backend's status takes over. Without this, a "working" overlay set on
-  // send in workspace A would never clear while the user is on workspace B,
-  // masking the backend's "completed" event for A.
-  const handleBranchBackendUpdate = useCallback((branch: string | null) => {
-    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, branch));
-  }, []);
-  const { activity: branchActivity, refetch: refetchBranchActivity } = useBranchActivity(
-    currentProject?.id ?? null,
-    { onBackendUpdate: handleBranchBackendUpdate },
-  );
+  const {
+    activity: branchActivity,
+    refetch: refetchBranchActivity,
+    setOptimisticActivity,
+  } = useBranchActivity(currentProject?.id ?? null);
   const { rules, createRule, updateRule, deleteRule } = useRules(currentProject?.id ?? null, selectedBranch);
   const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
   const mainChatRef = useRef<MainConversationHandle>(null);
 
-  // Compute workspace statuses for all worktrees
+  // Compute workspace statuses for all worktrees — single tier: the SSE-
+  // backed activity map. Optimistic transitions (send → working, New
+  // Conversation → idle) are written directly into that map via
+  // setOptimisticActivity, so there's no separate "realtime overlay" tier.
   const workspaceStatuses = useMemo(
-    () => computeWorkspaceStatuses(worktrees, realtimeWorkspaceStatuses, branchActivity),
-    [worktrees, branchActivity, realtimeWorkspaceStatuses]
+    () => computeWorkspaceStatuses(worktrees, branchActivity),
+    [worktrees, branchActivity]
   );
 
-  // User just hit send → optimistic working overlay (sub-50ms before the
-  // backend's branch:activity event lands).
+  // User just hit send → seed "working" into the activity map ahead of the
+  // backend's branch:activity event (sub-50ms latency hide). The backend's
+  // emit arrives shortly and is a no-op transition (same value).
   const handleStatusChange = useCallback(() => {
-    setRealtimeWorkspaceStatuses(prev => applyStatusWorking(prev, selectedBranch));
-  }, [selectedBranch]);
+    setOptimisticActivity(selectedBranch, "working");
+  }, [selectedBranch, setOptimisticActivity]);
 
-  // Sidebar status comes from useBranchActivity now (REST + SSE). These
-  // handlers stay only for non-status side effects (task table refresh).
+  // Task panel refresh — sidebar dot is driven by useBranchActivity directly,
+  // so this handler no longer has any branch-activity side effect.
   const handleTaskCompleted = useCallback(() => {
     refetchTasks();
-    // Clear the optimistic overlay so the backend's "completed" wins.
-    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, selectedBranch));
-  }, [refetchTasks, selectedBranch]);
+  }, [refetchTasks]);
 
   const handleSessionStarted = useCallback(() => {
     refetchBranchActivity();
   }, [refetchBranchActivity]);
 
-  // New Conversation → optimistic idle overlay until backend's
-  // branch:activity:idle (createNewSession fires it) clears the realtime
-  // entry on the next tick. Note: storing "idle" in realtime explicitly
-  // because the backend may still report "completed" until its own SSE
-  // event reaches the consumer.
+  // New Conversation seeds "idle" so the dot turns gray immediately. The
+  // backend doesn't emit anything when the user clicks New Conv (no DB
+  // session is created until the first message), so this optimistic seed
+  // is the only signal until the first send.
   const handleNewConversation = useCallback(() => {
-    setRealtimeWorkspaceStatuses(prev => {
-      const next = new Map(prev);
-      next.set(toBranchKey(selectedBranch), "idle");
-      return next;
-    });
-  }, [selectedBranch]);
+    setOptimisticActivity(selectedBranch, "idle");
+  }, [selectedBranch, setOptimisticActivity]);
 
   // task:* events drive the Tasks panel. Session-status / -finished /
   // -taskCompleted SSE events are no longer consumed here — useBranchActivity
@@ -184,10 +168,10 @@ export default function Home() {
   }, []);
 
   const handleResetTask = useCallback((taskId: string) => {
-    // Clear realtime status so the branch falls back to polling/task-derived (idle)
-    setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, selectedBranch));
+    // Unassigning a task is metadata-only — agent_sessions stays put, so
+    // there's no branch-activity transition to seed here.
     updateTask(taskId, { assigned_branch: null });
-  }, [selectedBranch, updateTask]);
+  }, [updateTask]);
 
   // Reset branch selection when switching between projects (not on initial load)
   useEffect(() => {
@@ -379,7 +363,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         onUpdateTaskTitle={(id, title) => updateTask(id, { title })}
                         onCompleteTask={(id) => {
                           updateTask(id, { status: "done", assigned_branch: null });
-                          setRealtimeWorkspaceStatuses(prev => clearRealtimeStatus(prev, selectedBranch));
                         }}
                       />
                     </div>

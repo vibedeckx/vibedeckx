@@ -131,51 +131,41 @@ export function classifyActivityEvent(
   return { kind: "transition", key };
 }
 
-interface UseBranchActivityOptions {
-  /**
-   * Fired whenever a backend update for `branch` is applied (REST refetch or
-   * SSE event). The consumer typically uses this to drop optimistic overlays
-   * for that branch — once the backend has spoken, realtime is stale.
-   */
-  onBackendUpdate?: (branch: string | null) => void;
-}
-
 /**
  * Reads the backend's derived per-branch activity state for the current
  * project. REST fetch on mount + SSE subscription for live updates. The
- * returned Map keys are branch strings (empty string for the null/main
- * branch), values are the latest activity state.
+ * returned `activity` map keys are branch strings (empty string for the
+ * null/main branch), values are the latest activity state.
+ *
+ * `setOptimisticActivity(branch, activity)` lets callers seed the map
+ * locally before the backend event lands (e.g. "working" on send, "idle" on
+ * New Conversation). Internally written with `since = Date.now()` so a
+ * subsequent backend SSE event with a newer `since` correctly takes over;
+ * an event with the same activity is a no-op transition (the map is already
+ * in the right state).
  *
  * `since` is tracked per branch so out-of-order SSE events (rare, but
  * possible during reconnect) don't overwrite a newer state with an older one.
  */
 export function useBranchActivity(
   projectId: string | null,
-  options?: UseBranchActivityOptions,
 ): {
   activity: Map<string, BranchActivity>;
   refetch: () => Promise<void>;
+  setOptimisticActivity: (branch: string | null, activity: BranchActivity) => void;
 } {
   const [activity, setActivity] = useState<Map<string, BranchActivity>>(new Map());
   // Shadow map of `since` timestamps for stale-event guarding.
   const sinceRef = useRef<Map<string, number>>(new Map());
-  // Mirror of `activity` state so REST refetch can diff against the prior
-  // value without going through React's render cycle. Required so we only
-  // notify on genuine transitions — see fetchActivity below.
+  // Mirror of `activity` state so REST refetch and the SSE handler can read
+  // the current map synchronously (without going through React's render
+  // cycle) — needed by `reconcileActivitySnapshot` and `classifyActivityEvent`.
   const activityRef = useRef<Map<string, BranchActivity>>(new Map());
   // Tracks which projectId activityRef currently belongs to. When projectId
   // changes (project switch), the next fetch is a fresh snapshot for the new
-  // project — diffing against the prior project's data would fire spurious
-  // onBackendUpdate calls that clobber valid optimistic overlays (e.g. the
-  // "idle" overlay set by New Conversation in project A would be cleared
-  // when the user switches B → A and the refetch sees A's "completed").
+  // project — diffing against the prior project's data would be meaningless
+  // and risks corrupting state during switches.
   const activityProjectRef = useRef<string | null>(null);
-  // Latest callback ref so the SSE handler closure reads the current one
-  // without resubscribing whenever the parent re-renders.
-  const onBackendUpdateRef = useRef(options?.onBackendUpdate);
-  useEffect(() => {
-    onBackendUpdateRef.current = options?.onBackendUpdate;
-  });
 
   const fetchActivity = useCallback(async () => {
     if (!projectId) {
@@ -201,22 +191,12 @@ export function useBranchActivity(
       // `since` so a stale snapshot can't roll back a newer SSE update.
       // See `reconcileActivitySnapshot` for the why.
       const isFreshProject = activityProjectRef.current !== projectId;
-      const { nextActivity, nextSince, transitions } = reconcileActivitySnapshot(
+      const { nextActivity, nextSince } = reconcileActivitySnapshot(
         data.branches,
         activityRef.current,
         sinceRef.current,
         isFreshProject,
       );
-
-      // Only notify for branches whose activity actually transitioned. REST
-      // refetch is a snapshot, not a state-change event — firing onBackendUpdate
-      // unconditionally would clobber intentional optimistic overlays (e.g.
-      // the "idle" overlay set by New Conversation while the latest DB session
-      // is still "completed" because no new session has been created yet).
-      const cb = onBackendUpdateRef.current;
-      if (cb) {
-        for (const branch of transitions) cb(branch);
-      }
       setActivity(nextActivity);
       activityRef.current = nextActivity;
       activityProjectRef.current = projectId;
@@ -263,11 +243,6 @@ export function useBranchActivity(
           activityRef.current = next;
           return next;
         });
-        // Notify caller so it can clear optimistic overlays for this branch
-        // — including branches the user isn't currently viewing, which is
-        // how a non-selected workspace turns green when its agent finishes.
-        // Only fires on actual transitions (see classifyActivityEvent).
-        onBackendUpdateRef.current?.(evt.branch);
       } catch {
         // Ignore parse errors (e.g. keepalive comments)
       }
@@ -285,5 +260,37 @@ export function useBranchActivity(
     };
   }, [projectId]);
 
-  return { activity, refetch: fetchActivity };
+  /**
+   * Seed the activity map for `branch` locally, ahead of the backend's SSE
+   * event. Used for sub-50ms UX feedback on user actions (e.g. "working"
+   * on send) and to override stale backend state during placeholder-only
+   * UI transitions (e.g. "idle" on New Conversation, before any new DB
+   * session has been created and emitted a real branch:activity event).
+   *
+   * Writes `since = Date.now()` so the stale-event guard correctly compares
+   * against subsequent backend events: an event with newer `since` wins
+   * (transition fires), an older one is dropped (stale), and an event with
+   * the same activity is a no-op (map already in the right state).
+   */
+  const setOptimisticActivity = useCallback(
+    (branch: string | null, next: BranchActivity) => {
+      const key = toKey(branch);
+      const now = Date.now();
+      sinceRef.current.set(key, now);
+      setActivity((prev) => {
+        if (prev.get(key) === next) {
+          // Map already says this; only bump since (already done above).
+          activityRef.current = prev;
+          return prev;
+        }
+        const m = new Map(prev);
+        m.set(key, next);
+        activityRef.current = m;
+        return m;
+      });
+    },
+    [],
+  );
+
+  return { activity, refetch: fetchActivity, setOptimisticActivity };
 }

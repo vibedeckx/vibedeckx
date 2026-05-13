@@ -7,6 +7,7 @@ import type { AgentWsInput } from "../agent-types.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import type { RemotePatchCache } from "../remote-patch-cache.js";
 import type { EventBus } from "../event-bus.js";
+import type { AgentSessionManager } from "../agent-session-manager.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
 import { statusEventFromRemotePatch, projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import "../server-types.js";
@@ -64,6 +65,7 @@ function connectPersistentRemoteWs(
   wsOptions: Record<string, unknown>,
   reverseConnectManager?: import("../reverse-connect-manager.js").ReverseConnectManager,
   eventBus?: EventBus,
+  agentSessionManager?: AgentSessionManager,
 ): void {
   const hasCachedData = cache.hasData(sessionId);
   const useVirtual = reverseConnectManager && reverseConnectManager.isConnected(remoteInfo.remoteServerId);
@@ -169,13 +171,11 @@ function connectPersistentRemoteWs(
           input_tokens: tc?.input_tokens as number | undefined,
           output_tokens: tc?.output_tokens as number | undefined,
         });
-        eventBus.emit({
-          type: "branch:activity",
+        agentSessionManager?.emitBranchActivityIfChanged(
           projectId,
           branch,
-          activity: "completed",
-          since: Date.now(),
-        });
+          { activity: "completed", since: Date.now() },
+        );
       }
     } else if ("branchActivity" in parsed) {
       // Remote signaled a branch:activity transition outside the natural
@@ -184,20 +184,18 @@ function connectPersistentRemoteWs(
       // (useBranchActivity) updates the workspace dot live without waiting
       // for the next REST refetch.
       cache.broadcast(sessionId, raw);
-      if (eventBus) {
+      if (agentSessionManager) {
         const ba = parsed.branchActivity as { activity?: unknown; since?: unknown };
         if (
           (ba.activity === "idle" || ba.activity === "working" ||
            ba.activity === "completed" || ba.activity === "stopped") &&
           typeof ba.since === "number"
         ) {
-          eventBus.emit({
-            type: "branch:activity",
-            projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),
-            branch: remoteInfo.branch ?? null,
-            activity: ba.activity,
-            since: ba.since,
-          });
+          agentSessionManager.emitBranchActivityIfChanged(
+            projectIdFromRemoteSessionId(sessionId, remoteInfo),
+            remoteInfo.branch ?? null,
+            { activity: ba.activity, since: ba.since },
+          );
         }
       }
     } else if ("error" in parsed) {
@@ -323,7 +321,7 @@ function connectPersistentRemoteWs(
     const entry = cache.get(sessionId);
     if (!entry || entry.finished) return;
 
-    scheduleRemoteReconnect(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager, eventBus);
+    scheduleRemoteReconnect(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager, eventBus, agentSessionManager);
   });
 }
 
@@ -338,6 +336,7 @@ function scheduleRemoteReconnect(
   wsOptions: Record<string, unknown>,
   reverseConnectManager?: import("../reverse-connect-manager.js").ReverseConnectManager,
   eventBus?: EventBus,
+  agentSessionManager?: AgentSessionManager,
 ): void {
   const entry = cache.get(sessionId);
   if (!entry || entry.finished) return;
@@ -366,7 +365,7 @@ function scheduleRemoteReconnect(
       cache.setReconnecting(sessionId, false);
       return;
     }
-    connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager, eventBus);
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager, eventBus, agentSessionManager);
   }, totalDelay);
 
   cache.setReconnectTimer(sessionId, timer);
@@ -390,7 +389,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       console.log(`[AgentWS] Reverse-connect restored for ${remoteServerId}, re-establishing WS for ${sessionId}`);
       cache.resetReconnectAttempt(sessionId);
-      connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, fastify.reverseConnectManager, fastify.eventBus);
+      connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, fastify.reverseConnectManager, fastify.eventBus, fastify.agentSessionManager);
     }
   });
 
@@ -714,7 +713,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const existingRemoteWs = cache.getRemoteWs(sessionId);
           if (!existingRemoteWs && !cache.isReconnecting(sessionId)) {
             // Need to open a new persistent remote WS
-            connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, fastify.reverseConnectManager, fastify.eventBus);
+            connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, fastify.reverseConnectManager, fastify.eventBus, fastify.agentSessionManager);
           }
 
           // Send current remote connection status to the newly connected frontend

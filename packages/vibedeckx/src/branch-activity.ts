@@ -74,6 +74,52 @@ export function computeBranchActivity(
 }
 
 /**
+ * Stateful dedupe gate for `branch:activity` emissions. The backend has many
+ * state-changing operations that all want to publish activity; rather than
+ * each one guessing whether the state actually changed, they go through this
+ * gate so a redundant emit (same activity as the last one we sent for this
+ * branch) is dropped at the source.
+ *
+ * Concrete bug this guards against: clicking Stop then New Conversation
+ * re-runs `stopSession` on the already-stopped session, which without this
+ * gate re-emits `branch:activity:stopped` and clobbers the frontend's
+ * optimistic "idle" overlay.
+ *
+ * Keyed by `${projectId}::${branch ?? ""}`. The cache only stores the
+ * last-emitted activity value — `since` is not part of dedupe because the
+ * value timestamp doesn't carry semantic state (and the frontend's stale-
+ * event guard uses `since` separately for ordering, not for identity).
+ */
+export class BranchActivityDedupe {
+  private cache = new Map<string, BranchActivity>();
+
+  private key(projectId: string, branch: string | null): string {
+    return `${projectId}::${branch ?? ""}`;
+  }
+
+  /**
+   * Returns true if `next` differs from the last emit for this branch
+   * (and updates the cache). Returns false on a redundant emit, leaving
+   * the cache as-is.
+   */
+  shouldEmit(projectId: string, branch: string | null, next: BranchActivity): boolean {
+    const k = this.key(projectId, branch);
+    if (this.cache.get(k) === next) return false;
+    this.cache.set(k, next);
+    return true;
+  }
+
+  /**
+   * Drop the cache entry for a branch — call when the branch's session
+   * history is wiped (e.g. all sessions deleted) so the next emit isn't
+   * suppressed against a stale post-deletion value.
+   */
+  forget(projectId: string, branch: string | null): void {
+    this.cache.delete(this.key(projectId, branch));
+  }
+}
+
+/**
  * Compare two sessions by `updated_at` (the millisecond-precision text format
  * is lex-sortable by design — see the schema comment in sqlite.ts). Falls back
  * to `created_at` when updated_at is missing on legacy rows.

@@ -16,6 +16,11 @@ import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
+import {
+  BranchActivityDedupe,
+  computeBranchActivity,
+  type BranchActivityState,
+} from "./branch-activity.js";
 
 // ============ Session Store Types ============
 
@@ -51,6 +56,12 @@ export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
   private storage: Storage;
   private eventBus: EventBus | null = null;
+  /**
+   * Single source of truth for `branch:activity` emit dedupe. All call sites
+   * that publish branch activity go through `emitDerivedBranchActivity` /
+   * `emitBranchActivityIfChanged`, which check this gate before emitting.
+   */
+  private branchActivityDedupe = new BranchActivityDedupe();
   /** Sessions for which title generation is currently in flight or already done. */
   private titleResolved: Set<string> = new Set();
   /**
@@ -68,6 +79,53 @@ export class AgentSessionManager {
 
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
+  }
+
+  /**
+   * Single emit path for `branch:activity` events. Derives the current
+   * activity from local DB state (the source of truth — see
+   * `computeBranchActivity`) and emits iff the value changed since the
+   * last emit for this branch. Returns the emitted state or null when
+   * deduped.
+   *
+   * Use this for any local state change that affects branch activity
+   * (createNewSession / persistEntry / taskCompleted / stopSession /
+   * deleteSession). Sites that already know the intended activity but
+   * can't derive it from local DB (e.g. forwarding from a remote backend)
+   * should use `emitBranchActivityIfChanged` instead.
+   */
+  emitDerivedBranchActivity(
+    projectId: string,
+    branch: string | null,
+  ): BranchActivityState | null {
+    const sessions = this.storage.agentSessions.listByBranch(projectId, branch ?? "");
+    const derived = computeBranchActivity(sessions).get(branch ?? "")
+                  ?? { activity: "idle", since: Date.now() };
+    return this.emitBranchActivityIfChanged(projectId, branch, derived);
+  }
+
+  /**
+   * Emit `branch:activity` with the given state iff it differs from the
+   * last emit for this branch. Used by forwarding paths that have the
+   * activity value but no local DB to derive from (remote-proxied
+   * sessions). Returns the emitted state or null when deduped.
+   */
+  emitBranchActivityIfChanged(
+    projectId: string,
+    branch: string | null,
+    state: BranchActivityState,
+  ): BranchActivityState | null {
+    if (!this.branchActivityDedupe.shouldEmit(projectId, branch, state.activity)) {
+      return null;
+    }
+    this.eventBus?.emit({
+      type: "branch:activity",
+      projectId,
+      branch,
+      activity: state.activity,
+      since: state.since,
+    });
+    return state;
   }
 
   /**
@@ -211,13 +269,7 @@ export class AgentSessionManager {
     // The new session has fresh updated_at and no timestamps, so the branch
     // resets to idle (see computeBranchActivity). Emit so SSE consumers don't
     // sit on a stale "completed" until the next user message arrives.
-    this.eventBus?.emit({
-      type: "branch:activity",
-      projectId,
-      branch,
-      activity: "idle",
-      since: Date.now(),
-    });
+    this.emitDerivedBranchActivity(projectId, branch);
 
     return sessionId;
   }
@@ -542,13 +594,7 @@ export class AgentSessionManager {
             input_tokens: event.input_tokens,
             output_tokens: event.output_tokens,
           });
-          this.eventBus?.emit({
-            type: "branch:activity",
-            projectId: session.projectId,
-            branch: session.branch,
-            activity: "completed",
-            since: completedAt,
-          });
+          this.emitDerivedBranchActivity(session.projectId, session.branch);
 
           // Turn finished — process stays alive (stream-json) waiting for next
           // input, but status now reflects "between turns" so UI affordances
@@ -695,13 +741,7 @@ export class AgentSessionManager {
       if (message.type === "user") {
         const now = Date.now();
         this.storage.agentSessions.markUserMessage(session.id, now);
-        this.eventBus?.emit({
-          type: "branch:activity",
-          projectId: session.projectId,
-          branch: session.branch,
-          activity: "working",
-          since: now,
-        });
+        this.emitDerivedBranchActivity(session.projectId, session.branch);
         if (!this.suppressTitleGeneration) {
           const dbRow = this.storage.agentSessions.getById(session.id);
           if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
@@ -937,31 +977,26 @@ export class AgentSessionManager {
       if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
-      // Only surface "stopped" (amber) when the user's last message hadn't yet
-      // reached completion — that's the genuine "interrupted, unfinished work"
-      // case. If the prior turn already completed naturally (e.g. New
-      // Conversation stops a dormant session between turns), emitting "stopped"
-      // would briefly flash amber over a workspace that should stay green
-      // until the new session's idle overlay takes over.
-      const dbRow = !session.skipDb ? this.storage.agentSessions.getById(sessionId) : undefined;
-      const lastUser = dbRow?.last_user_message_at ?? 0;
-      const lastCompleted = dbRow?.last_completed_at ?? 0;
-      if (lastUser > lastCompleted) {
-        const stoppedAt = Date.now();
-        this.eventBus?.emit({
-          type: "branch:activity",
-          projectId: session.projectId,
-          branch: session.branch,
-          activity: "stopped",
-          since: stoppedAt,
-        });
-        // Mirror over the per-session WS so the local-side bridge for remote
-        // sessions can re-emit on the local EventBus (parallel to how
-        // taskCompleted bridges into branch:activity:completed). Local-direct
-        // subscribers ignore unknown message types, so this is a no-op there.
-        this.broadcastRaw(sessionId, {
-          branchActivity: { activity: "stopped", since: stoppedAt },
-        });
+      // The derived activity is "stopped" iff the user's last message hadn't
+      // reached completion — that's the "interrupted, unfinished work" case
+      // we want to surface as amber. If the prior turn already completed
+      // naturally (e.g. New Conversation stops a dormant session between
+      // turns), the derived activity is still "completed" and dedupe
+      // suppresses any redundant emit, so the workspace dot stays green.
+      // Both rules live in `computeBranchActivity`; this site doesn't
+      // re-derive them inline.
+      if (!session.skipDb) {
+        const emitted = this.emitDerivedBranchActivity(session.projectId, session.branch);
+        if (emitted?.activity === "stopped") {
+          // Mirror over the per-session WS so the local-side bridge for
+          // remote sessions can re-emit on the local EventBus (parallel to
+          // how taskCompleted bridges into branch:activity:completed).
+          // Local-direct subscribers ignore unknown message types, so this
+          // is a no-op there.
+          this.broadcastRaw(sessionId, {
+            branchActivity: { activity: emitted.activity, since: emitted.since },
+          });
+        }
       }
       // Don't send { finished: true } — keep the WebSocket connection alive
       // so the UI stays "Connected" and the user can continue the conversation.
@@ -1006,6 +1041,14 @@ export class AgentSessionManager {
 
     // 5. Remove from in-memory map
     this.sessions.delete(sessionId);
+
+    // 6. Re-derive branch activity — deleting the latest session can change
+    //    which session is now "latest" for the branch, so the activity might
+    //    flip (e.g. removing the only stopped session, leaving a completed
+    //    one, should turn the dot green). Dedupe handles the no-change case.
+    if (!session.skipDb) {
+      this.emitDerivedBranchActivity(session.projectId, session.branch);
+    }
     return true;
   }
 

@@ -588,14 +588,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           // Mirror createNewSession's branch:activity:idle on the local
           // EventBus so SSE consumers don't sit on stale "completed" until
-          // the next user message reaches the remote.
-          fastify.eventBus?.emit({
-            type: "branch:activity",
-            projectId: req.params.projectId,
-            branch: branch ?? null,
-            activity: "idle",
-            since: Date.now(),
-          });
+          // the next user message reaches the remote. Goes through the
+          // dedupe gate so a repeat in an already-idle placeholder is a
+          // no-op.
+          fastify.agentSessionManager.emitBranchActivityIfChanged(
+            req.params.projectId,
+            branch ?? null,
+            { activity: "idle", since: Date.now() },
+          );
           return reply.code(200).send({
             session: { ...remoteData.session, id: localSessionId, projectId: req.params.projectId },
             messages: remoteData.messages,
@@ -744,14 +744,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       // Emit branch:activity working — remote's own EventBus would also emit
       // this event but we don't subscribe to remote SSE; deriving from the
-      // proxy success is the cheapest reliable signal.
-      fastify.eventBus?.emit({
-        type: "branch:activity",
-        projectId: projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
-        branch: remoteInfo.branch ?? null,
-        activity: "working",
-        since: Date.now(),
-      });
+      // proxy success is the cheapest reliable signal. Dedupe handles
+      // repeated sends within the same working turn.
+      fastify.agentSessionManager.emitBranchActivityIfChanged(
+        projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
+        remoteInfo.branch ?? null,
+        { activity: "working", since: Date.now() },
+      );
       // First-message title generation runs locally (uses the same
       // chat_provider config as main chat), then PATCHes the result back to
       // the remote. Fire-and-forget so it doesn't delay the response.

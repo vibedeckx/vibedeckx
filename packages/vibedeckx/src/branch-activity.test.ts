@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { AgentSession } from "./storage/types.js";
-import { computeBranchActivity } from "./branch-activity.js";
+import { BranchActivityDedupe, computeBranchActivity } from "./branch-activity.js";
 
 function session(opts: Partial<AgentSession> & { branch: string; id?: string }): AgentSession {
   return {
@@ -175,5 +175,63 @@ describe("computeBranchActivity", () => {
     ]);
     // B has newer created_at, no timestamps → idle
     expect(result.get("feat-a")?.activity).toBe("idle");
+  });
+});
+
+describe("BranchActivityDedupe", () => {
+  it("first emit for a branch → shouldEmit returns true", () => {
+    const gate = new BranchActivityDedupe();
+    expect(gate.shouldEmit("proj-1", "feat-a", "working")).toBe(true);
+  });
+
+  it("repeating the same activity for a branch → shouldEmit returns false", () => {
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", "feat-a", "working");
+    expect(gate.shouldEmit("proj-1", "feat-a", "working")).toBe(false);
+  });
+
+  it("transition to a new activity → shouldEmit returns true", () => {
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", "feat-a", "working");
+    expect(gate.shouldEmit("proj-1", "feat-a", "completed")).toBe(true);
+  });
+
+  it("regression: redundant stopped after Stop+New Conversation is dropped", () => {
+    // The original bug: clicking Stop emitted branch:activity:stopped; the
+    // subsequent New Conversation re-ran stopSession which re-emitted stopped.
+    // The gate must suppress the second emit so the frontend's optimistic
+    // "idle" overlay survives.
+    const gate = new BranchActivityDedupe();
+    expect(gate.shouldEmit("proj-1", "feat-a", "stopped")).toBe(true);
+    expect(gate.shouldEmit("proj-1", "feat-a", "stopped")).toBe(false);
+  });
+
+  it("different branches are independent", () => {
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", "feat-a", "working");
+    // Same activity on a different branch is a real first emit.
+    expect(gate.shouldEmit("proj-1", "feat-b", "working")).toBe(true);
+  });
+
+  it("different projects are independent", () => {
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", "feat-a", "working");
+    expect(gate.shouldEmit("proj-2", "feat-a", "working")).toBe(true);
+  });
+
+  it("null branch (main worktree) is keyed separately from empty-string", () => {
+    // The cache uses `branch ?? ""` so null and "" share a key — both
+    // represent the main worktree. This is the same convention as
+    // `computeBranchActivity` and `toBranchKey` in the frontend.
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", null, "working");
+    expect(gate.shouldEmit("proj-1", "", "working")).toBe(false);
+  });
+
+  it("forget(branch) lets the next emit through even if value is unchanged", () => {
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", "feat-a", "completed");
+    gate.forget("proj-1", "feat-a");
+    expect(gate.shouldEmit("proj-1", "feat-a", "completed")).toBe(true);
   });
 });
