@@ -3,14 +3,33 @@
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { api, type ChatProviderConfig } from '@/lib/api';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  api,
+  DEEPSEEK_MODELS,
+  DEFAULT_DEEPSEEK_MODEL,
+  type ChatProviderConfig,
+  type DeepSeekModel,
+} from '@/lib/api';
 import { Loader2, CheckCircle2 } from 'lucide-react';
 
 type Provider = ChatProviderConfig['provider'];
 
+const DEEPSEEK_MODEL_LABELS: Record<DeepSeekModel, string> = {
+  'deepseek-v4-flash': 'DeepSeek V4 Flash — faster, lower cost',
+  'deepseek-v4-pro': 'DeepSeek V4 Pro — higher quality',
+};
+
 export function ChatProviderSettings() {
   const [provider, setProvider] = useState<Provider>('deepseek');
   const [deepseekApiKey, setDeepseekApiKey] = useState('');
+  const [deepseekModel, setDeepseekModel] = useState<DeepSeekModel>(DEFAULT_DEEPSEEK_MODEL);
   const [openrouterApiKey, setOpenrouterApiKey] = useState('');
   const [openrouterModel, setOpenrouterModel] = useState('');
   const [loading, setLoading] = useState(true);
@@ -25,6 +44,7 @@ export function ChatProviderSettings() {
     api.getChatProviderSettings().then((config) => {
       setProvider(config.provider);
       setDeepseekApiKey(config.deepseekApiKey);
+      setDeepseekModel(config.deepseekModel ?? DEFAULT_DEEPSEEK_MODEL);
       setOpenrouterApiKey(config.openrouterApiKey);
       setOpenrouterModel(config.openrouterModel);
       setDeepseekKeyDirty(false);
@@ -41,6 +61,7 @@ export function ChatProviderSettings() {
     try {
       const payload: Partial<ChatProviderConfig> = {
         provider,
+        deepseekModel,
         openrouterModel,
       };
       if (deepseekKeyDirty) payload.deepseekApiKey = deepseekApiKey;
@@ -106,22 +127,45 @@ export function ChatProviderSettings() {
       </div>
 
       {provider === 'deepseek' && (
-        <div>
-          <label className="text-sm font-medium mb-1 block">DeepSeek API Key</label>
-          <Input
-            type="password"
-            placeholder={deepseekApiKey && !deepseekKeyDirty ? deepseekApiKey : 'sk-...'}
-            value={deepseekKeyDirty ? deepseekApiKey : ''}
-            onChange={(e) => {
-              setDeepseekApiKey(e.target.value);
-              setDeepseekKeyDirty(true);
-              setSaveMessage(null);
-            }}
-          />
-          <p className="text-xs text-muted-foreground mt-1">
-            Leave empty to use DEEPSEEK_API_KEY environment variable
-          </p>
-        </div>
+        <>
+          <div>
+            <label className="text-sm font-medium mb-1 block">DeepSeek API Key</label>
+            <Input
+              type="password"
+              placeholder={deepseekApiKey && !deepseekKeyDirty ? deepseekApiKey : 'sk-...'}
+              value={deepseekKeyDirty ? deepseekApiKey : ''}
+              onChange={(e) => {
+                setDeepseekApiKey(e.target.value);
+                setDeepseekKeyDirty(true);
+                setSaveMessage(null);
+              }}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Leave empty to use DEEPSEEK_API_KEY environment variable
+            </p>
+          </div>
+          <div>
+            <label className="text-sm font-medium mb-1 block">Model</label>
+            <Select
+              value={deepseekModel}
+              onValueChange={(value) => {
+                setDeepseekModel(value as DeepSeekModel);
+                setSaveMessage(null);
+              }}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {DEEPSEEK_MODELS.map((model) => (
+                  <SelectItem key={model} value={model}>
+                    {DEEPSEEK_MODEL_LABELS[model]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </>
       )}
 
       {provider === 'openrouter' && (

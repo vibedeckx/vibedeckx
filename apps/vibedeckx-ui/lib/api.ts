@@ -337,9 +337,19 @@ export interface ProxyConfig {
   port: number;
 }
 
+export type DeepSeekModel = 'deepseek-v4-flash' | 'deepseek-v4-pro';
+
+export const DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
+  'deepseek-v4-flash',
+  'deepseek-v4-pro',
+] as const;
+
+export const DEFAULT_DEEPSEEK_MODEL: DeepSeekModel = 'deepseek-v4-flash';
+
 export interface ChatProviderConfig {
   provider: 'deepseek' | 'openrouter';
   deepseekApiKey: string;
+  deepseekModel: DeepSeekModel;
   openrouterApiKey: string;
   openrouterModel: string;
 }
@@ -1252,7 +1262,13 @@ export const api = {
   async getChatProviderSettings(): Promise<ChatProviderConfig> {
     const res = await authFetch(`${getApiBase()}/api/settings/chat-provider`);
     if (!res.ok) {
-      return { provider: 'deepseek', deepseekApiKey: '', openrouterApiKey: '', openrouterModel: '' };
+      return {
+        provider: 'deepseek',
+        deepseekApiKey: '',
+        deepseekModel: DEFAULT_DEEPSEEK_MODEL,
+        openrouterApiKey: '',
+        openrouterModel: '',
+      };
     }
     return res.json();
   },
