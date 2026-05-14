@@ -104,4 +104,42 @@ describe("computeWorkspaceStatuses", () => {
     expect(result.has("ghost")).toBe(false);
     expect(result.get("feat")).toBe("idle");
   });
+
+  it("isPlaceholder override forces idle even when backend says completed", () => {
+    // Bug scenario: user clicks New Conversation on a branch with a prior
+    // completed session, then switches to another project and back. The
+    // refetch trusts the backend wholesale on a fresh project, so the dot
+    // would turn green again without this override.
+    const backend = new Map<string, WorkspaceStatus>([
+      ["feat-a", "completed"],
+      ["feat-b", "working"],
+    ]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat-a"), makeWorktree("feat-b")],
+      backend,
+      (branch) => branch === "feat-a",
+    );
+    expect(result.get("feat-a")).toBe("idle");
+    expect(result.get("feat-b")).toBe("working");
+  });
+
+  it("isPlaceholder handles null branch (main worktree)", () => {
+    const backend = new Map<string, WorkspaceStatus>([["", "stopped"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree(null)],
+      backend,
+      (branch) => branch === null,
+    );
+    expect(result.get("")).toBe("idle");
+  });
+
+  it("isPlaceholder returning false leaves backend status intact", () => {
+    const backend = new Map<string, WorkspaceStatus>([["feat", "completed"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat")],
+      backend,
+      () => false,
+    );
+    expect(result.get("feat")).toBe("completed");
+  });
 });

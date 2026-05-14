@@ -5,6 +5,12 @@ import { produce } from "immer";
 import { toast } from "sonner";
 import { getWebSocketUrl, getAuthToken, createNewAgentSession } from "@/lib/api";
 import type { AgentType } from "@/lib/api";
+import {
+  workspaceKey,
+  hasPlaceholder,
+  addPlaceholder,
+  removePlaceholder,
+} from "@/lib/placeholder-workspaces";
 
 // ============ Content Part Types (for image attachments) ============
 
@@ -232,36 +238,6 @@ function getCacheKey(projectId: string, branch: string | null, sessionId?: strin
   return `${projectId}:${branch ?? ""}:${sessionId ?? "latest"}`;
 }
 
-function getWorkspaceKey(projectId: string, branch: string | null, agentMode: string | undefined): string {
-  return `${projectId}:${branch ?? ""}:${agentMode ?? ""}`;
-}
-
-// Persist the "this workspace is in placeholder mode" intent across reloads.
-// Survives refresh; lost only by an explicit clear (first message, picking a
-// history session, or clearing site data).
-const PLACEHOLDER_STORAGE_KEY = "vibedeckx:placeholder-workspaces";
-
-function loadPlaceholderWorkspaces(): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    const raw = window.localStorage.getItem(PLACEHOLDER_STORAGE_KEY);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function persistPlaceholderWorkspaces(set: Set<string>): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(PLACEHOLDER_STORAGE_KEY, JSON.stringify([...set]));
-  } catch {
-    // localStorage quota exceeded or disabled (private mode) — accept loss
-  }
-}
-
 async function getSessionById(sessionId: string): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
   const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}`, {
     headers: getAuthHeaders(),
@@ -390,16 +366,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const sessionGenerationRef = useRef(0); // Incremented on branch/project change to discard stale API responses
   const lastStartFailedRef = useRef(false); // Prevents auto-restart loop after session creation failure
   const startingRef = useRef(false); // Reentrancy guard for startSession
-  // After "New Conversation" the user explicitly wants an empty placeholder.
-  // Tracked per-workspace (projectId|branch|agentMode) so the intent survives
-  // workspace switches AND page reloads (mirrored to localStorage). Cleared
-  // per-workspace when the user picks a session from history or sends the
-  // first message via ensureSession.
-  const placeholderWorkspacesRef = useRef<Set<string> | null>(null);
-  if (placeholderWorkspacesRef.current === null) {
-    placeholderWorkspacesRef.current = loadPlaceholderWorkspaces();
-  }
-  const placeholderWorkspaces = placeholderWorkspacesRef.current;
+  // Placeholder mode ("user clicked New Conversation, no session in DB yet")
+  // is module-level state in `lib/placeholder-workspaces.ts`. Mirrored to
+  // localStorage so the intent survives reloads and project switches; cleared
+  // when the user picks a history session or sends the first message.
   const onTaskCompletedRef = useRef(options?.onTaskCompleted);
   const onSessionStartedRef = useRef(options?.onSessionStarted);
   const onTitleUpdatedRef = useRef(options?.onTitleUpdated);
@@ -992,10 +962,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // and so switching away and back (or refreshing) preserves the empty
     // placeholder. Cleared when the user picks a session from history or
     // sends the first message.
-    placeholderWorkspaces.add(getWorkspaceKey(projectId, branch, agentMode));
-    persistPlaceholderWorkspaces(placeholderWorkspaces);
+    addPlaceholder(workspaceKey(projectId, branch, agentMode));
     return null;
-  }, [projectId, branch, agentMode, session?.id, explicitSessionId, placeholderWorkspaces]);
+  }, [projectId, branch, agentMode, session?.id, explicitSessionId]);
 
   // Create a real session on demand (called by submitMessage on first send).
   // POSTs to /api/projects/:projectId/agent-sessions/new and wires up WS.
@@ -1024,9 +993,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setStatus(newSession.status);
       setIsInitialized(true);
       // No longer in placeholder mode — a real session exists now.
-      if (placeholderWorkspaces.delete(getWorkspaceKey(projectId, branch, agentMode))) {
-        persistPlaceholderWorkspaces(placeholderWorkspaces);
-      }
+      removePlaceholder(workspaceKey(projectId, branch, agentMode));
       connectWebSocket(newSession.id);
       onSessionStartedRef.current?.();
       return newSession;
@@ -1038,7 +1005,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     } finally {
       setIsLoading(false);
     }
-  }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket, placeholderWorkspaces]);
+  }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -1081,17 +1048,15 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Per-workspace placeholder intent. Skip auto-start and mark initialized
     // so the empty-state UI shows instead of a spinner. If the user picks an
     // explicit session for this workspace, drop the placeholder intent.
-    const workspaceKey = projectId
-      ? getWorkspaceKey(projectId, branch, agentMode)
+    const currentWorkspaceKey = projectId
+      ? workspaceKey(projectId, branch, agentMode)
       : null;
-    if (workspaceKey && explicitSessionId) {
-      if (placeholderWorkspaces.delete(workspaceKey)) {
-        persistPlaceholderWorkspaces(placeholderWorkspaces);
-      }
+    if (currentWorkspaceKey && explicitSessionId) {
+      removePlaceholder(currentWorkspaceKey);
     }
     const stayingInPlaceholder =
-      !explicitSessionId && workspaceKey !== null
-      && placeholderWorkspaces.has(workspaceKey);
+      !explicitSessionId && currentWorkspaceKey !== null
+      && hasPlaceholder(currentWorkspaceKey);
 
     // Reset all state
     setSession(null);
@@ -1125,13 +1090,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   useEffect(() => {
     const inPlaceholder =
       projectId !== null
-      && placeholderWorkspaces.has(getWorkspaceKey(projectId, branch, agentMode));
+      && hasPlaceholder(workspaceKey(projectId, branch, agentMode));
     if (shouldAutoStartRef.current && projectId && !session && !isLoading && !lastStartFailedRef.current && !inPlaceholder) {
       shouldAutoStartRef.current = false;
       console.log(`[AgentSession] Auto-start: projectId=${projectId}, branch=${branch}, agentMode=${agentMode}`);
       startSession();
     }
-  }, [projectId, branch, agentMode, session, isLoading, startSession, placeholderWorkspaces]);
+  }, [projectId, branch, agentMode, session, isLoading, startSession]);
 
   // Reconnect when tab becomes visible again (browser may suspend timers when backgrounded)
   useEffect(() => {

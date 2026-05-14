@@ -32,6 +32,10 @@ import {
   toBranchKey,
   computeWorkspaceStatuses,
 } from '@/lib/workspace-status';
+import {
+  usePlaceholderWorkspaces,
+  workspaceKey,
+} from '@/lib/placeholder-workspaces';
 
 export type { WorkspaceStatus } from '@/lib/workspace-status';
 
@@ -109,13 +113,31 @@ export default function Home() {
   const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
   const mainChatRef = useRef<MainConversationHandle>(null);
 
-  // Compute workspace statuses for all worktrees — single tier: the SSE-
-  // backed activity map. Optimistic transitions (send → working, New
-  // Conversation → idle) are written directly into that map via
-  // setOptimisticActivity, so there's no separate "realtime overlay" tier.
+  // Placeholder set (per-workspace "user hit New Conversation, no DB session
+  // yet") layered on top of the SSE-backed activity map. Without this
+  // override, switching projects and back wipes the in-memory optimistic
+  // "idle" — the snapshot refetch trusts the backend wholesale on a fresh
+  // project, and the backend still sees the prior session as the latest
+  // (completed/stopped), turning the dot green again. The placeholder set is
+  // already persisted in localStorage so it survives project switches.
+  const placeholderSet = usePlaceholderWorkspaces();
+  const projectIdForKey = currentProject?.id ?? null;
+  const agentModeForKey = currentProject?.agent_mode ?? null;
+  const isPlaceholder = useCallback(
+    (branch: string | null) => {
+      if (!projectIdForKey) return false;
+      return placeholderSet.has(workspaceKey(projectIdForKey, branch, agentModeForKey));
+    },
+    [placeholderSet, projectIdForKey, agentModeForKey],
+  );
+
+  // Compute workspace statuses for all worktrees: SSE-backed activity, with
+  // `isPlaceholder` forcing "idle" for branches in placeholder mode. The
+  // existing `setOptimisticActivity` calls (send → working) still write
+  // directly into the activity map for sub-50ms feedback on other transitions.
   const workspaceStatuses = useMemo(
-    () => computeWorkspaceStatuses(worktrees, branchActivity),
-    [worktrees, branchActivity]
+    () => computeWorkspaceStatuses(worktrees, branchActivity, isPlaceholder),
+    [worktrees, branchActivity, isPlaceholder]
   );
 
   // User just hit send → seed "working" into the activity map ahead of the
