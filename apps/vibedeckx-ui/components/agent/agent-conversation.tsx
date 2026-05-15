@@ -566,7 +566,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   }}
                 >
                   {providers.map((p) => (
-                    <DropdownMenuRadioItem key={p.type} value={p.type} disabled={!p.available} className="text-xs">
+                    <DropdownMenuRadioItem
+                      key={p.type}
+                      value={p.type}
+                      disabled={!p.available}
+                      className="text-xs pl-2 [&>span:first-child]:hidden data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground"
+                    >
                       {p.displayName}
                     </DropdownMenuRadioItem>
                   ))}
