@@ -550,7 +550,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     session !== null && messages.length > 0 && "opacity-50 cursor-not-allowed"
                   )}
                 >
-                  <Bot className={`h-3 w-3 ${agentType === "codex" ? "text-green-500" : "text-violet-500"}`} />
                   {providers.find(p => p.type === agentType)?.displayName ?? (agentType === "codex" ? "Codex" : "Claude Code")}
                   <ChevronDown className="h-3 w-3 text-muted-foreground" />
                 </button>
@@ -568,7 +567,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 >
                   {providers.map((p) => (
                     <DropdownMenuRadioItem key={p.type} value={p.type} disabled={!p.available} className="text-xs">
-                      <Bot className={`h-3 w-3 ${p.type === "codex" ? "text-green-500" : "text-violet-500"}`} />
                       {p.displayName}
                     </DropdownMenuRadioItem>
                   ))}
