@@ -44,6 +44,9 @@
   --radius-2xl: calc(var(--radius) + 8px);
   --radius-3xl: calc(var(--radius) + 12px);
   --radius-4xl: calc(var(--radius) + 16px);
+  --shadow-sm: var(--shadow-sm-app);
+  --shadow-md: var(--shadow-md-app);
+  --shadow-lg: var(--shadow-lg-app);
 }
 
 :root {
@@ -79,6 +82,9 @@
   --sidebar-accent-foreground: oklch(0.52 0.18 268);
   --sidebar-border: oklch(0.92 0.005 260);
   --sidebar-ring: oklch(0.52 0.18 268);
+  --shadow-sm-app: 0 1px 2px oklch(0.2 0.02 260 / 0.04), 0 0 0 1px oklch(0.2 0.02 260 / 0.04);
+  --shadow-md-app: 0 4px 12px oklch(0.2 0.02 260 / 0.06), 0 1px 2px oklch(0.2 0.02 260 / 0.04);
+  --shadow-lg-app: 0 12px 32px oklch(0.2 0.02 260 / 0.10), 0 2px 6px oklch(0.2 0.02 260 / 0.05);
 }
 
 .dark {
@@ -113,6 +119,9 @@
   --sidebar-accent-foreground: oklch(0.65 0.20 268);
   --sidebar-border: oklch(0.28 0.012 260);
   --sidebar-ring: oklch(0.65 0.20 268);
+  --shadow-sm-app: 0 1px 2px oklch(0 0 0 / 0.4);
+  --shadow-md-app: 0 4px 12px oklch(0 0 0 / 0.4);
+  --shadow-lg-app: 0 12px 32px oklch(0 0 0 / 0.5);
 }
 
 @layer base {

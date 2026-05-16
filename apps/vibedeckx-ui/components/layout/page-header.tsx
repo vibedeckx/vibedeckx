@@ -70,7 +70,7 @@ export function FilterChip({ active, count, onClick, children }: FilterChipProps
       className={cn(
         "inline-flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[11.5px] font-normal transition-colors whitespace-nowrap flex-shrink-0 border",
         active
-          ? "bg-card text-foreground font-medium border-border shadow-[0_1px_2px_oklch(0.2_0.02_260/0.04),0_0_0_1px_oklch(0.2_0.02_260/0.04)]"
+          ? "bg-card text-foreground font-medium border-border shadow-sm"
           : "bg-transparent text-muted-foreground border-transparent hover:bg-muted hover:text-foreground",
       )}
     >
