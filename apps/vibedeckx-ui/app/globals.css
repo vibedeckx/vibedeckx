@@ -116,6 +116,9 @@
 }
 
 @layer base {
+  html {
+    font-size: 14px;
+  }
   * {
     @apply border-border outline-ring/50;
   }
@@ -123,6 +126,7 @@
     @apply bg-background text-foreground antialiased;
     font-feature-settings: 'cv11', 'ss01', 'ss03';
     letter-spacing: -0.005em;
+    line-height: 1.45;
   }
   code, kbd, pre, samp, .font-mono {
     font-feature-settings: 'ss01', 'cv02';

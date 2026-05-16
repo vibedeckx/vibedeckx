@@ -309,12 +309,14 @@ Please proceed step by step and let me know if there are any issues or conflicts
   return (
     <div className="h-screen flex flex-col w-full">
         {/* Header with Project Selector */}
-        <div className="border-b border-border/60 bg-card/80 backdrop-blur-sm px-4 h-12 flex items-center justify-between sticky top-0 z-10">
+        <div className="border-b border-border bg-card px-3 h-[44px] flex items-center justify-between sticky top-0 z-10">
           <div className="flex items-center gap-2">
-            <div className="h-6 w-6 rounded-md bg-primary flex items-center justify-center">
-              <span className="text-[10px] font-bold text-primary-foreground tracking-tighter">VDX</span>
+            <div className="h-[22px] w-[22px] rounded-md bg-foreground text-background grid place-items-center font-mono text-[10px] font-bold tracking-tighter">
+              VDX
             </div>
-            <h1 className="text-sm font-semibold tracking-tight text-foreground">VibeDeckX</h1>
+            <h1 className="text-[13px] font-semibold tracking-tight text-foreground">
+              VibeDeck<span className="text-primary font-bold">X</span>
+            </h1>
           </div>
           <UserMenu />
         </div>
