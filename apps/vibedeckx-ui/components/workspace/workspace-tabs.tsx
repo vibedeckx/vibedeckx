@@ -84,7 +84,7 @@ export function WorkspaceTabs({
           onClick={() => setActiveTab("task")}
           className={`text-xs font-medium pb-1 border-b-2 transition-colors ${
             activeTab === "task"
-              ? "text-foreground border-foreground"
+              ? "text-foreground border-primary"
               : "text-muted-foreground border-transparent hover:text-foreground/70"
           }`}
         >
@@ -94,7 +94,7 @@ export function WorkspaceTabs({
           onClick={() => setActiveTab("rules")}
           className={`text-xs font-medium pb-1 border-b-2 transition-colors ${
             activeTab === "rules"
-              ? "text-foreground border-foreground"
+              ? "text-foreground border-primary"
               : "text-muted-foreground border-transparent hover:text-foreground/70"
           }`}
         >
@@ -104,7 +104,7 @@ export function WorkspaceTabs({
           onClick={() => setActiveTab("commands")}
           className={`text-xs font-medium pb-1 border-b-2 transition-colors ${
             activeTab === "commands"
-              ? "text-foreground border-foreground"
+              ? "text-foreground border-primary"
               : "text-muted-foreground border-transparent hover:text-foreground/70"
           }`}
         >

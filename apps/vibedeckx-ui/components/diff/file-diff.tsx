@@ -30,18 +30,18 @@ export function FileDiff({ file, defaultOpen = true }: FileDiffProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
   return (
-    <Collapsible open={isOpen} onOpenChange={setIsOpen} className="border rounded-lg overflow-hidden">
-      <CollapsibleTrigger className="flex items-center gap-2 px-4 py-2 bg-muted border-b w-full cursor-pointer hover:bg-muted/80 transition-colors">
+    <Collapsible open={isOpen} onOpenChange={setIsOpen} className="border border-border rounded-lg overflow-hidden">
+      <CollapsibleTrigger className="flex items-center gap-2 px-4 py-2 bg-secondary border-b border-border w-full cursor-pointer hover:bg-muted transition-colors">
         {isOpen ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         )}
-        <span className="font-mono text-sm flex-1 min-w-0 truncate text-left">
+        <span className="font-mono text-[11.5px] flex-1 min-w-0 truncate text-left text-foreground font-medium">
           {file.oldPath && file.status === 'renamed' ? (
             <>
-              <span className="text-muted-foreground">{file.oldPath}</span>
-              <span className="mx-2">→</span>
+              <span className="text-muted-foreground font-normal">{file.oldPath}</span>
+              <span className="mx-2 text-muted-foreground">→</span>
               {file.path}
             </>
           ) : (
@@ -56,7 +56,7 @@ export function FileDiff({ file, defaultOpen = true }: FileDiffProps) {
         <div>
           {file.hunks.map((hunk, hunkIndex) => (
             <div key={hunkIndex}>
-              <div className="px-4 py-1 bg-muted/50 text-muted-foreground text-sm font-mono sticky top-0">
+              <div className="px-4 py-0.5 bg-accent text-accent-foreground text-[11px] font-mono font-medium sticky top-0">
                 @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
               </div>
               {hunk.lines.map((line, lineIndex) => (

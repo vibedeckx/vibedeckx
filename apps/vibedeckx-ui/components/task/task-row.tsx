@@ -139,7 +139,7 @@ export function TaskRow({ task, onUpdate, onDelete, onClick, worktrees, assigned
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="focus:outline-none">
-              <Badge variant="outline" className={`cursor-pointer text-xs ${task.assigned_branch !== null ? "bg-blue-500/10 text-blue-600 border-blue-500/30" : "text-muted-foreground"}`}>
+              <Badge variant="outline" className={`cursor-pointer text-xs font-mono ${task.assigned_branch !== null ? "bg-accent text-accent-foreground border-transparent" : "text-muted-foreground"}`}>
                 <GitBranch className="h-3 w-3 mr-1" />
                 {task.assigned_branch !== null
                   ? (task.assigned_branch === "" ? "main" : task.assigned_branch)
@@ -179,7 +179,7 @@ export function TaskRow({ task, onUpdate, onDelete, onClick, worktrees, assigned
           </DropdownMenuContent>
         </DropdownMenu>
       </TableCell>
-      <TableCell className="text-muted-foreground text-xs">
+      <TableCell className="text-muted-foreground text-[10.5px] font-mono">
         {new Date(task.created_at).toLocaleDateString()}
       </TableCell>
       <TableCell className="w-10" onClick={(e) => e.stopPropagation()}>

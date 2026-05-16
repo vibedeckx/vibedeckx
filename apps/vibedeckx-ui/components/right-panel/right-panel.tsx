@@ -46,7 +46,7 @@ export function RightPanel({ projectId, selectedBranch, onMergeRequest, project,
   return (
     <div className="h-full flex flex-col">
       {/* Tab Bar */}
-      <div className="flex items-center px-3 gap-4 border-b border-border/60">
+      <div className="flex items-center px-3 gap-4 border-b border-border">
         {([
           { id: 'agent' as const, icon: Bot, label: 'Agent' },
           { id: 'executors' as const, icon: Terminal, label: 'Executors' },
@@ -60,7 +60,7 @@ export function RightPanel({ projectId, selectedBranch, onMergeRequest, project,
             className={cn(
               'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
               activeTab === id
-                ? 'text-foreground border-foreground'
+                ? 'text-foreground border-primary'
                 : 'text-muted-foreground border-transparent hover:text-foreground/70'
             )}
           >
