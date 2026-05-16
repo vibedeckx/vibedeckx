@@ -7,6 +7,7 @@ import { api, type ProxyConfig } from '@/lib/api';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { ChatProviderSettings } from './chat-provider-settings';
 import { TerminalSettingsSection } from './terminal-settings';
+import { AppearanceSettings } from './appearance-settings';
 import { PageHeader } from '@/components/layout';
 
 type ProxyType = ProxyConfig['type'];
@@ -81,6 +82,11 @@ export function SettingsView() {
           </div>
         ) : (
           <div className="space-y-8">
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold">Appearance</h3>
+              <AppearanceSettings />
+            </div>
+
             <div className="space-y-4">
               <h3 className="text-sm font-semibold">AI Chat</h3>
               <ChatProviderSettings />
