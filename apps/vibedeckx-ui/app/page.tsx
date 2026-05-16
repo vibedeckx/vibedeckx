@@ -451,7 +451,16 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Project Info View */}
           <div className={(activeView !== 'project-info' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden'}>
-            {currentProject && <ProjectInfoView project={currentProject} onProjectUpdated={updateProject} />}
+            {currentProject && (
+              <ProjectInfoView
+                project={currentProject}
+                tasks={tasks}
+                worktrees={worktrees}
+                selectedBranch={selectedBranch}
+                workspaceStatuses={workspaceStatuses}
+                onProjectUpdated={updateProject}
+              />
+            )}
           </div>
 
           {/* Remote Servers View — only mounted when active to avoid background polling */}
