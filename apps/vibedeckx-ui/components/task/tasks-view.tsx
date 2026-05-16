@@ -30,10 +30,23 @@ interface TasksViewProps {
 
 export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask }: TasksViewProps) {
   const [formOpen, setFormOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
   const handleAssign = (taskId: string, branch: string | null) => {
     onUpdateTask(taskId, { assigned_branch: branch });
   };
+
+  // Counts per status drive the mono count badges on each chip.
+  const counts = useMemo(() => {
+    const c: Record<StatusFilter, number> = { all: tasks.length, todo: 0, in_progress: 0, done: 0, cancelled: 0 };
+    for (const t of tasks) c[t.status]++;
+    return c;
+  }, [tasks]);
+
+  const filteredTasks = useMemo(
+    () => (statusFilter === "all" ? tasks : tasks.filter((t) => t.status === statusFilter)),
+    [tasks, statusFilter],
+  );
 
   if (!projectId) {
     return (
@@ -61,6 +74,19 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
         }
       />
 
+      <FilterBar>
+        {STATUS_FILTERS.map((f) => (
+          <FilterChip
+            key={f.value}
+            active={statusFilter === f.value}
+            count={counts[f.value]}
+            onClick={() => setStatusFilter(f.value)}
+          >
+            {f.label}
+          </FilterChip>
+        ))}
+      </FilterBar>
+
       <div className="flex-1 overflow-auto px-5">
         {loading ? (
           <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
@@ -68,7 +94,7 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
           </div>
         ) : (
           <TaskTable
-            tasks={tasks}
+            tasks={filteredTasks}
             onUpdate={onUpdateTask}
             onDelete={onDeleteTask}
             worktrees={worktrees}

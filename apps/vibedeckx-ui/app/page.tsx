@@ -357,7 +357,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 <p className="text-muted-foreground max-w-sm mx-auto leading-relaxed">
                   Create your first project to get started with AI-powered development.
                 </p>
-                <Button size="lg" onClick={() => setCreateDialogOpen(true)} className="shadow-md">
+                <Button variant="accent" size="lg" onClick={() => setCreateDialogOpen(true)} className="shadow-md">
                   <Plus className="h-5 w-5 mr-2" />
                   Create Project
                 </Button>
