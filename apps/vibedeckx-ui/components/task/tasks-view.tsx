@@ -1,11 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { TaskTable } from "./task-table";
 import { TaskForm } from "./task-form";
+import { PageHeader, FilterBar, FilterChip } from "@/components/layout";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
+
+type StatusFilter = "all" | TaskStatus;
+
+const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "todo", label: "Todo" },
+  { value: "in_progress", label: "Doing" },
+  { value: "done", label: "Done" },
+  { value: "cancelled", label: "Cancelled" },
+];
 
 interface TasksViewProps {
   projectId: string | null;
@@ -39,16 +50,16 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-5 py-3 border-b border-border/60 flex-shrink-0">
-        <div>
-          <h2 className="text-sm font-semibold text-foreground">Tasks</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Manage and track your project tasks</p>
-        </div>
-        <Button size="sm" onClick={() => setFormOpen(true)} className="shadow-sm">
-          <Plus className="h-3.5 w-3.5 mr-1.5" />
-          New Task
-        </Button>
-      </div>
+      <PageHeader
+        title="Tasks"
+        count={tasks.length}
+        actions={
+          <Button size="sm" onClick={() => setFormOpen(true)} className="shadow-sm">
+            <Plus className="h-3.5 w-3.5 mr-1.5" />
+            New Task
+          </Button>
+        }
+      />
 
       <div className="flex-1 overflow-auto px-5">
         {loading ? (

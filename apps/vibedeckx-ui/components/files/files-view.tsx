@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { FileTree } from "./file-tree";
 import { FilePreview } from "./file-preview";
+import { PageHeader } from "@/components/layout";
 import { useFileBrowser } from "@/hooks/use-file-browser";
 import { api, type Project } from "@/lib/api";
 
@@ -61,16 +62,14 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-5 py-3 border-b border-border/60 flex-shrink-0">
-        <div>
-          <h2 className="text-sm font-semibold text-foreground">Files</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Browse and preview project files</p>
-        </div>
-        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={fetchRoot} title="Refresh">
-          <RefreshCw className={`h-3.5 w-3.5 ${rootLoading ? "animate-spin" : ""}`} />
-        </Button>
-      </div>
+      <PageHeader
+        title="Files"
+        actions={
+          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={fetchRoot} title="Refresh">
+            <RefreshCw className={`h-3.5 w-3.5 ${rootLoading ? "animate-spin" : ""}`} />
+          </Button>
+        }
+      />
 
       {/* Split content */}
       <ResizablePanelGroup direction="horizontal" autoSaveId="files-panels" className="flex-1">

@@ -7,6 +7,7 @@ import { api, type ProxyConfig } from '@/lib/api';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { ChatProviderSettings } from './chat-provider-settings';
 import { TerminalSettingsSection } from './terminal-settings';
+import { PageHeader } from '@/components/layout';
 
 type ProxyType = ProxyConfig['type'];
 
@@ -70,10 +71,7 @@ export function SettingsView() {
 
   return (
     <div className="h-full flex flex-col overflow-auto">
-      <div className="border-b border-border/60 px-6 py-4 flex-shrink-0">
-        <h2 className="text-sm font-semibold text-foreground">Settings</h2>
-        <p className="text-xs text-muted-foreground mt-0.5">Configure proxy and network settings</p>
-      </div>
+      <PageHeader title="Settings" />
 
       <div className="flex-1 px-6 py-5 flex justify-center">
         <div className="w-full max-w-2xl">

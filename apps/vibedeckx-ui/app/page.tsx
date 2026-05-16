@@ -20,7 +20,7 @@ import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
 import { MainConversation, type MainConversationHandle } from '@/components/conversation';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
-import { AppSidebar, type ActiveView } from '@/components/layout';
+import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import { FilesView } from '@/components/files';
 import type { ExecutionMode, Task, Worktree } from '@/lib/api';
@@ -473,10 +473,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
           {activeView === 'remote-servers' && (
             <div className="flex-1 overflow-hidden">
               <div className="h-full flex flex-col overflow-auto">
-                <div className="border-b border-border/60 px-6 py-4 flex-shrink-0">
-                  <h2 className="text-sm font-semibold text-foreground">Remote Servers</h2>
-                  <p className="text-xs text-muted-foreground mt-0.5">Manage your remote server connections</p>
-                </div>
+                <PageHeader title="Remote Servers" />
                 <div className="flex-1 px-6 py-5 flex justify-center">
                   <div className="w-full max-w-2xl">
                     <RemoteServersSettings />
