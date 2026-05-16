@@ -458,6 +458,10 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 worktrees={worktrees}
                 selectedBranch={selectedBranch}
                 workspaceStatuses={workspaceStatuses}
+                onSelectBranch={(branch) => {
+                  setSelectedBranch(branch);
+                  setActiveView('workspace');
+                }}
                 onProjectUpdated={updateProject}
               />
             )}

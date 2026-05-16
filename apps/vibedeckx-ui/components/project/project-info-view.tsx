@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   FolderOpen,
   Globe,
@@ -24,6 +24,7 @@ import type {
 } from "@/lib/api";
 import { toBranchKey, type WorkspaceStatus } from "@/lib/workspace-status";
 import { ProjectSettingsForm } from "./project-settings-form";
+import { TaskDetailDialog } from "@/components/task/task-detail-dialog";
 
 function StatusBadge({ project }: { project: Project }) {
   const hasLocal = !!project.path;
@@ -104,6 +105,7 @@ interface ProjectInfoViewProps {
   worktrees: Worktree[];
   selectedBranch: string | null;
   workspaceStatuses: Map<string, WorkspaceStatus>;
+  onSelectBranch: (branch: string | null) => void;
   onProjectUpdated: (id: string, opts: {
     name?: string;
     path?: string | null;
@@ -121,9 +123,12 @@ export function ProjectInfoView({
   worktrees,
   selectedBranch,
   workspaceStatuses,
+  onSelectBranch,
   onProjectUpdated,
 }: ProjectInfoViewProps) {
   const { remotes } = useProjectRemotes(project.id);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [taskDetailOpen, setTaskDetailOpen] = useState(false);
 
   const sortedTasks = useMemo(() => {
     return [...tasks].sort((a, b) => {
@@ -198,16 +203,25 @@ export function ProjectInfoView({
                     {visibleTasks.map((t) => {
                       const dim = t.status === "done" || t.status === "cancelled";
                       return (
-                        <li key={t.id} className="flex items-center gap-2 text-sm">
-                          <TaskStatusIcon status={t.status} />
-                          <span
-                            className={`flex-1 truncate ${
-                              dim ? "text-muted-foreground line-through" : ""
-                            }`}
+                        <li key={t.id}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedTask(t);
+                              setTaskDetailOpen(true);
+                            }}
+                            className="flex w-full items-center gap-2 text-sm rounded-md px-2 py-1 -mx-2 hover:bg-muted/60 transition-colors text-left"
                           >
-                            {t.title}
-                          </span>
-                          <PriorityDot priority={t.priority} />
+                            <TaskStatusIcon status={t.status} />
+                            <span
+                              className={`flex-1 truncate ${
+                                dim ? "text-muted-foreground line-through" : ""
+                              }`}
+                            >
+                              {t.title}
+                            </span>
+                            <PriorityDot priority={t.priority} />
+                          </button>
                         </li>
                       );
                     })}
@@ -237,16 +251,22 @@ export function ProjectInfoView({
                       const branchKey = toBranchKey(wt.branch);
                       const isSelected = selectedBranch === wt.branch;
                       return (
-                        <li key={branchKey} className="flex items-center gap-2 text-sm">
-                          <WorkspaceStatusDot status={workspaceStatuses.get(branchKey)} />
-                          <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span
-                            className={`flex-1 truncate ${
-                              isSelected ? "font-medium text-foreground" : "text-muted-foreground"
-                            }`}
+                        <li key={branchKey}>
+                          <button
+                            type="button"
+                            onClick={() => onSelectBranch(wt.branch)}
+                            className="flex w-full items-center gap-2 text-sm rounded-md px-2 py-1 -mx-2 hover:bg-muted/60 transition-colors text-left"
                           >
-                            {wt.branch ?? "(main)"}
-                          </span>
+                            <WorkspaceStatusDot status={workspaceStatuses.get(branchKey)} />
+                            <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span
+                              className={`flex-1 truncate ${
+                                isSelected ? "font-medium text-foreground" : "text-muted-foreground"
+                              }`}
+                            >
+                              {wt.branch ?? "(main)"}
+                            </span>
+                          </button>
                         </li>
                       );
                     })}
@@ -264,6 +284,12 @@ export function ProjectInfoView({
           />
         </TabsContent>
       </Tabs>
+
+      <TaskDetailDialog
+        task={selectedTask}
+        open={taskDetailOpen}
+        onOpenChange={setTaskDetailOpen}
+      />
     </div>
   );
 }
