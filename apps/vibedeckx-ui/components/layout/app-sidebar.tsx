@@ -1,6 +1,6 @@
 "use client";
 
-import { Columns3, ListTodo, FolderOpen, Plus, Trash2, Globe, Settings, Folder } from "lucide-react";
+import { Columns3, ListTodo, FolderOpen, Plus, Trash2, Globe, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -234,10 +234,6 @@ export function AppSidebar({
 
         {currentProject && worktrees && worktrees.length > 0 && (
           <>
-            <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 font-mono text-[11px] text-muted-foreground truncate">
-              <Folder className="h-2.5 w-2.5 shrink-0" />
-              <span className="truncate">{currentProject.name}</span>
-            </div>
             <TooltipProvider delayDuration={300}>
               <div className="flex flex-col gap-px">
                 {worktrees.map((wt) => {
@@ -252,7 +248,7 @@ export function AppSidebar({
                               onViewChange("workspace");
                             }}
                             className={cn(
-                              "flex-1 min-w-0 flex items-center gap-2 rounded-[5px] pl-[22px] pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
+                              "flex-1 min-w-0 flex items-center gap-2 rounded-[5px] pl-2 pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
                               !isActive && "text-foreground/80 hover:bg-muted",
                               isActive && "bg-accent text-accent-foreground font-medium"
                             )}
