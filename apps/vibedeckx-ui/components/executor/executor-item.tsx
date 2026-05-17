@@ -197,12 +197,17 @@ export function ExecutorItem({
                     size="sm"
                     variant="destructive"
                     onClick={handleStop}
+                    className="min-w-20"
                   >
                     <Square className="h-3 w-3 mr-1" />
                     Stop
                   </Button>
                 ) : (
-                  <Button size="sm" onClick={handleStart}>
+                  <Button
+                    size="sm"
+                    onClick={handleStart}
+                    className="min-w-20"
+                  >
                     <Play className="h-3 w-3 mr-1" />
                     Start
                   </Button>
