@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Copy, Check } from "lucide-react";
+import { Logo } from "@/components/brand/logo";
 
 const INSTALL_COMMAND = "npm install -g vibedeckx";
 
@@ -21,9 +22,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
       <header className="nav">
         <div className="wrap nav-inner">
           <a href="#" className="brand" onClick={(e) => e.preventDefault()}>
-            <span className="brand-mark">
-              V<span className="brand-x">×</span>
-            </span>
+            <Logo size={24} />
             <span>vibedeckx</span>
           </a>
           <nav className="nav-links">
@@ -119,12 +118,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             <div className="mini-app">
               <div className="mini-topbar">
                 <span className="brand">
-                  <span
-                    className="brand-mark"
-                    style={{ width: 20, height: 20, fontSize: "9.5px" }}
-                  >
-                    V<span className="brand-x">×</span>
-                  </span>
+                  <Logo size={20} live={false} stripes="off" />
                 </span>
                 <span className="crumb">
                   <b>orchestrator-core</b> ·{" "}
@@ -855,9 +849,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                 onClick={(e) => e.preventDefault()}
                 style={{ marginBottom: 12 }}
               >
-                <span className="brand-mark">
-                  V<span className="brand-x">×</span>
-                </span>
+                <Logo size={24} />
                 <span>vibedeckx</span>
               </a>
               <div className="foot-brand" style={{ marginTop: 10 }}>

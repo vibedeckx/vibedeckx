@@ -16,6 +16,7 @@ import { RemoteServersSettings } from '@/components/settings/remote-servers-sett
 import { CreateWorktreeDialog } from '@/components/project/create-worktree-dialog';
 import { DeleteWorktreeDialog } from '@/components/project/delete-worktree-dialog';
 import { UserMenu } from '@/components/auth/user-menu';
+import { Logo } from '@/components/brand/logo';
 import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
 import { MainConversation, type MainConversationHandle } from '@/components/conversation';
@@ -310,10 +311,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
     <div className="h-screen flex flex-col w-full">
         {/* Header with Project Selector */}
         <div className="border-b border-border bg-card px-3 h-[44px] flex items-center justify-between sticky top-0 z-10">
-          <div className="flex items-center gap-2">
-            <div className="h-[22px] w-[22px] rounded-md bg-foreground text-background grid place-items-center font-mono text-[10px] font-bold tracking-tighter">
-              VDX
-            </div>
+          <div className="flex items-center gap-[9px]">
+            <Logo size={22} />
             <h1 className="text-[13px] font-semibold tracking-tight text-foreground">
               VibeDeck<span className="text-primary font-bold">X</span>
             </h1>
