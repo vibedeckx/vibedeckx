@@ -197,7 +197,7 @@ export function ExecutorItem({
                     size="sm"
                     variant="destructive"
                     onClick={handleStop}
-                    className="min-w-20"
+                    className="w-20 border border-destructive"
                   >
                     <Square className="h-3 w-3 mr-1" />
                     Stop
@@ -206,7 +206,7 @@ export function ExecutorItem({
                   <Button
                     size="sm"
                     onClick={handleStart}
-                    className="min-w-20"
+                    className="w-20"
                   >
                     <Play className="h-3 w-3 mr-1" />
                     Start
