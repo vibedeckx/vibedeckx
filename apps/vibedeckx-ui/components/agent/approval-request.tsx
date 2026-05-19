@@ -51,7 +51,10 @@ export function CommandApprovalUI({ requestId, command, cwd, messageIndex }: Com
             <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-xs text-muted-foreground">Command</span>
           </div>
-          <pre className="text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+          <pre
+            className="bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+            style={{ fontSize: "var(--conv-font-size, 12px)" }}
+          >
             {command || "(empty)"}
           </pre>
           {cwd && (
@@ -76,7 +79,10 @@ export function CommandApprovalUI({ requestId, command, cwd, messageIndex }: Com
           <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
           <span className="text-xs text-muted-foreground">Command</span>
         </div>
-        <pre className="text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+        <pre
+          className="bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+          style={{ fontSize: "var(--conv-font-size, 12px)" }}
+        >
           {command || "(empty)"}
         </pre>
         {cwd && (
@@ -184,7 +190,10 @@ export function FileChangeApprovalUI({ requestId, changes, messageIndex }: FileC
                 <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
                   View diff
                 </summary>
-                <pre className="mt-1 text-xs p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+                <pre
+                  className="mt-1 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+                  style={{ fontSize: "var(--conv-font-size, 12px)" }}
+                >
                   {change.diff.split("\n").map((line, li) => {
                     let className = "";
                     if (line.startsWith("+")) className = "bg-green-500/10 text-green-700 dark:text-green-400";

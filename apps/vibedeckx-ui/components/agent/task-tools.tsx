@@ -38,7 +38,10 @@ function parseInput<T>(input: unknown, validate: (obj: Record<string, unknown>) 
 function FallbackJSON({ input }: { input: unknown }) {
   const str = typeof input === "string" ? input : JSON.stringify(input, null, 2);
   return (
-    <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+    <pre
+      className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+      style={{ fontSize: "var(--conv-font-size, 12px)" }}
+    >
       {str.length > 500 ? str.substring(0, 500) + "..." : str}
     </pre>
   );

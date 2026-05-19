@@ -24,7 +24,10 @@ export function ReadToolUseUI({ input }: { input: unknown }) {
   const parsed = parseReadInput(input);
   if (!parsed) {
     return (
-      <pre className="text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {typeof input === "string" ? input : JSON.stringify(input, null, 2)}
       </pre>
     );
@@ -73,7 +76,10 @@ export function ReadToolResultUI({ output }: { output: string }) {
       <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         File contents ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
-      <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {output.length > 1000 ? output.substring(0, 1000) + "..." : output}
       </pre>
     </details>
@@ -103,7 +109,10 @@ export function WriteToolUseUI({ input }: { input: unknown }) {
   const parsed = parseWriteInput(input);
   if (!parsed) {
     return (
-      <pre className="text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {typeof input === "string" ? input : JSON.stringify(input, null, 2)}
       </pre>
     );
@@ -129,7 +138,10 @@ export function WriteToolUseUI({ input }: { input: unknown }) {
         <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
           Content ({lineCount} {lineCount === 1 ? "line" : "lines"})
         </summary>
-        <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+        <pre
+          className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+          style={{ fontSize: "var(--conv-font-size, 12px)" }}
+        >
           {content.length > 1000 ? content.substring(0, 1000) + "..." : content}
         </pre>
       </details>
@@ -149,7 +161,10 @@ export function WriteToolResultUI({ output }: { output: string }) {
       <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Result
       </summary>
-      <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {output.length > 1000 ? output.substring(0, 1000) + "..." : output}
       </pre>
     </details>

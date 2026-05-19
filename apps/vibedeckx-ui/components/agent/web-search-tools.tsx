@@ -24,7 +24,10 @@ export function WebSearchToolUseUI({ input }: { input: unknown }) {
   const parsed = parseWebSearchInput(input);
   if (!parsed) {
     return (
-      <pre className="text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {typeof input === "string" ? input : JSON.stringify(input, null, 2)}
       </pre>
     );
@@ -73,7 +76,10 @@ export function WebSearchToolResultUI({ output }: { output: string }) {
       <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Results ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
-      <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {output.length > 1000 ? output.substring(0, 1000) + "..." : output}
       </pre>
     </details>

@@ -65,7 +65,10 @@ export function AskUserQuestion({ input, messageIndex }: AskUserQuestionProps) {
     // Fallback: render raw JSON
     const inputStr = typeof input === "string" ? input : JSON.stringify(input, null, 2);
     return (
-      <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+      <pre
+        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+        style={{ fontSize: "var(--conv-font-size, 12px)" }}
+      >
         {inputStr.length > 500 ? inputStr.substring(0, 500) + "..." : inputStr}
       </pre>
     );
