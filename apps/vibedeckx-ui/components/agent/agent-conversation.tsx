@@ -36,6 +36,7 @@ import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
+import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText } from "@/lib/api";
 import { toast } from "sonner";
@@ -521,6 +522,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
   };
 
+  const { settings: convSettings } = useConversationSettings();
+
   // No project selected
   if (!projectId) {
     return (
@@ -536,7 +539,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   }
 
   return (
-    <div className="h-full flex flex-col min-h-0">
+    <div
+      className="h-full flex flex-col min-h-0"
+      style={{ "--conv-font-size": `${convSettings.agentFontSize}px` } as React.CSSProperties}
+    >
       {/* Header */}
       <div className="flex-shrink-0 flex items-center justify-between px-4 h-10 border-b border-border/60 bg-muted/20">
         <div className="flex items-center gap-2">
