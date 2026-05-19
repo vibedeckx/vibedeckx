@@ -78,9 +78,18 @@ function isRemoteProviderPath(url: string): boolean {
   return false;
 }
 
-export const createServer = async (opts: { storage: Storage; authEnabled?: boolean; acceptRemote?: boolean }) => {
+export interface TLSOptions {
+  cert: string | Buffer;
+  key: string | Buffer;
+  // Optional client CA bundle for mTLS — e.g. Cloudflare Authenticated Origin Pulls.
+  // When set, the server rejects TLS handshakes that don't present a cert signed by this CA.
+  clientCA?: string | Buffer;
+}
+
+export const createServer = async (opts: { storage: Storage; authEnabled?: boolean; acceptRemote?: boolean; tls?: TLSOptions }) => {
   const authEnabled = opts.authEnabled ?? false;
   const acceptRemote = opts.acceptRemote ?? false;
+  const tls = opts.tls;
 
   // Validate Clerk env vars when auth is enabled
   if (authEnabled) {
@@ -102,7 +111,21 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   // bodyLimit: 16MB to accommodate large paste uploads and image attachments. Per-route
   // limits do not always reach the body parser when requests arrive via the reverse-connect
   // tunnel (server.inject), so the global bound has to be at least as large.
-  const server = fastify({ maxParamLength: 500, bodyLimit: 16 * 1024 * 1024 });
+  const server = fastify({
+    maxParamLength: 500,
+    bodyLimit: 16 * 1024 * 1024,
+    ...(tls && {
+      https: {
+        cert: tls.cert,
+        key: tls.key,
+        ...(tls.clientCA && {
+          ca: tls.clientCA,
+          requestCert: true,
+          rejectUnauthorized: true,
+        }),
+      },
+    }),
+  });
 
   // Diagnostic: log raw HTTP upgrade events to confirm they reach the server
   // This fires at the Node.js level, before @fastify/websocket or any Fastify routing
@@ -292,7 +315,8 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   return {
     start: async (port: number) => {
       await server.listen({ port, host: "0.0.0.0" });
-      return `http://localhost:${port}`;
+      const protocol = tls ? "https" : "http";
+      return `${protocol}://localhost:${port}`;
     },
     startLocal: async (port: number) => {
       await server.listen({ port, host: "127.0.0.1" });

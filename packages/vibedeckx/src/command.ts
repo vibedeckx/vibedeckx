@@ -1,10 +1,34 @@
+import fs from "node:fs";
 import path from "node:path";
 import { buildApplication, buildCommand, buildRouteMap } from "@stricli/core";
 import { createSqliteStorage } from "./storage/sqlite.js";
-import { createServer } from "./server.js";
+import { createServer, type TLSOptions } from "./server.js";
 import { ReverseConnectClient } from "./reverse-connect-client.js";
 import { DB_PATH, DEFAULT_PORT } from "./constants.js";
 import open from "open";
+
+function loadTLSOptions(flags: {
+  cert: string | undefined;
+  key: string | undefined;
+  "client-ca": string | undefined;
+}): TLSOptions | undefined {
+  const certPath = flags.cert ?? process.env.VIBEDECKX_TLS_CERT;
+  const keyPath = flags.key ?? process.env.VIBEDECKX_TLS_KEY;
+  const clientCAPath = flags["client-ca"] ?? process.env.VIBEDECKX_TLS_CLIENT_CA;
+
+  if (!certPath && !keyPath && !clientCAPath) return undefined;
+
+  if (!certPath || !keyPath) {
+    console.error("Error: --cert and --key must both be provided to enable HTTPS");
+    process.exit(1);
+  }
+
+  return {
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath),
+    ...(clientCAPath && { clientCA: fs.readFileSync(clientCAPath) }),
+  };
+}
 
 const startCommand = buildCommand({
   parameters: {
@@ -31,26 +55,56 @@ const startCommand = buildCommand({
         brief: "Allow other vibedeckx servers to use this instance as a remote provider (exposes /api/path/*, /api/browse, /api/execute-one-shot)",
         optional: true,
       },
+      cert: {
+        kind: "parsed",
+        parse: String,
+        brief: "Path to TLS certificate (PEM). Enables HTTPS when provided together with --key. Env: VIBEDECKX_TLS_CERT",
+        optional: true,
+      },
+      key: {
+        kind: "parsed",
+        parse: String,
+        brief: "Path to TLS private key (PEM). Required with --cert. Env: VIBEDECKX_TLS_KEY",
+        optional: true,
+      },
+      "client-ca": {
+        kind: "parsed",
+        parse: String,
+        brief: "Path to client CA bundle (PEM) for mTLS, e.g. Cloudflare Authenticated Origin Pulls. Requires --cert/--key. Env: VIBEDECKX_TLS_CLIENT_CA",
+        optional: true,
+      },
     },
   },
-  func: async (flags: { port: number | undefined; auth: boolean | undefined; "data-dir": string | undefined; "accept-remote": boolean | undefined }) => {
+  func: async (flags: {
+    port: number | undefined;
+    auth: boolean | undefined;
+    "data-dir": string | undefined;
+    "accept-remote": boolean | undefined;
+    cert: string | undefined;
+    key: string | undefined;
+    "client-ca": string | undefined;
+  }) => {
     const port = flags.port ?? DEFAULT_PORT;
     const authEnabled = flags.auth ?? false;
     const acceptRemote = flags["accept-remote"] ?? false;
+    const tls = loadTLSOptions(flags);
 
-    console.log(`Starting vibedeckx${acceptRemote ? " (accepting remote clients)" : ""}...`);
+    console.log(`Starting vibedeckx${acceptRemote ? " (accepting remote clients)" : ""}${tls ? " (HTTPS)" : ""}...`);
 
     const dbPath = flags["data-dir"]
       ? path.join(flags["data-dir"], "data.sqlite")
       : DB_PATH;
     const storage = await createSqliteStorage(dbPath);
-    const server = await createServer({ storage, authEnabled, acceptRemote });
+    const server = await createServer({ storage, authEnabled, acceptRemote, tls });
 
     const url = await server.start(port);
     console.log(`Server running at ${url}`);
 
-    // 打开浏览器
-    await open(url);
+    // Skip auto-open when TLS is on: the cert is for the public domain,
+    // so https://localhost would just show a cert warning.
+    if (!tls) {
+      await open(url);
+    }
 
     // Graceful shutdown with re-entrancy guard and force-exit timeout
     let shuttingDown = false;

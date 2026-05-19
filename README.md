@@ -70,12 +70,58 @@ Starts the local server. All flags are optional.
 | `--port <number>` | Port to bind (default: `5173`) |
 | `--auth` | Enable Clerk authentication (requires `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`) |
 | `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
+| `--cert <path>` | Path to TLS certificate PEM. Enables HTTPS when paired with `--key`. Env: `VIBEDECKX_TLS_CERT` |
+| `--key <path>` | Path to TLS private key PEM. Required with `--cert`. Env: `VIBEDECKX_TLS_KEY` |
+| `--client-ca <path>` | Client CA bundle for mTLS (e.g. Cloudflare Authenticated Origin Pulls). Requires `--cert`/`--key`. Env: `VIBEDECKX_TLS_CLIENT_CA` |
 
 ```bash
 vibedeckx start --port 8080
 vibedeckx start --data-dir /path/to/data    # database at /path/to/data/data.sqlite
 CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth
 ```
+
+#### HTTPS / TLS
+
+When `--cert` and `--key` are both supplied (via CLI flag or environment variable), the server listens over HTTPS instead of HTTP. WebSocket connections automatically use `wss://`. Without these flags the default plain-HTTP behavior is unchanged.
+
+The CLI flags take precedence over the environment variables. Values point to **file paths** on disk, not the PEM contents themselves — this keeps multi-line certs out of env strings and lets you `chmod 600` the key files normally.
+
+| CLI flag | Environment variable | Purpose |
+|----------|----------------------|---------|
+| `--cert` | `VIBEDECKX_TLS_CERT` | Server certificate (PEM) |
+| `--key` | `VIBEDECKX_TLS_KEY` | Server private key (PEM) |
+| `--client-ca` | `VIBEDECKX_TLS_CLIENT_CA` | Client CA bundle for mTLS (optional) |
+
+**Recommended setup behind Cloudflare** — use a Cloudflare Origin Certificate (valid up to 15 years, no ACME / auto-renewal needed) plus Authenticated Origin Pulls so the origin only accepts connections from Cloudflare:
+
+```bash
+# 1. Origin Cert only — encrypts CF ↔ origin, but a leaked origin IP can still be hit directly
+vibedeckx start \
+  --cert /etc/vibedeckx/cf-origin.pem \
+  --key  /etc/vibedeckx/cf-origin.key
+
+# 2. Origin Cert + Authenticated Origin Pulls (mTLS) — origin rejects any request that
+#    doesn't present Cloudflare's client cert, so direct hits on the origin IP are dropped
+#    at the TLS layer. Download the CA from:
+#    https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
+vibedeckx start \
+  --cert      /etc/vibedeckx/cf-origin.pem \
+  --key       /etc/vibedeckx/cf-origin.key \
+  --client-ca /etc/vibedeckx/cloudflare-aop-ca.pem
+```
+
+Same configuration via environment (e.g. `systemd` `EnvironmentFile` or `docker -e`):
+
+```ini
+VIBEDECKX_TLS_CERT=/etc/vibedeckx/cf-origin.pem
+VIBEDECKX_TLS_KEY=/etc/vibedeckx/cf-origin.key
+VIBEDECKX_TLS_CLIENT_CA=/etc/vibedeckx/cloudflare-aop-ca.pem
+```
+
+Notes:
+- If only one of `--cert` / `--key` is supplied, startup fails with a clear error.
+- `--client-ca` requires `--cert`/`--key` (mTLS needs server identity first).
+- TLS mode skips the auto-open-browser step on launch — the certificate is for the public hostname, so opening `https://localhost:<port>` would just trigger a cert-mismatch warning. Visit your public URL through Cloudflare instead.
 
 ### `vibedeckx connect`
 
@@ -270,6 +316,9 @@ vibedeckx start [options]        Start the server
   --port <value>                 Port to run the server on (default: 3000)
   --auth                         Enable Clerk authentication
   --data-dir <path>              Directory for storing database file (default: ~/.vibedeckx)
+  --cert <path>                  TLS certificate PEM (enables HTTPS with --key)
+  --key <path>                   TLS private key PEM (required with --cert)
+  --client-ca <path>             Client CA PEM for mTLS / Cloudflare AOP (optional)
 vibedeckx --help                 Show help
 vibedeckx --version              Show version
 ```
