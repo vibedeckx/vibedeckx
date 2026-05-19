@@ -29,8 +29,8 @@ export interface ConversationSettings {
 }
 
 const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
-  agentFontSize: 14,
-  chatFontSize: 14,
+  agentFontSize: 16,
+  chatFontSize: 15,
 };
 
 const CONV_FONT_SIZE_MIN = 12;

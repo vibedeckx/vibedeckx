@@ -379,8 +379,8 @@ export interface ConversationSettings {
 }
 
 export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
-  agentFontSize: 14,
-  chatFontSize: 14,
+  agentFontSize: 16,
+  chatFontSize: 15,
 };
 
 export const CONVERSATION_SETTINGS_LIMITS = {
