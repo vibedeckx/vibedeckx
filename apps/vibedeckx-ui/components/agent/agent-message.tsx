@@ -470,7 +470,10 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
           <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
             Input
           </summary>
-          <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all">
+          <pre
+            className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+            style={{ fontSize: "var(--conv-font-size, 12px)" }}
+          >
             {inputStr.length > 500 ? inputStr.substring(0, 500) + "..." : inputStr}
           </pre>
         </details>
@@ -493,7 +496,10 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
               <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
                 Output
               </summary>
-              <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+              <pre
+                className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+                style={{ fontSize: "var(--conv-font-size, 12px)" }}
+              >
                 {output.length > 1000 ? output.substring(0, 1000) + "..." : output}
               </pre>
             </details>
@@ -633,7 +639,10 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
           <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
             Output
           </summary>
-          <pre className="mt-1 text-xs bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all">
+          <pre
+            className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+            style={{ fontSize: "var(--conv-font-size, 12px)" }}
+          >
             {output.length > 1000 ? output.substring(0, 1000) + "..." : output}
           </pre>
         </details>
