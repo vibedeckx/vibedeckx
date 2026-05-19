@@ -310,7 +310,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             if (msg.type === "user") {
               return (
                 <Message key={index} from="user">
-                  <MessageContent>{msg.content}</MessageContent>
+                  <MessageContent style={{ fontSize: "var(--conv-font-size, 14px)" }}>
+                    {msg.content}
+                  </MessageContent>
                 </Message>
               );
             }
@@ -318,7 +320,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             if (msg.type === "assistant") {
               return (
                 <Message key={index} from="assistant">
-                  <MessageContent>
+                  <MessageContent style={{ fontSize: "var(--conv-font-size, 14px)" }}>
                     <MessageResponse>{msg.content}</MessageResponse>
                   </MessageContent>
                 </Message>
@@ -341,7 +343,10 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                     <summary className="cursor-pointer hover:text-foreground">
                       Tool result
                     </summary>
-                    <pre className="mt-1 p-2 bg-muted/50 rounded text-xs overflow-x-auto whitespace-pre-wrap">
+                    <pre
+                      className="mt-1 p-2 bg-muted/50 rounded overflow-x-auto whitespace-pre-wrap"
+                      style={{ fontSize: "var(--conv-font-size, 12px)" }}
+                    >
                       {msg.output}
                     </pre>
                   </details>
