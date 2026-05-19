@@ -36,33 +36,40 @@ const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
 const CONV_FONT_SIZE_MIN = 12;
 const CONV_FONT_SIZE_MAX = 22;
 
-function readStoredConversationSettings(saved: string | undefined): ConversationSettings {
-  if (!saved) return DEFAULT_CONVERSATION_SETTINGS;
-  try {
-    const parsed = JSON.parse(saved) as Partial<ConversationSettings>;
-    return {
-      agentFontSize:
-        typeof parsed.agentFontSize === "number"
-          ? parsed.agentFontSize
-          : DEFAULT_CONVERSATION_SETTINGS.agentFontSize,
-      chatFontSize:
-        typeof parsed.chatFontSize === "number"
-          ? parsed.chatFontSize
-          : DEFAULT_CONVERSATION_SETTINGS.chatFontSize,
-    };
-  } catch {
-    return DEFAULT_CONVERSATION_SETTINGS;
-  }
-}
-
 function validateConvFontSize(value: unknown, field: string): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return `${field} must be a finite number`;
+  }
+  if (!Number.isInteger(value)) {
+    return `${field} must be an integer`;
   }
   if (value < CONV_FONT_SIZE_MIN || value > CONV_FONT_SIZE_MAX) {
     return `${field} must be between ${CONV_FONT_SIZE_MIN} and ${CONV_FONT_SIZE_MAX}`;
   }
   return null;
+}
+
+function readStoredConversationSettings(saved: string | undefined): ConversationSettings {
+  if (!saved) return DEFAULT_CONVERSATION_SETTINGS;
+  try {
+    const parsed = JSON.parse(saved) as Partial<ConversationSettings>;
+    const agentValid =
+      typeof parsed.agentFontSize === "number" &&
+      validateConvFontSize(parsed.agentFontSize, "agentFontSize") === null;
+    const chatValid =
+      typeof parsed.chatFontSize === "number" &&
+      validateConvFontSize(parsed.chatFontSize, "chatFontSize") === null;
+    return {
+      agentFontSize: agentValid
+        ? (parsed.agentFontSize as number)
+        : DEFAULT_CONVERSATION_SETTINGS.agentFontSize,
+      chatFontSize: chatValid
+        ? (parsed.chatFontSize as number)
+        : DEFAULT_CONVERSATION_SETTINGS.chatFontSize,
+    };
+  } catch {
+    return DEFAULT_CONVERSATION_SETTINGS;
+  }
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
