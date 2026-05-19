@@ -151,7 +151,10 @@ function renderTextWithVPaste(text: string) {
     return <MessageResponse remarkPlugins={USER_REMARK_PLUGINS}>{text ?? ""}</MessageResponse>;
   }
   return (
-    <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
+    <div
+      className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+      style={{ fontSize: "var(--conv-font-size, 14px)" }}
+    >
       {segments.map((seg, i) =>
         seg.kind === "text" ? (
           <Fragment key={i}>
@@ -173,7 +176,10 @@ function UserMessage({ content }: { content: string | ContentPart[] }) {
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-sm font-medium text-foreground mb-1">You</p>
-        <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
+        <div
+          className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+          style={{ fontSize: "var(--conv-font-size, 14px)" }}
+        >
           {typeof content === "string" ? (
             renderTextWithVPaste(content)
           ) : (
@@ -219,7 +225,10 @@ function AssistantMessage({ content }: { content: string }) {
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className={`text-sm font-medium ${textColor} mb-1`}>{label}</p>
-        <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
+        <div
+          className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+          style={{ fontSize: "var(--conv-font-size, 14px)" }}
+        >
           <MessageResponse>{content ?? ""}</MessageResponse>
         </div>
       </div>
