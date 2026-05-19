@@ -23,6 +23,48 @@ const SCROLLBACK_MAX = 100000;
 const FONT_SIZE_MIN = 8;
 const FONT_SIZE_MAX = 32;
 
+export interface ConversationSettings {
+  agentFontSize: number;
+  chatFontSize: number;
+}
+
+const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
+  agentFontSize: 14,
+  chatFontSize: 14,
+};
+
+const CONV_FONT_SIZE_MIN = 12;
+const CONV_FONT_SIZE_MAX = 22;
+
+function readStoredConversationSettings(saved: string | undefined): ConversationSettings {
+  if (!saved) return DEFAULT_CONVERSATION_SETTINGS;
+  try {
+    const parsed = JSON.parse(saved) as Partial<ConversationSettings>;
+    return {
+      agentFontSize:
+        typeof parsed.agentFontSize === "number"
+          ? parsed.agentFontSize
+          : DEFAULT_CONVERSATION_SETTINGS.agentFontSize,
+      chatFontSize:
+        typeof parsed.chatFontSize === "number"
+          ? parsed.chatFontSize
+          : DEFAULT_CONVERSATION_SETTINGS.chatFontSize,
+    };
+  } catch {
+    return DEFAULT_CONVERSATION_SETTINGS;
+  }
+}
+
+function validateConvFontSize(value: unknown, field: string): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return `${field} must be a finite number`;
+  }
+  if (value < CONV_FONT_SIZE_MIN || value > CONV_FONT_SIZE_MAX) {
+    return `${field} must be between ${CONV_FONT_SIZE_MIN} and ${CONV_FONT_SIZE_MAX}`;
+  }
+  return null;
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get proxy settings
   fastify.get("/api/settings/proxy", async (_req, reply) => {
@@ -245,6 +287,41 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     fastify.storage.settings.set("terminal", JSON.stringify(updated));
     console.log(`[Settings] Terminal updated: scrollback=${updated.scrollback}, fontSize=${updated.fontSize}, fontFamily="${updated.fontFamily}"`);
+
+    return reply.code(200).send(updated);
+  });
+
+  // ---- Conversation Settings ----
+
+  fastify.get("/api/settings/conversation", async (_req, reply) => {
+    const saved = fastify.storage.settings.get("conversation");
+    return reply.code(200).send(readStoredConversationSettings(saved));
+  });
+
+  fastify.put<{
+    Body: Partial<ConversationSettings>;
+  }>("/api/settings/conversation", async (req, reply) => {
+    const { agentFontSize, chatFontSize } = req.body;
+
+    if (agentFontSize !== undefined) {
+      const err = validateConvFontSize(agentFontSize, "agentFontSize");
+      if (err) return reply.code(400).send({ error: err });
+    }
+    if (chatFontSize !== undefined) {
+      const err = validateConvFontSize(chatFontSize, "chatFontSize");
+      if (err) return reply.code(400).send({ error: err });
+    }
+
+    const existing = readStoredConversationSettings(fastify.storage.settings.get("conversation"));
+    const updated: ConversationSettings = {
+      agentFontSize: agentFontSize ?? existing.agentFontSize,
+      chatFontSize: chatFontSize ?? existing.chatFontSize,
+    };
+
+    fastify.storage.settings.set("conversation", JSON.stringify(updated));
+    console.log(
+      `[Settings] Conversation updated: agentFontSize=${updated.agentFontSize}, chatFontSize=${updated.chatFontSize}`,
+    );
 
     return reply.code(200).send(updated);
   });
