@@ -109,7 +109,7 @@ export function ConversationSettingsProvider({ children }: { children: ReactNode
         const payload = pendingRef.current;
         pendingRef.current = {};
         if (Object.keys(payload).length > 0) {
-          api.updateConversationSettings(payload).catch(() => {
+          api.updateConversationSettings(payload, { keepalive: true }).catch(() => {
             // Swallow — we are unmounting and cannot show toast reliably.
           });
         }

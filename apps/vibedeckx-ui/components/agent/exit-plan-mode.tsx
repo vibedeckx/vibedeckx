@@ -108,7 +108,10 @@ export function ExitPlanModeUI({ input, messageIndex }: ExitPlanModeUIProps) {
             View Plan
           </summary>
           <div className="mt-2 rounded-lg border p-3 bg-muted/30">
-            <div className="text-sm prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words">
+            <div
+              className="prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+              style={{ fontSize: "var(--conv-font-size, 14px)" }}
+            >
               <MessageResponse>{planContent}</MessageResponse>
             </div>
           </div>
@@ -129,7 +132,10 @@ export function ExitPlanModeUI({ input, messageIndex }: ExitPlanModeUIProps) {
           {isExpanded ? "Collapse" : "Expand"} Plan
         </button>
         {isExpanded && (
-          <div className="text-sm prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words max-h-96 overflow-y-auto">
+          <div
+            className="prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words max-h-96 overflow-y-auto"
+            style={{ fontSize: "var(--conv-font-size, 14px)" }}
+          >
             <MessageResponse>{planContent}</MessageResponse>
           </div>
         )}

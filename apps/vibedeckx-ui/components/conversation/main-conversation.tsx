@@ -358,7 +358,8 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               return (
                 <div
                   key={index}
-                  className="mx-auto max-w-[90%] rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+                  className="mx-auto max-w-[90%] rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-destructive"
+                  style={{ fontSize: "var(--conv-font-size, 14px)" }}
                 >
                   {msg.message}
                 </div>

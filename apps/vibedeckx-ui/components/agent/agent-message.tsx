@@ -689,7 +689,12 @@ function ErrorMessage({ message }: { message: string }) {
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-sm font-medium text-red-500 mb-1">Error</p>
-        <p className="text-sm text-red-500/80 break-words">{message}</p>
+        <p
+          className="text-red-500/80 break-words"
+          style={{ fontSize: "var(--conv-font-size, 14px)" }}
+        >
+          {message}
+        </p>
       </div>
     </div>
   );
@@ -702,7 +707,12 @@ function SystemMessage({ content }: { content: string }) {
         <Info className="w-3.5 h-3.5 text-gray-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-xs text-muted-foreground break-words">{content ?? ""}</p>
+        <p
+          className="text-muted-foreground break-words"
+          style={{ fontSize: "var(--conv-font-size, 12px)" }}
+        >
+          {content ?? ""}
+        </p>
       </div>
     </div>
   );

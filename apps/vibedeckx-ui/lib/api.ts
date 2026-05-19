@@ -1333,11 +1333,15 @@ export const api = {
 
   async updateConversationSettings(
     config: Partial<ConversationSettings>,
+    options: { keepalive?: boolean } = {},
   ): Promise<ConversationSettings> {
     const res = await authFetch(`${getApiBase()}/api/settings/conversation`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
+      // keepalive: true lets the request finish after the page unmounts/unloads,
+      // so a drag-then-close-tab inside the debounce window still persists.
+      keepalive: options.keepalive,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Failed to update conversation settings" }));
