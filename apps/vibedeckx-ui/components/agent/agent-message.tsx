@@ -668,9 +668,10 @@ function ThinkingMessage({ content }: { content: string }) {
             Thinking...
           </summary>
           <div
-            className={`mt-2 text-xs whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded-md overflow-hidden ${
+            className={`mt-2 whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded-md overflow-hidden ${
               hasContent ? "text-muted-foreground" : "text-muted-foreground/70 italic"
             }`}
+            style={{ fontSize: "var(--conv-font-size, 12px)" }}
           >
             {display}
           </div>
