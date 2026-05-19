@@ -18,6 +18,7 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
+import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { MessageSquare, Loader2, Square, Search, Radio, SquarePen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -190,6 +191,8 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     restartSession,
   } = useChatSession(projectId, branch);
 
+  const { settings: convSettings } = useConversationSettings();
+
   useImperativeHandle(ref, () => ({
     sendMessage: async (text: string) => {
       const trimmed = text.trim();
@@ -234,7 +237,10 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   }
 
   return (
-    <div className="h-full flex flex-col min-h-0">
+    <div
+      className="h-full flex flex-col min-h-0"
+      style={{ "--conv-font-size": `${convSettings.chatFontSize}px` } as React.CSSProperties}
+    >
       {/* Header */}
       <div className="flex-shrink-0 flex items-center justify-between px-4 h-10 border-b border-border/60 bg-muted/20">
         <div className="flex items-center gap-2">
