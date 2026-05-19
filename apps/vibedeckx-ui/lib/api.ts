@@ -373,6 +373,21 @@ export const TERMINAL_SETTINGS_LIMITS = {
   fontSizeMax: 32,
 } as const;
 
+export interface ConversationSettings {
+  agentFontSize: number;
+  chatFontSize: number;
+}
+
+export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
+  agentFontSize: 14,
+  chatFontSize: 14,
+};
+
+export const CONVERSATION_SETTINGS_LIMITS = {
+  fontSizeMin: 12,
+  fontSizeMax: 22,
+} as const;
+
 // ============ Agent Provider Types ============
 
 export type AgentType = "claude-code" | "codex";
@@ -1304,6 +1319,29 @@ export const api = {
     if (!res.ok) {
       const error = await res.json();
       throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async getConversationSettings(): Promise<ConversationSettings> {
+    const res = await authFetch(`${getApiBase()}/api/settings/conversation`);
+    if (!res.ok) {
+      return { ...DEFAULT_CONVERSATION_SETTINGS };
+    }
+    return res.json();
+  },
+
+  async updateConversationSettings(
+    config: Partial<ConversationSettings>,
+  ): Promise<ConversationSettings> {
+    const res = await authFetch(`${getApiBase()}/api/settings/conversation`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed to update conversation settings" }));
+      throw new Error(err.error || "Failed to update conversation settings");
     }
     return res.json();
   },
