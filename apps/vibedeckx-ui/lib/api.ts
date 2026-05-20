@@ -379,7 +379,7 @@ export interface ConversationSettings {
 }
 
 export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
-  agentFontSize: 16,
+  agentFontSize: 15,
   chatFontSize: 15,
 };
 
