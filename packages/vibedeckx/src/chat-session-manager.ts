@@ -55,6 +55,26 @@ interface ChatSession {
    * transitions back to "main-running".
    */
   taskCompleted: boolean;
+  /**
+   * True while the current turn was triggered by a reactive system event
+   * (executor/agent/terminal/browser) rather than direct user input. Such
+   * turns must NOT drive the orchestrator workspace dot (violet/cyan) —
+   * the dot should keep reflecting the real subsystem state (e.g. the
+   * coding agent's own "completed"/emerald). Set per-turn at sendMessage
+   * start; read by emitChatActivity gating.
+   */
+  eventDrivenTurn: boolean;
+}
+
+/**
+ * Detect the synthetic "[X Event: ...]" messages the manager injects into
+ * the chat when a subsystem fires (executor finished, coding agent task
+ * completed, terminal output, browser error). These are reactive turns —
+ * the user did not type them — so they must not repaint the orchestrator
+ * workspace dot.
+ */
+function isSystemEventMessage(content: string): boolean {
+  return /^\[(Executor|Agent|Terminal|Browser) Event/.test(content);
 }
 
 /**
@@ -819,6 +839,7 @@ export class ChatSessionManager {
       abortController: null,
       eventListeningEnabled: false,
       taskCompleted: false,
+      eventDrivenTurn: false,
     };
 
     this.sessions.set(id, session);
@@ -871,8 +892,14 @@ export class ChatSessionManager {
       return false;
     }
     session.taskCompleted = true;
-    this.emitChatActivity(session, "main-completed");
-    console.log(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"}`);
+    // On reactive event-driven turns the orchestrator dot belongs to the
+    // subsystem (agent/executor) — don't repaint it cyan just because the
+    // chat finished auto-summarizing. Still set taskCompleted above so the
+    // watchdog treats the turn as well-formed.
+    if (!session.eventDrivenTurn) {
+      this.emitChatActivity(session, "main-completed");
+      console.log(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"}`);
+    }
     return true;
   }
 
@@ -1970,6 +1997,11 @@ export class ChatSessionManager {
     // 2. Update status to running
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
+    // Classify the turn. Reactive system-event turns (executor/agent/
+    // terminal/browser) must NOT repaint the orchestrator dot — leave it
+    // showing the real subsystem state (e.g. the coding agent's emerald
+    // "completed"). Only user-initiated turns drive violet/cyan.
+    session.eventDrivenTurn = isSystemEventMessage(content);
     // A new turn is starting — clear the prior turn's completion so the
     // dot returns to "main-running" (violet). `complete_task` means "this
     // response is finished, over to you" (cyan); the next turn is fresh
@@ -1977,7 +2009,9 @@ export class ChatSessionManager {
     // it stays sticky for the rest of the turn it was set in (see the
     // tool-call handler + the trailing-text case).
     session.taskCompleted = false;
-    this.emitChatActivity(session, "main-running");
+    if (!session.eventDrivenTurn) {
+      this.emitChatActivity(session, "main-running");
+    }
 
     // 3. Build messages array for AI SDK
     const messages = session.store.entries
@@ -2092,12 +2126,15 @@ export class ChatSessionManager {
             // override it. Sticky-completed: if complete_task was called
             // earlier (even in this same stream, e.g. the model called
             // complete_task then another tool), keep cyan instead of
-            // reverting to violet.
+            // reverting to violet. Suppressed entirely on event-driven
+            // turns (the dot belongs to the subsystem there).
             toolCallCountInStream++;
-            this.emitChatActivity(
-              session,
-              session.taskCompleted ? "main-completed" : "main-running",
-            );
+            if (!session.eventDrivenTurn) {
+              this.emitChatActivity(
+                session,
+                session.taskCompleted ? "main-completed" : "main-running",
+              );
+            }
 
             // Reset so next text starts a new assistant message
             assistantIndex = null;
