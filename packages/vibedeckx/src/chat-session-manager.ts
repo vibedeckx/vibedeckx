@@ -853,13 +853,16 @@ export class ChatSessionManager {
   }
 
   /**
-   * Called by the `complete_task` tool when the model declares the user's
-   * goal achieved. Sticky — does NOT abort the in-flight stream, so the
-   * tool's `tool-result` can still be produced and any trailing assistant
-   * text rendered. The flag also persists across follow-up event-driven
-   * sendMessage calls (executor:stopped, terminal output, etc.) so the
-   * cyan dot doesn't flicker back to violet while the chat processes
-   * tail events. Cleared only by `resetSession` (New Conversation).
+   * Called by the `complete_task` tool when the model finishes its response
+   * ("done, over to you" — turns the dot cyan). Does NOT abort the in-flight
+   * stream, so the tool's `tool-result` and any trailing assistant text are
+   * still rendered.
+   *
+   * The flag is sticky for the REST OF THE CURRENT TURN — any further emits
+   * within this stream (a post-complete tool-call, or the execute/tool-call
+   * ordering race) keep cyan rather than reverting to violet. It is cleared
+   * at the start of the next sendMessage (a new turn = fresh work = violet)
+   * and by resetSession.
    */
   markCompleted(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
@@ -1967,16 +1970,14 @@ export class ChatSessionManager {
     // 2. Update status to running
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
-    // Emit workspace dot — refreshes the `since` so the chat dominates
-    // any stale agent-derived state. If complete_task was already called
-    // earlier in this session, stay on "main-completed" (cyan sticky)
-    // so processing of follow-up events (executor:stopped, etc.) doesn't
-    // visually downgrade the task back to "running". The flag clears
-    // only on resetSession (New Conversation).
-    this.emitChatActivity(
-      session,
-      session.taskCompleted ? "main-completed" : "main-running",
-    );
+    // A new turn is starting — clear the prior turn's completion so the
+    // dot returns to "main-running" (violet). `complete_task` means "this
+    // response is finished, over to you" (cyan); the next turn is fresh
+    // work again. The flag is reset here rather than in markCompleted so
+    // it stays sticky for the rest of the turn it was set in (see the
+    // tool-call handler + the trailing-text case).
+    session.taskCompleted = false;
+    this.emitChatActivity(session, "main-running");
 
     // 3. Build messages array for AI SDK
     const messages = session.store.entries
