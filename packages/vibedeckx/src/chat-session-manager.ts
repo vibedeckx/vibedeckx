@@ -13,6 +13,7 @@ import { resolveChatModel } from "./utils/chat-model.js";
 import WsWebSocket from "ws";
 import type WebSocket from "ws";
 import type { AgentMessage, AgentSessionStatus } from "./agent-types.js";
+import type { BranchActivity } from "./branch-activity.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult } from "./conversation-patch.js";
 import type { Storage } from "./storage/types.js";
@@ -46,7 +47,22 @@ interface ChatSession {
   status: AgentSessionStatus;
   abortController: AbortController | null;
   eventListeningEnabled: boolean;
+  /**
+   * Sticky flag set when the model calls the `complete_task` tool. Used by
+   * the workspace dot (emits "main-completed") and by the post-stream
+   * watchdog (skips correction injection when set). Does NOT terminate the
+   * stream — user can still send more messages, and a new user message
+   * transitions back to "main-running".
+   */
+  taskCompleted: boolean;
 }
+
+/**
+ * Max consecutive "no tool_use" corrections per session before the watchdog
+ * gives up and surfaces a warning. Two is enough to nudge the model back on
+ * track without spiraling into infinite reminders when the model is stuck.
+ */
+const MAX_CHAT_CORRECTIONS = 2;
 
 // ============ Helpers ============
 
@@ -88,6 +104,14 @@ export class ChatSessionManager {
 
   /** sessionId → queued messages waiting to be sent after current stream finishes */
   private messageQueue = new Map<string, string[]>();
+
+  /**
+   * sessionId → consecutive "no tool_use" watchdog corrections injected since
+   * the last well-formed turn. Reset to 0 whenever a stream produces at least
+   * one tool_use. Capped at MAX_CHAT_CORRECTIONS to prevent infinite nudge
+   * loops when the model is genuinely stuck.
+   */
+  private correctionCounts = new Map<string, number>();
 
   private storage: Storage;
   private eventBus: EventBus | null = null;
@@ -794,6 +818,7 @@ export class ChatSessionManager {
       status: "stopped",
       abortController: null,
       eventListeningEnabled: false,
+      taskCompleted: false,
     };
 
     this.sessions.set(id, session);
@@ -808,6 +833,38 @@ export class ChatSessionManager {
 
   getMessages(sessionId: string): AgentMessage[] {
     return this.sessions.get(sessionId)?.store.entries ?? [];
+  }
+
+  // ---- Workspace dot activity (chat-session driven) ----
+
+  /**
+   * Emit a `branch:activity` event for the chat session's workspace dot.
+   * Reuses AgentSessionManager's dedupe gate so the chat and coding-agent
+   * paths share one source of truth for the dot color. Most recent emit
+   * wins on the frontend (by `since`), which is how `main-running` overrides
+   * a stale agent `completed` while the orchestrator is still working.
+   */
+  private emitChatActivity(session: ChatSession, activity: BranchActivity): void {
+    this.agentSessionManager.emitBranchActivityIfChanged(
+      session.projectId,
+      session.branch,
+      { activity, since: Date.now() },
+    );
+  }
+
+  /**
+   * Called by the `complete_task` tool when the model declares the user's
+   * goal achieved. Sticky — does NOT abort the in-flight stream, so the
+   * tool's `tool-result` can still be produced and any trailing assistant
+   * text rendered. Subsequent user input clears the flag (the next
+   * sendMessage emits "main-running" again).
+   */
+  markCompleted(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.taskCompleted = true;
+    this.emitChatActivity(session, "main-completed");
+    return true;
   }
 
   // ---- WebSocket subscription ----
@@ -893,10 +950,22 @@ export class ChatSessionManager {
       "",
       "<critical-rules>",
       "Every action you take MUST be an actual tool invocation. Writing text like \"I'll run X\" or \"I've started X\" does NOT execute anything — only a tool_use block does. If you need to perform an action, invoke the tool. If you cannot invoke the tool right now, say so honestly instead of pretending you did. Never narrate a tool call without actually making it. Violating this rule means the action silently fails while you falsely report success.",
+      "",
+      "PER-TURN TOOL INVARIANT: every assistant turn you produce MUST contain at least one tool_use block. There are exactly three ways for a turn to end legitimately:",
+      "  1. Invoke a tool to make progress (executor, terminal, browser, agent-query, etc.).",
+      "  2. Invoke `complete_task` to declare the user's overall goal achieved.",
+      "  3. The user explicitly aborts.",
+      "Pure text turns are invalid — if you end a turn with text only, the system will detect the violation and inject a correction asking you to invoke a tool. Do not chat conversationally between turns; carry any explanation inside the same turn as a tool call.",
       "</critical-rules>",
     );
 
     sections.push("", "<tools>");
+
+    sections.push(
+      "  <lifecycle-tools>",
+      "  - complete_task: call this when the user's overall task in this workspace is fully accomplished and no further work is needed. Marks the workspace dot 'main-completed' (cyan). Does NOT terminate the chat — the user can still send follow-up messages. Use this instead of ending a turn with bare text when you believe the task is done.",
+      "  </lifecycle-tools>",
+    );
 
     sections.push(
       "  <executor-tools>",
@@ -985,6 +1054,34 @@ export class ChatSessionManager {
       : () => Promise.resolve(null);
 
     return {
+      complete_task: tool({
+        description:
+          "Signal that the user's overall task in this workspace is fully accomplished. " +
+          "Call this when no further work is needed — every required action has been taken, verified, and any external events have arrived. " +
+          "This marks the workspace dot 'main-completed' (cyan). It does NOT terminate the chat — the user can still send follow-up messages, which will move the workspace back to 'main-running'.",
+        inputSchema: z.object({
+          summary: z
+            .string()
+            .optional()
+            .describe("Brief 1-sentence summary of what was accomplished, shown to the user."),
+        }),
+        execute: async ({ summary }) => {
+          if (!sessionId) {
+            return { completed: false, message: "No session context available." };
+          }
+          const ok = this.markCompleted(sessionId);
+          if (!ok) {
+            return { completed: false, message: "Session not found." };
+          }
+          return {
+            completed: true,
+            message: summary
+              ? `Task marked complete: ${summary}`
+              : "Task marked complete.",
+          };
+        },
+      }),
+
       getAgentConversation: tool({
         description:
           "Get the conversation history of the coding agent in the current workspace. " +
@@ -1864,6 +1961,10 @@ export class ChatSessionManager {
     // 2. Update status to running
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
+    // Emit workspace dot "main-running" — overrides any stale agent-derived
+    // state and refreshes the `since` so the chat keeps the violet pulse
+    // visible while the orchestrator is actively processing.
+    this.emitChatActivity(session, "main-running");
 
     // 3. Build messages array for AI SDK
     const messages = session.store.entries
@@ -1881,6 +1982,14 @@ export class ChatSessionManager {
 
     let assistantIndex: number | null = null;
     let accumulatedText = "";
+    /**
+     * Counts real tool_use blocks emitted by the model during this stream.
+     * After the stream completes the watchdog enforces the invariant
+     * "every turn must invoke at least one tool" — zero tool-calls without
+     * an abort or prior complete_task means the model just talked, which
+     * usually indicates a hallucinated tool call or a missing complete_task.
+     */
+    let toolCallCountInStream = 0;
 
     try {
       const result = streamText({
@@ -1965,6 +2074,13 @@ export class ChatSessionManager {
             };
             this.pushEntry(session, toolUseMsg);
 
+            // Watchdog accounting: model actually invoked a tool this turn.
+            // Re-emit "main-running" so the dot's `since` refreshes —
+            // prevents a long-running tool's completion event from rolling
+            // the dot back to agent state mid-loop.
+            toolCallCountInStream++;
+            this.emitChatActivity(session, "main-running");
+
             // Reset so next text starts a new assistant message
             assistantIndex = null;
             accumulatedText = "";
@@ -1998,6 +2114,53 @@ export class ChatSessionManager {
         session.store.patches.push(patch);
         session.store.entries[assistantIndex] = finalMsg;
         this.broadcastPatch(session, patch);
+      }
+
+      // 6. Watchdog — structural invariant check.
+      //
+      // Every chat turn must invoke at least one tool (any real tool or
+      // `complete_task`). Zero tool-calls means the model violated the
+      // contract — usually a hallucinated tool call ("I ran X") or just
+      // chatting without making progress. Inject a correction back into
+      // the queue; drainQueue (in finally) will pick it up and start a
+      // new stream so the model has a chance to invoke a tool this time.
+      //
+      // Skipped on abort (user clicked stop) and when complete_task was
+      // already called this stream (the model is legitimately done).
+      if (
+        toolCallCountInStream === 0 &&
+        !abortController.signal.aborted &&
+        !session.taskCompleted
+      ) {
+        const prev = this.correctionCounts.get(sessionId) ?? 0;
+        if (prev < MAX_CHAT_CORRECTIONS) {
+          this.correctionCounts.set(sessionId, prev + 1);
+          console.log(
+            `[ChatSession] watchdog: no tool_use in stream for ${sessionId}, ` +
+              `injecting correction (attempt ${prev + 1}/${MAX_CHAT_CORRECTIONS})`,
+          );
+          // Queue the correction. finally → drainQueue will pick it up
+          // immediately after the current stream cleans up.
+          this.enqueueOrSend(
+            sessionId,
+            [
+              "[System Invariant Violation]",
+              "You ended a turn without invoking any tool.",
+              "Either call a tool to make progress, or call `complete_task` to mark the user's task finished.",
+              "Do not narrate actions you did not actually take — only a tool_use block executes anything.",
+            ].join("\n"),
+          );
+        } else {
+          console.warn(
+            `[ChatSession] watchdog: correction limit (${MAX_CHAT_CORRECTIONS}) ` +
+              `reached for ${sessionId}, giving up nudging`,
+          );
+          this.correctionCounts.delete(sessionId);
+        }
+      } else if (toolCallCountInStream > 0) {
+        // Well-formed turn — reset the counter so future violations
+        // get the full nudge budget.
+        this.correctionCounts.delete(sessionId);
       }
     } catch (err: unknown) {
       // Don't push error for intentional abort
@@ -2046,6 +2209,11 @@ export class ChatSessionManager {
     if (!session || !session.abortController) return false;
 
     session.abortController.abort();
+    // User explicitly stopped the orchestrator — flip the dot to amber
+    // so it's visually distinct from "completed" (cyan) and "running"
+    // (violet pulse). The next user message will switch it back to
+    // "main-running".
+    this.emitChatActivity(session, "stopped");
     return true;
   }
 
@@ -2068,12 +2236,18 @@ export class ChatSessionManager {
     session.store.entries = [];
     session.store.nextIndex = 0;
     session.status = "stopped";
+    session.taskCompleted = false;
 
     // Broadcast clearAll + status to connected subscribers
     const clearPatch = ConversationPatch.clearAll();
     this.broadcastPatch(session, clearPatch);
     const statusPatch = ConversationPatch.updateStatus("stopped");
     this.broadcastPatch(session, statusPatch);
+
+    // New Conversation semantics — the workspace dot returns to idle
+    // (gray). The watchdog counter is fresh for the new conversation.
+    this.correctionCounts.delete(sessionId);
+    this.emitChatActivity(session, "idle");
 
     console.log(`[ChatSession] Reset session ${sessionId}`);
     return true;

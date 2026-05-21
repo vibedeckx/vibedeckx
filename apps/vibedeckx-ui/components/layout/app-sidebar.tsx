@@ -40,6 +40,19 @@ function StatusDot({ status }: { status?: WorkspaceStatus }) {
       </span>
     );
   }
+  if (status === "main-running") {
+    return (
+      <span className={cn(base, "bg-violet-500")}>
+        <span
+          className="absolute inset-[-2px] rounded-full bg-violet-500"
+          style={{ animation: "status-dot-pulse 1.6s ease-out infinite", opacity: 0.5 }}
+        />
+      </span>
+    );
+  }
+  if (status === "main-completed") {
+    return <span className={cn(base, "bg-cyan-500")} />;
+  }
   if (status === "stopped") {
     return <span className={cn(base, "bg-amber-500")} />;
   }

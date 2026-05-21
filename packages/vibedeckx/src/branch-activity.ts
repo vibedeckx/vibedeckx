@@ -4,8 +4,20 @@ import type { AgentSession } from "./storage/types.js";
  * Derived activity state per branch. The single source of truth for
  * workspace status indicators (idle / working / completed dot color) — see
  * `plans/branch-activity-refactor.md`.
+ *
+ * The `main-*` variants are emitted directly by ChatSessionManager (the
+ * orchestrator chat) and are NEVER returned by `computeBranchActivity`,
+ * which only derives state from the coding-agent `agent_sessions` table.
+ * They override the agent-derived dot color so users can visually tell
+ * "orchestrator is running" apart from "coding agent is running".
  */
-export type BranchActivity = "idle" | "working" | "completed" | "stopped";
+export type BranchActivity =
+  | "idle"
+  | "working"
+  | "completed"
+  | "stopped"
+  | "main-running"
+  | "main-completed";
 
 export interface BranchActivityState {
   activity: BranchActivity;

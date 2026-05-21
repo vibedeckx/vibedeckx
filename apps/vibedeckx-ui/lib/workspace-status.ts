@@ -1,6 +1,12 @@
 import type { Worktree } from "@/lib/api";
 
-export type WorkspaceStatus = "idle" | "working" | "completed" | "stopped";
+export type WorkspaceStatus =
+  | "idle"
+  | "working"
+  | "completed"
+  | "stopped"
+  | "main-running"
+  | "main-completed";
 
 /** Normalize null branch (main worktree) to empty string for Map keys. */
 export function toBranchKey(branch: string | null): string {
