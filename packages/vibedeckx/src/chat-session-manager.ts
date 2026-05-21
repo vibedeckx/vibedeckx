@@ -856,14 +856,20 @@ export class ChatSessionManager {
    * Called by the `complete_task` tool when the model declares the user's
    * goal achieved. Sticky — does NOT abort the in-flight stream, so the
    * tool's `tool-result` can still be produced and any trailing assistant
-   * text rendered. Subsequent user input clears the flag (the next
-   * sendMessage emits "main-running" again).
+   * text rendered. The flag also persists across follow-up event-driven
+   * sendMessage calls (executor:stopped, terminal output, etc.) so the
+   * cyan dot doesn't flicker back to violet while the chat processes
+   * tail events. Cleared only by `resetSession` (New Conversation).
    */
   markCompleted(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
+    if (!session) {
+      console.log(`[ChatSession] markCompleted: session ${sessionId} not found`);
+      return false;
+    }
     session.taskCompleted = true;
     this.emitChatActivity(session, "main-completed");
+    console.log(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"}`);
     return true;
   }
 
@@ -1961,10 +1967,16 @@ export class ChatSessionManager {
     // 2. Update status to running
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
-    // Emit workspace dot "main-running" — overrides any stale agent-derived
-    // state and refreshes the `since` so the chat keeps the violet pulse
-    // visible while the orchestrator is actively processing.
-    this.emitChatActivity(session, "main-running");
+    // Emit workspace dot — refreshes the `since` so the chat dominates
+    // any stale agent-derived state. If complete_task was already called
+    // earlier in this session, stay on "main-completed" (cyan sticky)
+    // so processing of follow-up events (executor:stopped, etc.) doesn't
+    // visually downgrade the task back to "running". The flag clears
+    // only on resetSession (New Conversation).
+    this.emitChatActivity(
+      session,
+      session.taskCompleted ? "main-completed" : "main-running",
+    );
 
     // 3. Build messages array for AI SDK
     const messages = session.store.entries
@@ -2075,11 +2087,16 @@ export class ChatSessionManager {
             this.pushEntry(session, toolUseMsg);
 
             // Watchdog accounting: model actually invoked a tool this turn.
-            // Re-emit "main-running" so the dot's `since` refreshes —
-            // prevents a long-running tool's completion event from rolling
-            // the dot back to agent state mid-loop.
+            // Refresh the dot's `since` so a concurrent agent emit can't
+            // override it. Sticky-completed: if complete_task was called
+            // earlier (even in this same stream, e.g. the model called
+            // complete_task then another tool), keep cyan instead of
+            // reverting to violet.
             toolCallCountInStream++;
-            this.emitChatActivity(session, "main-running");
+            this.emitChatActivity(
+              session,
+              session.taskCompleted ? "main-completed" : "main-running",
+            );
 
             // Reset so next text starts a new assistant message
             assistantIndex = null;
