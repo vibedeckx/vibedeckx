@@ -133,6 +133,32 @@ describe("computeWorkspaceStatuses", () => {
     expect(result.get("")).toBe("idle");
   });
 
+  it("isPlaceholder does NOT clobber a live orchestrator main-running", () => {
+    // Bug scenario: user clicks New Session in the agent window (sets the
+    // agent placeholder → gray dot), then sends a message in the chat
+    // window. The orchestrator emits a live `main-running`, which lands in
+    // the activity map. The agent's "no session yet" placeholder must not
+    // suppress the chat's live state — the dot should turn violet, not stay
+    // gray. See chat-session-manager's emitChatActivity.
+    const backend = new Map<string, WorkspaceStatus>([["feat", "main-running"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat")],
+      backend,
+      () => true,
+    );
+    expect(result.get("feat")).toBe("main-running");
+  });
+
+  it("isPlaceholder does NOT clobber a live orchestrator main-completed", () => {
+    const backend = new Map<string, WorkspaceStatus>([["feat", "main-completed"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat")],
+      backend,
+      () => true,
+    );
+    expect(result.get("feat")).toBe("main-completed");
+  });
+
   it("isPlaceholder returning false leaves backend status intact", () => {
     const backend = new Map<string, WorkspaceStatus>([["feat", "completed"]]);
     const result = computeWorkspaceStatuses(
