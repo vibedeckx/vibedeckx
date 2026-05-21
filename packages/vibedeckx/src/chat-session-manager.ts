@@ -13,7 +13,7 @@ import { resolveChatModel } from "./utils/chat-model.js";
 import WsWebSocket from "ws";
 import type WebSocket from "ws";
 import type { AgentMessage, AgentSessionStatus } from "./agent-types.js";
-import type { BranchActivity } from "./branch-activity.js";
+import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult } from "./conversation-patch.js";
 import type { Storage } from "./storage/types.js";
@@ -933,13 +933,21 @@ export class ChatSessionManager {
       return false;
     }
     session.taskCompleted = true;
-    // On reactive event-driven turns the orchestrator dot belongs to the
-    // subsystem (agent/executor) — don't repaint it cyan just because the
-    // chat finished auto-summarizing. Still set taskCompleted above so the
-    // watchdog treats the turn as well-formed.
-    if (!session.eventDrivenTurn) {
+    // On reactive event-driven turns the orchestrator dot normally belongs to
+    // the subsystem (agent/executor) — don't repaint it just because the chat
+    // finished auto-summarizing. The exception: when the dot still shows the
+    // orchestrator's own `main-running` (a prior user turn kicked off async
+    // work, ended without completing, and the work finished via an
+    // [Executor/Terminal/Agent Event] turn — which is where complete_task
+    // fires). That stale violet must be cleared, or it sticks forever. Still
+    // set taskCompleted above so the watchdog treats the turn as well-formed.
+    const currentDot = this.agentSessionManager.getCurrentBranchActivity(
+      session.projectId,
+      session.branch,
+    );
+    if (shouldEmitMainCompleted(session.eventDrivenTurn, currentDot)) {
       this.emitChatActivity(session, "main-completed");
-      console.log(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"}`);
+      console.log(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} (eventDriven=${session.eventDrivenTurn}, dotWas=${currentDot ?? "none"})`);
     }
     return true;
   }

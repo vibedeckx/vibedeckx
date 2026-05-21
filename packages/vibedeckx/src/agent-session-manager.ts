@@ -19,6 +19,7 @@ import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/ses
 import {
   BranchActivityDedupe,
   computeBranchActivity,
+  type BranchActivity,
   type BranchActivityState,
 } from "./branch-activity.js";
 
@@ -126,6 +127,19 @@ export class AgentSessionManager {
       since: state.since,
     });
     return state;
+  }
+
+  /**
+   * Read the last-emitted `branch:activity` for a branch (what the workspace
+   * dot currently shows), or undefined if nothing has been emitted yet. Reads
+   * the shared dedupe cache without mutating it. Used by ChatSessionManager to
+   * tell whether a stale orchestrator `main-running` is still on screen.
+   */
+  getCurrentBranchActivity(
+    projectId: string,
+    branch: string | null,
+  ): BranchActivity | undefined {
+    return this.branchActivityDedupe.peek(projectId, branch);
   }
 
   /**

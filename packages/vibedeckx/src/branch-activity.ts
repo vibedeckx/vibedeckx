@@ -122,6 +122,16 @@ export class BranchActivityDedupe {
   }
 
   /**
+   * Read the last-emitted activity for a branch without mutating the cache,
+   * or undefined if nothing has been emitted yet. Lets callers reason about
+   * what the dot currently shows (e.g. ChatSessionManager.markCompleted needs
+   * to know whether a stale orchestrator `main-running` is still on screen).
+   */
+  peek(projectId: string, branch: string | null): BranchActivity | undefined {
+    return this.cache.get(this.key(projectId, branch));
+  }
+
+  /**
    * Drop the cache entry for a branch — call when the branch's session
    * history is wiped (e.g. all sessions deleted) so the next emit isn't
    * suppressed against a stale post-deletion value.
@@ -129,6 +139,31 @@ export class BranchActivityDedupe {
   forget(projectId: string, branch: string | null): void {
     this.cache.delete(this.key(projectId, branch));
   }
+}
+
+/**
+ * Decide whether the chat orchestrator's `complete_task` tool should repaint
+ * the workspace dot to `main-completed`.
+ *
+ * User-initiated turns always own the orchestrator dot, so they always clear
+ * to `main-completed`. On reactive (event-driven) turns the dot normally
+ * belongs to the subsystem (coding agent / executor) and must not be
+ * repainted — EXCEPT when it still shows the orchestrator's own
+ * `main-running`. That happens in the common "kick off async work, end the
+ * turn, finish when the event arrives" flow: a prior user turn painted the
+ * dot violet without completing, the work finished via an
+ * `[Executor Event]` / `[Terminal Event]` / `[Agent Event]` turn, and that
+ * reactive turn is where `complete_task` fires. `complete_task` is a
+ * definitive "the user's overall task is done" signal, so it must clear that
+ * stale violet rather than leave it stuck.
+ *
+ * Pure function — exported for tests.
+ */
+export function shouldEmitMainCompleted(
+  eventDrivenTurn: boolean,
+  currentDotActivity: BranchActivity | undefined,
+): boolean {
+  return !eventDrivenTurn || currentDotActivity === "main-running";
 }
 
 /**

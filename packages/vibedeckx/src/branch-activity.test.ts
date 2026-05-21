@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import type { AgentSession } from "./storage/types.js";
-import { BranchActivityDedupe, computeBranchActivity } from "./branch-activity.js";
+import {
+  BranchActivityDedupe,
+  computeBranchActivity,
+  shouldEmitMainCompleted,
+} from "./branch-activity.js";
 
 function session(opts: Partial<AgentSession> & { branch: string; id?: string }): AgentSession {
   return {
@@ -233,5 +237,39 @@ describe("BranchActivityDedupe", () => {
     gate.shouldEmit("proj-1", "feat-a", "completed");
     gate.forget("proj-1", "feat-a");
     expect(gate.shouldEmit("proj-1", "feat-a", "completed")).toBe(true);
+  });
+
+  it("peek returns the last-emitted activity without mutating the cache", () => {
+    const gate = new BranchActivityDedupe();
+    expect(gate.peek("proj-1", "feat-a")).toBeUndefined();
+    gate.shouldEmit("proj-1", "feat-a", "main-running");
+    expect(gate.peek("proj-1", "feat-a")).toBe("main-running");
+    // peek must not count as an emit — a repeat shouldEmit is still deduped.
+    expect(gate.shouldEmit("proj-1", "feat-a", "main-running")).toBe(false);
+  });
+});
+
+describe("shouldEmitMainCompleted", () => {
+  it("user-initiated turn always clears to main-completed", () => {
+    expect(shouldEmitMainCompleted(false, "main-running")).toBe(true);
+    expect(shouldEmitMainCompleted(false, "completed")).toBe(true);
+    expect(shouldEmitMainCompleted(false, undefined)).toBe(true);
+  });
+
+  it("event-driven turn clears a stale orchestrator main-running", () => {
+    // Regression: run executors, the [Executor Event: Process Finished] turn
+    // calls complete_task. The dot still shows the prior user turn's violet
+    // main-running, so complete_task must clear it to main-completed.
+    expect(shouldEmitMainCompleted(true, "main-running")).toBe(true);
+  });
+
+  it("event-driven turn leaves a subsystem-owned dot untouched", () => {
+    // The coding agent / executor owns the dot here — complete_task from a
+    // reactive auto-summary turn must not repaint it.
+    expect(shouldEmitMainCompleted(true, "working")).toBe(false);
+    expect(shouldEmitMainCompleted(true, "completed")).toBe(false);
+    expect(shouldEmitMainCompleted(true, "stopped")).toBe(false);
+    expect(shouldEmitMainCompleted(true, "main-completed")).toBe(false);
+    expect(shouldEmitMainCompleted(true, undefined)).toBe(false);
   });
 });
