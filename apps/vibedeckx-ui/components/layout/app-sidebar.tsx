@@ -51,7 +51,9 @@ function StatusDot({ status }: { status?: WorkspaceStatus }) {
     );
   }
   if (status === "main-completed") {
-    return <span className={cn(base, "bg-cyan-500")} />;
+    // Same green family as agent-completed (emerald-500) but a lighter mint
+    // shade so the two completion states read distinctly at a glance.
+    return <span className={cn(base, "bg-emerald-300")} />;
   }
   if (status === "stopped") {
     return <span className={cn(base, "bg-amber-500")} />;
