@@ -103,7 +103,7 @@ export function computeBranchActivity(
  * event guard uses `since` separately for ordering, not for identity).
  */
 export class BranchActivityDedupe {
-  private cache = new Map<string, BranchActivity>();
+  private cache = new Map<string, BranchActivityState>();
 
   private key(projectId: string, branch: string | null): string {
     return `${projectId}::${branch ?? ""}`;
@@ -113,11 +113,22 @@ export class BranchActivityDedupe {
    * Returns true if `next` differs from the last emit for this branch
    * (and updates the cache). Returns false on a redundant emit, leaving
    * the cache as-is.
+   *
+   * `since` is stored alongside the activity so `getProjectStates` can replay
+   * the cached state into the REST `/branches/activity` snapshot — but it's
+   * NOT part of the dedupe identity (the value timestamp carries no semantic
+   * state; the frontend's stale-event guard uses `since` separately for
+   * ordering, not for identity).
    */
-  shouldEmit(projectId: string, branch: string | null, next: BranchActivity): boolean {
+  shouldEmit(
+    projectId: string,
+    branch: string | null,
+    next: BranchActivity,
+    since = 0,
+  ): boolean {
     const k = this.key(projectId, branch);
-    if (this.cache.get(k) === next) return false;
-    this.cache.set(k, next);
+    if (this.cache.get(k)?.activity === next) return false;
+    this.cache.set(k, { activity: next, since });
     return true;
   }
 
@@ -128,7 +139,25 @@ export class BranchActivityDedupe {
    * to know whether a stale orchestrator `main-running` is still on screen).
    */
   peek(projectId: string, branch: string | null): BranchActivity | undefined {
-    return this.cache.get(this.key(projectId, branch));
+    return this.cache.get(this.key(projectId, branch))?.activity;
+  }
+
+  /**
+   * All cached dot states for a project, keyed by branch ("" for the null/main
+   * worktree). This is the only place the orchestrator's `main-*` states live
+   * server-side (they're never persisted to `agent_sessions`), so the REST
+   * `/branches/activity` route reads it to replay the orchestrator overlay —
+   * see `overlayOrchestratorActivity`. Reads without mutating.
+   */
+  getProjectStates(projectId: string): Map<string, BranchActivityState> {
+    const prefix = `${projectId}::`;
+    const out = new Map<string, BranchActivityState>();
+    for (const [k, state] of this.cache) {
+      if (k.startsWith(prefix)) {
+        out.set(k.slice(prefix.length), { ...state });
+      }
+    }
+    return out;
   }
 
   /**
@@ -139,6 +168,38 @@ export class BranchActivityDedupe {
   forget(projectId: string, branch: string | null): void {
     this.cache.delete(this.key(projectId, branch));
   }
+}
+
+/**
+ * Overlay live orchestrator (`main-*`) states onto the agent-derived activity
+ * map. `computeBranchActivity` only knows the coding-agent layer (the
+ * `agent_sessions` table); the chat orchestrator's `main-running` /
+ * `main-completed` live only in the in-memory `BranchActivityDedupe` cache —
+ * the single authoritative "current dot", since every emit (agent or chat)
+ * passes through it. The REST `/branches/activity` snapshot must replay that
+ * overlay, or a project switch-and-return would lose the orchestrator dot and
+ * fall back to the stale agent color (e.g. emerald `main-completed` reverting
+ * to lime `completed`). See `lib/workspace-status.ts`.
+ *
+ * Only `main-*` cache entries are overlaid: any later agent activity (incl. a
+ * New Conversation reset to `idle`) overwrites the cache away from `main-*`, so
+ * a `main-*` value still being current means it genuinely is the latest emit
+ * for that branch — and `computeBranchActivity` can never produce it. For all
+ * other branches the DB-derived map wins; the DB owns those resets.
+ *
+ * Pure function — returns a new map, does not mutate inputs.
+ */
+export function overlayOrchestratorActivity(
+  computed: Map<string, BranchActivityState>,
+  orchestratorStates: Map<string, BranchActivityState>,
+): Map<string, BranchActivityState> {
+  const result = new Map(computed);
+  for (const [branch, state] of orchestratorStates) {
+    if (state.activity === "main-running" || state.activity === "main-completed") {
+      result.set(branch, { ...state });
+    }
+  }
+  return result;
 }
 
 /**

@@ -116,7 +116,7 @@ export class AgentSessionManager {
     branch: string | null,
     state: BranchActivityState,
   ): BranchActivityState | null {
-    if (!this.branchActivityDedupe.shouldEmit(projectId, branch, state.activity)) {
+    if (!this.branchActivityDedupe.shouldEmit(projectId, branch, state.activity, state.since)) {
       return null;
     }
     this.eventBus?.emit({
@@ -140,6 +140,17 @@ export class AgentSessionManager {
     branch: string | null,
   ): BranchActivity | undefined {
     return this.branchActivityDedupe.peek(projectId, branch);
+  }
+
+  /**
+   * All cached `branch:activity` dot states for a project, keyed by branch
+   * ("" for the null/main worktree). The REST `/branches/activity` route uses
+   * this to replay the orchestrator (`main-*`) overlay onto the DB-derived
+   * activity — see `overlayOrchestratorActivity`. Without it, switching away
+   * from a project and back loses the live orchestrator dot.
+   */
+  getProjectBranchStates(projectId: string): Map<string, BranchActivityState> {
+    return this.branchActivityDedupe.getProjectStates(projectId);
   }
 
   /**

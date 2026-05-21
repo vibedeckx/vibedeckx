@@ -3,7 +3,9 @@ import type { AgentSession } from "./storage/types.js";
 import {
   BranchActivityDedupe,
   computeBranchActivity,
+  overlayOrchestratorActivity,
   shouldEmitMainCompleted,
+  type BranchActivityState,
 } from "./branch-activity.js";
 
 function session(opts: Partial<AgentSession> & { branch: string; id?: string }): AgentSession {
@@ -246,6 +248,75 @@ describe("BranchActivityDedupe", () => {
     expect(gate.peek("proj-1", "feat-a")).toBe("main-running");
     // peek must not count as an emit — a repeat shouldEmit is still deduped.
     expect(gate.shouldEmit("proj-1", "feat-a", "main-running")).toBe(false);
+  });
+
+  it("getProjectStates returns every cached branch state for the project", () => {
+    const gate = new BranchActivityDedupe();
+    gate.shouldEmit("proj-1", null, "main-completed", 100);
+    gate.shouldEmit("proj-1", "feat-a", "working", 200);
+    gate.shouldEmit("proj-2", "feat-b", "completed", 300);
+
+    const states = gate.getProjectStates("proj-1");
+    expect(states.size).toBe(2);
+    expect(states.get("")).toEqual({ activity: "main-completed", since: 100 });
+    expect(states.get("feat-a")).toEqual({ activity: "working", since: 200 });
+    // Other projects are not included.
+    expect(states.has("feat-b")).toBe(false);
+  });
+
+  it("getProjectStates is empty for a project with no emits", () => {
+    const gate = new BranchActivityDedupe();
+    expect(gate.getProjectStates("proj-1").size).toBe(0);
+  });
+});
+
+describe("overlayOrchestratorActivity", () => {
+  const state = (activity: BranchActivityState["activity"], since: number): BranchActivityState => ({
+    activity,
+    since,
+  });
+
+  it("main-completed cache overrides the agent-derived completed (the project-switch bug)", () => {
+    // The chat orchestrator finished (dot emerald = main-completed), but the
+    // branch also has a completed agent_session (lime). On project switch the
+    // REST snapshot must keep the orchestrator dot, not fall back to the agent.
+    const computed = new Map([["", state("completed", 50)]]);
+    const orchestrator = new Map([["", state("main-completed", 100)]]);
+    const result = overlayOrchestratorActivity(computed, orchestrator);
+    expect(result.get("")).toEqual({ activity: "main-completed", since: 100 });
+  });
+
+  it("main-* is overlaid even when the branch has no agent session at all", () => {
+    // Chat ran on a branch but never spawned a coding agent → no agent_session
+    // → computed has no entry. The dot should still be main-completed, not gray.
+    const computed = new Map<string, BranchActivityState>();
+    const orchestrator = new Map([["feat-a", state("main-running", 100)]]);
+    const result = overlayOrchestratorActivity(computed, orchestrator);
+    expect(result.get("feat-a")).toEqual({ activity: "main-running", since: 100 });
+  });
+
+  it("non-main cache values never override the DB-derived state", () => {
+    // The DB owns idle/working/completed/stopped (it handles New Conversation
+    // resets). Only main-* — which computeBranchActivity can never produce —
+    // is overlaid from the cache.
+    const computed = new Map([["", state("idle", 0)]]);
+    const orchestrator = new Map([["", state("completed", 100)]]);
+    const result = overlayOrchestratorActivity(computed, orchestrator);
+    expect(result.get("")).toEqual({ activity: "idle", since: 0 });
+  });
+
+  it("leaves branches without an orchestrator entry untouched", () => {
+    const computed = new Map([["feat-a", state("working", 50)]]);
+    const orchestrator = new Map<string, BranchActivityState>();
+    const result = overlayOrchestratorActivity(computed, orchestrator);
+    expect(result.get("feat-a")).toEqual({ activity: "working", since: 50 });
+  });
+
+  it("does not mutate the input map", () => {
+    const computed = new Map([["", state("completed", 50)]]);
+    const orchestrator = new Map([["", state("main-completed", 100)]]);
+    overlayOrchestratorActivity(computed, orchestrator);
+    expect(computed.get("")).toEqual({ activity: "completed", since: 50 });
   });
 });
 

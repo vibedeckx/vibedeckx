@@ -1,6 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
-import { computeBranchActivity, type BranchActivityState } from "../branch-activity.js";
+import {
+  computeBranchActivity,
+  overlayOrchestratorActivity,
+  type BranchActivityState,
+} from "../branch-activity.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
@@ -26,6 +30,12 @@ function toResponse(map: Map<string, BranchActivityState>): BranchActivityRespon
       since: state.since,
     })),
   };
+}
+
+function fromResponse(resp: BranchActivityResponse): Map<string, BranchActivityState> {
+  return new Map(
+    resp.branches.map((b) => [b.branch ?? "", { activity: b.activity, since: b.since }]),
+  );
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -56,7 +66,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(200).send({ branches: [] } satisfies BranchActivityResponse);
       }
       const sessions = fastify.storage.agentSessions.getByProjectId(project.id);
-      return reply.code(200).send(toResponse(computeBranchActivity(sessions)));
+      const computed = computeBranchActivity(sessions);
+      const orchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
+      return reply.code(200).send(toResponse(overlayOrchestratorActivity(computed, orchestrator)));
     },
   );
 
@@ -73,12 +85,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       if (project.agent_mode !== "local") {
+        // The chat orchestrator always runs locally (even for remote projects —
+        // chat-session-routes use the local manager, never a proxy), so its
+        // `main-*` dot state lives in THIS node's dedupe cache, not the remote's
+        // agent snapshot. Overlay it onto every return so a project switch-and-
+        // return doesn't drop the orchestrator dot. See `overlayOrchestratorActivity`.
+        const localOrchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
+        const overlayResponse = (computed: Map<string, BranchActivityState>) =>
+          toResponse(overlayOrchestratorActivity(computed, localOrchestrator));
+
         const remoteConfig = fastify.storage.projectRemotes.getByProjectAndServer(
           project.id, project.agent_mode,
         );
         if (!remoteConfig) {
-          // Remote misconfigured — return empty so the sidebar just shows idle.
-          return reply.code(200).send({ branches: [] } satisfies BranchActivityResponse);
+          // Remote misconfigured — no remote agent state, but still surface the
+          // local orchestrator dot.
+          return reply.code(200).send(overlayResponse(new Map()));
         }
         const params = new URLSearchParams({ path: remoteConfig.remote_path });
         const result = await proxyAuto(
@@ -90,17 +112,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
         );
         if (!result.ok) {
           // Older remote backend may not have this endpoint yet — degrade
-          // gracefully so the sidebar isn't broken during a partial rollout.
+          // gracefully (local orchestrator dot only) so the sidebar isn't
+          // broken during a partial rollout.
           if (result.status === 404) {
-            return reply.code(200).send({ branches: [] } satisfies BranchActivityResponse);
+            return reply.code(200).send(overlayResponse(new Map()));
           }
           return reply.code(proxyStatus(result)).send(result.data);
         }
-        return reply.code(200).send(result.data);
+        return reply.code(200).send(
+          overlayResponse(fromResponse(result.data as BranchActivityResponse)),
+        );
       }
 
       const sessions = fastify.storage.agentSessions.getByProjectId(project.id);
-      return reply.code(200).send(toResponse(computeBranchActivity(sessions)));
+      const computed = computeBranchActivity(sessions);
+      const orchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
+      return reply.code(200).send(toResponse(overlayOrchestratorActivity(computed, orchestrator)));
     },
   );
 };
