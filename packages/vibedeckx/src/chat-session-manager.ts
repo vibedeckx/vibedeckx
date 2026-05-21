@@ -122,8 +122,29 @@ export class ChatSessionManager {
   /** processId → cleanup function for remote executor monitors */
   private remoteExecutorMonitors = new Map<string, () => void>();
 
-  /** sessionId → queued messages waiting to be sent after current stream finishes */
-  private messageQueue = new Map<string, string[]>();
+  /**
+   * sessionId → queued messages waiting to be sent after the current stream
+   * finishes. Each entry carries an optional `eventDriven` override so the
+   * turn classification (orchestrator dot gating) survives queuing — see
+   * `sendMessage`. When omitted, classification falls back to content
+   * sniffing via `isSystemEventMessage`.
+   */
+  private messageQueue = new Map<string, Array<{ content: string; eventDriven?: boolean }>>();
+
+  /**
+   * Coding-agent sessionIds that were started BY this chat orchestrator
+   * (vs. directly in the agent window). When such a task completes, the
+   * resulting `[Agent Event]` turn is a genuine continuation of the chat's
+   * workflow — it drives the orchestrator dot (violet/cyan). Agent-window
+   * tasks are absent here, so their completion turns stay gated and the dot
+   * keeps showing the agent's own state.
+   *
+   * Populated by `registerChatInitiatedAgentTask` once a chat tool that
+   * delegates to the coding agent exists; currently always empty, so all
+   * agent events take the gated (event-driven) path — preserving today's
+   * behavior while leaving the discriminator wired for that feature.
+   */
+  private chatInitiatedAgentTasks = new Set<string>();
 
   /**
    * sessionId → consecutive "no tool_use" watchdog corrections injected since
@@ -186,6 +207,17 @@ export class ChatSessionManager {
     return session?.eventListeningEnabled ?? false;
   }
 
+  /**
+   * Record that the given coding-agent session was delegated to BY the chat
+   * orchestrator. Call this from a future chat tool that starts an agent
+   * task, so its completion event is treated as a workflow continuation
+   * (drives the dot + subject to the response watchdog) rather than an
+   * incidental agent-window summary. See `chatInitiatedAgentTasks`.
+   */
+  registerChatInitiatedAgentTask(agentSessionId: string): void {
+    this.chatInitiatedAgentTasks.add(agentSessionId);
+  }
+
   private setupEventListeners(): void {
     if (!this.eventBus) return;
     this.eventBus.subscribe((event: GlobalEvent) => {
@@ -243,8 +275,17 @@ export class ChatSessionManager {
         `Summarize in 1-2 sentences what the coding agent accomplished.`,
       ].filter(Boolean).join("\n");
 
+      // Provenance gate: if this agent task was delegated by the chat
+      // orchestrator, its completion is a workflow continuation that
+      // legitimately drives the dot (eventDriven=false). Otherwise it was
+      // started in the agent window — a reactive summary that must not
+      // repaint the dot (eventDriven=true). The set is currently always
+      // empty (no delegating tool yet), so every event takes the gated
+      // path, matching today's behavior. Consume the entry on completion.
+      const isChatInitiated = this.chatInitiatedAgentTasks.delete(event.sessionId);
+
       // Send as a user message into the main chat — triggers AI response
-      this.enqueueOrSend(sessionId, message);
+      this.enqueueOrSend(sessionId, message, !isChatInitiated);
     } catch (error) {
       console.error(`[ChatSession] handleSessionTaskCompleted error:`, error);
     }
@@ -1934,7 +1975,7 @@ export class ChatSessionManager {
 
   // ---- Message queue (prevents concurrent streams on the same session) ----
 
-  private enqueueOrSend(sessionId: string, content: string): void {
+  private enqueueOrSend(sessionId: string, content: string, eventDriven?: boolean): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.log(`[ChatSession] enqueueOrSend: session ${sessionId} not found, dropping message`);
@@ -1948,14 +1989,14 @@ export class ChatSessionManager {
         queue = [];
         this.messageQueue.set(sessionId, queue);
       }
-      queue.push(content);
+      queue.push({ content, eventDriven });
       console.log(`[ChatSession] Queued message for session ${sessionId} (queue length: ${queue.length})`);
       return;
     }
 
     // No active stream — send immediately
     console.log(`[ChatSession] enqueueOrSend: sending immediately for session ${sessionId} (abortController=null)`);
-    this.sendMessage(sessionId, content).catch((err) => {
+    this.sendMessage(sessionId, content, eventDriven).catch((err) => {
       console.error(`[ChatSession] enqueueOrSend sendMessage error:`, err);
     });
   }
@@ -1971,14 +2012,21 @@ export class ChatSessionManager {
     if (queue.length === 0) this.messageQueue.delete(sessionId);
 
     console.log(`[ChatSession] Draining queued message for session ${sessionId}`);
-    this.sendMessage(sessionId, next).catch((err) => {
+    this.sendMessage(sessionId, next.content, next.eventDriven).catch((err) => {
       console.error(`[ChatSession] drainQueue sendMessage error:`, err);
     });
   }
 
   // ---- Send message & stream AI response ----
 
-  async sendMessage(sessionId: string, content: string): Promise<boolean> {
+  /**
+   * @param eventDriven Explicit turn classification override. When omitted,
+   *   the turn is classified by sniffing the content for a `[X Event]`
+   *   prefix. Callers that know the provenance (e.g. a chat-initiated agent
+   *   completion, which is a workflow continuation despite being an
+   *   `[Agent Event]`) pass it explicitly. Drives orchestrator dot gating.
+   */
+  async sendMessage(sessionId: string, content: string, eventDriven?: boolean): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.log(`[ChatSession] sendMessage: session ${sessionId} not found`);
@@ -2000,8 +2048,10 @@ export class ChatSessionManager {
     // Classify the turn. Reactive system-event turns (executor/agent/
     // terminal/browser) must NOT repaint the orchestrator dot — leave it
     // showing the real subsystem state (e.g. the coding agent's emerald
-    // "completed"). Only user-initiated turns drive violet/cyan.
-    session.eventDrivenTurn = isSystemEventMessage(content);
+    // "completed"). Only user-initiated turns (and chat-initiated agent
+    // continuations) drive violet/cyan. An explicit `eventDriven` from the
+    // caller wins over content sniffing.
+    session.eventDrivenTurn = eventDriven ?? isSystemEventMessage(content);
     // A new turn is starting — clear the prior turn's completion so the
     // dot returns to "main-running" (violet). `complete_task` means "this
     // response is finished, over to you" (cyan); the next turn is fresh
