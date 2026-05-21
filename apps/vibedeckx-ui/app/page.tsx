@@ -107,6 +107,7 @@ export default function Home() {
 
   const {
     activity: branchActivity,
+    since: branchActivitySince,
     refetch: refetchBranchActivity,
     setOptimisticActivity,
   } = useBranchActivity(currentProject?.id ?? null);
@@ -131,14 +132,35 @@ export default function Home() {
     },
     [placeholderSet, projectIdForKey, agentModeForKey],
   );
+  // Epoch ms when the workspace was reset via New Conversation — used to order
+  // the reset against a terminal `main-completed` orchestrator dot so the
+  // green dot only survives a reset that predates it. See
+  // `computeWorkspaceStatuses`.
+  const placeholderSince = useCallback(
+    (branch: string | null) => {
+      if (!projectIdForKey) return undefined;
+      return placeholderSet.get(workspaceKey(projectIdForKey, branch, agentModeForKey));
+    },
+    [placeholderSet, projectIdForKey, agentModeForKey],
+  );
+  const backendSince = useCallback(
+    (branch: string | null) => branchActivitySince.get(toBranchKey(branch)),
+    [branchActivitySince],
+  );
 
   // Compute workspace statuses for all worktrees: SSE-backed activity, with
   // `isPlaceholder` forcing "idle" for branches in placeholder mode. The
   // existing `setOptimisticActivity` calls (send → working) still write
   // directly into the activity map for sub-50ms feedback on other transitions.
+  // `timing` lets a reset that post-dates a `main-completed` keep its gray dot
+  // across a project switch (the orchestrator overlay would otherwise win).
   const workspaceStatuses = useMemo(
-    () => computeWorkspaceStatuses(worktrees, branchActivity, isPlaceholder),
-    [worktrees, branchActivity, isPlaceholder]
+    () =>
+      computeWorkspaceStatuses(worktrees, branchActivity, isPlaceholder, {
+        backendSince,
+        placeholderSince,
+      }),
+    [worktrees, branchActivity, isPlaceholder, backendSince, placeholderSince]
   );
 
   // User just hit send → seed "working" into the activity map ahead of the

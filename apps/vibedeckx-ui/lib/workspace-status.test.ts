@@ -149,7 +149,9 @@ describe("computeWorkspaceStatuses", () => {
     expect(result.get("feat")).toBe("main-running");
   });
 
-  it("isPlaceholder does NOT clobber a live orchestrator main-completed", () => {
+  it("without timing info, keeps main-completed under a placeholder (fallback)", () => {
+    // Conservative pre-timing behavior: with no `since` data to order the
+    // reset against the orchestrator completion, main-completed is kept.
     const backend = new Map<string, WorkspaceStatus>([["feat", "main-completed"]]);
     const result = computeWorkspaceStatuses(
       [makeWorktree("feat")],
@@ -157,6 +159,54 @@ describe("computeWorkspaceStatuses", () => {
       () => true,
     );
     expect(result.get("feat")).toBe("main-completed");
+  });
+
+  it("placeholder set AFTER main-completed wins → idle (the project-switch bug)", () => {
+    // Bug scenario: the chat orchestrator completed (emerald main-completed),
+    // THEN the user clicked New Session in the agent window. The reset is the
+    // newer intent, so the dot must be gray — and stay gray across a project
+    // switch-and-return that replays the cached main-completed.
+    const backend = new Map<string, WorkspaceStatus>([["feat", "main-completed"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat")],
+      backend,
+      () => true,
+      {
+        backendSince: () => 100, // orchestrator completed at t=100
+        placeholderSince: () => 200, // reset at t=200 (later)
+      },
+    );
+    expect(result.get("feat")).toBe("idle");
+  });
+
+  it("main-completed landing AFTER the reset keeps its green dot", () => {
+    // User reset the agent window (placeholder), then drove the chat to
+    // completion. The completion is newer than the reset, so green wins.
+    const backend = new Map<string, WorkspaceStatus>([["feat", "main-completed"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat")],
+      backend,
+      () => true,
+      {
+        backendSince: () => 300, // orchestrator completed at t=300 (later)
+        placeholderSince: () => 200, // reset at t=200
+      },
+    );
+    expect(result.get("feat")).toBe("main-completed");
+  });
+
+  it("main-running always wins over the placeholder regardless of timing", () => {
+    const backend = new Map<string, WorkspaceStatus>([["feat", "main-running"]]);
+    const result = computeWorkspaceStatuses(
+      [makeWorktree("feat")],
+      backend,
+      () => true,
+      {
+        backendSince: () => 100,
+        placeholderSince: () => 999, // reset newer, but live work still wins
+      },
+    );
+    expect(result.get("feat")).toBe("main-running");
   });
 
   it("isPlaceholder returning false leaves backend status intact", () => {

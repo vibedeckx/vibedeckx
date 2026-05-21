@@ -157,11 +157,20 @@ export function useBranchActivity(
   projectId: string | null,
 ): {
   activity: Map<string, BranchActivity>;
+  /**
+   * Per-branch `since` (epoch ms) of the current activity, exposed reactively
+   * so callers can order a backend dot against other timestamps (e.g. a New
+   * Conversation reset vs. a terminal `main-completed`). Mirrors `sinceRef`.
+   */
+  since: Map<string, number>;
   refetch: () => Promise<void>;
   setOptimisticActivity: (branch: string | null, activity: BranchActivity) => void;
 } {
   const [activity, setActivity] = useState<Map<string, BranchActivity>>(new Map());
-  // Shadow map of `since` timestamps for stale-event guarding.
+  const [since, setSince] = useState<Map<string, number>>(new Map());
+  // Shadow map of `since` timestamps for stale-event guarding. Kept in sync
+  // with the `since` state (the ref is read synchronously by the reconcile /
+  // classify helpers; the state drives renders).
   const sinceRef = useRef<Map<string, number>>(new Map());
   // Mirror of `activity` state so REST refetch and the SSE handler can read
   // the current map synchronously (without going through React's render
@@ -176,6 +185,7 @@ export function useBranchActivity(
   const fetchActivity = useCallback(async () => {
     if (!projectId) {
       setActivity(new Map());
+      setSince(new Map());
       activityRef.current = new Map();
       activityProjectRef.current = null;
       sinceRef.current = new Map();
@@ -204,6 +214,7 @@ export function useBranchActivity(
         isFreshProject,
       );
       setActivity(nextActivity);
+      setSince(nextSince);
       activityRef.current = nextActivity;
       activityProjectRef.current = projectId;
       sinceRef.current = nextSince;
@@ -241,6 +252,7 @@ export function useBranchActivity(
         if (outcome.kind === "stale") return;
 
         sinceRef.current.set(outcome.key, evt.since);
+        setSince(new Map(sinceRef.current));
         if (outcome.kind === "redundant") return;
 
         setActivity((prev) => {
@@ -283,6 +295,7 @@ export function useBranchActivity(
       const key = toKey(branch);
       const now = Date.now();
       sinceRef.current.set(key, now);
+      setSince(new Map(sinceRef.current));
       setActivity((prev) => {
         if (prev.get(key) === next) {
           // Map already says this; only bump since (already done above).
@@ -298,5 +311,5 @@ export function useBranchActivity(
     [],
   );
 
-  return { activity, refetch: fetchActivity, setOptimisticActivity };
+  return { activity, since, refetch: fetchActivity, setOptimisticActivity };
 }

@@ -20,37 +20,55 @@ import { useSyncExternalStore } from "react";
 
 const STORAGE_KEY = "vibedeckx:placeholder-workspaces";
 
-function load(): Set<string> {
-  if (typeof window === "undefined") return new Set();
+/**
+ * Map of placeholder key → epoch ms when the reset happened. The timestamp
+ * lets the workspace dot order a reset against a terminal orchestrator
+ * (`main-completed`) state: a reset newer than the completion wins (gray), an
+ * older one yields to the green dot. See `computeWorkspaceStatuses`.
+ */
+function load(): Map<string, number> {
+  if (typeof window === "undefined") return new Map();
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return new Set();
+    if (!raw) return new Map();
     const parsed = JSON.parse(raw);
-    return new Set(
-      Array.isArray(parsed)
-        ? parsed.filter((x): x is string => typeof x === "string")
-        : [],
-    );
+    if (!Array.isArray(parsed)) return new Map();
+    const out = new Map<string, number>();
+    for (const item of parsed) {
+      // Current format: [key, since] entries.
+      if (
+        Array.isArray(item) &&
+        typeof item[0] === "string" &&
+        typeof item[1] === "number"
+      ) {
+        out.set(item[0], item[1]);
+      } else if (typeof item === "string") {
+        // Legacy format: array of bare keys with no timestamp. Treat as a
+        // fresh reset so existing placeholders keep their gray dot.
+        out.set(item, Date.now());
+      }
+    }
+    return out;
   } catch {
-    return new Set();
+    return new Map();
   }
 }
 
-function persist(set: Set<string>): void {
+function persist(map: Map<string, number>): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...set]));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...map]));
   } catch {
     // quota exceeded or private-mode disable — accept loss; placeholder state
     // is best-effort UX, not a correctness requirement.
   }
 }
 
-let state: Set<string> = load();
+let state: Map<string, number> = load();
 const subscribers = new Set<() => void>();
 // Singleton for SSR so `getServerSnapshot` returns a referentially stable
 // value across server renders (required by `useSyncExternalStore`).
-const EMPTY_SNAPSHOT: ReadonlySet<string> = new Set();
+const EMPTY_SNAPSHOT: ReadonlyMap<string, number> = new Map();
 
 function notify(): void {
   for (const cb of subscribers) cb();
@@ -63,11 +81,11 @@ function subscribe(cb: () => void): () => void {
   };
 }
 
-function getSnapshot(): ReadonlySet<string> {
+function getSnapshot(): ReadonlyMap<string, number> {
   return state;
 }
 
-function getServerSnapshot(): ReadonlySet<string> {
+function getServerSnapshot(): ReadonlyMap<string, number> {
   return EMPTY_SNAPSHOT;
 }
 
@@ -83,10 +101,16 @@ export function hasPlaceholder(key: string): boolean {
   return state.has(key);
 }
 
+/** Epoch ms when the placeholder was created, or undefined if not present. */
+export function getPlaceholderSince(key: string): number | undefined {
+  return state.get(key);
+}
+
 export function addPlaceholder(key: string): void {
-  if (state.has(key)) return;
-  const next = new Set(state);
-  next.add(key);
+  // Always (re)stamp with the current time — the reset moment is what the dot
+  // ordering compares against, so a repeat New Conversation refreshes it.
+  const next = new Map(state);
+  next.set(key, Date.now());
   state = next;
   persist(state);
   notify();
@@ -95,7 +119,7 @@ export function addPlaceholder(key: string): void {
 /** Returns true iff the key was present and got removed. */
 export function removePlaceholder(key: string): boolean {
   if (!state.has(key)) return false;
-  const next = new Set(state);
+  const next = new Map(state);
   next.delete(key);
   state = next;
   persist(state);
@@ -103,6 +127,6 @@ export function removePlaceholder(key: string): boolean {
   return true;
 }
 
-export function usePlaceholderWorkspaces(): ReadonlySet<string> {
+export function usePlaceholderWorkspaces(): ReadonlyMap<string, number> {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
