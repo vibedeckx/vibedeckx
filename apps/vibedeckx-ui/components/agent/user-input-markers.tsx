@@ -132,7 +132,7 @@ export function UserInputMarkers({
           style={{ top: `${marker.position * 100}%` }}
         >
           <div
-            className="w-5 h-[3px] rounded-sm bg-primary/50 hover:bg-primary cursor-pointer transition-colors"
+            className="w-4 h-[3px] rounded-sm bg-primary/50 hover:bg-primary cursor-pointer transition-colors"
             onClick={() => handleClick(marker.index)}
             onMouseEnter={() => setHoveredIndex(marker.index)}
             onMouseLeave={() => setHoveredIndex(null)}
