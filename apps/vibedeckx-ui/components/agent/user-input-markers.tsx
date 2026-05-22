@@ -124,7 +124,7 @@ export function UserInputMarkers({
   if (!isOverflowing || markers.length === 0) return null;
 
   return (
-    <div className="absolute right-0 top-0 bottom-0 w-5 z-20 pointer-events-none">
+    <div className="absolute right-0 top-0 bottom-0 w-6 z-20 pointer-events-none">
       {markers.map((marker) => (
         <div
           key={marker.index}
@@ -132,7 +132,7 @@ export function UserInputMarkers({
           style={{ top: `${marker.position * 100}%` }}
         >
           <div
-            className="w-3 h-[3px] rounded-sm bg-primary/50 hover:bg-primary cursor-pointer transition-colors"
+            className="w-5 h-[3px] rounded-sm bg-primary/50 hover:bg-primary cursor-pointer transition-colors"
             onClick={() => handleClick(marker.index)}
             onMouseEnter={() => setHoveredIndex(marker.index)}
             onMouseLeave={() => setHoveredIndex(null)}
