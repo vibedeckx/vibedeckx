@@ -5,10 +5,12 @@ import { BrowserFramesProvider } from "@/components/preview/browser-frames-provi
 import { TerminalSettingsProvider } from "@/hooks/use-terminal-settings";
 import { ConversationSettingsProvider } from "@/hooks/use-conversation-settings";
 import { ThemeProvider } from "@/hooks/use-theme";
+import { ScrollActivity } from "@/components/scroll-activity";
 
 export function ClientProviders({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider>
+      <ScrollActivity />
       <AuthWrapper>
         <TerminalSettingsProvider>
           <ConversationSettingsProvider>

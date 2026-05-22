@@ -163,19 +163,15 @@
   background: transparent;
 }
 
+/* Thumb is faint at rest and deepens to a solid gray only while scrolling
+   (<html class="scrolling"> is toggled by ScrollActivity). Same value in light
+   and dark mode so every scroll area renders identically. */
 ::-webkit-scrollbar-thumb {
-  background: oklch(0.7 0 0 / 25%);
+  background: rgba(127, 127, 127, 0.4);
   border-radius: 3px;
+  transition: background 150ms ease;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0 / 40%);
-}
-
-.dark ::-webkit-scrollbar-thumb {
-  background: oklch(1 0 0 / 15%);
-}
-
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: oklch(1 0 0 / 25%);
+html.scrolling ::-webkit-scrollbar-thumb {
+  background: rgb(127, 127, 127);
 }
