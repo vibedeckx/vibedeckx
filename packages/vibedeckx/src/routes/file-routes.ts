@@ -49,6 +49,44 @@ function isPathSafe(basePath: string, relativePath: string): boolean {
   return resolved.startsWith(normalizedBase + path.sep) || resolved === normalizedBase;
 }
 
+const MAX_REMOTE_UPLOAD_BYTES = 12 * 1024 * 1024; // base64 of these fits under the 16MB JSON bodyLimit
+
+/**
+ * Writes uploaded files into `relativeDir` under `basePath`, overwriting any
+ * existing file of the same name. Each filename is reduced to its basename and
+ * re-checked against path traversal. Returns the list of filenames written.
+ * Throws on traversal, a non-directory target, or a missing target dir.
+ */
+async function writeUploadedFiles(
+  basePath: string,
+  relativeDir: string,
+  files: { name: string; data: Buffer }[],
+): Promise<string[]> {
+  if (!isPathSafe(basePath, relativeDir || ".")) {
+    throw Object.assign(new Error("Path traversal not allowed"), { statusCode: 403 });
+  }
+  const targetDir = relativeDir ? path.resolve(basePath, relativeDir) : basePath;
+
+  const stat = await fs.stat(targetDir); // throws ENOENT/ENOTDIR — mapped by caller
+  if (!stat.isDirectory()) {
+    throw Object.assign(new Error("Target is not a directory"), { statusCode: 400 });
+  }
+
+  const written: string[] = [];
+  for (const file of files) {
+    const name = path.basename(file.name);
+    if (!name || name === "." || name === "..") {
+      throw Object.assign(new Error(`Invalid filename: ${file.name}`), { statusCode: 400 });
+    }
+    if (!isPathSafe(targetDir, name)) {
+      throw Object.assign(new Error("Path traversal not allowed"), { statusCode: 403 });
+    }
+    await fs.writeFile(path.join(targetDir, name), file.data); // overwrites
+    written.push(name);
+  }
+  return written;
+}
+
 async function isBinaryFile(filePath: string): Promise<boolean> {
   const fd = await fs.open(filePath, "r");
   try {
@@ -200,6 +238,45 @@ const routes: FastifyPluginAsync = async (fastify) => {
         .send(stream);
     } catch {
       return reply.code(404).send({ error: "File not found" });
+    }
+  });
+
+  // Upload files (path-based, for remote execution). Receives files as base64
+  // JSON because the remote proxy only forwards JSON bodies.
+  fastify.post<{
+    Body: {
+      path: string;
+      branch?: string;
+      relativePath?: string;
+      files: { name: string; contentBase64: string }[];
+    };
+  }>("/api/path/upload", async (req, reply) => {
+    const { path: projectPath, branch, relativePath, files } = req.body;
+    if (!projectPath) {
+      return reply.code(400).send({ error: "Path is required" });
+    }
+    if (!Array.isArray(files) || files.length === 0) {
+      return reply.code(400).send({ error: "No files provided" });
+    }
+
+    const basePath = resolveWorktreePath(projectPath, branch ?? null);
+    const decoded = files.map((f) => ({ name: f.name, data: Buffer.from(f.contentBase64, "base64") }));
+
+    try {
+      const uploaded = await writeUploadedFiles(basePath, relativePath || "", decoded);
+      return reply.code(200).send({ uploaded });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode;
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return reply.code(404).send({ error: "Target directory not found", code });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return reply.code(403).send({ error: "Permission denied", code });
+      }
+      fastify.log.warn({ err }, "path upload failed");
+      return reply.code(500).send({ error: "Failed to write files", code });
     }
   });
 
