@@ -3,7 +3,6 @@
 import { useEffect } from "react";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { FileTree } from "./file-tree";
 import { FilePreview } from "./file-preview";
@@ -77,25 +76,18 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
       <ResizablePanelGroup direction="horizontal" autoSaveId="files-panels" className="flex-1">
         {/* File tree (left) */}
         <ResizablePanel defaultSize={33} minSize={20}>
-          <ScrollArea className="h-full">
-            {rootLoading && rootEntries.length === 0 ? (
-              <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-                Loading files...
-              </div>
-            ) : (
-              <FileTree
-                entries={rootEntries}
-                expandedDirs={expandedDirs}
-                directoryContents={directoryContents}
-                loadingDirs={loadingDirs}
-                selectedFile={selectedFile}
-                uploadingDirs={uploadingDirs}
-                onToggleDirectory={toggleDirectory}
-                onSelectFile={selectFile}
-                onUploadFiles={uploadFiles}
-              />
-            )}
-          </ScrollArea>
+          <FileTree
+            entries={rootEntries}
+            expandedDirs={expandedDirs}
+            directoryContents={directoryContents}
+            loadingDirs={loadingDirs}
+            selectedFile={selectedFile}
+            uploadingDirs={uploadingDirs}
+            rootLoading={rootLoading}
+            onToggleDirectory={toggleDirectory}
+            onSelectFile={selectFile}
+            onUploadFiles={uploadFiles}
+          />
         </ResizablePanel>
 
         <ResizableHandle withHandle />

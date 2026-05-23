@@ -3,6 +3,7 @@
 import { useState, useCallback } from "react";
 import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Copy, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import type { BrowseEntry } from "@/lib/api";
 
 const CODE_EXTENSIONS = new Set([
@@ -250,6 +251,7 @@ interface FileTreeProps {
   loadingDirs: Set<string>;
   selectedFile: string | null;
   uploadingDirs: Set<string>;
+  rootLoading: boolean;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   onUploadFiles: (dirPath: string, files: File[]) => void;
@@ -262,6 +264,7 @@ export function FileTree({
   loadingDirs,
   selectedFile,
   uploadingDirs,
+  rootLoading,
   onToggleDirectory,
   onSelectFile,
   onUploadFiles,
@@ -270,10 +273,13 @@ export function FileTree({
   const isRootDragOver = dragOverPath === "";
   const isRootUploading = uploadingDirs.has("");
 
+  // The drop zone wraps the whole panel (outside the ScrollArea) so the empty
+  // area below the file list also accepts drops. Folder/file rows stop
+  // propagation, so they capture their own drops before reaching here.
   return (
     <div
       className={cn(
-        "py-1 min-h-full transition-colors",
+        "h-full transition-colors",
         isRootDragOver && "bg-accent/30 outline-2 -outline-offset-2 outline-dashed outline-primary/50",
       )}
       onDragOver={(e) => {
@@ -294,39 +300,47 @@ export function FileTree({
         if (files.length) onUploadFiles("", files);
       }}
     >
-      {isRootUploading && (
-        <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Uploading…
+      <ScrollArea className="h-full">
+        <div className="py-1">
+          {isRootUploading && (
+            <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Uploading…
+            </div>
+          )}
+          {rootLoading && entries.length === 0 ? (
+            <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
+              Loading files...
+            </div>
+          ) : entries.length === 0 ? (
+            <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+              {isRootDragOver ? "Drop files to upload" : "No files found. Drop files here to upload."}
+            </div>
+          ) : (
+            entries.map(entry => {
+              const entryPath = entry.name;
+              return (
+                <FileTreeNode
+                  key={entryPath}
+                  entry={entry}
+                  path={entryPath}
+                  depth={0}
+                  expandedDirs={expandedDirs}
+                  directoryContents={directoryContents}
+                  loadingDirs={loadingDirs}
+                  selectedFile={selectedFile}
+                  uploadingDirs={uploadingDirs}
+                  dragOverPath={dragOverPath}
+                  onToggleDirectory={onToggleDirectory}
+                  onSelectFile={onSelectFile}
+                  onUploadFiles={onUploadFiles}
+                  onSetDragOverPath={setDragOverPath}
+                />
+              );
+            })
+          )}
         </div>
-      )}
-      {entries.length === 0 ? (
-        <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-          {isRootDragOver ? "Drop files to upload" : "No files found. Drop files here to upload."}
-        </div>
-      ) : (
-        entries.map(entry => {
-          const entryPath = entry.name;
-          return (
-            <FileTreeNode
-              key={entryPath}
-              entry={entry}
-              path={entryPath}
-              depth={0}
-              expandedDirs={expandedDirs}
-              directoryContents={directoryContents}
-              loadingDirs={loadingDirs}
-              selectedFile={selectedFile}
-              uploadingDirs={uploadingDirs}
-              dragOverPath={dragOverPath}
-              onToggleDirectory={onToggleDirectory}
-              onSelectFile={onSelectFile}
-              onUploadFiles={onUploadFiles}
-              onSetDragOverPath={setDragOverPath}
-            />
-          );
-        })
-      )}
+      </ScrollArea>
     </div>
   );
 }
