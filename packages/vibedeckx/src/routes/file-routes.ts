@@ -520,6 +520,94 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "File not found" });
     }
   });
+
+  // Upload files into a project directory (project-scoped). Local: multipart
+  // write. Remote: read files into memory and forward as base64 JSON.
+  fastify.post<{
+    Params: { id: string };
+    Querystring: { path?: string; branch?: string; target?: "local" | "remote" };
+  }>("/api/projects/:id/upload", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const relativePath = req.query.path || "";
+    const branch = req.query.branch;
+    const target = req.query.target;
+    const useRemote = target === "remote" || (!target && !project.path);
+
+    // Collect uploaded file parts into buffers.
+    const collected: { name: string; data: Buffer }[] = [];
+    try {
+      for await (const part of req.files()) {
+        const data = await part.toBuffer();
+        collected.push({ name: part.filename, data });
+      }
+    } catch (err) {
+      // @fastify/multipart throws when fileSize limit is exceeded.
+      if ((err as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE") {
+        return reply.code(413).send({ error: "File too large" });
+      }
+      return reply.code(400).send({ error: "Failed to read upload" });
+    }
+    if (collected.length === 0) {
+      return reply.code(400).send({ error: "No files provided" });
+    }
+
+    if (useRemote) {
+      const remoteConfig = getRemoteConfig(fastify, project);
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: "Project has no remote configuration" });
+      }
+      const totalBytes = collected.reduce((sum, f) => sum + f.data.length, 0);
+      if (totalBytes > MAX_REMOTE_UPLOAD_BYTES) {
+        return reply.code(413).send({
+          error: `Upload too large for remote (max ${Math.floor(MAX_REMOTE_UPLOAD_BYTES / (1024 * 1024))}MB total)`,
+        });
+      }
+      const result = await proxyToRemoteAuto(
+        remoteConfig.serverId,
+        remoteConfig.url,
+        remoteConfig.apiKey,
+        "POST",
+        "/api/path/upload",
+        {
+          path: remoteConfig.remotePath,
+          branch,
+          relativePath,
+          files: collected.map((f) => ({ name: f.name, contentBase64: f.data.toString("base64") })),
+        },
+        { reverseConnectManager: fastify.reverseConnectManager },
+      );
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    if (!project.path) {
+      return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    const basePath = resolveWorktreePath(project.path, branch ?? null);
+    try {
+      const uploaded = await writeUploadedFiles(basePath, relativePath, collected);
+      return reply.code(200).send({ uploaded });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode;
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return reply.code(404).send({ error: "Target directory not found", code });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return reply.code(403).send({ error: "Permission denied", code });
+      }
+      fastify.log.warn({ err }, "project upload failed");
+      return reply.code(500).send({ error: "Failed to write files", code });
+    }
+  });
 };
 
 export default fp(routes, { name: "file-routes" });
