@@ -92,7 +92,16 @@ export function UserInputMarkers({
 
   useEffect(() => {
     const contentEl = contentRef.current;
-    if (!contentEl) return;
+    if (!contentEl) {
+      // Content unmounted (e.g. "New Conversation" cleared messages and the
+      // placeholder rendered in its place). Drop stale markers so they don't
+      // linger over the empty state, and force scroll-parent re-resolution
+      // when the conversation remounts.
+      scrollElRef.current = null;
+      setMarkers([]);
+      setIsOverflowing(false);
+      return;
+    }
 
     const scrollEl = findScrollParent(contentEl);
     if (!scrollEl) return;
