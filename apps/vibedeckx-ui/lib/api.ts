@@ -1221,6 +1221,26 @@ export const api = {
     return res.json();
   },
 
+  async deleteFile(
+    projectId: string,
+    filePath: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<{ deleted: string }> {
+    const params = new URLSearchParams({ path: filePath });
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/file?${params.toString()}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(error.error || "Delete failed");
+    }
+    return res.json();
+  },
+
   // Terminal API
   async getTerminals(projectId: string, branch?: string | null): Promise<TerminalSession[]> {
     const params = new URLSearchParams();
