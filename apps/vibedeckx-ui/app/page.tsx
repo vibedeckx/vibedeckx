@@ -25,6 +25,7 @@ import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree } from '@/lib/api';
 import { useGlobalEvents } from '@/hooks/use-global-events';
+import { useStatusSound } from '@/hooks/use-status-sound';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
 import {
@@ -161,6 +162,11 @@ export default function Home() {
       }),
     [worktrees, branchActivity, isPlaceholder, backendSince, placeholderSince]
   );
+
+  // Play a notification sound when any workspace transitions into a completed
+  // state: sound1 for Agent completion (lime dot), sound2 for chat completion
+  // (emerald dot). See `hooks/use-status-sound.ts`.
+  useStatusSound(workspaceStatuses);
 
   // User just hit send → seed "working" into the activity map ahead of the
   // backend's branch:activity event (sub-50ms latency hide). The backend's
