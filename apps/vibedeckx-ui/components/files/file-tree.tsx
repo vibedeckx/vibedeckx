@@ -4,6 +4,17 @@ import { useState, useCallback } from "react";
 import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Copy, Check, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { buttonVariants } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import type { BrowseEntry } from "@/lib/api";
 
 const CODE_EXTENSIONS = new Set([
@@ -95,30 +106,23 @@ function DeleteButton({
   entryPath,
   type,
   deleting,
-  onDeleteEntry,
+  onRequestDelete,
 }: {
   entryPath: string;
   type: "file" | "directory";
   deleting: boolean;
-  onDeleteEntry: (entryPath: string, type: "file" | "directory") => void;
+  onRequestDelete: (entryPath: string, type: "file" | "directory") => void;
 }) {
-  const handleDelete = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    const name = entryPath.includes("/") ? entryPath.slice(entryPath.lastIndexOf("/") + 1) : entryPath;
-    const message = type === "directory"
-      ? `Delete "${name}" and all its contents? This can't be undone.`
-      : `Delete "${name}"? This can't be undone.`;
-    if (!window.confirm(message)) return;
-    onDeleteEntry(entryPath, type);
-  }, [entryPath, type, onDeleteEntry]);
-
   if (deleting) {
     return <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />;
   }
 
   return (
     <button
-      onClick={handleDelete}
+      onClick={(e) => {
+        e.stopPropagation();
+        onRequestDelete(entryPath, type);
+      }}
       className="p-0.5 rounded hover:bg-destructive/20 transition-colors"
       title={`Delete ${entryPath}`}
       aria-label={`Delete ${entryPath}`}
@@ -143,7 +147,7 @@ interface FileTreeNodeProps {
   onSelectFile: (path: string) => void;
   onUploadFiles: (dirPath: string, files: File[]) => void;
   onSetDragOverPath: (path: string | null) => void;
-  onDeleteEntry: (entryPath: string, type: "file" | "directory") => void;
+  onRequestDelete: (entryPath: string, type: "file" | "directory") => void;
 }
 
 function FileTreeNode({
@@ -161,7 +165,7 @@ function FileTreeNode({
   onSelectFile,
   onUploadFiles,
   onSetDragOverPath,
-  onDeleteEntry,
+  onRequestDelete,
 }: FileTreeNodeProps) {
   const isExpanded = expandedDirs.has(nodePath);
   const isLoading = loadingDirs.has(nodePath);
@@ -209,7 +213,7 @@ function FileTreeNode({
           </div>
           <div className={cn("shrink-0 ml-1 items-center gap-1", isDeleting ? "flex" : "hidden group-hover:flex")}>
             <CopyPathButton path={nodePath} />
-            <DeleteButton entryPath={nodePath} type="directory" deleting={isDeleting} onDeleteEntry={onDeleteEntry} />
+            <DeleteButton entryPath={nodePath} type="directory" deleting={isDeleting} onRequestDelete={onRequestDelete} />
           </div>
         </div>
         {isExpanded && children && (
@@ -233,7 +237,7 @@ function FileTreeNode({
                   onSelectFile={onSelectFile}
                   onUploadFiles={onUploadFiles}
                   onSetDragOverPath={onSetDragOverPath}
-                  onDeleteEntry={onDeleteEntry}
+                  onRequestDelete={onRequestDelete}
                 />
               );
             })}
@@ -284,7 +288,7 @@ function FileTreeNode({
         </span>
         <div className={cn("items-center gap-1", isDeleting ? "flex" : "hidden group-hover:flex")}>
           <CopyPathButton path={nodePath} />
-          <DeleteButton entryPath={nodePath} type="file" deleting={isDeleting} onDeleteEntry={onDeleteEntry} />
+          <DeleteButton entryPath={nodePath} type="file" deleting={isDeleting} onRequestDelete={onRequestDelete} />
         </div>
       </div>
     </div>
@@ -321,8 +325,17 @@ export function FileTree({
   onDeleteEntry,
 }: FileTreeProps) {
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ path: string; type: "file" | "directory" } | null>(null);
   const isRootDragOver = dragOverPath === "";
   const isRootUploading = uploadingDirs.has("");
+
+  const requestDelete = useCallback((path: string, type: "file" | "directory") => {
+    setPendingDelete({ path, type });
+  }, []);
+
+  const pendingName = pendingDelete
+    ? (pendingDelete.path.includes("/") ? pendingDelete.path.slice(pendingDelete.path.lastIndexOf("/") + 1) : pendingDelete.path)
+    : "";
 
   // The drop zone wraps the whole panel (outside the ScrollArea) so the empty
   // area below the file list also accepts drops. Folder/file rows stop
@@ -387,13 +400,52 @@ export function FileTree({
                   onSelectFile={onSelectFile}
                   onUploadFiles={onUploadFiles}
                   onSetDragOverPath={setDragOverPath}
-                  onDeleteEntry={onDeleteEntry}
+                  onRequestDelete={requestDelete}
                 />
               );
             })
           )}
         </div>
       </ScrollArea>
+
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {pendingDelete?.type === "directory" ? "folder" : "file"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete?.type === "directory" ? (
+                <>
+                  <span className="font-medium text-foreground">{pendingName}</span> and all its
+                  contents will be permanently deleted. This can&apos;t be undone.
+                </>
+              ) : (
+                <>
+                  <span className="font-medium text-foreground">{pendingName}</span> will be
+                  permanently deleted. This can&apos;t be undone.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "destructive" })}
+              onClick={() => {
+                if (pendingDelete) onDeleteEntry(pendingDelete.path, pendingDelete.type);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
