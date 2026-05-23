@@ -44,6 +44,12 @@ export class ClaudeCodeProvider implements AgentProvider {
       "--output-format=stream-json",
       "--input-format=stream-json",
       permissionFlag,
+      // AskUserQuestion can't work over piped (non-TTY) stdin: claude resolves it
+      // internally as "dismissed" before we can present a picker and wait for the
+      // user. Disable it so the agent falls back to asking in plain text, which the
+      // user answers through the normal conversation input.
+      "--disallowedTools",
+      "AskUserQuestion",
       "--verbose",
     ];
 
