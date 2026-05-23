@@ -331,6 +331,10 @@ export interface FileContentResponse {
   size: number;
 }
 
+export interface UploadResponse {
+  uploaded: string[];
+}
+
 export interface ProxyConfig {
   type: 'none' | 'http' | 'socks5';
   host: string;
@@ -1185,6 +1189,36 @@ export const api = {
     if (branch) params.set("branch", branch);
     if (target) params.set("target", target);
     return `${getApiBase()}/api/projects/${projectId}/file-download?${params.toString()}`;
+  },
+
+  async uploadFiles(
+    projectId: string,
+    files: File[],
+    targetPath: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<UploadResponse> {
+    const params = new URLSearchParams();
+    if (targetPath) params.set("path", targetPath);
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+    const query = params.toString() ? `?${params.toString()}` : "";
+
+    const form = new FormData();
+    for (const file of files) {
+      form.append("file", file, file.name);
+    }
+
+    // Do NOT set Content-Type — the browser sets the multipart boundary.
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/upload${query}`, {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(error.error || "Upload failed");
+    }
+    return res.json();
   },
 
   // Terminal API
