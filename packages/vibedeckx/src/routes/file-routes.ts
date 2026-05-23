@@ -658,6 +658,74 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(500).send({ error: "Failed to write files", code });
     }
   });
+
+  // Delete a file or directory in a project (project-scoped). Local: fs.rm.
+  // Remote: proxy to the path-based delete route.
+  fastify.delete<{
+    Params: { id: string };
+    Querystring: { path: string; branch?: string; target?: "local" | "remote" };
+  }>("/api/projects/:id/file", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const filePath = req.query.path;
+    if (!filePath) {
+      return reply.code(400).send({ error: "File path is required" });
+    }
+
+    const branch = req.query.branch;
+    const target = req.query.target;
+    const useRemote = target === "remote" || (!target && !project.path);
+
+    if (useRemote) {
+      const remoteConfig = getRemoteConfig(fastify, project);
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: "Project has no remote configuration" });
+      }
+      const params = [
+        `path=${encodeURIComponent(remoteConfig.remotePath)}`,
+        `filePath=${encodeURIComponent(filePath)}`,
+      ];
+      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
+      const result = await proxyToRemoteAuto(
+        remoteConfig.serverId,
+        remoteConfig.url,
+        remoteConfig.apiKey,
+        "DELETE",
+        `/api/path/delete?${params.join("&")}`,
+        undefined,
+        { reverseConnectManager: fastify.reverseConnectManager },
+      );
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    if (!project.path) {
+      return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    const basePath = resolveWorktreePath(project.path, branch ?? null);
+    try {
+      const deleted = await deletePath(basePath, filePath);
+      return reply.code(200).send({ deleted });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode;
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return reply.code(404).send({ error: "File or directory not found", code });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return reply.code(403).send({ error: "Permission denied", code });
+      }
+      fastify.log.warn({ err }, "project delete failed");
+      return reply.code(500).send({ error: "Failed to delete", code });
+    }
+  });
 };
 
 export default fp(routes, { name: "file-routes" });
