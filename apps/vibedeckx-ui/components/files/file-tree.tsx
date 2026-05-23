@@ -436,7 +436,7 @@ export function FileTree({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className={buttonVariants({ variant: "destructive" })}
+              className={cn(buttonVariants({ variant: "destructive" }), "border-transparent")}
               onClick={() => {
                 if (pendingDelete) onDeleteEntry(pendingDelete.path, pendingDelete.type);
               }}
