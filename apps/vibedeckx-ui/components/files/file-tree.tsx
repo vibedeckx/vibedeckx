@@ -44,6 +44,14 @@ function formatRelativeTime(isoDate: string): string {
   return new Date(isoDate).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function dragHasFiles(e: React.DragEvent): boolean {
+  return Array.from(e.dataTransfer.types).includes("Files");
+}
+
+function dragFiles(e: React.DragEvent): File[] {
+  return Array.from(e.dataTransfer.files);
+}
+
 function CopyPathButton({ path }: { path: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -77,8 +85,12 @@ interface FileTreeNodeProps {
   directoryContents: Map<string, BrowseEntry[]>;
   loadingDirs: Set<string>;
   selectedFile: string | null;
+  uploadingDirs: Set<string>;
+  dragOverPath: string | null;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
+  onUploadFiles: (dirPath: string, files: File[]) => void;
+  onSetDragOverPath: (path: string | null) => void;
 }
 
 function FileTreeNode({
@@ -89,8 +101,12 @@ function FileTreeNode({
   directoryContents,
   loadingDirs,
   selectedFile,
+  uploadingDirs,
+  dragOverPath,
   onToggleDirectory,
   onSelectFile,
+  onUploadFiles,
+  onSetDragOverPath,
 }: FileTreeNodeProps) {
   const isExpanded = expandedDirs.has(nodePath);
   const isLoading = loadingDirs.has(nodePath);
@@ -99,16 +115,35 @@ function FileTreeNode({
   if (entry.type === "directory") {
     const FolderIcon = isExpanded ? FolderOpen : Folder;
     const ChevronIcon = isExpanded ? ChevronDown : ChevronRight;
+    const isDragOver = dragOverPath === nodePath;
+    const isUploading = uploadingDirs.has(nodePath);
 
     return (
       <div>
         <div
-          className="group flex items-center w-full px-2 py-1 text-sm rounded-sm hover:bg-accent transition-colors cursor-pointer"
+          className={cn(
+            "group flex items-center w-full px-2 py-1 text-sm rounded-sm transition-colors cursor-pointer",
+            isDragOver ? "bg-primary/15 outline-2 -outline-offset-2 outline-dashed outline-primary/60" : "hover:bg-accent",
+          )}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
           onClick={() => onToggleDirectory(nodePath)}
+          onDragOver={(e) => {
+            if (!dragHasFiles(e)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            onSetDragOverPath(nodePath);
+          }}
+          onDrop={(e) => {
+            if (!dragHasFiles(e)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            onSetDragOverPath(null);
+            const files = dragFiles(e);
+            if (files.length) onUploadFiles(nodePath, files);
+          }}
         >
           <div className="flex items-center gap-1 min-w-0 flex-1">
-            {isLoading ? (
+            {isUploading || isLoading ? (
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
             ) : (
               <ChevronIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -134,8 +169,12 @@ function FileTreeNode({
                   directoryContents={directoryContents}
                   loadingDirs={loadingDirs}
                   selectedFile={selectedFile}
+                  uploadingDirs={uploadingDirs}
+                  dragOverPath={dragOverPath}
                   onToggleDirectory={onToggleDirectory}
                   onSelectFile={onSelectFile}
+                  onUploadFiles={onUploadFiles}
+                  onSetDragOverPath={onSetDragOverPath}
                 />
               );
             })}
@@ -182,8 +221,10 @@ interface FileTreeProps {
   directoryContents: Map<string, BrowseEntry[]>;
   loadingDirs: Set<string>;
   selectedFile: string | null;
+  uploadingDirs: Set<string>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
+  onUploadFiles: (dirPath: string, files: File[]) => void;
 }
 
 export function FileTree({
@@ -192,36 +233,72 @@ export function FileTree({
   directoryContents,
   loadingDirs,
   selectedFile,
+  uploadingDirs,
   onToggleDirectory,
   onSelectFile,
+  onUploadFiles,
 }: FileTreeProps) {
-  if (entries.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-        No files found.
-      </div>
-    );
-  }
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const isRootDragOver = dragOverPath === "";
+  const isRootUploading = uploadingDirs.has("");
 
   return (
-    <div className="py-1">
-      {entries.map(entry => {
-        const entryPath = entry.name;
-        return (
-          <FileTreeNode
-            key={entryPath}
-            entry={entry}
-            path={entryPath}
-            depth={0}
-            expandedDirs={expandedDirs}
-            directoryContents={directoryContents}
-            loadingDirs={loadingDirs}
-            selectedFile={selectedFile}
-            onToggleDirectory={onToggleDirectory}
-            onSelectFile={onSelectFile}
-          />
-        );
-      })}
+    <div
+      className={cn(
+        "py-1 min-h-full transition-colors",
+        isRootDragOver && "bg-accent/30 outline-2 -outline-offset-2 outline-dashed outline-primary/50",
+      )}
+      onDragOver={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        setDragOverPath("");
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setDragOverPath(null);
+        }
+      }}
+      onDrop={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        setDragOverPath(null);
+        const files = dragFiles(e);
+        if (files.length) onUploadFiles("", files);
+      }}
+    >
+      {isRootUploading && (
+        <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Uploading…
+        </div>
+      )}
+      {entries.length === 0 ? (
+        <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+          {isRootDragOver ? "Drop files to upload" : "No files found. Drop files here to upload."}
+        </div>
+      ) : (
+        entries.map(entry => {
+          const entryPath = entry.name;
+          return (
+            <FileTreeNode
+              key={entryPath}
+              entry={entry}
+              path={entryPath}
+              depth={0}
+              expandedDirs={expandedDirs}
+              directoryContents={directoryContents}
+              loadingDirs={loadingDirs}
+              selectedFile={selectedFile}
+              uploadingDirs={uploadingDirs}
+              dragOverPath={dragOverPath}
+              onToggleDirectory={onToggleDirectory}
+              onSelectFile={onSelectFile}
+              onUploadFiles={onUploadFiles}
+              onSetDragOverPath={setDragOverPath}
+            />
+          );
+        })
+      )}
     </div>
   );
 }
