@@ -49,7 +49,9 @@ function isPathSafe(basePath: string, relativePath: string): boolean {
   return resolved.startsWith(normalizedBase + path.sep) || resolved === normalizedBase;
 }
 
-const MAX_REMOTE_UPLOAD_BYTES = 12 * 1024 * 1024; // base64 of these fits under the 16MB JSON bodyLimit
+// base64 inflates ~33%, so 11MB → ~14.7MB encoded, leaving headroom under the
+// remote server's 16MB JSON bodyLimit for the surrounding JSON envelope.
+const MAX_REMOTE_UPLOAD_BYTES = 11 * 1024 * 1024;
 
 /**
  * Writes uploaded files into `relativeDir` under `basePath`, overwriting any

@@ -49,6 +49,19 @@ function dragHasFiles(e: React.DragEvent): boolean {
 }
 
 function dragFiles(e: React.DragEvent): File[] {
+  const items = e.dataTransfer.items;
+  // Prefer the items API so we can skip dropped directories (files only).
+  if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === "function") {
+    const files: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind !== "file") continue;
+      const entry = item.webkitGetAsEntry();
+      if (entry?.isDirectory) continue; // ignore dropped folders
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    return files;
+  }
   return Array.from(e.dataTransfer.files);
 }
 
@@ -186,6 +199,7 @@ function FileTreeNode({
 
   const FileIcon = getFileIcon(entry.name);
   const isSelected = selectedFile === nodePath;
+  const parentPath = nodePath.includes("/") ? nodePath.slice(0, nodePath.lastIndexOf("/")) : "";
 
   return (
     <div
@@ -195,6 +209,20 @@ function FileTreeNode({
       )}
       style={{ paddingLeft: `${depth * 16 + 8 + 18}px` }}
       onClick={() => onSelectFile(nodePath)}
+      onDragOver={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onSetDragOverPath(parentPath);
+      }}
+      onDrop={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onSetDragOverPath(null);
+        const files = dragFiles(e);
+        if (files.length) onUploadFiles(parentPath, files);
+      }}
     >
       <div className="flex items-center gap-1 min-w-0 flex-1">
         <FileIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
