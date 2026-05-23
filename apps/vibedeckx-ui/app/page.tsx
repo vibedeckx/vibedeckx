@@ -163,11 +163,12 @@ export default function Home() {
     [worktrees, branchActivity, isPlaceholder, backendSince, placeholderSince]
   );
 
-  // Play a notification sound when any workspace transitions into a completed
-  // state: sound1 for Agent completion (lime dot), sound2 for chat completion
-  // (emerald dot). Passing the project id resets the baseline on project switch
-  // so already-completed workspaces don't sound. See `hooks/use-status-sound.ts`.
-  useStatusSound(workspaceStatuses, currentProject?.id ?? null);
+  // Play a notification sound when any workspace (in any project) transitions
+  // into a completed state: sound1 for Agent completion (lime dot), sound2 for
+  // chat completion (emerald dot). Listens to the global SSE stream directly so
+  // background-project completions still sound and project switches stay
+  // silent. See `hooks/use-status-sound.ts`.
+  useStatusSound();
 
   // User just hit send → seed "working" into the activity map ahead of the
   // backend's branch:activity event (sub-50ms latency hide). The backend's
