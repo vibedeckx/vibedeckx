@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Plus, Terminal, FolderPlus, Monitor, Cloud } from "lucide-react";
 import { ExecutorItem } from "./executor-item";
 import { ExecutorForm } from "./executor-form";
@@ -186,7 +185,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
         )}
       </div>
 
-      <ScrollArea className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-y-auto">
         <div className="p-4 space-y-3">
           {loading ? (
             <div className="text-center text-muted-foreground py-8">
@@ -245,7 +244,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
             </DndContext>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       <ExecutorForm
         open={createDialogOpen}
