@@ -165,8 +165,9 @@ export default function Home() {
 
   // Play a notification sound when any workspace transitions into a completed
   // state: sound1 for Agent completion (lime dot), sound2 for chat completion
-  // (emerald dot). See `hooks/use-status-sound.ts`.
-  useStatusSound(workspaceStatuses);
+  // (emerald dot). Passing the project id resets the baseline on project switch
+  // so already-completed workspaces don't sound. See `hooks/use-status-sound.ts`.
+  useStatusSound(workspaceStatuses, currentProject?.id ?? null);
 
   // User just hit send → seed "working" into the activity map ahead of the
   // backend's branch:activity event (sub-50ms latency hide). The backend's

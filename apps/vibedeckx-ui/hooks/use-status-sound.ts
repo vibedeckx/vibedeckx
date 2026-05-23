@@ -14,33 +14,54 @@ const SOUND_FOR_STATUS: Partial<Record<WorkspaceStatus, string>> = {
 
 /**
  * Plays a notification sound whenever any workspace *transitions into* a
- * completed status. Watches the computed status map and compares each branch
- * against its previous value, so a sound fires once per completion (not on
- * every recompute) and across every workspace, not just the selected one.
+ * completed status. A sound fires once per completion (not on every recompute)
+ * and across every workspace, not just the selected one.
  *
- * The first run after mount only seeds the baseline — a workspace that is
- * already "completed" on page load stays silent.
+ * Two guards keep project switches and page loads silent — neither should
+ * announce workspaces that were *already* completed:
+ *
+ *   1. On mount and on every `projectId` change, the baseline is reset to an
+ *      *empty* map. Switching projects swaps the whole branch set, and the
+ *      orchestrator dot shares the empty-string branch key across all projects,
+ *      so a stale baseline would diff across projects and false-fire. Clearing
+ *      it drops those cross-project keys.
+ *   2. A sound only fires for an *observed* transition: the branch must have
+ *      been seen in a non-completed state first. A branch that appears already
+ *      "completed" (prev value undefined) is recorded silently. This covers the
+ *      window after a reset/switch while the new project's data streams in.
+ *
+ * Together: a genuine completion you watched happen (working → completed) plays;
+ * a workspace that was already done when you arrived stays quiet.
  */
-export function useStatusSound(statuses: Map<string, WorkspaceStatus>) {
-  const prevRef = useRef<Map<string, WorkspaceStatus> | null>(null);
+export function useStatusSound(
+  statuses: Map<string, WorkspaceStatus>,
+  projectId: string | null,
+) {
+  const prevRef = useRef<Map<string, WorkspaceStatus>>(new Map());
+  const projectRef = useRef<string | null>(null);
   const audioCache = useRef<Map<string, HTMLAudioElement>>(new Map());
 
   useEffect(() => {
-    const prev = prevRef.current;
-    if (prev === null) {
-      prevRef.current = new Map(statuses);
-      return;
+    if (projectRef.current !== projectId) {
+      // New project (or first mount): drop the previous project's baseline so
+      // its branches — and the shared orchestrator key — can't diff across the
+      // switch. The new project's statuses are recorded silently below.
+      projectRef.current = projectId;
+      prevRef.current = new Map();
     }
 
+    const prev = prevRef.current;
     for (const [branch, status] of statuses) {
       const src = SOUND_FOR_STATUS[status];
       if (!src) continue;
-      if (prev.get(branch) === status) continue; // no transition into completed
+      const prevStatus = prev.get(branch);
+      if (prevStatus === undefined) continue; // first sighting — record, don't sound
+      if (prevStatus === status) continue; // no transition into completed
       playSound(src, audioCache.current);
     }
 
     prevRef.current = new Map(statuses);
-  }, [statuses]);
+  }, [statuses, projectId]);
 }
 
 function playSound(src: string, cache: Map<string, HTMLAudioElement>) {
