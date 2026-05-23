@@ -2,6 +2,7 @@ import fastify from "fastify";
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { fastifyStatic } from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
+import fastifyMultipart from "@fastify/multipart";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { Storage } from "./storage/types.js";
@@ -223,6 +224,11 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   // Register plugins and routes
   server.register(sharedServices, { storage: opts.storage });
   server.register(fastifyWebsocket);
+  // Multipart uploads (Files page drag-and-drop). 50MB per-file cap; the
+  // remote-upload path is further bounded by the 16MB JSON bodyLimit.
+  server.register(fastifyMultipart, {
+    limits: { fileSize: 50 * 1024 * 1024, files: 50 },
+  });
 
   // Conditionally register Clerk auth for API routes when auth is enabled.
   // We use a manual preHandler instead of clerkPlugin because clerkPlugin uses fp()
