@@ -89,6 +89,23 @@ async function writeUploadedFiles(
   return written;
 }
 
+/**
+ * Deletes the file or directory at `relativePath` under `basePath`. Directories
+ * are removed recursively. Returns the deleted relative path. Throws on
+ * traversal, an attempt to delete the root, or a missing entry (ENOENT).
+ */
+async function deletePath(basePath: string, relativePath: string): Promise<string> {
+  if (!relativePath || relativePath === ".") {
+    throw Object.assign(new Error("Cannot delete the workspace root"), { statusCode: 400 });
+  }
+  if (!isPathSafe(basePath, relativePath)) {
+    throw Object.assign(new Error("Path traversal not allowed"), { statusCode: 403 });
+  }
+  const fullPath = path.resolve(basePath, relativePath);
+  await fs.rm(fullPath, { recursive: true, force: false }); // throws ENOENT if missing
+  return relativePath;
+}
+
 async function isBinaryFile(filePath: string): Promise<boolean> {
   const fd = await fs.open(filePath, "r");
   try {
@@ -279,6 +296,37 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       fastify.log.warn({ err }, "path upload failed");
       return reply.code(500).send({ error: "Failed to write files", code });
+    }
+  });
+
+  // Delete a file or directory (path-based, for remote execution).
+  fastify.delete<{
+    Querystring: { path: string; filePath: string; branch?: string };
+  }>("/api/path/delete", async (req, reply) => {
+    const projectPath = req.query.path;
+    const filePath = req.query.filePath;
+    if (!projectPath || !filePath) {
+      return reply.code(400).send({ error: "Path and filePath are required" });
+    }
+
+    const branch = req.query.branch;
+    const basePath = resolveWorktreePath(projectPath, branch ?? null);
+
+    try {
+      const deleted = await deletePath(basePath, filePath);
+      return reply.code(200).send({ deleted });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode;
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return reply.code(404).send({ error: "File or directory not found", code });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return reply.code(403).send({ error: "Permission denied", code });
+      }
+      fastify.log.warn({ err }, "path delete failed");
+      return reply.code(500).send({ error: "Failed to delete", code });
     }
   });
 
