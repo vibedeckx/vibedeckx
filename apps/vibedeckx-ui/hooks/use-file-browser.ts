@@ -22,6 +22,8 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   // Track which directories are currently receiving an upload ("" = root)
   const [uploadingDirs, setUploadingDirs] = useState<Set<string>>(new Set());
+  // Track which entry paths are currently being deleted
+  const [deletingPaths, setDeletingPaths] = useState<Set<string>>(new Set());
   // Track the last fetched params to detect stale results
   const fetchKeyRef = useRef(0);
 
@@ -148,6 +150,37 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     }
   }, [projectId, branch, target, refreshDirectory]);
 
+  // Delete a file or directory, then refresh its parent and clear the preview
+  // if the deleted entry (or something inside it) was selected.
+  const deleteEntry = useCallback(async (entryPath: string) => {
+    if (!projectId || !entryPath) return;
+    setDeletingPaths(prev => new Set(prev).add(entryPath));
+    try {
+      await api.deleteFile(projectId, entryPath, branch, target);
+      setSelectedFile(prev => {
+        if (prev === entryPath || (prev && prev.startsWith(`${entryPath}/`))) {
+          setFileContent(null);
+          return null;
+        }
+        return prev;
+      });
+      const parent = entryPath.includes("/") ? entryPath.slice(0, entryPath.lastIndexOf("/")) : "";
+      await refreshDirectory(parent);
+      toast.success("Deleted");
+    } catch (err) {
+      console.error("Failed to delete:", err);
+      toast.error("Delete failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setDeletingPaths(prev => {
+        const next = new Set(prev);
+        next.delete(entryPath);
+        return next;
+      });
+    }
+  }, [projectId, branch, target, refreshDirectory]);
+
   return {
     rootEntries,
     directoryContents,
@@ -158,10 +191,12 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     rootLoading,
     loadingDirs,
     uploadingDirs,
+    deletingPaths,
     fetchRoot,
     toggleDirectory,
     selectFile,
     uploadFiles,
     refreshDirectory,
+    deleteEntry,
   };
 }
