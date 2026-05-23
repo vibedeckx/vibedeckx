@@ -163,14 +163,22 @@
   background: transparent;
 }
 
-/* Thumb is faint at rest and deepens to a solid gray only while scrolling.
-   ScrollActivity adds the `scrolling` class to the element actually being
-   scrolled, so only that container's scrollbar deepens. Same value in light
-   and dark mode so every scroll area renders identically. */
+/* Thumb is a solid light gray at rest and deepens to a darker gray only while
+   scrolling. The resting color is opaque (not translucent) so it renders the
+   same RGB regardless of the background behind it — every scroll area looks
+   identical. ScrollActivity adds the `scrolling` class to the element actually
+   being scrolled, so only that container's scrollbar deepens. */
 ::-webkit-scrollbar-thumb {
-  background: rgba(127, 127, 127, 0.4);
+  background: rgb(201, 202, 203);
   border-radius: 3px;
   transition: background 150ms ease;
+}
+
+/* Dark mode: the resting light gray would glare against the dark background, so
+   use a subtle gray that sits just above the background. Also opaque, so it
+   renders the same RGB across every scroll area. */
+.dark ::-webkit-scrollbar-thumb {
+  background: rgb(82, 82, 82);
 }
 
 .scrolling::-webkit-scrollbar-thumb {
