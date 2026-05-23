@@ -237,12 +237,32 @@ export function useBranchActivity(
     const url = `${getApiBase()}/api/events${tokenParam}`;
     const es = new EventSource(url);
 
+    // [dot-delay-debug] Temporary instrumentation — pair with
+    // [sound-delay-debug] in use-status-sound.ts. Same event (matched by
+    // `since`) lands on both connections; comparing latencyMs reveals whether
+    // the green dot's connection got it promptly while the sound's lagged.
+    // Remove once the sound-delay root cause is confirmed.
+    es.onopen = () => console.log(`[dot-delay-debug] onopen t=${Date.now()}`);
+    es.addEventListener("error", () =>
+      console.log(
+        `[dot-delay-debug] onerror t=${Date.now()} readyState=${es.readyState}`,
+      ),
+    );
+
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as { type?: string };
         if (data.type !== "branch:activity") return;
         const evt = data as BranchActivityEvent;
         if (evt.projectId !== projectId) return;
+
+        // [dot-delay-debug] latency = backend-emit (`since`) → arrival here.
+        const nowDot = Date.now();
+        console.log(
+          `[dot-delay-debug] recv activity=${evt.activity} ` +
+            `branch=${evt.branch ?? "(null)"} since=${evt.since} ` +
+            `now=${nowDot} latencyMs=${nowDot - evt.since}`,
+        );
 
         const outcome = classifyActivityEvent(
           evt,

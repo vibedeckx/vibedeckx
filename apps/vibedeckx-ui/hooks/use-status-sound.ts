@@ -70,6 +70,19 @@ export function useStatusSound() {
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
     const es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
 
+    // [sound-delay-debug] Temporary instrumentation to distinguish H2 (TCP
+    // flush delay: event arrives late with NO reconnect) from H1 (reconnect +
+    // missed event: onerror/onopen fire around the gap). Remove once root
+    // cause is confirmed. Compare timestamps against [dot-delay-debug] in
+    // use-branch-activity.ts — both connections receive the same event with
+    // the same `since`, so the latency skew between them is the smoking gun.
+    es.onopen = () =>
+      console.log(`[sound-delay-debug] onopen t=${Date.now()}`);
+    es.onerror = () =>
+      console.log(
+        `[sound-delay-debug] onerror t=${Date.now()} readyState=${es.readyState}`,
+      );
+
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as { type?: string };
@@ -81,6 +94,14 @@ export function useStatusSound() {
         lastActivity.current.set(key, evt.activity);
 
         const src = SOUND_FOR_ACTIVITY[evt.activity];
+        // [sound-delay-debug] latency = backend-emit (`since`) → arrival here.
+        const now = Date.now();
+        console.log(
+          `[sound-delay-debug] recv activity=${evt.activity} key=${key} ` +
+            `since=${evt.since} now=${now} latencyMs=${now - evt.since} ` +
+            `changed=${changed} willPlay=${Boolean(src && changed)}`,
+        );
+
         if (src && changed) playSound(src, audioCache.current);
       } catch {
         // Ignore parse errors (e.g. keepalive comments)
