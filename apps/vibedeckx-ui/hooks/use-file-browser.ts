@@ -20,6 +20,8 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
   const [rootLoading, setRootLoading] = useState(false);
   // Track which directories are currently loading
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
+  // Track which directories are currently receiving an upload ("" = root)
+  const [uploadingDirs, setUploadingDirs] = useState<Set<string>>(new Set());
   // Track the last fetched params to detect stale results
   const fetchKeyRef = useRef(0);
 
@@ -103,6 +105,49 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     }
   }, [projectId, branch, target]);
 
+  // Re-fetch a single directory's listing without resetting tree state.
+  // dirPath "" refreshes the root.
+  const refreshDirectory = useCallback(async (dirPath: string) => {
+    if (!projectId) return;
+    if (dirPath === "") {
+      const result = await api.browseProjectDirectory(projectId, undefined, branch, target);
+      setRootEntries(result.items);
+    } else {
+      const result = await api.browseProjectDirectory(projectId, dirPath, branch, target);
+      setDirectoryContents(prev => {
+        const next = new Map(prev);
+        next.set(dirPath, result.items);
+        return next;
+      });
+    }
+  }, [projectId, branch, target]);
+
+  // Upload files into dirPath ("" = root), then refresh that directory.
+  const uploadFiles = useCallback(async (dirPath: string, files: File[]) => {
+    if (!projectId || files.length === 0) return;
+    setUploadingDirs(prev => new Set(prev).add(dirPath));
+    try {
+      const { uploaded } = await api.uploadFiles(projectId, files, dirPath, branch, target);
+      // Expand the folder so newly uploaded files are visible.
+      if (dirPath !== "") {
+        setExpandedDirs(prev => new Set(prev).add(dirPath));
+      }
+      await refreshDirectory(dirPath);
+      toast.success(`Uploaded ${uploaded.length} file${uploaded.length === 1 ? "" : "s"}`);
+    } catch (err) {
+      console.error("Failed to upload files:", err);
+      toast.error("Upload failed", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setUploadingDirs(prev => {
+        const next = new Set(prev);
+        next.delete(dirPath);
+        return next;
+      });
+    }
+  }, [projectId, branch, target, refreshDirectory]);
+
   return {
     rootEntries,
     directoryContents,
@@ -112,8 +157,11 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     fileLoading,
     rootLoading,
     loadingDirs,
+    uploadingDirs,
     fetchRoot,
     toggleDirectory,
     selectFile,
+    uploadFiles,
+    refreshDirectory,
   };
 }
