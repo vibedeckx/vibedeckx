@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Copy, Check } from "lucide-react";
+import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Copy, Check, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { BrowseEntry } from "@/lib/api";
@@ -91,6 +91,43 @@ function CopyPathButton({ path }: { path: string }) {
   );
 }
 
+function DeleteButton({
+  entryPath,
+  type,
+  deleting,
+  onDeleteEntry,
+}: {
+  entryPath: string;
+  type: "file" | "directory";
+  deleting: boolean;
+  onDeleteEntry: (entryPath: string, type: "file" | "directory") => void;
+}) {
+  const handleDelete = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    const name = entryPath.includes("/") ? entryPath.slice(entryPath.lastIndexOf("/") + 1) : entryPath;
+    const message = type === "directory"
+      ? `Delete "${name}" and all its contents? This can't be undone.`
+      : `Delete "${name}"? This can't be undone.`;
+    if (!window.confirm(message)) return;
+    onDeleteEntry(entryPath, type);
+  }, [entryPath, type, onDeleteEntry]);
+
+  if (deleting) {
+    return <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />;
+  }
+
+  return (
+    <button
+      onClick={handleDelete}
+      className="p-0.5 rounded hover:bg-destructive/20 transition-colors"
+      title={`Delete ${entryPath}`}
+      aria-label={`Delete ${entryPath}`}
+    >
+      <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+    </button>
+  );
+}
+
 interface FileTreeNodeProps {
   entry: BrowseEntry;
   path: string;
@@ -101,10 +138,12 @@ interface FileTreeNodeProps {
   selectedFile: string | null;
   uploadingDirs: Set<string>;
   dragOverPath: string | null;
+  deletingPaths: Set<string>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   onUploadFiles: (dirPath: string, files: File[]) => void;
   onSetDragOverPath: (path: string | null) => void;
+  onDeleteEntry: (entryPath: string, type: "file" | "directory") => void;
 }
 
 function FileTreeNode({
@@ -117,10 +156,12 @@ function FileTreeNode({
   selectedFile,
   uploadingDirs,
   dragOverPath,
+  deletingPaths,
   onToggleDirectory,
   onSelectFile,
   onUploadFiles,
   onSetDragOverPath,
+  onDeleteEntry,
 }: FileTreeNodeProps) {
   const isExpanded = expandedDirs.has(nodePath);
   const isLoading = loadingDirs.has(nodePath);
@@ -131,6 +172,7 @@ function FileTreeNode({
     const ChevronIcon = isExpanded ? ChevronDown : ChevronRight;
     const isDragOver = dragOverPath === nodePath;
     const isUploading = uploadingDirs.has(nodePath);
+    const isDeleting = deletingPaths.has(nodePath);
 
     return (
       <div>
@@ -165,8 +207,9 @@ function FileTreeNode({
             <FolderIcon className="h-4 w-4 shrink-0 text-blue-500" />
             <span className="truncate">{entry.name}</span>
           </div>
-          <div className="shrink-0 hidden group-hover:block ml-1">
+          <div className={cn("shrink-0 ml-1 items-center gap-1", isDeleting ? "flex" : "hidden group-hover:flex")}>
             <CopyPathButton path={nodePath} />
+            <DeleteButton entryPath={nodePath} type="directory" deleting={isDeleting} onDeleteEntry={onDeleteEntry} />
           </div>
         </div>
         {isExpanded && children && (
@@ -185,10 +228,12 @@ function FileTreeNode({
                   selectedFile={selectedFile}
                   uploadingDirs={uploadingDirs}
                   dragOverPath={dragOverPath}
+                  deletingPaths={deletingPaths}
                   onToggleDirectory={onToggleDirectory}
                   onSelectFile={onSelectFile}
                   onUploadFiles={onUploadFiles}
                   onSetDragOverPath={onSetDragOverPath}
+                  onDeleteEntry={onDeleteEntry}
                 />
               );
             })}
@@ -201,6 +246,7 @@ function FileTreeNode({
   const FileIcon = getFileIcon(entry.name);
   const isSelected = selectedFile === nodePath;
   const parentPath = nodePath.includes("/") ? nodePath.slice(0, nodePath.lastIndexOf("/")) : "";
+  const isDeleting = deletingPaths.has(nodePath);
 
   return (
     <div
@@ -236,8 +282,9 @@ function FileTreeNode({
         <span className="text-[11px] text-muted-foreground/70 group-hover:hidden whitespace-nowrap w-[52px] text-right tabular-nums">
           {entry.size != null && formatFileSize(entry.size)}
         </span>
-        <div className="hidden group-hover:block">
+        <div className={cn("items-center gap-1", isDeleting ? "flex" : "hidden group-hover:flex")}>
           <CopyPathButton path={nodePath} />
+          <DeleteButton entryPath={nodePath} type="file" deleting={isDeleting} onDeleteEntry={onDeleteEntry} />
         </div>
       </div>
     </div>
@@ -252,9 +299,11 @@ interface FileTreeProps {
   selectedFile: string | null;
   uploadingDirs: Set<string>;
   rootLoading: boolean;
+  deletingPaths: Set<string>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   onUploadFiles: (dirPath: string, files: File[]) => void;
+  onDeleteEntry: (entryPath: string, type: "file" | "directory") => void;
 }
 
 export function FileTree({
@@ -265,9 +314,11 @@ export function FileTree({
   selectedFile,
   uploadingDirs,
   rootLoading,
+  deletingPaths,
   onToggleDirectory,
   onSelectFile,
   onUploadFiles,
+  onDeleteEntry,
 }: FileTreeProps) {
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const isRootDragOver = dragOverPath === "";
@@ -331,10 +382,12 @@ export function FileTree({
                   selectedFile={selectedFile}
                   uploadingDirs={uploadingDirs}
                   dragOverPath={dragOverPath}
+                  deletingPaths={deletingPaths}
                   onToggleDirectory={onToggleDirectory}
                   onSelectFile={onSelectFile}
                   onUploadFiles={onUploadFiles}
                   onSetDragOverPath={setDragOverPath}
+                  onDeleteEntry={onDeleteEntry}
                 />
               );
             })
