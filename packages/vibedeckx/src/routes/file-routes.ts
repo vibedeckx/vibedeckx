@@ -102,6 +102,9 @@ async function deletePath(basePath: string, relativePath: string): Promise<strin
     throw Object.assign(new Error("Path traversal not allowed"), { statusCode: 403 });
   }
   const fullPath = path.resolve(basePath, relativePath);
+  if (fullPath === path.resolve(basePath)) {
+    throw Object.assign(new Error("Cannot delete the workspace root"), { statusCode: 400 });
+  }
   await fs.rm(fullPath, { recursive: true, force: false }); // throws ENOENT if missing
   return relativePath;
 }
