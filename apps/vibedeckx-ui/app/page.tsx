@@ -23,7 +23,6 @@ import { MainConversation, type MainConversationHandle } from '@/components/conv
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
-import { FilesView } from '@/components/files';
 import type { ExecutionMode, Task, Worktree } from '@/lib/api';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useUrlState } from '@/hooks/use-url-state';
@@ -365,7 +364,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Welcome state — shown for project-dependent views when no project exists */}
           <div className={
-            needsProject && (activeView === 'workspace' || activeView === 'tasks' || activeView === 'files' || activeView === 'project-info')
+            needsProject && (activeView === 'workspace' || activeView === 'tasks' || activeView === 'project-info')
               ? 'flex-1 overflow-hidden'
               : 'hidden'
           }>
@@ -460,15 +459,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
               onCreateTask={createTask}
               onUpdateTask={updateTask}
               onDeleteTask={deleteTask}
-            />
-          </div>
-
-          {/* Files View — kept mounted, hidden via CSS */}
-          <div className={(activeView !== 'files' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden'}>
-            <FilesView
-              projectId={currentProject?.id ?? null}
-              project={currentProject}
-              selectedBranch={selectedBranch}
             />
           </div>
 

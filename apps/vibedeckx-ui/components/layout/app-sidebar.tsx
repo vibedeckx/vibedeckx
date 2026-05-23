@@ -7,7 +7,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import type { Worktree, Project } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 
-export type ActiveView = "workspace" | "tasks" | "files" | "remote-servers" | "settings" | "project-info";
+export type ActiveView = "workspace" | "tasks" | "remote-servers" | "settings" | "project-info";
 
 interface AppSidebarProps {
   activeView: ActiveView;
@@ -214,16 +214,6 @@ export function AppSidebar({
               if (!hasProject) return;
               onBranchChange?.(null);
               onViewChange("tasks");
-            }}
-          />
-          <NavItem
-            icon={<FolderOpen className="h-3.5 w-3.5" />}
-            label="Files"
-            active={activeView === "files" && hasProject}
-            disabled={!hasProject}
-            onClick={() => {
-              if (!hasProject) return;
-              onViewChange("files");
             }}
           />
         </div>
