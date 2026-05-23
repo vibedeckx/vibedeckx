@@ -30,9 +30,11 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
     fileLoading,
     rootLoading,
     loadingDirs,
+    uploadingDirs,
     fetchRoot,
     toggleDirectory,
     selectFile,
+    uploadFiles,
   } = useFileBrowser({
     projectId,
     branch: selectedBranch,
@@ -87,8 +89,10 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
                 directoryContents={directoryContents}
                 loadingDirs={loadingDirs}
                 selectedFile={selectedFile}
+                uploadingDirs={uploadingDirs}
                 onToggleDirectory={toggleDirectory}
                 onSelectFile={selectFile}
+                onUploadFiles={uploadFiles}
               />
             )}
           </ScrollArea>
