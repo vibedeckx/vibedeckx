@@ -30,10 +30,12 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
     rootLoading,
     loadingDirs,
     uploadingDirs,
+    deletingPaths,
     fetchRoot,
     toggleDirectory,
     selectFile,
     uploadFiles,
+    deleteEntry,
   } = useFileBrowser({
     projectId,
     branch: selectedBranch,
@@ -84,9 +86,11 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
             selectedFile={selectedFile}
             uploadingDirs={uploadingDirs}
             rootLoading={rootLoading}
+            deletingPaths={deletingPaths}
             onToggleDirectory={toggleDirectory}
             onSelectFile={selectFile}
             onUploadFiles={uploadFiles}
+            onDeleteEntry={deleteEntry}
           />
         </ResizablePanel>
 
