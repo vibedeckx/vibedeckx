@@ -177,7 +177,13 @@ export function useCompletionNotifications(
   return { notifications, unreadCount, markRead, markAllRead, remove, clear };
 }
 
+// [sound-delay-debug] Monotonically increasing id so each playSound call's
+// media-event timeline is traceable in the console. Remove with the rest of
+// the debug instrumentation.
+let playCallSeq = 0;
+
 function playSound(src: string, cache: Map<string, HTMLAudioElement>) {
+  const wasCached = cache.has(src);
   let audio = cache.get(src);
   if (!audio) {
     audio = new Audio(src);
@@ -185,8 +191,30 @@ function playSound(src: string, cache: Map<string, HTMLAudioElement>) {
     cache.set(src, audio);
   }
   audio.currentTime = 0;
+
+  // [sound-delay-debug] Time each phase of the audio pipeline relative to the
+  // play() call. The gaps localize the ~10s: play→loadstart = request queued
+  // behind the saturated HTTP/1.1 connection pool; loadstart→canplay =
+  // download+decode; canplay/play→playing = actual audible start. `wasCached`
+  // tells us whether this is the first (cold) play of this src.
+  const id = ++playCallSeq;
+  const t0 = Date.now();
+  const log = (phase: string) =>
+    console.log(
+      `[sound-delay-debug] play#${id} ${phase} src=${src} ` +
+        `wasCached=${wasCached} +${Date.now() - t0}ms readyState=${audio!.readyState}`,
+    );
+  log('play()-called');
+  const phases = ['loadstart', 'canplay', 'canplaythrough', 'playing', 'stalled', 'suspend'] as const;
+  for (const phase of phases) {
+    audio.addEventListener(phase, () => log(phase), { once: true });
+  }
+
   // Browser autoplay policy rejects play() until the user has interacted with
   // the page. By the time a completion fires the user has invariably clicked
   // into the workspace, so this resolves; swallow the rejection regardless.
-  void audio.play().catch(() => {});
+  void audio
+    .play()
+    .then(() => log('play()-resolved'))
+    .catch((err) => log(`play()-rejected:${(err as Error)?.name ?? 'err'}`));
 }
