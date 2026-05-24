@@ -25,7 +25,8 @@ import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree } from '@/lib/api';
 import { useGlobalEvents } from '@/hooks/use-global-events';
-import { useStatusSound } from '@/hooks/use-status-sound';
+import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
+import { CompletionNotificationsMenu } from '@/components/layout/completion-notifications-menu';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
 import {
@@ -163,12 +164,26 @@ export default function Home() {
     [worktrees, branchActivity, isPlaceholder, backendSince, placeholderSince]
   );
 
-  // Play a notification sound when any workspace (in any project) transitions
-  // into a completed state: sound1 for Agent completion (lime dot), sound2 for
-  // chat completion (emerald dot). Listens to the global SSE stream directly so
-  // background-project completions still sound and project switches stay
-  // silent. See `hooks/use-status-sound.ts`.
-  useStatusSound();
+  // Completion notification center. Listens to the global SSE stream directly
+  // (one connection for all projects), plays the completion sound — sound1 for
+  // Agent completion (lime dot), sound2 for chat completion (emerald dot) — and
+  // feeds the top-right bell with a read/unread list so background-project
+  // completions are discoverable and one click away. `activeKey` lets a
+  // completion for the workspace already on screen be listed but pre-read (no
+  // unread badge for something you can see). See
+  // `hooks/use-completion-notifications.ts`.
+  const activeKey =
+    currentProject && activeView === 'workspace'
+      ? `${currentProject.id}:${selectedBranch ?? ''}`
+      : null;
+  const {
+    notifications,
+    unreadCount,
+    markRead: markNotificationRead,
+    markAllRead: markAllNotificationsRead,
+    remove: removeNotification,
+    clear: clearNotifications,
+  } = useCompletionNotifications(activeKey);
 
   // User just hit send → seed "working" into the activity map ahead of the
   // backend's branch:activity event (sub-50ms latency hide). The backend's
@@ -233,13 +248,50 @@ export default function Home() {
     prevProjectId.current = currentProject?.id;
   }, [currentProject?.id]);
 
+  // A cross-project notification click sets this to the branch we want selected
+  // once the target project's worktrees finish loading. Without it, the
+  // project-change effect above resets selectedBranch to null and the
+  // auto-select effect below picks worktrees[0] before our intended branch can
+  // take hold. `undefined` = no pending navigation.
+  const pendingBranchRef = useRef<string | null | undefined>(undefined);
+
   // Auto-select first worktree if current selection is not in the list
   useEffect(() => {
     if (worktreesLoading || worktrees.length === 0) return;
+    // Honor a pending cross-project branch selection before any fallback.
+    const pending = pendingBranchRef.current;
+    if (pending !== undefined) {
+      if (worktrees.some(w => w.branch === pending)) {
+        pendingBranchRef.current = undefined;
+        setSelectedBranch(pending);
+        return;
+      }
+      // Target branch isn't in the freshly-loaded project — drop it and fall
+      // through to the normal auto-select.
+      pendingBranchRef.current = undefined;
+    }
     if (!worktrees.some(w => w.branch === selectedBranch)) {
       setSelectedBranch(worktrees[0].branch);
     }
   }, [worktrees, worktreesLoading, selectedBranch]);
+
+  // Jump to the workspace a completion notification points at. Same project →
+  // select the branch directly; different project → switch projects and let the
+  // auto-select effect honor pendingBranchRef once its worktrees load.
+  const handleNavigateToWorkspace = useCallback(
+    (projectId: string, branch: string | null) => {
+      setActiveView('workspace');
+      if (projectId === currentProject?.id) {
+        setSelectedBranch(branch);
+        return;
+      }
+      const target = projects.find((p) => p.id === projectId);
+      if (!target) return;
+      pendingBranchRef.current = branch;
+      selectProject(target);
+    },
+    [currentProject?.id, projects, selectProject],
+  );
 
   // Track previous (projectId, branch) so we can detect switches.
   // sessionId is scoped to one (projectId, branch); on switch we must drop it,
@@ -346,7 +398,19 @@ Please proceed step by step and let me know if there are any issues or conflicts
               VibeDeck<span className="text-primary font-bold">X</span>
             </h1>
           </div>
-          <UserMenu />
+          <div className="flex items-center gap-1">
+            <CompletionNotificationsMenu
+              notifications={notifications}
+              unreadCount={unreadCount}
+              projects={projects}
+              onNavigate={handleNavigateToWorkspace}
+              markRead={markNotificationRead}
+              markAllRead={markAllNotificationsRead}
+              remove={removeNotification}
+              clear={clearNotifications}
+            />
+            <UserMenu />
+          </div>
         </div>
 
         <div className="flex-1 flex overflow-hidden">
