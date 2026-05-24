@@ -122,13 +122,10 @@ export function CompletionNotificationsMenu({
                     onNavigate(n.projectId, n.branch);
                   }}
                   className={cn(
-                    "group relative flex flex-col items-start gap-0.5 rounded-none px-3 py-2 pl-4",
-                    !n.read && "bg-primary/[0.04]",
+                    "group flex flex-col items-start gap-0.5 rounded-none px-3 py-2",
+                    !n.read && "bg-primary/[0.08]",
                   )}
                 >
-                  {!n.read && (
-                    <span className="absolute left-1 top-2.5 h-2 w-2 rounded-full bg-primary" />
-                  )}
                   <div className="flex w-full items-center gap-2">
                     <span className={cn("h-[7px] w-[7px] shrink-0 rounded-full", meta.dot)} />
                     <span

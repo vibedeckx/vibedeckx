@@ -14,6 +14,12 @@ export function useWorktrees(projectId: string | null) {
       return;
     }
 
+    // Flag loading synchronously (before the await) so callers gating on
+    // `loading` — e.g. page.tsx's auto-select effect — don't act on the
+    // previous project's worktrees during a project switch. Without this, a
+    // cross-project notification's pending branch gets consumed against stale
+    // worktrees and the selection falls back to the main workspace.
+    setLoading(true);
     try {
       const data = await api.getProjectWorktrees(projectId);
       setWorktrees(data);
