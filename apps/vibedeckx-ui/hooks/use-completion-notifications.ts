@@ -57,6 +57,48 @@ function notificationKey(projectId: string, branch: string | null): string {
   return `${projectId}:${branch ?? ''}`;
 }
 
+const STORAGE_KEY = 'vibedeckx:completion-notifications';
+// Cap the persisted list. Per-workspace de-dup already bounds it by workspace
+// count, but persistence means it accumulates across sessions, so trim the
+// oldest beyond this to keep localStorage small.
+const MAX_NOTIFICATIONS = 50;
+
+function isStoredNotification(v: unknown): v is CompletionNotification {
+  if (typeof v !== 'object' || v === null) return false;
+  const n = v as Record<string, unknown>;
+  return (
+    typeof n.id === 'string' &&
+    typeof n.projectId === 'string' &&
+    (typeof n.branch === 'string' || n.branch === null) &&
+    (n.type === 'completed' || n.type === 'main-completed') &&
+    typeof n.at === 'number' &&
+    typeof n.read === 'boolean'
+  );
+}
+
+function loadStored(): CompletionNotification[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isStoredNotification).slice(0, MAX_NOTIFICATIONS);
+  } catch {
+    return [];
+  }
+}
+
+function persist(list: CompletionNotification[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // quota exceeded or private-mode disable — accept loss; the notification
+    // list is best-effort UX, not a correctness requirement.
+  }
+}
+
 export interface CompletionNotificationsResult {
   notifications: CompletionNotification[];
   unreadCount: number;
@@ -70,8 +112,9 @@ export interface CompletionNotificationsResult {
  * Completion notification center, fed by the single global `/api/events` SSE
  * stream. Detects every workspace's transition into a completed state (across
  * *all* projects, not just the one on screen), plays the completion sound, and
- * maintains an in-memory, newest-first notification list with per-entry
- * read/unread state.
+ * maintains a newest-first notification list with per-entry read/unread state,
+ * persisted to localStorage (capped at MAX_NOTIFICATIONS) so the list and its
+ * read flags survive page reloads.
  *
  * This is the sole owner of the global completion signal — it absorbs what was
  * `useStatusSound`, so the app opens one global SSE connection for both sound
@@ -140,9 +183,10 @@ export function useCompletionNotifications(
           };
           // De-dup: one entry per workspace. A repeat completion replaces the
           // old entry (updated time/type, re-marked unread unless active) and
-          // floats to the top.
+          // floats to the top. Trim to MAX_NOTIFICATIONS now that the list
+          // persists across sessions.
           const rest = prev.filter((n) => n.id !== key);
-          return [entry, ...rest];
+          return [entry, ...rest].slice(0, MAX_NOTIFICATIONS);
         });
       } catch {
         // Ignore parse errors (e.g. keepalive comments)
@@ -151,6 +195,34 @@ export function useCompletionNotifications(
 
     return () => es.close();
   }, []);
+
+  // Hydrate from localStorage after mount (not via a lazy initializer) so the
+  // server/build render and the first client render agree — otherwise a stored
+  // unread badge would trip a hydration mismatch. Merges rather than replaces
+  // so a completion that somehow arrived before this runs isn't clobbered.
+  useEffect(() => {
+    const stored = loadStored();
+    if (stored.length === 0) return;
+    setNotifications((prev) => {
+      if (prev.length === 0) return stored;
+      const seen = new Set(prev.map((n) => n.id));
+      return [...prev, ...stored.filter((n) => !seen.has(n.id))].slice(
+        0,
+        MAX_NOTIFICATIONS,
+      );
+    });
+  }, []);
+
+  // Persist on every change. Skip the initial mount pass so we don't overwrite
+  // stored data with the empty initial state before hydration has loaded it.
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (!hydratedRef.current) {
+      hydratedRef.current = true;
+      return;
+    }
+    persist(notifications);
+  }, [notifications]);
 
   const markRead = useCallback((id: string) => {
     setNotifications((prev) =>
