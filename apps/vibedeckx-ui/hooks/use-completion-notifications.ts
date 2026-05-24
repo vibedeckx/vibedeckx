@@ -99,6 +99,29 @@ function persist(list: CompletionNotification[]): void {
   }
 }
 
+// Module-level so the warmed <audio> elements outlive any mount/unmount of the
+// hook's host and are shared app-wide. Switching projects keeps page.tsx
+// mounted so this already wouldn't reload — but hoisting it out of the
+// component guarantees the sounds are fetched+decoded exactly once per page
+// load regardless of remounts (HMR, Strict Mode, future refactors).
+const audioCache = new Map<string, HTMLAudioElement>();
+
+// Fetch + decode the completion sounds ahead of time so the first play is an
+// in-memory replay rather than a cold network fetch. The cold fetch otherwise
+// stalls for seconds — a <audio> media request starved of an HTTP/1.1
+// connection slot (held by the long-lived SSE + WebSocket) or just a slow
+// network. Pre-warming moves that one-time cost to idle startup.
+function warmCompletionSounds(): void {
+  if (typeof window === 'undefined') return;
+  for (const src of Object.values(SOUND_FOR_ACTIVITY)) {
+    if (audioCache.has(src)) continue;
+    const audio = new Audio(src);
+    audio.preload = 'auto';
+    audio.load();
+    audioCache.set(src, audio);
+  }
+}
+
 export interface CompletionNotificationsResult {
   notifications: CompletionNotification[];
   unreadCount: number;
@@ -140,7 +163,13 @@ export function useCompletionNotifications(
 ): CompletionNotificationsResult {
   const [notifications, setNotifications] = useState<CompletionNotification[]>([]);
   const lastActivity = useRef<Map<string, BranchActivity>>(new Map());
-  const audioCache = useRef<Map<string, HTMLAudioElement>>(new Map());
+
+  // Warm the shared, module-level audio cache once. Switching projects keeps
+  // this hook mounted, so no reload happens on navigation; the module-level
+  // cache also makes it a no-op should the host ever remount.
+  useEffect(() => {
+    warmCompletionSounds();
+  }, []);
 
   // The SSE handler closes over this ref so it always reads the *current*
   // active workspace without re-subscribing on every navigation.
@@ -169,7 +198,7 @@ export function useCompletionNotifications(
         // `evt.activity` back to BranchActivity across the callback boundary.
         const type = evt.activity;
 
-        playSound(SOUND_FOR_ACTIVITY[type], audioCache.current);
+        playSound(SOUND_FOR_ACTIVITY[type]);
 
         const read = activeKeyRef.current === key;
         setNotifications((prev) => {
@@ -249,44 +278,18 @@ export function useCompletionNotifications(
   return { notifications, unreadCount, markRead, markAllRead, remove, clear };
 }
 
-// [sound-delay-debug] Monotonically increasing id so each playSound call's
-// media-event timeline is traceable in the console. Remove with the rest of
-// the debug instrumentation.
-let playCallSeq = 0;
-
-function playSound(src: string, cache: Map<string, HTMLAudioElement>) {
-  const wasCached = cache.has(src);
-  let audio = cache.get(src);
+function playSound(src: string) {
+  let audio = audioCache.get(src);
   if (!audio) {
+    // Normally already warmed by warmCompletionSounds(); this is the fallback
+    // if a completion somehow beats the preload.
     audio = new Audio(src);
     audio.preload = 'auto';
-    cache.set(src, audio);
+    audioCache.set(src, audio);
   }
   audio.currentTime = 0;
-
-  // [sound-delay-debug] Time each phase of the audio pipeline relative to the
-  // play() call. The gaps localize the ~10s: play→loadstart = request queued
-  // behind the saturated HTTP/1.1 connection pool; loadstart→canplay =
-  // download+decode; canplay/play→playing = actual audible start. `wasCached`
-  // tells us whether this is the first (cold) play of this src.
-  const id = ++playCallSeq;
-  const t0 = Date.now();
-  const log = (phase: string) =>
-    console.log(
-      `[sound-delay-debug] play#${id} ${phase} src=${src} ` +
-        `wasCached=${wasCached} +${Date.now() - t0}ms readyState=${audio!.readyState}`,
-    );
-  log('play()-called');
-  const phases = ['loadstart', 'canplay', 'canplaythrough', 'playing', 'stalled', 'suspend'] as const;
-  for (const phase of phases) {
-    audio.addEventListener(phase, () => log(phase), { once: true });
-  }
-
   // Browser autoplay policy rejects play() until the user has interacted with
   // the page. By the time a completion fires the user has invariably clicked
   // into the workspace, so this resolves; swallow the rejection regardless.
-  void audio
-    .play()
-    .then(() => log('play()-resolved'))
-    .catch((err) => log(`play()-rejected:${(err as Error)?.name ?? 'err'}`));
+  void audio.play().catch(() => {});
 }
