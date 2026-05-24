@@ -22,7 +22,7 @@ export function PermissionModeToggle({
         className={cn(
           "inline-flex items-center gap-1 rounded-sm px-2 py-0.5 transition-colors",
           mode === "plan"
-            ? "bg-background text-foreground shadow-sm"
+            ? "bg-primary text-primary-foreground font-medium shadow-sm"
             : "text-muted-foreground hover:text-foreground",
           disabled && "opacity-50 cursor-not-allowed"
         )}
@@ -36,7 +36,7 @@ export function PermissionModeToggle({
         className={cn(
           "inline-flex items-center gap-1 rounded-sm px-2 py-0.5 transition-colors",
           mode === "edit"
-            ? "bg-background text-foreground shadow-sm"
+            ? "bg-primary text-primary-foreground font-medium shadow-sm"
             : "text-muted-foreground hover:text-foreground",
           disabled && "opacity-50 cursor-not-allowed"
         )}
