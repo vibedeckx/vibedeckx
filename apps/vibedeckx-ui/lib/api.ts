@@ -239,6 +239,15 @@ export type InputMessage =
   | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number };
 
+// 多路复用 executor 日志通道
+export type MuxClientMessage =
+  | { type: "subscribe"; processId: string }
+  | { type: "unsubscribe"; processId: string }
+  | { type: "input"; processId: string; data: string }
+  | { type: "resize"; processId: string; cols: number; rows: number };
+
+export type MuxServerMessage = { processId: string } & LogMessage;
+
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'cancelled';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
