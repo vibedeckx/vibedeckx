@@ -2,7 +2,12 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import WebSocket from "ws";
-import type { LogMessage, InputMessage } from "../process-manager.js";
+import {
+  attachLocalProcessStream,
+  attachRemoteProcessStream,
+  type StreamMessage,
+  type InputMessage,
+} from "./executor-stream-handlers.js";
 import type { AgentWsInput } from "../agent-types.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import type { RemotePatchCache } from "../remote-patch-cache.js";
@@ -401,224 +406,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
       { websocket: true },
       (socket, req) => {
         const { processId } = req.params;
-
         console.log(`[WebSocket] Client connected for process ${processId}`);
 
-        // Remote executor process proxy
-        if (processId.startsWith("remote-")) {
-          let remoteInfo = fastify.remoteExecutorMap.get(processId);
-          // Fall back to the DB row when the in-memory map is empty (e.g. the
-          // process already finished). The remote may still hold the buffered
-          // output within its log retention window, letting us replay history
-          // for an executor whose ExecutorItem just remounted after a workspace
-          // switch.
-          if (!remoteInfo) {
-            const row = fastify.storage.remoteExecutorProcesses.getById(processId);
-            if (row) {
-              console.log(`[WebSocket] Remote process ${processId} not in map; using DB row (status=${row.status})`);
-              remoteInfo = {
-                remoteServerId: row.remote_server_id,
-                remoteUrl: row.remote_url,
-                remoteApiKey: row.remote_api_key,
-                remoteProcessId: row.remote_process_id,
-                executorId: row.executor_id,
-                projectId: row.project_id ?? undefined,
-                branch: row.branch,
-                stoppedEmitted: row.status !== 'running',
-              };
-            }
-          }
-          if (!remoteInfo) {
-            console.log(`[WebSocket] Remote process ${processId} not found in map or DB`);
-            socket.send(JSON.stringify({ type: "error", message: "Remote process not found" }));
-            socket.close();
-            return;
-          }
+        // 旧端点：send 不包 processId；onTerminal 关闭 socket（保持单进程单连接语义）
+        const send = (msg: StreamMessage) => {
+          try { socket.send(JSON.stringify(msg)); } catch { /* socket closed */ }
+        };
+        const onTerminal = () => { try { socket.close(); } catch { /* already closed */ } };
 
-          const useVirtualExec = fastify.reverseConnectManager.isConnected(remoteInfo.remoteServerId);
-          let remoteWs: WebSocket | VirtualWsAdapter;
-
-          if (useVirtualExec) {
-            const channelId = randomUUID();
-            const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
-            const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-            const adapter = new VirtualWsAdapter(
-              (data) => fastify.reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),
-              () => fastify.reverseConnectManager.closeChannel(remoteInfo.remoteServerId, channelId),
-            );
-            fastify.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
-            fastify.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
-            remoteWs = adapter;
-            console.log(`[WebSocket] Virtual channel opened for remote process ${remoteInfo.remoteProcessId}`);
-            setTimeout(() => adapter.emit("open"), 0);
-          } else {
-            if (!remoteInfo.remoteUrl) {
-              console.log(`[WebSocket] No direct URL for remote process ${processId}, cannot proxy (reverse-connect only)`);
-              socket.send(JSON.stringify({ type: "error", message: "Remote server not reachable (reverse-connect offline)" }));
-              socket.close();
-              return;
-            }
-            const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
-            const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-            const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-            const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-            console.log(`[WebSocket] Proxying to remote: ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
-            remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
-          }
-
-          remoteWs.on("open", () => {
-            console.log(`[WebSocket] Connected to remote process ${remoteInfo.remoteProcessId}`);
-          });
-
-          // Ping/pong keepalive to prevent idle disconnections when browser tab is backgrounded
-          const pingInterval = setInterval(() => {
-            if (remoteWs.readyState === WebSocket.OPEN) {
-              remoteWs.ping();
-            }
-          }, 30000);
-
-          // Track whether we've already delivered a terminal signal to the client
-          // so the close handler can synthesize one if the upstream omits it.
-          let terminalSignalSent = false;
-
-          remoteWs.on("message", (data) => {
-            try {
-              const raw = data.toString();
-              socket.send(raw);
-              // Detect remote process finish and clean up remoteExecutorMap
-              try {
-                const parsed = JSON.parse(raw);
-                if (parsed.type === "init" || parsed.type === "history_end") {
-                  console.log(`[WebSocket] Remote proxy forwarded: ${parsed.type} for ${processId}`);
-                }
-                if (parsed.type === "finished" || parsed.type === "error") {
-                  terminalSignalSent = true;
-                }
-                if (parsed.type === "finished") {
-                  const info = fastify.remoteExecutorMap.get(processId);
-                  if (info && !info.stoppedEmitted) {
-                    info.stoppedEmitted = true;
-                    fastify.eventBus.emit({
-                      type: "executor:stopped",
-                      projectId: info.projectId ?? "",
-                      executorId: info.executorId,
-                      processId,
-                      exitCode: parsed.exitCode ?? 0,
-                      target: info.remoteServerId,
-                    });
-                  }
-                  if (info) {
-                    fastify.remoteExecutorMap.delete(processId);
-                    // Soft-delete only — the DB row keeps "Last run" alive and
-                    // lets the WS route reconnect to the buffered output via
-                    // getById() while the remote retains its log buffer.
-                    fastify.storage.remoteExecutorProcesses.markFinished(
-                      processId,
-                      typeof parsed.exitCode === 'number' ? parsed.exitCode : 0,
-                    );
-                  }
-                }
-              } catch { /* ignore parse errors */ }
-            } catch (error) {
-              console.error("[WebSocket] Failed to forward message to client:", error);
-            }
-          });
-
-          socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
-            try {
-              if (remoteWs.readyState === WebSocket.OPEN) {
-                remoteWs.send(data.toString());
-              }
-            } catch (error) {
-              console.error("[WebSocket] Failed to forward message to remote:", error);
-            }
-          });
-
-          remoteWs.on("close", () => {
-            console.log(`[WebSocket] Remote connection closed for process ${processId}`);
-            clearInterval(pingInterval);
-            // If the upstream closed without sending a terminal signal (e.g. the
-            // remote process was already purged and only replied with init +
-            // history_end), synthesize a `finished` event from the DB so the
-            // client treats this as terminal instead of reconnecting forever.
-            if (!terminalSignalSent) {
-              try {
-                const row = fastify.storage.remoteExecutorProcesses.getById(processId);
-                socket.send(JSON.stringify({
-                  type: "finished",
-                  exitCode: row?.exit_code ?? 0,
-                }));
-              } catch (error) {
-                console.error("[WebSocket] Failed to synthesize finished event:", error);
-              }
-            }
-            socket.close();
-          });
-
-          remoteWs.on("error", (error) => {
-            console.error(`[WebSocket] Remote connection error:`, error);
-            clearInterval(pingInterval);
-            socket.send(JSON.stringify({ type: "error", message: "Remote connection error" }));
-            terminalSignalSent = true;
-            socket.close();
-          });
-
-          socket.on("close", () => {
-            console.log(`[WebSocket] Client disconnected from remote process ${processId}`);
-            clearInterval(pingInterval);
-            remoteWs.close();
-          });
-
-          return;
-        }
-
-        // Local process handling
-        const isPty = fastify.processManager.isPtyProcess(processId);
-        socket.send(JSON.stringify({ type: "init", isPty }));
-
-        const logs = fastify.processManager.getLogs(processId);
-        console.log(`[WebSocket] Sending ${logs.length} historical logs`);
-        for (const log of logs) {
-          socket.send(JSON.stringify(log));
-        }
-        socket.send(JSON.stringify({ type: "history_end" }));
-
-        const isRunning = fastify.processManager.isRunning(processId);
-        console.log(`[WebSocket] Process running: ${isRunning}`);
-
-        if (logs.length === 0 && !isRunning) {
-          console.log(`[WebSocket] Process not found or no logs, closing connection`);
-          socket.send(JSON.stringify({ type: "error", message: "Process not found" }));
-          // Explicit terminal signal so clients (including the local proxy and
-          // backend watchers) treat this as done instead of reconnecting. Exit
-          // code is unknown — the process is already gone from processManager.
-          socket.send(JSON.stringify({ type: "finished", exitCode: null }));
-          socket.close();
-          return;
-        }
-
-        const lastLog = logs[logs.length - 1];
-        if (lastLog?.type === "finished") {
-          socket.close();
-          return;
-        }
-
-        const unsubscribe = fastify.processManager.subscribe(processId, (msg: LogMessage) => {
-          try {
-            socket.send(JSON.stringify(msg));
-            if (msg.type === "finished") {
-              socket.close();
-            }
-          } catch (error) {
-            unsubscribe?.();
-          }
-        });
+        const handle = processId.startsWith("remote-")
+          ? attachRemoteProcessStream(fastify, processId, send, onTerminal)
+          : attachLocalProcessStream(fastify, processId, send, onTerminal);
 
         socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
           try {
             const message = JSON.parse(data.toString()) as InputMessage;
             if (message.type === "input" || message.type === "resize") {
-              fastify.processManager.handleInput(processId, message);
+              handle.handleInput(message);
             }
           } catch (error) {
             console.error("[WebSocket] Failed to parse input message:", error);
@@ -626,7 +430,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
 
         socket.on("close", () => {
-          unsubscribe?.();
+          console.log(`[WebSocket] Client disconnected from process ${processId}`);
+          handle.cleanup();
         });
       }
     );
