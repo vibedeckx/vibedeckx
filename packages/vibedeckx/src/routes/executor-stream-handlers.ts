@@ -100,7 +100,6 @@ export function attachRemoteProcessStream(
   }
   if (!remoteInfo) {
     send({ type: "error", message: "Remote process not found" });
-    send({ type: "finished", exitCode: null });
     onTerminal();
     return noop;
   }
@@ -124,7 +123,6 @@ export function attachRemoteProcessStream(
   } else {
     if (!info.remoteUrl) {
       send({ type: "error", message: "Remote server not reachable (reverse-connect offline)" });
-      send({ type: "finished", exitCode: null });
       onTerminal();
       return noop;
     }
@@ -187,6 +185,7 @@ export function attachRemoteProcessStream(
   });
 
   remoteWs.on("error", (error: unknown) => {
+    clearInterval(pingInterval);
     console.error(`[ExecutorStream] Remote connection error:`, error);
     if (!terminalSignalSent) {
       send({ type: "error", message: "Remote connection error" });
@@ -196,6 +195,7 @@ export function attachRemoteProcessStream(
   });
 
   remoteWs.on("close", () => {
+    clearInterval(pingInterval);
     if (!terminalSignalSent) {
       const row = fastify.storage.remoteExecutorProcesses.getById(processId);
       send({ type: "finished", exitCode: row?.exit_code ?? 0 });
