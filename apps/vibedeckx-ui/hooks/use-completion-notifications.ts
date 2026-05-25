@@ -155,8 +155,10 @@ export interface CompletionNotificationsResult {
  *
  * `activeKey` is the workspace the user is currently viewing
  * (`${projectId}:${branch ?? ''}`, or null). A completion for the active
- * workspace is still listed but pushed pre-read — the user can already see it,
- * so it shouldn't inflate the unread badge.
+ * workspace is still listed but kept read — both when it arrives while you're
+ * viewing the workspace and when you navigate into a workspace that already has
+ * an unread entry (e.g. via the sidebar) — so it never inflates the unread
+ * badge for something on screen.
  */
 export function useCompletionNotifications(
   activeKey: string | null,
@@ -177,6 +179,22 @@ export function useCompletionNotifications(
   useEffect(() => {
     activeKeyRef.current = activeKey;
   }, [activeKey]);
+
+  // Viewing a workspace clears its completion notification's unread state.
+  // The SSE handler pre-reads a completion that *arrives* while you're on the
+  // workspace, but this also covers navigating *into* a workspace that already
+  // has an unread entry (e.g. clicking it in the sidebar) and a stored unread
+  // entry for the workspace you're already viewing on reload. `notifications`
+  // is a dep so hydration/new arrivals are caught; the same-reference guard
+  // (returning `prev` unchanged) prevents a re-render loop.
+  useEffect(() => {
+    if (!activeKey) return;
+    setNotifications((prev) =>
+      prev.some((n) => n.id === activeKey && !n.read)
+        ? prev.map((n) => (n.id === activeKey ? { ...n, read: true } : n))
+        : prev,
+    );
+  }, [activeKey, notifications]);
 
   useEffect(() => {
     const token = getAuthToken();
