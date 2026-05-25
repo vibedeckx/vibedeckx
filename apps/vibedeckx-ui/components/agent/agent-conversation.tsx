@@ -653,7 +653,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               projectId={projectId}
               branch={branch}
               currentSessionId={session?.id ?? null}
-              currentEntryCount={messages.length}
               refreshKey={titleRefreshKey}
               pendingTitleSessionId={pendingTitleSessionId}
               aiTitleOverride={aiTitleOverride}

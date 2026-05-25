@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { ChevronDown, Pencil, Trash2, Check, X, Star } from "lucide-react";
 import {
   DropdownMenu,
@@ -24,7 +24,6 @@ interface SessionHistoryDropdownProps {
   projectId: string;
   branch: string | null;
   currentSessionId: string | null;
-  currentEntryCount?: number;
   /** Bumping this value forces a session-list refresh (used after the
    *  backend writes an AI-generated title). */
   refreshKey?: number;
@@ -44,7 +43,6 @@ export function SessionHistoryDropdown({
   projectId,
   branch,
   currentSessionId,
-  currentEntryCount,
   refreshKey,
   pendingTitleSessionId,
   aiTitleOverride,
@@ -56,48 +54,40 @@ export function SessionHistoryDropdown({
   const [editingValue, setEditingValue] = useState("");
   const [open, setOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    try {
-      const data = await listBranchSessions(projectId, branch);
-      setSessions(data.sessions);
-    } catch (e) {
-      console.error("[SessionHistoryDropdown] refresh failed:", e);
-    }
-  }, [projectId, branch]);
+  // `reloadToken` is the explicit "re-fetch the list now" signal, bumped only
+  // from user events (opening the menu, the Refresh item). Funnelling event
+  // refetches through one token — rather than each event/effect calling
+  // listBranchSessions() itself — means several bumps in a single commit batch
+  // into one token change, i.e. one fetch.
+  const [reloadToken, setReloadToken] = useState(0);
+  const reload = useCallback(() => setReloadToken((t) => t + 1), []);
 
+  // The single data-fetching Effect: keep `sessions` synchronized with the
+  // server for the current (projectId, branch). Re-runs on a workspace switch,
+  // when an AI title arrives (refreshKey), or on an explicit reload(). The
+  // `ignore` cleanup discards stale responses, so a rapid A→B→A switch can't
+  // render the wrong branch's list out of order — the data-fetch race condition
+  // from https://react.dev/learn/you-might-not-need-an-effect#fetching-data.
+  //
+  // Note it deliberately does NOT depend on `currentSessionId`: switching to a
+  // session already in the list doesn't change the list, and that dependency
+  // was what fanned a single workspace switch into ~4 identical requests. A
+  // brand-new session's row arrives via `refreshKey` once its title is written;
+  // until then the parent shows a "Generating title…" loader, so the row's
+  // absence is already covered without a refetch here.
   useEffect(() => {
-    if (open) void refresh();
-  }, [open, refresh]);
-
-  // Also fetch on mount / whenever the workspace or current session changes, so
-  // the trigger button can show the current session's label (not just "History").
-  useEffect(() => {
-    void refresh();
-  }, [refresh, currentSessionId]);
-
-  // Refresh once when the current session receives its first entry — the server
-  // auto-sets the session title from the first user message, but the dropdown
-  // state was fetched when the session was still untitled, so the button would
-  // keep showing the created-at timestamp until reopened.
-  const prevEntryRef = useRef<{ sessionId: string | null; count: number }>({
-    sessionId: null,
-    count: 0,
-  });
-  useEffect(() => {
-    const prev = prevEntryRef.current;
-    const count = currentEntryCount ?? 0;
-    if (prev.sessionId === currentSessionId && prev.count === 0 && count > 0) {
-      void refresh();
-    }
-    prevEntryRef.current = { sessionId: currentSessionId, count };
-  }, [currentSessionId, currentEntryCount, refresh]);
-
-  // Refresh when an external trigger (e.g. an AI-generated title arriving over
-  // the agent WebSocket) signals that the persisted title may have changed.
-  useEffect(() => {
-    if (refreshKey === undefined) return;
-    void refresh();
-  }, [refreshKey, refresh]);
+    let ignore = false;
+    listBranchSessions(projectId, branch)
+      .then((data) => {
+        if (!ignore) setSessions(data.sessions);
+      })
+      .catch((e) => {
+        if (!ignore) console.error("[SessionHistoryDropdown] refresh failed:", e);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [projectId, branch, refreshKey, reloadToken]);
 
   const handleRename = async (id: string, next: string) => {
     const title = next.trim().length > 0 ? next.trim() : null;
@@ -174,7 +164,15 @@ export function SessionHistoryDropdown({
   const triggerTitle = triggerPending ? "Generating title…" : triggerLabel;
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Refetch because the user opened the menu — an event, not a render
+        // side-effect, so it belongs in the handler rather than an Effect.
+        if (next) reload();
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -318,7 +316,7 @@ export function SessionHistoryDropdown({
           );
         })}
         {sessions.length > 0 && <DropdownMenuSeparator />}
-        <DropdownMenuItem onSelect={() => void refresh()} className="text-xs text-muted-foreground">
+        <DropdownMenuItem onSelect={() => reload()} className="text-xs text-muted-foreground">
           Refresh
         </DropdownMenuItem>
       </DropdownMenuContent>
