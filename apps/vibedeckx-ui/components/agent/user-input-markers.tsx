@@ -77,13 +77,19 @@ export function UserInputMarkers({
 
     userMsgEls.forEach((el) => {
       const idx = parseInt(el.dataset.userMsgIdx!, 10);
+      // The ResizeObserver fires asynchronously, so the queried DOM nodes can
+      // momentarily be ahead of the `messages` closure (e.g. while switching to
+      // a shorter conversation). Skip stale nodes whose index no longer maps to
+      // a message — otherwise getMessagePreview() reads `.type` off undefined.
+      const msg = messages[idx];
+      if (!msg) return;
       const elRect = el.getBoundingClientRect();
       const absoluteTop = elRect.top - scrollRect.top + scrollEl.scrollTop;
       const position = absoluteTop / scrollEl.scrollHeight;
       newMarkers.push({
         index: idx,
         position: Math.max(0, Math.min(1, position)),
-        preview: getMessagePreview(messages[idx]),
+        preview: getMessagePreview(msg),
       });
     });
 
