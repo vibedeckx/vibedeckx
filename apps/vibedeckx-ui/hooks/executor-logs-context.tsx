@@ -128,17 +128,26 @@ export function ExecutorLogsProvider({
       ws.onclose = () => {
         wsRef.current = null;
         if (cancelled) return;
+        // 已终止的进程（closed/error）不因连接断开而被改写状态
+        const isTerminal = (pid: string) => {
+          const s = statesRef.current.get(pid);
+          return s?.status === "closed" || s?.status === "error";
+        };
         if (reconnectAttemptRef.current < RECONNECT_MAX_ATTEMPTS) {
           const attempt = reconnectAttemptRef.current++;
           const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** attempt);
           const totalDelay = delay + delay * Math.random() * 0.25;
-          for (const pid of desiredRef.current) update(pid, { status: "connecting" });
+          for (const pid of desiredRef.current) {
+            if (!isTerminal(pid)) update(pid, { status: "connecting" });
+          }
           reconnectTimerRef.current = setTimeout(() => {
             reconnectTimerRef.current = null;
             if (!cancelled) connect();
           }, totalDelay);
         } else {
-          for (const pid of desiredRef.current) update(pid, { status: "error" });
+          for (const pid of desiredRef.current) {
+            if (!isTerminal(pid)) update(pid, { status: "error" });
+          }
         }
       };
     };
