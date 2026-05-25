@@ -1,5 +1,8 @@
+import { randomUUID } from "crypto";
+import WebSocket from "ws";
 import type { FastifyInstance } from "fastify";
 import type { LogMessage, InputMessage } from "../process-manager.js";
+import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
 
 // Re-export so callers can import from this module if preferred.
 export type { LogMessage, InputMessage };
@@ -62,5 +65,153 @@ export function attachLocalProcessStream(
   return {
     cleanup: () => unsubscribe?.(),
     handleInput: (msg) => fastify.processManager.handleInput(processId, msg),
+  };
+}
+
+/**
+ * 把单个远程进程（remote- 前缀）的流通过后端代理接到 send 回调。
+ * 复用现有代理逻辑：reverse-connect 虚拟通道 / 直连上游 WS、ping 保活、
+ * finished 时清理 remoteExecutorMap + markFinished + emit executor:stopped、
+ * 上游关闭无终止信号时补发 finished。
+ */
+export function attachRemoteProcessStream(
+  fastify: FastifyInstance,
+  processId: string,
+  send: (msg: StreamMessage) => void,
+  onTerminal: () => void,
+): ProcessStreamHandle {
+  const noop: ProcessStreamHandle = { cleanup: () => {}, handleInput: () => {} };
+
+  let remoteInfo = fastify.remoteExecutorMap.get(processId);
+  if (!remoteInfo) {
+    const row = fastify.storage.remoteExecutorProcesses.getById(processId);
+    if (row) {
+      remoteInfo = {
+        remoteServerId: row.remote_server_id,
+        remoteUrl: row.remote_url,
+        remoteApiKey: row.remote_api_key,
+        remoteProcessId: row.remote_process_id,
+        executorId: row.executor_id,
+        projectId: row.project_id ?? undefined,
+        branch: row.branch,
+        stoppedEmitted: row.status !== "running",
+      };
+    }
+  }
+  if (!remoteInfo) {
+    send({ type: "error", message: "Remote process not found" });
+    send({ type: "finished", exitCode: null });
+    onTerminal();
+    return noop;
+  }
+  const info = remoteInfo;
+
+  const useVirtualExec = fastify.reverseConnectManager.isConnected(info.remoteServerId);
+  let remoteWs: WebSocket | VirtualWsAdapter;
+
+  if (useVirtualExec) {
+    const channelId = randomUUID();
+    const wsPath = `/api/executor-processes/${info.remoteProcessId}/logs`;
+    const wsQuery = `apiKey=${encodeURIComponent(info.remoteApiKey)}`;
+    const adapter = new VirtualWsAdapter(
+      (data) => fastify.reverseConnectManager.sendChannelData(info.remoteServerId, channelId, data),
+      () => fastify.reverseConnectManager.closeChannel(info.remoteServerId, channelId),
+    );
+    fastify.reverseConnectManager.setChannelAdapter(info.remoteServerId, channelId, adapter);
+    fastify.reverseConnectManager.openVirtualChannel(info.remoteServerId, channelId, wsPath, wsQuery);
+    remoteWs = adapter;
+    setTimeout(() => adapter.emit("open"), 0);
+  } else {
+    if (!info.remoteUrl) {
+      send({ type: "error", message: "Remote server not reachable (reverse-connect offline)" });
+      send({ type: "finished", exitCode: null });
+      onTerminal();
+      return noop;
+    }
+    const cleanRemoteUrl = info.remoteUrl.replace(/\/+$/, "");
+    const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
+    const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
+    const remoteWsUrl = `${wsUrl}/api/executor-processes/${info.remoteProcessId}/logs?apiKey=${encodeURIComponent(info.remoteApiKey)}`;
+    remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
+  }
+
+  const pingInterval = setInterval(() => {
+    if (remoteWs.readyState === WebSocket.OPEN) remoteWs.ping();
+  }, 30000);
+
+  let terminalSignalSent = false;
+  let cleanedUp = false;
+
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    clearInterval(pingInterval);
+    try { remoteWs.close(); } catch { /* ignore */ }
+  };
+
+  remoteWs.on("message", (data: Buffer | string) => {
+    try {
+      const raw = data.toString();
+      let parsed: StreamMessage | null = null;
+      try { parsed = JSON.parse(raw) as StreamMessage; } catch { /* non-JSON, ignore */ }
+      if (!parsed) return;
+      send(parsed);
+
+      if (parsed.type === "finished" || parsed.type === "error") terminalSignalSent = true;
+      if (parsed.type === "finished") {
+        const live = fastify.remoteExecutorMap.get(processId);
+        if (live && !live.stoppedEmitted) {
+          live.stoppedEmitted = true;
+          fastify.eventBus.emit({
+            type: "executor:stopped",
+            projectId: live.projectId ?? "",
+            executorId: live.executorId,
+            processId,
+            exitCode: parsed.exitCode ?? 0,
+            target: live.remoteServerId,
+          });
+        }
+        if (live) {
+          fastify.remoteExecutorMap.delete(processId);
+          fastify.storage.remoteExecutorProcesses.markFinished(
+            processId,
+            typeof parsed.exitCode === "number" ? parsed.exitCode : 0,
+          );
+        }
+        onTerminal();
+      }
+      if (parsed.type === "error") onTerminal();
+    } catch (error) {
+      console.error("[ExecutorStream] Failed to forward remote message:", error);
+    }
+  });
+
+  remoteWs.on("error", (error: unknown) => {
+    console.error(`[ExecutorStream] Remote connection error:`, error);
+    if (!terminalSignalSent) {
+      send({ type: "error", message: "Remote connection error" });
+      terminalSignalSent = true;
+    }
+    onTerminal();
+  });
+
+  remoteWs.on("close", () => {
+    if (!terminalSignalSent) {
+      const row = fastify.storage.remoteExecutorProcesses.getById(processId);
+      send({ type: "finished", exitCode: row?.exit_code ?? 0 });
+      terminalSignalSent = true;
+    }
+    onTerminal();
+  });
+
+  return {
+    cleanup,
+    handleInput: (msg) => {
+      try {
+        if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(JSON.stringify(msg));
+      } catch (error) {
+        console.error("[ExecutorStream] Failed to forward input to remote:", error);
+      }
+    },
   };
 }
