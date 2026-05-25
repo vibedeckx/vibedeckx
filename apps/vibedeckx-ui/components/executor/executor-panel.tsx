@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Plus, Terminal, FolderPlus, Monitor, Cloud } from "lucide-react";
 import { ExecutorItem } from "./executor-item";
 import { ExecutorForm } from "./executor-form";
+import { ExecutorLogsProvider } from "@/hooks/executor-logs-context";
 import { useExecutors } from "@/hooks/use-executors";
 import { useExecutorGroups } from "@/hooks/use-executor-groups";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
@@ -162,6 +163,10 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
   }
 
   return (
+    <ExecutorLogsProvider
+      key={`${projectId ?? "none"}-${project?.executor_mode ?? "local"}`}
+      projectId={projectId}
+    >
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between px-4 py-2 border-b border-border/60 h-10">
         <div className="flex items-center gap-2">
@@ -254,5 +259,6 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
         }}
       />
     </div>
+    </ExecutorLogsProvider>
   );
 }

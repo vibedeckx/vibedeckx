@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { ExecutorOutput } from "./executor-output";
 import { ExecutorForm } from "./executor-form";
-import { useExecutorLogs } from "@/hooks/use-executor-logs";
+import { useExecutorProcessLogs } from "@/hooks/executor-logs-context";
 import type { ExecutorWithProcess } from "@/hooks/use-executors";
 import type { ExecutorType, PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -83,7 +83,7 @@ export function ExecutorItem({
     opacity: isDragging ? 1 : undefined,
   };
 
-  const { logs, status, exitCode, isPty, replayingHistory, sendInput, sendResize } = useExecutorLogs(localProcessId, executorMode);
+  const { logs, status, exitCode, isPty, replayingHistory, sendInput, sendResize } = useExecutorProcessLogs(localProcessId, executorMode);
 
   // Sync local process ID with executor's current process.
   // Only update when a NEW process starts — don't clear to null when the process

@@ -1,8 +1,9 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { getWebSocketUrl, type LogMessage, type MuxClientMessage, type MuxServerMessage } from "@/lib/api";
 import type { ConnectionStatus } from "./use-executor-logs";
+import type { UseExecutorLogsResult } from "./use-executor-logs";
 
 const RECONNECT_MAX_ATTEMPTS = 8;
 const RECONNECT_BASE_DELAY_MS = 1000;
@@ -181,4 +182,60 @@ export function ExecutorLogsProvider({
   }), [notify, sendRaw]);
 
   return <ExecutorLogsContext.Provider value={store}>{children}</ExecutorLogsContext.Provider>;
+}
+
+/**
+ * Selector hook: reads a single process's log state from the multiplexed store.
+ * Signature/return value matches the old useExecutorLogs, for drop-in use in ExecutorItem.
+ * Must be used inside <ExecutorLogsProvider>.
+ */
+export function useExecutorProcessLogs(
+  processId: string | null,
+  resetKey?: string,
+): UseExecutorLogsResult {
+  const store = useExecutorLogsStore();
+
+  const subscribe = useCallback(
+    (cb: () => void) => {
+      if (!processId) return () => {};
+      store.subscribeProcess(processId);
+      const off = store.onProcessChange(processId, cb);
+      return () => {
+        off();
+        store.unsubscribeProcess(processId);
+      };
+    },
+    // resetKey (executorMode) change triggers re-subscription
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [processId, resetKey, store],
+  );
+
+  const getSnapshot = useCallback(
+    () => (processId ? store.getProcessState(processId) : null),
+    [processId, store],
+  );
+
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  const clearLogs = useCallback(() => {}, []); // store resets logs on re-subscription
+
+  const sendInput = useCallback(
+    (data: string) => { if (processId) store.sendInput(processId, data); },
+    [processId, store],
+  );
+  const sendResize = useCallback(
+    (cols: number, rows: number) => { if (processId) store.sendResize(processId, cols, rows); },
+    [processId, store],
+  );
+
+  return {
+    logs: state?.logs ?? [],
+    status: state?.status ?? "closed",
+    exitCode: state?.exitCode ?? null,
+    isPty: state?.isPty ?? false,
+    replayingHistory: state?.replayingHistory ?? true,
+    clearLogs,
+    sendInput,
+    sendResize,
+  };
 }
