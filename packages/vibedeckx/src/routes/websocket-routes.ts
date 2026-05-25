@@ -436,6 +436,72 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     );
 
+    // 多路复用 executor 日志端点：一个 workspace 一条连接，按 processId 订阅
+    fastify.get<{ Querystring: { projectId?: string; apiKey?: string; token?: string } }>(
+      "/api/executor-logs/stream",
+      { websocket: true },
+      (socket) => {
+        console.log(`[ExecutorMux] Client connected`);
+        const subs = new Map<string, () => void>(); // processId → cleanup
+        const handleInputMap = new Map<string, (msg: InputMessage) => void>();
+
+        const subscribeProcess = (processId: string) => {
+          if (subs.has(processId)) return; // 幂等：已订阅则跳过
+
+          const send = (msg: StreamMessage) => {
+            try { socket.send(JSON.stringify({ processId, ...msg })); } catch { /* closed */ }
+          };
+          let terminated = false;
+          const onTerminal = () => {
+            terminated = true;
+            const c = subs.get(processId);
+            if (c) { c(); subs.delete(processId); }
+            handleInputMap.delete(processId);
+          };
+
+          const handle = processId.startsWith("remote-")
+            ? attachRemoteProcessStream(fastify, processId, send, onTerminal)
+            : attachLocalProcessStream(fastify, processId, send, onTerminal);
+
+          // 仅当流尚未同步终止时登记 cleanup（避免给已终止进程留下陈旧条目）
+          if (!terminated) {
+            subs.set(processId, handle.cleanup);
+            handleInputMap.set(processId, handle.handleInput);
+          }
+        };
+
+        socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
+          try {
+            const msg = JSON.parse(data.toString()) as
+              | { type: "subscribe" | "unsubscribe"; processId: string }
+              | { type: "input"; processId: string; data: string }
+              | { type: "resize"; processId: string; cols: number; rows: number };
+
+            if (msg.type === "subscribe") {
+              subscribeProcess(msg.processId);
+            } else if (msg.type === "unsubscribe") {
+              subs.get(msg.processId)?.();
+              subs.delete(msg.processId);
+              handleInputMap.delete(msg.processId);
+            } else if (msg.type === "input") {
+              handleInputMap.get(msg.processId)?.({ type: "input", data: msg.data });
+            } else if (msg.type === "resize") {
+              handleInputMap.get(msg.processId)?.({ type: "resize", cols: msg.cols, rows: msg.rows });
+            }
+          } catch (error) {
+            console.error("[ExecutorMux] Failed to parse client message:", error);
+          }
+        });
+
+        socket.on("close", () => {
+          console.log(`[ExecutorMux] Client disconnected; cleaning ${subs.size} subscriptions`);
+          for (const cleanup of subs.values()) cleanup();
+          subs.clear();
+          handleInputMap.clear();
+        });
+      },
+    );
+
     // Agent Session WebSocket
     fastify.get<{ Params: { sessionId: string }; Querystring: { apiKey?: string; token?: string } }>(
       "/api/agent-sessions/:sessionId/stream",
