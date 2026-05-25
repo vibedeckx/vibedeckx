@@ -273,6 +273,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       files: { name: string; contentBase64: string }[];
     };
   }>("/api/path/upload", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
     const { path: projectPath, branch, relativePath, files } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
@@ -281,7 +284,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "No files provided" });
     }
 
-    const basePath = resolveWorktreePath(projectPath, branch ?? null);
+    const project = fastify.storage.projects.getByPath(projectPath);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const basePath = resolveWorktreePath(project.path ?? projectPath, branch ?? null);
     const decoded = files.map((f) => ({ name: f.name, data: Buffer.from(f.contentBase64, "base64") }));
 
     try {
