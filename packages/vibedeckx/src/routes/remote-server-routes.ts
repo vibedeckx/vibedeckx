@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { RemoteServer } from "../storage/types.js";
-import { proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { proxyToRemote, proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
@@ -176,6 +176,35 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(502).send({ error: "Failed to browse remote directory", details: result.data });
       } catch (err) {
         return reply.code(502).send({ error: "Failed to browse remote directory" });
+      }
+    }
+  );
+
+  // POST /api/remote-servers/:id/mkdir — create a directory on the remote server
+  fastify.post<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/mkdir",
+    async (request, reply) => {
+      const userId = requireAuth(request, reply);
+      if (userId === null) return;
+      const { id } = request.params;
+      const { parentPath, name } =
+        (request.body as { parentPath?: string; name?: string }) ?? {};
+      const server = fastify.storage.remoteServers.getById(id, userId);
+      if (!server) return reply.code(404).send({ error: "Server not found" });
+
+      try {
+        const result = await proxyToRemoteAuto(
+          id,
+          server.url ?? "",
+          server.api_key ?? "",
+          "POST",
+          "/api/mkdir",
+          { parentPath, name },
+          { reverseConnectManager: fastify.reverseConnectManager }
+        );
+        return reply.code(proxyStatus(result)).send(result.data);
+      } catch (err) {
+        return reply.code(502).send({ error: "Failed to create remote directory" });
       }
     }
   );
