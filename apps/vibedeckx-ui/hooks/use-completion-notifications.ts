@@ -106,19 +106,43 @@ function persist(list: CompletionNotification[]): void {
 // load regardless of remounts (HMR, Strict Mode, future refactors).
 const audioCache = new Map<string, HTMLAudioElement>();
 
-// Fetch + decode the completion sounds ahead of time so the first play is an
-// in-memory replay rather than a cold network fetch. The cold fetch otherwise
-// stalls for seconds — a <audio> media request starved of an HTTP/1.1
-// connection slot (held by the long-lived SSE + WebSocket) or just a slow
-// network. Pre-warming moves that one-time cost to idle startup.
+// Tracks srcs whose warm fetch is in flight so a re-entrant call (or React
+// Strict Mode double-invoke) doesn't kick off a duplicate download.
+const warming = new Set<string>();
+
+// Preload the completion sounds by fetching the bytes ourselves and holding
+// them as in-memory object URLs, so the first play is purely local.
+//
+// Why not just `new Audio(src)` + preload="auto" + load(): browsers treat
+// preload as a *hint* and deliberately defer/suspend media downloads for
+// detached <audio> elements before a user gesture (we observed `suspend` and
+// readyState 0 at play time even after load()). So that approach never
+// buffered the file — the completion play still did a cold, stall-prone fetch.
+// A plain fetch() runs immediately and is exempt from those media heuristics;
+// the object URL then makes play() read from RAM with no network involved.
 function warmCompletionSounds(): void {
   if (typeof window === 'undefined') return;
   for (const src of Object.values(SOUND_FOR_ACTIVITY)) {
-    if (audioCache.has(src)) continue;
-    const audio = new Audio(src);
-    audio.preload = 'auto';
-    audio.load();
-    audioCache.set(src, audio);
+    if (audioCache.has(src) || warming.has(src)) continue;
+    warming.add(src);
+    void (async () => {
+      try {
+        const res = await fetch(src);
+        const blob = await res.blob();
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.preload = 'auto';
+        audio.load();
+        audioCache.set(src, audio);
+        // [sound-preload-debug] Confirms the bytes landed in memory ahead of
+        // any completion. Remove once verified.
+        console.log(`[sound-preload-debug] warmed ${src} bytes=${blob.size}`);
+      } catch (err) {
+        // Network hiccup at startup — leave it to playSound's lazy fallback.
+        console.log(`[sound-preload-debug] warm failed ${src}`, err);
+      } finally {
+        warming.delete(src);
+      }
+    })();
   }
 }
 
@@ -306,6 +330,9 @@ function playSound(src: string) {
     audioCache.set(src, audio);
   }
   audio.currentTime = 0;
+  // [sound-preload-debug] readyState here tells the story: 4 = warmed (should
+  // be instant), 0/1 = still cold (would stall). Remove once verified.
+  console.log(`[sound-preload-debug] play ${src} readyState=${audio.readyState}`);
   // Browser autoplay policy rejects play() until the user has interacted with
   // the page. By the time a completion fires the user has invariably clicked
   // into the workspace, so this resolves; swallow the rejection regardless.
