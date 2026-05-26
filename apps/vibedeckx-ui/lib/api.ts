@@ -935,6 +935,23 @@ export const api = {
     return res.json();
   },
 
+  async createRemoteServerDirectory(
+    serverId: string,
+    parentPath: string,
+    name: string
+  ): Promise<RemoteBrowseItem> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${serverId}/mkdir`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parentPath, name }),
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || "Failed to create directory");
+    }
+    return res.json();
+  },
+
   async createRemoteProject(
     name: string,
     remotePath: string,
