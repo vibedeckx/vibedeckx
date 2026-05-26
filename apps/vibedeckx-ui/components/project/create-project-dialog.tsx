@@ -237,11 +237,12 @@ export function CreateProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg h-[620px] max-h-[calc(100vh-4rem)] grid-rows-[auto_minmax(0,1fr)_auto]">
         <DialogHeader>
           <DialogTitle>Create New Project</DialogTitle>
         </DialogHeader>
 
+        <div className="overflow-y-auto -mx-1 px-1">
         <div className="space-y-5 py-2">
           {/* Project Name */}
           <div className="space-y-2">
@@ -446,9 +447,10 @@ export function CreateProjectDialog({
               </div>
             )}
           </div>
-        </div>
 
-        {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && <p className="text-sm text-red-500 pt-3">{error}</p>}
+        </div>
+        </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => handleOpenChange(false)}>
