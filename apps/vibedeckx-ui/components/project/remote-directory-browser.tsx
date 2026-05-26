@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Folder, FolderPlus, ChevronRight, ChevronUp, Loader2 } from "lucide-react";
@@ -27,8 +27,9 @@ export function RemoteDirectoryBrowser({
   const [createError, setCreateError] = useState("");
   const [createBusy, setCreateBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const createBusyRef = useRef(false);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (!serverId) {
       setItems([]);
       return;
@@ -44,7 +45,7 @@ export function RemoteDirectoryBrowser({
     } finally {
       setLoading(false);
     }
-  };
+  }, [serverId, currentPath]);
 
   useEffect(() => {
     void refresh();
@@ -52,8 +53,7 @@ export function RemoteDirectoryBrowser({
     setCreating(false);
     setNewName("");
     setCreateError("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverId, currentPath]);
+  }, [refresh]);
 
   // Focus + select the input when the create row appears.
   useEffect(() => {
@@ -89,11 +89,13 @@ export function RemoteDirectoryBrowser({
   };
 
   const commitCreate = async () => {
+    if (createBusyRef.current) return;
     const name = newName.trim();
     if (!name) {
       cancelCreate();
       return;
     }
+    createBusyRef.current = true;
     setCreateBusy(true);
     setCreateError("");
     try {
@@ -105,6 +107,7 @@ export function RemoteDirectoryBrowser({
     } catch (e) {
       setCreateError(e instanceof Error ? e.message : "Failed to create folder");
     } finally {
+      createBusyRef.current = false;
       setCreateBusy(false);
     }
   };
