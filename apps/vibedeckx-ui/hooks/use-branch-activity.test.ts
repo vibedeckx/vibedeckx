@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyOptimisticActivity,
   classifyActivityEvent,
   reconcileActivitySnapshot,
   type ActivitySnapshotEntry,
@@ -241,5 +242,70 @@ describe("classifyActivityEvent", () => {
     if (outcome.kind === "transition") {
       expect(outcome.key).toBe("");
     }
+  });
+});
+
+describe("applyOptimisticActivity", () => {
+  it("updates the activity map without any `since` input (cannot poison the guard)", () => {
+    const next = applyOptimisticActivity(
+      new Map<string, BranchActivity>([["feat-a", "idle"]]),
+      "feat-a",
+      "working",
+    );
+    expect(next.get("feat-a")).toBe("working");
+  });
+
+  it("returns the same map reference when activity is unchanged (no needless render)", () => {
+    const prev = new Map<string, BranchActivity>([["feat-a", "working"]]);
+    expect(applyOptimisticActivity(prev, "feat-a", "working")).toBe(prev);
+  });
+
+  it("null branch maps to '' key", () => {
+    const next = applyOptimisticActivity(new Map<string, BranchActivity>(), null, "idle");
+    expect(next.get("")).toBe("idle");
+  });
+
+  it("regression: browser clock ahead of server — backend 'completed' is NOT dropped as stale", () => {
+    // Repro of the cross-machine clock-skew bug: the user's Windows browser
+    // ran ~20s ahead of the Linux box hosting the backend.
+    //
+    //   1. User hits send → optimistic "working" is seeded locally. The OLD
+    //      code stamped since = Date.now() (BROWSER clock) ≈ T_server + 20s.
+    //   2. Agent finishes → backend emits branch:activity:completed with
+    //      since = completedAt (SERVER clock), only a turn-duration past the
+    //      real "working" emit.
+    //   3. For any turn shorter than the 20s skew, the server's completed
+    //      timestamp is SMALLER than the browser-stamped optimistic working
+    //      timestamp → classifyActivityEvent dropped it as "stale" → the dot
+    //      stayed blue forever.
+    //
+    // The fix routes optimistic seeds through applyOptimisticActivity, which
+    // has no access to `since`. The guard therefore only ever compares
+    // server-clock timestamps, so the genuine "completed" classifies as a
+    // real transition regardless of how far the browser clock has drifted.
+    const serverWorkingSince = 1_000_000_000; // backend's real "working" emit
+    const browserClockSkewMs = 20_000;
+
+    // `since` is anchored to the last real *server* event...
+    const since = new Map<string, number>([["feat-a", serverWorkingSince]]);
+    // ...and the optimistic "working" seed leaves it untouched.
+    const activity = applyOptimisticActivity(
+      new Map<string, BranchActivity>([["feat-a", "idle"]]),
+      "feat-a",
+      "working",
+    );
+
+    // The backend's genuine completion lands just after the working emit, but
+    // still well below what the browser clock would have stamped.
+    const serverCompletedSince = serverWorkingSince + 500;
+    const browserOptimisticSince = serverWorkingSince + browserClockSkewMs;
+    expect(serverCompletedSince).toBeLessThan(browserOptimisticSince);
+
+    const outcome = classifyActivityEvent(
+      { branch: "feat-a", activity: "completed", since: serverCompletedSince },
+      activity,
+      since,
+    );
+    expect(outcome.kind).toBe("transition");
   });
 });

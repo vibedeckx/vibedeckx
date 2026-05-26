@@ -138,6 +138,41 @@ export function classifyActivityEvent(
 }
 
 /**
+ * Apply an optimistic local activity seed to the activity map, returning the
+ * same reference unchanged when the value already matches (so callers don't
+ * trigger a needless render).
+ *
+ * Deliberately has NO access to the `since` map. Optimistic seeds exist purely
+ * for sub-50ms visual feedback (e.g. "working" the instant the user hits send)
+ * and must not participate in the `since`-based stale-event guard. `since`
+ * lives entirely in the *server* clock domain — every real `branch:activity`
+ * event carries the backend's `Date.now()` — whereas a client-stamped seed
+ * would carry the *browser's* clock. When the two machines differ (a browser
+ * on a box whose clock runs ahead of the server's — e.g. a Windows machine
+ * ~20s ahead of a Linux server), a `Date.now()` seed would be larger than the
+ * server's genuine `completed` timestamp, and `classifyActivityEvent` would
+ * drop that real `completed` as "stale" — leaving the workspace dot stuck on
+ * "working" (blue) forever.
+ *
+ * Leaving `since` anchored to the last real server event keeps the stale guard
+ * a pure server-vs-server comparison. The optimistic activity is corrected by
+ * the next genuine server transition, which carries a newer server `since`.
+ *
+ * Pure function — exported for tests.
+ */
+export function applyOptimisticActivity(
+  activity: Map<string, BranchActivity>,
+  branch: string | null,
+  next: BranchActivity,
+): Map<string, BranchActivity> {
+  const key = toKey(branch);
+  if (activity.get(key) === next) return activity;
+  const m = new Map(activity);
+  m.set(key, next);
+  return m;
+}
+
+/**
  * Reads the backend's derived per-branch activity state for the current
  * project. REST fetch on mount + SSE subscription for live updates. The
  * returned `activity` map keys are branch strings (empty string for the
@@ -285,25 +320,16 @@ export function useBranchActivity(
    * UI transitions (e.g. "idle" on New Conversation, before any new DB
    * session has been created and emitted a real branch:activity event).
    *
-   * Writes `since = Date.now()` so the stale-event guard correctly compares
-   * against subsequent backend events: an event with newer `since` wins
-   * (transition fires), an older one is dropped (stale), and an event with
-   * the same activity is a no-op (map already in the right state).
+   * Deliberately does NOT touch `since` — see `applyOptimisticActivity` for
+   * why mixing the browser clock into the server-clock stale guard left the
+   * dot stuck on a cross-machine clock skew. `since` stays anchored to the
+   * last real server event; the next genuine backend transition (carrying a
+   * newer server `since`) corrects the optimistic value.
    */
   const setOptimisticActivity = useCallback(
     (branch: string | null, next: BranchActivity) => {
-      const key = toKey(branch);
-      const now = Date.now();
-      sinceRef.current.set(key, now);
-      setSince(new Map(sinceRef.current));
       setActivity((prev) => {
-        if (prev.get(key) === next) {
-          // Map already says this; only bump since (already done above).
-          activityRef.current = prev;
-          return prev;
-        }
-        const m = new Map(prev);
-        m.set(key, next);
+        const m = applyOptimisticActivity(prev, branch, next);
         activityRef.current = m;
         return m;
       });
