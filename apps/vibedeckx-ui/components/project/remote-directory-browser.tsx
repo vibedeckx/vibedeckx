@@ -144,11 +144,11 @@ export function RemoteDirectoryBrowser({
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center p-8">
+        <div className="flex items-center justify-center h-[200px]">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
       ) : error ? (
-        <div className="p-4 text-sm text-red-500">{error}</div>
+        <div className="p-4 text-sm text-red-500 h-[200px] overflow-y-auto">{error}</div>
       ) : (
         <ScrollArea className="h-[200px]">
           <div className="p-1">
