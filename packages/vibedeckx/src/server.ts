@@ -68,7 +68,7 @@ export function requireAuth(req: FastifyRequest, reply: FastifyReply): string | 
 // without --accept-remote means the caller is treating us as a remote we never
 // opted into being — return 404 to make Server-mode invisible as a remote.
 const REMOTE_PROVIDER_PREFIXES = ["/api/path/"];
-const REMOTE_PROVIDER_EXACT = new Set(["/api/browse", "/api/execute-one-shot"]);
+const REMOTE_PROVIDER_EXACT = new Set(["/api/browse", "/api/mkdir", "/api/execute-one-shot"]);
 
 function isRemoteProviderPath(url: string): boolean {
   const pathOnly = url.split("?")[0];
