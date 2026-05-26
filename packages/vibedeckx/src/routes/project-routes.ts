@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import path from "path";
 import { randomUUID } from "crypto";
 import { exec } from "child_process";
-import { readdir } from "fs/promises";
+import { readdir, mkdir } from "fs/promises";
 import type { Project, SyncButtonConfig } from "../storage/types.js";
 import { selectFolder } from "../dialog.js";
 import { proxyStatus, proxyToRemote } from "../utils/remote-proxy.js";
@@ -65,6 +65,37 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(200).send({ path: browsePath, items });
     } catch {
       return reply.code(400).send({ error: "Failed to read directory" });
+    }
+  });
+
+  // Create a directory (used by the remote directory browser's "new folder")
+  fastify.post<{
+    Body: { parentPath?: string; name?: string };
+  }>("/api/mkdir", async (req, reply) => {
+    const parentPath = req.body?.parentPath;
+    const rawName = req.body?.name;
+
+    if (!parentPath || !rawName) {
+      return reply.code(400).send({ error: "parentPath and name are required" });
+    }
+
+    // Reduce to a single path segment and reject traversal / separators.
+    const name = path.basename(rawName.trim());
+    if (!name || name === "." || name === ".." || name !== rawName.trim()) {
+      return reply.code(400).send({ error: "Invalid folder name" });
+    }
+
+    const fullPath = path.join(parentPath, name);
+
+    try {
+      await mkdir(fullPath); // non-recursive: duplicate name throws EEXIST
+      return reply.code(201).send({ path: fullPath, name, type: "directory" });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EEXIST") {
+        return reply.code(409).send({ error: "A folder with that name already exists" });
+      }
+      return reply.code(400).send({ error: "Failed to create directory" });
     }
   });
 
