@@ -325,17 +325,34 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Task 5.12: Permission mode mapping ============
 
-  /** Build params for thread/start — uses `sandbox` (string enum) per ThreadStartParams schema */
+  /**
+   * Build params for thread/start.
+   *
+   * `sandbox` is the `SandboxMode` string enum ("read-only" | "workspace-write"
+   * | "danger-full-access") and `approvalPolicy` is the `AskForApproval` enum
+   * ("untrusted" | "on-failure" | "on-request" | "never" | ...).
+   *
+   * We always set `approvalPolicy: "never"` so Codex runs autonomously without
+   * emitting `item/commandExecution/requestApproval` prompts — the equivalent of
+   * Claude Code's `--dangerously-skip-permissions`. (`"on-request"` is what makes
+   * Codex stop and ask before every command.)
+   *
+   * Edit mode uses `danger-full-access` so commands execute directly: with a
+   * confined sandbox + `never`, any command that needs to escape the sandbox is
+   * auto-denied and silently fails instead of prompting (and on hosts where the
+   * Linux sandbox can't initialize, every command would fail).
+   */
   private buildThreadStartParams(mode: "plan" | "edit"): Record<string, unknown> {
     if (mode === "plan") {
       return {
         sandbox: "read-only",
+        approvalPolicy: "never",
       };
     }
     // edit mode
     return {
-      sandbox: "workspace-write",
-      approvalPolicy: "on-request",
+      sandbox: "danger-full-access",
+      approvalPolicy: "never",
     };
   }
 
