@@ -56,10 +56,6 @@ export function useMarkerKeyboardNav(
       const scrollEl = findScrollParent(contentEl);
       if (!scrollEl) return;
 
-      // Default Shift+Arrow extends a text selection in the messages area — we own
-      // this combo, so suppress it.
-      event.preventDefault();
-
       const scrollRect = scrollEl.getBoundingClientRect();
       const viewTop = scrollEl.scrollTop;
       const goUp = event.key === "ArrowUp";
@@ -89,8 +85,9 @@ export function useMarkerKeyboardNav(
       // Stop at the ends — nothing further in this direction.
       if (!target) return;
 
-      // TypeScript loses track of `target` after mutation inside the forEach
-      // callback — assert it back to HTMLElement.
+      // We're handling the keystroke now; suppress the default selection-extension.
+      event.preventDefault();
+
       const targetEl = target as HTMLElement;
       targetEl.scrollIntoView({ block: "start", behavior: "smooth" });
 
