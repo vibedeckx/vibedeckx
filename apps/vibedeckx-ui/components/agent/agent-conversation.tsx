@@ -41,6 +41,7 @@ import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib
 import { getAgentProviders, translateText } from "@/lib/api";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
+import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
 import { SessionHistoryDropdown } from "./session-history-dropdown";
 import { QuotePopover, formatAsQuote } from "./quote-popover";
 
@@ -138,6 +139,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // that gap. Cleared once refresh syncs (or on session switch / timeout).
   const [aiTitleOverride, setAiTitleOverride] = useState<{ sessionId: string; title: string } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const { onKeyDown: onMarkerKeyDown, highlightedIndex } = useMarkerKeyboardNav(messagesRef);
   const textareaWrapperRef = useRef<HTMLDivElement>(null);
   const inputHistory = useInputHistory(setInput, projectId, branch);
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
@@ -731,12 +733,21 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               </div>
             ) : (
               <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null }}>
-                <div className="space-y-1" ref={messagesRef}>
+                <div
+                  className="space-y-1 outline-none"
+                  ref={messagesRef}
+                  tabIndex={-1}
+                  onKeyDown={onMarkerKeyDown}
+                >
                   {messages.map((msg, index) => (
                     <div
                       key={index}
                       data-message-idx={index}
                       {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
+                      className={cn(
+                        "rounded-md transition-colors duration-500",
+                        index === highlightedIndex && "bg-primary/10 ring-2 ring-primary/40"
+                      )}
                     >
                       <AgentMessageItem message={msg} messageIndex={index} />
                     </div>
