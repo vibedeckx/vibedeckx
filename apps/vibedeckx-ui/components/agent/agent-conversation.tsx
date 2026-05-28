@@ -139,7 +139,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // that gap. Cleared once refresh syncs (or on session switch / timeout).
   const [aiTitleOverride, setAiTitleOverride] = useState<{ sessionId: string; title: string } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
-  const { onKeyDown: onMarkerKeyDown, highlightedIndex } = useMarkerKeyboardNav(messagesRef);
+  const onMarkerKeyDown = useMarkerKeyboardNav(messagesRef);
   const textareaWrapperRef = useRef<HTMLDivElement>(null);
   const inputHistory = useInputHistory(setInput, projectId, branch);
   const { remotes } = useProjectRemotes(project?.id ?? undefined);
@@ -744,10 +744,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       key={index}
                       data-message-idx={index}
                       {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
-                      className={cn(
-                        "scroll-mt-2 rounded-md transition-colors duration-500",
-                        index === highlightedIndex && "bg-primary/15"
-                      )}
+                      className="scroll-mt-2"
                     >
                       <AgentMessageItem message={msg} messageIndex={index} />
                     </div>
