@@ -1,0 +1,104 @@
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { findScrollParent } from "@/lib/scroll";
+
+// Treat a marker within this many pixels of the viewport top as "current" so
+// repeated Shift+Arrow presses keep advancing instead of re-selecting the
+// marker that scrollIntoView just parked at the top edge.
+const TOP_EPSILON_PX = 4;
+
+// How long the landed message stays highlighted, in ms.
+const HIGHLIGHT_MS = 1000;
+
+interface MarkerNav {
+  onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+  highlightedIndex: number | null;
+}
+
+/**
+ * Keyboard navigation between user-input markers in the agent messages area.
+ *
+ * Shift+ArrowUp jumps to the nearest user message whose top is above the current
+ * scroll-viewport top; Shift+ArrowDown to the nearest one below. Navigation is
+ * scroll-position based (stateless) so it stays correct after manual scrolling.
+ * Stops at the ends. The landed message index is reported via `highlightedIndex`
+ * for a transient pulse, then cleared after HIGHLIGHT_MS.
+ *
+ * Attach `onKeyDown` to the messages container (made focusable with tabIndex={-1});
+ * keydown events bubble from focused children, so it fires whenever focus is within
+ * the messages area.
+ */
+export function useMarkerKeyboardNav(
+  contentRef: RefObject<HTMLDivElement | null>
+): MarkerNav {
+  const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear any pending highlight timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const triggerHighlight = useCallback((index: number) => {
+    setHighlightedIndex(index);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setHighlightedIndex(null), HIGHLIGHT_MS);
+  }, []);
+
+  const onKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLElement>) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      if (!event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+
+      const contentEl = contentRef.current;
+      if (!contentEl) return;
+      const scrollEl = findScrollParent(contentEl);
+      if (!scrollEl) return;
+
+      // Default Shift+Arrow extends a text selection in the messages area — we own
+      // this combo, so suppress it.
+      event.preventDefault();
+
+      const scrollRect = scrollEl.getBoundingClientRect();
+      const viewTop = scrollEl.scrollTop;
+      const goUp = event.key === "ArrowUp";
+
+      let target: HTMLElement | null = null;
+      let targetTop = goUp ? -Infinity : Infinity;
+
+      const els = contentEl.querySelectorAll<HTMLElement>("[data-user-msg-idx]");
+      els.forEach((el) => {
+        const elRect = el.getBoundingClientRect();
+        const top = elRect.top - scrollRect.top + scrollEl.scrollTop;
+        if (goUp) {
+          // Nearest marker above the viewport top: largest top still < viewTop.
+          if (top < viewTop - TOP_EPSILON_PX && top > targetTop) {
+            targetTop = top;
+            target = el;
+          }
+        } else {
+          // Nearest marker below the viewport top: smallest top still > viewTop.
+          if (top > viewTop + TOP_EPSILON_PX && top < targetTop) {
+            targetTop = top;
+            target = el;
+          }
+        }
+      });
+
+      // Stop at the ends — nothing further in this direction.
+      if (!target) return;
+
+      // TypeScript loses track of `target` after mutation inside the forEach
+      // callback — assert it back to HTMLElement.
+      const targetEl = target as HTMLElement;
+      targetEl.scrollIntoView({ block: "start", behavior: "smooth" });
+
+      const idx = Number.parseInt(targetEl.dataset.userMsgIdx ?? "", 10);
+      if (!Number.isNaN(idx)) triggerHighlight(idx);
+    },
+    [contentRef, triggerHighlight]
+  );
+
+  return { onKeyDown, highlightedIndex };
+}
