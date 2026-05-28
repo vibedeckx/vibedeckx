@@ -11,6 +11,14 @@ const TOP_EPSILON_PX = 12;
 // How long the landed message stays highlighted, in ms.
 const HIGHLIGHT_MS = 1000;
 
+// After scrollIntoView, poll the scroll container until scrollTop stays put for
+// this long, then treat the smooth scroll as complete. ~80ms (~5 frames @ 60Hz)
+// lets the animation start without noticeably delaying the no-scroll-needed case.
+const SCROLL_STABLE_MS = 80;
+// Absolute cap on how long we'll wait for scroll completion before highlighting
+// anyway, so a stuck or interrupted animation never swallows the visual feedback.
+const SCROLL_POLL_TIMEOUT_MS = 1500;
+
 interface MarkerNav {
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   highlightedIndex: number | null;
@@ -34,11 +42,13 @@ export function useMarkerKeyboardNav(
 ): MarkerNav {
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingScrollEndRef = useRef<(() => void) | null>(null);
 
-  // Clear any pending highlight timer on unmount.
+  // Clear any pending highlight timer and scroll-end watcher on unmount.
   useEffect(() => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      pendingScrollEndRef.current?.();
     };
   }, []);
 
@@ -91,10 +101,44 @@ export function useMarkerKeyboardNav(
       event.preventDefault();
 
       const targetEl = target as HTMLElement;
+      const idx = Number.parseInt(targetEl.dataset.userMsgIdx ?? "", 10);
+
+      // Cancel any prior scroll-end watcher so a rapid follow-up keypress doesn't
+      // fire a stale-index highlight when its scroll happens to land.
+      pendingScrollEndRef.current?.();
+
       targetEl.scrollIntoView({ block: "start", behavior: "smooth" });
 
-      const idx = Number.parseInt(targetEl.dataset.userMsgIdx ?? "", 10);
-      if (!Number.isNaN(idx)) triggerHighlight(idx);
+      if (Number.isNaN(idx)) return;
+
+      // Defer the highlight until the smooth scroll actually finishes — for long
+      // jumps the 1s fade can otherwise run out before the user sees the target.
+      const startTime = performance.now();
+      let lastTop = scrollEl.scrollTop;
+      let stableSince = startTime;
+      let frameId = 0;
+
+      const tick = (now: number) => {
+        const currentTop = scrollEl.scrollTop;
+        if (currentTop !== lastTop) {
+          lastTop = currentTop;
+          stableSince = now;
+        }
+        const settled = now - stableSince >= SCROLL_STABLE_MS;
+        const timedOut = now - startTime >= SCROLL_POLL_TIMEOUT_MS;
+        if (settled || timedOut) {
+          pendingScrollEndRef.current = null;
+          triggerHighlight(idx);
+          return;
+        }
+        frameId = requestAnimationFrame(tick);
+      };
+      frameId = requestAnimationFrame(tick);
+
+      pendingScrollEndRef.current = () => {
+        cancelAnimationFrame(frameId);
+        pendingScrollEndRef.current = null;
+      };
     },
     [contentRef, triggerHighlight]
   );
