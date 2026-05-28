@@ -3,8 +3,10 @@ import { findScrollParent } from "@/lib/scroll";
 
 // Treat a marker within this many pixels of the viewport top as "current" so
 // repeated Shift+Arrow presses keep advancing instead of re-selecting the
-// marker that scrollIntoView just parked at the top edge.
-const TOP_EPSILON_PX = 4;
+// marker that scrollIntoView just parked at the top edge. Must exceed the
+// scroll-margin-top applied to message wrappers in agent-conversation.tsx
+// (scroll-mt-2 = 8px), or Shift+Down re-selects the just-landed marker.
+const TOP_EPSILON_PX = 12;
 
 // How long the landed message stays highlighted, in ms.
 const HIGHLIGHT_MS = 1000;
