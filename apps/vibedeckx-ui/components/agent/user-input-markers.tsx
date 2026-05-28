@@ -2,18 +2,7 @@
 
 import { useRef, useState, useEffect, useCallback, type RefObject } from "react";
 import type { AgentMessage } from "@/hooks/use-agent-session";
-
-function findScrollParent(el: HTMLElement): HTMLElement | null {
-  let parent = el.parentElement;
-  while (parent) {
-    const { overflowY } = getComputedStyle(parent);
-    if (overflowY === "auto" || overflowY === "scroll") {
-      return parent;
-    }
-    parent = parent.parentElement;
-  }
-  return null;
-}
+import { findScrollParent } from "@/lib/scroll";
 
 function getMessagePreview(msg: AgentMessage): string {
   if (msg.type !== "user") return "";
