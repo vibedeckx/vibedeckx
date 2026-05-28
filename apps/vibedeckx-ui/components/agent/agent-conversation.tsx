@@ -745,7 +745,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       data-message-idx={index}
                       {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
                       className={cn(
-                        "rounded-md transition-colors duration-500",
+                        "rounded-md transition-[background-color,box-shadow] duration-500",
                         index === highlightedIndex && "bg-primary/10 ring-2 ring-primary/40"
                       )}
                     >
