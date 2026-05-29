@@ -597,7 +597,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           <PermissionModeToggle
             mode={permissionMode}
             onModeChange={handlePermissionModeChange}
-            disabled={isLoading}
           />
           {agentTargets.length >= 1 && onAgentModeChange && (
             <ExecutionModeToggle
