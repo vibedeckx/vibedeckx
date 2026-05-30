@@ -1,8 +1,10 @@
 "use client";
 
-import { Download, FileWarning, Copy } from "lucide-react";
+import { useState } from "react";
+import { Download, FileWarning, Copy, Code, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, CodeBlockCopyButton } from "@/components/ai-elements/code-block";
+import { MessageResponse } from "@/components/ai-elements/message";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { FileContentResponse } from "@/lib/api";
 import type { BundledLanguage } from "shiki";
@@ -60,6 +62,11 @@ function getLanguage(filePath: string): BundledLanguage {
   return EXTENSION_LANGUAGE_MAP[ext] ?? "text";
 }
 
+function isMarkdown(filePath: string): boolean {
+  const lang = getLanguage(filePath);
+  return lang === "markdown" || lang === "mdx";
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -74,6 +81,15 @@ interface FilePreviewProps {
 }
 
 export function FilePreview({ filePath, fileContent, loading, downloadUrl }: FilePreviewProps) {
+  const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
+  const [prevFilePath, setPrevFilePath] = useState(filePath);
+
+  // Reset to rendered mode whenever a different file is opened.
+  if (filePath !== prevFilePath) {
+    setPrevFilePath(filePath);
+    setViewMode("rendered");
+  }
+
   if (!filePath) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
@@ -116,6 +132,11 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
     }
   };
 
+  // Markdown files with previewable content can toggle between rendered and source.
+  const canToggleMarkdown =
+    isMarkdown(filePath) && !fileContent.tooLarge && !fileContent.binary && !!fileContent.content;
+  const showRendered = canToggleMarkdown && viewMode === "rendered";
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -127,6 +148,17 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
           </span>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {canToggleMarkdown && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setViewMode((m) => (m === "rendered" ? "source" : "rendered"))}
+              title={showRendered ? "View source" : "View rendered"}
+            >
+              {showRendered ? <Code className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </Button>
+          )}
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleCopyPath} title="Copy path">
             <Copy className="h-3.5 w-3.5" />
           </Button>
@@ -161,6 +193,10 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
                 Download
               </Button>
             )}
+          </div>
+        ) : showRendered ? (
+          <div className="p-4 text-sm">
+            <MessageResponse>{fileContent.content ?? ""}</MessageResponse>
           </div>
         ) : fileContent.content !== null ? (
           <CodeBlock
