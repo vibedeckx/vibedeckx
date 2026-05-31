@@ -197,18 +197,30 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       console.log(`[ExecutorOutput] writing ${newCount} logs (${lastLogIndexRef.current}→${logs.length}), muteInput=${muteInputRef.current}`);
     }
 
-    // Only write new logs since last update
+    // Coalesce all new logs into a single write. Writing each entry with its
+    // own terminal.write() call floods xterm's internal WriteBuffer — when a
+    // large backlog arrives at once (e.g. full-history replay on WS reconnect)
+    // the queued-chunk count exceeds xterm's discard limit and it throws
+    // "write data discarded, use flow control to avoid losing data", which
+    // bubbles out of React's commit phase into the error boundary. One write
+    // per effect run keeps the buffer to a single chunk.
+    let pending = "";
     for (let i = lastLogIndexRef.current; i < logs.length; i++) {
       const log = logs[i];
-      if (log.type === "pty") {
-        // PTY output - write directly (already has proper formatting)
-        terminalRef.current.write(log.data);
-      } else if (log.type === "stdout" || log.type === "stderr") {
-        // Regular process output - write with ANSI code interpretation
-        terminalRef.current.write(log.data);
+      // PTY/stdout/stderr are all written verbatim (ANSI interpreted by xterm).
+      if (log.type === "pty" || log.type === "stdout" || log.type === "stderr") {
+        pending += log.data;
       }
     }
     lastLogIndexRef.current = logs.length;
+    if (pending) {
+      try {
+        terminalRef.current.write(pending);
+      } catch (err) {
+        // Last-resort guard: never let a terminal write crash the React tree.
+        console.error("[ExecutorOutput] terminal write failed", err);
+      }
+    }
   }, [logs]);
 
   // Apply live terminal settings changes (font, scrollback) without remounting
