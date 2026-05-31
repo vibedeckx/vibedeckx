@@ -33,6 +33,38 @@ async function verifyWsToken(token: string): Promise<string | null> {
   }
 }
 
+/**
+ * Authenticate a WebSocket connection for the executor log routes.
+ *
+ * These routes forward client `input` frames into PTY/terminal stdin, so an
+ * unauthenticated connection is an unauthenticated command-execution primitive.
+ * Mirrors the agent-session WS auth: when auth is enabled, require either a
+ * pre-validated `apiKey` (already checked against VIBEDECKX_API_KEY by the
+ * global API-key onRequest hook) or a valid Clerk session token. On failure,
+ * closes the socket and returns false.
+ */
+async function authenticateLogsWs(
+  authEnabled: boolean,
+  query: { apiKey?: string; token?: string },
+  socket: WebSocket,
+): Promise<boolean> {
+  if (!authEnabled) return true;
+
+  // API key takes precedence (remote proxy connections).
+  if (query.apiKey) return true;
+
+  const reject = (error: string) => {
+    try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }
+    try { socket.close(); } catch { /* already closed */ }
+    return false;
+  };
+
+  if (!query.token) return reject("Authentication required");
+  const userId = await verifyWsToken(query.token);
+  if (!userId) return reject("Invalid authentication token");
+  return true;
+}
+
 // ---- Remote reconnection constants ----
 const REMOTE_RECONNECT_MAX_ATTEMPTS = 10;
 const REMOTE_RECONNECT_BASE_DELAY_MS = 1000;
@@ -401,11 +433,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // WebSocket routes must be registered after the websocket plugin is ready
   fastify.after(() => {
     // Executor process logs WebSocket
-    fastify.get<{ Params: { processId: string } }>(
+    fastify.get<{ Params: { processId: string }; Querystring: { apiKey?: string; token?: string } }>(
       "/api/executor-processes/:processId/logs",
       { websocket: true },
-      (socket, req) => {
+      async (socket, req) => {
         const { processId } = req.params;
+        console.log(`[WebSocket] Connection attempt for process ${processId} (auth=${fastify.authEnabled})`);
+
+        if (!(await authenticateLogsWs(fastify.authEnabled, req.query, socket))) {
+          console.log(`[WebSocket] Auth rejected for process ${processId}`);
+          return;
+        }
         console.log(`[WebSocket] Client connected for process ${processId}`);
 
         // 旧端点：send 不包 processId；onTerminal 关闭 socket（保持单进程单连接语义）
@@ -440,7 +478,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     fastify.get<{ Querystring: { projectId?: string; apiKey?: string; token?: string } }>(
       "/api/executor-logs/stream",
       { websocket: true },
-      (socket) => {
+      async (socket, req) => {
+        console.log(`[ExecutorMux] Connection attempt (auth=${fastify.authEnabled})`);
+
+        if (!(await authenticateLogsWs(fastify.authEnabled, req.query, socket))) {
+          console.log(`[ExecutorMux] Auth rejected`);
+          return;
+        }
         console.log(`[ExecutorMux] Client connected`);
         const subs = new Map<string, () => void>(); // processId → cleanup
         const handleInputMap = new Map<string, (msg: InputMessage) => void>();
