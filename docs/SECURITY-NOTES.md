@@ -32,3 +32,13 @@ if (worktreePath && worktreePath !== ".") {
 ```
 
 Note: We check `projectParent` rather than `project.path` because git worktrees are typically created in sibling directories (e.g., `../.worktrees/feature-x`).
+
+## Browser Preview Runs Proxied Pages as App-Origin Script
+
+**Location:** `packages/vibedeckx/src/routes/browser-proxy-routes.ts`, preview iframe sandbox in `apps/vibedeckx-ui/components/preview/browser-frames-provider.tsx`.
+
+**Current Behavior:** Previewed dev-server URLs are served through a same-origin proxy into an iframe sandboxed with `allow-scripts allow-same-origin`, so proxied content executes with the Vibedeckx origin.
+
+**Risk Level:** Low for current use case (solo, self-hosted, no-auth; users preview only their own trusted dev servers). `allow-same-origin` is required for preview functionality (storage/cookies/HMR/login state).
+
+**Future Hardening (before hosted multi-tenant `--auth`):** Serve the proxy from a separate origin so `allow-same-origin` can stay without exposing the main app origin/token. Full design and implementation checklist: [browser-preview-origin-isolation.md](browser-preview-origin-isolation.md).
