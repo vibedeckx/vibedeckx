@@ -92,17 +92,28 @@ The CLI flags take precedence over the environment variables. Values point to **
 | `--key` | `VIBEDECKX_TLS_KEY` | Server private key (PEM) |
 | `--client-ca` | `VIBEDECKX_TLS_CLIENT_CA` | Client CA bundle for mTLS (optional) |
 
-**Recommended setup behind Cloudflare** — use a Cloudflare Origin Certificate (valid up to 15 years, no ACME / auto-renewal needed) plus Authenticated Origin Pulls so the origin only accepts connections from Cloudflare:
+**Recommended setup behind Cloudflare** — use a Cloudflare Origin Certificate (valid up to 15 years, no ACME / auto-renewal needed) plus Authenticated Origin Pulls so the origin only accepts connections from Cloudflare, and protect the public Cloudflare route with Cloudflare Access, `--auth`, `VIBEDECKX_API_KEY`, or an equivalent user-authentication layer:
 
 ```bash
-# 1. Origin Cert only — encrypts CF ↔ origin, but a leaked origin IP can still be hit directly
+# 1. Cloudflare Access protected route + Origin Cert — encrypts CF ↔ origin, but
+#    a leaked origin IP can still be hit directly. This no-auth Vibedeckx mode is
+#    safe only when the public Cloudflare hostname is protected by Cloudflare
+#    Access or an equivalent user-authentication policy.
 vibedeckx start \
   --cert /etc/vibedeckx/cf-origin.pem \
   --key  /etc/vibedeckx/cf-origin.key
 
-# 2. Origin Cert + Authenticated Origin Pulls (mTLS) — origin rejects any request that
-#    doesn't present Cloudflare's client cert, so direct hits on the origin IP are dropped
-#    at the TLS layer. Download the CA from:
+# 2. Built-in Clerk auth + Origin Cert — use when you want Vibedeckx to enforce
+#    application-layer user authentication itself.
+CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth \
+  --cert /etc/vibedeckx/cf-origin.pem \
+  --key  /etc/vibedeckx/cf-origin.key
+
+# 3. Origin Cert + Authenticated Origin Pulls (mTLS) — origin rejects any request
+#    that doesn't present Cloudflare's client cert, so direct hits on the origin
+#    IP are dropped at the TLS layer. You still need Cloudflare Access, --auth,
+#    VIBEDECKX_API_KEY, or equivalent user authentication for the public URL.
+#    Download the CA from:
 #    https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
 vibedeckx start \
   --cert      /etc/vibedeckx/cf-origin.pem \
@@ -121,6 +132,10 @@ VIBEDECKX_TLS_CLIENT_CA=/etc/vibedeckx/cloudflare-aop-ca.pem
 Notes:
 - If only one of `--cert` / `--key` is supplied, startup fails with a clear error.
 - `--client-ca` requires `--cert`/`--key` (mTLS needs server identity first).
+
+> [!WARNING]
+> TLS, Cloudflare Origin Certificates, and Authenticated Origin Pulls do not authenticate end users. If this Vibedeckx URL is Internet-reachable, protect it with Cloudflare Access, `--auth`, `VIBEDECKX_API_KEY`, or an equivalent user-authentication layer. Do not expose a no-auth Vibedeckx instance directly to the public Internet.
+
 - TLS mode skips the auto-open-browser step on launch — the certificate is for the public hostname, so opening `https://localhost:<port>` would just trigger a cert-mismatch warning. Visit your public URL through Cloudflare instead.
 
 ### `vibedeckx connect`
