@@ -18,6 +18,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (userId === null) return;
 
     const { projectId } = req.params;
+    const project = fastify.storage.projects.getById(projectId, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
     const branch = req.body?.branch ?? null;
 
     const sessionId = fastify.chatSessionManager.getOrCreateSession(
@@ -47,6 +51,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/chat-sessions/:sessionId/message", async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
+    const userId = resolveUserId(authResult);
 
     const { sessionId } = req.params;
     const { content } = req.body;
@@ -58,6 +63,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const session = fastify.chatSessionManager.getSession(sessionId);
     if (!session) {
       return reply.code(404).send({ error: "Session not found" });
+    }
+    if (session.userId !== userId) {
+      return reply.code(403).send({ error: "Forbidden" });
     }
 
     // Fire and forget — response streams over WebSocket

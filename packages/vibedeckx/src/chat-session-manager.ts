@@ -1663,7 +1663,7 @@ export class ChatSessionManager {
         inputSchema: z.object({}),
         execute: async () => {
           // Local terminals
-          const localTerminals = processManager.getTerminals(projectId).map((t) => ({
+          const localTerminals = processManager.getTerminals(projectId, branch).map((t) => ({
             id: t.id,
             name: t.name,
             cwd: t.cwd,
@@ -1682,6 +1682,7 @@ export class ChatSessionManager {
           for (const [key, info] of remoteExecutorMap.entries()) {
             if (!key.startsWith("remote-terminal-")) continue;
             if (info.projectId && info.projectId !== projectId) continue;
+            if (info.branch !== (branch ?? null)) continue;
             remoteTerminals.push({
               id: key,
               name: key,
@@ -1734,11 +1735,9 @@ export class ChatSessionManager {
               }
 
               // Start a remote terminal watcher so output flows back as a [Terminal Event]
-              const sessionKey = `${projectId}:${branch ?? ""}`;
-              const chatSessionId = this.sessionIndex.get(sessionKey);
-              console.log(`[runInTerminal] remote: sessionKey=${sessionKey}, chatSessionId=${chatSessionId ?? "NOT FOUND"}`);
-              if (chatSessionId) {
-                this.startRemoteTerminalWatcher(chatSessionId, terminalId, remoteInfo);
+              console.log(`[runInTerminal] remote: sessionId=${sessionId ?? "NOT FOUND"}`);
+              if (sessionId) {
+                this.startRemoteTerminalWatcher(sessionId, terminalId, remoteInfo);
               } else {
                 console.log(`[runInTerminal] WARNING: No chat session found — remote terminal watcher NOT started`);
               }
@@ -1747,15 +1746,13 @@ export class ChatSessionManager {
             }
 
             // Local terminal — send command and start watcher
-            processManager.sendToTerminal(terminalId, command);
+            processManager.sendToTerminal(terminalId, command, projectId, branch);
             console.log(`[runInTerminal] Command sent to PTY for terminal=${terminalId}`);
 
             // Find the chat session that called this tool so we can inject the [Terminal Event] later
-            const sessionKey = `${projectId}:${branch ?? ""}`;
-            const chatSessionId = this.sessionIndex.get(sessionKey);
-            console.log(`[runInTerminal] sessionKey=${sessionKey}, chatSessionId=${chatSessionId ?? "NOT FOUND"}`);
-            if (chatSessionId) {
-              this.startTerminalWatcher(chatSessionId, terminalId);
+            console.log(`[runInTerminal] sessionId=${sessionId ?? "NOT FOUND"}`);
+            if (sessionId) {
+              this.startTerminalWatcher(sessionId, terminalId);
             } else {
               console.log(`[runInTerminal] WARNING: No chat session found — terminal watcher NOT started`);
             }

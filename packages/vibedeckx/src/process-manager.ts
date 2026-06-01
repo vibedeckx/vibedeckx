@@ -845,7 +845,12 @@ export class ProcessManager {
    * Send a command to a running terminal session (fire-and-forget).
    * Writes the command + newline to the PTY. Does not wait for output.
    */
-  sendToTerminal(processId: string, command: string): void {
+  sendToTerminal(
+    processId: string,
+    command: string,
+    expectedProjectId?: string,
+    expectedBranch?: string | null,
+  ): void {
     const runningProcess = this.processes.get(processId);
     if (!runningProcess) {
       throw new Error(`Terminal ${processId} not found`);
@@ -856,6 +861,12 @@ export class ProcessManager {
     const lastLog = runningProcess.logs[runningProcess.logs.length - 1];
     if (lastLog?.type === "finished") {
       throw new Error(`Terminal ${processId} has already exited`);
+    }
+    if (expectedProjectId && runningProcess.projectId !== expectedProjectId) {
+      throw new Error(`Terminal ${processId} is not in the active project`);
+    }
+    if (expectedBranch !== undefined && runningProcess.branch !== (expectedBranch ?? null)) {
+      throw new Error(`Terminal ${processId} is not in the active branch`);
     }
 
     if (runningProcess.isPty) {
