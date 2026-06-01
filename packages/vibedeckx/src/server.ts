@@ -45,9 +45,13 @@ export function requireAuth(req: FastifyRequest, reply: FastifyReply): string | 
   const server = req.server;
   if (!server.authEnabled) return undefined;
 
-  // Skip Clerk auth if API key header is present (remote proxy)
+  // Skip Clerk auth only when a server API key is configured AND the header is
+  // present (remote proxy). The API-key middleware has, by this point, already
+  // rejected any header that doesn't match API_KEY, so a present header here is
+  // the validated key. When VIBEDECKX_API_KEY is unset the header is unvalidated
+  // and must NOT bypass Clerk — otherwise any value authenticates as no-user.
   const apiKeyHeader = req.headers["x-vibedeckx-api-key"];
-  if (apiKeyHeader) return undefined;
+  if (API_KEY && apiKeyHeader) return undefined;
 
   try {
     const { userId } = getAuth(req);
