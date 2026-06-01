@@ -89,6 +89,25 @@ const startCommand = buildCommand({
     const acceptRemote = flags["accept-remote"] ?? false;
     const tls = loadTLSOptions(flags);
 
+    // --accept-remote exposes the path-based provider surface (/api/path/*,
+    // /api/browse, /api/mkdir, /api/execute-one-shot). Those routes do privileged
+    // work — including writing commands into a PTY via /api/path/terminals — and
+    // are NOT individually authenticated; they rely entirely on the global API-key
+    // hook, which is a no-op when VIBEDECKX_API_KEY is unset. Clerk (--auth) does
+    // not cover them either, since they never call requireAuth. Since `start` binds
+    // 0.0.0.0, accepting remotes without an API key is unauthenticated RCE. Refuse
+    // to boot in that configuration. (Reverse-connect mode is unaffected: it binds
+    // 127.0.0.1 behind a token-authenticated tunnel and never enters this command.)
+    if (acceptRemote && !process.env.VIBEDECKX_API_KEY) {
+      console.error(
+        "Error: --accept-remote requires VIBEDECKX_API_KEY to be set.\n" +
+        "It exposes privileged path-based endpoints (/api/path/*, /api/browse, /api/execute-one-shot)\n" +
+        "to the network without per-route authentication. Set VIBEDECKX_API_KEY so callers must\n" +
+        "present a matching x-vibedeckx-api-key header."
+      );
+      process.exit(1);
+    }
+
     console.log(`Starting vibedeckx${acceptRemote ? " (accepting remote clients)" : ""}${tls ? " (HTTPS)" : ""}...`);
 
     const dbPath = flags["data-dir"]
