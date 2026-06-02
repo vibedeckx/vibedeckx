@@ -116,10 +116,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     console.log(`[worktree] ${requestId} Creating: branch=${trimmedBranch}, base=${startPoint}, path=${projectPath}`);
 
     try {
-      const { execSync } = await import("child_process");
+      const { execFileSync } = await import("child_process");
 
       try {
-        execSync(`git rev-parse --verify refs/heads/${trimmedBranch}`, {
+        execFileSync("git", ["rev-parse", "--verify", `refs/heads/${trimmedBranch}`], {
           cwd: projectPath,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
@@ -133,7 +133,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       await mkdir(getWorktreeBaseForProject(projectPath), { recursive: true });
 
-      execSync(`git worktree add -b "${trimmedBranch}" "${worktreeAbsolutePath}" "${startPoint}"`, {
+      execFileSync("git", ["worktree", "add", "-b", trimmedBranch, worktreeAbsolutePath, startPoint], {
         cwd: projectPath,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
@@ -162,8 +162,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Path and branch are required" });
     }
 
+    if (!/^[a-zA-Z0-9]/.test(branch) || /[^a-zA-Z0-9/_-]/.test(branch)) {
+      return reply.code(400).send({ error: "Invalid branch name format" });
+    }
+
     try {
-      const { execSync } = await import("child_process");
+      const { execSync, execFileSync } = await import("child_process");
       const worktreeAbsPath = resolveWorktreePath(projectPath, branch);
 
       try {
@@ -190,7 +194,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Continue without branch deletion
       }
 
-      execSync(`git worktree remove "${worktreeAbsPath}"`, {
+      execFileSync("git", ["worktree", "remove", worktreeAbsPath], {
         cwd: projectPath,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
@@ -199,7 +203,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       if (branchToDelete) {
         try {
-          execSync(`git branch -d "${branchToDelete}"`, {
+          execFileSync("git", ["branch", "-d", branchToDelete], {
             cwd: projectPath,
             encoding: "utf-8",
             stdio: ["pipe", "pipe", "pipe"],
@@ -342,6 +346,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Branch is required" });
     }
 
+    if (!/^[a-zA-Z0-9]/.test(branch) || /[^a-zA-Z0-9/_-]/.test(branch)) {
+      return reply.code(400).send({ error: "Invalid branch name format" });
+    }
+
     const hasLocal = !!project.path;
     const remoteConfigs = getAllRemoteConfigs(fastify, project);
     const hasRemote = remoteConfigs.length > 0;
@@ -400,7 +408,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Local deletion helper
     const deleteLocal = async () => {
-      const { execSync } = await import("child_process");
+      const { execSync, execFileSync } = await import("child_process");
       const worktreeAbsPath = resolveWorktreePath(project.path!, branch);
 
       try {
@@ -427,7 +435,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Failed to get branch info, continue without deleting branch
       }
 
-      execSync(`git worktree remove "${worktreeAbsPath}"`, {
+      execFileSync("git", ["worktree", "remove", worktreeAbsPath], {
         cwd: project.path!,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
@@ -436,7 +444,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       if (branchToDelete) {
         try {
-          execSync(`git branch -d "${branchToDelete}"`, {
+          execFileSync("git", ["branch", "-d", branchToDelete], {
             cwd: project.path!,
             encoding: "utf-8",
             stdio: ["pipe", "pipe", "pipe"],
@@ -613,10 +621,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Local creation helper
     const createLocal = async () => {
-      const { execSync } = await import("child_process");
+      const { execFileSync } = await import("child_process");
 
       try {
-        execSync(`git rev-parse --verify refs/heads/${trimmedBranch}`, {
+        execFileSync("git", ["rev-parse", "--verify", `refs/heads/${trimmedBranch}`], {
           cwd: project.path!,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
@@ -632,7 +640,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       await mkdir(getWorktreeBaseForProject(project.path!), { recursive: true });
 
-      execSync(`git worktree add -b "${trimmedBranch}" "${worktreeAbsolutePath}" "${localStartPoint}"`, {
+      execFileSync("git", ["worktree", "add", "-b", trimmedBranch, worktreeAbsolutePath, localStartPoint], {
         cwd: project.path!,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
