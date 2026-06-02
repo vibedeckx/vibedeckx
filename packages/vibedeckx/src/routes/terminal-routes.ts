@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
+import path from "path";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
@@ -217,7 +218,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const basePath = resolveWorktreePath(project.path, branch ?? null);
-    const cwd = req.body?.cwd || basePath;
+    // Contain cwd within the project path. A caller-supplied cwd is resolved
+    // relative to basePath and rejected if it escapes (absolute path outside,
+    // or `..` traversal). This is defense-in-depth for the multi-tenant --auth
+    // model, where an authenticated user must not spawn a shell outside their
+    // own project tree. (In no-auth solo mode the caller already has full shell
+    // access, so this is a no-op safeguard rather than a security boundary.)
+    const requestedCwd = req.body?.cwd;
+    const cwd = requestedCwd ? path.resolve(basePath, requestedCwd) : basePath;
+    const relativeToBase = path.relative(basePath, cwd);
+    if (path.isAbsolute(relativeToBase) || relativeToBase.startsWith("..")) {
+      return reply.code(400).send({ error: "cwd must be within project path" });
+    }
 
     try {
       const terminal = fastify.processManager.startTerminal(req.params.projectId, cwd, branch ?? null);
@@ -231,12 +243,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { terminalId: string } }>(
     "/api/terminals/:terminalId",
     async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
       const { terminalId } = req.params;
 
       // Remote terminal
       if (terminalId.startsWith("remote-terminal-")) {
         const remoteInfo = fastify.remoteExecutorMap.get(terminalId);
         if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote terminal not found" });
+        }
+
+        // Verify the caller owns the project this terminal belongs to. In
+        // no-auth solo mode userId is undefined and getById does not filter.
+        if (remoteInfo.projectId && !fastify.storage.projects.getById(remoteInfo.projectId, userId)) {
           return reply.code(404).send({ error: "Remote terminal not found" });
         }
 
@@ -260,7 +281,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(200).send({ success: true });
       }
 
-      // Local terminal
+      // Local terminal. Confirm the id refers to an interactive terminal (not
+      // an arbitrary executor process) AND that the caller owns its project,
+      // before calling the generic stop(). Without these checks the route was a
+      // cross-project process-kill primitive under --auth.
+      const projectId = fastify.processManager.getTerminalProjectId(terminalId);
+      if (!projectId || !fastify.storage.projects.getById(projectId, userId)) {
+        return reply.code(404).send({ error: "Terminal not found or already closed" });
+      }
+
       const stopped = fastify.processManager.stop(terminalId);
       if (!stopped) {
         return reply.code(404).send({ error: "Terminal not found or already closed" });

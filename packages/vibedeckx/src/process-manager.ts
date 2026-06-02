@@ -982,6 +982,19 @@ export class ProcessManager {
   }
 
   /**
+   * Resolve the projectId of a running interactive terminal. Returns null if
+   * the process is unknown or is not a terminal (e.g. an executor process).
+   * Used to authorize terminal-scoped routes: the caller must both confirm the
+   * id refers to a terminal and that the terminal belongs to a project they own
+   * before stopping it.
+   */
+  getTerminalProjectId(processId: string): string | null {
+    const proc = this.processes.get(processId);
+    if (!proc || !proc.isTerminal) return null;
+    return proc.projectId;
+  }
+
+  /**
    * Get all running terminal sessions for a project
    */
   getTerminals(projectId: string, branch?: string | null): TerminalInfo[] {
