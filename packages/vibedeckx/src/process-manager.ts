@@ -996,6 +996,16 @@ export class ProcessManager {
   }
 
   /**
+   * Resolve the projectId of any running process (executor or terminal). Returns
+   * null if the process is unknown. Used to authorize per-process WebSocket
+   * access: the caller confirms the resolved project belongs to a user they own
+   * before streaming logs or forwarding PTY input.
+   */
+  getProcessProjectId(processId: string): string | null {
+    return this.processes.get(processId)?.projectId ?? null;
+  }
+
+  /**
    * Get all running terminal sessions for a project
    */
   getTerminals(projectId: string, branch?: string | null): TerminalInfo[] {

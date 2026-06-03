@@ -14,6 +14,7 @@ import type { RemotePatchCache } from "../remote-patch-cache.js";
 import type { EventBus } from "../event-bus.js";
 import type { AgentSessionManager } from "../agent-session-manager.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
+import { userOwnsProcess, userOwnsSession, type WsPrincipal } from "./ws-authz.js";
 import { statusEventFromRemotePatch, projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import "../server-types.js";
 
@@ -47,26 +48,28 @@ async function authenticateLogsWs(
   authEnabled: boolean,
   query: { apiKey?: string; token?: string },
   socket: WebSocket,
-): Promise<boolean> {
-  if (!authEnabled) return true;
+): Promise<WsPrincipal | null> {
+  // No-auth (solo) mode: a single trusted operator, no per-user isolation.
+  if (!authEnabled) return { userId: null };
 
   // API key takes precedence (remote proxy connections) — but only when the server
   // actually has VIBEDECKX_API_KEY configured. By this point the global API-key
   // onRequest hook has rejected any ?apiKey= that doesn't match the configured key,
   // so a present param here is the validated key. When VIBEDECKX_API_KEY is unset
   // the param is unvalidated and must NOT bypass Clerk — otherwise any value passes.
-  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return true;
+  // A trusted server-to-server proxy connection — not a specific end user.
+  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return { userId: null };
 
-  const reject = (error: string) => {
+  const reject = (error: string): null => {
     try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }
     try { socket.close(); } catch { /* already closed */ }
-    return false;
+    return null;
   };
 
   if (!query.token) return reject("Authentication required");
   const userId = await verifyWsToken(query.token);
   if (!userId) return reject("Invalid authentication token");
-  return true;
+  return { userId };
 }
 
 // ---- Remote reconnection constants ----
@@ -444,8 +447,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const { processId } = req.params;
         console.log(`[WebSocket] Connection attempt for process ${processId} (auth=${fastify.authEnabled})`);
 
-        if (!(await authenticateLogsWs(fastify.authEnabled, req.query, socket))) {
+        const principal = await authenticateLogsWs(fastify.authEnabled, req.query, socket);
+        if (!principal) {
           console.log(`[WebSocket] Auth rejected for process ${processId}`);
+          return;
+        }
+        // Per-process ownership: a Clerk user may only stream/control processes
+        // belonging to a project (or remote server) they own. Trusted principals
+        // (no-auth / apiKey proxy) carry userId === null and skip this. Gating the
+        // whole connection (not just input) also prevents reading another tenant's
+        // terminal output.
+        if (principal.userId !== null && !userOwnsProcess(fastify, processId, principal.userId)) {
+          console.log(`[WebSocket] Ownership denied for process ${processId} (user=${principal.userId})`);
+          try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
+          try { socket.close(); } catch { /* already closed */ }
           return;
         }
         console.log(`[WebSocket] Client connected for process ${processId}`);
@@ -485,7 +500,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       async (socket, req) => {
         console.log(`[ExecutorMux] Connection attempt (auth=${fastify.authEnabled})`);
 
-        if (!(await authenticateLogsWs(fastify.authEnabled, req.query, socket))) {
+        const principal = await authenticateLogsWs(fastify.authEnabled, req.query, socket);
+        if (!principal) {
           console.log(`[ExecutorMux] Auth rejected`);
           return;
         }
@@ -495,6 +511,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         const subscribeProcess = (processId: string) => {
           if (subs.has(processId)) return; // 幂等：已订阅则跳过
+
+          // Per-process ownership, checked per subscription (one mux connection
+          // can subscribe to many processIds). Trusted principals (userId === null)
+          // skip this; a Clerk user is refused processes they don't own.
+          if (principal.userId !== null && !userOwnsProcess(fastify, processId, principal.userId)) {
+            console.log(`[ExecutorMux] Ownership denied for process ${processId} (user=${principal.userId})`);
+            try { socket.send(JSON.stringify({ processId, type: "error", message: "Forbidden" })); } catch { /* closed */ }
+            return;
+          }
 
           const send = (msg: StreamMessage) => {
             try { socket.send(JSON.stringify({ processId, ...msg })); } catch { /* closed */ }
@@ -560,7 +585,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Log before auth check for visibility
         console.log(`[AgentWS] Connection attempt for session ${sessionId} (auth=${fastify.authEnabled})`);
 
-        // Verify auth token for WebSocket when auth is enabled
+        // Verify auth token for WebSocket when auth is enabled. `principalUserId`
+        // stays null for trusted connections (no-auth, or apiKey server-to-server
+        // proxy) and is set to the Clerk user otherwise.
+        let principalUserId: string | null = null;
         if (fastify.authEnabled) {
           const apiKey = req.query.apiKey;
           const token = req.query.token;
@@ -584,7 +612,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
               socket.close();
               return;
             }
+            principalUserId = userId;
           }
+        }
+
+        // Per-session ownership: a Clerk user may only stream sessions they own.
+        // Trusted principals (userId === null) skip this.
+        if (principalUserId !== null && !userOwnsSession(fastify, sessionId, principalUserId)) {
+          console.log(`[AgentWS] Ownership denied for session ${sessionId} (user=${principalUserId})`);
+          try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
+          try { socket.close(); } catch { /* already closed */ }
+          return;
         }
 
         console.log(`[AgentWS] Client connected for session ${sessionId}`);
