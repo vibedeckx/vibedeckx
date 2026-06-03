@@ -114,6 +114,7 @@ export function ExecutorItem({
   useEffect(() => {
     if (status === "closed" && exitCode !== null && !processFinishedCalledRef.current) {
       processFinishedCalledRef.current = true;
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} executor-item marking finished executorId=${executor.id} processId=${localProcessId} exitCode=${exitCode} — removing from runningProcesses (button → Start)`);
       onProcessFinished(localProcessId);
     }
   }, [status, exitCode, localProcessId, onProcessFinished]);

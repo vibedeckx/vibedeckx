@@ -336,6 +336,7 @@ export class ReverseConnectManager {
     // Set pong timeout
     conn.pongTimer = setTimeout(() => {
       console.log(`[ReverseConnect] Pong timeout for ${remoteServerId}, closing connection`);
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} PONG TIMEOUT server=${remoteServerId} openVirtualChannels=${conn.virtualChannels.size} — about to tear down control conn + all channels (will trigger upstream CLOSE on each executor stream)`);
       conn.ws.close(1000, "Pong timeout");
     }, PONG_TIMEOUT_MS);
   }
@@ -363,6 +364,9 @@ export class ReverseConnectManager {
     conn.pendingRawRequests.clear();
 
     // Close all virtual channels
+    if (conn.virtualChannels.size > 0) {
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} cleanupConnection force-closing ${conn.virtualChannels.size} virtual channel(s) for ${remoteServerId} (code 1001) — these are the executor/log streams whose CLOSE fabricates finished`);
+    }
     for (const [, adapter] of conn.virtualChannels) {
       adapter.deliverClose(1001, "Control connection closed");
     }

@@ -414,6 +414,7 @@ export class ProcessManager {
       const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
 
       console.log(`[ProcessManager] PTY process ${processId} exited with code ${code}`);
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} PTY onExit (this machine's process truly exited) processId=${processId} executorId=${runningProcess.executorId} code=${code} — if seen on the REMOTE machine, the executor genuinely finished (mechanism B), not a transport drop`);
 
       if (!skipDb) {
         this.storage.executorProcesses.updateStatus(processId, status, code);

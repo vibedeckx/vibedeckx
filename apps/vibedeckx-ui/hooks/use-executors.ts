@@ -213,6 +213,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
           );
         } else if (data.type === "executor:stopped") {
           console.log(`[useExecutors] Processing executor:stopped, removing from runningProcesses`);
+          console.log(`[diag:remote-stop] ${new Date().toISOString()} SSE executor:stopped executor=${data.executorId} process=${data.processId} target=${data.target ?? "local"} — flips button via SSE (NOT the mux finished path)`);
           setRunningProcesses((prev) => {
             const entries = prev.get(data.executorId);
             if (!entries) return prev;

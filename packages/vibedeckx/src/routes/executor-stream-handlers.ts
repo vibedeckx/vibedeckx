@@ -106,6 +106,7 @@ export function attachRemoteProcessStream(
   const info = remoteInfo;
 
   const useVirtualExec = fastify.reverseConnectManager.isConnected(info.remoteServerId);
+  console.log(`[diag:remote-stop] ${new Date().toISOString()} attach processId=${processId} executorId=${info.executorId} server=${info.remoteServerId} transport=${useVirtualExec ? "reverse-connect" : "direct-ws"} remoteProcessId=${info.remoteProcessId}`);
   let remoteWs: WebSocket | VirtualWsAdapter;
 
   if (useVirtualExec) {
@@ -156,6 +157,9 @@ export function attachRemoteProcessStream(
       send(parsed);
 
       if (parsed.type === "finished" || parsed.type === "error") terminalSignalSent = true;
+      if (parsed.type === "finished" || parsed.type === "error") {
+        console.log(`[diag:remote-stop] ${new Date().toISOString()} REAL ${parsed.type} from remote processId=${processId} exitCode=${parsed.type === "finished" ? parsed.exitCode : "n/a"} — remote reported this itself`);
+      }
       if (parsed.type === "finished") {
         const live = fastify.remoteExecutorMap.get(processId);
         if (live && !live.stoppedEmitted) {
@@ -187,6 +191,7 @@ export function attachRemoteProcessStream(
   remoteWs.on("error", (error: unknown) => {
     clearInterval(pingInterval);
     console.error(`[ExecutorStream] Remote connection error:`, error);
+    console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream ERROR processId=${processId} terminalSignalSent=${terminalSignalSent} — ${terminalSignalSent ? "no fabricated signal" : "will send error (non-terminal for isRunning)"}`);
     if (!terminalSignalSent) {
       send({ type: "error", message: "Remote connection error" });
       terminalSignalSent = true;
@@ -198,8 +203,11 @@ export function attachRemoteProcessStream(
     clearInterval(pingInterval);
     if (!terminalSignalSent) {
       const row = fastify.storage.remoteExecutorProcesses.getById(processId);
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished → FABRICATING finished processId=${processId} executorId=${info.executorId} transport=${useVirtualExec ? "reverse-connect" : "direct-ws"} dbStatus=${row?.status} dbExitCode=${row?.exit_code ?? "null"} sentExitCode=${row?.exit_code ?? 0} — THIS flips UI to Stopped while remote process may still be running`);
       send({ type: "finished", exitCode: row?.exit_code ?? 0 });
       terminalSignalSent = true;
+    } else {
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE after terminal signal already sent processId=${processId} (benign)`);
     }
     onTerminal();
   });

@@ -84,8 +84,10 @@ export function ExecutorLogsProvider({
     } else if (m.type === "history_end") {
       update(processId, { replayingHistory: false });
     } else if (m.type === "finished") {
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received FINISHED processId=${processId} exitCode=${m.exitCode} — will trigger markProcessFinished → button flips to Start`);
       update(processId, { exitCode: m.exitCode, status: "closed" });
     } else if (m.type === "error") {
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received ERROR processId=${processId} — status=error, does NOT flip isRunning`);
       update(processId, { status: "error" });
     } else {
       const prev = statesRef.current.get(processId) ?? EMPTY_STATE;
