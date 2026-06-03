@@ -50,8 +50,12 @@ async function authenticateLogsWs(
 ): Promise<boolean> {
   if (!authEnabled) return true;
 
-  // API key takes precedence (remote proxy connections).
-  if (query.apiKey) return true;
+  // API key takes precedence (remote proxy connections) — but only when the server
+  // actually has VIBEDECKX_API_KEY configured. By this point the global API-key
+  // onRequest hook has rejected any ?apiKey= that doesn't match the configured key,
+  // so a present param here is the validated key. When VIBEDECKX_API_KEY is unset
+  // the param is unvalidated and must NOT bypass Clerk — otherwise any value passes.
+  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return true;
 
   const reject = (error: string) => {
     try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }
@@ -561,8 +565,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const apiKey = req.query.apiKey;
           const token = req.query.token;
 
-          // API key takes precedence (remote proxy connections)
-          if (!apiKey) {
+          // API key takes precedence (remote proxy connections), but only when the
+          // server has VIBEDECKX_API_KEY set — the global API-key onRequest hook has
+          // validated its value by this point. An unvalidated ?apiKey= (key unset)
+          // must NOT bypass Clerk, so fall through to token verification.
+          const apiKeyTrusted = !!process.env.VIBEDECKX_API_KEY && !!apiKey;
+          if (!apiKeyTrusted) {
             if (!token) {
               console.log(`[AgentWS] Auth rejected: no token (session=${sessionId})`);
               socket.send(JSON.stringify({ error: "Authentication required" }));
