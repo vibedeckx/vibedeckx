@@ -2,10 +2,13 @@
 
 import { useMemo, useRef, useState, type AnchorHTMLAttributes } from "react";
 import { Download, FileWarning, Copy, Code, Eye } from "lucide-react";
+import rehypeSlug from "rehype-slug";
+import { defaultRehypePlugins } from "streamdown";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, CodeBlockCopyButton } from "@/components/ai-elements/code-block";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import type { FileContentResponse } from "@/lib/api";
 import type { BundledLanguage } from "shiki";
 
@@ -67,16 +70,6 @@ function isMarkdown(filePath: string): boolean {
   return lang === "markdown" || lang === "mdx";
 }
 
-// Approximates the heading-slug algorithm used by GitHub / common TOC tools so
-// in-document links like [xxx](#yyy) can be resolved to a heading by its text.
-function slugify(text: string): string {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "-");
-}
-
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -95,45 +88,56 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
   const [prevFilePath, setPrevFilePath] = useState(filePath);
   const markdownRef = useRef<HTMLDivElement>(null);
 
+  // Streamdown ships no rehype-slug, so rendered headings have no `id` for an
+  // in-document link ([xxx](#yyy)) to scroll to. Append rehype-slug after the
+  // default plugins (so it runs after rehype-sanitize and its ids aren't
+  // rewritten with a `user-content-` prefix) to give headings GitHub-style ids.
+  const rehypePlugins = useMemo(
+    () => [...Object.values(defaultRehypePlugins), rehypeSlug],
+    []
+  );
+
   // Streamdown renders every link with target="_blank", which makes in-document
-  // references ([xxx](#yyy)) open in a new tab instead of jumping within the
-  // current file. Override the anchor so hash links scroll inside the preview.
+  // references open in a new tab instead of jumping within the current file.
+  // Mirror Streamdown's own anchor styling, but for hash links scroll inside the
+  // preview instead of opening a new tab.
   const markdownComponents = useMemo(
     () => ({
       a: ({
         href,
         children,
+        className,
         node,
         ...props
       }: AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
         // `node` is the hast node injected by the markdown renderer; drop it so
         // it isn't spread onto the DOM element.
         void node;
-        if (typeof href === "string" && href.startsWith("#")) {
-          return (
-            <a
-              href={href}
-              onClick={(e) => {
-                e.preventDefault();
-                const root = markdownRef.current;
-                if (!root) return;
-                const id = decodeURIComponent(href.slice(1));
-                const escaped = id.replace(/["\\]/g, "\\$&");
-                const target =
-                  root.querySelector<HTMLElement>(`[id="${escaped}"]`) ??
-                  Array.from(
-                    root.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")
-                  ).find((h) => slugify(h.textContent ?? "") === id);
-                target?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-              {...props}
-            >
-              {children}
-            </a>
-          );
-        }
+        const isHashLink = typeof href === "string" && href.startsWith("#");
         return (
-          <a href={href} target="_blank" rel="noreferrer" {...props}>
+          <a
+            href={href}
+            className={cn(
+              "wrap-anywhere font-medium text-primary underline",
+              className
+            )}
+            data-streamdown="link"
+            {...(isHashLink
+              ? {
+                  onClick: (e: React.MouseEvent<HTMLAnchorElement>) => {
+                    e.preventDefault();
+                    const root = markdownRef.current;
+                    if (!root) return;
+                    const id = decodeURIComponent(href.slice(1));
+                    const target = root.querySelector<HTMLElement>(
+                      `[id="${CSS.escape(id)}"]`
+                    );
+                    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  },
+                }
+              : { target: "_blank", rel: "noreferrer" })}
+            {...props}
+          >
             {children}
           </a>
         );
@@ -254,7 +258,10 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
           </div>
         ) : showRendered ? (
           <div className="p-4 text-sm" ref={markdownRef}>
-            <MessageResponse components={markdownComponents}>
+            <MessageResponse
+              components={markdownComponents}
+              rehypePlugins={rehypePlugins}
+            >
               {fileContent.content ?? ""}
             </MessageResponse>
           </div>
