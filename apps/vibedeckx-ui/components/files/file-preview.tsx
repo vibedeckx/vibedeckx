@@ -1,6 +1,13 @@
 "use client";
 
-import { useMemo, useRef, useState, type AnchorHTMLAttributes } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type AnchorHTMLAttributes,
+} from "react";
 import { Download, FileWarning, Copy, Code, Eye } from "lucide-react";
 import rehypeSlug from "rehype-slug";
 import { defaultRehypePlugins } from "streamdown";
@@ -87,6 +94,48 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [prevFilePath, setPrevFilePath] = useState(filePath);
   const markdownRef = useRef<HTMLDivElement>(null);
+  const realignCleanupRef = useRef<(() => void) | null>(null);
+
+  // Scroll an in-document target into view and keep it aligned while the layout
+  // settles. Streamdown renders code blocks (Shiki), Mermaid diagrams and images
+  // asynchronously, so content above the target keeps changing height for a
+  // moment after the click — a single scroll would leave the target stranded at
+  // the wrong offset. Re-align on every reflow until the user scrolls away or a
+  // short window elapses.
+  const scrollToHashTarget = useCallback((rawId: string) => {
+    const root = markdownRef.current;
+    if (!root) return;
+    const target = root.querySelector<HTMLElement>(`[id="${CSS.escape(rawId)}"]`);
+    if (!target) return;
+
+    // Cancel any re-alignment still running from a previous click.
+    realignCleanupRef.current?.();
+
+    const align = () => target.scrollIntoView({ block: "start", behavior: "auto" });
+    align();
+
+    const observer = new ResizeObserver(align);
+    observer.observe(root);
+
+    const stop = () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+      window.removeEventListener("wheel", stop);
+      window.removeEventListener("touchmove", stop);
+      window.removeEventListener("keydown", stop);
+      realignCleanupRef.current = null;
+    };
+    // User intent to scroll wins immediately; otherwise give async content ~1s
+    // to settle, which covers Shiki/Mermaid/image rendering in practice.
+    const timer = window.setTimeout(stop, 1000);
+    window.addEventListener("wheel", stop, { passive: true });
+    window.addEventListener("touchmove", stop, { passive: true });
+    window.addEventListener("keydown", stop);
+    realignCleanupRef.current = stop;
+  }, []);
+
+  // Tear down a pending re-alignment if the preview unmounts mid-window.
+  useEffect(() => () => realignCleanupRef.current?.(), []);
 
   // Streamdown ships no rehype-slug, so rendered headings have no `id` for an
   // in-document link ([xxx](#yyy)) to scroll to. Append rehype-slug after the
@@ -126,13 +175,7 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
               ? {
                   onClick: (e: React.MouseEvent<HTMLAnchorElement>) => {
                     e.preventDefault();
-                    const root = markdownRef.current;
-                    if (!root) return;
-                    const id = decodeURIComponent(href.slice(1));
-                    const target = root.querySelector<HTMLElement>(
-                      `[id="${CSS.escape(id)}"]`
-                    );
-                    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    scrollToHashTarget(decodeURIComponent(href.slice(1)));
                   },
                 }
               : { target: "_blank", rel: "noreferrer" })}
@@ -143,7 +186,7 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
         );
       },
     }),
-    []
+    [scrollToHashTarget]
   );
 
   // Reset to rendered mode whenever a different file is opened.
