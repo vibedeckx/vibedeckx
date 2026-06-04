@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useRef, useState, type AnchorHTMLAttributes } from "react";
 import { Download, FileWarning, Copy, Code, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, CodeBlockCopyButton } from "@/components/ai-elements/code-block";
@@ -67,6 +67,16 @@ function isMarkdown(filePath: string): boolean {
   return lang === "markdown" || lang === "mdx";
 }
 
+// Approximates the heading-slug algorithm used by GitHub / common TOC tools so
+// in-document links like [xxx](#yyy) can be resolved to a heading by its text.
+function slugify(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-");
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -83,6 +93,54 @@ interface FilePreviewProps {
 export function FilePreview({ filePath, fileContent, loading, downloadUrl }: FilePreviewProps) {
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [prevFilePath, setPrevFilePath] = useState(filePath);
+  const markdownRef = useRef<HTMLDivElement>(null);
+
+  // Streamdown renders every link with target="_blank", which makes in-document
+  // references ([xxx](#yyy)) open in a new tab instead of jumping within the
+  // current file. Override the anchor so hash links scroll inside the preview.
+  const markdownComponents = useMemo(
+    () => ({
+      a: ({
+        href,
+        children,
+        node,
+        ...props
+      }: AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
+        // `node` is the hast node injected by the markdown renderer; drop it so
+        // it isn't spread onto the DOM element.
+        void node;
+        if (typeof href === "string" && href.startsWith("#")) {
+          return (
+            <a
+              href={href}
+              onClick={(e) => {
+                e.preventDefault();
+                const root = markdownRef.current;
+                if (!root) return;
+                const id = decodeURIComponent(href.slice(1));
+                const escaped = id.replace(/["\\]/g, "\\$&");
+                const target =
+                  root.querySelector<HTMLElement>(`[id="${escaped}"]`) ??
+                  Array.from(
+                    root.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")
+                  ).find((h) => slugify(h.textContent ?? "") === id);
+                target?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+              {...props}
+            >
+              {children}
+            </a>
+          );
+        }
+        return (
+          <a href={href} target="_blank" rel="noreferrer" {...props}>
+            {children}
+          </a>
+        );
+      },
+    }),
+    []
+  );
 
   // Reset to rendered mode whenever a different file is opened.
   if (filePath !== prevFilePath) {
@@ -195,8 +253,10 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
             )}
           </div>
         ) : showRendered ? (
-          <div className="p-4 text-sm">
-            <MessageResponse>{fileContent.content ?? ""}</MessageResponse>
+          <div className="p-4 text-sm" ref={markdownRef}>
+            <MessageResponse components={markdownComponents}>
+              {fileContent.content ?? ""}
+            </MessageResponse>
           </div>
         ) : fileContent.content !== null ? (
           <CodeBlock
