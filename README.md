@@ -68,6 +68,7 @@ Starts the local server. All flags are optional.
 | Flag | Description |
 |------|-------------|
 | `--port <number>` | Port to bind (default: `5173`) |
+| `--host <address>` | Interface to bind (default: `127.0.0.1`, loopback only). Use `0.0.0.0` to expose on all interfaces — only do so behind `--auth`, `VIBEDECKX_API_KEY`, or a trusted tunnel/proxy. |
 | `--auth` | Enable Clerk authentication (requires `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`) |
 | `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
 | `--cert <path>` | Path to TLS certificate PEM. Enables HTTPS when paired with `--key`. Env: `VIBEDECKX_TLS_CERT` |
@@ -77,8 +78,18 @@ Starts the local server. All flags are optional.
 ```bash
 vibedeckx start --port 8080
 vibedeckx start --data-dir /path/to/data    # database at /path/to/data/data.sqlite
+vibedeckx start --host 0.0.0.0 --auth       # expose on the LAN, gated by Clerk auth
 CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth
 ```
+
+> By default the server binds to `127.0.0.1` (loopback only), so a no-auth instance
+> is reachable only from the same machine. The executor API runs commands on the
+> host and is not authenticated per-route in no-auth mode, so widen the bind with
+> `--host 0.0.0.0` only behind `--auth`, `VIBEDECKX_API_KEY`, or a trusted
+> tunnel/reverse-proxy. A Cloudflare tunnel (`cloudflared`) dials `127.0.0.1`
+> locally and needs no `--host` change; binding `0.0.0.0` is only required when
+> something off-box (a reverse proxy, or Cloudflare reaching the origin IP
+> directly) must connect.
 
 #### HTTPS / TLS
 
@@ -95,17 +106,21 @@ The CLI flags take precedence over the environment variables. Values point to **
 **Recommended setup behind Cloudflare** — use a Cloudflare Origin Certificate (valid up to 15 years, no ACME / auto-renewal needed) plus Authenticated Origin Pulls so the origin only accepts connections from Cloudflare, and protect the public Cloudflare route with Cloudflare Access, `--auth`, `VIBEDECKX_API_KEY`, or an equivalent user-authentication layer:
 
 ```bash
+# These bind --host 0.0.0.0 because Cloudflare reaches the origin IP over the
+# network. With a cloudflared tunnel instead, drop --host (cloudflared dials the
+# default 127.0.0.1 locally) for a tighter origin that isn't directly reachable.
+
 # 1. Cloudflare Access protected route + Origin Cert — encrypts CF ↔ origin, but
 #    a leaked origin IP can still be hit directly. This no-auth Vibedeckx mode is
 #    safe only when the public Cloudflare hostname is protected by Cloudflare
 #    Access or an equivalent user-authentication policy.
-vibedeckx start \
+vibedeckx start --host 0.0.0.0 \
   --cert /etc/vibedeckx/cf-origin.pem \
   --key  /etc/vibedeckx/cf-origin.key
 
 # 2. Built-in Clerk auth + Origin Cert — use when you want Vibedeckx to enforce
 #    application-layer user authentication itself.
-CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth \
+CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --host 0.0.0.0 --auth \
   --cert /etc/vibedeckx/cf-origin.pem \
   --key  /etc/vibedeckx/cf-origin.key
 
@@ -115,7 +130,7 @@ CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth \
 #    VIBEDECKX_API_KEY, or equivalent user authentication for the public URL.
 #    Download the CA from:
 #    https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
-vibedeckx start \
+vibedeckx start --host 0.0.0.0 \
   --cert      /etc/vibedeckx/cf-origin.pem \
   --key       /etc/vibedeckx/cf-origin.key \
   --client-ca /etc/vibedeckx/cloudflare-aop-ca.pem
@@ -239,8 +254,8 @@ Vibedeckx supports connecting to remote vibedeckx servers, allowing you to manag
 1. Start vibedeckx on the remote machine with an API key:
 
 ```bash
-# On the remote server
-VIBEDECKX_API_KEY=your-secret-key vibedeckx start --port 5174
+# On the remote server (--host 0.0.0.0 so the LAN can reach it; the API key gates all /api/)
+VIBEDECKX_API_KEY=your-secret-key vibedeckx start --host 0.0.0.0 --port 5174
 ```
 
 The `VIBEDECKX_API_KEY` environment variable enables API authentication. All API requests must include the `X-Vibedeckx-Api-Key` header.
@@ -329,6 +344,7 @@ vibedeckx
 ```
 vibedeckx start [options]        Start the server
   --port <value>                 Port to run the server on (default: 3000)
+  --host <address>               Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)
   --auth                         Enable Clerk authentication
   --data-dir <path>              Directory for storing database file (default: ~/.vibedeckx)
   --cert <path>                  TLS certificate PEM (enables HTTPS with --key)

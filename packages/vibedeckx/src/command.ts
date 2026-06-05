@@ -39,6 +39,12 @@ const startCommand = buildCommand({
         brief: "Port to run the server on",
         optional: true,
       },
+      host: {
+        kind: "parsed",
+        parse: String,
+        brief: "Network interface to bind (default: 127.0.0.1, loopback only). Use 0.0.0.0 to expose on all interfaces — only do so behind --auth, VIBEDECKX_API_KEY, or a trusted tunnel/proxy.",
+        optional: true,
+      },
       auth: {
         kind: "boolean",
         brief: "Enable Clerk authentication (requires CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY env vars)",
@@ -77,6 +83,7 @@ const startCommand = buildCommand({
   },
   func: async (flags: {
     port: number | undefined;
+    host: string | undefined;
     auth: boolean | undefined;
     "data-dir": string | undefined;
     "accept-remote": boolean | undefined;
@@ -85,19 +92,36 @@ const startCommand = buildCommand({
     "client-ca": string | undefined;
   }) => {
     const port = flags.port ?? DEFAULT_PORT;
+    const host = flags.host ?? "127.0.0.1";
     const authEnabled = flags.auth ?? false;
     const acceptRemote = flags["accept-remote"] ?? false;
     const tls = loadTLSOptions(flags);
+
+    // Binding beyond loopback puts the (per-route-unauthenticated) executor API
+    // on the network. Without --auth or an API key, anyone who can reach the
+    // host can run commands. Warn rather than refuse — a trusted tunnel/proxy in
+    // front is a legitimate setup, but the operator should know it's open.
+    const isLoopbackHost =
+      host === "127.0.0.1" || host === "::1" || host === "localhost";
+    if (!isLoopbackHost && !authEnabled && !process.env.VIBEDECKX_API_KEY) {
+      console.warn(
+        `Warning: binding to ${host} exposes vibedeckx on the network with no authentication.\n` +
+        "Anyone who can reach this host can run commands via the executor API. Enable --auth or\n" +
+        "set VIBEDECKX_API_KEY, or keep the default loopback bind (127.0.0.1) behind a trusted tunnel/proxy."
+      );
+    }
 
     // --accept-remote exposes the path-based provider surface (/api/path/*,
     // /api/browse, /api/mkdir, /api/execute-one-shot). Those routes do privileged
     // work — including writing commands into a PTY via /api/path/terminals — and
     // are NOT individually authenticated; they rely entirely on the global API-key
     // hook, which is a no-op when VIBEDECKX_API_KEY is unset. Clerk (--auth) does
-    // not cover them either, since they never call requireAuth. Since `start` binds
-    // 0.0.0.0, accepting remotes without an API key is unauthenticated RCE. Refuse
-    // to boot in that configuration. (Reverse-connect mode is unaffected: it binds
-    // 127.0.0.1 behind a token-authenticated tunnel and never enters this command.)
+    // not cover them either, since they never call requireAuth. Accepting remotes
+    // only makes sense when reachable over the network (typically paired with
+    // --host 0.0.0.0), so without an API key it's unauthenticated RCE — and even on
+    // loopback, other local users shouldn't get an unauthenticated provider surface.
+    // Refuse to boot in that configuration. (Reverse-connect mode is unaffected: it
+    // binds 127.0.0.1 behind a token-authenticated tunnel and never enters this command.)
     if (acceptRemote && !process.env.VIBEDECKX_API_KEY) {
       console.error(
         "Error: --accept-remote requires VIBEDECKX_API_KEY to be set.\n" +
@@ -116,7 +140,7 @@ const startCommand = buildCommand({
     const storage = await createSqliteStorage(dbPath);
     const server = await createServer({ storage, authEnabled, acceptRemote, tls });
 
-    const url = await server.start(port);
+    const url = await server.start(port, host);
     console.log(`Server running at ${url}`);
 
     // Skip auto-open when TLS is on: the cert is for the public domain,

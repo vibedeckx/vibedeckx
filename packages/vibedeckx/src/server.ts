@@ -323,10 +323,16 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   });
 
   return {
-    start: async (port: number) => {
-      await server.listen({ port, host: "0.0.0.0" });
+    // Defaults to loopback (127.0.0.1) so a no-auth instance isn't reachable
+    // from the LAN or by other devices on a shared network. Callers opt into
+    // wider exposure by passing an explicit host (e.g. "0.0.0.0").
+    start: async (port: number, host: string = "127.0.0.1") => {
+      await server.listen({ port, host });
       const protocol = tls ? "https" : "http";
-      return `${protocol}://localhost:${port}`;
+      // Wildcard binds include loopback, so localhost is the friendly URL.
+      // A specific interface IP isn't reachable via localhost, so show it as-is.
+      const displayHost = host === "0.0.0.0" || host === "::" ? "localhost" : host;
+      return `${protocol}://${displayHost}:${port}`;
     },
     startLocal: async (port: number) => {
       await server.listen({ port, host: "127.0.0.1" });
