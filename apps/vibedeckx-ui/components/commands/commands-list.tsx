@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useImperativeHandle, forwardRef } from "react";
+import { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Play, Plus } from "lucide-react";
+import { Play, Plus, Check } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { CommandDialog } from "./command-dialog";
 import type { Command } from "@/lib/api";
 
@@ -25,6 +26,19 @@ export const CommandsList = forwardRef<CommandsListHandle, CommandsListProps>(fu
 ) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingCommand, setEditingCommand] = useState<Command | null>(null);
+  const [executedId, setExecutedId] = useState<string | null>(null);
+  const executedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (executedTimerRef.current) clearTimeout(executedTimerRef.current);
+  }, []);
+
+  const handleExecute = (command: Command) => {
+    onExecuteCommand(command.content);
+    setExecutedId(command.id);
+    if (executedTimerRef.current) clearTimeout(executedTimerRef.current);
+    executedTimerRef.current = setTimeout(() => setExecutedId(null), 1200);
+  };
 
   useImperativeHandle(ref, () => ({
     openAdd: () => {
@@ -85,11 +99,20 @@ export const CommandsList = forwardRef<CommandsListHandle, CommandsListProps>(fu
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                onClick={() => onExecuteCommand(command.content)}
-                title="Execute command"
+                className={cn(
+                  "h-6 w-6 shrink-0 transition-all duration-150 active:scale-90",
+                  executedId === command.id
+                    ? "opacity-100 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    : "opacity-0 group-hover:opacity-100 hover:bg-primary/15 hover:text-primary active:bg-primary/25"
+                )}
+                onClick={() => handleExecute(command)}
+                title={executedId === command.id ? "Sent to chat" : "Execute command"}
               >
-                <Play className="h-3 w-3" />
+                {executedId === command.id ? (
+                  <Check className="h-3 w-3" />
+                ) : (
+                  <Play className="h-3 w-3" />
+                )}
               </Button>
             </div>
           ))}
