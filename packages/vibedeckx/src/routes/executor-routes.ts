@@ -125,9 +125,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { name?: string; command?: string; executor_type?: string; prompt_provider?: string; cwd?: string | null; pty?: boolean };
   }>("/api/executors/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
     const existing = fastify.storage.executors.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Executor not found" });
+    }
+    // Confirm the caller owns the executor's project — otherwise one tenant
+    // could rewrite another tenant's executor command by id.
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
     }
 
     const { executor_type, prompt_provider, ...rest } = req.body;
@@ -148,9 +157,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // 删除 Executor
   fastify.delete<{ Params: { id: string } }>("/api/executors/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
     const existing = fastify.storage.executors.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Executor not found" });
+    }
+    // Confirm the caller owns the executor's project before deleting it.
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
     }
 
     fastify.storage.executors.delete(req.params.id);
