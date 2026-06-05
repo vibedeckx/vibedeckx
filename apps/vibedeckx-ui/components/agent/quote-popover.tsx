@@ -145,7 +145,7 @@ export function QuotePopover({ containerRef, onQuote }: QuotePopoverProps) {
         transform: "translateX(-50%)",
         zIndex: 50,
       }}
-      className="inline-flex items-center gap-1 rounded-md border border-primary bg-primary px-2 py-1 text-xs font-medium text-primary-foreground shadow-lg hover:bg-primary/90"
+      className="inline-flex items-center gap-1 rounded-md border-2 border-border bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-xl ring-1 ring-black/10 hover:bg-accent dark:ring-white/10"
     >
       <Quote className="h-3 w-3" />
       Quote
