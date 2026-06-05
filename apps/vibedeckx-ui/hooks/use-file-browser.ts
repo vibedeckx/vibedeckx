@@ -8,9 +8,10 @@ interface UseFileBrowserOptions {
   projectId: string | null;
   branch?: string | null;
   target?: "local" | "remote";
+  showHidden?: boolean;
 }
 
-export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOptions) {
+export function useFileBrowser({ projectId, branch, target, showHidden = false }: UseFileBrowserOptions) {
   const [rootEntries, setRootEntries] = useState<BrowseEntry[]>([]);
   const [directoryContents, setDirectoryContents] = useState<Map<string, BrowseEntry[]>>(new Map());
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -32,7 +33,7 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     setRootLoading(true);
     const key = ++fetchKeyRef.current;
     try {
-      const result = await api.browseProjectDirectory(projectId, undefined, branch, target);
+      const result = await api.browseProjectDirectory(projectId, undefined, branch, target, showHidden);
       if (key !== fetchKeyRef.current) return;
       setRootEntries(result.items);
       setDirectoryContents(new Map());
@@ -49,7 +50,7 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     } finally {
       if (key === fetchKeyRef.current) setRootLoading(false);
     }
-  }, [projectId, branch, target]);
+  }, [projectId, branch, target, showHidden]);
 
   const toggleDirectory = useCallback(async (dirPath: string) => {
     if (!projectId) return;
@@ -68,7 +69,7 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
     if (!directoryContents.has(dirPath)) {
       setLoadingDirs(prev => new Set(prev).add(dirPath));
       try {
-        const result = await api.browseProjectDirectory(projectId, dirPath, branch, target);
+        const result = await api.browseProjectDirectory(projectId, dirPath, branch, target, showHidden);
         setDirectoryContents(prev => {
           const next = new Map(prev);
           next.set(dirPath, result.items);
@@ -87,7 +88,7 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
         });
       }
     }
-  }, [projectId, branch, target, directoryContents]);
+  }, [projectId, branch, target, showHidden, directoryContents]);
 
   const selectFile = useCallback(async (filePath: string) => {
     if (!projectId) return;
@@ -112,17 +113,17 @@ export function useFileBrowser({ projectId, branch, target }: UseFileBrowserOpti
   const refreshDirectory = useCallback(async (dirPath: string) => {
     if (!projectId) return;
     if (dirPath === "") {
-      const result = await api.browseProjectDirectory(projectId, undefined, branch, target);
+      const result = await api.browseProjectDirectory(projectId, undefined, branch, target, showHidden);
       setRootEntries(result.items);
     } else {
-      const result = await api.browseProjectDirectory(projectId, dirPath, branch, target);
+      const result = await api.browseProjectDirectory(projectId, dirPath, branch, target, showHidden);
       setDirectoryContents(prev => {
         const next = new Map(prev);
         next.set(dirPath, result.items);
         return next;
       });
     }
-  }, [projectId, branch, target]);
+  }, [projectId, branch, target, showHidden]);
 
   // Upload files into dirPath ("" = root), then refresh that directory.
   const uploadFiles = useCallback(async (dirPath: string, files: File[]) => {

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
-import { RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
+import { RefreshCw, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { FileTree } from "./file-tree";
@@ -19,6 +19,8 @@ interface FilesViewProps {
 export function FilesView({ projectId, project, selectedBranch }: FilesViewProps) {
   // Determine target based on project config — if no local path, try remote
   const target = project && !project.path ? "remote" as const : undefined;
+
+  const [showHidden, setShowHidden] = useState(false);
 
   const {
     rootEntries,
@@ -40,6 +42,7 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
     projectId,
     branch: selectedBranch,
     target,
+    showHidden,
   });
 
   useEffect(() => {
@@ -68,9 +71,21 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
       <PageHeader
         title="Files"
         actions={
-          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={fetchRoot} title="Refresh">
-            <RefreshCw className={`h-3.5 w-3.5 ${rootLoading ? "animate-spin" : ""}`} />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className={`h-7 w-7 hover:text-foreground ${showHidden ? "text-foreground" : "text-muted-foreground"}`}
+              onClick={() => setShowHidden(v => !v)}
+              title={showHidden ? "Hide hidden files" : "Show hidden files"}
+              aria-pressed={showHidden}
+            >
+              {showHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={fetchRoot} title="Refresh">
+              <RefreshCw className={`h-3.5 w-3.5 ${rootLoading ? "animate-spin" : ""}`} />
+            </Button>
+          </div>
         }
       />
 

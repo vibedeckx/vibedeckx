@@ -123,12 +123,17 @@ async function isBinaryFile(filePath: string): Promise<boolean> {
   }
 }
 
-async function browseDirectory(dirPath: string): Promise<{ path: string; items: BrowseEntry[] }> {
+async function browseDirectory(
+  dirPath: string,
+  showHidden = false,
+): Promise<{ path: string; items: BrowseEntry[] }> {
   const entries = await fs.readdir(dirPath, { withFileTypes: true });
   const items: BrowseEntry[] = [];
 
   for (const entry of entries) {
-    if (entry.name.startsWith(".")) continue;
+    if (!showHidden && entry.name.startsWith(".")) continue;
+    // Always skip node_modules — it's not "hidden", just noise that would
+    // explode the tree even when hidden files are shown.
     if (entry.name === "node_modules") continue;
 
     if (entry.isDirectory()) {
@@ -160,7 +165,7 @@ async function browseDirectory(dirPath: string): Promise<{ path: string; items: 
 const routes: FastifyPluginAsync = async (fastify) => {
   // Browse directory (path-based, for remote execution)
   fastify.get<{
-    Querystring: { path: string; branch?: string; relativePath?: string };
+    Querystring: { path: string; branch?: string; relativePath?: string; hidden?: string };
   }>("/api/path/browse", async (req, reply) => {
     const projectPath = req.query.path;
     if (!projectPath) {
@@ -169,6 +174,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const branch = req.query.branch;
     const relativePath = req.query.relativePath || "";
+    const showHidden = req.query.hidden === "1" || req.query.hidden === "true";
     const basePath = resolveWorktreePath(projectPath, branch ?? null);
 
     if (!isPathSafe(basePath, relativePath || ".")) {
@@ -178,7 +184,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const cwd = relativePath ? path.resolve(basePath, relativePath) : basePath;
 
     try {
-      const result = await browseDirectory(cwd);
+      const result = await browseDirectory(cwd, showHidden);
       return reply.code(200).send(result);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
@@ -344,7 +350,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Browse project directory (project-scoped)
   fastify.get<{
     Params: { id: string };
-    Querystring: { path?: string; branch?: string; target?: "local" | "remote" };
+    Querystring: { path?: string; branch?: string; target?: "local" | "remote"; hidden?: string };
   }>("/api/projects/:id/browse", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -357,6 +363,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const relativePath = req.query.path || "";
     const branch = req.query.branch;
     const target = req.query.target;
+    const showHidden = req.query.hidden === "1" || req.query.hidden === "true";
 
     const useRemote = target === "remote"
       || (!target && !project.path);
@@ -369,6 +376,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const params = [`path=${encodeURIComponent(remoteConfig.remotePath)}`];
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
       if (relativePath) params.push(`relativePath=${encodeURIComponent(relativePath)}`);
+      if (showHidden) params.push("hidden=1");
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
         remoteConfig.url,
@@ -393,7 +401,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const result = await browseDirectory(dirPath);
+      const result = await browseDirectory(dirPath, showHidden);
       return reply.code(200).send(result);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;

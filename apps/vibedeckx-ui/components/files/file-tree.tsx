@@ -170,6 +170,7 @@ function FileTreeNode({
   const isExpanded = expandedDirs.has(nodePath);
   const isLoading = loadingDirs.has(nodePath);
   const children = directoryContents.get(nodePath);
+  const isHidden = entry.name.startsWith(".");
 
   if (entry.type === "directory") {
     const FolderIcon = isExpanded ? FolderOpen : Folder;
@@ -208,8 +209,8 @@ function FileTreeNode({
             ) : (
               <ChevronIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             )}
-            <FolderIcon className="h-4 w-4 shrink-0 text-blue-500" />
-            <span className="truncate">{entry.name}</span>
+            <FolderIcon className={cn("h-4 w-4 shrink-0 text-blue-500", isHidden && "opacity-60")} />
+            <span className={cn("truncate", isHidden && "text-muted-foreground")}>{entry.name}</span>
           </div>
           <div className={cn("shrink-0 ml-1 items-center gap-1", isDeleting ? "flex" : "hidden group-hover:flex")}>
             <CopyPathButton path={nodePath} />
@@ -276,8 +277,8 @@ function FileTreeNode({
       }}
     >
       <div className="flex items-center gap-1 min-w-0 flex-1">
-        <FileIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">{entry.name}</span>
+        <FileIcon className={cn("h-4 w-4 shrink-0 text-muted-foreground", isHidden && "opacity-60")} />
+        <span className={cn("truncate", isHidden && "text-muted-foreground")}>{entry.name}</span>
       </div>
       <div className="shrink-0 flex items-center gap-2 ml-1">
         <span className="text-[11px] text-muted-foreground/70 group-hover:hidden whitespace-nowrap w-[52px] text-right tabular-nums">

@@ -1173,12 +1173,14 @@ export const api = {
     projectId: string,
     relativePath?: string,
     branch?: string | null,
-    target?: "local" | "remote"
+    target?: "local" | "remote",
+    showHidden?: boolean
   ): Promise<BrowseResponse> {
     const params = new URLSearchParams();
     if (relativePath) params.set("path", relativePath);
     if (branch) params.set("branch", branch);
     if (target) params.set("target", target);
+    if (showHidden) params.set("hidden", "1");
     const query = params.toString() ? `?${params.toString()}` : "";
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browse${query}`);
     if (!res.ok) {
