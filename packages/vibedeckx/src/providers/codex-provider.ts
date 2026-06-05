@@ -384,13 +384,13 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Lifecycle hooks ============
 
-  onSessionCreated(sessionId: string): void {
+  onSessionCreated(sessionId: string, permissionMode: "plan" | "edit" = "plan"): void {
     this.sessions.set(sessionId, {
       threadId: null,
       rpcIdCounter: 1,
       initialized: false,
       pendingRequests: new Map(),
-      permissionMode: "edit",
+      permissionMode,
       pendingTurnContent: null,
     });
   }
@@ -408,7 +408,7 @@ export class CodexProvider implements AgentProvider {
         rpcIdCounter: 1,
         initialized: false,
         pendingRequests: new Map(),
-        permissionMode: "edit",
+        permissionMode: "plan",
         pendingTurnContent: null,
       };
       this.sessions.set(sessionId, state);

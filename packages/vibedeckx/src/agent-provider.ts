@@ -51,7 +51,7 @@ export interface AgentProvider {
   formatApprovalResponse?(requestId: string, decision: string, sessionId: string): string;
 
   /** Called when a new session is created for this agent type. */
-  onSessionCreated?(sessionId: string): void;
+  onSessionCreated?(sessionId: string, permissionMode?: "plan" | "edit"): void;
 
   /** Called when a session is destroyed/deleted for this agent type. */
   onSessionDestroyed?(sessionId: string): void;

@@ -144,6 +144,6 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   // Lifecycle hooks are no-ops for Claude (stateless per-session)
-  onSessionCreated(_sessionId: string): void {}
+  onSessionCreated(_sessionId: string, _permissionMode?: "plan" | "edit"): void {}
   onSessionDestroyed(_sessionId: string): void {}
 }

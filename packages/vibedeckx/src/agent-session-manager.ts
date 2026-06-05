@@ -285,7 +285,7 @@ export class AgentSessionManager {
 
     // Notify provider of session creation (for per-session state init)
     const provider = getProvider(agentType);
-    provider.onSessionCreated?.(sessionId);
+    provider.onSessionCreated?.(sessionId, permissionMode);
 
     // Spawn agent process
     this.spawnAgent(session, absoluteWorktreePath);
@@ -1121,7 +1121,7 @@ export class AgentSessionManager {
     if (agentType) {
       session.agentType = agentType;
     }
-    getProvider(session.agentType).onSessionCreated?.(sessionId);
+    getProvider(session.agentType).onSessionCreated?.(sessionId, session.permissionMode);
 
     // 7. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
