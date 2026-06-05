@@ -100,19 +100,29 @@ export const CommandsList = forwardRef<CommandsListHandle, CommandsListProps>(fu
                 variant="ghost"
                 size="icon-sm"
                 className={cn(
-                  "h-6 w-6 shrink-0 transition-all duration-150 active:scale-90",
+                  "relative h-6 w-6 shrink-0 transition-all duration-150 active:scale-90",
                   executedId === command.id
-                    ? "opacity-100 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    ? "opacity-100 bg-emerald-500/15"
                     : "opacity-0 group-hover:opacity-100 hover:bg-primary/15 hover:text-primary active:bg-primary/25"
                 )}
                 onClick={() => handleExecute(command)}
                 title={executedId === command.id ? "Sent to chat" : "Execute command"}
               >
-                {executedId === command.id ? (
-                  <Check className="h-3 w-3" />
-                ) : (
-                  <Play className="h-3 w-3" />
-                )}
+                {/* Two stacked icons: Play is driven purely by group-hover so it
+                    never flashes in while the checkmark fades out after the mouse
+                    has left the row. When the mouse stays, they crossfade. */}
+                <Play
+                  className={cn(
+                    "absolute h-3 w-3 transition-opacity duration-150",
+                    executedId === command.id ? "opacity-0" : "opacity-0 group-hover:opacity-100"
+                  )}
+                />
+                <Check
+                  className={cn(
+                    "absolute h-3 w-3 text-emerald-600 dark:text-emerald-400 transition-opacity duration-150",
+                    executedId === command.id ? "opacity-100" : "opacity-0"
+                  )}
+                />
               </Button>
             </div>
           ))}
