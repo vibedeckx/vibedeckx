@@ -351,7 +351,15 @@ export default function Home() {
     }
   }, [currentProject, updateProject]);
 
+  // Guard against double-click sending the same command twice: ignore a repeat
+  // of the same content within a short window (a native double-click fires two
+  // click events before the session status can update).
+  const lastExecuteRef = useRef<{ content: string; at: number }>({ content: "", at: 0 });
   const handleExecuteCommand = useCallback((content: string) => {
+    const now = Date.now();
+    const last = lastExecuteRef.current;
+    if (last.content === content && now - last.at < 600) return;
+    lastExecuteRef.current = { content, at: now };
     mainChatRef.current?.sendMessage(content);
   }, []);
 
