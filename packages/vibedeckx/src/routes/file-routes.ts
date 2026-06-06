@@ -295,10 +295,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const basePath = resolveWorktreePath(project.path ?? projectPath, branch ?? null);
     const decoded = files.map((f) => ({ name: f.name, data: Buffer.from(f.contentBase64, "base64") }));
 
     try {
+      const basePath = resolveWorktreePath(project.path ?? projectPath, branch ?? null);
       const uploaded = await writeUploadedFiles(basePath, relativePath || "", decoded);
       return reply.code(200).send({ uploaded });
     } catch (err) {
@@ -327,9 +327,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const branch = req.query.branch;
-    const basePath = resolveWorktreePath(projectPath, branch ?? null);
 
     try {
+      const basePath = resolveWorktreePath(projectPath, branch ?? null);
       const deleted = await deletePath(basePath, filePath);
       return reply.code(200).send({ deleted });
     } catch (err) {
@@ -727,8 +727,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Project has no local path" });
     }
 
-    const basePath = resolveWorktreePath(project.path, branch ?? null);
     try {
+      const basePath = resolveWorktreePath(project.path, branch ?? null);
       const deleted = await deletePath(basePath, filePath);
       return reply.code(200).send({ deleted });
     } catch (err) {

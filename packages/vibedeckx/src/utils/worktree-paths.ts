@@ -91,7 +91,16 @@ export function resolveWorktreePath(projectPath: string, branch: string | null):
     // git failed (not a repo, etc.) — fall through to convention.
   }
   const dirName = branch.replace(/\//g, "-");
-  return path.join(WORKTREE_BASE_DIR, getProjectIdentifier(projectPath), dirName);
+  const base = path.join(WORKTREE_BASE_DIR, getProjectIdentifier(projectPath));
+  const candidate = path.join(base, dirName);
+  // Containment guard: a branch that doesn't map to a real git worktree must
+  // resolve to a path inside this project's own worktree base. Otherwise a
+  // value like ".." escapes via path.join to the shared worktree root (or
+  // beyond), letting a caller reach sibling projects' worktrees.
+  if (candidate !== base && !candidate.startsWith(base + path.sep)) {
+    throw Object.assign(new Error("Invalid branch"), { statusCode: 400 });
+  }
+  return candidate;
 }
 
 /** Get the base worktree directory for a project (for mkdir) */
