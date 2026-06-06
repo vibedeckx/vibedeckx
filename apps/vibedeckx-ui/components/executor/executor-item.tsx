@@ -85,6 +85,17 @@ export function ExecutorItem({
 
   const { logs, status, exitCode, isPty, replayingHistory, sendInput, sendResize } = useExecutorProcessLogs(localProcessId, executorMode);
 
+  // [diag:mux] 临时诊断：item 挂载/卸载 + localProcessId 变化。
+  // 用来区分“切回时一直空”是因为 item 重挂载、还是 localProcessId 掉成 null。
+  useEffect(() => {
+    console.log("[diag:mux] ExecutorItem MOUNT", executor.id, "localProcessId=", localProcessId);
+    return () => console.log("[diag:mux] ExecutorItem UNMOUNT", executor.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    console.log("[diag:mux] localProcessId →", localProcessId, "executor=", executor.id);
+  }, [localProcessId, executor.id]);
+
   // Sync local process ID with executor's current process.
   // Only update when a NEW process starts — don't clear to null when the process
   // finishes. This prevents a race condition where monitorRemoteExecutor detects

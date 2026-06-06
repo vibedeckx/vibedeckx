@@ -79,6 +79,14 @@ export function ExecutorLogsProvider({
 
   const applyServerMessage = useCallback((m: MuxServerMessage) => {
     const { processId } = m;
+    // [diag:mux] 临时诊断：打印每条收到的 mux 帧（init/输出/history_end/finished/error）
+    const detail =
+      m.type === "error" ? m.message
+      : m.type === "finished" ? `exitCode=${m.exitCode}`
+      : m.type === "init" ? `isPty=${m.isPty}`
+      : m.type === "history_end" ? ""
+      : `${m.data.length}b`;
+    console.log("[diag:mux] recv", m.type, processId, detail);
     if (m.type === "init") {
       update(processId, { isPty: m.isPty, replayingHistory: true, logs: [], status: "connected" });
     } else if (m.type === "history_end") {
@@ -112,6 +120,8 @@ export function ExecutorLogsProvider({
       ws.onopen = () => {
         if (cancelled) return;
         reconnectAttemptRef.current = 0;
+        // [diag:mux] WS 新连接/重连建立 —— 若“空”发生在这之后，是 WS 重连；若没有这条，则是旧连接上的重订阅
+        console.log("[diag:mux] WS open, resubscribing", [...desiredRef.current]);
         // 重连后重新订阅所有期望进程
         for (const pid of desiredRef.current) {
           ws.send(JSON.stringify({ type: "subscribe", processId: pid } satisfies MuxClientMessage));
@@ -129,6 +139,7 @@ export function ExecutorLogsProvider({
 
       ws.onclose = () => {
         wsRef.current = null;
+        console.log("[diag:mux] WS close, reconnectAttempt=", reconnectAttemptRef.current, "cancelled=", cancelled);
         if (cancelled) return;
         // 已终止的进程（closed/error）不因连接断开而被改写状态
         const isTerminal = (pid: string) => {
@@ -173,11 +184,13 @@ export function ExecutorLogsProvider({
       // 新订阅前重置该进程状态
       statesRef.current.set(processId, { ...EMPTY_STATE });
       notify(processId);
+      console.log("[diag:mux] send subscribe", processId, "(state reset to EMPTY)");
       sendRaw({ type: "subscribe", processId });
     },
     unsubscribeProcess: (processId) => {
       if (!desiredRef.current.has(processId)) return;
       desiredRef.current.delete(processId);
+      console.log("[diag:mux] send unsubscribe", processId);
       sendRaw({ type: "unsubscribe", processId });
       // 保留 state（收起/展开不丢历史），只停止接收
     },
