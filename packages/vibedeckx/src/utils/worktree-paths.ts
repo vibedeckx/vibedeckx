@@ -19,6 +19,23 @@ function getProjectIdentifier(projectPath: string): string {
   return `${basename}-${hash}`;
 }
 
+function isSubpath(basePath: string, targetPath: string): boolean {
+  const relative = path.relative(basePath, targetPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/** A worktree path is trusted only if it is the project root itself or lives
+ *  under this project's own managed worktree base. Git can report stale,
+ *  prunable, or otherwise attacker-influenced `.git/worktrees/*` metadata that
+ *  points anywhere on disk (e.g. `/etc`); such paths must never be returned to
+ *  callers that use them as a filesystem confinement root. */
+function isTrustedWorktreePath(projectPath: string, worktreePath: string): boolean {
+  const normalizedWorktreePath = path.resolve(worktreePath);
+  if (normalizedWorktreePath === path.resolve(projectPath)) return true;
+  const managedBase = path.resolve(getWorktreeBaseForProject(projectPath));
+  return isSubpath(managedBase, normalizedWorktreePath);
+}
+
 function readWorktreeListFromGit(projectPath: string): Array<{ path: string; branch: string | null }> {
   const output = execSync("git worktree list --porcelain", {
     cwd: projectPath,
@@ -33,13 +50,17 @@ function readWorktreeListFromGit(projectPath: string): Array<{ path: string; bra
     const lines = block.split("\n");
     let worktreePath = "";
     let branch: string | null = null;
+    let isPrunable = false;
 
     for (const line of lines) {
       if (line.startsWith("worktree ")) worktreePath = line.slice(9);
       else if (line.startsWith("branch refs/heads/")) branch = line.slice(18);
+      else if (line === "prunable" || line.startsWith("prunable ")) isPrunable = true;
     }
 
-    if (worktreePath) {
+    // Skip prunable (stale) records and any path outside this project's trusted
+    // worktree base — those can carry attacker-controlled `gitdir` targets.
+    if (worktreePath && !isPrunable && isTrustedWorktreePath(projectPath, worktreePath)) {
       entries.push({ path: worktreePath, branch });
     }
   }
@@ -81,8 +102,9 @@ export function invalidateWorktreeListCache(projectPath: string): void {
 /** Resolve branch to absolute filesystem path. null = main worktree. */
 export function resolveWorktreePath(projectPath: string, branch: string | null): string {
   if (!branch) return projectPath;
-  // Prefer git's real worktree path so worktrees created outside the
-  // vibedeckx convention still resolve correctly.
+  // Prefer git's real worktree path for the branch. parseGitWorktreeList only
+  // returns trusted, non-prunable paths (project root or under the managed
+  // base), so a match here is always safely confined.
   try {
     const entries = parseGitWorktreeList(projectPath);
     const match = entries.find((e) => e.branch === branch);
