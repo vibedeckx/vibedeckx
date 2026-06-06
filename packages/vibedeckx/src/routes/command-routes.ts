@@ -53,8 +53,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { name?: string; content?: string; position?: number };
   }>("/api/commands/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const existing = fastify.storage.commands.getById(req.params.id);
     if (!existing) {
+      return reply.code(404).send({ error: "Command not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
       return reply.code(404).send({ error: "Command not found" });
     }
 
@@ -67,8 +73,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.delete<{ Params: { id: string } }>("/api/commands/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const existing = fastify.storage.commands.getById(req.params.id);
     if (!existing) {
+      return reply.code(404).send({ error: "Command not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
       return reply.code(404).send({ error: "Command not found" });
     }
 
