@@ -61,6 +61,31 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }
 
   /**
+   * Resolve a remote-prefixed session id to its RemoteSessionInfo only when the
+   * caller owns the mapped project. The remoteSessionMap is a process-wide map
+   * hydrated from persisted mappings with no owner context, so a bare map lookup
+   * authorizes by ID-presence alone — which is an unauth/IDOR hole on the direct
+   * control routes. Gate every remote branch through here.
+   *
+   * `userId` is the raw `requireAuth` result: `undefined` in no-auth/solo mode,
+   * where `projects.getById(id, undefined)` skips the owner filter (one-user
+   * deployment), and the Clerk user id under `--auth`, where it enforces
+   * per-user ownership. Do NOT pass `resolveUserId(...)` here — that collapses
+   * `undefined` to `"local"`, which would not match solo projects (user_id="").
+   */
+  function getAuthorizedRemoteSessionInfo(
+    sessionId: string,
+    userId: string | undefined,
+  ): RemoteSessionInfo | null {
+    const remoteInfo = fastify.remoteSessionMap.get(sessionId);
+    if (!remoteInfo) return null;
+    const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
+    const project = fastify.storage.projects.getById(projectId, userId);
+    if (!project) return null;
+    return remoteInfo;
+  }
+
+  /**
    * For a remote session, generate a title locally (using the local
    * chat_provider config — the same one main chat uses), then push it to the
    * remote DB and broadcast `titleUpdated` to local subscribers so the
@@ -644,7 +669,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     "/api/agent-sessions/:sessionId",
     async (req, reply) => {
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -719,7 +746,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (req.params.sessionId.startsWith("remote-")) {
-      const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, authResult);
       if (!remoteInfo) {
         console.log(`[API] /message 404: remote session not found. Known keys: [${[...fastify.remoteSessionMap.keys()].join(', ')}]`);
         return reply.code(404).send({ error: "Remote session not found" });
@@ -800,7 +827,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (req.params.sessionId.startsWith("remote-")) {
-      const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
       if (!remoteInfo) {
         return reply.code(404).send({ error: "Remote session not found" });
       }
@@ -840,7 +869,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     "/api/agent-sessions/:sessionId/stop",
     async (req, reply) => {
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -867,7 +898,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     "/api/agent-sessions/:sessionId/restart",
     async (req, reply) => {
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -915,7 +948,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -961,7 +996,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1014,7 +1051,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1051,7 +1090,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     "/api/agent-sessions/:sessionId",
     async (req, reply) => {
       if (req.params.sessionId.startsWith("remote-")) {
-        const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1086,7 +1127,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (req.params.sessionId.startsWith("remote-")) {
-      const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
       if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
@@ -1115,7 +1158,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (req.params.sessionId.startsWith("remote-")) {
-      const remoteInfo = fastify.remoteSessionMap.get(req.params.sessionId);
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
       if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
