@@ -23,7 +23,10 @@ export function SettingsSection({
   children,
 }: SettingsSectionProps) {
   return (
-    <section id={id} className="scroll-mt-6">
+    <section
+      id={id}
+      className="scroll-mt-6 rounded-[10px] border border-border bg-card p-5 shadow-[var(--shadow-sm-app)]"
+    >
       <header className="flex items-end justify-between gap-3 pb-3 mb-4 border-b border-border/70">
         <div className="min-w-0">
           <h2 className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/80 leading-none">
@@ -326,7 +329,7 @@ export function SettingsLayout({ nav, children }: SettingsLayoutProps) {
         </nav>
       </aside>
       <div ref={scrollRef} className="overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-8 py-7 space-y-12">{children}</div>
+        <div className="mx-auto max-w-2xl px-8 py-7 space-y-6">{children}</div>
       </div>
     </div>
   );
