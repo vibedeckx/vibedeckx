@@ -170,11 +170,11 @@ export function TerminalSettingsSection() {
 
       <SettingsActions>
         <Button variant="outline" size="sm" onClick={handleReset} disabled={saving}>
-          Reset to defaults
+          Reset
         </Button>
         <Button size="sm" onClick={handleSave} disabled={saving || !canSave}>
           {saving && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
-          Save changes
+          Save
         </Button>
       </SettingsActions>
     </div>

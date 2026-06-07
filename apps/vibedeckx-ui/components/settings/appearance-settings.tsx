@@ -62,7 +62,7 @@ export function AppearanceSettings() {
 
       <SettingsActions>
         <Button variant="ghost" size="sm" onClick={handleReset}>
-          Reset to defaults
+          Reset
         </Button>
       </SettingsActions>
     </div>
