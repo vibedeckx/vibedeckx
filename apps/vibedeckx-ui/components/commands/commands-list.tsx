@@ -100,10 +100,13 @@ export const CommandsList = forwardRef<CommandsListHandle, CommandsListProps>(fu
                 variant="ghost"
                 size="icon-sm"
                 className={cn(
-                  "relative h-6 w-6 shrink-0 transition-all duration-150 active:scale-90",
+                  // No button background — feedback is icon-only (color + press
+                  // scale + the green check), so nothing lingers behind the icon
+                  // once the mouse leaves.
+                  "relative h-6 w-6 shrink-0 transition-all duration-150 active:scale-90 hover:bg-transparent dark:hover:bg-transparent",
                   executedId === command.id
-                    ? "opacity-100 bg-emerald-500/15"
-                    : "opacity-0 group-hover:opacity-100 hover:bg-primary/15 hover:text-primary active:bg-primary/25"
+                    ? "opacity-100"
+                    : "opacity-0 group-hover:opacity-100 hover:text-primary"
                 )}
                 onClick={() => handleExecute(command)}
                 title={executedId === command.id ? "Sent to chat" : "Execute command"}
