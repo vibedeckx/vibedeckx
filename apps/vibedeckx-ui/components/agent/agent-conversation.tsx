@@ -22,7 +22,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Cloud, Languages, X, Loader2, ChevronDown } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -35,7 +35,7 @@ import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
-import { useProjectRemotes } from "@/hooks/use-project-remotes";
+import { useProjectRemotes, remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText } from "@/lib/api";
@@ -142,13 +142,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const onMarkerKeyDown = useMarkerKeyboardNav(messagesRef);
   const textareaWrapperRef = useRef<HTMLDivElement>(null);
   const inputHistory = useInputHistory(setInput, projectId, branch);
-  const { remotes } = useProjectRemotes(project?.id ?? undefined);
+  const { remotes } = useProjectRemotes(project?.id ?? undefined, { withStatus: true });
 
   // Build execution mode targets from local path + project remotes
   const agentTargets: ExecutionModeTarget[] = [];
   if (project?.path) agentTargets.push({ id: "local", label: "Local", icon: Monitor });
   for (const r of remotes) {
-    agentTargets.push({ id: r.remote_server_id, label: r.server_name, icon: Cloud });
+    agentTargets.push({ id: r.remote_server_id, label: r.server_name, icon: remoteConnectionIcon(r) });
   }
 
   const {

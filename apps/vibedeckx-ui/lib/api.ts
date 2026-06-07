@@ -130,6 +130,9 @@ export interface ProjectRemote {
   sync_down_config?: SyncButtonConfig;
   server_name: string;
   server_url: string;
+  // Optionally joined from the remote server (see useProjectRemotes withStatus)
+  status?: RemoteServerStatus;
+  connection_mode?: RemoteServerConnectionMode;
 }
 
 export interface RemoteBrowseItem {

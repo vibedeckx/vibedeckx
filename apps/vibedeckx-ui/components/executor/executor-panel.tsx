@@ -2,14 +2,14 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Plus, Terminal, FolderPlus, Monitor, Cloud } from "lucide-react";
+import { Plus, Terminal, FolderPlus, Monitor } from "lucide-react";
 import { ExecutorItem } from "./executor-item";
 import { ExecutorForm } from "./executor-form";
 import { ExecutorLogsProvider } from "@/hooks/executor-logs-context";
 import { useExecutors } from "@/hooks/use-executors";
 import { useExecutorGroups } from "@/hooks/use-executor-groups";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
-import { useProjectRemotes } from "@/hooks/use-project-remotes";
+import { useProjectRemotes, remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import type { Project, ExecutionMode } from "@/lib/api";
 import {
   DndContext,
@@ -102,13 +102,13 @@ const headerOnlyCollision: CollisionDetection = (args) => {
 export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorModeChange }: ExecutorPanelProps) {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [openExecutors, setOpenExecutors] = useState<Set<string>>(new Set());
-  const { remotes } = useProjectRemotes(project?.id ?? undefined);
+  const { remotes } = useProjectRemotes(project?.id ?? undefined, { withStatus: true });
 
   // Build execution mode targets from local path + project remotes
   const executorTargets: ExecutionModeTarget[] = [];
   if (project?.path) executorTargets.push({ id: "local", label: "Local", icon: Monitor });
   for (const r of remotes) {
-    executorTargets.push({ id: r.remote_server_id, label: r.server_name, icon: Cloud });
+    executorTargets.push({ id: r.remote_server_id, label: r.server_name, icon: remoteConnectionIcon(r) });
   }
 
   const { activeGroup, loading: groupLoading, createGroup } = useExecutorGroups(projectId, selectedBranch);
