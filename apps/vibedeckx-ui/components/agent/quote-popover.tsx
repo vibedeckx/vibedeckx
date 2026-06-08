@@ -120,7 +120,7 @@ export function QuotePopover({ containerRef, onQuote }: QuotePopoverProps) {
   // Position centered above the selection. If the top would be off-screen,
   // flip below. Clamp horizontally to the viewport.
   const BTN_GAP = 8;
-  const BTN_HEIGHT = 28;
+  const BTN_HEIGHT = 30;
   const flipBelow = sel.rect.top - BTN_GAP - BTN_HEIGHT < 8;
   const top = flipBelow ? sel.rect.bottom + BTN_GAP : sel.rect.top - BTN_GAP - BTN_HEIGHT;
   const rawLeft = sel.rect.left + sel.rect.width / 2;
@@ -145,7 +145,7 @@ export function QuotePopover({ containerRef, onQuote }: QuotePopoverProps) {
         transform: "translateX(-50%)",
         zIndex: 50,
       }}
-      className="inline-flex items-center gap-1 rounded-md border border-border bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-2xl hover:bg-accent"
+      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-popover px-3 py-1.5 text-xs font-medium text-popover-foreground shadow-2xl hover:bg-accent"
     >
       <Quote className="h-3 w-3" />
       Quote
