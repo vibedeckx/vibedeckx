@@ -1438,6 +1438,7 @@ export class ChatSessionManager {
               executorId: executor.id,
               projectId,
               branch,
+              machineId: this.reverseConnectManager?.getMachineId(resolvedRemote),
             });
 
             // Emit SSE event so the Executor panel learns about the new process

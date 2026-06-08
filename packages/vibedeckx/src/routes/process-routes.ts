@@ -137,6 +137,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           executorId: executor.id,
           projectId: project.id,
           branch: branch ?? undefined,
+          machineId: fastify.reverseConnectManager.getMachineId(executorMode),
         });
         fastify.eventBus.emit({
           type: "executor:started",
@@ -213,18 +214,40 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // 获取所有运行中的进程
   fastify.get("/api/executor-processes/running", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    // A process is visible to the caller only if its owning project belongs to
+    // them. userId === undefined means no auth scope is in effect (solo/no-auth,
+    // or a validated remote-proxy api key on a single-tenant remote node) — in
+    // that case everything is returned, preserving the recovery/restore path.
+    const ownsProject = (projectId: string | null | undefined): boolean => {
+      if (userId === undefined) return true;
+      if (!projectId) return false;
+      return !!fastify.storage.projects.getById(projectId, userId);
+    };
+
     const runningProcessIds = fastify.processManager.getRunningProcessIds();
     // Local processes (includes temp processes started via /api/path/execute
     // which have no DB record — skipDb=true)
-    const processes: Array<Record<string, unknown>> = runningProcessIds.map((id) => {
+    const processes: Array<Record<string, unknown>> = [];
+    for (const id of runningProcessIds) {
       const dbProcess = fastify.storage.executorProcesses.getById(id);
-      return dbProcess
-        ? { ...dbProcess, target: "local" }
-        : { id, executor_id: "", status: "running", exit_code: null, started_at: null, finished_at: null, target: "local" };
-    });
+      if (dbProcess) {
+        const executor = fastify.storage.executors.getById(dbProcess.executor_id);
+        if (!ownsProject(executor?.project_id)) continue;
+        processes.push({ ...dbProcess, target: "local" });
+      } else {
+        // Temp process with no DB record and thus no owner attribution. Only
+        // surfaced when no auth scope is in effect.
+        if (userId !== undefined) continue;
+        processes.push({ id, executor_id: "", status: "running", exit_code: null, started_at: null, finished_at: null, target: "local" });
+      }
+    }
 
-    // Remote processes (tracked in remoteExecutorMap)
+    // Remote processes (tracked in remoteExecutorMap, a global cross-tenant map)
     for (const [localProcessId, info] of fastify.remoteExecutorMap) {
+      if (!ownsProject(info.projectId)) continue;
       processes.push({
         id: localProcessId,
         executor_id: info.executorId,

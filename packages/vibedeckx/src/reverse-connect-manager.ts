@@ -42,6 +42,10 @@ export class ReverseConnectManager {
   // This handles cases where the same physical machine reconnects under
   // a different remote_servers.id (e.g., after server entry recreation).
   private aliases = new Map<string, string>();
+  // Verified machine identity (public-key fingerprint) per connected server ID.
+  // Set only after a successful challenge-response handshake; absent for
+  // unauthenticated (legacy) connections.
+  private machineIdByServer = new Map<string, string>();
 
   /** Resolve a server ID through aliases. */
   private resolveId(serverId: string): string {
@@ -55,13 +59,19 @@ export class ReverseConnectManager {
     }
   }
 
+  /** Verified machine fingerprint for a server ID, or undefined if unauthenticated. */
+  getMachineId(remoteServerId: string): string | undefined {
+    return this.machineIdByServer.get(this.resolveId(remoteServerId));
+  }
+
   setStatusChangeHandler(handler: (remoteServerId: string, status: "online" | "offline") => void): void {
     this.statusChangeHandlers.push(handler);
   }
 
-  registerConnection(remoteServerId: string, ws: WebSocket): void {
+  registerConnection(remoteServerId: string, ws: WebSocket, machineId?: string): void {
     // If this server had an alias, remove it — it now has its own connection
     this.aliases.delete(remoteServerId);
+    if (machineId) this.machineIdByServer.set(remoteServerId, machineId);
 
     // Last-writer-wins: close old connection if exists
     const existing = this.connections.get(remoteServerId);
@@ -97,6 +107,7 @@ export class ReverseConnectManager {
       if (c && c.ws === ws) {
         this.cleanupConnection(remoteServerId, c);
         this.connections.delete(remoteServerId);
+        this.machineIdByServer.delete(remoteServerId);
         for (const h of this.statusChangeHandlers) h(remoteServerId, "offline");
       }
     });

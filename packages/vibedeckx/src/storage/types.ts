@@ -106,6 +106,24 @@ export interface RemoteExecutorProcessRow {
   status: ExecutorProcessStatus;
   exit_code: number | null;
   finished_at: string | null;
+  /**
+   * Fingerprint of the remote's stable machine identity (sha256 of its public
+   * key) that ran this process. Used to re-anchor the row after the machine
+   * reconnects under a new remote_servers.id. Null for direct-URL servers and
+   * for rows created before machine identity was introduced.
+   */
+  machine_id: string | null;
+}
+
+export interface MachineIdentityRow {
+  /** sha256(publicKey) hex — stable across remote_servers.id recreation. */
+  machine_id: string;
+  /** SPKI PEM of the remote machine's public key. */
+  public_key: string;
+  /** Owner of the machine, pinned on first (token-authenticated) connect. */
+  user_id: string;
+  created_at: string;
+  last_seen_at: string | null;
 }
 
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'cancelled';
@@ -203,6 +221,8 @@ export interface Storage {
     getById(id: string, userId?: string): RemoteServer | undefined;
     getByUrl(url: string): RemoteServer | undefined;
     getByToken(token: string): RemoteServer | undefined;
+    /** Owner user_id of a server, unscoped — for ownership checks without a request context. */
+    getOwnerId(id: string): string | undefined;
     update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer | undefined;
     updateStatus(id: string, status: RemoteServerStatus): void;
     generateToken(id: string, userId?: string): string | undefined;
@@ -256,7 +276,7 @@ export interface Storage {
     updatePid: (id: string, pid: number) => void;
   };
   remoteExecutorProcesses: {
-    insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null }): void;
+    insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null; machineId?: string | null }): void;
     /**
      * Hard-delete a row. Use only for stale-row cleanup or transient sessions
      * (e.g. terminals). Use markFinished() when an executor process exits so
@@ -276,8 +296,25 @@ export interface Storage {
     getLastByExecutorIdsGroupedByServer(executorIds: string[]): RemoteExecutorProcessRow[];
     /** Only rows currently marked 'running' — used for restoration on startup/reconnect. */
     getRunning(): RemoteExecutorProcessRow[];
+    /**
+     * Running rows anchored to a specific verified machine identity. Used by
+     * reverse-connect recovery to safely re-claim a machine's processes after
+     * it reconnects under a new remote_servers.id.
+     */
+    getRunningByMachine(machineId: string): RemoteExecutorProcessRow[];
     /** All rows including finished — primarily for legacy callers. */
     getAll(): RemoteExecutorProcessRow[];
+  };
+  /**
+   * Stable cryptographic identities for reverse-connect remote machines. Keyed
+   * by public-key fingerprint so a machine remains recognizable across
+   * remote_servers record recreation (new id + new token).
+   */
+  machineIdentity: {
+    get(machineId: string): MachineIdentityRow | undefined;
+    /** Pin a fingerprint→(publicKey, owner) on first connect. No-op if present. */
+    pin(machineId: string, publicKey: string, userId: string): void;
+    touch(machineId: string): void;
   };
   agentSessions: {
     create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => AgentSession;

@@ -196,6 +196,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           executorId: "",
           projectId: req.params.projectId,
           branch: branch ?? null,
+          machineId: fastify.reverseConnectManager.getMachineId(remoteConfig.serverId),
         });
 
         return reply.code(201).send({

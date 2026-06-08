@@ -3,7 +3,7 @@ import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer, RemoteExecutorProcessRow } from "./types.js";
+import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer, RemoteExecutorProcessRow, MachineIdentityRow } from "./types.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -72,6 +72,14 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       project_id TEXT,
       branch TEXT,
       started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS machine_identity (
+      machine_id TEXT PRIMARY KEY,
+      public_key TEXT NOT NULL,
+      user_id TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -407,6 +415,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   }
   if (!remoteProcessTableInfo.some(col => col.name === "finished_at")) {
     db.exec("ALTER TABLE remote_executor_processes ADD COLUMN finished_at TIMESTAMP");
+  }
+  if (!remoteProcessTableInfo.some(col => col.name === "machine_id")) {
+    db.exec("ALTER TABLE remote_executor_processes ADD COLUMN machine_id TEXT");
   }
   // Note: unlike executor_processes, we don't bulk-mark remote 'running' rows
   // as killed here. Remote processes can outlive a local restart, so the
@@ -862,6 +873,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .prepare<{ token: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE connect_token = @token`)
           .get({ token });
         return row ? toRemoteServer(row) : undefined;
+      },
+
+      getOwnerId: (id: string): string | undefined => {
+        const row = db
+          .prepare<{ id: string }, { user_id: string }>(`SELECT user_id FROM remote_servers WHERE id = @id`)
+          .get({ id });
+        return row?.user_id;
       },
 
       update: (id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer | undefined => {
@@ -1339,7 +1357,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     remoteExecutorProcesses: {
       insert: (localProcessId, info) => {
         db.prepare(
-          `INSERT OR REPLACE INTO remote_executor_processes (local_process_id, remote_server_id, remote_url, remote_api_key, remote_process_id, executor_id, project_id, branch) VALUES (@local_process_id, @remote_server_id, @remote_url, @remote_api_key, @remote_process_id, @executor_id, @project_id, @branch)`
+          `INSERT OR REPLACE INTO remote_executor_processes (local_process_id, remote_server_id, remote_url, remote_api_key, remote_process_id, executor_id, project_id, branch, machine_id) VALUES (@local_process_id, @remote_server_id, @remote_url, @remote_api_key, @remote_process_id, @executor_id, @project_id, @branch, @machine_id)`
         ).run({
           local_process_id: localProcessId,
           remote_server_id: info.remoteServerId,
@@ -1349,6 +1367,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           executor_id: info.executorId,
           project_id: info.projectId ?? null,
           branch: info.branch ?? null,
+          machine_id: info.machineId ?? null,
         });
       },
 
@@ -1423,12 +1442,43 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({});
       },
 
+      getRunningByMachine: (machineId: string) => {
+        return db
+          .prepare<{ machine_id: string }, RemoteExecutorProcessRow>(
+            `SELECT * FROM remote_executor_processes WHERE status = 'running' AND machine_id = @machine_id`
+          )
+          .all({ machine_id: machineId });
+      },
+
       getAll: () => {
         return db
           .prepare<{}, RemoteExecutorProcessRow>(
             `SELECT * FROM remote_executor_processes`
           )
           .all({});
+      },
+    },
+
+    machineIdentity: {
+      get: (machineId: string) => {
+        const row = db
+          .prepare<{ machine_id: string }, MachineIdentityRow>(
+            `SELECT * FROM machine_identity WHERE machine_id = @machine_id`
+          )
+          .get({ machine_id: machineId });
+        return row ?? undefined;
+      },
+
+      pin: (machineId: string, publicKey: string, userId: string) => {
+        db.prepare(
+          `INSERT OR IGNORE INTO machine_identity (machine_id, public_key, user_id) VALUES (@machine_id, @public_key, @user_id)`
+        ).run({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "" });
+      },
+
+      touch: (machineId: string) => {
+        db.prepare(
+          `UPDATE machine_identity SET last_seen_at = datetime('now') WHERE machine_id = @machine_id`
+        ).run({ machine_id: machineId });
       },
     },
 

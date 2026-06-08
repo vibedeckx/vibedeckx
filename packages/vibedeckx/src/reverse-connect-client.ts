@@ -1,6 +1,12 @@
 import WebSocket from "ws";
-import type { ControlFrame, HttpRequestFrame, WsOpenFrame, WsCloseFrame, PingFrame, HttpResponseFrame, PongFrame, StatusFrame, WsDataFrame } from "./reverse-connect-types.js";
+import { generateKeyPairSync, sign as cryptoSign, createPrivateKey, createPublicKey, type KeyObject } from "crypto";
+import type { ControlFrame, HttpRequestFrame, WsOpenFrame, WsCloseFrame, PingFrame, HttpResponseFrame, PongFrame, StatusFrame, WsDataFrame, MachineChallengeFrame, MachineAuthFrame } from "./reverse-connect-types.js";
 import type { FastifyInstance } from "fastify";
+
+// Settings key under which the remote node persists its stable Ed25519 private
+// key (PKCS8 PEM). This key is the machine's cryptographic identity, recognized
+// by the hub across remote_servers record recreation.
+const MACHINE_KEY_SETTING = "reverse_machine_private_key";
 
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
@@ -105,9 +111,46 @@ export class ReverseConnectClient {
       case "ping":
         this.handlePing(frame);
         break;
+      case "machine_challenge":
+        this.handleMachineChallenge(frame);
+        break;
       default:
         break;
     }
+  }
+
+  /**
+   * Prove possession of this machine's stable private key by signing the hub's
+   * challenge nonce. The hub uses the public key's fingerprint to recognize
+   * this machine across remote_servers.id changes.
+   */
+  private handleMachineChallenge(frame: MachineChallengeFrame): void {
+    try {
+      const { privateKey, publicKeyPem } = this.getOrCreateKeys();
+      const signature = cryptoSign(null, Buffer.from(frame.nonce, "base64"), privateKey);
+      const reply: MachineAuthFrame = {
+        type: "machine_auth",
+        publicKey: publicKeyPem,
+        signature: signature.toString("base64"),
+      };
+      this.sendFrame(reply);
+    } catch (err) {
+      console.error("[ReverseClient] Failed to answer machine challenge:", err);
+    }
+  }
+
+  private getOrCreateKeys(): { privateKey: KeyObject; publicKeyPem: string } {
+    const settings = this.localServer.storage.settings;
+    let pem = settings.get(MACHINE_KEY_SETTING);
+    if (!pem) {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+      settings.set(MACHINE_KEY_SETTING, pem);
+      console.log("[ReverseClient] Generated new stable machine identity key");
+    }
+    const privateKey = createPrivateKey(pem);
+    const publicKeyPem = createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString();
+    return { privateKey, publicKeyPem };
   }
 
   private async handleHttpRequest(frame: HttpRequestFrame): Promise<void> {

@@ -32,6 +32,17 @@ export interface PingFrame {
   ts: number;
 }
 
+/**
+ * Sent by the server right after token validation to challenge the remote to
+ * prove it holds the stable machine private key. The remote must respond with
+ * a MachineAuthFrame whose signature covers this nonce.
+ */
+export interface MachineChallengeFrame {
+  type: "machine_challenge";
+  /** base64-encoded random nonce, fresh per connection (anti-replay). */
+  nonce: string;
+}
+
 // ---------------------------------------------------------------------------
 // Remote → Server frames
 // ---------------------------------------------------------------------------
@@ -52,6 +63,20 @@ export interface PongFrame {
 export interface StatusFrame {
   type: "status";
   ready: boolean;
+}
+
+/**
+ * Remote's response to a MachineChallengeFrame. Carries the remote's stable
+ * public key (used to identify the machine across remote_servers.id changes)
+ * and an Ed25519 signature over the challenge nonce proving private-key
+ * possession.
+ */
+export interface MachineAuthFrame {
+  type: "machine_auth";
+  /** SPKI PEM of the remote's stable machine public key. */
+  publicKey: string;
+  /** base64-encoded Ed25519 signature over the challenge nonce. */
+  signature: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,13 +105,15 @@ export type ServerToRemoteFrame =
   | WsOpenFrame
   | WsDataFrame
   | WsCloseFrame
-  | PingFrame;
+  | PingFrame
+  | MachineChallengeFrame;
 
 export type RemoteToServerFrame =
   | HttpResponseFrame
   | WsDataFrame
   | WsCloseFrame
   | PongFrame
-  | StatusFrame;
+  | StatusFrame
+  | MachineAuthFrame;
 
 export type ControlFrame = ServerToRemoteFrame | RemoteToServerFrame;
