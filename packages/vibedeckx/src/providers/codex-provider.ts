@@ -10,6 +10,7 @@ interface CodexSessionState {
   permissionMode: "plan" | "edit";
   /** Buffered first-turn content, sent after thread/start response provides threadId */
   pendingTurnContent: string | ContentPart[] | null;
+  lastTokenUsage: { input_tokens?: number; output_tokens?: number };
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -105,7 +106,7 @@ export class CodexProvider implements AgentProvider {
 
     // (b) Notification: has method, no id
     if (msg.method) {
-      return this.handleNotification(msg);
+      return this.handleNotification(msg, sessionId);
     }
 
     return [];
@@ -113,15 +114,15 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Notification routing ============
 
-  private handleNotification(msg: any): ParsedAgentEvent[] {
+  private handleNotification(msg: any, sessionId: string): ParsedAgentEvent[] {
     const params = msg.params;
     switch (msg.method) {
       case "item/completed":
         return this.handleItemCompleted(params?.item);
       case "turn/completed":
-        return this.handleTurnCompleted(params);
+        return this.handleTurnCompleted(params, sessionId);
       case "thread/tokenUsage/updated":
-        return this.handleTokenUsage(params);
+        return this.handleTokenUsage(params, sessionId);
       default:
         return [];
     }
@@ -201,29 +202,34 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Task 5.7: turn/completed ============
 
-  private handleTurnCompleted(params: any): ParsedAgentEvent[] {
+  private handleTurnCompleted(params: any, sessionId: string): ParsedAgentEvent[] {
     const turn = params?.turn;
     if (!turn) return [];
-    return [{
+    const state = this.getSessionState(sessionId);
+    const result: ParsedAgentEvent = {
       type: "result",
       subtype: turn.status === "completed" ? "success" : "error",
-      error: turn.error?.message,
-    }];
+      ...state?.lastTokenUsage,
+    };
+    if (turn.error?.message) {
+      result.error = turn.error.message;
+    }
+    return [result];
   }
 
   // ============ Task 5.8: thread/tokenUsage/updated ============
 
-  private handleTokenUsage(params: any): ParsedAgentEvent[] {
+  private handleTokenUsage(params: any, sessionId: string): ParsedAgentEvent[] {
     const usage = params?.tokenUsage;
     if (!usage) return [];
     const last = usage.last;
     if (!last) return [];
-    return [{
-      type: "result",
-      subtype: "success",
+    const state = this.getSessionState(sessionId);
+    state.lastTokenUsage = {
       input_tokens: last.inputTokens,
       output_tokens: last.outputTokens,
-    }];
+    };
+    return [];
   }
 
   // ============ Task 5.9: Server requests (approvals) ============
@@ -392,6 +398,7 @@ export class CodexProvider implements AgentProvider {
       pendingRequests: new Map(),
       permissionMode,
       pendingTurnContent: null,
+      lastTokenUsage: {},
     });
   }
 
@@ -410,6 +417,7 @@ export class CodexProvider implements AgentProvider {
         pendingRequests: new Map(),
         permissionMode: "plan",
         pendingTurnContent: null,
+        lastTokenUsage: {},
       };
       this.sessions.set(sessionId, state);
     }
