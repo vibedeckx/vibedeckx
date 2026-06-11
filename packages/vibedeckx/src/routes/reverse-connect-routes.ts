@@ -105,6 +105,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           }
           fastify.storage.machineIdentity.touch(fingerprint);
 
+          console.log(`[ReverseConnect] Machine auth verified ${fingerprint.slice(0, 12)} for ${serverId}`);
           fastify.reverseConnectManager.registerConnection(serverId, ws, fingerprint);
           fastify.storage.remoteServers.updateStatus(serverId, "online");
         }
