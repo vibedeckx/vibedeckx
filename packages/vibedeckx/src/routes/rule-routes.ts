@@ -57,8 +57,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { name?: string; content?: string; enabled?: boolean; position?: number };
   }>("/api/rules/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const existing = fastify.storage.rules.getById(req.params.id);
     if (!existing) {
+      return reply.code(404).send({ error: "Rule not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
       return reply.code(404).send({ error: "Rule not found" });
     }
 
@@ -73,8 +79,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Delete rule
   fastify.delete<{ Params: { id: string } }>("/api/rules/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const existing = fastify.storage.rules.getById(req.params.id);
     if (!existing) {
+      return reply.code(404).send({ error: "Rule not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
       return reply.code(404).send({ error: "Rule not found" });
     }
 
