@@ -735,11 +735,54 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     );
     // Chat Session WebSocket
-    fastify.get<{ Params: { sessionId: string } }>(
+    fastify.get<{ Params: { sessionId: string }; Querystring: { apiKey?: string; token?: string } }>(
       "/api/chat-sessions/:sessionId/stream",
       { websocket: true },
-      (socket, req) => {
+      async (socket, req) => {
         const { sessionId } = req.params;
+
+        // Verify auth when enabled, mirroring the agent-session WS path. The chat
+        // stream forwards `user_message` into sendMessage, which builds a system
+        // prompt from the workspace's rules and streams the model reply back — an
+        // unauthenticated connection would leak another tenant's rule content and
+        // burn their LLM budget. `principalUserId` stays null for trusted
+        // connections (no-auth, or apiKey server-to-server proxy).
+        let principalUserId: string | null = null;
+        if (fastify.authEnabled) {
+          const apiKey = req.query.apiKey;
+          const token = req.query.token;
+
+          const apiKeyTrusted = !!process.env.VIBEDECKX_API_KEY && !!apiKey;
+          if (!apiKeyTrusted) {
+            if (!token) {
+              console.log(`[ChatWS] Auth rejected: no token (session=${sessionId})`);
+              try { socket.send(JSON.stringify({ error: "Authentication required" })); } catch { /* socket closed */ }
+              try { socket.close(); } catch { /* already closed */ }
+              return;
+            }
+            const userId = await verifyWsToken(token);
+            if (!userId) {
+              console.log(`[ChatWS] Auth rejected: invalid token (session=${sessionId})`);
+              try { socket.send(JSON.stringify({ error: "Invalid authentication token" })); } catch { /* socket closed */ }
+              try { socket.close(); } catch { /* already closed */ }
+              return;
+            }
+            principalUserId = userId;
+          }
+        }
+
+        // Per-session ownership: a Clerk user may only stream chat sessions they
+        // own. Chat sessions are in-memory, so check the manager directly. Trusted
+        // principals (userId === null) skip this.
+        if (principalUserId !== null) {
+          const owned = fastify.chatSessionManager.getSession(sessionId);
+          if (!owned || owned.userId !== principalUserId) {
+            console.log(`[ChatWS] Ownership denied for session ${sessionId} (user=${principalUserId})`);
+            try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
+            try { socket.close(); } catch { /* already closed */ }
+            return;
+          }
+        }
 
         console.log(`[ChatWS] Client connected for session ${sessionId}`);
 
