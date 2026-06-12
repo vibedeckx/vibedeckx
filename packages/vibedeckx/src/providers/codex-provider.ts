@@ -11,6 +11,7 @@ interface CodexSessionState {
   /** Buffered first-turn content, sent after thread/start response provides threadId */
   pendingTurnContent: string | ContentPart[] | null;
   lastTokenUsage: { input_tokens?: number; output_tokens?: number };
+  turnsWithFinalMessage: Set<string>;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -118,7 +119,7 @@ export class CodexProvider implements AgentProvider {
     const params = msg.params;
     switch (msg.method) {
       case "item/completed":
-        return this.handleItemCompleted(params?.item);
+        return this.handleItemCompleted(params, sessionId);
       case "turn/completed":
         return this.handleTurnCompleted(params, sessionId);
       case "thread/tokenUsage/updated":
@@ -130,12 +131,18 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Task 5.6: item/completed — ThreadItem parsing ============
 
-  private handleItemCompleted(item: any): ParsedAgentEvent[] {
+  private handleItemCompleted(params: any, sessionId: string): ParsedAgentEvent[] {
+    const item = params?.item;
     if (!item?.type) return [];
 
     switch (item.type) {
-      case "agentMessage":
+      case "agentMessage": {
+        if (params?.turnId && (item.phase === "final_answer" || item.text)) {
+          const state = this.getSessionState(sessionId);
+          state.turnsWithFinalMessage.add(String(params.turnId));
+        }
         return [{ type: "text", content: item.text ?? "" }];
+      }
 
       case "reasoning": {
         const parts: string[] = item.summary ?? item.content ?? [];
@@ -206,6 +213,16 @@ export class CodexProvider implements AgentProvider {
     const turn = params?.turn;
     if (!turn) return [];
     const state = this.getSessionState(sessionId);
+    const turnId = turn.id == null ? null : String(turn.id);
+    const hadFinalMessage = turnId != null && state.turnsWithFinalMessage.has(turnId);
+    if (turnId != null) {
+      state.turnsWithFinalMessage.delete(turnId);
+    }
+
+    if (turn.status === "completed" && !hadFinalMessage) {
+      return [];
+    }
+
     const result: ParsedAgentEvent = {
       type: "result",
       subtype: turn.status === "completed" ? "success" : "error",
@@ -399,6 +416,7 @@ export class CodexProvider implements AgentProvider {
       permissionMode,
       pendingTurnContent: null,
       lastTokenUsage: {},
+      turnsWithFinalMessage: new Set(),
     });
   }
 
@@ -418,6 +436,7 @@ export class CodexProvider implements AgentProvider {
         permissionMode: "plan",
         pendingTurnContent: null,
         lastTokenUsage: {},
+        turnsWithFinalMessage: new Set(),
       };
       this.sessions.set(sessionId, state);
     }
