@@ -43,6 +43,10 @@ jobs:
       - name: Package and prepare platform artifacts
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version tag: $VERSION" >&2
+            exit 1
+          fi
           ARCHIVE_NAME="vibedeckx-${VERSION}-${{ matrix.platform }}"
           CURRENT_PLATFORM="${{ matrix.platform }}"
           mkdir -p "staging/${ARCHIVE_NAME}"
@@ -83,11 +87,11 @@ jobs:
           find node_modules/node-pty -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
 
           # --- Archive: inject bin for npx, include sourcemap, create via npm pack ---
-          node -e "
+          VERSION="$VERSION" node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             pkg.name = 'vibedeckx';
-            pkg.version = '${VERSION}';
+            pkg.version = process.env.VERSION;
             pkg.bin = { vibedeckx: './dist/bin.js' };
             pkg.files = ['dist', 'node_modules'];
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
@@ -102,10 +106,10 @@ jobs:
           rm -f npm-package/dist/bin.js.map
           cp -r "staging/${ARCHIVE_NAME}/node_modules" npm-package/
           cp "packages/vibedeckx-${{ matrix.platform }}/package.json" npm-package/
-          node -e "
+          VERSION="$VERSION" node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('npm-package/package.json', 'utf8'));
-            pkg.version = '${VERSION}';
+            pkg.version = process.env.VERSION;
             fs.writeFileSync('npm-package/package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
         shell: bash
@@ -236,23 +240,28 @@ jobs:
       - name: Prepare main package for npm
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version tag: $VERSION" >&2
+            exit 1
+          fi
           cd packages/vibedeckx
 
           # Rewrite package.json as thin wrapper (no dependencies, just platform optionalDeps)
-          node -e "
+          VERSION="$VERSION" node -e "
             const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            const version = process.env.VERSION;
             const wrapper = {
               name: pkg.name,
-              version: '${VERSION}',
+              version,
               type: 'module',
               description: 'AI-powered app generator with project management',
               bin: { vibedeckx: './bin/vibedeckx.mjs' },
               files: ['bin'],
               engines: { node: '>=20' },
               optionalDependencies: {
-                '@vibedeckx/linux-x64': '${VERSION}',
-                '@vibedeckx/darwin-arm64': '${VERSION}',
-                '@vibedeckx/win32-x64': '${VERSION}'
+                '@vibedeckx/linux-x64': version,
+                '@vibedeckx/darwin-arm64': version,
+                '@vibedeckx/win32-x64': version
               }
             };
             require('fs').writeFileSync('package.json', JSON.stringify(wrapper, null, 2) + '\n');
