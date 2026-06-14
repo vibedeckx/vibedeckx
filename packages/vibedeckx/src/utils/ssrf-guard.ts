@@ -79,28 +79,62 @@ function isBlockedV4(ip: string): boolean {
   return false;
 }
 
-/** First 16-bit hextet of an IPv6 string (0 for `::`-leading / compressed). */
-function firstHextet(ip: string): number {
-  if (ip.startsWith("::")) return 0;
-  const first = ip.split(":")[0];
-  const n = parseInt(first, 16);
-  return Number.isNaN(n) ? 0 : n;
+/** Expand a (net.isIPv6-validated) IPv6 string to its 16 bytes, or null. */
+function ipv6ToBytes(input: string): number[] | null {
+  let s = input.toLowerCase();
+  const zone = s.indexOf("%");
+  if (zone >= 0) s = s.slice(0, zone);
+
+  // Fold a trailing dotted-IPv4 (e.g. ::ffff:1.2.3.4) into two hex groups so the
+  // dotted and hex forms expand to identical bytes.
+  const lastColon = s.lastIndexOf(":");
+  const tail = lastColon >= 0 ? s.slice(lastColon + 1) : s;
+  if (tail.includes(".")) {
+    if (!net.isIPv4(tail)) return null;
+    const o = tail.split(".").map((x) => Number(x));
+    const hi = ((o[0] << 8) | o[1]).toString(16);
+    const lo = ((o[2] << 8) | o[3]).toString(16);
+    s = s.slice(0, lastColon + 1) + hi + ":" + lo;
+  }
+
+  const dbl = s.split("::");
+  if (dbl.length > 2) return null;
+  const head = dbl[0] === "" ? [] : dbl[0].split(":");
+  const rest = dbl.length === 2 ? (dbl[1] === "" ? [] : dbl[1].split(":")) : [];
+  let groups: string[];
+  if (dbl.length === 2) {
+    const missing = 8 - head.length - rest.length;
+    if (missing < 0) return null;
+    groups = [...head, ...new Array(missing).fill("0"), ...rest];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+
+  const bytes: number[] = [];
+  for (const g of groups) {
+    if (g.length === 0 || g.length > 4 || !/^[0-9a-f]+$/.test(g)) return null;
+    const n = parseInt(g, 16);
+    bytes.push((n >> 8) & 0xff, n & 0xff);
+  }
+  return bytes;
 }
 
 function isBlockedV6(ipRaw: string): boolean {
-  const ip = ipRaw.toLowerCase();
-  if (ip === "::1" || ip === "::") return true;
+  const b = ipv6ToBytes(ipRaw);
+  if (!b) return true; // unparseable — fail closed
 
-  // IPv4-mapped (::ffff:a.b.c.d) — unwrap and check as IPv4.
-  if (ip.includes(".")) {
-    const v4 = ip.slice(ip.lastIndexOf(":") + 1);
-    if (net.isIPv4(v4)) return isBlockedV4(v4);
+  // IPv4-mapped (::ffff:a.b.c.d, any textual form) — check the embedded IPv4.
+  const first10Zero = b.slice(0, 10).every((x) => x === 0);
+  if (first10Zero && b[10] === 0xff && b[11] === 0xff) {
+    return isBlockedV4(b.slice(12).join("."));
   }
+  // ::, ::1, and ::a.b.c.d (deprecated IPv4-compatible) — all non-public.
+  if (b.slice(0, 12).every((x) => x === 0)) return true;
 
-  const h = firstHextet(ip);
-  if (h >= 0xfc00 && h <= 0xfdff) return true; // fc00::/7 ULA
-  if (h >= 0xfe80 && h <= 0xfebf) return true; // fe80::/10 link-local
-  if (h >= 0xff00) return true; // ff00::/8 multicast
+  if (b[0] >= 0xfc && b[0] <= 0xfd) return true; // fc00::/7 ULA
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true; // fe80::/10 link-local
+  if (b[0] === 0xff) return true; // ff00::/8 multicast
   return false;
 }
 
@@ -109,6 +143,63 @@ export function isBlockedIp(ip: string): boolean {
   if (net.isIPv4(ip)) return isBlockedV4(ip);
   if (net.isIPv6(ip)) return isBlockedV6(ip);
   return true; // not a recognizable IP — fail closed
+}
+
+/** Parse one inet_aton octet/word in decimal, octal (leading 0), or hex (0x). */
+function parseAtonPart(s: string): number | null {
+  if (/^0x[0-9a-f]+$/i.test(s)) return parseInt(s, 16);
+  if (/^0[0-7]*$/.test(s)) return parseInt(s, 8); // octal, incl. "0"
+  if (/^[1-9][0-9]*$/.test(s)) return parseInt(s, 10);
+  return null;
+}
+
+/**
+ * Normalize an inet_aton-style numeric host (decimal/octal/hex, and the
+ * 1/2/3/4-part short forms — e.g. `2130706433`, `0x7f.1`, `0177.0.0.1`,
+ * `127.1`) to canonical dotted IPv4. Returns null if not such a literal.
+ * This makes range checks independent of libc getaddrinfo normalization.
+ */
+function inetAton(host: string): string | null {
+  const parts = host.split(".");
+  if (parts.length < 1 || parts.length > 4) return null;
+  const vals: number[] = [];
+  for (const p of parts) {
+    const v = parseAtonPart(p);
+    if (v === null || v < 0) return null;
+    vals.push(v);
+  }
+  let n: number;
+  // Per inet_aton, the final part absorbs the remaining low-order bytes.
+  if (vals.length === 1) {
+    n = vals[0];
+    if (n > 0xffffffff) return null;
+  } else if (vals.length === 2) {
+    if (vals[0] > 0xff || vals[1] > 0xffffff) return null;
+    n = vals[0] * 0x1000000 + vals[1];
+  } else if (vals.length === 3) {
+    if (vals[0] > 0xff || vals[1] > 0xff || vals[2] > 0xffff) return null;
+    n = vals[0] * 0x1000000 + vals[1] * 0x10000 + vals[2];
+  } else {
+    if (vals.some((x) => x > 0xff)) return null;
+    n = vals[0] * 0x1000000 + vals[1] * 0x10000 + vals[2] * 0x100 + vals[3];
+  }
+  n = n >>> 0;
+  return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff].join(".");
+}
+
+/**
+ * If `host` denotes an IP address in any form (standard IPv4/IPv6, bracketed
+ * IPv6, or an inet_aton numeric encoding), return it canonicalized; otherwise
+ * null (treat as a DNS name to be resolved). Lets us range-check literals
+ * directly instead of trusting getaddrinfo to normalize them.
+ */
+export function parseIpHost(host: string): string | null {
+  if (net.isIPv4(host) || net.isIPv6(host)) return host;
+  if (host.startsWith("[") && host.endsWith("]")) {
+    const inner = host.slice(1, -1);
+    return net.isIPv6(inner) ? inner : null;
+  }
+  return inetAton(host);
 }
 
 /** Throws if the URL scheme is not in the allowed set for the given protocol. */
@@ -130,10 +221,11 @@ export function assertSchemeAllowed(url: string, kind: "http" | "ws"): void {
  * Returns the list of validated addresses. Used as a pre-connect check (WS).
  */
 export function assertHostAllowed(hostname: string): Promise<string[]> {
-  // An IP literal needs no DNS resolution.
-  if (net.isIP(hostname)) {
-    if (isBlockedIp(hostname)) throw new SsrfBlockedError(hostname, hostname);
-    return Promise.resolve([hostname]);
+  // An IP literal (any encoding) needs no DNS resolution.
+  const literal = parseIpHost(hostname);
+  if (literal) {
+    if (isBlockedIp(literal)) throw new SsrfBlockedError(hostname, literal);
+    return Promise.resolve([literal]);
   }
   return new Promise((resolve, reject) => {
     dns.lookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
@@ -159,6 +251,18 @@ export const guardedLookup: LookupFunction = ((
   options: dns.LookupOptions,
   callback: (err: NodeJS.ErrnoException | null, address: unknown, family?: number) => void,
 ) => {
+  // An IP literal (incl. numeric encodings) is validated and pinned directly,
+  // without DNS resolution — undici/ws connect to exactly this address.
+  const literal = parseIpHost(hostname);
+  if (literal) {
+    if (isBlockedIp(literal)) {
+      return callback(new SsrfBlockedError(hostname, literal), undefined);
+    }
+    const family = net.isIPv6(literal) ? 6 : 4;
+    if (options && options.all) callback(null, [{ address: literal, family }]);
+    else callback(null, literal, family);
+    return;
+  }
   dns.lookup(hostname, { ...options, all: true, verbatim: true }, (err, addresses) => {
     if (err) return callback(err, undefined);
     const list = addresses as dns.LookupAddress[];
@@ -187,9 +291,12 @@ const baseConnector = buildConnector({ lookup: guardedLookup });
 
 export const guardedDispatcher = new Agent({
   connect: (opts, callback) => {
-    const host = opts.hostname;
-    if (net.isIP(host) && isBlockedIp(host)) {
-      callback(new SsrfBlockedError(host, host), null);
+    // Validate IP-literal hosts (any encoding) here, since undici only calls
+    // `lookup` for hosts it does not recognize as IPs. DNS names fall through to
+    // baseConnector → guardedLookup.
+    const literal = parseIpHost(opts.hostname);
+    if (literal && isBlockedIp(literal)) {
+      callback(new SsrfBlockedError(opts.hostname, literal), null);
       return;
     }
     baseConnector(opts, callback);

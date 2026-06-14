@@ -226,7 +226,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   }));
 
   // Register plugins and routes
-  server.register(sharedServices, { storage: opts.storage });
+  server.register(sharedServices, { storage: opts.storage, authEnabled });
   server.register(fastifyWebsocket);
   // Multipart uploads (Files page drag-and-drop). 50MB per-file cap; the
   // remote-upload path is further bounded by the 16MB JSON bodyLimit.

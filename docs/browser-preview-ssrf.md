@@ -78,15 +78,23 @@ proxy routes, enforced only when `authEnabled`:
 
 1. **Scheme allowlist** — only `http`/`https` (HTTP route) and `ws`/`wss` (WS
    route). Rejects `file:` etc.
-2. **Resolve + range check** — resolve the host to **all** A/AAAA records and
-   reject if **any** resolved IP falls in a blocked range (conservative: a
-   partially-private result is rejected). Blocked ranges:
+2. **Normalize + range check** — filtering is by **IP**, never by hostname string
+   matching (which encoding tricks defeat). A host that already denotes an IP —
+   standard IPv4/IPv6, bracketed IPv6, or an inet_aton numeric encoding
+   (decimal/octal/hex and 1–4 part short forms, e.g. `2130706433`, `0x7f.1`,
+   `0177.0.0.1`) — is normalized by `parseIpHost()` and range-checked **directly,
+   without DNS** (independent of libc `getaddrinfo`). A DNS name is resolved to
+   **all** A/AAAA records and rejected if **any** resolved IP is blocked
+   (conservative: a partially-private result is rejected). Blocked ranges:
    - IPv4: `0.0.0.0/8`, `10/8`, `100.64/10`, `127/8`, **`169.254/16`** (covers
      `169.254.169.254`), `172.16/12`, `192.0.0/24`, `192.168/16`, `198.18/15`,
      `224/4`, `240/4`.
    - IPv6: `::1`, `::`, `fc00::/7` (ULA — also covers AWS `fd00:ec2::254`),
-     `fe80::/10` (link-local), `ff00::/8` (multicast), and IPv4-mapped
-     `::ffff:a.b.c.d` is unwrapped and re-checked against the IPv4 ranges.
+     `fe80::/10` (link-local), `ff00::/8` (multicast). The address is
+     **byte-expanded**, so IPv4-mapped (`::ffff:a.b.c.d` in dotted **or** hex
+     form, e.g. `::ffff:a9fe:a9fe` = `169.254.169.254`) and IPv4-compatible
+     (`::/96`) addresses have their embedded IPv4 range-checked — string-form
+     tricks cannot bypass it.
 3. **IP pinning (DNS-rebinding defense)** — validation and connection use the
    **same** resolved IP, via an undici `Agent` with two layers (undici skips
    `lookup` for IP-literal hosts, so a lookup-only guard would miss
@@ -120,14 +128,30 @@ route) with a clear message, distinct from a generic `502` proxy error.
   private-IP dev server not exposed via reverse-connect — which is exactly the
   unsupported/dangerous path; users use reverse-connect instead.
 
+## Outbound proxy (Settings proxy) interaction
+
+The browser-preview proxy **always egresses directly** — it has never used the
+Settings outbound proxy (`utils/proxy-manager.ts`; that proxy is applied only by
+`remote-proxy.ts` and a few WS routes, never by this path). The guard pins and
+range-checks those direct connections. Crucially, the high-value SSRF targets —
+cloud metadata `169.254.169.254` (link-local), RFC1918, and loopback — are
+direct-reachable regardless of any forward-proxy config, so they are filtered
+either way.
+
+In the hosted (`--auth`) deployment the Settings proxy is **not used**. As
+defense against misconfiguration, if `--auth` is on **and** a Settings proxy is
+configured, the server logs a startup warning that preview egress is direct +
+filtered and does not route through that proxy (so it is not mistaken for the
+egress-control point). If a deployment ever required all egress through a forward
+proxy, IP pinning could not see the post-proxy address and egress filtering would
+have to be enforced at the proxy — but that is not the hosted model here.
+
 ## Known limitations
 
-- **Outbound proxy configured** (`utils/proxy-manager.ts`): if the operator
-  routes egress through an HTTP/SOCKS proxy, IP pinning is bypassed (the proxy
-  resolves the name). Egress filtering must then be enforced at that proxy. The
-  guard applies to direct egress only.
-- **Exotic IP literal encodings** (decimal/octal/hex hostnames like
-  `http://2130706433/`) rely on `getaddrinfo` normalizing them to a real IP,
-  which it does on Linux glibc; the resolved IP is then range-checked. Not
-  independently re-parsed.
-- The guard is **hosted-only by design**. Solo deployments keep current behavior.
+- The guard is **hosted-only by design**. Solo deployments keep current behavior
+  (so `localhost` / LAN dev-server preview keeps working).
+- Filtering is destination-IP based. It is **not** a domain allowlist: a *public*
+  attacker-controlled URL is still fetched (that is the intended "preview a public
+  site" capability). Preventing the previewed page from acting as app-origin
+  script, and cookie forwarding, are the separate-origin fix's concern
+  ([browser-preview-origin-isolation.md](browser-preview-origin-isolation.md)).

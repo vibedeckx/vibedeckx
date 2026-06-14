@@ -16,6 +16,7 @@ import "../server-types.js";
 
 interface SharedServicesOptions {
   storage: Storage;
+  authEnabled?: boolean;
 }
 
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
@@ -61,6 +62,16 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
       proxyManager.updateConfig(config);
       if (config.type !== "none") {
         console.log(`[ProxyManager] Loaded ${config.type} proxy: ${config.host}:${config.port}`);
+        if (opts.authEnabled) {
+          // The browser-preview proxy egresses directly (with SSRF IP filtering),
+          // not through this proxy. Make that explicit so the configured proxy is
+          // not mistaken for the egress-control point in hosted mode.
+          console.warn(
+            "[ProxyManager] --auth is on with an outbound proxy configured. " +
+            "Browser-preview egress uses direct connections with SSRF filtering and does NOT route through this proxy. " +
+            "Enforce any additional egress policy at the proxy itself.",
+          );
+        }
       }
     } catch {
       console.warn("[ProxyManager] Failed to parse saved proxy config, using direct connection");
