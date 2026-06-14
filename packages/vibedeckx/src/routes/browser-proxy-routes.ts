@@ -4,6 +4,14 @@ import fp from "fastify-plugin";
 import WsWebSocket from "ws";
 import type { ReverseConnectManager, RawHttpResponse } from "../reverse-connect-manager.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
+import {
+  assertSchemeAllowed,
+  assertHostAllowed,
+  guardedLookup,
+  guardedDispatcher,
+  findSsrfCause,
+  SsrfBlockedError,
+} from "../utils/ssrf-guard.js";
 import "../server-types.js";
 
 export interface ResolvedTarget {
@@ -59,6 +67,7 @@ async function proxyFetch(
   resolved: ResolvedTarget,
   requestHeaders: Record<string, string>,
   reverseConnectManager: ReverseConnectManager | null,
+  enforceSsrf: boolean,
 ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
   if (resolved.remoteServerId && reverseConnectManager?.isConnected(resolved.remoteServerId)) {
     const parsed = new URL(resolved.fetchUrl);
@@ -76,11 +85,19 @@ async function proxyFetch(
     return { status: raw.status, headers: raw.headers, body: raw.body };
   }
 
-  // Direct fetch
+  // Direct fetch — the control plane connects to the target itself.
+  // In hosted mode, enforce SSRF egress filtering. The initial host is pre-checked
+  // here for a clean error; the guarded dispatcher then re-validates and pins every
+  // connection, including redirect hops and IP-literal targets.
+  if (enforceSsrf) {
+    assertSchemeAllowed(resolved.fetchUrl, "http");
+    await assertHostAllowed(new URL(resolved.fetchUrl).hostname);
+  }
   const response = await fetch(resolved.fetchUrl, {
     headers: requestHeaders,
     redirect: "follow",
-  });
+    ...(enforceSsrf ? { dispatcher: guardedDispatcher } : {}),
+  } as RequestInit & { dispatcher?: unknown });
 
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
@@ -349,6 +366,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "Cookie": (req.headers.cookie as string) || "",
         },
         fastify.reverseConnectManager,
+        fastify.authEnabled,
       );
 
       const contentType = response.headers["content-type"] || "";
@@ -394,6 +412,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // Non-HTML/CSS — pass through as-is
       return reply.code(response.status).send(response.body);
     } catch (err) {
+      // SSRF rejections (scheme or blocked IP) — surface as 403, not a 502.
+      // undici may nest the connector error a few levels deep under `.cause`.
+      const ssrf = findSsrfCause(err);
+      if (ssrf) {
+        console.warn(`[BrowserProxy] SSRF blocked for ${targetUrl}: ${ssrf.message}`);
+        return reply.code(403).send({ error: "Target address is not allowed" });
+      }
       const msg = err instanceof Error ? err.message : "Proxy request failed";
       console.error(`[BrowserProxy] Error proxying ${targetUrl}:`, msg);
       return reply.code(502).send({ error: `Proxy error: ${msg}` });
@@ -403,7 +428,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // --- WebSocket Reverse Proxy (for HMR) ---
   fastify.get<{
     Params: { id: string; "*": string };
-  }>("/api/projects/:id/browser/proxy-ws/*", { websocket: true }, (socket, req) => {
+  }>("/api/projects/:id/browser/proxy-ws/*", { websocket: true }, async (socket, req) => {
     const { id: projectId } = req.params;
     const rawPath = req.url;
     const prefix = `/api/projects/${projectId}/browser/proxy-ws/`;
@@ -456,8 +481,24 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return;
     }
 
-    // Direct WebSocket connection
-    const remote = new WsWebSocket(targetWsUrl);
+    // Direct WebSocket connection — control plane connects to the target itself.
+    // In hosted mode, enforce SSRF egress filtering before/while connecting.
+    let remote: WsWebSocket;
+    if (fastify.authEnabled) {
+      try {
+        assertSchemeAllowed(targetWsUrl, "ws");
+        await assertHostAllowed(new URL(targetWsUrl).hostname);
+      } catch (err) {
+        const msg = err instanceof SsrfBlockedError ? err.message : "Invalid target";
+        console.warn(`[BrowserProxy] WS SSRF blocked for ${targetWsUrl}: ${msg}`);
+        socket.close(4403, "Target address is not allowed");
+        return;
+      }
+      // Pin the validated IP for the connection (DNS-rebinding defense).
+      remote = new WsWebSocket(targetWsUrl, { lookup: guardedLookup });
+    } else {
+      remote = new WsWebSocket(targetWsUrl);
+    }
 
     remote.on("open", () => {
       console.log(`[BrowserProxy] WS proxy connected to ${targetWsUrl}`);

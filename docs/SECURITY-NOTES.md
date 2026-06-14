@@ -42,3 +42,11 @@ Note: We check `projectParent` rather than `project.path` because git worktrees 
 **Risk Level:** Low for current use case (solo, self-hosted, no-auth; users preview only their own trusted dev servers). `allow-same-origin` is required for preview functionality (storage/cookies/HMR/login state).
 
 **Future Hardening (before hosted multi-tenant `--auth`):** Serve the proxy from a separate origin so `allow-same-origin` can stay without exposing the main app origin/token. Full design and implementation checklist: [browser-preview-origin-isolation.md](browser-preview-origin-isolation.md).
+
+## Browser Preview Proxy SSRF (Server-Side Egress)
+
+**Location:** `packages/vibedeckx/src/routes/browser-proxy-routes.ts` (direct-fetch branch of the HTTP/WS proxy), guard in `packages/vibedeckx/src/utils/ssrf-guard.ts`.
+
+**Issue:** The proxy's direct branch makes the control-plane server connect to the target URL and returns the body (full-read SSRF) — reaching cloud metadata (`169.254.169.254`), internal services, and loopback. Distinct from, and not addressed by, the origin-isolation fix above (that is browser-side; this is server-side egress).
+
+**Status:** **Fixed** for hosted (`--auth`) mode — outbound requests on the direct branch are filtered (scheme allowlist + private/loopback/link-local/metadata IP block + DNS-rebinding pinning + per-redirect re-validation). Off in solo so `localhost`/LAN preview keeps working. Reverse-connect previews are unaffected (they tunnel to the user's own machine). Design + impact: [browser-preview-ssrf.md](browser-preview-ssrf.md).
