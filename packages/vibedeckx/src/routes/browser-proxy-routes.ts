@@ -16,6 +16,14 @@ import {
 } from "../utils/ssrf-guard.js";
 import "../server-types.js";
 
+/**
+ * Extra trusted embedder (parent-frame) origin for the postMessage command
+ * channel, for custom split-origin deployments where the UI is served from a
+ * different origin than the proxy. Same-origin (bundled) and the standard dev
+ * setup (:3000 → :5173) are handled by the injected script's built-in defaults.
+ */
+const EXTRA_UI_ORIGIN = process.env.VIBEDECKX_UI_ORIGIN?.trim() || null;
+
 export interface ResolvedTarget {
   /** The remote server ID if routed via reverse-connect, null for direct fetch */
   remoteServerId: string | null;
@@ -242,8 +250,21 @@ function generateInjectedScript(projectId: string, targetOrigin: string, proxyWs
   Object.defineProperty(window.WebSocket, "CLOSING", { value: OrigWebSocket.CLOSING });
   Object.defineProperty(window.WebSocket, "CLOSED", { value: OrigWebSocket.CLOSED });
 
+  // --- Trusted embedder (parent-frame) origins ---
+  // The command channel only honors messages from, and only returns DOM data to,
+  // the Vibedeckx UI. A malicious site that iframes this proxy is a different
+  // origin, so its commands are ignored and no proxied DOM is posted back to it.
+  // Bundled production serves the UI same-origin (location.origin); the dev setup
+  // runs the UI on :3000 against the proxy on :5173 (cross-origin).
+  var TRUSTED_PARENT_ORIGINS = [location.origin, "http://localhost:3000", "http://127.0.0.1:3000"];
+  ${EXTRA_UI_ORIGIN ? `TRUSTED_PARENT_ORIGINS.push(${JSON.stringify(EXTRA_UI_ORIGIN)});` : ""}
+  function isTrustedParent(origin) {
+    return TRUSTED_PARENT_ORIGINS.indexOf(origin) !== -1;
+  }
+
   // --- Command Receiver (from parent frame via postMessage) ---
   window.addEventListener("message", function(e) {
+    if (e.source !== window.parent || !isTrustedParent(e.origin)) return;
     if (!e.data || e.data.type !== "vibedeckx-command") return;
     var cmd = e.data;
     var result = { type: "vibedeckx-result", id: cmd.id, projectId: PROJECT_ID, success: false };
@@ -320,20 +341,25 @@ function generateInjectedScript(projectId: string, targetOrigin: string, proxyWs
     } catch(err) {
       result.error = err.message || "Command execution failed";
     }
+    // Reply only to the validated embedder origin (never "*"), so a malicious
+    // parent can't receive proxied DOM even if it somehow triggered a command.
     try {
-      window.parent.postMessage(result, "*");
+      window.parent.postMessage(result, e.origin);
     } catch(e) { /* ignore */ }
   });
 
   // --- Report to Parent Frame ---
   function report(type, data) {
-    try {
-      window.parent.postMessage({
-        type: "vibedeckx-browser-error",
-        projectId: PROJECT_ID,
-        error: { type: type, data: data, timestamp: Date.now(), url: location.href }
-      }, "*");
-    } catch(e) { /* ignore */ }
+    var msg = {
+      type: "vibedeckx-browser-error",
+      projectId: PROJECT_ID,
+      error: { type: type, data: data, timestamp: Date.now(), url: location.href }
+    };
+    // No event origin to echo here, so post to each trusted origin; only the
+    // real parent's origin delivers, the rest are dropped by the browser.
+    for (var i = 0; i < TRUSTED_PARENT_ORIGINS.length; i++) {
+      try { window.parent.postMessage(msg, TRUSTED_PARENT_ORIGINS[i]); } catch(e) { /* ignore */ }
+    }
   }
 })();
 </script>`;

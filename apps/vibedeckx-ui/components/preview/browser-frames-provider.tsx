@@ -47,7 +47,9 @@ export function sendCommandToIframe(
       resolve(result);
     });
 
-    iframe.contentWindow!.postMessage(command, "*");
+    // Target the proxy origin (never "*") so the command isn't delivered if the
+    // iframe was somehow navigated to an untrusted origin.
+    iframe.contentWindow!.postMessage(command, api.getBrowserProxyOrigin());
   });
 }
 
@@ -180,7 +182,11 @@ export function BrowserFramesProvider({ children }: { children: React.ReactNode 
 
   // Listen for postMessages from all proxied iframes (errors + command results)
   useEffect(() => {
+    const proxyOrigin = api.getBrowserProxyOrigin();
     const handler = (event: MessageEvent) => {
+      // Only trust messages from the proxy origin — a malicious page could
+      // postMessage spoofed errors/results from any other origin otherwise.
+      if (event.origin !== proxyOrigin) return;
       if (!event.data?.type) return;
 
       if (event.data.type === "vibedeckx-browser-error" && event.data.projectId) {

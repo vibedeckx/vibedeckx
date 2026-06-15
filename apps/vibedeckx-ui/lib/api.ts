@@ -1633,4 +1633,16 @@ export const api = {
   getBrowserProxyUrl(projectId: string, targetUrl: string): string {
     return `${getApiBase()}/api/projects/${projectId}/browser/proxy/${encodeURIComponent(targetUrl)}`;
   },
+
+  /**
+   * Origin that serves the browser-proxy iframes. Used to scope the postMessage
+   * command channel so commands target — and results are accepted from — only the
+   * proxy origin (never "*"). Dev serves the proxy from :5173; production bundles
+   * it same-origin.
+   */
+  getBrowserProxyOrigin(): string {
+    const base = getApiBase();
+    if (base) return new URL(base).origin;
+    return typeof window !== "undefined" ? window.location.origin : "";
+  },
 };
