@@ -1,17 +1,36 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  // Authenticate and verify the caller owns (or, in solo mode, that there
+  // exists) the project before touching BrowserManager. Returns the projectId
+  // on success, or null after sending the appropriate error response.
+  const ensureProjectAccess = (
+    req: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+  ): string | null => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return null;
+
+    const projectId = req.params.id;
+    const project = fastify.storage.projects.getById(projectId, userId);
+    if (!project) {
+      reply.code(404).send({ error: "Project not found" });
+      return null;
+    }
+
+    return projectId;
+  };
+
   // Start browser session
   fastify.post<{
     Params: { id: string };
     Body: { branch?: string };
   }>("/api/projects/:id/browser", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-
-    const { id: projectId } = req.params;
+    const projectId = ensureProjectAccess(req, reply);
+    if (projectId === null) return;
     const { branch } = req.body || {};
 
     try {
@@ -30,9 +49,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{
     Params: { id: string };
   }>("/api/projects/:id/browser", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-
-    const { id: projectId } = req.params;
+    const projectId = ensureProjectAccess(req, reply);
+    if (projectId === null) return;
     const session = fastify.browserManager.getSession(projectId);
 
     if (!session) {
@@ -46,9 +64,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{
     Params: { id: string };
   }>("/api/projects/:id/browser", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-
-    const { id: projectId } = req.params;
+    const projectId = ensureProjectAccess(req, reply);
+    if (projectId === null) return;
     const stopped = await fastify.browserManager.stopSession(projectId);
 
     if (!stopped) {
@@ -63,9 +80,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { url: string };
   }>("/api/projects/:id/browser/navigate", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-
-    const { id: projectId } = req.params;
+    const projectId = ensureProjectAccess(req, reply);
+    if (projectId === null) return;
     const { url } = req.body;
 
     if (!url) {
@@ -89,9 +105,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { type: string; data: Record<string, unknown> };
   }>("/api/projects/:id/browser/error", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-
-    const { id: projectId } = req.params;
+    const projectId = ensureProjectAccess(req, reply);
+    if (projectId === null) return;
     const { type, data } = req.body;
 
     console.log(`[BrowserRoutes] Error report for project ${projectId}: ${type}`, data);
