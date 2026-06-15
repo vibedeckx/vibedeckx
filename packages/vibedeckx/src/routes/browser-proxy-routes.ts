@@ -4,6 +4,8 @@ import fp from "fastify-plugin";
 import WsWebSocket from "ws";
 import type { ReverseConnectManager, RawHttpResponse } from "../reverse-connect-manager.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
+import { requireAuth } from "../server.js";
+import { authenticateWs } from "./ws-authz.js";
 import {
   assertSchemeAllowed,
   assertHostAllowed,
@@ -342,7 +344,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{
     Params: { id: string; "*": string };
   }>("/api/projects/:id/browser/proxy/*", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
     const { id: projectId } = req.params;
+    // Ownership: the proxy tunnels into the project's reverse-connected remote
+    // (reaching 127.0.0.1:<port> on that host), so a caller must own the project.
+    // In solo no-auth mode userId is undefined and getById resolves unscoped.
+    if (!fastify.storage.projects.getById(projectId, userId)) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
     const targetUrl = extractTargetUrl(req.url, projectId);
 
     if (!targetUrl) {
@@ -428,8 +439,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // --- WebSocket Reverse Proxy (for HMR) ---
   fastify.get<{
     Params: { id: string; "*": string };
+    Querystring: { apiKey?: string; token?: string };
   }>("/api/projects/:id/browser/proxy-ws/*", { websocket: true }, async (socket, req) => {
     const { id: projectId } = req.params;
+
+    // WS upgrades carry no Authorization header (global Clerk preHandler skips
+    // them), so auth rides on query params. Then enforce project ownership —
+    // the channel pipes into the project's reverse-connected remote.
+    const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
+    if (!principal) return;
+    if (principal.userId !== null && !fastify.storage.projects.getById(projectId, principal.userId)) {
+      try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* closed */ }
+      try { socket.close(); } catch { /* already closed */ }
+      return;
+    }
+
     const rawPath = req.url;
     const prefix = `/api/projects/${projectId}/browser/proxy-ws/`;
     const idx = rawPath.indexOf(prefix);

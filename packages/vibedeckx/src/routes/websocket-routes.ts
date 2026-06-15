@@ -14,63 +14,9 @@ import type { RemotePatchCache } from "../remote-patch-cache.js";
 import type { EventBus } from "../event-bus.js";
 import type { AgentSessionManager } from "../agent-session-manager.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
-import { userOwnsProcess, userOwnsSession, type WsPrincipal } from "./ws-authz.js";
+import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs } from "./ws-authz.js";
 import { statusEventFromRemotePatch, projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import "../server-types.js";
-
-/**
- * Verify a Clerk session token for WebSocket connections.
- * Returns the userId if valid, null otherwise.
- */
-async function verifyWsToken(token: string): Promise<string | null> {
-  try {
-    const { verifyToken } = await import("@clerk/backend");
-    const payload = await verifyToken(token, {
-      secretKey: process.env.CLERK_SECRET_KEY!,
-    });
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Authenticate a WebSocket connection for the executor log routes.
- *
- * These routes forward client `input` frames into PTY/terminal stdin, so an
- * unauthenticated connection is an unauthenticated command-execution primitive.
- * Mirrors the agent-session WS auth: when auth is enabled, require either a
- * pre-validated `apiKey` (already checked against VIBEDECKX_API_KEY by the
- * global API-key onRequest hook) or a valid Clerk session token. On failure,
- * closes the socket and returns false.
- */
-async function authenticateLogsWs(
-  authEnabled: boolean,
-  query: { apiKey?: string; token?: string },
-  socket: WebSocket,
-): Promise<WsPrincipal | null> {
-  // No-auth (solo) mode: a single trusted operator, no per-user isolation.
-  if (!authEnabled) return { userId: null };
-
-  // API key takes precedence (remote proxy connections) — but only when the server
-  // actually has VIBEDECKX_API_KEY configured. By this point the global API-key
-  // onRequest hook has rejected any ?apiKey= that doesn't match the configured key,
-  // so a present param here is the validated key. When VIBEDECKX_API_KEY is unset
-  // the param is unvalidated and must NOT bypass Clerk — otherwise any value passes.
-  // A trusted server-to-server proxy connection — not a specific end user.
-  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return { userId: null };
-
-  const reject = (error: string): null => {
-    try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }
-    try { socket.close(); } catch { /* already closed */ }
-    return null;
-  };
-
-  if (!query.token) return reject("Authentication required");
-  const userId = await verifyWsToken(query.token);
-  if (!userId) return reject("Invalid authentication token");
-  return { userId };
-}
 
 // ---- Remote reconnection constants ----
 const REMOTE_RECONNECT_MAX_ATTEMPTS = 10;
@@ -447,7 +393,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const { processId } = req.params;
         console.log(`[WebSocket] Connection attempt for process ${processId} (auth=${fastify.authEnabled})`);
 
-        const principal = await authenticateLogsWs(fastify.authEnabled, req.query, socket);
+        const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
         if (!principal) {
           console.log(`[WebSocket] Auth rejected for process ${processId}`);
           return;
@@ -500,7 +446,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       async (socket, req) => {
         console.log(`[ExecutorMux] Connection attempt (auth=${fastify.authEnabled})`);
 
-        const principal = await authenticateLogsWs(fastify.authEnabled, req.query, socket);
+        const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
         if (!principal) {
           console.log(`[ExecutorMux] Auth rejected`);
           return;

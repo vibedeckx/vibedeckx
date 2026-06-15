@@ -13,6 +13,61 @@ import type { FastifyInstance } from "fastify";
  */
 export type WsPrincipal = { userId: string | null };
 
+/** Minimal socket surface needed to reject a connection. */
+type RejectableSocket = {
+  send: (data: string) => void;
+  close: (code?: number, reason?: string) => void;
+};
+
+/**
+ * Verify a Clerk session token for WebSocket connections.
+ * Returns the userId if valid, null otherwise.
+ */
+export async function verifyWsToken(token: string): Promise<string | null> {
+  try {
+    const { verifyToken } = await import("@clerk/backend");
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY!,
+    });
+    return payload.sub ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Authenticate a WebSocket connection. Returns the principal, or null after
+ * closing the socket on failure.
+ *
+ * Mirrors `requireAuth` for the WS world: WebSocket upgrades carry no
+ * Authorization header (the global Clerk preHandler skips them), so auth rides
+ * on query params. When auth is enabled, require either a pre-validated
+ * `apiKey` (already checked against VIBEDECKX_API_KEY by the global API-key
+ * onRequest hook) or a valid Clerk session `token`. A present `apiKey` only
+ * counts when VIBEDECKX_API_KEY is configured — otherwise it is unvalidated and
+ * must NOT bypass Clerk. Trusted principals (no-auth / apiKey proxy) carry
+ * `userId === null` and skip per-user ownership checks.
+ */
+export async function authenticateWs(
+  authEnabled: boolean,
+  query: { apiKey?: string; token?: string },
+  socket: RejectableSocket,
+): Promise<WsPrincipal | null> {
+  if (!authEnabled) return { userId: null };
+  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return { userId: null };
+
+  const reject = (error: string): null => {
+    try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }
+    try { socket.close(); } catch { /* already closed */ }
+    return null;
+  };
+
+  if (!query.token) return reject("Authentication required");
+  const userId = await verifyWsToken(query.token);
+  if (!userId) return reject("Invalid authentication token");
+  return { userId };
+}
+
 /**
  * Resolve the owning projectId of a local executor/terminal process. Prefers the
  * live ProcessManager (the only source for terminals, which are never persisted)
