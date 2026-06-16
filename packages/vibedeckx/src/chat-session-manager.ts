@@ -2344,6 +2344,7 @@ export class ChatSessionManager {
               "You ended a turn without invoking any tool.",
               "Either call a tool to make progress, or call `complete_task` to mark the user's task finished.",
               "Do not narrate actions you did not actually take — only a tool_use block executes anything.",
+              "If you claimed to have started or run something this turn, re-issue that action NOW by invoking the actual tool — do NOT just query status to 'confirm' a step you never executed. A status row may be left over from an earlier turn; check `startedThisTurn`/`finishedThisTurn` before assuming progress.",
             ].join("\n"),
           );
         } else {
