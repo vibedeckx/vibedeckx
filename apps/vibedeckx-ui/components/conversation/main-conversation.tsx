@@ -45,111 +45,11 @@ function ExecutorEventReStick({ messages }: { messages: AgentMessage[] }) {
     for (let i = prev; i < messages.length; i++) {
       const msg = messages[i];
       if (msg.type === "user" && msg.content.startsWith("[Executor Event:")) {
-        console.log("[sticky] ExecutorEventReStick FIRED → scrollToBottom(instant)");
         scrollToBottom({ animation: "instant" });
         return;
       }
     }
   }, [messages, scrollToBottom]);
-
-  return null;
-}
-
-/**
- * Diagnostic logger for the use-stick-to-bottom library. Captures wheel/scroll/
- * resize events into a ring buffer; when `isAtBottom` flips to false, dumps the
- * recent buffer so we can identify which event broke stick-to-bottom.
- *
- * All logs are prefixed `[sticky]` for easy filtering. Safe to leave on while
- * iterating — overhead is just a few console.log calls per event.
- */
-function StickyDiagnostics({ messages }: { messages: AgentMessage[] }) {
-  const ctx = useStickToBottomContext();
-  const { isAtBottom, scrollRef, contentRef, state } = ctx;
-
-  const ringRef = useRef<string[]>([]);
-  const t0Ref = useRef<number>(0);
-
-  const log = useCallback((msg: string) => {
-    if (t0Ref.current === 0) t0Ref.current = performance.now();
-    const ts = (performance.now() - t0Ref.current).toFixed(1).padStart(8);
-    const line = `+${ts}ms ${msg}`;
-    ringRef.current.push(line);
-    if (ringRef.current.length > 40) ringRef.current.shift();
-    console.log("[sticky]", line);
-  }, []);
-
-  // Track isAtBottom transitions. Dump ring on true → false.
-  const prevIsAtBottomRef = useRef(isAtBottom);
-  useEffect(() => {
-    const prev = prevIsAtBottomRef.current;
-    if (prev === isAtBottom) return;
-    prevIsAtBottomRef.current = isAtBottom;
-
-    const snapshot = `isAtBottom: ${prev} → ${isAtBottom}` +
-      ` | scrollTop=${state.scrollTop}` +
-      ` targetTop=${state.targetScrollTop}` +
-      ` diff=${state.scrollDifference?.toFixed?.(1) ?? state.scrollDifference}` +
-      ` resizeDiff=${state.resizeDifference}` +
-      ` escaped=${state.escapedFromLock}`;
-    log(snapshot);
-    if (prev === true && isAtBottom === false) {
-      console.warn("[sticky] === LOST STICKY ===\n" + ringRef.current.slice(-25).join("\n"));
-    }
-  }, [isAtBottom, state, log]);
-
-  // Wheel + scroll listeners on the same element the library uses.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      log(`wheel deltaY=${e.deltaY.toFixed(1)} target=<${(e.target as HTMLElement)?.tagName ?? "?"}>`);
-    };
-    let lastScrollTop = el.scrollTop;
-    const onScroll = () => {
-      const dt = el.scrollTop - lastScrollTop;
-      const diff = el.scrollHeight - el.scrollTop - el.clientHeight;
-      log(`scroll scrollTop=${el.scrollTop} (Δ${dt >= 0 ? "+" : ""}${dt}) scrollH=${el.scrollHeight} clientH=${el.clientHeight} bottomDiff=${diff} resizeDiff=${state.resizeDifference}`);
-      lastScrollTop = el.scrollTop;
-    };
-    el.addEventListener("wheel", onWheel, { passive: true });
-    el.addEventListener("scroll", onScroll, { passive: true });
-    log("listeners attached");
-    return () => {
-      el.removeEventListener("wheel", onWheel);
-      el.removeEventListener("scroll", onScroll);
-    };
-  }, [scrollRef, state, log]);
-
-  // Independent ResizeObserver on the same content element.
-  useEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    let prevH = content.getBoundingClientRect().height;
-    const ro = new ResizeObserver(([entry]) => {
-      const h = entry.contentRect.height;
-      log(`resize height ${prevH.toFixed(1)} → ${h.toFixed(1)} (Δ${(h - prevH).toFixed(1)})`);
-      prevH = h;
-    });
-    ro.observe(content);
-    return () => ro.disconnect();
-  }, [contentRef, log]);
-
-  // Snapshot when messages array grows.
-  const prevLenRef = useRef(messages.length);
-  useEffect(() => {
-    const prev = prevLenRef.current;
-    if (messages.length === prev) return;
-    prevLenRef.current = messages.length;
-    const last = messages[messages.length - 1];
-    let lastDesc: string;
-    if (last?.type === "user" || last?.type === "assistant" || last?.type === "system") {
-      lastDesc = `${last.type}[${last.content.slice(0, 50).replace(/\n/g, "\\n")}]`;
-    } else {
-      lastDesc = `${last?.type ?? "?"}`;
-    }
-    log(`messages ${prev} → ${messages.length} last=${lastDesc} isAtBottom=${isAtBottom} scrollTop=${state.scrollTop} target=${state.targetScrollTop} diff=${state.scrollDifference?.toFixed?.(1) ?? state.scrollDifference}`);
-  }, [messages, isAtBottom, state, log]);
 
   return null;
 }
@@ -286,7 +186,6 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
       {/* Messages area */}
       <Conversation className="flex-1 min-h-0" initial="instant">
         <ExecutorEventReStick messages={messages} />
-        <StickyDiagnostics messages={messages} />
         <ConversationContent className="gap-4 p-4">
           {isLoading && messages.length === 0 && (
             <div className="flex items-center justify-center py-8">
