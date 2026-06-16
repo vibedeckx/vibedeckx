@@ -64,6 +64,14 @@ interface ChatSession {
    * start; read by emitChatActivity gating.
    */
   eventDrivenTurn: boolean;
+  /**
+   * Epoch ms when the current turn's stream started (set at runStream start).
+   * Read by getExecutorStatus to compute `startedThisTurn`/`finishedThisTurn`,
+   * so the model can tell a process that ran THIS turn from one whose status
+   * row is left over from an earlier turn (the row is per-executor, not
+   * per-turn). Null before the first turn.
+   */
+  turnStartedAt: number | null;
 }
 
 /**
@@ -97,6 +105,35 @@ function extractLogText(logs: LogMessage[], tailLines: number): string {
   const joined = textLogs.join("");
   const lines = joined.split("\n");
   return stripAnsi(lines.slice(-tailLines).join("\n"));
+}
+
+/**
+ * Parse a timestamp stored in executor_processes to epoch ms. The column holds
+ * two formats depending on the write path: ISO-8601 (`new Date().toISOString()`,
+ * has `T`/`Z`) from updateStatus, and SQLite `CURRENT_TIMESTAMP`
+ * ("YYYY-MM-DD HH:MM:SS", UTC, no zone marker) from the schema default and boot
+ * cleanup. The latter must be forced to UTC or `new Date()` reads it as local.
+ */
+function parseDbTimestamp(s: string): number {
+  if (s.includes("T") || s.endsWith("Z")) return new Date(s).getTime();
+  return new Date(s.replace(" ", "T") + "Z").getTime();
+}
+
+/**
+ * Server-computed relative age (e.g. "8s ago", "3m ago") so the model can judge
+ * freshness without knowing the current time. Lets a fresh status reading
+ * visibly supersede the model's own earlier narration about executor state.
+ */
+function formatRelativeAge(timestamp: string, nowMs: number): string {
+  const t = parseDbTimestamp(timestamp);
+  if (Number.isNaN(t)) return "unknown";
+  const sec = Math.max(0, Math.round((nowMs - t) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.round(hr / 24)}d ago`;
 }
 
 // ============ Manager ============
@@ -881,6 +918,7 @@ export class ChatSessionManager {
       eventListeningEnabled: false,
       taskCompleted: false,
       eventDrivenTurn: false,
+      turnStartedAt: null,
     };
 
     this.sessions.set(id, session);
@@ -1126,6 +1164,10 @@ export class ChatSessionManager {
   private createTools(projectId: string, branch: string | null, sessionId?: string) {
     const storage = this.storage;
     const processManager = this.processManager;
+    // Captured for turn-attribution in getExecutorStatus. createTools runs once
+    // per turn, after session.turnStartedAt is set, so this is stable and
+    // correct for the current turn.
+    const turnStartedAt = (sessionId ? this.sessions.get(sessionId)?.turnStartedAt : null) ?? null;
     const agentSessionManager = this.agentSessionManager;
     const remoteExecutorMap = this.remoteExecutorMap;
     const reverseConnectManager = this.reverseConnectManager;
@@ -1290,7 +1332,14 @@ export class ChatSessionManager {
       getExecutorStatus: tool({
         description:
           "Get the status of all executors (dev servers, build processes, etc.) in the current workspace. " +
-          "Use this when the user asks about running processes, errors, build output, or dev server status.",
+          "Use this when the user asks about running processes, errors, build output, or dev server status. " +
+          "Each result is a point-in-time snapshot taken NOW (see top-level `observedAt`). " +
+          "Trust this reading over anything said in earlier turns: `status` is explicit — " +
+          "`never_started` means the command has NOT run (do not assume it completed), " +
+          "`running` means in progress, and `completed`/`failed`/`killed` are finished outcomes with an `exitCode`. " +
+          "The status row is per-executor, not per-turn: a `completed` may be left over from an earlier turn. " +
+          "Use `startedThisTurn`/`finishedThisTurn` to tell what actually happened in the CURRENT turn — " +
+          "if both are false, you have NOT run this executor this turn, regardless of `status`.",
         inputSchema: z.object({
           tailLines: z
             .number()
@@ -1307,22 +1356,55 @@ export class ChatSessionManager {
           }
 
           const executors = storage.executors.getByGroupId(group.id);
+          const now = Date.now();
 
           const results = executors.map((executor) => {
-            const processes = processManager.getProcessesByExecutorId(executor.id);
-            const latestProcess = processes[processes.length - 1];
+            // Lifecycle + timestamps come from the persistent row (authoritative,
+            // survives restart, has exit code). Recent output stays in-memory
+            // (logs aren't persisted).
+            const lastRow = storage.executorProcesses.getLastByExecutorId(executor.id);
+            const liveProcesses = processManager.getProcessesByExecutorId(executor.id);
+            const latestLive = liveProcesses[liveProcesses.length - 1];
+
+            if (!lastRow) {
+              return {
+                name: executor.name,
+                command: executor.command,
+                status: "never_started" as const,
+                note: "This executor has NEVER been started — its command has not run. Do not assume it completed.",
+              };
+            }
+
+            // Turn attribution. started_at is seconds-precision (SQLite
+            // CURRENT_TIMESTAMP), so allow a 1s grace against the ms-precision
+            // turn anchor to avoid undercounting a process started this turn.
+            const TURN_GRACE_MS = 1000;
+            const startedThisTurn =
+              turnStartedAt != null &&
+              parseDbTimestamp(lastRow.started_at) >= turnStartedAt - TURN_GRACE_MS;
+            const finishedThisTurn =
+              turnStartedAt != null &&
+              lastRow.finished_at != null &&
+              parseDbTimestamp(lastRow.finished_at) >= turnStartedAt - TURN_GRACE_MS;
 
             return {
               name: executor.name,
               command: executor.command,
-              isRunning: latestProcess?.isRunning ?? false,
-              recentOutput: latestProcess
-                ? extractLogText(latestProcess.logs, tailLines)
-                : "(no process history)",
+              status: lastRow.status, // 'running' | 'completed' | 'failed' | 'killed'
+              exitCode: lastRow.exit_code,
+              startedAt: lastRow.started_at,
+              startedAgo: formatRelativeAge(lastRow.started_at, now),
+              startedThisTurn,
+              finishedAt: lastRow.finished_at,
+              finishedAgo: lastRow.finished_at ? formatRelativeAge(lastRow.finished_at, now) : null,
+              finishedThisTurn,
+              recentOutput: latestLive
+                ? extractLogText(latestLive.logs, tailLines)
+                : "(no buffered output — logs may have expired since the process finished)",
             };
           });
 
-          return { executors: results };
+          return { observedAt: new Date(now).toISOString(), executors: results };
         },
       }),
 
@@ -2082,6 +2164,9 @@ export class ChatSessionManager {
     // 4. Stream response
     const abortController = new AbortController();
     session.abortController = abortController;
+    // Anchor for turn-attribution in getExecutorStatus. Set here, after the
+    // messages array is built, so it marks when THIS stream began.
+    session.turnStartedAt = Date.now();
 
     let assistantIndex: number | null = null;
     let accumulatedText = "";
