@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { generateText } from "ai";
-import { resolveChatModel } from "../utils/chat-model.js";
+import { resolveFastChatModel } from "../utils/chat-model.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
@@ -20,7 +20,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       try {
         const { text: translatedText } = await generateText({
-          model: resolveChatModel(fastify.storage),
+          model: resolveFastChatModel(fastify.storage),
           prompt: `You are a precise translation assistant for software development.
 Translate the following text into English. This text is an instruction for an AI coding agent.
 

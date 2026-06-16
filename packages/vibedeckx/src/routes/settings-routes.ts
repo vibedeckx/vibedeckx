@@ -1,7 +1,16 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
-import { getChatProviderConfig, DEEPSEEK_MODELS, type ChatProviderConfig, type DeepSeekModel } from "../utils/chat-model.js";
+import {
+  getChatProviderConfig,
+  normalizeModel,
+  isProviderId,
+  PROVIDER_IDS,
+  PROVIDERS,
+  type ChatProviderConfig,
+  type ModelChoice,
+  type ProviderId,
+} from "../utils/chat-model.js";
 import "../server-types.js";
 
 const DEFAULT_PROXY_CONFIG: ProxyConfig = { type: "none", host: "", port: 0 };
@@ -181,50 +190,85 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return "****" + key.slice(-4);
   }
 
+  function maskApiKeys(keys: Record<ProviderId, string>): Record<ProviderId, string> {
+    const masked = {} as Record<ProviderId, string>;
+    for (const id of PROVIDER_IDS) masked[id] = maskApiKey(keys[id]);
+    return masked;
+  }
+
+  function serializeConfig(config: ChatProviderConfig) {
+    return {
+      apiKeys: maskApiKeys(config.apiKeys),
+      main: config.main,
+      fast: config.fast,
+    };
+  }
+
+  /** Validate + normalize a model choice from the request body, or return an error string. */
+  function parseChoice(
+    raw: Partial<ModelChoice> | undefined,
+    existing: ModelChoice,
+    field: string,
+  ): ModelChoice | { error: string } {
+    if (raw === undefined) return existing;
+    const provider = raw.provider !== undefined ? raw.provider : existing.provider;
+    if (!isProviderId(provider)) {
+      return { error: `${field}.provider must be one of: ${PROVIDER_IDS.join(", ")}` };
+    }
+    const rawModel = raw.model !== undefined ? raw.model : existing.model;
+    const def = PROVIDERS[provider];
+    if (def.models && typeof rawModel === "string" && rawModel.length > 0 && !def.models.includes(rawModel)) {
+      return { error: `${field}.model for ${provider} must be one of: ${def.models.join(", ")}` };
+    }
+    return { provider, model: normalizeModel(provider, rawModel) };
+  }
+
   fastify.get("/api/settings/chat-provider", async (_req, reply) => {
     const config = getChatProviderConfig(fastify.storage);
-    return reply.code(200).send({
-      provider: config.provider,
-      deepseekApiKey: maskApiKey(config.deepseekApiKey),
-      deepseekModel: config.deepseekModel,
-      openrouterApiKey: maskApiKey(config.openrouterApiKey),
-      openrouterModel: config.openrouterModel,
-    });
+    return reply.code(200).send(serializeConfig(config));
   });
 
   fastify.put<{
     Body: Partial<ChatProviderConfig>;
   }>("/api/settings/chat-provider", async (req, reply) => {
-    const { provider, deepseekApiKey, deepseekModel, openrouterApiKey, openrouterModel } = req.body;
+    const { apiKeys, main, fast } = req.body;
 
-    if (provider && provider !== "deepseek" && provider !== "openrouter") {
-      return reply.code(400).send({ error: "provider must be 'deepseek' or 'openrouter'" });
-    }
-
-    if (deepseekModel !== undefined && !DEEPSEEK_MODELS.includes(deepseekModel as DeepSeekModel)) {
-      return reply.code(400).send({ error: `deepseekModel must be one of: ${DEEPSEEK_MODELS.join(", ")}` });
-    }
-
-    // Merge with existing config so omitted fields are preserved
     const existing = getChatProviderConfig(fastify.storage);
+
+    // Merge API keys per provider; only providers present in the body are updated.
+    const mergedKeys = { ...existing.apiKeys };
+    if (apiKeys !== undefined) {
+      if (typeof apiKeys !== "object" || apiKeys === null) {
+        return reply.code(400).send({ error: "apiKeys must be an object" });
+      }
+      for (const id of PROVIDER_IDS) {
+        const value = (apiKeys as Record<string, unknown>)[id];
+        if (value !== undefined) {
+          if (typeof value !== "string") {
+            return reply.code(400).send({ error: `apiKeys.${id} must be a string` });
+          }
+          mergedKeys[id] = value;
+        }
+      }
+    }
+
+    const mainResult = parseChoice(main, existing.main, "main");
+    if ("error" in mainResult) return reply.code(400).send({ error: mainResult.error });
+    const fastResult = parseChoice(fast, existing.fast, "fast");
+    if ("error" in fastResult) return reply.code(400).send({ error: fastResult.error });
+
     const updated: ChatProviderConfig = {
-      provider: provider ?? existing.provider,
-      deepseekApiKey: deepseekApiKey !== undefined ? deepseekApiKey : existing.deepseekApiKey,
-      deepseekModel: deepseekModel !== undefined ? (deepseekModel as DeepSeekModel) : existing.deepseekModel,
-      openrouterApiKey: openrouterApiKey !== undefined ? openrouterApiKey : existing.openrouterApiKey,
-      openrouterModel: openrouterModel !== undefined ? openrouterModel : existing.openrouterModel,
+      apiKeys: mergedKeys,
+      main: mainResult,
+      fast: fastResult,
     };
 
     fastify.storage.settings.set("chat_provider", JSON.stringify(updated));
-    console.log(`[Settings] Chat provider updated: ${updated.provider} (deepseekModel=${updated.deepseekModel})`);
+    console.log(
+      `[Settings] Chat provider updated: main=${updated.main.provider}/${updated.main.model}, fast=${updated.fast.provider}/${updated.fast.model}`,
+    );
 
-    return reply.code(200).send({
-      provider: updated.provider,
-      deepseekApiKey: maskApiKey(updated.deepseekApiKey),
-      deepseekModel: updated.deepseekModel,
-      openrouterApiKey: maskApiKey(updated.openrouterApiKey),
-      openrouterModel: updated.openrouterModel,
-    });
+    return reply.code(200).send(serializeConfig(updated));
   });
 
   // ---- Terminal Settings ----

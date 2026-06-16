@@ -353,21 +353,66 @@ export interface ProxyConfig {
   port: number;
 }
 
-export type DeepSeekModel = 'deepseek-v4-flash' | 'deepseek-v4-pro';
+export type ProviderId = 'deepseek' | 'openrouter';
 
-export const DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
-  'deepseek-v4-flash',
-  'deepseek-v4-pro',
-] as const;
+export interface ProviderUiDef {
+  id: ProviderId;
+  label: string;
+  /** Fixed model list (rendered as a dropdown), or null for free-form input. */
+  models: readonly string[] | null;
+  modelLabels?: Record<string, string>;
+  defaultModel: string;
+  placeholder?: string;
+  /** Env var name shown in the API-key hint. */
+  envKey: string;
+}
 
-export const DEFAULT_DEEPSEEK_MODEL: DeepSeekModel = 'deepseek-v4-flash';
+export const PROVIDERS: Record<ProviderId, ProviderUiDef> = {
+  deepseek: {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    modelLabels: {
+      'deepseek-v4-flash': 'DeepSeek V4 Flash — faster, lower cost',
+      'deepseek-v4-pro': 'DeepSeek V4 Pro — higher quality',
+    },
+    defaultModel: 'deepseek-v4-flash',
+    placeholder: 'sk-...',
+    envKey: 'DEEPSEEK_API_KEY',
+  },
+  openrouter: {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    models: null,
+    defaultModel: 'deepseek/deepseek-chat-v3-0324',
+    placeholder: 'deepseek/deepseek-chat-v3-0324',
+    envKey: 'OPENROUTER_API_KEY',
+  },
+};
+
+export const PROVIDER_IDS: ProviderId[] = ['deepseek', 'openrouter'];
+
+export interface ModelChoice {
+  provider: ProviderId;
+  model: string;
+}
 
 export interface ChatProviderConfig {
-  provider: 'deepseek' | 'openrouter';
-  deepseekApiKey: string;
-  deepseekModel: DeepSeekModel;
-  openrouterApiKey: string;
-  openrouterModel: string;
+  apiKeys: Record<ProviderId, string>;
+  main: ModelChoice;
+  fast: ModelChoice;
+}
+
+export function defaultModelChoice(provider: ProviderId = 'deepseek'): ModelChoice {
+  return { provider, model: PROVIDERS[provider].defaultModel };
+}
+
+export function defaultChatProviderConfig(): ChatProviderConfig {
+  return {
+    apiKeys: { deepseek: '', openrouter: '' },
+    main: defaultModelChoice(),
+    fast: defaultModelChoice(),
+  };
 }
 
 export interface TerminalSettings {
@@ -1362,13 +1407,7 @@ export const api = {
   async getChatProviderSettings(): Promise<ChatProviderConfig> {
     const res = await authFetch(`${getApiBase()}/api/settings/chat-provider`);
     if (!res.ok) {
-      return {
-        provider: 'deepseek',
-        deepseekApiKey: '',
-        deepseekModel: DEFAULT_DEEPSEEK_MODEL,
-        openrouterApiKey: '',
-        openrouterModel: '',
-      };
+      return defaultChatProviderConfig();
     }
     return res.json();
   },

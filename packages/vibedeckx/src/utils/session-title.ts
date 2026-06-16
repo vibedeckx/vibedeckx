@@ -1,7 +1,7 @@
 import { generateText } from "ai";
 import type { Storage } from "../storage/types.js";
 import type { ContentPart } from "../agent-types.js";
-import { getChatProviderConfig, resolveChatModel } from "./chat-model.js";
+import { getChatProviderConfig, isModelConfigured, resolveFastChatModel } from "./chat-model.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
@@ -30,10 +30,8 @@ function buildPrompt(userMessage: string): string {
  */
 export function isChatModelConfigured(storage: Storage): boolean {
   const config = getChatProviderConfig(storage);
-  if (config.provider === "openrouter") {
-    return Boolean(config.openrouterApiKey || process.env.OPENROUTER_API_KEY);
-  }
-  return Boolean(config.deepseekApiKey || process.env.DEEPSEEK_API_KEY);
+  // Session titles run on the fast model, so check that lane's provider key.
+  return isModelConfigured(config, config.fast);
 }
 
 /**
@@ -129,5 +127,5 @@ export async function generateSessionTitle(
   userId: string,
 ): Promise<string | null> {
   if (!isChatModelConfigured(storage)) return null;
-  return generateSessionTitleWithModel(resolveChatModel(storage), userMessage, { userId });
+  return generateSessionTitleWithModel(resolveFastChatModel(storage), userMessage, { userId });
 }
