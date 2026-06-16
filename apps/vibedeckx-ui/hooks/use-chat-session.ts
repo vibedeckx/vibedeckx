@@ -14,7 +14,8 @@ export type AgentMessage =
   | { type: "tool_use"; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }
   | { type: "error"; message: string; timestamp: number }
-  | { type: "system"; content: string; timestamp: number };
+  | { type: "system"; content: string; timestamp: number }
+  | { type: "turn_end"; timestamp: number };
 
 export type AgentSessionStatus = "running" | "stopped" | "error";
 

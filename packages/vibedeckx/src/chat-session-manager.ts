@@ -2391,6 +2391,17 @@ export class ChatSessionManager {
       session.status = "stopped";
       this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
 
+      // Mark the end of this turn so the UI can render a divider. Every
+      // stream (normal, aborted, or errored) reaches this point, so a
+      // turn_end entry here separates each turn from the next — including
+      // the most recent one at the bottom. Skip if the last entry is
+      // already a turn_end (defends against an empty stream producing a
+      // bare double divider).
+      const lastEntry = session.store.entries[session.store.nextIndex - 1];
+      if (lastEntry && lastEntry.type !== "turn_end") {
+        this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
+      }
+
       // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
       const queueLen = this.messageQueue.get(sessionId)?.length ?? 0;
       console.log(`[ChatSession] sendMessage finished for ${sessionId}, draining queue (${queueLen} items), subscribers=${session.subscribers.size}`);

@@ -206,6 +206,20 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           )}
 
           {messages.map((msg, index) => {
+            // Turn boundary — the backend pushes one after every stream
+            // finalizes (see sendMessage's finally in chat-session-manager),
+            // so a divider here marks where each turn ended, including the
+            // most recent one at the bottom.
+            if (msg.type === "turn_end") {
+              return (
+                <div key={index} className="mx-4 my-3 flex items-center gap-2" aria-hidden>
+                  <div className="h-px flex-1 bg-border" />
+                  <div className="h-1 w-1 shrink-0 rounded-full bg-border" />
+                  <div className="h-px flex-1 bg-border" />
+                </div>
+              );
+            }
+
             // System-injected watchdog correction — render as a distinct
             // warning row, not a plain user bubble, so it's obvious this came
             // from the system, not the user.
