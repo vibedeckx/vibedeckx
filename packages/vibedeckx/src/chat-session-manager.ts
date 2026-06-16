@@ -1079,6 +1079,7 @@ export class ChatSessionManager {
       "  2. Invoke `complete_task` to declare the user's overall goal achieved.",
       "  3. The user explicitly aborts.",
       "Pure text turns are invalid — if you end a turn with text only, the system will detect the violation and inject a correction asking you to invoke a tool. Do not chat conversationally between turns; carry any explanation inside the same turn as a tool call.",
+      "WRAP-UP RULE: when the work is done and you want to summarize, the summary text and the `complete_task` call MUST go in the SAME turn — write your closing summary and invoke `complete_task` together. Never emit a standalone 'all done / 任务已完成' text turn and stop, expecting to call `complete_task` afterwards; that text-only turn is itself a violation and will trigger a correction. Deciding you are finished and calling `complete_task` are one action, not two.",
       "</critical-rules>",
     );
 
@@ -1086,7 +1087,7 @@ export class ChatSessionManager {
 
     sections.push(
       "  <lifecycle-tools>",
-      "  - complete_task: call this when the user's overall task in this workspace is fully accomplished and no further work is needed. Marks the workspace dot 'main-completed' (cyan). Does NOT terminate the chat — the user can still send follow-up messages. Use this instead of ending a turn with bare text when you believe the task is done.",
+      "  - complete_task: call this when the user's overall task in this workspace is fully accomplished and no further work is needed. Marks the workspace dot 'main-completed' (cyan). Does NOT terminate the chat — the user can still send follow-up messages. Use this instead of ending a turn with bare text when you believe the task is done. Your completion summary and this call belong in the same turn — invoke complete_task in the very turn where you conclude the work is finished, not in a follow-up turn.",
       "  </lifecycle-tools>",
     );
 
