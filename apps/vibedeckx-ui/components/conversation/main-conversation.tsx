@@ -19,7 +19,7 @@ import {
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
-import { MessageSquare, Loader2, Square, Search, Radio, SquarePen } from "lucide-react";
+import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -307,6 +307,32 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           )}
 
           {messages.map((msg, index) => {
+            // System-injected watchdog correction — render as a distinct
+            // warning row, not a plain user bubble, so it's obvious this came
+            // from the system, not the user.
+            if (msg.type === "user" && msg.content.startsWith("[System Invariant Violation]")) {
+              const body = msg.content.replace(/^\[System Invariant Violation\]\n?/, "");
+              return (
+                <div
+                  key={index}
+                  className="mx-4 my-2 flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2"
+                >
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-amber-600 dark:text-amber-400">
+                      System invariant correction
+                    </div>
+                    <div
+                      className="mt-0.5 whitespace-pre-wrap text-muted-foreground"
+                      style={{ fontSize: "var(--conv-font-size, 12px)" }}
+                    >
+                      {body}
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
             if (msg.type === "user") {
               return (
                 <Message key={index} from="user">
