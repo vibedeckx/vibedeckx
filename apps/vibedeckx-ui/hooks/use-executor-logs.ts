@@ -152,10 +152,12 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
         console.log(`[useExecutorLogs] WebSocket closed:`, event.code, event.reason);
         wsRef.current = null;
 
-        // Don't reconnect if the process finished normally, component unmounted,
-        // or this is a local process (reconnection only helps remote terminals
-        // where the process survives independently)
-        if (finishedRef.current || cancelled || !processId?.startsWith("remote-")) {
+        // Don't reconnect if the process finished normally or the component
+        // unmounted. Local terminals reconnect too: an idle socket dropped while
+        // the tab was hidden must be re-established or input is silently lost.
+        // The guards below (history-with-no-live-data, max attempts) stop a
+        // genuinely-gone process from looping.
+        if (finishedRef.current || cancelled) {
           setStatus("closed");
           return;
         }
@@ -169,7 +171,7 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
           return;
         }
 
-        // Attempt reconnection for remote terminals
+        // Attempt reconnection (local or remote) with exponential backoff
         if (reconnectAttemptRef.current < RECONNECT_MAX_ATTEMPTS) {
           const attempt = reconnectAttemptRef.current;
           const delay = Math.min(

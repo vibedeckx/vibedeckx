@@ -411,6 +411,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         console.log(`[WebSocket] Client connected for process ${processId}`);
 
+        // Ping/pong keepalive to prevent idle disconnections (code 1005).
+        // Terminals sit quiet on hidden tabs; without this the idle socket is
+        // dropped by the browser/proxy and input silently stops working.
+        const pingInterval = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.ping();
+          }
+        }, 30000); // Ping every 30 seconds
+
         // 旧端点：send 不包 processId；onTerminal 关闭 socket（保持单进程单连接语义）
         const send = (msg: StreamMessage) => {
           try { socket.send(JSON.stringify(msg)); } catch { /* socket closed */ }
@@ -434,6 +443,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         socket.on("close", () => {
           console.log(`[WebSocket] Client disconnected from process ${processId}`);
+          clearInterval(pingInterval);
           handle.cleanup();
         });
       }
@@ -452,6 +462,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return;
         }
         console.log(`[ExecutorMux] Client connected`);
+
+        // Ping/pong keepalive to prevent idle disconnections (code 1005),
+        // same as the single-process endpoint above.
+        const pingInterval = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.ping();
+          }
+        }, 30000); // Ping every 30 seconds
+
         const subs = new Map<string, () => void>(); // processId → cleanup
         const handleInputMap = new Map<string, (msg: InputMessage) => void>();
 
@@ -514,6 +533,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         socket.on("close", () => {
           console.log(`[ExecutorMux] Client disconnected; cleaning ${subs.size} subscriptions`);
+          clearInterval(pingInterval);
           for (const cleanup of subs.values()) cleanup();
           subs.clear();
           handleInputMap.clear();

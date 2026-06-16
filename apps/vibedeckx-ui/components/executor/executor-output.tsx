@@ -141,6 +141,11 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // Delay fit to ensure container is ready
     setTimeout(() => {
       try {
+        // Skip fit while the container is hidden (0×0): fitting against no size
+        // resizes xterm to a tiny column count and tells the PTY it is narrow,
+        // corrupting the prompt wrap. The ResizeObserver re-fits once visible.
+        const el = containerRef.current;
+        if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
         fitAddon.fit();
         if (isPty) {
           onResize?.(terminal.cols, terminal.rows);
@@ -233,6 +238,11 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
 
     const resizeObserver = new ResizeObserver(() => {
       try {
+        // Don't fit against a hidden (0×0) container — that would push a tiny
+        // width to the PTY and corrupt the wrap. When the panel becomes visible
+        // again the observer fires for the 0→real transition and fit() re-syncs.
+        const el = containerRef.current;
+        if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
         fitAddonRef.current?.fit();
       } catch {
         // Ignore resize errors
