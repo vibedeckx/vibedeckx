@@ -11,6 +11,7 @@ import {
   type ModelChoice,
   type ProviderId,
 } from "../utils/chat-model.js";
+import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const DEFAULT_PROXY_CONFIG: ProxyConfig = { type: "none", host: "", port: 0 };
@@ -83,7 +84,8 @@ function readStoredConversationSettings(saved: string | undefined): Conversation
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get proxy settings
-  fastify.get("/api/settings/proxy", async (_req, reply) => {
+  fastify.get("/api/settings/proxy", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const saved = fastify.storage.settings.get("proxy");
     if (!saved) {
       return reply.code(200).send(DEFAULT_PROXY_CONFIG);
@@ -100,6 +102,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Body: ProxyConfig;
   }>("/api/settings/proxy", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const { type, host, port } = req.body;
 
     if (!type || !["none", "http", "socks5"].includes(type)) {
@@ -133,6 +136,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Body: ProxyConfig;
   }>("/api/settings/proxy/test", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const { type, host, port } = req.body;
 
     if (!type || !["none", "http", "socks5"].includes(type)) {
@@ -223,7 +227,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return { provider, model: normalizeModel(provider, rawModel) };
   }
 
-  fastify.get("/api/settings/chat-provider", async (_req, reply) => {
+  fastify.get("/api/settings/chat-provider", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const config = getChatProviderConfig(fastify.storage);
     return reply.code(200).send(serializeConfig(config));
   });
@@ -231,6 +236,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Body: Partial<ChatProviderConfig>;
   }>("/api/settings/chat-provider", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const { apiKeys, main, fast } = req.body;
 
     const existing = getChatProviderConfig(fastify.storage);
@@ -273,7 +279,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // ---- Terminal Settings ----
 
-  fastify.get("/api/settings/terminal", async (_req, reply) => {
+  fastify.get("/api/settings/terminal", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const saved = fastify.storage.settings.get("terminal");
     if (!saved) {
       return reply.code(200).send(DEFAULT_TERMINAL_SETTINGS);
@@ -295,6 +302,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Body: Partial<TerminalSettings>;
   }>("/api/settings/terminal", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const { scrollback, fontSize, fontFamily } = req.body;
 
     if (scrollback !== undefined) {
@@ -344,7 +352,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // ---- Conversation Settings ----
 
-  fastify.get("/api/settings/conversation", async (_req, reply) => {
+  fastify.get("/api/settings/conversation", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const saved = fastify.storage.settings.get("conversation");
     return reply.code(200).send(readStoredConversationSettings(saved));
   });
@@ -352,6 +361,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Body: Partial<ConversationSettings>;
   }>("/api/settings/conversation", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
     const { agentFontSize, chatFontSize } = req.body;
 
     if (agentFontSize !== undefined) {
