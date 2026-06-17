@@ -83,6 +83,17 @@ function isRemoteProviderPath(url: string): boolean {
   return false;
 }
 
+// Strip the query string before logging a URL. WebSocket/SSE/remote-proxy
+// auth material rides in query params (?token=, ?apiKey=), so diagnostic
+// logs that echo req.url verbatim would leak credentials to anyone with log
+// access. Redact the whole query rather than named keys to stay safe against
+// future params.
+function redactUrlForLog(url: string | undefined): string {
+  if (!url) return "";
+  const queryIndex = url.indexOf("?");
+  return queryIndex === -1 ? url : `${url.slice(0, queryIndex)}?[REDACTED]`;
+}
+
 export interface TLSOptions {
   cert: string | Buffer;
   key: string | Buffer;
@@ -135,7 +146,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   // Diagnostic: log raw HTTP upgrade events to confirm they reach the server
   // This fires at the Node.js level, before @fastify/websocket or any Fastify routing
   server.server.on("upgrade", (req) => {
-    console.log(`[WS-RAW] HTTP upgrade event: ${req.url}`);
+    console.log(`[WS-RAW] HTTP upgrade event: ${redactUrlForLog(req.url)}`);
   });
 
   // Decorate authEnabled so routes can access it
@@ -152,7 +163,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   // Log WebSocket upgrade requests (catches rejections before route handler, e.g. by Clerk)
   server.addHook("onRequest", (req, reply, done) => {
     if (req.headers.upgrade?.toLowerCase() === "websocket") {
-      console.log(`[WS] Upgrade request: ${req.method} ${req.url}`);
+      console.log(`[WS] Upgrade request: ${req.method} ${redactUrlForLog(req.url)}`);
     }
     done();
   });
@@ -199,7 +210,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     const requestId = req.headers["x-request-id"];
     if (requestId) {
       (req as unknown as Record<string, unknown>).startTime = Date.now();
-      console.log(`[remote] ${requestId} ${req.method} ${req.url}`);
+      console.log(`[remote] ${requestId} ${req.method} ${redactUrlForLog(req.url)}`);
     }
     done();
   });
@@ -209,7 +220,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     if (requestId) {
       const startTime = (req as unknown as Record<string, unknown>).startTime as number | undefined;
       const ms = startTime ? Date.now() - startTime : 0;
-      console.log(`[remote] ${requestId} ${req.method} ${req.url} -> ${reply.statusCode} (${ms}ms)`);
+      console.log(`[remote] ${requestId} ${req.method} ${redactUrlForLog(req.url)} -> ${reply.statusCode} (${ms}ms)`);
     }
     done();
   });
@@ -300,7 +311,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
 
   // Catch errors in hooks/handlers (Fastify default logger is disabled, so errors are silent)
   server.addHook("onError", (req, _reply, error, done) => {
-    console.error(`[Server] onError: ${req.method} ${req.url}:`, error);
+    console.error(`[Server] onError: ${req.method} ${redactUrlForLog(req.url)}:`, error);
     done();
   });
 
@@ -308,7 +319,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.setNotFoundHandler(async (req, reply) => {
     // Detect WebSocket upgrade requests that didn't match any route
     if (req.headers.upgrade?.toLowerCase() === "websocket") {
-      console.error(`[WS] 404 - No matching WebSocket route for: ${req.method} ${req.url}`);
+      console.error(`[WS] 404 - No matching WebSocket route for: ${req.method} ${redactUrlForLog(req.url)}`);
     }
     if (req.url.startsWith("/api/")) {
       return reply.code(404).send({ error: "Not found" });
