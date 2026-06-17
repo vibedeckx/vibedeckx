@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import { generateText } from "ai";
-import { resolveChatModel } from "../utils/chat-model.js";
+import { resolveFastChatModel } from "../utils/chat-model.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
@@ -45,7 +45,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!title) {
       try {
         const { text } = await generateText({
-          model: resolveChatModel(fastify.storage),
+          model: resolveFastChatModel(fastify.storage),
           prompt: `Generate a concise task title (under 10 words) that captures the essence of this task description. Return only the title text, nothing else.\n\nDescription: ${description}`,
           experimental_telemetry: {
             isEnabled: true,
