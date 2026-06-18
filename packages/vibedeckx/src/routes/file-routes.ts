@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import fs from "fs/promises";
-import { createReadStream } from "fs";
+import { createReadStream, constants as fsConstants } from "fs";
 import { Readable } from "stream";
 import { proxyStatus, proxyToRemoteAuto, proxyToRemoteRaw } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
@@ -49,6 +49,24 @@ function isPathSafe(basePath: string, relativePath: string): boolean {
   return resolved.startsWith(normalizedBase + path.sep) || resolved === normalizedBase;
 }
 
+// Canonical (symlink-resolved) containment check. isPathSafe above is lexical
+// only and does not account for symlinks: a symlink inside a project can point
+// outside it, and fs.stat/readFile/createReadStream/readdir all follow symlinks.
+// This resolves both ends with fs.realpath so an in-project symlink that
+// escapes the root is rejected. Returns false (rather than throwing) when
+// either path is missing/unreadable, so callers map it to 404/not-allowed.
+async function isWithinBaseReal(basePath: string, candidatePath: string): Promise<boolean> {
+  try {
+    const [realBase, realCandidate] = await Promise.all([
+      fs.realpath(basePath),
+      fs.realpath(candidatePath),
+    ]);
+    return realCandidate === realBase || realCandidate.startsWith(realBase + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 // base64 inflates ~33%, so 11MB → ~14.7MB encoded, leaving headroom under the
 // remote server's 16MB JSON bodyLimit for the surrounding JSON envelope.
 const MAX_REMOTE_UPLOAD_BYTES = 11 * 1024 * 1024;
@@ -74,6 +92,12 @@ async function writeUploadedFiles(
     throw Object.assign(new Error("Target is not a directory"), { statusCode: 400 });
   }
 
+  // A symlinked target directory could redirect the write outside the project
+  // despite the lexical check above. Reject if the canonical dir escapes.
+  if (!(await isWithinBaseReal(basePath, targetDir))) {
+    throw Object.assign(new Error("Path traversal not allowed"), { statusCode: 403 });
+  }
+
   const written: string[] = [];
   for (const file of files) {
     const name = path.basename(file.name);
@@ -83,7 +107,21 @@ async function writeUploadedFiles(
     if (!isPathSafe(targetDir, name)) {
       throw Object.assign(new Error("Path traversal not allowed"), { statusCode: 403 });
     }
-    await fs.writeFile(path.join(targetDir, name), file.data); // overwrites
+    // O_NOFOLLOW refuses to write *through* a pre-existing symlink whose target
+    // lies outside the project (e.g. name -> /etc/cron.d/x); it fails with ELOOP
+    // instead of following. O_NOFOLLOW is absent on Windows — fall back to 0
+    // (no extra guard) there, where symlink creation already needs privilege.
+    const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    const fh = await fs.open(
+      path.join(targetDir, name),
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow,
+      0o644,
+    );
+    try {
+      await fh.writeFile(file.data); // overwrites
+    } finally {
+      await fh.close();
+    }
     written.push(name);
   }
   return written;
@@ -183,6 +221,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const cwd = relativePath ? path.resolve(basePath, relativePath) : basePath;
 
+    if (!(await isWithinBaseReal(basePath, cwd))) {
+      return reply.code(404).send({ error: "Directory not found" });
+    }
+
     try {
       const result = await browseDirectory(cwd, showHidden);
       return reply.code(200).send(result);
@@ -219,6 +261,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const fullPath = path.resolve(basePath, filePath);
 
     try {
+      if (!(await isWithinBaseReal(basePath, fullPath))) {
+        return reply.code(404).send({ error: "File not found" });
+      }
+
       const stat = await fs.stat(fullPath);
 
       if (stat.size > MAX_FILE_SIZE) {
@@ -258,6 +304,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const fileName = path.basename(fullPath);
 
     try {
+      if (!(await isWithinBaseReal(basePath, fullPath))) {
+        return reply.code(404).send({ error: "File not found" });
+      }
+
       await fs.access(fullPath);
       const stream = createReadStream(fullPath);
       return reply
@@ -400,6 +450,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(403).send({ error: "Path traversal not allowed" });
     }
 
+    if (!(await isWithinBaseReal(basePath, dirPath))) {
+      return reply.code(404).send({ error: "Directory not found" });
+    }
+
     try {
       const result = await browseDirectory(dirPath, showHidden);
       return reply.code(200).send(result);
@@ -475,6 +529,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const fullPath = path.resolve(basePath, filePath);
 
     try {
+      if (!(await isWithinBaseReal(basePath, fullPath))) {
+        return reply.code(404).send({ error: "File not found" });
+      }
+
       const stat = await fs.stat(fullPath);
 
       if (stat.size > MAX_FILE_SIZE) {
@@ -579,6 +637,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const fileName = path.basename(fullPath);
 
     try {
+      if (!(await isWithinBaseReal(basePath, fullPath))) {
+        return reply.code(404).send({ error: "File not found" });
+      }
+
       await fs.access(fullPath);
       const stream = createReadStream(fullPath);
       return reply
