@@ -1241,6 +1241,23 @@ export const api = {
     return res.json();
   },
 
+  async listProjectFiles(
+    projectId: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<{ files: string[]; truncated: boolean }> {
+    const params = new URLSearchParams();
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/list-files${query}`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
   async getFileContent(
     projectId: string,
     filePath: string,

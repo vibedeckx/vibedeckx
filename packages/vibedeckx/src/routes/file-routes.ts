@@ -4,6 +4,8 @@ import path from "path";
 import fs from "fs/promises";
 import { createReadStream, constants as fsConstants } from "fs";
 import { Readable } from "stream";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { proxyStatus, proxyToRemoteAuto, proxyToRemoteRaw } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
@@ -42,6 +44,13 @@ interface BrowseEntry {
 }
 
 const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB
+
+// Upper bound on the flat file list returned for the GitHub-style file finder.
+// Past this we truncate and flag it so the UI can surface that results are
+// partial rather than silently dropping files.
+const MAX_LIST_FILES = 50_000;
+
+const execFileAsync = promisify(execFile);
 
 function isPathSafe(basePath: string, relativePath: string): boolean {
   const normalizedBase = path.resolve(basePath);
@@ -200,6 +209,65 @@ async function browseDirectory(
   return { path: dirPath, items };
 }
 
+// Recursive fallback for listProjectFiles when `basePath` is not a git repo (or
+// git is unavailable). Walks the tree skipping node_modules and dot-directories,
+// mirroring the skip rules in browseDirectory. Returns POSIX-relative paths.
+async function walkFilesFallback(basePath: string): Promise<{ files: string[]; truncated: boolean }> {
+  const files: string[] = [];
+  let truncated = false;
+
+  async function walk(dir: string, rel: string): Promise<void> {
+    if (truncated) return;
+    let entries: import("fs").Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (truncated) return;
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+        await walk(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
+      } else if (entry.isFile()) {
+        files.push(rel ? `${rel}/${entry.name}` : entry.name);
+        if (files.length >= MAX_LIST_FILES) {
+          truncated = true;
+          return;
+        }
+      }
+    }
+  }
+
+  await walk(basePath, "");
+  return { files, truncated };
+}
+
+// Returns the flat list of files under `basePath` for the file finder. Prefers
+// `git ls-files` (tracked + untracked-but-not-ignored, .gitignore-aware) so
+// node_modules / build output are excluded for free; falls back to a recursive
+// walk when not a git repo. Files only, as POSIX-relative paths.
+async function listProjectFiles(basePath: string): Promise<{ files: string[]; truncated: boolean }> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      { cwd: basePath, maxBuffer: 64 * 1024 * 1024 },
+    );
+    // -z gives NUL-separated paths (safe for odd filenames); drop the trailing
+    // empty segment after the final NUL.
+    let files = stdout.split("\0").filter(Boolean);
+    let truncated = false;
+    if (files.length > MAX_LIST_FILES) {
+      files = files.slice(0, MAX_LIST_FILES);
+      truncated = true;
+    }
+    return { files, truncated };
+  } catch {
+    return walkFilesFallback(basePath);
+  }
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Browse directory (path-based, for remote execution)
   fastify.get<{
@@ -238,6 +306,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(403).send({ error: "Permission denied", code });
       }
       return reply.code(500).send({ error: "Failed to browse directory", code });
+    }
+  });
+
+  // List all files (path-based, for remote execution)
+  fastify.get<{
+    Querystring: { path: string; branch?: string };
+  }>("/api/path/list-files", async (req, reply) => {
+    const projectPath = req.query.path;
+    if (!projectPath) {
+      return reply.code(400).send({ error: "Path is required" });
+    }
+
+    const branch = req.query.branch;
+    const basePath = resolveWorktreePath(projectPath, branch ?? null);
+
+    try {
+      const result = await listProjectFiles(basePath);
+      return reply.code(200).send(result);
+    } catch (err) {
+      fastify.log.warn({ err, basePath }, "listProjectFiles failed");
+      return reply.code(500).send({ error: "Failed to list files" });
     }
   });
 
@@ -467,6 +556,59 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(403).send({ error: "Permission denied", code });
       }
       return reply.code(500).send({ error: "Failed to browse directory", code });
+    }
+  });
+
+  // List all files (project-scoped)
+  fastify.get<{
+    Params: { id: string };
+    Querystring: { branch?: string; target?: "local" | "remote" };
+  }>("/api/projects/:id/list-files", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const branch = req.query.branch;
+    const target = req.query.target;
+
+    const useRemote = target === "remote"
+      || (!target && !project.path);
+
+    if (useRemote) {
+      const remoteConfig = getRemoteConfig(fastify, project);
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: "Project has no remote configuration" });
+      }
+      const params = [`path=${encodeURIComponent(remoteConfig.remotePath)}`];
+      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
+      const result = await proxyToRemoteAuto(
+        remoteConfig.serverId,
+        remoteConfig.url,
+        remoteConfig.apiKey,
+        "GET",
+        `/api/path/list-files?${params.join("&")}`,
+        undefined,
+        { reverseConnectManager: fastify.reverseConnectManager }
+      );
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    if (!project.path) {
+      return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    const basePath = resolveWorktreePath(project.path, branch ?? null);
+
+    try {
+      const result = await listProjectFiles(basePath);
+      return reply.code(200).send(result);
+    } catch (err) {
+      fastify.log.warn({ err, basePath }, "listProjectFiles failed");
+      return reply.code(500).send({ error: "Failed to list files" });
     }
   });
 
