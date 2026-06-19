@@ -159,6 +159,8 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
                   <Search className="h-3.5 w-3.5" />
                 </InputGroupAddon>
                 <InputGroupInput
+                  type="search"
+                  autoComplete="off"
                   placeholder="Search files..."
                   value={search.query}
                   onFocus={search.ensureLoaded}
