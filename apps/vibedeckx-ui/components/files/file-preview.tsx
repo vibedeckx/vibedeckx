@@ -300,7 +300,11 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
             )}
           </div>
         ) : showRendered ? (
-          <div className="p-4 text-sm" ref={markdownRef}>
+          <div
+            className="p-4"
+            style={{ fontSize: "var(--files-content-font-size, 14px)" }}
+            ref={markdownRef}
+          >
             <MessageResponse
               components={markdownComponents}
               rehypePlugins={rehypePlugins}
@@ -309,14 +313,16 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
             </MessageResponse>
           </div>
         ) : fileContent.content !== null ? (
-          <CodeBlock
-            code={fileContent.content}
-            language={getLanguage(filePath)}
-            showLineNumbers
-            className="border-0 rounded-none"
-          >
-            <CodeBlockCopyButton />
-          </CodeBlock>
+          <div className="h-full [&_pre]:text-[length:var(--files-content-font-size,14px)]! [&_code]:text-[length:var(--files-content-font-size,14px)]!">
+            <CodeBlock
+              code={fileContent.content}
+              language={getLanguage(filePath)}
+              showLineNumbers
+              className="border-0 rounded-none"
+            >
+              <CodeBlockCopyButton />
+            </CodeBlock>
+          </div>
         ) : (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Empty file.
