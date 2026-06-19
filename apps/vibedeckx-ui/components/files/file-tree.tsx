@@ -183,7 +183,7 @@ function FileTreeNode({
       <div>
         <div
           className={cn(
-            "group flex items-center w-full px-2 py-2 text-sm rounded-sm transition-colors cursor-pointer",
+            "group flex items-center w-full px-2 py-2 rounded-sm transition-colors cursor-pointer",
             isDragOver ? "bg-primary/15 outline-2 -outline-offset-2 outline-dashed outline-primary/60" : "hover:bg-accent",
           )}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -256,7 +256,7 @@ function FileTreeNode({
   return (
     <div
       className={cn(
-        "group flex items-center w-full px-2 py-2 text-sm rounded-sm transition-colors cursor-pointer",
+        "group flex items-center w-full px-2 py-2 rounded-sm transition-colors cursor-pointer",
         isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
       style={{ paddingLeft: `${depth * 16 + 8 + 18}px` }}
@@ -347,6 +347,7 @@ export function FileTree({
         "h-full transition-colors",
         isRootDragOver && "bg-accent/30 outline-2 -outline-offset-2 outline-dashed outline-primary/50",
       )}
+      style={{ fontSize: "var(--files-tree-font-size, 14px)" }}
       onDragOver={(e) => {
         if (!dragHasFiles(e)) return;
         e.preventDefault();
