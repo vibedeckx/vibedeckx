@@ -23,11 +23,19 @@ const { fontSizeMin, fontSizeMax } = CONVERSATION_SETTINGS_LIMITS;
 
 export function AppearanceSettings() {
   const { theme, setTheme } = useTheme();
-  const { settings, setAgentFontSize, setChatFontSize } = useConversationSettings();
+  const {
+    settings,
+    setAgentFontSize,
+    setChatFontSize,
+    setFilesTreeFontSize,
+    setFilesContentFontSize,
+  } = useConversationSettings();
 
   const handleReset = () => {
     setAgentFontSize(DEFAULT_CONVERSATION_SETTINGS.agentFontSize);
     setChatFontSize(DEFAULT_CONVERSATION_SETTINGS.chatFontSize);
+    setFilesTreeFontSize(DEFAULT_CONVERSATION_SETTINGS.filesTreeFontSize);
+    setFilesContentFontSize(DEFAULT_CONVERSATION_SETTINGS.filesContentFontSize);
   };
 
   return (
@@ -56,6 +64,24 @@ export function AppearanceSettings() {
             label="Chat session"
             value={settings.chatFontSize}
             onChange={setChatFontSize}
+          />
+        </div>
+      </SettingsField>
+
+      <SettingsField
+        label="Files font size"
+        hint="Independent typography for the Files tab. Tree controls the file list; content controls the file preview and code."
+      >
+        <div className="space-y-5">
+          <FontSizeRow
+            label="File tree"
+            value={settings.filesTreeFontSize}
+            onChange={setFilesTreeFontSize}
+          />
+          <FontSizeRow
+            label="File content"
+            value={settings.filesContentFontSize}
+            onChange={setFilesContentFontSize}
           />
         </div>
       </SettingsField>
