@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { RefreshCw, Eye, EyeOff, Search, X, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { RefreshCw, Eye, EyeOff, Search, X, Loader2, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import type { ImperativePanelHandle } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupButton } from "@/components/ui/input-group";
@@ -24,6 +25,17 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
   const target = project && !project.path ? "remote" as const : undefined;
 
   const [showHidden, setShowHidden] = useState(false);
+
+  // Imperative handle + mirrored state for the collapsible left (file tree) panel.
+  const treePanelRef = useRef<ImperativePanelHandle>(null);
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+
+  const toggleTree = useCallback(() => {
+    const panel = treePanelRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  }, []);
 
   const {
     rootEntries,
@@ -92,6 +104,16 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
             <Button
               variant="ghost"
               size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={toggleTree}
+              title={treeCollapsed ? "Show file tree" : "Hide file tree"}
+              aria-pressed={!treeCollapsed}
+            >
+              {treeCollapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               className={`h-7 w-7 hover:text-foreground ${showHidden ? "text-foreground" : "text-muted-foreground"}`}
               onClick={() => setShowHidden(v => !v)}
               title={showHidden ? "Hide hidden files" : "Show hidden files"}
@@ -109,7 +131,15 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
       {/* Split content */}
       <ResizablePanelGroup direction="horizontal" autoSaveId="files-panels" className="flex-1">
         {/* File tree + search (left) */}
-        <ResizablePanel defaultSize={33} minSize={20}>
+        <ResizablePanel
+          ref={treePanelRef}
+          collapsible
+          collapsedSize={0}
+          defaultSize={33}
+          minSize={20}
+          onCollapse={() => setTreeCollapsed(true)}
+          onExpand={() => setTreeCollapsed(false)}
+        >
           {/* The search input lives inside <Command> so its keydown events bubble
               to cmdk, giving the results list free arrow-key nav + Enter-to-open. */}
           <Command shouldFilter={false} className="flex h-full flex-col bg-transparent">
