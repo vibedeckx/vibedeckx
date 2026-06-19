@@ -12,6 +12,7 @@ import { FilePreview } from "./file-preview";
 import { PageHeader } from "@/components/layout";
 import { useFileBrowser } from "@/hooks/use-file-browser";
 import { useFileSearch } from "@/hooks/use-file-search";
+import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { api, type Project } from "@/lib/api";
 
 interface FilesViewProps {
@@ -25,6 +26,7 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
   const target = project && !project.path ? "remote" as const : undefined;
 
   const [showHidden, setShowHidden] = useState(false);
+  const { settings } = useConversationSettings();
 
   // Imperative handle + mirrored state for the collapsible left (file tree) panel.
   const treePanelRef = useRef<ImperativePanelHandle>(null);
@@ -96,7 +98,15 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
     : null;
 
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex flex-col h-full"
+      style={
+        {
+          "--files-tree-font-size": `${settings.filesTreeFontSize}px`,
+          "--files-content-font-size": `${settings.filesContentFontSize}px`,
+        } as React.CSSProperties
+      }
+    >
       <PageHeader
         title="Files"
         actions={
