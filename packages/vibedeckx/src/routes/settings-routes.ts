@@ -36,11 +36,15 @@ const FONT_SIZE_MAX = 32;
 export interface ConversationSettings {
   agentFontSize: number;
   chatFontSize: number;
+  filesTreeFontSize: number;
+  filesContentFontSize: number;
 }
 
 const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
   agentFontSize: 15,
   chatFontSize: 15,
+  filesTreeFontSize: 14,
+  filesContentFontSize: 14,
 };
 
 const CONV_FONT_SIZE_MIN = 12;
@@ -69,6 +73,12 @@ function readStoredConversationSettings(saved: string | undefined): Conversation
     const chatValid =
       typeof parsed.chatFontSize === "number" &&
       validateConvFontSize(parsed.chatFontSize, "chatFontSize") === null;
+    const filesTreeValid =
+      typeof parsed.filesTreeFontSize === "number" &&
+      validateConvFontSize(parsed.filesTreeFontSize, "filesTreeFontSize") === null;
+    const filesContentValid =
+      typeof parsed.filesContentFontSize === "number" &&
+      validateConvFontSize(parsed.filesContentFontSize, "filesContentFontSize") === null;
     return {
       agentFontSize: agentValid
         ? (parsed.agentFontSize as number)
@@ -76,6 +86,12 @@ function readStoredConversationSettings(saved: string | undefined): Conversation
       chatFontSize: chatValid
         ? (parsed.chatFontSize as number)
         : DEFAULT_CONVERSATION_SETTINGS.chatFontSize,
+      filesTreeFontSize: filesTreeValid
+        ? (parsed.filesTreeFontSize as number)
+        : DEFAULT_CONVERSATION_SETTINGS.filesTreeFontSize,
+      filesContentFontSize: filesContentValid
+        ? (parsed.filesContentFontSize as number)
+        : DEFAULT_CONVERSATION_SETTINGS.filesContentFontSize,
     };
   } catch {
     return DEFAULT_CONVERSATION_SETTINGS;
@@ -362,7 +378,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Body: Partial<ConversationSettings>;
   }>("/api/settings/conversation", async (req, reply) => {
     if (requireAuth(req, reply) === null) return;
-    const { agentFontSize, chatFontSize } = req.body;
+    const { agentFontSize, chatFontSize, filesTreeFontSize, filesContentFontSize } = req.body;
 
     if (agentFontSize !== undefined) {
       const err = validateConvFontSize(agentFontSize, "agentFontSize");
@@ -372,16 +388,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const err = validateConvFontSize(chatFontSize, "chatFontSize");
       if (err) return reply.code(400).send({ error: err });
     }
+    if (filesTreeFontSize !== undefined) {
+      const err = validateConvFontSize(filesTreeFontSize, "filesTreeFontSize");
+      if (err) return reply.code(400).send({ error: err });
+    }
+    if (filesContentFontSize !== undefined) {
+      const err = validateConvFontSize(filesContentFontSize, "filesContentFontSize");
+      if (err) return reply.code(400).send({ error: err });
+    }
 
     const existing = readStoredConversationSettings(fastify.storage.settings.get("conversation"));
     const updated: ConversationSettings = {
       agentFontSize: agentFontSize ?? existing.agentFontSize,
       chatFontSize: chatFontSize ?? existing.chatFontSize,
+      filesTreeFontSize: filesTreeFontSize ?? existing.filesTreeFontSize,
+      filesContentFontSize: filesContentFontSize ?? existing.filesContentFontSize,
     };
 
     fastify.storage.settings.set("conversation", JSON.stringify(updated));
     console.log(
-      `[Settings] Conversation updated: agentFontSize=${updated.agentFontSize}, chatFontSize=${updated.chatFontSize}`,
+      `[Settings] Conversation updated: agentFontSize=${updated.agentFontSize}, chatFontSize=${updated.chatFontSize}, filesTreeFontSize=${updated.filesTreeFontSize}, filesContentFontSize=${updated.filesContentFontSize}`,
     );
 
     return reply.code(200).send(updated);
