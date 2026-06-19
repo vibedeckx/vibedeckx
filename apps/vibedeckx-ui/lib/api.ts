@@ -510,7 +510,10 @@ export async function listBranchSessions(
   projectId: string,
   branch: string | null
 ): Promise<{ sessions: BranchSessionSummary[] }> {
-  const qs = branch != null ? `?branch=${encodeURIComponent(branch)}` : "";
+  // Main/default branch is represented by the empty-string sentinel ("") across
+  // the system, so always send the param (empty for main) to keep the backend on
+  // the branch-filtered query path rather than the unfiltered all-branches one.
+  const qs = `?branch=${encodeURIComponent(branch ?? "")}`;
   const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions${qs}`);
   if (!res.ok) throw new Error(`listBranchSessions failed: ${res.status}`);
   return res.json();

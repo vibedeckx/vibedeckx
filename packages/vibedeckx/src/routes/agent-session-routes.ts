@@ -375,9 +375,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(200).send({ sessions: [] });
       }
 
-      const dbSessions = typeof req.query.branch === "string"
-        ? fastify.storage.agentSessions.listByBranch(req.params.projectId, req.query.branch)
-        : fastify.storage.agentSessions.getByProjectId(req.params.projectId);
+      // Always filter by branch. A missing param means the main/default branch,
+      // which is stored with the empty-string sentinel (""). Falling back to
+      // getByProjectId() here would leak sessions from every branch into the list.
+      const dbSessions = fastify.storage.agentSessions.listByBranch(
+        req.params.projectId,
+        typeof req.query.branch === "string" ? req.query.branch : "",
+      );
 
       const countMap = new Map(
         fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
