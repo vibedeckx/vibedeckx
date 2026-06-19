@@ -70,11 +70,11 @@ export function AppearanceSettings() {
 
       <SettingsField
         label="Files font size"
-        hint="Independent typography for the Files tab. Tree controls the file list; content controls the file preview and code."
+        hint="Independent typography for the Files tab. File tree controls the file list and search results; file content controls the preview and code."
       >
         <div className="space-y-5">
           <FontSizeRow
-            label="File tree"
+            label="File tree, File search"
             value={settings.filesTreeFontSize}
             onChange={setFilesTreeFontSize}
           />

@@ -200,7 +200,7 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
                           key={r.path}
                           value={r.path}
                           onSelect={() => handleSelectResult(r.path)}
-                          className="flex-col items-start gap-0"
+                          className="flex-col items-start gap-0 text-[length:var(--files-tree-font-size,14px)]!"
                         >
                           <span className="font-medium">{base}</span>
                           {dir && (
