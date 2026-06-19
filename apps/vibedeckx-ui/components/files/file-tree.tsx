@@ -183,7 +183,7 @@ function FileTreeNode({
       <div>
         <div
           className={cn(
-            "group flex items-center w-full px-2 py-1 text-sm rounded-sm transition-colors cursor-pointer",
+            "group flex items-center w-full px-2 py-2 text-sm rounded-sm transition-colors cursor-pointer",
             isDragOver ? "bg-primary/15 outline-2 -outline-offset-2 outline-dashed outline-primary/60" : "hover:bg-accent",
           )}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
