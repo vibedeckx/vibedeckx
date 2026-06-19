@@ -246,9 +246,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // No project registered at that path yet — nothing to list.
         return reply.code(200).send({ sessions: [] });
       }
-      const dbSessions = typeof req.query.branch === "string"
-        ? fastify.storage.agentSessions.listByBranch(existing.id, req.query.branch)
-        : fastify.storage.agentSessions.getByProjectId(existing.id);
+      // Always filter by branch. A missing param means the main/default branch,
+      // stored with the empty-string sentinel (""). Mirrors the project-id route;
+      // falling back to getByProjectId() here would leak every branch's sessions.
+      const dbSessions = fastify.storage.agentSessions.listByBranch(
+        existing.id,
+        typeof req.query.branch === "string" ? req.query.branch : "",
+      );
 
       const countMap = new Map(
         fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
@@ -333,9 +337,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const params = new URLSearchParams();
         params.set("path", remoteConfig.remote_path);
-        if (typeof req.query.branch === "string") {
-          params.set("branch", req.query.branch);
-        }
+        // Always forward branch (empty for main) so the remote stays on its
+        // branch-filtered query path instead of listing every branch's sessions.
+        params.set("branch", typeof req.query.branch === "string" ? req.query.branch : "");
         const result = await proxyAuto(
           project.agent_mode,
           remoteConfig.server_url ?? "",
