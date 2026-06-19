@@ -437,11 +437,15 @@ export const TERMINAL_SETTINGS_LIMITS = {
 export interface ConversationSettings {
   agentFontSize: number;
   chatFontSize: number;
+  filesTreeFontSize: number;
+  filesContentFontSize: number;
 }
 
 export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
   agentFontSize: 15,
   chatFontSize: 15,
+  filesTreeFontSize: 14,
+  filesContentFontSize: 14,
 };
 
 export const CONVERSATION_SETTINGS_LIMITS = {
