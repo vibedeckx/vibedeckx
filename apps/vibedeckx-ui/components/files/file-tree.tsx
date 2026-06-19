@@ -256,7 +256,7 @@ function FileTreeNode({
   return (
     <div
       className={cn(
-        "group flex items-center w-full px-2 py-1 text-sm rounded-sm transition-colors cursor-pointer",
+        "group flex items-center w-full px-2 py-2 text-sm rounded-sm transition-colors cursor-pointer",
         isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
       style={{ paddingLeft: `${depth * 16 + 8 + 18}px` }}
