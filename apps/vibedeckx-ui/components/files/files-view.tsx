@@ -160,10 +160,22 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
                 </InputGroupAddon>
                 <InputGroupInput
                   type="search"
+                  name="files-search"
                   autoComplete="off"
+                  data-1p-ignore
+                  data-lpignore="true"
+                  data-form-type="other"
+                  // Chrome offers saved-password autofill on any text-ish field
+                  // once a credential exists for the domain, ignoring
+                  // autocomplete="off". Starting read-only makes Chrome skip the
+                  // field on load; we drop it on focus so typing still works.
+                  readOnly
+                  onFocus={(e) => {
+                    e.currentTarget.removeAttribute("readonly")
+                    search.ensureLoaded()
+                  }}
                   placeholder="Search files..."
                   value={search.query}
-                  onFocus={search.ensureLoaded}
                   onChange={(e) => search.setQuery(e.target.value)}
                 />
                 {search.query && (
