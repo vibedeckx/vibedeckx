@@ -59,7 +59,7 @@ export function parseUrlState(): UrlState {
 
 /**
  * Build a URL string from app state.
- * Returns paths like: /, /p/uuid, /p/uuid/workspace, /p/uuid/files?branch=main
+ * Returns paths like: /, /p/uuid/tasks, /p/uuid/workspace, /p/uuid/files?branch=main
  */
 export function buildUrl(state: { projectId?: string | null; tab?: ActiveView; branch?: string | null }): string {
   const { projectId, tab, branch } = state;
@@ -71,10 +71,10 @@ export function buildUrl(state: { projectId?: string | null; tab?: ActiveView; b
     return "/";
   }
 
-  let path = `/p/${projectId}`;
-  if (tab && tab !== DEFAULT_TAB) {
-    path += `/${tab}`;
-  }
+  // Always emit the tab segment (including the default `tasks` tab) so the
+  // tab's position in the path is fixed. Old `/p/:id` links without a tab
+  // segment still resolve via parseUrlState's fallback to DEFAULT_TAB.
+  let path = `/p/${projectId}/${tab ?? DEFAULT_TAB}`;
 
   if (branch) {
     path += `?branch=${encodeURIComponent(branch)}`;
