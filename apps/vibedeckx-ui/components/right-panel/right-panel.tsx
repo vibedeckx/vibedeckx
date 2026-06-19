@@ -72,46 +72,58 @@ export function RightPanel({ projectId, selectedBranch, onMergeRequest, project,
         ))}
       </div>
 
-      {/* Tab Content — CSS show/hide to keep all panels mounted */}
-      <div className={cn("flex-1 overflow-hidden", activeTab !== 'agent' && 'hidden')}>
-        {agentSlot}
-      </div>
-      <div className={cn("flex-1 overflow-hidden", activeTab !== 'executors' && 'hidden')}>
-        <ExecutorPanel
-          projectId={projectId}
-          selectedBranch={selectedBranch}
-          project={project}
-          onExecutorModeChange={onExecutorModeChange}
-        />
-      </div>
-      <div className={cn("flex-1 overflow-hidden", activeTab !== 'diff' && 'hidden')}>
-        <DiffPanel
-          projectId={projectId}
-          selectedBranch={selectedBranch}
-          onMergeRequest={onMergeRequest}
-          project={project}
-        />
-      </div>
-      <div className={cn("flex-1 overflow-hidden", activeTab !== 'terminal' && 'hidden')}>
-        <TerminalPanel
-          projectId={projectId}
-          selectedBranch={selectedBranch}
-          project={project}
-        />
-      </div>
-      <div className={cn("flex-1 overflow-hidden", activeTab !== 'preview' && 'hidden')}>
-        <PreviewPanel
-          projectId={projectId}
-          selectedBranch={selectedBranch}
-          project={project}
-        />
-      </div>
-      <div className={cn("flex-1 overflow-hidden", activeTab !== 'files' && 'hidden')}>
-        <FilesView
-          projectId={projectId}
-          project={project}
-          selectedBranch={selectedBranch}
-        />
+      {/* Tab Content — panels share a relative wrapper so each fills the same
+          box. Inactive panels are display:none, except the Agent panel which
+          stays laid out (visibility:hidden, out of flow) so its scroll position
+          is preserved across tab switches. Using `hidden` on the agent panel
+          collapses its scroll container to 0 height, which makes
+          use-stick-to-bottom think it's at the bottom and snap there on return. */}
+      <div className="relative flex-1 overflow-hidden">
+        <div
+          className={cn(
+            "absolute inset-0 overflow-hidden",
+            activeTab !== 'agent' && 'invisible pointer-events-none'
+          )}
+        >
+          {agentSlot}
+        </div>
+        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'executors' && 'hidden')}>
+          <ExecutorPanel
+            projectId={projectId}
+            selectedBranch={selectedBranch}
+            project={project}
+            onExecutorModeChange={onExecutorModeChange}
+          />
+        </div>
+        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'diff' && 'hidden')}>
+          <DiffPanel
+            projectId={projectId}
+            selectedBranch={selectedBranch}
+            onMergeRequest={onMergeRequest}
+            project={project}
+          />
+        </div>
+        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'terminal' && 'hidden')}>
+          <TerminalPanel
+            projectId={projectId}
+            selectedBranch={selectedBranch}
+            project={project}
+          />
+        </div>
+        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'preview' && 'hidden')}>
+          <PreviewPanel
+            projectId={projectId}
+            selectedBranch={selectedBranch}
+            project={project}
+          />
+        </div>
+        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'files' && 'hidden')}>
+          <FilesView
+            projectId={projectId}
+            project={project}
+            selectedBranch={selectedBranch}
+          />
+        </div>
       </div>
     </div>
   );
