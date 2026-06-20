@@ -24,10 +24,48 @@ import { SymbolNavPopover } from "./symbol-nav-popover";
 const SYMBOL_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 // Custom "selection" highlight for a double-clicked symbol, via the CSS Custom
-// Highlight API. We register it synchronously in the double-click handler —
-// BEFORE the popover mounts and clears the native selection — because a range
-// read after that point has already collapsed to empty.
+// Highlight API. The highlight stands in for the native selection (which opening
+// the popover clears). It is (re)built from the click coordinates AFTER the
+// popover mounts — never from a captured node/range, because the code's text
+// nodes get replaced on re-render, so any captured node ends up detached.
 const SYMBOL_HL = "symbol-nav";
+
+const WORD_CHAR = /[A-Za-z0-9_$]/;
+
+// Find the identifier under a viewport point and return a fresh range over it,
+// resolved against the LIVE DOM (so its nodes are connected and paintable).
+function wordRangeFromPoint(x: number, y: number): Range | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  let node: Node | null = null;
+  let offset = 0;
+  if (doc.caretRangeFromPoint) {
+    const r = doc.caretRangeFromPoint(x, y);
+    if (r) {
+      node = r.startContainer;
+      offset = r.startOffset;
+    }
+  } else if (doc.caretPositionFromPoint) {
+    const p = doc.caretPositionFromPoint(x, y);
+    if (p) {
+      node = p.offsetNode;
+      offset = p.offset;
+    }
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+  const text = node.textContent ?? "";
+  let start = offset;
+  let end = offset;
+  while (start > 0 && WORD_CHAR.test(text[start - 1])) start--;
+  while (end < text.length && WORD_CHAR.test(text[end])) end++;
+  if (start >= end) return null;
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, end);
+  return range;
+}
 
 function highlightApiAvailable(): boolean {
   return (
@@ -148,63 +186,34 @@ export function FilePreview({
     x: number;
     y: number;
   } | null>(null);
-  // The double-clicked word's selection boundaries (nodes + offsets), NOT a Range
-  // object. Opening the popover clears the native selection, which collapses any
-  // Range that exists during that moment — but the underlying text nodes stay put
-  // (verified: conn=true). So we stash the boundaries and rebuild a fresh range
-  // AFTER mount, in the effect below, where the one-time collapse is already past.
-  const symbolBoundsRef = useRef<{ sc: Node; so: number; ec: Node; eo: number } | null>(null);
-  const [symbolDebug, setSymbolDebug] = useState("");
-
-  // Double-click selects a word natively; if it's an identifier, record its
-  // boundaries and open the symbol popover. The actual highlight is applied in the
-  // effect below (after the popover mounts), where the rebuilt range survives.
+  // Double-click selects a word natively; if it's an identifier, open the symbol
+  // popover. The custom highlight is applied in the effect below from the click
+  // coordinates — not from the selection — so it doesn't depend on the native
+  // selection (which the popover clears) surviving.
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    const selection = window.getSelection();
-    const sel = selection?.toString().trim() ?? "";
+    const sel = window.getSelection()?.toString().trim() ?? "";
     if (!SYMBOL_RE.test(sel)) return;
-
-    symbolBoundsRef.current =
-      selection && selection.rangeCount > 0
-        ? {
-            sc: selection.getRangeAt(0).startContainer,
-            so: selection.getRangeAt(0).startOffset,
-            ec: selection.getRangeAt(0).endContainer,
-            eo: selection.getRangeAt(0).endOffset,
-          }
-        : null;
-
     setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
   }, []);
 
   // Apply (and tear down) the custom symbol highlight. Runs after the popover
-  // mounts, so rebuilding the range here dodges the mount-time selection clear
-  // that collapses a range made earlier. Clears when the popover closes / file
-  // changes / unmounts.
+  // mounts; we resolve the word against the live DOM from the click point, so the
+  // range's nodes are connected (a node captured earlier would be detached by the
+  // re-render that swaps the code's text nodes). Clears on close / file change /
+  // unmount.
   useEffect(() => {
-    const bounds = symbolBoundsRef.current;
-    if (!symbolNav || !bounds || !highlightApiAvailable()) {
+    if (!symbolNav || !highlightApiAvailable()) {
       clearSymbolHighlight();
       return;
     }
-    const range = document.createRange();
-    try {
-      range.setStart(bounds.sc, bounds.so);
-      range.setEnd(bounds.ec, bounds.eo);
-    } catch (err) {
-      setSymbolDebug(`setStart/End THREW: ${(err as Error).message}`);
+    const range = wordRangeFromPoint(symbolNav.x, symbolNav.y);
+    if (!range) {
+      clearSymbolHighlight();
       return;
     }
     ensureSymbolHlStyle();
     CSS.highlights.set(SYMBOL_HL, new Highlight(range));
-    const snap = (t: string) =>
-      `${t}[c=${range.collapsed} l=${range.toString().length} size=${CSS.highlights.size} conn=${bounds.sc.isConnected} scType=${bounds.sc.nodeType}]`;
-    setSymbolDebug(snap("eff"));
-    const id = window.setTimeout(() => setSymbolDebug((d) => `${d} ${snap("t300")}`), 300);
-    return () => {
-      window.clearTimeout(id);
-      clearSymbolHighlight();
-    };
+    return clearSymbolHighlight;
   }, [symbolNav]);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
@@ -457,7 +466,6 @@ export function FilePreview({
           target={target}
           currentFile={filePath}
           anchor={{ x: symbolNav.x, y: symbolNav.y }}
-          debug={symbolDebug}
           onJump={onJump}
           onClose={() => setSymbolNav(null)}
         />
