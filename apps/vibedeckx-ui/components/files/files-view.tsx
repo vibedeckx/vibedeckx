@@ -50,9 +50,11 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
     loadingDirs,
     uploadingDirs,
     deletingPaths,
+    jumpTarget,
     fetchRoot,
     toggleDirectory,
     selectFile,
+    jumpTo,
     uploadFiles,
     deleteEntry,
   } = useFileBrowser({
@@ -262,6 +264,12 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
               fileContent={fileContent}
               loading={fileLoading}
               downloadUrl={downloadUrl}
+              projectId={projectId}
+              branch={selectedBranch}
+              target={target}
+              scrollToLine={jumpTarget?.line ?? null}
+              scrollKey={jumpTarget?.nonce}
+              onJump={jumpTo}
             />
           </div>
         </ResizablePanel>

@@ -18,6 +18,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { FileContentResponse } from "@/lib/api";
 import type { BundledLanguage } from "shiki";
+import { SymbolNavPopover } from "./symbol-nav-popover";
+
+// A double-clicked selection is treated as a symbol only if it's a bare identifier.
+const SYMBOL_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 const EXTENSION_LANGUAGE_MAP: Record<string, BundledLanguage> = {
   ts: "typescript",
@@ -88,11 +92,38 @@ interface FilePreviewProps {
   fileContent: FileContentResponse | null;
   loading: boolean;
   downloadUrl: string | null;
+  projectId: string;
+  branch?: string | null;
+  target?: "local" | "remote";
+  scrollToLine?: number | null;
+  scrollKey?: number;
+  onJump: (file: string, line: number) => void;
 }
 
-export function FilePreview({ filePath, fileContent, loading, downloadUrl }: FilePreviewProps) {
+export function FilePreview({
+  filePath,
+  fileContent,
+  loading,
+  downloadUrl,
+  projectId,
+  branch,
+  target,
+  scrollToLine,
+  scrollKey,
+  onJump,
+}: FilePreviewProps) {
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [prevFilePath, setPrevFilePath] = useState(filePath);
+  const [symbolNav, setSymbolNav] = useState<{ symbol: string; x: number; y: number } | null>(null);
+
+  // Double-click selects a word natively; if it's an identifier, open the
+  // symbol navigation popover anchored at the cursor.
+  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
+    const sel = window.getSelection()?.toString().trim() ?? "";
+    if (SYMBOL_RE.test(sel)) {
+      setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
+    }
+  }, []);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
 
@@ -193,6 +224,7 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
   if (filePath !== prevFilePath) {
     setPrevFilePath(filePath);
     setViewMode("rendered");
+    setSymbolNav(null);
   }
 
   if (!filePath) {
@@ -313,11 +345,16 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
             </MessageResponse>
           </div>
         ) : fileContent.content !== null ? (
-          <div className="h-full [&_pre]:text-[length:var(--files-content-font-size,14px)]! [&_code]:text-[length:var(--files-content-font-size,14px)]!">
+          <div
+            className="h-full [&_pre]:text-[length:var(--files-content-font-size,14px)]! [&_code]:text-[length:var(--files-content-font-size,14px)]!"
+            onDoubleClick={handleDoubleClick}
+          >
             <CodeBlock
               code={fileContent.content}
               language={getLanguage(filePath)}
               showLineNumbers
+              scrollToLine={scrollToLine}
+              scrollKey={scrollKey}
               className="border-0 rounded-none"
             >
               <CodeBlockCopyButton />
@@ -329,6 +366,19 @@ export function FilePreview({ filePath, fileContent, loading, downloadUrl }: Fil
           </div>
         )}
       </div>
+
+      {symbolNav && (
+        <SymbolNavPopover
+          projectId={projectId}
+          symbol={symbolNav.symbol}
+          branch={branch}
+          target={target}
+          currentFile={filePath}
+          anchor={{ x: symbolNav.x, y: symbolNav.y }}
+          onJump={onJump}
+          onClose={() => setSymbolNav(null)}
+        />
+      )}
     </div>
   );
 }

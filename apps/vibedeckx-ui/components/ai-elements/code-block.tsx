@@ -18,6 +18,10 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  // 1-based line to scroll into view and briefly highlight once highlighting
+  // renders. `scrollKey` lets the same line (or a repeat jump) re-trigger.
+  scrollToLine?: number | null;
+  scrollKey?: number;
 };
 
 type CodeBlockContextType = {
@@ -27,6 +31,14 @@ type CodeBlockContextType = {
 const CodeBlockContext = createContext<CodeBlockContextType>({
   code: "",
 });
+
+// Tag every line with its 1-based number so a jump can address it by selector.
+const lineDataTransformer: ShikiTransformer = {
+  name: "line-data",
+  line(node, line) {
+    node.properties["data-line"] = String(line);
+  },
+};
 
 const lineNumberTransformer: ShikiTransformer = {
   name: "line-numbers",
@@ -55,8 +67,8 @@ export async function highlightCode(
   showLineNumbers = false
 ) {
   const transformers: ShikiTransformer[] = showLineNumbers
-    ? [lineNumberTransformer]
-    : [];
+    ? [lineDataTransformer, lineNumberTransformer]
+    : [lineDataTransformer];
 
   return await Promise.all([
     codeToHtml(code, {
@@ -76,6 +88,8 @@ export const CodeBlock = ({
   code,
   language,
   showLineNumbers = false,
+  scrollToLine,
+  scrollKey,
   className,
   children,
   ...props
@@ -83,6 +97,7 @@ export const CodeBlock = ({
   const [html, setHtml] = useState<string>("");
   const [darkHtml, setDarkHtml] = useState<string>("");
   const mounted = useRef(false);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
@@ -98,9 +113,39 @@ export const CodeBlock = ({
     };
   }, [code, language, showLineNumbers]);
 
+  // Scroll the target line into view and briefly highlight it, once the
+  // highlighted HTML is in the DOM. CodeBlock renders two copies (light/dark);
+  // only one is visible, so scroll that one but tag both for theme toggles.
+  useEffect(() => {
+    if (scrollToLine == null) return;
+    const root = rootRef.current;
+    if (!root || (!html && !darkHtml)) return;
+
+    const nodes = Array.from(
+      root.querySelectorAll<HTMLElement>(`[data-line="${scrollToLine}"]`)
+    );
+    if (nodes.length === 0) return;
+    const visible = nodes.find((n) => n.offsetParent !== null) ?? nodes[0];
+
+    const raf = requestAnimationFrame(() => {
+      visible.scrollIntoView({ block: "center", behavior: "auto" });
+      nodes.forEach((n) => n.classList.add("code-line-highlight"));
+    });
+    const timer = window.setTimeout(
+      () => nodes.forEach((n) => n.classList.remove("code-line-highlight")),
+      1600
+    );
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+      nodes.forEach((n) => n.classList.remove("code-line-highlight"));
+    };
+  }, [scrollToLine, scrollKey, html, darkHtml]);
+
   return (
     <CodeBlockContext.Provider value={{ code }}>
       <div
+        ref={rootRef}
         className={cn(
           "group relative w-full overflow-hidden rounded-md border bg-background text-foreground",
           className

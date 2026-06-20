@@ -347,6 +347,19 @@ export interface UploadResponse {
   uploaded: string[];
 }
 
+export interface SymbolHit {
+  file: string;
+  line: number;
+  text: string;
+  kind: "definition" | "reference";
+}
+
+export interface SymbolSearchResponse {
+  symbol: string;
+  hits: SymbolHit[];
+  truncated: boolean;
+}
+
 export interface ProxyConfig {
   type: 'none' | 'http' | 'socks5';
   host: string;
@@ -1275,6 +1288,25 @@ export const api = {
     if (!res.ok) {
       const error = await res.json();
       throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async searchSymbol(
+    projectId: string,
+    symbol: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<SymbolSearchResponse> {
+    const params = new URLSearchParams({ symbol });
+    if (branch) params.set("branch", branch);
+    if (target) params.set("target", target);
+    const res = await authFetch(
+      `${getApiBase()}/api/projects/${projectId}/symbol-search?${params.toString()}`
+    );
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(error.error || "Symbol search failed");
     }
     return res.json();
   },

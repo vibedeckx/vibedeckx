@@ -268,6 +268,87 @@ async function listProjectFiles(basePath: string): Promise<{ files: string[]; tr
   }
 }
 
+// Only a valid identifier is accepted as a symbol. This also prevents git grep
+// pattern injection / ReDoS, since the symbol is interpolated into the
+// definition-classifier regexes below.
+const SYMBOL_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const MAX_SYMBOL_HITS = 300;
+
+interface SymbolHit {
+  file: string;
+  line: number;
+  text: string;
+  kind: "definition" | "reference";
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Heuristic: does this line look like a *definition* of `symbol`? Same precision
+// tier as GitHub's search-based code navigation — name-based, not semantic, so
+// false positives (e.g. `const x = foo()` flagged as defining `foo`) are
+// expected and acceptable.
+function isDefinitionLine(text: string, symbol: string): boolean {
+  const e = escapeRe(symbol);
+  return (
+    // function foo / class Foo / def foo / type Foo / struct Foo ...
+    new RegExp(
+      `\\b(?:function|func|fn|def|defn|class|interface|type|struct|enum|trait|impl|module|namespace)\\s+${e}\\b`,
+    ).test(text) ||
+    // const/let/var/val/export/static ... foo = | foo: | foo(
+    new RegExp(
+      `\\b(?:const|let|var|val|public|private|protected|static|export|final)\\b[^\\n]*\\b${e}\\s*[=:(]`,
+    ).test(text) ||
+    // leading `foo =` / `foo:`   or   `foo(...) {`  method definition
+    new RegExp(`^\\s*${e}\\s*[:=]`).test(text) ||
+    new RegExp(`\\b${e}\\s*\\([^)]*\\)\\s*[{:]`).test(text)
+  );
+}
+
+// Single `git grep` (working tree + untracked-non-ignored, word-boundary, fixed
+// string), then classify each matching line into definition vs reference. No
+// index, no state — runs wherever the worktree lives, so it works through the
+// remote proxy unchanged.
+async function searchSymbol(
+  basePath: string,
+  symbol: string,
+): Promise<{ hits: SymbolHit[]; truncated: boolean }> {
+  let stdout = "";
+  try {
+    const res = await execFileAsync(
+      "git",
+      ["grep", "-n", "-I", "-F", "-w", "--no-color", "--untracked", "-e", symbol],
+      { cwd: basePath, maxBuffer: 32 * 1024 * 1024, timeout: 10_000 },
+    );
+    stdout = res.stdout;
+  } catch (err) {
+    // git grep exits 1 when there are simply no matches — not an error.
+    if ((err as { code?: number }).code === 1) return { hits: [], truncated: false };
+    throw err; // exit 128 = not a git repo / other: let the caller map it
+  }
+
+  const lines = stdout.split("\n").filter(Boolean);
+  const hits: SymbolHit[] = [];
+  let truncated = false;
+  for (const raw of lines) {
+    const m = raw.match(/^(.*?):(\d+):(.*)$/);
+    if (!m) continue;
+    const [, file, lineStr, text] = m;
+    hits.push({
+      file,
+      line: Number(lineStr),
+      text: text.slice(0, 400),
+      kind: isDefinitionLine(text, symbol) ? "definition" : "reference",
+    });
+    if (hits.length >= MAX_SYMBOL_HITS) {
+      truncated = true;
+      break;
+    }
+  }
+  return { hits, truncated };
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Browse directory (path-based, for remote execution)
   fastify.get<{
@@ -486,6 +567,29 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Symbol search (path-based, for remote execution)
+  fastify.get<{
+    Querystring: { path: string; symbol: string; branch?: string };
+  }>("/api/path/symbol-search", async (req, reply) => {
+    const projectPath = req.query.path;
+    const symbol = req.query.symbol;
+    if (!projectPath || !symbol) {
+      return reply.code(400).send({ error: "Path and symbol are required" });
+    }
+    if (!SYMBOL_RE.test(symbol)) {
+      return reply.code(400).send({ error: "Invalid symbol" });
+    }
+
+    const basePath = resolveWorktreePath(projectPath, req.query.branch ?? null);
+    try {
+      const result = await searchSymbol(basePath, symbol);
+      return reply.code(200).send({ symbol, ...result });
+    } catch (err) {
+      fastify.log.warn({ err, basePath }, "symbol-search failed");
+      return reply.code(200).send({ symbol, hits: [], truncated: false });
+    }
+  });
+
   // Browse project directory (project-scoped)
   fastify.get<{
     Params: { id: string };
@@ -690,6 +794,66 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(200).send({ binary: false, content, size: stat.size });
     } catch {
       return reply.code(404).send({ error: "File not found" });
+    }
+  });
+
+  // Symbol search (project-scoped)
+  fastify.get<{
+    Params: { id: string };
+    Querystring: { symbol: string; branch?: string; target?: "local" | "remote" };
+  }>("/api/projects/:id/symbol-search", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = fastify.storage.projects.getById(req.params.id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const symbol = req.query.symbol;
+    if (!symbol) {
+      return reply.code(400).send({ error: "Symbol is required" });
+    }
+    if (!SYMBOL_RE.test(symbol)) {
+      return reply.code(400).send({ error: "Invalid symbol" });
+    }
+
+    const branch = req.query.branch;
+    const useRemote = req.query.target === "remote" || (!req.query.target && !project.path);
+
+    if (useRemote) {
+      const remoteConfig = getRemoteConfig(fastify, project);
+      if (!remoteConfig) {
+        return reply.code(400).send({ error: "Project has no remote configuration" });
+      }
+      const params = [
+        `path=${encodeURIComponent(remoteConfig.remotePath)}`,
+        `symbol=${encodeURIComponent(symbol)}`,
+      ];
+      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
+      const result = await proxyToRemoteAuto(
+        remoteConfig.serverId,
+        remoteConfig.url,
+        remoteConfig.apiKey,
+        "GET",
+        `/api/path/symbol-search?${params.join("&")}`,
+        undefined,
+        { reverseConnectManager: fastify.reverseConnectManager }
+      );
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    if (!project.path) {
+      return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    const basePath = resolveWorktreePath(project.path, branch ?? null);
+    try {
+      const result = await searchSymbol(basePath, symbol);
+      return reply.code(200).send({ symbol, ...result });
+    } catch (err) {
+      fastify.log.warn({ err, basePath }, "symbol-search failed");
+      return reply.code(200).send({ symbol, hits: [], truncated: false });
     }
   });
 
