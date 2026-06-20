@@ -30,40 +30,67 @@ const SYMBOL_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 // nodes get replaced on re-render, so any captured node ends up detached.
 const SYMBOL_HL = "symbol-nav";
 
-const WORD_CHAR = /[A-Za-z0-9_$]/;
+// A stable, DOM-node-free anchor for the highlight: which code line (by the
+// `data-line` attribute the CodeBlock stamps on every line) and the character
+// span within it. Captured from the live selection in the double-click handler,
+// then re-resolved against the live DOM after the popover mounts — so it survives
+// both the selection being cleared and the code's text nodes being replaced.
+interface LineColAnchor {
+  line: string;
+  start: number;
+  end: number;
+}
 
-// Find the identifier under a viewport point and return a fresh range over it,
-// resolved against the LIVE DOM (so its nodes are connected and paintable).
-function wordRangeFromPoint(x: number, y: number): Range | null {
-  const doc = document as Document & {
-    caretRangeFromPoint?: (x: number, y: number) => Range | null;
-    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
-  };
-  let node: Node | null = null;
-  let offset = 0;
-  if (doc.caretRangeFromPoint) {
-    const r = doc.caretRangeFromPoint(x, y);
-    if (r) {
-      node = r.startContainer;
-      offset = r.startOffset;
-    }
-  } else if (doc.caretPositionFromPoint) {
-    const p = doc.caretPositionFromPoint(x, y);
-    if (p) {
-      node = p.offsetNode;
-      offset = p.offset;
-    }
-  }
-  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
-  const text = node.textContent ?? "";
-  let start = offset;
-  let end = offset;
-  while (start > 0 && WORD_CHAR.test(text[start - 1])) start--;
-  while (end < text.length && WORD_CHAR.test(text[end])) end++;
+// Character offset of (container, offset) from the start of `root`'s text. Using
+// a Range handles text- and element-typed containers uniformly.
+function charOffsetWithin(root: Element, container: Node, offset: number): number {
+  const r = document.createRange();
+  r.selectNodeContents(root);
+  r.setEnd(container, offset);
+  return r.toString().length;
+}
+
+function anchorFromRange(range: Range): LineColAnchor | null {
+  const startEl =
+    range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? (range.startContainer as Element)
+      : range.startContainer.parentElement;
+  const lineEl = startEl?.closest("[data-line]");
+  if (!lineEl || !lineEl.contains(range.endContainer)) return null;
+  const line = lineEl.getAttribute("data-line");
+  if (line === null) return null;
+  const start = charOffsetWithin(lineEl, range.startContainer, range.startOffset);
+  const end = charOffsetWithin(lineEl, range.endContainer, range.endOffset);
   if (start >= end) return null;
+  return { line, start, end };
+}
+
+// Locate the text node + offset for a character position within `root`.
+function charToPoint(root: Element, target: number): { node: Node; offset: number } | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let total = 0;
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    const len = (n.textContent ?? "").length;
+    if (target <= total + len) return { node: n, offset: target - total };
+    total += len;
+  }
+  return null;
+}
+
+function rangeFromAnchor(anchor: LineColAnchor): Range | null {
+  const els = Array.from(
+    document.querySelectorAll<HTMLElement>(`[data-line="${CSS.escape(anchor.line)}"]`)
+  );
+  // CodeBlock renders two copies (light/dark); resolve against the visible one.
+  const lineEl = els.find((el) => el.offsetParent !== null) ?? els[0];
+  if (!lineEl) return null;
+  const startPt = charToPoint(lineEl, anchor.start);
+  const endPt = charToPoint(lineEl, anchor.end);
+  if (!startPt || !endPt) return null;
   const range = document.createRange();
-  range.setStart(node, start);
-  range.setEnd(node, end);
+  range.setStart(startPt.node, startPt.offset);
+  range.setEnd(endPt.node, endPt.offset);
   return range;
 }
 
@@ -185,28 +212,31 @@ export function FilePreview({
     symbol: string;
     x: number;
     y: number;
+    anchor: LineColAnchor | null;
   } | null>(null);
-  // Double-click selects a word natively; if it's an identifier, open the symbol
-  // popover. The custom highlight is applied in the effect below from the click
-  // coordinates — not from the selection — so it doesn't depend on the native
-  // selection (which the popover clears) surviving.
+  // Double-click selects a word natively; if it's an identifier, capture a stable
+  // line+column anchor (from the live selection, before the popover clears it)
+  // and open the popover. The highlight itself is applied in the effect below.
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    const sel = window.getSelection()?.toString().trim() ?? "";
+    const selection = window.getSelection();
+    const sel = selection?.toString().trim() ?? "";
     if (!SYMBOL_RE.test(sel)) return;
-    setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
+    const anchor =
+      selection && selection.rangeCount > 0 ? anchorFromRange(selection.getRangeAt(0)) : null;
+    setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY, anchor });
   }, []);
 
   // Apply (and tear down) the custom symbol highlight. Runs after the popover
-  // mounts; we resolve the word against the live DOM from the click point, so the
-  // range's nodes are connected (a node captured earlier would be detached by the
-  // re-render that swaps the code's text nodes). Clears on close / file change /
-  // unmount.
+  // mounts; we re-resolve the anchor against the live DOM, so the range's nodes
+  // are connected (a node captured at double-click would be detached by the
+  // re-render that swaps the code's text nodes, and the click point would now be
+  // under the popover). Clears on close / file change / unmount.
   useEffect(() => {
-    if (!symbolNav || !highlightApiAvailable()) {
+    if (!symbolNav?.anchor || !highlightApiAvailable()) {
       clearSymbolHighlight();
       return;
     }
-    const range = wordRangeFromPoint(symbolNav.x, symbolNav.y);
+    const range = rangeFromAnchor(symbolNav.anchor);
     if (!range) {
       clearSymbolHighlight();
       return;
