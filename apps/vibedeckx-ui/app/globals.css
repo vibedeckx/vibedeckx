@@ -186,10 +186,11 @@
 }
 
 /* Transient highlight applied to a Shiki line when a symbol jump scrolls to it.
-   `display: block` lets the background span the full line; a left bar mimics
-   GitHub's jump-to-line cue. Removed after ~1.6s by the CodeBlock effect. */
+   The Shiki `code` element is `display: grid`, so each `.line` is already a
+   full-width row — no `display: block` needed (it would re-introduce the
+   trailing-newline blank line). A left bar mimics GitHub's jump-to-line cue.
+   Removed after ~1.6s by the CodeBlock effect. */
 .code-line-highlight {
-  display: block;
   background-color: color-mix(in srgb, var(--primary) 16%, transparent);
   box-shadow: inset 3px 0 0 0 var(--primary);
   transition: background-color 0.4s ease;
