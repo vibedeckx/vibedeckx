@@ -148,45 +148,52 @@ export function FilePreview({
     x: number;
     y: number;
   } | null>(null);
-  const [symbolDebug, setSymbolDebug] = useState("");
+  // The double-clicked word's selection boundaries (nodes + offsets), NOT a Range
+  // object. Opening the popover clears the native selection, which collapses any
+  // Range that exists during that moment — but the underlying text nodes stay put
+  // (verified: conn=true). So we stash the boundaries and rebuild a fresh range
+  // AFTER mount, in the effect below, where the one-time collapse is already past.
+  const symbolBoundsRef = useRef<{ sc: Node; so: number; ec: Node; eo: number } | null>(null);
 
-  // Double-click selects a word natively; if it's an identifier, paint our own
-  // "selection" highlight on it and open the symbol popover. The highlight is
-  // registered HERE, synchronously, while the native selection is still live —
-  // opening the popover clears the native selection, and a range read after that
-  // (e.g. in the popover's effect) has already collapsed to empty. We build a
-  // standalone range (not derived from the selection) so clearing the selection
-  // can't collapse it.
+  // Double-click selects a word natively; if it's an identifier, record its
+  // boundaries and open the symbol popover. The actual highlight is applied in the
+  // effect below (after the popover mounts), where the rebuilt range survives.
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     const selection = window.getSelection();
     const sel = selection?.toString().trim() ?? "";
     if (!SYMBOL_RE.test(sel)) return;
 
-    if (selection && selection.rangeCount > 0 && highlightApiAvailable()) {
-      const live = selection.getRangeAt(0);
-      const range = document.createRange();
-      range.setStart(live.startContainer, live.startOffset);
-      range.setEnd(live.endContainer, live.endOffset);
-      ensureSymbolHlStyle();
-      CSS.highlights.set(SYMBOL_HL, new Highlight(range));
-
-      // DIAG: sample the range over time to see when (if) it collapses.
-      const snap = (t: string) =>
-        `${t}[c=${range.collapsed} l=${range.toString().length} size=${CSS.highlights.size} conn=${range.startContainer.isConnected}]`;
-      setSymbolDebug(snap("t0"));
-      requestAnimationFrame(() => setSymbolDebug((d) => `${d} ${snap("raf")}`));
-      setTimeout(() => setSymbolDebug((d) => `${d} ${snap("t200")}`), 200);
-    }
+    symbolBoundsRef.current =
+      selection && selection.rangeCount > 0
+        ? {
+            sc: selection.getRangeAt(0).startContainer,
+            so: selection.getRangeAt(0).startOffset,
+            ec: selection.getRangeAt(0).endContainer,
+            eo: selection.getRangeAt(0).endOffset,
+          }
+        : null;
 
     setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
   }, []);
 
-  // Drop the highlight whenever the popover isn't open (closed, or file changed),
-  // and on unmount.
+  // Apply (and tear down) the custom symbol highlight. Runs after the popover
+  // mounts, so rebuilding the range here dodges the mount-time selection clear
+  // that collapses a range made earlier. Clears when the popover closes / file
+  // changes / unmounts.
   useEffect(() => {
-    if (!symbolNav) clearSymbolHighlight();
+    const bounds = symbolBoundsRef.current;
+    if (!symbolNav || !bounds || !highlightApiAvailable()) {
+      clearSymbolHighlight();
+      return;
+    }
+    if (!bounds.sc.isConnected || !bounds.ec.isConnected) return;
+    const range = document.createRange();
+    range.setStart(bounds.sc, bounds.so);
+    range.setEnd(bounds.ec, bounds.eo);
+    ensureSymbolHlStyle();
+    CSS.highlights.set(SYMBOL_HL, new Highlight(range));
+    return clearSymbolHighlight;
   }, [symbolNav]);
-  useEffect(() => clearSymbolHighlight, []);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
 
@@ -438,7 +445,6 @@ export function FilePreview({
           target={target}
           currentFile={filePath}
           anchor={{ x: symbolNav.x, y: symbolNav.y }}
-          debug={symbolDebug}
           onJump={onJump}
           onClose={() => setSymbolNav(null)}
         />
