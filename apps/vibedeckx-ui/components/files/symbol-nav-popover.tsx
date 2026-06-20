@@ -17,7 +17,11 @@ function ensureHighlightStyle() {
   if (highlightStyleInjected || typeof document === "undefined") return;
   highlightStyleInjected = true;
   const style = document.createElement("style");
-  style.textContent = `::highlight(${HIGHLIGHT_NAME}){background-color:color-mix(in srgb, var(--primary) 35%, transparent);}`;
+  // Literal color, not var(--primary)/color-mix: custom properties don't resolve
+  // reliably inside ::highlight() (its restricted inheritance), which silently
+  // dropped the background and left the highlight invisible. This blue reads as a
+  // selection on both light and dark code backgrounds.
+  style.textContent = `::highlight(${HIGHLIGHT_NAME}){background-color:rgba(101, 160, 255, 0.5);}`;
   document.head.appendChild(style);
 }
 
