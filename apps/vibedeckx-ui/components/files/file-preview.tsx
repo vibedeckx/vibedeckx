@@ -148,6 +148,7 @@ export function FilePreview({
     x: number;
     y: number;
   } | null>(null);
+  const [symbolDebug, setSymbolDebug] = useState("");
 
   // Double-click selects a word natively; if it's an identifier, paint our own
   // "selection" highlight on it and open the symbol popover. The highlight is
@@ -168,6 +169,13 @@ export function FilePreview({
       range.setEnd(live.endContainer, live.endOffset);
       ensureSymbolHlStyle();
       CSS.highlights.set(SYMBOL_HL, new Highlight(range));
+
+      // DIAG: sample the range over time to see when (if) it collapses.
+      const snap = (t: string) =>
+        `${t}[c=${range.collapsed} l=${range.toString().length} size=${CSS.highlights.size} conn=${range.startContainer.isConnected}]`;
+      setSymbolDebug(snap("t0"));
+      requestAnimationFrame(() => setSymbolDebug((d) => `${d} ${snap("raf")}`));
+      setTimeout(() => setSymbolDebug((d) => `${d} ${snap("t200")}`), 200);
     }
 
     setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
@@ -430,6 +438,7 @@ export function FilePreview({
           target={target}
           currentFile={filePath}
           anchor={{ x: symbolNav.x, y: symbolNav.y }}
+          debug={symbolDebug}
           onJump={onJump}
           onClose={() => setSymbolNav(null)}
         />
