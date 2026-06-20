@@ -265,19 +265,26 @@ export function FilePreview({
   // Both find the word from the click point (single-click has no native selection
   // to read). A drag-select (non-collapsed selection on a plain click) is ignored.
   const handleClick = useCallback((e: React.MouseEvent) => {
+    if (e.detail >= 2) {
+      // Second click of a double-click: upgrade the already-open popover to a real
+      // native selection. Reuse the FIRST click's anchor — the popover now covers
+      // the point, so re-detecting from coordinates would hit the popover itself.
+      window.getSelection()?.removeAllRanges();
+      setSymbolNav((prev) => (prev ? { ...prev, selectWord: true } : prev));
+      return;
+    }
     const existing = window.getSelection();
-    if (existing && !existing.isCollapsed && e.detail === 1) return; // drag-select
+    if (existing && !existing.isCollapsed) return; // drag-select
     const found = wordFromPoint(e.clientX, e.clientY);
     if (!found) return;
-    // Kill the native (blue) selection now so it can't flash; for a double-click
-    // the effect re-asserts it after mount.
+    // Kill the native (blue) selection now so it can't flash before the highlight.
     existing?.removeAllRanges();
     setSymbolNav({
       symbol: found.word,
       x: e.clientX,
       y: e.clientY,
       anchor: found.anchor,
-      selectWord: e.detail >= 2,
+      selectWord: false,
     });
   }, []);
 

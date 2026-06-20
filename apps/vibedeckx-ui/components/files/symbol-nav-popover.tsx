@@ -59,6 +59,9 @@ export function SymbolNavPopover({
   // Dismiss on outside click or Escape.
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
+      // Let the second click of a double-click through — it upgrades this popover
+      // to a native selection rather than dismissing it.
+      if (e.detail >= 2) return;
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
