@@ -57,6 +57,7 @@ export function SymbolNavPopover({
   const [loading, setLoading] = useState(true);
   const [hits, setHits] = useState<SymbolHit[]>([]);
   const [truncated, setTruncated] = useState(false);
+  const [debug, setDebug] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
   // The native double-click selection gets cleared the moment this popover
@@ -66,12 +67,24 @@ export function SymbolNavPopover({
   // Ctrl-C is handled separately (the keydown effect below) since there's no
   // native selection to copy from. Falls back to no highlight on old browsers.
   useEffect(() => {
+    const hasCSS = typeof CSS !== "undefined";
+    const hasReg = hasCSS && "highlights" in CSS;
+    const hasCtor = typeof Highlight !== "undefined";
+    const rangeText = selectionRange ? selectionRange.toString() : "<null>";
+    const collapsed = selectionRange ? selectionRange.collapsed : "n/a";
+    setDebug(
+      `reg=${hasReg} ctor=${hasCtor} len=${rangeText.length} collapsed=${collapsed} txt="${rangeText.slice(0, 12)}"`
+    );
+
     if (!selectionRange) return;
-    if (typeof CSS === "undefined" || !("highlights" in CSS) || typeof Highlight === "undefined") {
-      return;
-    }
+    if (!hasReg || !hasCtor) return;
     ensureHighlightStyle();
-    CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(selectionRange));
+    try {
+      CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(selectionRange));
+      setDebug((d) => `${d} set=ok size=${CSS.highlights.size}`);
+    } catch (err) {
+      setDebug((d) => `${d} set=THREW:${(err as Error).message}`);
+    }
     return () => {
       CSS.highlights.delete(HIGHLIGHT_NAME);
     };
@@ -175,6 +188,11 @@ export function SymbolNavPopover({
     >
       <div className="border-b px-3 py-1.5 text-xs font-medium">
         <span className="font-mono">{symbol}</span>
+        {debug && (
+          <div className="mt-1 font-mono text-[10px] font-normal text-muted-foreground break-all">
+            {debug}
+          </div>
+        )}
       </div>
       <div className="flex-1 overflow-auto p-1">
         {loading ? (
