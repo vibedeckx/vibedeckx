@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { api, type SymbolHit } from "@/lib/api";
@@ -13,6 +13,9 @@ interface SymbolNavPopoverProps {
   /** The file currently in the preview, used to sort same-file hits first. */
   currentFile: string | null;
   anchor: { x: number; y: number };
+  /** The double-clicked word's selection range, re-asserted after mount so the
+      word stays selected (and Ctrl-C-copyable) despite the popover clearing it. */
+  selectionRange: Range | null;
   onJump: (file: string, line: number) => void;
   onClose: () => void;
 }
@@ -27,6 +30,7 @@ export function SymbolNavPopover({
   target,
   currentFile,
   anchor,
+  selectionRange,
   onJump,
   onClose,
 }: SymbolNavPopoverProps) {
@@ -34,6 +38,20 @@ export function SymbolNavPopover({
   const [hits, setHits] = useState<SymbolHit[]>([]);
   const [truncated, setTruncated] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+
+  // Mounting this popover clears the double-click word selection. Re-assert it
+  // before the browser paints (useLayoutEffect runs after DOM mutation, before
+  // paint), so the user never sees the selection flicker and can still Ctrl-C the
+  // symbol. Guard against clobbering a fresh selection the user made themselves.
+  // Re-runs when `loading` flips, since rendering results can clear it again.
+  useLayoutEffect(() => {
+    if (!selectionRange) return;
+    const s = window.getSelection();
+    if (!s) return;
+    if (s.rangeCount > 0 && !s.isCollapsed) return;
+    s.removeAllRanges();
+    s.addRange(selectionRange);
+  }, [selectionRange, loading]);
 
   useEffect(() => {
     let alive = true;

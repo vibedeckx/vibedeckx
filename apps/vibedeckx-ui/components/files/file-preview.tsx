@@ -114,23 +114,25 @@ export function FilePreview({
 }: FilePreviewProps) {
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [prevFilePath, setPrevFilePath] = useState(filePath);
-  const [symbolNav, setSymbolNav] = useState<{ symbol: string; x: number; y: number } | null>(null);
+  const [symbolNav, setSymbolNav] = useState<{
+    symbol: string;
+    x: number;
+    y: number;
+    range: Range | null;
+  } | null>(null);
 
-  // Double-click selects a word natively; if it's an identifier, open the
-  // symbol navigation popover anchored at the cursor.
-  //
-  // The open is deferred to the next tick on purpose. dblclick is a discrete
-  // event, so React flushes setState synchronously — mounting the popover portal
-  // in the same tick mutates the DOM while the browser is still settling the
-  // double-click word selection, which collapses it (Ctrl-C then copies nothing).
-  // Deferring lets the selection settle first; the popover then mounts without
-  // disturbing it, so the word stays selected and copyable.
+  // Double-click selects a word natively; if it's an identifier, open the symbol
+  // navigation popover anchored at the cursor. We capture the word's selection
+  // range and hand it to the popover, which re-asserts it after mounting —
+  // mounting the popover otherwise clears the selection, so the word would stop
+  // being selectable/copyable (Ctrl-C). See SymbolNavPopover's useLayoutEffect.
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    const sel = window.getSelection()?.toString().trim() ?? "";
+    const selection = window.getSelection();
+    const sel = selection?.toString().trim() ?? "";
     if (!SYMBOL_RE.test(sel)) return;
-    const x = e.clientX;
-    const y = e.clientY;
-    setTimeout(() => setSymbolNav({ symbol: sel, x, y }), 0);
+    const range =
+      selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+    setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY, range });
   }, []);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
@@ -383,6 +385,7 @@ export function FilePreview({
           target={target}
           currentFile={filePath}
           anchor={{ x: symbolNav.x, y: symbolNav.y }}
+          selectionRange={symbolNav.range}
           onJump={onJump}
           onClose={() => setSymbolNav(null)}
         />
