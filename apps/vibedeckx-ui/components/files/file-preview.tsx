@@ -254,12 +254,12 @@ export function FilePreview({
     x: number;
     y: number;
     anchor: LineColAnchor | null;
-    // PROTOTYPE: true when triggered by a double-click — the effect re-asserts a
-    // real native selection over the word instead of the custom amber highlight.
+    // true when triggered by a double-click — the effect re-asserts a real native
+    // selection over the word instead of the custom amber highlight.
     selectWord: boolean;
   } | null>(null);
 
-  // PROTOTYPE (single+double click via MouseEvent.detail):
+  // Single + double click are distinguished by MouseEvent.detail (no timer):
   //   detail 1 (single click) → custom amber highlight + popover
   //   detail 2 (double click) → real native selection + popover (no amber)
   // Both find the word from the click point (single-click has no native selection
