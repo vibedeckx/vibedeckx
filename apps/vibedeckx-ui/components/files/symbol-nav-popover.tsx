@@ -8,6 +8,19 @@ import { api, type SymbolHit } from "@/lib/api";
 // Name shared between the registered highlight and the ::highlight() CSS rule.
 const HIGHLIGHT_NAME = "symbol-nav";
 
+// The ::highlight() rule is injected at runtime rather than written in
+// globals.css: the build's CSS parser (Lightning CSS) rejects ::highlight() as an
+// unknown pseudo-element, but the browser engine that backs the Highlight API
+// parses it fine. Inject once, lazily, the first time a highlight is shown.
+let highlightStyleInjected = false;
+function ensureHighlightStyle() {
+  if (highlightStyleInjected || typeof document === "undefined") return;
+  highlightStyleInjected = true;
+  const style = document.createElement("style");
+  style.textContent = `::highlight(${HIGHLIGHT_NAME}){background-color:color-mix(in srgb, var(--primary) 35%, transparent);}`;
+  document.head.appendChild(style);
+}
+
 interface SymbolNavPopoverProps {
   projectId: string;
   symbol: string;
@@ -53,6 +66,7 @@ export function SymbolNavPopover({
     if (typeof CSS === "undefined" || !("highlights" in CSS) || typeof Highlight === "undefined") {
       return;
     }
+    ensureHighlightStyle();
     CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(selectionRange));
     return () => {
       CSS.highlights.delete(HIGHLIGHT_NAME);
