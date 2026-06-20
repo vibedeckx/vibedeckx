@@ -118,11 +118,19 @@ export function FilePreview({
 
   // Double-click selects a word natively; if it's an identifier, open the
   // symbol navigation popover anchored at the cursor.
+  //
+  // The open is deferred to the next tick on purpose. dblclick is a discrete
+  // event, so React flushes setState synchronously — mounting the popover portal
+  // in the same tick mutates the DOM while the browser is still settling the
+  // double-click word selection, which collapses it (Ctrl-C then copies nothing).
+  // Deferring lets the selection settle first; the popover then mounts without
+  // disturbing it, so the word stays selected and copyable.
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     const sel = window.getSelection()?.toString().trim() ?? "";
-    if (SYMBOL_RE.test(sel)) {
-      setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
-    }
+    if (!SYMBOL_RE.test(sel)) return;
+    const x = e.clientX;
+    const y = e.clientY;
+    setTimeout(() => setSymbolNav({ symbol: sel, x, y }), 0);
   }, []);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
