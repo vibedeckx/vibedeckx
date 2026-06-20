@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { api, type SymbolHit } from "@/lib/api";
+
+// Name shared between the registered highlight and the ::highlight() CSS rule.
+const HIGHLIGHT_NAME = "symbol-nav";
 
 interface SymbolNavPopoverProps {
   projectId: string;
@@ -39,19 +42,22 @@ export function SymbolNavPopover({
   const [truncated, setTruncated] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Mounting this popover clears the double-click word selection. Re-assert it
-  // before the browser paints (useLayoutEffect runs after DOM mutation, before
-  // paint), so the user never sees the selection flicker and can still Ctrl-C the
-  // symbol. Guard against clobbering a fresh selection the user made themselves.
-  // Re-runs when `loading` flips, since rendering results can clear it again.
-  useLayoutEffect(() => {
+  // The native double-click selection gets cleared the moment this popover
+  // mounts, so instead of fighting to preserve it we paint our OWN highlight on
+  // the word via the CSS Custom Highlight API. It styles a Range without touching
+  // the DOM or the native selection, so nothing the popover does can clear it.
+  // Ctrl-C is handled separately (the keydown effect below) since there's no
+  // native selection to copy from. Falls back to no highlight on old browsers.
+  useEffect(() => {
     if (!selectionRange) return;
-    const s = window.getSelection();
-    if (!s) return;
-    if (s.rangeCount > 0 && !s.isCollapsed) return;
-    s.removeAllRanges();
-    s.addRange(selectionRange);
-  }, [selectionRange, loading]);
+    if (typeof CSS === "undefined" || !("highlights" in CSS) || typeof Highlight === "undefined") {
+      return;
+    }
+    CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(selectionRange));
+    return () => {
+      CSS.highlights.delete(HIGHLIGHT_NAME);
+    };
+  }, [selectionRange]);
 
   useEffect(() => {
     let alive = true;
@@ -80,7 +86,19 @@ export function SymbolNavPopover({
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // Ctrl/Cmd+C copies the symbol. Our highlight isn't a native selection, so
+      // the browser has nothing to copy on its own — write it ourselves. Defer to
+      // a real selection if the user made one (so they can still copy other text).
+      if ((e.metaKey || e.ctrlKey) && (e.key === "c" || e.key === "C")) {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0 && !sel.isCollapsed) return;
+        e.preventDefault();
+        void navigator.clipboard?.writeText(symbol);
+      }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -88,7 +106,7 @@ export function SymbolNavPopover({
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [onClose]);
+  }, [onClose, symbol]);
 
   // Same-file hits first within each group.
   const sameFileFirst = (a: SymbolHit, b: SymbolHit) =>

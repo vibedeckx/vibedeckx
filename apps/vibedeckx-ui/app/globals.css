@@ -195,3 +195,11 @@
   box-shadow: inset 3px 0 0 0 var(--primary);
   transition: background-color 0.4s ease;
 }
+
+/* Custom highlight painted on a double-clicked symbol (CSS Custom Highlight API).
+   Stands in for the native selection — which the symbol popover clears on mount —
+   so the word stays visibly "selected" while the popover is open. Copy is handled
+   in JS (Ctrl/Cmd+C writes the symbol to the clipboard). */
+::highlight(symbol-nav) {
+  background-color: color-mix(in srgb, var(--primary) 35%, transparent);
+}
