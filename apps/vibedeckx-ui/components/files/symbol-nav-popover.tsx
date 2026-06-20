@@ -5,26 +5,6 @@ import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { api, type SymbolHit } from "@/lib/api";
 
-// Name shared between the registered highlight and the ::highlight() CSS rule.
-const HIGHLIGHT_NAME = "symbol-nav";
-
-// The ::highlight() rule is injected at runtime rather than written in
-// globals.css: the build's CSS parser (Lightning CSS) rejects ::highlight() as an
-// unknown pseudo-element, but the browser engine that backs the Highlight API
-// parses it fine. Inject once, lazily, the first time a highlight is shown.
-let highlightStyleInjected = false;
-function ensureHighlightStyle() {
-  if (highlightStyleInjected || typeof document === "undefined") return;
-  highlightStyleInjected = true;
-  const style = document.createElement("style");
-  // Literal color, not var(--primary)/color-mix: custom properties don't resolve
-  // reliably inside ::highlight() (its restricted inheritance), which silently
-  // dropped the background and left the highlight invisible. This blue reads as a
-  // selection on both light and dark code backgrounds.
-  style.textContent = `::highlight(${HIGHLIGHT_NAME}){background-color:rgba(101, 160, 255, 0.5);}`;
-  document.head.appendChild(style);
-}
-
 interface SymbolNavPopoverProps {
   projectId: string;
   symbol: string;
@@ -33,9 +13,6 @@ interface SymbolNavPopoverProps {
   /** The file currently in the preview, used to sort same-file hits first. */
   currentFile: string | null;
   anchor: { x: number; y: number };
-  /** The double-clicked word's selection range, re-asserted after mount so the
-      word stays selected (and Ctrl-C-copyable) despite the popover clearing it. */
-  selectionRange: Range | null;
   onJump: (file: string, line: number) => void;
   onClose: () => void;
 }
@@ -50,45 +27,13 @@ export function SymbolNavPopover({
   target,
   currentFile,
   anchor,
-  selectionRange,
   onJump,
   onClose,
 }: SymbolNavPopoverProps) {
   const [loading, setLoading] = useState(true);
   const [hits, setHits] = useState<SymbolHit[]>([]);
   const [truncated, setTruncated] = useState(false);
-  const [debug, setDebug] = useState("");
   const ref = useRef<HTMLDivElement>(null);
-
-  // The native double-click selection gets cleared the moment this popover
-  // mounts, so instead of fighting to preserve it we paint our OWN highlight on
-  // the word via the CSS Custom Highlight API. It styles a Range without touching
-  // the DOM or the native selection, so nothing the popover does can clear it.
-  // Ctrl-C is handled separately (the keydown effect below) since there's no
-  // native selection to copy from. Falls back to no highlight on old browsers.
-  useEffect(() => {
-    const hasCSS = typeof CSS !== "undefined";
-    const hasReg = hasCSS && "highlights" in CSS;
-    const hasCtor = typeof Highlight !== "undefined";
-    const rangeText = selectionRange ? selectionRange.toString() : "<null>";
-    const collapsed = selectionRange ? selectionRange.collapsed : "n/a";
-    setDebug(
-      `reg=${hasReg} ctor=${hasCtor} len=${rangeText.length} collapsed=${collapsed} txt="${rangeText.slice(0, 12)}"`
-    );
-
-    if (!selectionRange) return;
-    if (!hasReg || !hasCtor) return;
-    ensureHighlightStyle();
-    try {
-      CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(selectionRange));
-      setDebug((d) => `${d} set=ok size=${CSS.highlights.size}`);
-    } catch (err) {
-      setDebug((d) => `${d} set=THREW:${(err as Error).message}`);
-    }
-    return () => {
-      CSS.highlights.delete(HIGHLIGHT_NAME);
-    };
-  }, [selectionRange]);
 
   useEffect(() => {
     let alive = true;
@@ -188,11 +133,6 @@ export function SymbolNavPopover({
     >
       <div className="border-b px-3 py-1.5 text-xs font-medium">
         <span className="font-mono">{symbol}</span>
-        {debug && (
-          <div className="mt-1 font-mono text-[10px] font-normal text-muted-foreground break-all">
-            {debug}
-          </div>
-        )}
       </div>
       <div className="flex-1 overflow-auto p-1">
         {loading ? (

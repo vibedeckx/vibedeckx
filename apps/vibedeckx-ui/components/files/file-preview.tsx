@@ -23,6 +23,35 @@ import { SymbolNavPopover } from "./symbol-nav-popover";
 // A double-clicked selection is treated as a symbol only if it's a bare identifier.
 const SYMBOL_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
+// Custom "selection" highlight for a double-clicked symbol, via the CSS Custom
+// Highlight API. We register it synchronously in the double-click handler —
+// BEFORE the popover mounts and clears the native selection — because a range
+// read after that point has already collapsed to empty.
+const SYMBOL_HL = "symbol-nav";
+
+function highlightApiAvailable(): boolean {
+  return (
+    typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight !== "undefined"
+  );
+}
+
+// The ::highlight() rule is injected at runtime, not in globals.css: the build's
+// Lightning CSS rejects ::highlight() as an unknown pseudo-element, while the
+// browser engine backing the Highlight API parses it fine. A literal color is
+// used because var(--primary)/color-mix don't resolve inside ::highlight().
+let symbolHlStyleInjected = false;
+function ensureSymbolHlStyle() {
+  if (symbolHlStyleInjected || typeof document === "undefined") return;
+  symbolHlStyleInjected = true;
+  const style = document.createElement("style");
+  style.textContent = `::highlight(${SYMBOL_HL}){background-color:rgba(101, 160, 255, 0.5);}`;
+  document.head.appendChild(style);
+}
+
+function clearSymbolHighlight() {
+  if (highlightApiAvailable()) CSS.highlights.delete(SYMBOL_HL);
+}
+
 const EXTENSION_LANGUAGE_MAP: Record<string, BundledLanguage> = {
   ts: "typescript",
   tsx: "tsx",
@@ -118,22 +147,38 @@ export function FilePreview({
     symbol: string;
     x: number;
     y: number;
-    range: Range | null;
   } | null>(null);
 
-  // Double-click selects a word natively; if it's an identifier, open the symbol
-  // navigation popover anchored at the cursor. We capture the word's selection
-  // range and hand it to the popover, which re-asserts it after mounting —
-  // mounting the popover otherwise clears the selection, so the word would stop
-  // being selectable/copyable (Ctrl-C). See SymbolNavPopover's useLayoutEffect.
+  // Double-click selects a word natively; if it's an identifier, paint our own
+  // "selection" highlight on it and open the symbol popover. The highlight is
+  // registered HERE, synchronously, while the native selection is still live —
+  // opening the popover clears the native selection, and a range read after that
+  // (e.g. in the popover's effect) has already collapsed to empty. We build a
+  // standalone range (not derived from the selection) so clearing the selection
+  // can't collapse it.
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     const selection = window.getSelection();
     const sel = selection?.toString().trim() ?? "";
     if (!SYMBOL_RE.test(sel)) return;
-    const range =
-      selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
-    setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY, range });
+
+    if (selection && selection.rangeCount > 0 && highlightApiAvailable()) {
+      const live = selection.getRangeAt(0);
+      const range = document.createRange();
+      range.setStart(live.startContainer, live.startOffset);
+      range.setEnd(live.endContainer, live.endOffset);
+      ensureSymbolHlStyle();
+      CSS.highlights.set(SYMBOL_HL, new Highlight(range));
+    }
+
+    setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY });
   }, []);
+
+  // Drop the highlight whenever the popover isn't open (closed, or file changed),
+  // and on unmount.
+  useEffect(() => {
+    if (!symbolNav) clearSymbolHighlight();
+  }, [symbolNav]);
+  useEffect(() => clearSymbolHighlight, []);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
 
@@ -385,7 +430,6 @@ export function FilePreview({
           target={target}
           currentFile={filePath}
           anchor={{ x: symbolNav.x, y: symbolNav.y }}
-          selectionRange={symbolNav.range}
           onJump={onJump}
           onClose={() => setSymbolNav(null)}
         />
