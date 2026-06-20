@@ -94,6 +94,47 @@ function rangeFromAnchor(anchor: LineColAnchor): Range | null {
   return range;
 }
 
+const WORD_CHAR = /[A-Za-z0-9_$]/;
+
+// Find the identifier under a viewport point (used for single-click, which has no
+// native selection to read). Returns the word + its stable line+col anchor.
+function wordFromPoint(x: number, y: number): { word: string; anchor: LineColAnchor } | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  let node: Node | null = null;
+  let offset = 0;
+  if (doc.caretRangeFromPoint) {
+    const r = doc.caretRangeFromPoint(x, y);
+    if (r) {
+      node = r.startContainer;
+      offset = r.startOffset;
+    }
+  } else if (doc.caretPositionFromPoint) {
+    const p = doc.caretPositionFromPoint(x, y);
+    if (p) {
+      node = p.offsetNode;
+      offset = p.offset;
+    }
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+  const text = node.textContent ?? "";
+  let start = offset;
+  let end = offset;
+  while (start > 0 && WORD_CHAR.test(text[start - 1])) start--;
+  while (end < text.length && WORD_CHAR.test(text[end])) end++;
+  if (start >= end) return null;
+  const word = text.slice(start, end);
+  if (!SYMBOL_RE.test(word)) return null;
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, end);
+  const anchor = anchorFromRange(range);
+  if (!anchor) return null;
+  return { word, anchor };
+}
+
 function highlightApiAvailable(): boolean {
   return (
     typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight !== "undefined"
@@ -213,35 +254,54 @@ export function FilePreview({
     x: number;
     y: number;
     anchor: LineColAnchor | null;
+    // PROTOTYPE: true when triggered by a double-click — the effect re-asserts a
+    // real native selection over the word instead of the custom amber highlight.
+    selectWord: boolean;
   } | null>(null);
-  // Double-click selects a word natively; if it's an identifier, capture a stable
-  // line+column anchor (from the live selection, before the popover clears it)
-  // and open the popover. The highlight itself is applied in the effect below.
-  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    const selection = window.getSelection();
-    const sel = selection?.toString().trim() ?? "";
-    if (!SYMBOL_RE.test(sel)) return;
-    const anchor =
-      selection && selection.rangeCount > 0 ? anchorFromRange(selection.getRangeAt(0)) : null;
-    // Clear the native (blue) selection synchronously, before the browser paints
-    // it, so it doesn't flash before our amber highlight takes over. The anchor is
-    // already captured above, so clearing loses nothing.
-    selection?.removeAllRanges();
-    setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY, anchor });
+
+  // PROTOTYPE (single+double click via MouseEvent.detail):
+  //   detail 1 (single click) → custom amber highlight + popover
+  //   detail 2 (double click) → real native selection + popover (no amber)
+  // Both find the word from the click point (single-click has no native selection
+  // to read). A drag-select (non-collapsed selection on a plain click) is ignored.
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    const existing = window.getSelection();
+    if (existing && !existing.isCollapsed && e.detail === 1) return; // drag-select
+    const found = wordFromPoint(e.clientX, e.clientY);
+    if (!found) return;
+    // Kill the native (blue) selection now so it can't flash; for a double-click
+    // the effect re-asserts it after mount.
+    existing?.removeAllRanges();
+    setSymbolNav({
+      symbol: found.word,
+      x: e.clientX,
+      y: e.clientY,
+      anchor: found.anchor,
+      selectWord: e.detail >= 2,
+    });
   }, []);
 
-  // Apply (and tear down) the custom symbol highlight. Runs after the popover
-  // mounts; we re-resolve the anchor against the live DOM, so the range's nodes
-  // are connected (a node captured at double-click would be detached by the
-  // re-render that swaps the code's text nodes, and the click point would now be
-  // under the popover). Clears on close / file change / unmount.
+  // Apply the symbol affordance after the popover mounts (the re-render swaps the
+  // code's text nodes, so we re-resolve the anchor against the live DOM here).
+  // single-click → custom amber highlight; double-click → native selection.
   useEffect(() => {
-    if (!symbolNav?.anchor || !highlightApiAvailable()) {
+    if (!symbolNav?.anchor) {
       clearSymbolHighlight();
       return;
     }
     const range = rangeFromAnchor(symbolNav.anchor);
     if (!range) {
+      clearSymbolHighlight();
+      return;
+    }
+    if (symbolNav.selectWord) {
+      clearSymbolHighlight();
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      return;
+    }
+    if (!highlightApiAvailable()) {
       clearSymbolHighlight();
       return;
     }
@@ -472,7 +532,7 @@ export function FilePreview({
         ) : fileContent.content !== null ? (
           <div
             className="h-full [&_pre]:text-[length:var(--files-content-font-size,14px)]! [&_code]:text-[length:var(--files-content-font-size,14px)]!"
-            onDoubleClick={handleDoubleClick}
+            onClick={handleClick}
           >
             <CodeBlock
               code={fileContent.content}
