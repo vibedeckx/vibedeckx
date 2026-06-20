@@ -13,6 +13,7 @@ interface SymbolNavPopoverProps {
   /** The file currently in the preview, used to sort same-file hits first. */
   currentFile: string | null;
   anchor: { x: number; y: number };
+  debug?: string;
   onJump: (file: string, line: number) => void;
   onClose: () => void;
 }
@@ -27,6 +28,7 @@ export function SymbolNavPopover({
   target,
   currentFile,
   anchor,
+  debug,
   onJump,
   onClose,
 }: SymbolNavPopoverProps) {
@@ -133,6 +135,11 @@ export function SymbolNavPopover({
     >
       <div className="border-b px-3 py-1.5 text-xs font-medium">
         <span className="font-mono">{symbol}</span>
+        {debug && (
+          <div className="mt-1 font-mono text-[10px] font-normal text-muted-foreground break-all">
+            {debug}
+          </div>
+        )}
       </div>
       <div className="flex-1 overflow-auto p-1">
         {loading ? (

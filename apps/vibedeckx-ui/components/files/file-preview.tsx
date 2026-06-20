@@ -154,6 +154,7 @@ export function FilePreview({
   // (verified: conn=true). So we stash the boundaries and rebuild a fresh range
   // AFTER mount, in the effect below, where the one-time collapse is already past.
   const symbolBoundsRef = useRef<{ sc: Node; so: number; ec: Node; eo: number } | null>(null);
+  const [symbolDebug, setSymbolDebug] = useState("");
 
   // Double-click selects a word natively; if it's an identifier, record its
   // boundaries and open the symbol popover. The actual highlight is applied in the
@@ -186,13 +187,24 @@ export function FilePreview({
       clearSymbolHighlight();
       return;
     }
-    if (!bounds.sc.isConnected || !bounds.ec.isConnected) return;
     const range = document.createRange();
-    range.setStart(bounds.sc, bounds.so);
-    range.setEnd(bounds.ec, bounds.eo);
+    try {
+      range.setStart(bounds.sc, bounds.so);
+      range.setEnd(bounds.ec, bounds.eo);
+    } catch (err) {
+      setSymbolDebug(`setStart/End THREW: ${(err as Error).message}`);
+      return;
+    }
     ensureSymbolHlStyle();
     CSS.highlights.set(SYMBOL_HL, new Highlight(range));
-    return clearSymbolHighlight;
+    const snap = (t: string) =>
+      `${t}[c=${range.collapsed} l=${range.toString().length} size=${CSS.highlights.size} conn=${bounds.sc.isConnected} scType=${bounds.sc.nodeType}]`;
+    setSymbolDebug(snap("eff"));
+    const id = window.setTimeout(() => setSymbolDebug((d) => `${d} ${snap("t300")}`), 300);
+    return () => {
+      window.clearTimeout(id);
+      clearSymbolHighlight();
+    };
   }, [symbolNav]);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
@@ -445,6 +457,7 @@ export function FilePreview({
           target={target}
           currentFile={filePath}
           anchor={{ x: symbolNav.x, y: symbolNav.y }}
+          debug={symbolDebug}
           onJump={onJump}
           onClose={() => setSymbolNav(null)}
         />
