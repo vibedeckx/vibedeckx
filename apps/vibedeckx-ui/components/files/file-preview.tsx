@@ -109,7 +109,7 @@ function ensureSymbolHlStyle() {
   if (symbolHlStyleInjected || typeof document === "undefined") return;
   symbolHlStyleInjected = true;
   const style = document.createElement("style");
-  style.textContent = `::highlight(${SYMBOL_HL}){background-color:rgba(101, 160, 255, 0.5);}`;
+  style.textContent = `::highlight(${SYMBOL_HL}){background-color:rgba(255, 196, 0, 0.32);}`;
   document.head.appendChild(style);
 }
 
