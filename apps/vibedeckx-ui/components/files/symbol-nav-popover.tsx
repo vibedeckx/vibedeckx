@@ -93,9 +93,20 @@ export function SymbolNavPopover({
   const defs = hits.filter((h) => h.kind === "definition").sort(sameFileFirst);
   const refs = hits.filter((h) => h.kind === "reference").sort(sameFileFirst);
 
-  // Clamp into the viewport.
+  // Position so the popover never covers the clicked symbol's line: open GAP below
+  // the click; if it doesn't fit (symbol low on screen), flip ABOVE the click
+  // instead of sliding up over it. Keeping the symbol uncovered means a
+  // double-click's second click lands on the code (not the popover), so the
+  // native word selection is correct and visible.
+  const GAP = 18;
   const left = Math.max(8, Math.min(anchor.x, window.innerWidth - POPOVER_WIDTH - 8));
-  const top = Math.max(8, Math.min(anchor.y + 8, window.innerHeight - POPOVER_MAX_HEIGHT - 8));
+  const spaceBelow = window.innerHeight - 8 - (anchor.y + GAP);
+  const spaceAbove = anchor.y - GAP - 8;
+  const placeBelow = spaceBelow >= POPOVER_MAX_HEIGHT || spaceBelow >= spaceAbove;
+  const maxHeight = Math.max(120, Math.min(POPOVER_MAX_HEIGHT, placeBelow ? spaceBelow : spaceAbove));
+  const vStyle = placeBelow
+    ? { top: anchor.y + GAP }
+    : { bottom: window.innerHeight - (anchor.y - GAP) };
 
   const Row = ({ hit }: { hit: SymbolHit }) => (
     <button
@@ -131,8 +142,8 @@ export function SymbolNavPopover({
   return createPortal(
     <div
       ref={ref}
-      style={{ left, top, width: POPOVER_WIDTH, maxHeight: POPOVER_MAX_HEIGHT }}
-      className="fixed z-50 flex flex-col overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg"
+      style={{ left, ...vStyle, width: POPOVER_WIDTH, maxHeight }}
+      className="fixed z-50 flex flex-col overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg select-none"
     >
       <div className="border-b px-3 py-1.5 text-xs font-medium">
         <span className="font-mono">{symbol}</span>
