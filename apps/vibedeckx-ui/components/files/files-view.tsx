@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, Eye, EyeOff, Search, X, Loader2, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { RefreshCw, Eye, EyeOff, Search, X, Loader2, PanelLeftClose, PanelLeftOpen, ArrowLeft, ArrowRight } from "lucide-react";
 import type { ImperativePanelHandle } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
@@ -51,10 +51,14 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
     uploadingDirs,
     deletingPaths,
     jumpTarget,
+    canGoBack,
+    canGoForward,
     fetchRoot,
     toggleDirectory,
-    selectFile,
+    navigate,
     jumpTo,
+    goBack,
+    goForward,
     uploadFiles,
     deleteEntry,
   } = useFileBrowser({
@@ -78,9 +82,9 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
 
   // Open a search hit in the preview pane, then clear the query so the tree returns.
   const handleSelectResult = useCallback((path: string) => {
-    selectFile(path);
+    navigate(path);
     search.setQuery("");
-  }, [selectFile, search]);
+  }, [navigate, search]);
 
   if (!projectId) {
     return (
@@ -132,6 +136,26 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
               aria-pressed={showHidden}
             >
               {showHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={goBack}
+              disabled={!canGoBack}
+              title="Back"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              onClick={goForward}
+              disabled={!canGoForward}
+              title="Forward"
+            >
+              <ArrowRight className="h-3.5 w-3.5" />
             </Button>
             <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={handleRefresh} title="Refresh">
               <RefreshCw className={`h-3.5 w-3.5 ${rootLoading ? "animate-spin" : ""}`} />
@@ -245,7 +269,7 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
                   rootLoading={rootLoading}
                   deletingPaths={deletingPaths}
                   onToggleDirectory={toggleDirectory}
-                  onSelectFile={selectFile}
+                  onSelectFile={navigate}
                   onUploadFiles={uploadFiles}
                   onDeleteEntry={deleteEntry}
                 />
