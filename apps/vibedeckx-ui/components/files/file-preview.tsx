@@ -223,6 +223,10 @@ export function FilePreview({
     if (!SYMBOL_RE.test(sel)) return;
     const anchor =
       selection && selection.rangeCount > 0 ? anchorFromRange(selection.getRangeAt(0)) : null;
+    // Clear the native (blue) selection synchronously, before the browser paints
+    // it, so it doesn't flash before our amber highlight takes over. The anchor is
+    // already captured above, so clearing loses nothing.
+    selection?.removeAllRanges();
     setSymbolNav({ symbol: sel, x: e.clientX, y: e.clientY, anchor });
   }, []);
 
