@@ -170,6 +170,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const { name, path: newPath, remotePath, remoteUrl, remoteApiKey, agentMode, executorMode, syncUpConfig, syncDownConfig } = req.body;
 
+    // Secret-confusion guard: the stored remote_api_key is bound to the URL it was
+    // entered for. Repointing remote_url while omitting remoteApiKey would otherwise
+    // retain the old key and later send it (via proxyToRemote's X-Vibedeckx-Api-Key
+    // header) to the newly configured endpoint. Require a fresh key on URL change.
+    if (
+      remoteUrl !== undefined &&
+      remoteUrl !== (project.remote_url ?? null) &&
+      remoteApiKey === undefined &&
+      project.remote_api_key
+    ) {
+      return reply.code(400).send({ error: "remoteApiKey is required when changing remoteUrl" });
+    }
+
     const effectivePath = newPath !== undefined ? newPath : project.path;
     const effectiveRemotePath = remotePath !== undefined ? remotePath : (project.remote_path ?? null);
     const effectiveRemoteUrl = remoteUrl !== undefined ? remoteUrl : (project.remote_url ?? null);
