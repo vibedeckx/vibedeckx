@@ -56,6 +56,12 @@ const startCommand = buildCommand({
         brief: "Directory for storing database file (default: ~/.vibedeckx)",
         optional: true,
       },
+      "env-file": {
+        kind: "parsed",
+        parse: String,
+        brief: "Path to a .env file loaded at startup (default: <data-dir or ~/.vibedeckx>/.env). Shell-set variables take precedence.",
+        optional: true,
+      },
       "accept-remote": {
         kind: "boolean",
         brief: "Allow other vibedeckx servers to use this instance as a remote provider (exposes /api/path/*, /api/browse, /api/execute-one-shot)",
@@ -86,6 +92,9 @@ const startCommand = buildCommand({
     host: string | undefined;
     auth: boolean | undefined;
     "data-dir": string | undefined;
+    // Consumed by load-env.ts before the CLI parses flags; declared here so the
+    // flag is recognized and documented.
+    "env-file": string | undefined;
     "accept-remote": boolean | undefined;
     cert: string | undefined;
     key: string | undefined;
@@ -209,9 +218,15 @@ const connectCommand = buildCommand({
         brief: "Directory for storing database file (default: ~/.vibedeckx)",
         optional: true,
       },
+      "env-file": {
+        kind: "parsed",
+        parse: String,
+        brief: "Path to a .env file loaded at startup (default: <data-dir or ~/.vibedeckx>/.env). Shell-set variables take precedence.",
+        optional: true,
+      },
     },
   },
-  func: async (flags: { "connect-to": string; token: string; port: number | undefined; "data-dir": string | undefined }) => {
+  func: async (flags: { "connect-to": string; token: string; port: number | undefined; "data-dir": string | undefined; "env-file": string | undefined }) => {
     const requestedPort = flags.port ?? 0;
 
     console.log("Starting vibedeckx in reverse-connect mode...");
