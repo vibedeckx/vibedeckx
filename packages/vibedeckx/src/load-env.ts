@@ -44,18 +44,26 @@ if (!existsSync(envPath)) {
 } else {
   try {
     const parsed = parseEnv(readFileSync(envPath, "utf8"));
-    let loaded = 0;
+    const loaded: string[] = [];
+    const skipped: string[] = [];
     for (const [key, value] of Object.entries(parsed)) {
       // Variables already present in the shell environment win over the file,
       // matching standard dotenv semantics — explicit `VAR=… vibedeckx` and
       // exported vars are never silently overridden.
       if (process.env[key] === undefined) {
         process.env[key] = value as string;
-        loaded++;
+        loaded.push(key);
+      } else {
+        skipped.push(key);
       }
     }
-    if (loaded > 0) {
-      console.log(`Loaded ${loaded} environment variable${loaded === 1 ? "" : "s"} from ${envPath}`);
+    // Print names only — values are often secrets (API keys, tokens) and must
+    // not be written to logs.
+    if (loaded.length > 0) {
+      console.log(`Loaded ${loaded.length} environment variable${loaded.length === 1 ? "" : "s"} from ${envPath}: ${loaded.join(", ")}`);
+    }
+    if (skipped.length > 0) {
+      console.log(`Kept existing shell value for ${skipped.length} variable${skipped.length === 1 ? "" : "s"} (not overridden by ${envPath}): ${skipped.join(", ")}`);
     }
   } catch (err) {
     console.warn(`Warning: failed to load env file ${envPath}: ${(err as Error).message}`);
