@@ -327,9 +327,24 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     return reply.status(200).sendFile("index.html");
   });
 
-  // Print registered routes on ready (diagnostic: confirms WS routes are registered)
+  // Track route count + WebSocket routes so startup confirms WS routes are
+  // registered without dumping every static asset (KaTeX fonts etc.) to the log.
+  let routeCount = 0;
+  const wsRoutes: string[] = [];
+  server.addHook("onRoute", (routeOptions) => {
+    routeCount += 1;
+    if (routeOptions.websocket) {
+      const methods = Array.isArray(routeOptions.method) ? routeOptions.method.join(",") : routeOptions.method;
+      wsRoutes.push(`${methods} ${routeOptions.url}`);
+    }
+  });
+
+  // Print a compact diagnostic on ready (confirms WS routes are registered)
   server.addHook("onReady", (done) => {
-    console.log("[Server] Route table:\n" + server.printRoutes({ commonPrefix: false }));
+    console.log(
+      `[Server] ${routeCount} routes registered; ${wsRoutes.length} WebSocket route(s):\n` +
+        wsRoutes.map((r) => `  ${r}`).join("\n"),
+    );
     done();
   });
 
