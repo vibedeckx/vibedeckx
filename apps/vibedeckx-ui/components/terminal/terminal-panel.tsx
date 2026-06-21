@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { ExecutorOutput } from "@/components/executor/executor-output";
 import { useTerminals } from "@/hooks/use-terminals";
 import { useExecutorLogs } from "@/hooks/use-executor-logs";
-import { useProjectRemotes } from "@/hooks/use-project-remotes";
+import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import type { Project } from "@/lib/api";
 
 interface TerminalPanelProps {
@@ -54,7 +54,7 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
     removeTerminal,
   } = useTerminals(projectId, selectedBranch);
 
-  const { remotes } = useProjectRemotes(project?.id ?? undefined);
+  const { remotes } = useProjectRemotesContext();
 
   const [showLocationMenu, setShowLocationMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);

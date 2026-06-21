@@ -19,6 +19,7 @@ import { UserMenu } from '@/components/auth/user-menu';
 import { Logo } from '@/components/brand/logo';
 import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
+import { ProjectRemotesProvider } from '@/hooks/project-remotes-context';
 import { MainConversation, type MainConversationHandle } from '@/components/conversation';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
@@ -467,6 +468,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Workspace View — kept mounted, hidden via CSS to preserve WebSocket */}
           <div className={(activeView !== 'workspace' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden flex'}>
+           <ProjectRemotesProvider projectId={currentProject?.id ?? undefined}>
             <ResizablePanelGroup direction="horizontal" autoSaveId="workspace-panels">
               {/* Left Panel: Project Card + Main Chat */}
               <ResizablePanel defaultSize={33} minSize={25}>
@@ -527,6 +529,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>
+           </ProjectRemotesProvider>
           </div>
 
           {/* Tasks View — kept mounted, hidden via CSS */}

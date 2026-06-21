@@ -35,7 +35,8 @@ import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
-import { useProjectRemotes, remoteConnectionIcon } from "@/hooks/use-project-remotes";
+import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
+import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText } from "@/lib/api";
@@ -142,7 +143,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const onMarkerKeyDown = useMarkerKeyboardNav(messagesRef);
   const textareaWrapperRef = useRef<HTMLDivElement>(null);
   const inputHistory = useInputHistory(setInput, projectId, branch);
-  const { remotes } = useProjectRemotes(project?.id ?? undefined, { withStatus: true });
+  const { remotes } = useProjectRemotesContext();
 
   // Build execution mode targets from local path + project remotes
   const agentTargets: ExecutionModeTarget[] = [];

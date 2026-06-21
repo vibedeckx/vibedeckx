@@ -7,7 +7,7 @@ import { RefreshCw, GitBranch, GitMerge, ChevronsUpDown, Monitor, Cloud } from '
 import { FileDiff } from './file-diff';
 import { CommitSelector } from './commit-selector';
 import { ExecutionModeToggle, type ExecutionModeTarget } from '@/components/ui/execution-mode-toggle';
-import { useProjectRemotes } from '@/hooks/use-project-remotes';
+import { useProjectRemotesContext } from '@/hooks/project-remotes-context';
 import { useDiff } from '@/hooks/use-diff';
 import { useCommits } from '@/hooks/use-commits';
 import type { Project } from '@/lib/api';
@@ -21,7 +21,7 @@ interface DiffPanelProps {
 
 export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }: DiffPanelProps) {
   const [selectedCommit, setSinceCommit] = useState<string | null>(null);
-  const { remotes } = useProjectRemotes(project?.id ?? undefined);
+  const { remotes } = useProjectRemotesContext();
 
   // Build execution mode targets from local path + project remotes
   const diffTargets: ExecutionModeTarget[] = [];

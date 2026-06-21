@@ -9,7 +9,8 @@ import { ExecutorLogsProvider } from "@/hooks/executor-logs-context";
 import { useExecutors } from "@/hooks/use-executors";
 import { useExecutorGroups } from "@/hooks/use-executor-groups";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
-import { useProjectRemotes, remoteConnectionIcon } from "@/hooks/use-project-remotes";
+import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
+import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import type { Project, ExecutionMode } from "@/lib/api";
 import {
   DndContext,
@@ -102,7 +103,7 @@ const headerOnlyCollision: CollisionDetection = (args) => {
 export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorModeChange }: ExecutorPanelProps) {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [openExecutors, setOpenExecutors] = useState<Set<string>>(new Set());
-  const { remotes } = useProjectRemotes(project?.id ?? undefined, { withStatus: true });
+  const { remotes } = useProjectRemotesContext();
 
   // Build execution mode targets from local path + project remotes
   const executorTargets: ExecutionModeTarget[] = [];
