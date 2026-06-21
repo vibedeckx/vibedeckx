@@ -16,7 +16,7 @@ import { CodeBlock, CodeBlockCopyButton } from "@/components/ai-elements/code-bl
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import type { FileContentResponse } from "@/lib/api";
+import { api, type FileContentResponse } from "@/lib/api";
 import type { BundledLanguage } from "shiki";
 import { SymbolNavPopover } from "./symbol-nav-popover";
 
@@ -456,9 +456,10 @@ export function FilePreview({
   };
 
   const handleDownload = () => {
-    if (downloadUrl) {
-      window.open(downloadUrl, "_blank");
-    }
+    if (!filePath) return;
+    void api.downloadFile(projectId, filePath, branch, target).catch((err) => {
+      console.error("Failed to download file", err);
+    });
   };
 
   // Markdown files with previewable content can toggle between rendered and source.
