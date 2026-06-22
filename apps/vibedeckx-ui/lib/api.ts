@@ -68,6 +68,37 @@ export interface AppConfig {
 }
 
 let _cachedConfig: AppConfig | null = null;
+let _configInFlight: Promise<AppConfig> | null = null;
+
+// Persist the app config (public, non-sensitive: an authEnabled flag plus the
+// public Clerk publishable key) so a refresh can mount the auth provider on the
+// first render instead of blocking it on the /api/config round-trip. The value
+// is always revalidated against the server in the background — see getConfig.
+const CONFIG_STORAGE_KEY = "vibedeckx:app-config";
+
+function persistConfig(config: AppConfig): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // ignore storage failures (private mode / quota) — we still have it in memory
+  }
+}
+
+// Synchronously read a previously persisted config. Returns null on the first
+// ever visit (no cache yet), in which case callers fall back to the network.
+export function getPersistedConfig(): AppConfig | null {
+  if (_cachedConfig) return _cachedConfig;
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY);
+    if (!raw) return null;
+    _cachedConfig = JSON.parse(raw) as AppConfig;
+    return _cachedConfig;
+  } catch {
+    return null;
+  }
+}
 
 // 检查是否是本地开发模式（Next.js dev server 在 3000 端口）
 function isLocalDevMode(): boolean {
@@ -654,11 +685,22 @@ export async function setSessionFavorited(sessionId: string, favorited: boolean)
 
 export const api = {
   async getConfig(): Promise<AppConfig> {
-    if (_cachedConfig) return _cachedConfig;
-    const res = await fetch(`${getApiBase()}/api/config`);
-    const data = await res.json();
-    _cachedConfig = data;
-    return data;
+    // Always hit the network so the persisted config is revalidated on every
+    // page load; dedupe concurrent callers (e.g. AuthWrapper + UserMenu mounting
+    // together) onto a single in-flight request.
+    if (_configInFlight) return _configInFlight;
+    _configInFlight = (async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/api/config`);
+        const data = (await res.json()) as AppConfig;
+        _cachedConfig = data;
+        persistConfig(data);
+        return data;
+      } finally {
+        _configInFlight = null;
+      }
+    })();
+    return _configInFlight;
   },
 
   async getProjects(): Promise<Project[]> {

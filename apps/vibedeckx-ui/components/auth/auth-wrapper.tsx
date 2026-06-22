@@ -103,9 +103,17 @@ export function AuthWrapper({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
   }
 
-  // Auth mode — wrap with ClerkProvider
+  // Auth mode — wrap with ClerkProvider.
+  // clerkJSVersion is pinned to an exact patch so clerk.browser.js is requested
+  // by its canonical (immutable, cacheable) URL. Without it, clerk-react asks
+  // for the `@5` major alias, which is served with `no-store` and costs a 307
+  // redirect round-trip on every refresh. Keep this in sync with the installed
+  // @clerk/clerk-react when upgrading.
   return (
-    <ClerkProvider publishableKey={config.clerkPublishableKey}>
+    <ClerkProvider
+      publishableKey={config.clerkPublishableKey}
+      clerkJSVersion="5.125.13"
+    >
       <AuthTokenSync>
         <AuthGate>{children}</AuthGate>
       </AuthTokenSync>
