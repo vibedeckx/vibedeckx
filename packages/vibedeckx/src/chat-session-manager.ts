@@ -1140,6 +1140,10 @@ export class ChatSessionManager {
     sections.push(
       "  <agent-tools>",
       "  - getAgentConversation: view the coding agent's conversation history. Use when the user asks about what the agent is doing, has done, or references agent activities.",
+      "  - spawnAgentSession: start a NEW coding agent in this workspace and hand it a task. Use only when this workspace has no agent yet AND the sub-goal needs an autonomous multi-step coding agent (not a terminal/executor action). The agent runs in edit mode (autonomous, no per-step approval) on this branch.",
+      "  - sendToAgentSession: send a follow-up message to the coding agent ALREADY running in this workspace (chain next step / correct course / answer its question).",
+      "  - Choosing between them: no agent here yet → spawnAgentSession; an agent already exists → sendToAgentSession. Both are asynchronous (see async-execution-model): completion arrives later as an '[Agent Event: Task Completed]' message that wakes you — never claim the task is done from the kick-off tool's return value.",
+      "  - Safety (transitional): spawned agents run in edit mode with no approval prompts and may perform destructive operations. When delegating, write any irreversible/dangerous-operation boundaries directly into the prompt you give the agent.",
       "  </agent-tools>",
     );
 
