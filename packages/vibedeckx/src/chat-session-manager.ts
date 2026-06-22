@@ -523,6 +523,63 @@ export class ChatSessionManager {
     };
   }
 
+  private async sendToRemoteAgentSession(params: {
+    projectId: string;
+    branch: string | null;
+    message: string;
+    chatSessionId: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const { projectId, branch, message, chatSessionId } = params;
+
+    const target = this.findRemoteSessionForProject(projectId, branch);
+    if (!target) {
+      return { success: false, message: "This workspace has no coding agent yet. Use spawnAgentSession to start one." };
+    }
+
+    // Busy check: if the remote session is actively running a turn, don't send.
+    try {
+      const statusRes = await proxyToRemoteAuto(
+        target.info.remoteServerId, target.info.remoteUrl, target.info.remoteApiKey,
+        "GET", `/api/agent-sessions/${target.info.remoteSessionId}`, undefined,
+        { reverseConnectManager: this.reverseConnectManager ?? undefined },
+      );
+      const status = statusRes.ok ? (statusRes.data as { session?: { status?: string } }).session?.status : undefined;
+      if (status === "running") {
+        return { success: false, message: "The coding agent is busy mid-turn. You'll be woken with an '[Agent Event: Task Completed]' message when it finishes — send your message then." };
+      }
+    } catch {
+      // Status unknown — proceed to attempt delivery.
+    }
+
+    try {
+      const msgRes = await proxyToRemoteAuto(
+        target.info.remoteServerId, target.info.remoteUrl, target.info.remoteApiKey,
+        "POST", `/api/agent-sessions/${target.info.remoteSessionId}/message`, { content: message },
+        { reverseConnectManager: this.reverseConnectManager ?? undefined },
+      );
+      if (!msgRes.ok) {
+        return { success: false, message: `Failed to deliver the message to the remote coding agent (status ${msgRes.status}).` };
+      }
+    } catch (error) {
+      return { success: false, message: `Failed to deliver the message to the remote coding agent: ${String(error)}` };
+    }
+
+    ensureRemoteAgentStream(target.localSessionId, {
+      remoteSessionMap: this.remoteSessionMap,
+      remotePatchCache: this.remotePatchCache,
+      reverseConnectManager: this.reverseConnectManager,
+      eventBus: this.eventBus,
+      agentSessionManager: this.agentSessionManager,
+    });
+    this.registerChatInitiatedAgentTask(target.localSessionId);
+    this.setEventListening(chatSessionId, true);
+
+    return {
+      success: true,
+      message: "Message delivered to the remote coding agent. You'll be woken with an '[Agent Event: Task Completed]' message when it finishes. Do not claim completion yet.",
+    };
+  }
+
   private findRemoteSessionForProject(projectId: string, branch?: string | null): { localSessionId: string; info: RemoteSessionInfo } | null {
     // Session IDs use format: remote-{serverId}-{projectId}-{remoteSessionId}
     // Match any session that contains the projectId segment
@@ -1537,6 +1594,11 @@ export class ChatSessionManager {
         execute: async ({ message }) => {
           if (!sessionId) {
             return { success: false, message: "No session context available." };
+          }
+          const sendProject = storage.projects.getById(projectId);
+          const sendAgentMode = sendProject?.agent_mode;
+          if (sendProject && sendAgentMode && sendAgentMode !== "local") {
+            return await this.sendToRemoteAgentSession({ projectId, branch, message, chatSessionId: sessionId });
           }
           const project = storage.projects.getById(projectId);
           const target = agentSessionManager.getSessionByBranch(projectId, branch);
