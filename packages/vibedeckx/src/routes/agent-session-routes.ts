@@ -15,6 +15,7 @@ import {
 } from "../utils/session-title.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
+import { createRemoteAgentSession } from "../remote-agent-sessions.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -586,55 +587,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: `Remote server configuration not found for agent_mode="${agentMode}"` });
       }
       try {
-        const result = await proxyAuto(
-          agentMode,
-          remoteConfig.server_url ?? "",
-          remoteConfig.server_api_key || "",
-          "POST",
-          `/api/path/agent-sessions/new`,
-          { path: remoteConfig.remote_path, branch, permissionMode, agentType }
-        );
-        if (result.ok) {
-          const remoteData = result.data as { session: { id: string }; messages: unknown[] };
-          const localSessionId = `remote-${agentMode}-${project.id}-${remoteData.session.id}`;
-          fastify.remoteSessionMap.set(localSessionId, {
-            remoteServerId: agentMode,
-            remoteUrl: remoteConfig.server_url ?? "",
-            remoteApiKey: remoteConfig.server_api_key || "",
-            remoteSessionId: remoteData.session.id,
+        const created = await createRemoteAgentSession(
+          {
+            remoteSessionMap: fastify.remoteSessionMap,
+            remoteSessionMappings: fastify.storage.remoteSessionMappings,
+            remotePatchCache: fastify.remotePatchCache,
+            agentSessionManager: fastify.agentSessionManager,
+            reverseConnectManager: fastify.reverseConnectManager,
+          },
+          {
+            projectId: project.id,
+            agentMode,
+            remoteConfig,
             branch: branch ?? null,
-          });
-          fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, project.id, agentMode, remoteData.session.id, branch ?? null,
-          );
-
-          // Seed remotePatchCache with REST messages so WS replay has data immediately
-          if (remoteData.messages && remoteData.messages.length > 0) {
-            const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
-            if (cacheEntry.messages.length === 0) {
-              for (let i = 0; i < remoteData.messages.length; i++) {
-                const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
-                fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
-              }
-            }
-          }
-
-          // Mirror createNewSession's branch:activity:idle on the local
-          // EventBus so SSE consumers don't sit on stale "completed" until
-          // the next user message reaches the remote. Goes through the
-          // dedupe gate so a repeat in an already-idle placeholder is a
-          // no-op.
-          fastify.agentSessionManager.emitBranchActivityIfChanged(
-            req.params.projectId,
-            branch ?? null,
-            { activity: "idle", since: Date.now() },
-          );
+            permissionMode: permissionMode || "edit",
+            agentType,
+          },
+        );
+        if (created.ok) {
           return reply.code(200).send({
-            session: { ...remoteData.session, id: localSessionId, projectId: req.params.projectId },
-            messages: remoteData.messages,
+            session: { ...created.remoteSession, id: created.localSessionId, projectId: req.params.projectId },
+            messages: created.messages,
           });
         }
-        return reply.code(proxyStatus(result)).send(result.data);
+        return reply.code(proxyStatus({ status: created.status })).send(created.data);
       } catch (error) {
         console.error("[API] Remote agent session proxy error (new):", error);
         return reply.code(502).send({ error: `Remote agent error: ${String(error)}` });
