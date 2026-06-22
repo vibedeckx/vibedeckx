@@ -33,9 +33,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Vibedeckx — The orchestrator for coding agents",
+  title: "Vibedeckx — Mission control for your coding agents",
   description:
-    "A self-hosted control plane that schedules coding agents, runs the testing surface around them, and lets you swap providers — Claude Code, Codex, and beyond.",
+    "Drive a fleet of coding agents in parallel. Named workspaces, live status at a glance, completion alerts, and cross-environment runs — from any device. Cloud-hosted or self-host.",
 };
 
 // Sync, blocking script that runs before hydration to apply the saved theme

@@ -61,15 +61,15 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
         <div className="wrap hero-inner">
           <span className="eyebrow">
             <span className="dot" />
-            v0.1.6 · live branches now sync across hosts
+            v0.1.6 · now cloud-hosted · mobile app coming
           </span>
           <h1>
-            Run your coding agents <em>in&nbsp;parallel.</em>
+            Mission control for your <em>coding&nbsp;agents.</em>
           </h1>
           <p className="lede">
-            VibeDeckX is a local-first orchestrator for Claude, Codex, and friends. Spin
-            up an agent per branch, watch them work side-by-side, and review diffs
-            before they touch <span className="mono">main</span>.
+            Stop guessing which of a dozen terminal windows is doing what. Every agent
+            gets a named workspace, live status at a glance, and a ping when it&rsquo;s
+            done — run them in parallel, across any environment, from any device.
           </p>
           <div className="hero-cta">
             <button onClick={onSignIn} className="btn btn-primary btn-lg">
@@ -344,7 +344,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
 
           {/* Floating annotations */}
           <div className="annot a1">
-            <span className="badge">01</span> One branch per agent
+            <span className="badge">01</span> Live status at a glance
           </div>
           <div className="annot a2">
             <span className="badge">02</span> Live tool calls, streamed
@@ -393,23 +393,22 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
         <div className="wrap">
           <div className="section-head">
             <span className="kicker">Built for the way agents actually work</span>
-            <h2>The control surface for parallel agents.</h2>
+            <h2>Mission control for a fleet of agents.</h2>
             <p>
-              Stop tab-juggling four Claude windows. VibeDeckX gives every branch its
-              own sandboxed worktree, its own model, and a single dashboard to drive
-              them.
+              Stop tab-juggling a dozen terminal windows. Vibedeckx gives every agent a
+              named workspace, its own model, and one dashboard to see, steer, and ship
+              them all.
             </p>
           </div>
 
           <div className="feature-grid">
             <div className="feature f-wide">
-              <span className="kicker">Branch-native</span>
-              <h3>One worktree per agent. No more git stash gymnastics.</h3>
+              <span className="kicker">At a glance</span>
+              <h3>Know what every agent is doing — at a glance.</h3>
               <p>
-                Every session gets a clean checkout of its branch in an isolated
-                directory. Agents can run <span className="mono">pnpm install</span> or
-                rewrite the lockfile without stepping on the one you're actively
-                editing.
+                Every agent runs in its own named workspace with a live status you can
+                read in a second: working, waiting on you, done, or failed. No more
+                squinting at four cramped windows trying to remember which is which.
               </p>
               <div className="branch-graph">
                 <div className="bg-row">
@@ -572,11 +571,11 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             </div>
 
             <div className="feature f-third">
-              <span className="kicker">Remote</span>
-              <h3>Reach across machines.</h3>
+              <span className="kicker">Cross-environment</span>
+              <h3>Edit here, test there.</h3>
               <p>
-                Run an agent on your beefy GPU box from your laptop. Reverse SSH
-                tunnel, no port forwarding.
+                Wire up as many run environments as you like and route work between
+                them — build on one, run the suite on your GPU box, deploy from a third.
               </p>
               <div className="branch-graph">
                 <div className="bg-row">
@@ -598,24 +597,28 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             </div>
 
             <div className="feature f-third">
-              <span className="kicker">Costs</span>
-              <h3>See spend in real time.</h3>
-              <p>Tokens and dollars per branch, per day. No surprise invoices.</p>
+              <span className="kicker">Alerts</span>
+              <h3>Get pinged when it&rsquo;s done.</h3>
+              <p>
+                Stop babysitting the dashboard. Vibedeckx notifies you the moment an
+                agent finishes, needs approval, or fails — on the web now, your phone
+                soon.
+              </p>
               <div className="branch-graph">
                 <div className="bg-row">
-                  <span className="gutter">$</span>
+                  <span className="gutter">✓</span>
                   <span className="label">feat/parallel-streams</span>
-                  <span className="pill">$1.42</span>
+                  <span className="pill green">done</span>
                 </div>
                 <div className="bg-row">
-                  <span className="gutter">$</span>
+                  <span className="gutter">!</span>
                   <span className="label">fix/diff-virtualization</span>
-                  <span className="pill">$0.38</span>
+                  <span className="pill amber">needs approval</span>
                 </div>
                 <div className="bg-row">
-                  <span className="gutter">$</span>
+                  <span className="gutter">✕</span>
                   <span className="label">edge-runner/main</span>
-                  <span className="pill amber">$3.71</span>
+                  <span className="pill rose">failed</span>
                 </div>
                 <div
                   className="bg-row"
@@ -625,9 +628,9 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                     marginTop: 4,
                   }}
                 >
-                  <span className="gutter">Σ</span>
+                  <span className="gutter">♪</span>
                   <span className="label">today</span>
-                  <span className="pill accent">$7.94</span>
+                  <span className="pill accent">3 alerts</span>
                 </div>
               </div>
             </div>
@@ -640,16 +643,16 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
         <div className="wrap">
           <div className="section-head">
             <span className="kicker">How it works</span>
-            <h2>Three commands. Six parallel agents. One review queue.</h2>
+            <h2>Sign in. Spin up a fleet. Stay on top.</h2>
           </div>
           <div className="steps-grid">
             <div className="step">
               <div className="num">STEP 01</div>
-              <h4>Connect a repo.</h4>
+              <h4>Connect your repos.</h4>
               <p>
-                Point VibeDeckX at any local git directory or remote host. We mount
-                worktrees in <span className="mono">~/.vibedeckx/work</span> — your
-                source repo is never touched.
+                Sign in from any device and point Vibedeckx at your repos and run
+                environments — local, a GPU box, a remote VPS. Each agent works in its
+                own isolated worktree.
               </p>
               <div className="stub">
                 <span className="dollar">$</span> vibedeckx add
@@ -658,10 +661,10 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             </div>
             <div className="step">
               <div className="num">STEP 02</div>
-              <h4>Spawn agents.</h4>
+              <h4>Spawn a fleet.</h4>
               <p>
-                Open a session per branch, pick a model, and write the task. Agents
-                run in isolation — install dependencies, run tests, mutate the
+                Open a workspace per task, pick a model, and hit go. Agents run in
+                parallel and in isolation — install dependencies, run tests, mutate the
                 lockfile freely.
               </p>
               <div className="stub">
@@ -671,10 +674,10 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             </div>
             <div className="step">
               <div className="num">STEP 03</div>
-              <h4>Review &amp; ship.</h4>
+              <h4>Stay on top &amp; ship.</h4>
               <p>
-                Watch tool calls stream in. When the agent's done, review the diff,
-                approve, and push. Rejected hunks roll back without a stash.
+                Watch live status, get pinged the moment an agent finishes, then review
+                the diff, approve, and push. Rejected hunks roll back without a stash.
               </p>
               <div className="stub">
                 <span className="dollar">$</span> vibedeckx review ·{" "}
@@ -693,8 +696,9 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             <span className="kicker">Pricing</span>
             <h2>Bring your own keys. Pay for the surface.</h2>
             <p>
-              VibeDeckX never marks up model usage. You pay Anthropic and OpenAI
-              directly — we just charge for the orchestrator.
+              Cloud-hosted, or self-host for free. Vibedeckx never marks up model usage
+              — you pay Anthropic and OpenAI directly and we just charge for the
+              control surface.
             </p>
           </div>
           <div className="price-grid">
@@ -705,16 +709,16 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                 <span className="per">/ forever</span>
               </div>
               <p className="blurb">
-                Local-only. For solo developers and weekend hackers.
+                Self-host or run locally. For solo devs and weekend hackers.
               </p>
               <ul>
-                <li>Unlimited local sessions</li>
+                <li>Unlimited self-hosted sessions</li>
                 <li>Up to 4 parallel agents</li>
                 <li>Bring your own API keys</li>
                 <li>Community support</li>
               </ul>
               <button onClick={onSignIn} className="btn cta">
-                Download free
+                Self-host free
               </button>
             </div>
             <div className="price featured">
@@ -724,14 +728,14 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                 <span className="per">/ user / mo</span>
               </div>
               <p className="blurb">
-                For builders running agents across machines. The full surface.
+                Cloud-hosted. For builders driving a fleet across environments.
               </p>
               <ul>
                 <li>Everything in Solo</li>
                 <li>Unlimited parallel agents</li>
-                <li>Remote hosts &amp; reverse tunnels</li>
-                <li>Approval policies per project</li>
-                <li>Cost &amp; token analytics</li>
+                <li>Cloud access from any device</li>
+                <li>Multi-environment runs &amp; alerts</li>
+                <li>Approval policies &amp; cost analytics</li>
               </ul>
               <button onClick={onSignIn} className="btn cta">
                 Start 14-day trial
@@ -770,12 +774,12 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
           </div>
           <div className="faq-list">
             <details className="faq-item" open>
-              <summary>Does VibeDeckX send my code anywhere?</summary>
+              <summary>Cloud-hosted or self-hosted?</summary>
               <div className="body">
-                No. The orchestrator runs locally on your machine. The only network
-                traffic is whatever your chosen model provider needs — Anthropic,
-                OpenAI, or your own endpoint. There's no VibeDeckX cloud to opt out
-                of.
+                Both. Vibedeckx runs as a hosted service so you can sign in and command
+                your agents from any device — or self-host it on your own machines if
+                you'd rather keep everything in-house. Either way, model traffic goes
+                straight to your chosen provider with your own keys.
               </div>
             </details>
             <details className="faq-item">
@@ -806,10 +810,12 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
               </div>
             </details>
             <details className="faq-item">
-              <summary>Linux? Windows?</summary>
+              <summary>Linux? Windows? Mobile?</summary>
               <div className="body">
-                macOS and Linux today via <code>npm install -g vibedeckx</code>.
-                Windows via WSL works but isn't officially supported yet.
+                Use the hosted app from any modern browser. To self-host, macOS and
+                Linux today via <code>npm install -g vibedeckx</code>; Windows via WSL
+                works but isn't officially supported yet. A native mobile app is on the
+                way.
               </div>
             </details>
           </div>
@@ -820,7 +826,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
       <section className="wrap">
         <div className="cta-banner">
           <h2>
-            Stop juggling tabs. Start <em>shipping&nbsp;branches.</em>
+            Stop juggling tabs. <em>Take&nbsp;command.</em>
           </h2>
           <div className="row">
             <button onClick={onSignIn} className="btn btn-lg btn-light">
@@ -853,7 +859,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                 <span>vibedeckx</span>
               </a>
               <div className="foot-brand" style={{ marginTop: 10 }}>
-                A local-first orchestrator for coding agents.
+                Mission control for your coding agents.
               </div>
             </div>
             <div className="foot-col">
@@ -1562,6 +1568,7 @@ const vdxStyles = `
   .vdx-lp .bg-row .pill.green { background: var(--vdx-green-tint); border-color: transparent; color: var(--vdx-green); }
   .vdx-lp .bg-row .pill.amber { background: var(--vdx-amber-tint); border-color: transparent; color: oklch(from var(--vdx-amber) 0.42 c h); }
   .vdx-lp .bg-row .pill.accent { background: var(--vdx-accent-tint); border-color: transparent; color: var(--vdx-accent); }
+  .vdx-lp .bg-row .pill.rose { background: var(--vdx-rose-tint); border-color: transparent; color: var(--vdx-rose); }
 
   /* Visual: terminal */
   .vdx-lp .term {
