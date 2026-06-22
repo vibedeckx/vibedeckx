@@ -53,6 +53,13 @@ export interface HttpResponseFrame {
   status: number;
   headers: Record<string, string>;
   body?: string;
+  /**
+   * Encoding of `body`. Omitted/"utf8" means `body` is the raw text payload
+   * (the default for JSON API responses). "base64" means `body` is the
+   * base64-encoded raw bytes — used to carry binary responses (e.g. image
+   * file-download) through the JSON control channel without corruption.
+   */
+  encoding?: "base64";
 }
 
 export interface PongFrame {

@@ -12,6 +12,24 @@ const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const NO_PING_TIMEOUT_MS = 60_000;
 
+// Whether a response body of this content-type is safe to carry as a plain UTF-8
+// string through the control channel. Anything else (octet-stream, images, etc.)
+// is sent as base64 to avoid corrupting the bytes. An empty content-type defaults
+// to textual to preserve existing behavior for JSON API responses.
+function isTextualContentType(contentType: string): boolean {
+  const t = contentType.toLowerCase();
+  if (t === "") return true;
+  return (
+    t.startsWith("text/") ||
+    t.includes("application/json") ||
+    t.includes("application/javascript") ||
+    t.includes("application/xml") ||
+    t.includes("+json") ||
+    t.includes("+xml") ||
+    t.includes("image/svg")
+  );
+}
+
 export class ReverseConnectClient {
   private ws: WebSocket | null = null;
   private localServer: FastifyInstance;
@@ -158,6 +176,9 @@ export class ReverseConnectClient {
       let status: number;
       let responseHeaders: Record<string, string> = {};
       let body: string;
+      // base64 set only for binary responses (e.g. file-download) so the bytes
+      // survive the JSON control channel; text/JSON responses stay as-is.
+      let encoding: "base64" | undefined;
 
       if (frame.port) {
         // Direct fetch to localhost:{port} — used by browser proxy to reach dev servers
@@ -183,7 +204,7 @@ export class ReverseConnectClient {
           url: frame.path,
           headers: frame.headers,
           payload: frame.body,
-        }) as { statusCode: number; headers: Record<string, string | string[] | undefined>; payload: string };
+        }) as { statusCode: number; headers: Record<string, string | string[] | undefined>; payload: string; rawPayload: Buffer };
 
         status = response.statusCode;
         for (const [key, val] of Object.entries(response.headers)) {
@@ -193,7 +214,15 @@ export class ReverseConnectClient {
             responseHeaders[key] = val.join(", ");
           }
         }
-        body = response.payload;
+        // Binary responses (octet-stream, etc.) would be corrupted by a UTF-8
+        // string round-trip, so carry their raw bytes as base64. Text/JSON keep
+        // the plain payload.
+        if (isTextualContentType(responseHeaders["content-type"] ?? "")) {
+          body = response.payload;
+        } else {
+          body = response.rawPayload.toString("base64");
+          encoding = "base64";
+        }
       }
 
       const responseFrame: HttpResponseFrame = {
@@ -202,6 +231,7 @@ export class ReverseConnectClient {
         status,
         headers: responseHeaders,
         body,
+        ...(encoding ? { encoding } : {}),
       };
 
       this.sendFrame(responseFrame);

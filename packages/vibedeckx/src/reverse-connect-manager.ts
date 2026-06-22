@@ -282,10 +282,16 @@ export class ReverseConnectManager {
           conn.pendingRequests.delete(frame.requestId);
 
           let data: unknown;
-          try {
-            data = frame.body ? JSON.parse(frame.body) : {};
-          } catch {
-            data = { rawBody: frame.body };
+          if (frame.encoding === "base64") {
+            // Binary response (e.g. image file-download): hand the raw bytes back
+            // as a Buffer so the proxying route can stream them unchanged.
+            data = Buffer.from(frame.body ?? "", "base64");
+          } else {
+            try {
+              data = frame.body ? JSON.parse(frame.body) : {};
+            } catch {
+              data = { rawBody: frame.body };
+            }
           }
 
           const ok = frame.status >= 200 && frame.status < 300;

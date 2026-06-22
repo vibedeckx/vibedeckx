@@ -903,6 +903,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
           undefined,
           { reverseConnectManager: rcm }
         );
+        // Binary responses (e.g. images) arrive as a Buffer over the tunnel —
+        // stream the raw bytes instead of JSON-serializing them.
+        if (Buffer.isBuffer(result.data)) {
+          const fileName = path.basename(filePath);
+          return reply
+            .code(proxyStatus(result))
+            .header("Content-Disposition", `attachment; filename="${fileName}"`)
+            .type("application/octet-stream")
+            .send(result.data);
+        }
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
