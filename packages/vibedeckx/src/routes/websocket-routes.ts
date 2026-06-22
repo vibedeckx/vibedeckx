@@ -9,7 +9,7 @@ import {
 } from "./executor-stream-handlers.js";
 import type { AgentWsInput } from "../agent-types.js";
 import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs } from "./ws-authz.js";
-import { connectPersistentRemoteWs, tryParseWsMessage } from "../remote-agent-sessions.js";
+import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
