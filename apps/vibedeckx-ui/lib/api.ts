@@ -685,9 +685,12 @@ export async function setSessionFavorited(sessionId: string, favorited: boolean)
 
 export const api = {
   async getConfig(): Promise<AppConfig> {
-    // Always hit the network so the persisted config is revalidated on every
-    // page load; dedupe concurrent callers (e.g. AuthWrapper + UserMenu mounting
-    // together) onto a single in-flight request.
+    // Revalidate the persisted config once per page load and share that single
+    // request across every consumer (AuthWrapper, UserMenu, GlobalEventStream…).
+    // The resolved promise is cached for the page session so consumers mounting
+    // in different waves reuse it instead of each firing their own /api/config;
+    // a fresh load re-initializes this module and revalidates again. On failure
+    // we clear it so a later caller can retry rather than inheriting the error.
     if (_configInFlight) return _configInFlight;
     _configInFlight = (async () => {
       try {
@@ -696,8 +699,9 @@ export const api = {
         _cachedConfig = data;
         persistConfig(data);
         return data;
-      } finally {
+      } catch (err) {
         _configInFlight = null;
+        throw err;
       }
     })();
     return _configInFlight;

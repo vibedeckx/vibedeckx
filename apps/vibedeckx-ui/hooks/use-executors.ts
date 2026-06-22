@@ -121,10 +121,19 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     }
   }, []);
 
+  // Executors are scoped to the active group — refetch when projectId/groupId
+  // resolve or change.
   useEffect(() => {
     fetchExecutors();
+  }, [fetchExecutors]);
+
+  // Running processes are global (not group-scoped), so fetch once on mount.
+  // Kept out of the executor effect above, whose identity changes as projectId
+  // then groupId resolve — bundling them re-fired this argument-less call 3x
+  // per load for an identical result.
+  useEffect(() => {
     fetchRunningProcesses();
-  }, [fetchExecutors, fetchRunningProcesses]);
+  }, [fetchRunningProcesses]);
 
   // Reconcile stale running-process state when the browser tab regains focus.
   // SSE events emitted while the tab was backgrounded may have been lost.
