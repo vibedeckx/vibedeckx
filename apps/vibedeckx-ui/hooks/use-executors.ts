@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
+import { api, getAuthToken, getFreshToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
 
 function getApiBase(): string {
   if (typeof window === "undefined") return "";
@@ -148,10 +148,10 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   useEffect(() => {
     if (!projectId) return;
 
-    const url = buildExecutorEventsUrl();
-    const es = new EventSource(url);
+    let es: EventSource | null = null;
+    let cancelled = false;
 
-    es.onmessage = (event) => {
+    const handleMessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data) as {
           type: string;
@@ -239,8 +239,17 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
       }
     };
 
+    // Refresh the token (rides in the SSE query string) before connecting, so a
+    // background-throttled stale cache can't open the stream with an expired JWT.
+    void getFreshToken().then(() => {
+      if (cancelled) return;
+      es = new EventSource(buildExecutorEventsUrl());
+      es.onmessage = handleMessage;
+    });
+
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
     };
   }, [projectId]);
 

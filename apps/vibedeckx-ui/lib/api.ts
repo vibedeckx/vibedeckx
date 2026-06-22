@@ -1,5 +1,14 @@
 // ============ Auth Token Management ============
+// `_authToken` is a warm cache of the last-known Clerk session JWT. It exists so
+// that synchronous callers (WebSocket/SSE URL builders) can read a token without
+// awaiting. The source of truth, however, is `_tokenGetter` — Clerk's
+// `getToken()` — which returns a guaranteed-valid token (refreshing in the
+// background only when the cached JWT is near/after expiry). Always prefer
+// `getFreshToken()` over the bare cache for anything that can await.
 let _authToken: string | null = null;
+let _tokenGetter:
+  | ((opts?: { skipCache?: boolean }) => Promise<string | null>)
+  | null = null;
 
 export function setAuthToken(token: string | null) {
   _authToken = token;
@@ -7,6 +16,49 @@ export function setAuthToken(token: string | null) {
 
 export function getAuthToken(): string | null {
   return _authToken;
+}
+
+// Registered once by the auth wrapper with Clerk's `getToken`. Passing `null`
+// (on sign-out) makes `getFreshToken()` fall back to the bare cache.
+export function setTokenGetter(
+  fn: ((opts?: { skipCache?: boolean }) => Promise<string | null>) | null
+) {
+  _tokenGetter = fn;
+}
+
+// Returns a guaranteed-valid token. When the cached JWT is still valid this hits
+// Clerk's in-memory cache with zero network cost; only when it's near/after
+// expiry does Clerk fetch a new one. Pass `{ skipCache: true }` to force a
+// network refresh (used on a 401 retry). Always updates `_authToken` so the
+// synchronous WS/SSE readers stay warm.
+export async function getFreshToken(opts?: {
+  skipCache?: boolean;
+}): Promise<string | null> {
+  if (_tokenGetter) {
+    try {
+      const token = await _tokenGetter(opts);
+      _authToken = token;
+      return token;
+    } catch {
+      // Transient getToken() failure — fall back to the last-known token rather
+      // than dropping auth entirely.
+      return _authToken;
+    }
+  }
+  return _authToken;
+}
+
+// Build Authorization headers with a freshly-validated token. Use for fetch
+// calls that don't go through `authFetch` (e.g. the session hooks that build
+// their own requests).
+export async function getAuthHeaders(
+  contentType?: string
+): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  if (contentType) headers["Content-Type"] = contentType;
+  const token = await getFreshToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
 }
 
 // ============ App Config ============
@@ -39,39 +91,56 @@ function getApiBase(): string {
   return "";
 }
 
-// Helper for authenticated fetch
-async function authFetch(url: string, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers);
-  if (_authToken && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${_authToken}`);
+// Authenticated fetch: attaches a freshly-validated Clerk token and, if the
+// server still rejects it as expired (a token that lapsed in the brief window
+// between cache-hit and the server's clock check), force-refreshes once and
+// retries. The retry is safe even for POSTs: the backend's auth preHandler
+// rejects expired tokens before the route runs, so the first attempt never
+// reached the handler.
+export async function authFetch(
+  url: string,
+  init?: RequestInit
+): Promise<Response> {
+  const send = async (skipCache: boolean): Promise<Response> => {
+    const headers = new Headers(init?.headers);
+    if (!headers.has("Authorization")) {
+      const token = await getFreshToken(skipCache ? { skipCache: true } : undefined);
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+    }
+    return fetch(url, { ...init, headers });
+  };
+
+  const res = await send(false);
+  if (res.status === 401 && _tokenGetter && !new Headers(init?.headers).has("Authorization")) {
+    return send(true);
   }
-  return fetch(url, { ...init, headers });
+  return res;
 }
 
-export function getWebSocketUrl(path: string): string {
+// Builds a WebSocket URL with the auth token in the query string (WS can't send
+// Authorization headers). Pass an explicit `token` (from `await getFreshToken()`)
+// to guarantee freshness; omit it to fall back to the warm cache.
+export function getWebSocketUrl(path: string, token?: string | null): string {
+  const authToken = token !== undefined ? token : _authToken;
+  const withToken = (base: string): string => {
+    if (!authToken) return base;
+    const sep = path.includes("?") ? "&" : "?";
+    return `${base}${sep}token=${encodeURIComponent(authToken)}`;
+  };
+
   if (typeof window === "undefined") {
     return `ws://localhost:5173${path}`;
   }
 
   // 本地开发模式：连接到后端 5173 端口
   if (isLocalDevMode()) {
-    const base = `ws://localhost:5173${path}`;
-    if (_authToken) {
-      const sep = path.includes("?") ? "&" : "?";
-      return `${base}${sep}token=${encodeURIComponent(_authToken)}`;
-    }
-    return base;
+    return withToken(`ws://localhost:5173${path}`);
   }
 
   // 生产模式或通过 tunnel 访问：使用当前页面的 host
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  const base = `${protocol}//${host}${path}`;
-  if (_authToken) {
-    const sep = path.includes("?") ? "&" : "?";
-    return `${base}${sep}token=${encodeURIComponent(_authToken)}`;
-  }
-  return base;
+  return withToken(`${protocol}//${host}${path}`);
 }
 
 export type ExecutionMode = 'local' | string;

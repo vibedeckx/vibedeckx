@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getWebSocketUrl, type LogMessage, type InputMessage } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, type LogMessage, type InputMessage } from "@/lib/api";
 
 export type ConnectionStatus = "connecting" | "connected" | "closed" | "error";
 
@@ -72,7 +72,17 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
     // Per-effect cancellation flag — avoids stale reconnections when processId changes
     let cancelled = false;
 
+    // Token-refreshing entry point: every (re)connect first fetches a
+    // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
+    // carries an expired JWT in its query string.
     function connect() {
+      if (cancelled || finishedRef.current) return;
+      void getFreshToken().then(() => {
+        if (!cancelled && !finishedRef.current) openSocket();
+      });
+    }
+
+    function openSocket() {
       if (cancelled || finishedRef.current) return;
 
       setStatus("connecting");

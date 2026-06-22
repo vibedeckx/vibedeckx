@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from "react";
-import { getWebSocketUrl, type LogMessage, type MuxClientMessage, type MuxServerMessage } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, type LogMessage, type MuxClientMessage, type MuxServerMessage } from "@/lib/api";
 import type { ConnectionStatus } from "./use-executor-logs";
 import type { UseExecutorLogsResult } from "./use-executor-logs";
 
@@ -111,7 +111,7 @@ export function ExecutorLogsProvider({
     let cancelled = false;
     reconnectAttemptRef.current = 0;
 
-    const connect = () => {
+    const openSocket = () => {
       if (cancelled) return;
       const wsUrl = getWebSocketUrl(`/api/executor-logs/stream?projectId=${encodeURIComponent(projectId)}`);
       const ws = new WebSocket(wsUrl);
@@ -163,6 +163,16 @@ export function ExecutorLogsProvider({
           }
         }
       };
+    };
+
+    // Token-refreshing entry point: every (re)connect first fetches a
+    // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
+    // carries an expired JWT in its query string.
+    const connect = () => {
+      if (cancelled) return;
+      void getFreshToken().then(() => {
+        if (!cancelled) openSocket();
+      });
     };
 
     connect();

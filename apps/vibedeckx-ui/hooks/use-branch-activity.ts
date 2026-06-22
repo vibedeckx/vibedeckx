@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getAuthToken } from "@/lib/api";
+import { getFreshToken, authFetch } from "@/lib/api";
 
 export type BranchActivity =
   | "idle"
@@ -228,12 +228,8 @@ export function useBranchActivity(
     }
 
     try {
-      const headers: Record<string, string> = {};
-      const token = getAuthToken();
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch(
+      const res = await authFetch(
         `${getApiBase()}/api/projects/${projectId}/branches/activity`,
-        { headers },
       );
       if (!res.ok) return;
       const data = (await res.json()) as BranchActivityResponse;
@@ -267,12 +263,10 @@ export function useBranchActivity(
   useEffect(() => {
     if (!projectId) return;
 
-    const token = getAuthToken();
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
-    const url = `${getApiBase()}/api/events${tokenParam}`;
-    const es = new EventSource(url);
+    let es: EventSource | null = null;
+    let cancelled = false;
 
-    es.onmessage = (event) => {
+    const handleMessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data) as { type?: string };
         if (data.type !== "branch:activity") return;
@@ -301,15 +295,25 @@ export function useBranchActivity(
       }
     };
 
-    es.onerror = () => {
+    const handleError = () => {
       // Browser auto-reconnects EventSource. After reconnect we may have
       // missed events — refetch to resync. Debounce-ish: only refetch when
       // readyState comes back to OPEN (handled by onmessage taking over).
       // For now, the simple onerror → refetch is good enough.
     };
 
+    // Refresh the token (rides in the SSE query string) before connecting.
+    void getFreshToken().then((token) => {
+      if (cancelled) return;
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
+      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
+      es.onmessage = handleMessage;
+      es.onerror = handleError;
+    });
+
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
     };
   }, [projectId]);
 

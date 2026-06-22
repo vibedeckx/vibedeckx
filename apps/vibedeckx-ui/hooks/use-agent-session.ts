@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getAuthToken, createNewAgentSession } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession } from "@/lib/api";
 import type { AgentType } from "@/lib/api";
 import {
   workspaceKey,
@@ -91,23 +91,15 @@ function getApiBase(): string {
   return "";
 }
 
-function getAuthHeaders(contentType?: string): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (contentType) headers["Content-Type"] = contentType;
-  const token = getAuthToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
-
 async function loadExistingSession(
   projectId: string,
   branch: string | null,
   permissionMode?: "plan" | "edit",
   agentType?: AgentType
 ): Promise<{ session: AgentSession | null; messages: AgentMessage[] }> {
-  const response = await fetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`, {
+  const response = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ branch, permissionMode, agentType }),
   });
 
@@ -119,9 +111,9 @@ async function loadExistingSession(
 }
 
 async function sendMessageToSession(sessionId: string, content: string | ContentPart[]): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
 
@@ -154,9 +146,9 @@ async function uploadPasteToSession(
   sessionId: string,
   content: string
 ): Promise<UploadedPaste> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/paste`, {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/paste`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
 
@@ -183,9 +175,9 @@ async function uploadPasteToSession(
 }
 
 async function restartSessionApi(sessionId: string, agentType?: AgentType): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/restart`, {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/restart`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agentType }),
   });
 
@@ -195,9 +187,8 @@ async function restartSessionApi(sessionId: string, agentType?: AgentType): Prom
 }
 
 async function stopSessionApi(sessionId: string): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/stop`, {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/stop`, {
     method: "POST",
-    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error("Failed to stop session");
@@ -205,9 +196,9 @@ async function stopSessionApi(sessionId: string): Promise<void> {
 }
 
 async function switchModeApi(sessionId: string, mode: "plan" | "edit"): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/switch-mode`, {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/switch-mode`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode }),
   });
 
@@ -217,9 +208,9 @@ async function switchModeApi(sessionId: string, mode: "plan" | "edit"): Promise<
 }
 
 async function acceptPlanApi(sessionId: string, planContent: string): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}/accept-plan`, {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/accept-plan`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ planContent }),
   });
 
@@ -239,9 +230,7 @@ function getCacheKey(projectId: string, branch: string | null, sessionId?: strin
 }
 
 async function getSessionById(sessionId: string): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
-  const response = await fetch(`${getApiBase()}/api/agent-sessions/${sessionId}`, {
-    headers: getAuthHeaders(),
-  });
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}`);
   if (!response.ok) {
     throw new Error(`Session ${sessionId} not found`);
   }
@@ -354,6 +343,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
+  const openSocketRef = useRef<(sessionId: string) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
   const containerRef = useRef<PatchContainer>({ entries: [], status: "stopped" });
@@ -407,10 +397,18 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     return baseDelay + jitter;
   };
 
-  // Connect WebSocket to session
+  // Token-refreshing entry point. Every (re)connect first fetches a
+  // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
+  // carries an expired JWT. Actual socket setup is in `openSocket`, reached via
+  // a ref to keep this callback's deps empty.
   const connectWebSocket = useCallback((sessionId: string) => {
+    void getFreshToken().then(() => openSocketRef.current(sessionId));
+  }, []);
+
+  // Connect WebSocket to session
+  const openSocket = useCallback((sessionId: string) => {
     // Helper: invalidate cache entries for the current workspace context.
-    // Reads identity from refs because connectWebSocket has [] deps and would
+    // Reads identity from refs because openSocket has [] deps and would
     // otherwise close over stale projectId/branch/explicitSessionId values.
     const invalidateSessionCache = () => {
       const pid = projectIdRef.current;
@@ -644,7 +642,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     ws.onerror = (error) => {
       console.error("[AgentSession] WebSocket error:", error);
     };
-  }, []);
+  }, [connectWebSocket]);
+
+  // Keep the ref pointed at the latest openSocket so connectWebSocket (stable
+  // deps) reaches the current closure after refreshing the token.
+  useEffect(() => {
+    openSocketRef.current = openSocket;
+  }, [openSocket]);
 
   // Start or get existing session - returns the session for immediate use
   const startSession = useCallback(async (permissionMode?: "plan" | "edit"): Promise<AgentSession | null> => {

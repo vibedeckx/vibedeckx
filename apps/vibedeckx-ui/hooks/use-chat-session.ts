@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getAuthToken, api } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, authFetch, api } from "@/lib/api";
 import { sendCommandToIframe, openPreviewFrame } from "@/components/preview/browser-frames-provider";
 
 // ============ Types (reused from agent session) ============
@@ -76,21 +76,13 @@ function getApiBase(): string {
   return "";
 }
 
-function getAuthHeaders(contentType?: string): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (contentType) headers["Content-Type"] = contentType;
-  const token = getAuthToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
-
 async function createOrGetChatSession(
   projectId: string,
   branch: string | null
 ): Promise<{ session: ChatSession; messages: AgentMessage[] }> {
-  const response = await fetch(`${getApiBase()}/api/projects/${projectId}/chat-sessions`, {
+  const response = await authFetch(`${getApiBase()}/api/projects/${projectId}/chat-sessions`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ branch }),
   });
 
@@ -102,9 +94,9 @@ async function createOrGetChatSession(
 }
 
 async function sendMessageToChat(sessionId: string, content: string): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/chat-sessions/${sessionId}/message`, {
+  const response = await authFetch(`${getApiBase()}/api/chat-sessions/${sessionId}/message`, {
     method: "POST",
-    headers: getAuthHeaders("application/json"),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
 
@@ -114,9 +106,8 @@ async function sendMessageToChat(sessionId: string, content: string): Promise<vo
 }
 
 async function stopGenerationApi(sessionId: string): Promise<void> {
-  const response = await fetch(`${getApiBase()}/api/chat-sessions/${sessionId}/stop`, {
+  const response = await authFetch(`${getApiBase()}/api/chat-sessions/${sessionId}/stop`, {
     method: "POST",
-    headers: getAuthHeaders(),
   });
 
   if (!response.ok) {
@@ -190,6 +181,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const openSocketRef = useRef<(sessionId: string) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
   const containerRef = useRef<PatchContainer>({ entries: [], status: "stopped" });
@@ -213,7 +205,20 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     return baseDelay + jitter;
   };
 
+  // Token-refreshing entry point. Every (re)connect first fetches a
+  // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
+  // carries an expired JWT in its query string. The actual socket setup lives in
+  // `openSocket`, reached via a ref to avoid a connectWebSocket↔openSocket
+  // dependency cycle.
   const connectWebSocket = useCallback((sessionId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN ||
+        wsRef.current?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+    void getFreshToken().then(() => openSocketRef.current(sessionId));
+  }, []);
+
+  const openSocket = useCallback((sessionId: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN ||
         wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
@@ -223,6 +228,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     finishedRef.current = false;
     isReplayingRef.current = true;
 
+    // getFreshToken() already refreshed the warm cache that getWebSocketUrl reads.
     const wsUrl = getWebSocketUrl(`/api/chat-sessions/${sessionId}/stream`);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
@@ -379,7 +385,13 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     ws.onerror = () => {
       // onclose will fire next
     };
-  }, [session?.id]);
+  }, [session?.id, connectWebSocket]);
+
+  // Keep the ref pointed at the latest openSocket so connectWebSocket (stable
+  // deps) always reaches the current closure after refreshing the token.
+  useEffect(() => {
+    openSocketRef.current = openSocket;
+  }, [openSocket]);
 
   const startSession = useCallback(async (): Promise<ChatSession | null> => {
     if (!projectId) return null;

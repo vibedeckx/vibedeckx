@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { getAuthToken } from "@/lib/api";
+import { getFreshToken } from "@/lib/api";
 
 function getApiBase(): string {
   if (typeof window === "undefined") return "";
@@ -40,32 +40,39 @@ export function useGlobalEvents(
   useEffect(() => {
     if (!projectId) return;
 
-    const token = getAuthToken();
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
-    const url = `${getApiBase()}/api/events${tokenParam}`;
-    const es = new EventSource(url);
+    let es: EventSource | null = null;
+    let cancelled = false;
 
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as GlobalEvent;
+    // Fetch a guaranteed-valid token before opening the stream (the token rides
+    // in the query string; EventSource can't send headers).
+    void getFreshToken().then((token) => {
+      if (cancelled) return;
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
+      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
 
-        // Filter to current project
-        if (data.projectId !== projectId) return;
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as GlobalEvent;
 
-        if (
-          data.type === "task:created" ||
-          data.type === "task:updated" ||
-          data.type === "task:deleted"
-        ) {
-          onTaskChangedRef.current?.();
+          // Filter to current project
+          if (data.projectId !== projectId) return;
+
+          if (
+            data.type === "task:created" ||
+            data.type === "task:updated" ||
+            data.type === "task:deleted"
+          ) {
+            onTaskChangedRef.current?.();
+          }
+        } catch {
+          // Ignore parse errors (e.g. keepalive comments)
         }
-      } catch {
-        // Ignore parse errors (e.g. keepalive comments)
-      }
-    };
+      };
+    });
 
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
     };
   }, [projectId]);
 }

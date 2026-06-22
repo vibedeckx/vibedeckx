@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { ClerkProvider, SignIn, useAuth } from "@clerk/clerk-react";
 import { ArrowLeft } from "lucide-react";
-import { setAuthToken } from "@/lib/api";
+import { setAuthToken, setTokenGetter, getFreshToken } from "@/lib/api";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { Button } from "@/components/ui/button";
 import { LandingPage } from "./landing-page";
@@ -13,20 +13,22 @@ function AuthTokenSync({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!isSignedIn) {
+      setTokenGetter(null);
       setAuthToken(null);
       return;
     }
 
-    // Get initial token
-    getToken().then((token) => setAuthToken(token));
+    // Register Clerk's getToken as the source of truth. Each request fetches a
+    // guaranteed-valid token on demand (cache-hit = no network), so we no longer
+    // rely on a setInterval — which background tabs throttle, leaving a stale
+    // cached token that produced intermittent 401s.
+    setTokenGetter((opts) => getToken(opts));
 
-    // Refresh token periodically (Clerk tokens expire ~60s)
-    const interval = setInterval(async () => {
-      const token = await getToken();
-      setAuthToken(token);
-    }, 50000);
+    // Warm the cache once so synchronous WS/SSE URL builders have a token before
+    // the first request.
+    void getFreshToken();
 
-    return () => clearInterval(interval);
+    return () => setTokenGetter(null);
   }, [isSignedIn, getToken]);
 
   return <>{children}</>;

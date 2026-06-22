@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getAuthToken } from '@/lib/api';
+import { getFreshToken } from '@/lib/api';
 
 type BranchActivity =
   | 'idle'
@@ -221,11 +221,10 @@ export function useCompletionNotifications(
   }, [activeKey, notifications]);
 
   useEffect(() => {
-    const token = getAuthToken();
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
-    const es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
+    let es: EventSource | null = null;
+    let cancelled = false;
 
-    es.onmessage = (event) => {
+    const handleMessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data) as { type?: string };
         if (data.type !== 'branch:activity') return;
@@ -264,7 +263,18 @@ export function useCompletionNotifications(
       }
     };
 
-    return () => es.close();
+    // Refresh the token (rides in the SSE query string) before connecting.
+    void getFreshToken().then((token) => {
+      if (cancelled) return;
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
+      es.onmessage = handleMessage;
+    });
+
+    return () => {
+      cancelled = true;
+      es?.close();
+    };
   }, []);
 
   // Hydrate from localStorage after mount (not via a lazy initializer) so the
