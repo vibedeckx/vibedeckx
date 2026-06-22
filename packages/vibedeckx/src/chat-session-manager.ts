@@ -1414,6 +1414,52 @@ export class ChatSessionManager {
         },
       }),
 
+      sendToAgentSession: tool({
+        description:
+          "Send a follow-up message to the coding agent already running in THIS workspace — to chain the next step, correct course, or answer a question it raised. " +
+          "Asynchronous — see async-execution-model: the agent processes it and its completion arrives later as an '[Agent Event: Task Completed]' message that wakes you. Do NOT claim the task is done based on this tool's return value. " +
+          "If this workspace has no agent yet, use spawnAgentSession instead. " +
+          "If the agent is mid-turn (busy), this will not send — wait to be woken when it finishes, then send.",
+        inputSchema: z.object({
+          message: z
+            .string()
+            .min(1)
+            .describe("The message to send to the coding agent."),
+        }),
+        execute: async ({ message }) => {
+          if (!sessionId) {
+            return { success: false, message: "No session context available." };
+          }
+          const project = storage.projects.getById(projectId);
+          const target = agentSessionManager.getSessionByBranch(projectId, branch);
+          if (!target) {
+            return {
+              success: false,
+              message:
+                "This workspace has no coding agent yet. Use spawnAgentSession to start one.",
+            };
+          }
+          if (target.status === "running") {
+            return {
+              success: false,
+              message:
+                "The coding agent is busy mid-turn. You'll be woken with an '[Agent Event: Task Completed]' message when it finishes — send your message then.",
+            };
+          }
+          const sent = agentSessionManager.sendUserMessage(target.id, message, project?.path);
+          if (!sent) {
+            return { success: false, message: "Failed to deliver the message to the coding agent." };
+          }
+          this.registerChatInitiatedAgentTask(target.id);
+          this.setEventListening(sessionId, true);
+          return {
+            success: true,
+            message:
+              "Message delivered to the coding agent. You'll be woken with an '[Agent Event: Task Completed]' message when it finishes. Do not claim completion yet.",
+          };
+        },
+      }),
+
       getExecutorStatus: tool({
         description:
           "Get the status of all executors (dev servers, build processes, etc.) in the current workspace. " +
