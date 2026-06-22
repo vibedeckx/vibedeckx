@@ -64,6 +64,10 @@ function getToolLabel(tool: string): string {
       return "Listing terminals...";
     case "runInTerminal":
       return "Sending command to terminal...";
+    case "spawnAgentSession":
+      return "Starting a coding agent...";
+    case "sendToAgentSession":
+      return "Sending a message to the agent...";
     default:
       return `Running ${tool}...`;
   }
