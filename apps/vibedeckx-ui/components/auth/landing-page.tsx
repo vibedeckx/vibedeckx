@@ -28,7 +28,8 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
           <nav className="nav-links">
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
-            <a href="#pricing">Pricing</a>
+            {/* TODO: re-enable once Pricing section is live */}
+            {/* <a href="#pricing">Pricing</a> */}
             <a
               href="https://github.com/vibedeckx-dev/vibedeckx"
               target="_blank"
@@ -355,39 +356,6 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
         </div>
       </section>
 
-      {/* ───── Logos ───── */}
-      <section className="logos">
-        <div className="wrap">
-          <div className="logos-label">Trusted by engineers at</div>
-          <div className="logos-row">
-            <span className="logo-mark">
-              <span className="glyph" />
-              nullstack
-            </span>
-            <span className="logo-mark">
-              <span className="glyph round solid" />
-              orbital
-            </span>
-            <span className="logo-mark">
-              <span className="glyph tri" />
-              terminal&nbsp;labs
-            </span>
-            <span className="logo-mark">
-              <span className="glyph round" />
-              plaintext
-            </span>
-            <span className="logo-mark">
-              <span className="glyph solid" />
-              foundry/9
-            </span>
-            <span className="logo-mark">
-              <span className="glyph" />
-              greybox
-            </span>
-          </div>
-        </div>
-      </section>
-
       {/* ───── Features ───── */}
       <section id="features" className="features">
         <div className="wrap">
@@ -690,6 +658,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
       </section>
 
       {/* ───── Pricing ───── */}
+      {/* TODO: re-enable Pricing once billing plans are finalized
       <section id="pricing" className="pricing">
         <div className="wrap">
           <div className="section-head">
@@ -764,6 +733,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
           </div>
         </div>
       </section>
+      */}
 
       {/* ───── FAQ ───── */}
       <section className="faq">
@@ -880,9 +850,11 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                 <li>
                   <a href="#features">Features</a>
                 </li>
+                {/* TODO: re-enable once Pricing section is live
                 <li>
                   <a href="#pricing">Pricing</a>
                 </li>
+                */}
               </ul>
             </div>
             <div className="foot-col">
