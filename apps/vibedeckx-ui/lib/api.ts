@@ -1323,6 +1323,25 @@ export const api = {
     return `${getApiBase()}/api/projects/${projectId}/file-download?${params.toString()}`;
   },
 
+  // Fetch the file's raw bytes as a Blob, carrying auth headers via authFetch.
+  // Used for inline previews (e.g. images): a plain <img src={downloadUrl}> can't
+  // send the Authorization header the download route requires under --auth, so we
+  // fetch here and hand the caller an object URL via URL.createObjectURL.
+  async getFileBlob(
+    projectId: string,
+    filePath: string,
+    branch?: string | null,
+    target?: "local" | "remote"
+  ): Promise<Blob> {
+    const url = this.getFileDownloadUrl(projectId, filePath, branch, target);
+    const res = await authFetch(url);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(error.error || "Failed to load file");
+    }
+    return res.blob();
+  },
+
   // Fetch the file as a blob (carrying auth headers) and trigger a real browser
   // download. Using authFetch + an <a download> element avoids opening the file
   // inline in a new tab, which window.open() does when the browser renders the

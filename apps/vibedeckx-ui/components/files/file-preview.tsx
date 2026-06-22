@@ -19,6 +19,28 @@ import { cn } from "@/lib/utils";
 import { api, type FileContentResponse } from "@/lib/api";
 import type { BundledLanguage } from "shiki";
 import { SymbolNavPopover } from "./symbol-nav-popover";
+import { ImagePreview } from "./image-preview";
+
+// Raster image extensions previewed inline (when the backend flags the file
+// binary). Larger than this cap, the bytes aren't fetched — a download card is
+// shown instead, so big assets don't get pulled silently into memory.
+const IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "avif",
+  "svg",
+]);
+const IMAGE_PREVIEW_MAX_SIZE = 10 * 1024 * 1024;
+
+function isImage(filePath: string): boolean {
+  const ext = filePath.split("/").pop()?.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTENSIONS.has(ext);
+}
 
 // A double-clicked selection is treated as a symbol only if it's a bare identifier.
 const SYMBOL_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -513,10 +535,23 @@ export function FilePreview({
               </Button>
             )}
           </div>
+        ) : fileContent.binary && isImage(filePath) && fileContent.size <= IMAGE_PREVIEW_MAX_SIZE ? (
+          <ImagePreview
+            key={filePath}
+            projectId={projectId}
+            filePath={filePath}
+            branch={branch}
+            target={target}
+            onDownload={handleDownload}
+          />
         ) : fileContent.binary ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
             <FileWarning className="h-10 w-10" />
-            <p className="text-sm">Binary file ({formatSize(fileContent.size)})</p>
+            <p className="text-sm">
+              {isImage(filePath)
+                ? `Image too large to preview (${formatSize(fileContent.size)})`
+                : `Binary file (${formatSize(fileContent.size)})`}
+            </p>
             {downloadUrl && (
               <Button variant="outline" size="sm" onClick={handleDownload}>
                 <Download className="h-4 w-4 mr-2" />
