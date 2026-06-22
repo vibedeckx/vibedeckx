@@ -545,9 +545,9 @@ Please proceed step by step and let me know if there are any issues or conflicts
             />
           </div>
 
-          {/* Project Info View */}
-          <div className={(activeView !== 'project-info' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden'}>
-            {currentProject && (
+          {/* Project Info View — only mounted when active to avoid background polling */}
+          {activeView === 'project-info' && !needsProject && currentProject && (
+            <div className="flex-1 overflow-hidden">
               <ProjectInfoView
                 project={currentProject}
                 tasks={tasks}
@@ -560,8 +560,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 }}
                 onProjectUpdated={updateProject}
               />
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Remote Servers View — only mounted when active to avoid background polling */}
           {activeView === 'remote-servers' && (

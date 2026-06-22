@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, getAuthToken, getFreshToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
+import { api, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 function getApiBase(): string {
   if (typeof window === "undefined") return "";
@@ -143,115 +144,93 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     executorIdsRef.current = new Set(executors.map((e) => e.id));
   }, [executors]);
 
-  // Subscribe to global executor lifecycle events (SSE)
-  // This syncs state when executors are started/stopped externally (e.g. from chat)
-  useEffect(() => {
-    if (!projectId) return;
+  // Subscribe to global executor lifecycle events via the shared `/api/events`
+  // stream. This syncs state when executors are started/stopped externally
+  // (e.g. from chat).
+  useGlobalEventStream((raw) => {
+    const data = raw as {
+      type: string;
+      projectId: string;
+      executorId: string;
+      processId: string;
+      target?: string;
+    };
 
-    let es: EventSource | null = null;
-    let cancelled = false;
+    if (data.type === "executor:started" || data.type === "executor:stopped") {
+      console.log(`[useExecutors] SSE received: ${data.type} executor=${data.executorId} process=${data.processId} target=${data.target ?? "local"} project=${data.projectId}`);
+    }
 
-    const handleMessage = (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data) as {
-          type: string;
-          projectId: string;
-          executorId: string;
-          processId: string;
-          target?: string;
-        };
-
-        if (data.type === "executor:started" || data.type === "executor:stopped") {
-          console.log(`[useExecutors] SSE received: ${data.type} executor=${data.executorId} process=${data.processId} target=${data.target ?? "local"} project=${data.projectId}`);
-        }
-
-        if (data.projectId !== projectId) {
-          if (data.type === "executor:started" || data.type === "executor:stopped") {
-            console.log(`[useExecutors] SSE filtered: projectId mismatch (event=${data.projectId}, hook=${projectId})`);
-          }
-          return;
-        }
-        if (!executorIdsRef.current.has(data.executorId)) {
-          if (data.type === "executor:started" || data.type === "executor:stopped") {
-            console.log(`[useExecutors] SSE filtered: executorId ${data.executorId} not in current group (known: ${Array.from(executorIdsRef.current).join(",")})`);
-          }
-          return;
-        }
-
-        if (data.type === "executor:started") {
-          console.log(`[useExecutors] Processing executor:started, adding to runningProcesses`);
-          setRunningProcesses((prev) => {
-            const entries = prev.get(data.executorId) ?? [];
-            if (entries.some(e => e.processId === data.processId)) return prev;
-            const newMap = new Map(prev);
-            newMap.set(data.executorId, [...entries, { processId: data.processId, target: data.target ?? "local" }]);
-            return newMap;
-          });
-          setLastStartedProcess((prev) => {
-            const newMap = new Map(prev);
-            newMap.set(data.executorId, { processId: data.processId, target: data.target ?? "local" });
-            return newMap;
-          });
-          // Optimistically refresh "Last run" for this target so the hover
-          // label updates immediately instead of waiting for the next
-          // executor-list refetch (which only happens on workspace switch).
-          setExecutors((prev) =>
-            prev.map((e) => {
-              if (e.id !== data.executorId) return e;
-              const targetKey = data.target ?? "local";
-              return {
-                ...e,
-                last_runs: {
-                  ...(e.last_runs ?? {}),
-                  [targetKey]: {
-                    started_at: new Date().toISOString(),
-                    process_id: data.processId,
-                  },
-                },
-              };
-            }),
-          );
-        } else if (data.type === "executor:stopped") {
-          console.log(`[useExecutors] Processing executor:stopped, removing from runningProcesses`);
-          console.log(`[diag:remote-stop] ${new Date().toISOString()} SSE executor:stopped executor=${data.executorId} process=${data.processId} target=${data.target ?? "local"} — flips button via SSE (NOT the mux finished path)`);
-          setRunningProcesses((prev) => {
-            const entries = prev.get(data.executorId);
-            if (!entries) return prev;
-            const filtered = entries.filter(e => e.processId !== data.processId);
-            const newMap = new Map(prev);
-            if (filtered.length === 0) {
-              newMap.delete(data.executorId);
-            } else {
-              newMap.set(data.executorId, filtered);
-            }
-            return newMap;
-          });
-          setLastStartedProcess((prev) => {
-            const entry = prev.get(data.executorId);
-            if (!entry || entry.processId !== data.processId) return prev;
-            const newMap = new Map(prev);
-            newMap.delete(data.executorId);
-            return newMap;
-          });
-        }
-      } catch {
-        // Ignore parse errors (e.g. keepalive comments)
+    // No projectId (or a mismatch) means this event isn't ours.
+    if (!projectId || data.projectId !== projectId) {
+      if (data.type === "executor:started" || data.type === "executor:stopped") {
+        console.log(`[useExecutors] SSE filtered: projectId mismatch (event=${data.projectId}, hook=${projectId})`);
       }
-    };
+      return;
+    }
+    if (!executorIdsRef.current.has(data.executorId)) {
+      if (data.type === "executor:started" || data.type === "executor:stopped") {
+        console.log(`[useExecutors] SSE filtered: executorId ${data.executorId} not in current group (known: ${Array.from(executorIdsRef.current).join(",")})`);
+      }
+      return;
+    }
 
-    // Refresh the token (rides in the SSE query string) before connecting, so a
-    // background-throttled stale cache can't open the stream with an expired JWT.
-    void getFreshToken().then(() => {
-      if (cancelled) return;
-      es = new EventSource(buildExecutorEventsUrl());
-      es.onmessage = handleMessage;
-    });
-
-    return () => {
-      cancelled = true;
-      es?.close();
-    };
-  }, [projectId]);
+    if (data.type === "executor:started") {
+      console.log(`[useExecutors] Processing executor:started, adding to runningProcesses`);
+      setRunningProcesses((prev) => {
+        const entries = prev.get(data.executorId) ?? [];
+        if (entries.some(e => e.processId === data.processId)) return prev;
+        const newMap = new Map(prev);
+        newMap.set(data.executorId, [...entries, { processId: data.processId, target: data.target ?? "local" }]);
+        return newMap;
+      });
+      setLastStartedProcess((prev) => {
+        const newMap = new Map(prev);
+        newMap.set(data.executorId, { processId: data.processId, target: data.target ?? "local" });
+        return newMap;
+      });
+      // Optimistically refresh "Last run" for this target so the hover
+      // label updates immediately instead of waiting for the next
+      // executor-list refetch (which only happens on workspace switch).
+      setExecutors((prev) =>
+        prev.map((e) => {
+          if (e.id !== data.executorId) return e;
+          const targetKey = data.target ?? "local";
+          return {
+            ...e,
+            last_runs: {
+              ...(e.last_runs ?? {}),
+              [targetKey]: {
+                started_at: new Date().toISOString(),
+                process_id: data.processId,
+              },
+            },
+          };
+        }),
+      );
+    } else if (data.type === "executor:stopped") {
+      console.log(`[useExecutors] Processing executor:stopped, removing from runningProcesses`);
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} SSE executor:stopped executor=${data.executorId} process=${data.processId} target=${data.target ?? "local"} — flips button via SSE (NOT the mux finished path)`);
+      setRunningProcesses((prev) => {
+        const entries = prev.get(data.executorId);
+        if (!entries) return prev;
+        const filtered = entries.filter(e => e.processId !== data.processId);
+        const newMap = new Map(prev);
+        if (filtered.length === 0) {
+          newMap.delete(data.executorId);
+        } else {
+          newMap.set(data.executorId, filtered);
+        }
+        return newMap;
+      });
+      setLastStartedProcess((prev) => {
+        const entry = prev.get(data.executorId);
+        if (!entry || entry.processId !== data.processId) return prev;
+        const newMap = new Map(prev);
+        newMap.delete(data.executorId);
+        return newMap;
+      });
+    }
+  });
 
   // Create executor in the active group
   const createExecutor = useCallback(

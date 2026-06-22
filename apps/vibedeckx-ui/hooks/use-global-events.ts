@@ -1,22 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { getFreshToken } from "@/lib/api";
-
-function getApiBase(): string {
-  if (typeof window === "undefined") return "";
-  if (window.location.hostname === "localhost" && window.location.port === "3000") {
-    return "http://localhost:5173";
-  }
-  return "";
-}
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 type TaskChangedEvent = {
   type: "task:created" | "task:updated" | "task:deleted";
   projectId: string;
 };
 
-type GlobalEvent = TaskChangedEvent | { type: string; projectId?: string };
+type GlobalEvent = TaskChangedEvent | { type?: string; projectId?: string };
 
 interface UseGlobalEventsOptions {
   onTaskChanged?: () => void;
@@ -26,10 +18,13 @@ interface UseGlobalEventsOptions {
  * Subscribes to backend SSE for task-table refreshes. Workspace dot status
  * lives in `useBranchActivity`; legacy session:* events still flow on the
  * wire (ChatSessionManager consumes them server-side) but aren't read here.
+ *
+ * Rides the shared `/api/events` stream (see `GlobalEventStreamProvider`)
+ * rather than opening its own EventSource.
  */
 export function useGlobalEvents(
   projectId: string | null,
-  options: UseGlobalEventsOptions
+  options: UseGlobalEventsOptions,
 ) {
   const onTaskChangedRef = useRef(options.onTaskChanged);
 
@@ -37,42 +32,18 @@ export function useGlobalEvents(
     onTaskChangedRef.current = options.onTaskChanged;
   });
 
-  useEffect(() => {
-    if (!projectId) return;
+  useGlobalEventStream((data) => {
+    const evt = data as GlobalEvent;
 
-    let es: EventSource | null = null;
-    let cancelled = false;
+    // Filter to current project.
+    if (!projectId || evt.projectId !== projectId) return;
 
-    // Fetch a guaranteed-valid token before opening the stream (the token rides
-    // in the query string; EventSource can't send headers).
-    void getFreshToken().then((token) => {
-      if (cancelled) return;
-      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
-      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
-
-      es.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data) as GlobalEvent;
-
-          // Filter to current project
-          if (data.projectId !== projectId) return;
-
-          if (
-            data.type === "task:created" ||
-            data.type === "task:updated" ||
-            data.type === "task:deleted"
-          ) {
-            onTaskChangedRef.current?.();
-          }
-        } catch {
-          // Ignore parse errors (e.g. keepalive comments)
-        }
-      };
-    });
-
-    return () => {
-      cancelled = true;
-      es?.close();
-    };
-  }, [projectId]);
+    if (
+      evt.type === "task:created" ||
+      evt.type === "task:updated" ||
+      evt.type === "task:deleted"
+    ) {
+      onTaskChangedRef.current?.();
+    }
+  });
 }

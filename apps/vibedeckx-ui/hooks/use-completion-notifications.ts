@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getFreshToken } from '@/lib/api';
+import { useGlobalEventStream } from '@/hooks/global-event-stream';
 
 type BranchActivity =
   | 'idle'
@@ -43,14 +43,6 @@ export interface CompletionNotification {
   /** Backend emit time (`since`), epoch ms. */
   at: number;
   read: boolean;
-}
-
-function getApiBase(): string {
-  if (typeof window === 'undefined') return '';
-  if (window.location.hostname === 'localhost' && window.location.port === '3000') {
-    return 'http://localhost:5173';
-  }
-  return '';
 }
 
 function notificationKey(projectId: string, branch: string | null): string {
@@ -220,62 +212,39 @@ export function useCompletionNotifications(
     );
   }, [activeKey, notifications]);
 
-  useEffect(() => {
-    let es: EventSource | null = null;
-    let cancelled = false;
+  useGlobalEventStream((data) => {
+    if (data.type !== 'branch:activity') return;
+    const evt = data as unknown as BranchActivityEvent;
 
-    const handleMessage = (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data) as { type?: string };
-        if (data.type !== 'branch:activity') return;
-        const evt = data as BranchActivityEvent;
+    const key = notificationKey(evt.projectId, evt.branch);
+    const changed = lastActivity.current.get(key) !== evt.activity;
+    lastActivity.current.set(key, evt.activity);
 
-        const key = notificationKey(evt.projectId, evt.branch);
-        const changed = lastActivity.current.get(key) !== evt.activity;
-        lastActivity.current.set(key, evt.activity);
+    if (!changed || !isCompletion(evt.activity)) return;
+    // Capture the narrowed type before the closure — TS widens
+    // `evt.activity` back to BranchActivity across the callback boundary.
+    const type = evt.activity;
 
-        if (!changed || !isCompletion(evt.activity)) return;
-        // Capture the narrowed type before the closure — TS widens
-        // `evt.activity` back to BranchActivity across the callback boundary.
-        const type = evt.activity;
+    playSound(SOUND_FOR_ACTIVITY[type]);
 
-        playSound(SOUND_FOR_ACTIVITY[type]);
-
-        const read = activeKeyRef.current === key;
-        setNotifications((prev) => {
-          const entry: CompletionNotification = {
-            id: key,
-            projectId: evt.projectId,
-            branch: evt.branch,
-            type,
-            at: evt.since,
-            read,
-          };
-          // De-dup: one entry per workspace. A repeat completion replaces the
-          // old entry (updated time/type, re-marked unread unless active) and
-          // floats to the top. Trim to MAX_NOTIFICATIONS now that the list
-          // persists across sessions.
-          const rest = prev.filter((n) => n.id !== key);
-          return [entry, ...rest].slice(0, MAX_NOTIFICATIONS);
-        });
-      } catch {
-        // Ignore parse errors (e.g. keepalive comments)
-      }
-    };
-
-    // Refresh the token (rides in the SSE query string) before connecting.
-    void getFreshToken().then((token) => {
-      if (cancelled) return;
-      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
-      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
-      es.onmessage = handleMessage;
+    const read = activeKeyRef.current === key;
+    setNotifications((prev) => {
+      const entry: CompletionNotification = {
+        id: key,
+        projectId: evt.projectId,
+        branch: evt.branch,
+        type,
+        at: evt.since,
+        read,
+      };
+      // De-dup: one entry per workspace. A repeat completion replaces the
+      // old entry (updated time/type, re-marked unread unless active) and
+      // floats to the top. Trim to MAX_NOTIFICATIONS now that the list
+      // persists across sessions.
+      const rest = prev.filter((n) => n.id !== key);
+      return [entry, ...rest].slice(0, MAX_NOTIFICATIONS);
     });
-
-    return () => {
-      cancelled = true;
-      es?.close();
-    };
-  }, []);
+  });
 
   // Hydrate from localStorage after mount (not via a lazy initializer) so the
   // server/build render and the first client render agree — otherwise a stored

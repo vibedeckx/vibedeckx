@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getFreshToken, authFetch } from "@/lib/api";
+import { authFetch } from "@/lib/api";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 export type BranchActivity =
   | "idle"
@@ -259,63 +260,30 @@ export function useBranchActivity(
     fetchActivity();
   }, [fetchActivity]);
 
-  // SSE subscription
-  useEffect(() => {
-    if (!projectId) return;
+  // Live updates via the shared `/api/events` stream.
+  useGlobalEventStream((data) => {
+    if (data.type !== "branch:activity") return;
+    const evt = data as unknown as BranchActivityEvent;
+    if (!projectId || evt.projectId !== projectId) return;
 
-    let es: EventSource | null = null;
-    let cancelled = false;
+    const outcome = classifyActivityEvent(
+      evt,
+      activityRef.current,
+      sinceRef.current,
+    );
+    if (outcome.kind === "stale") return;
 
-    const handleMessage = (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data) as { type?: string };
-        if (data.type !== "branch:activity") return;
-        const evt = data as BranchActivityEvent;
-        if (evt.projectId !== projectId) return;
+    sinceRef.current.set(outcome.key, evt.since);
+    setSince(new Map(sinceRef.current));
+    if (outcome.kind === "redundant") return;
 
-        const outcome = classifyActivityEvent(
-          evt,
-          activityRef.current,
-          sinceRef.current,
-        );
-        if (outcome.kind === "stale") return;
-
-        sinceRef.current.set(outcome.key, evt.since);
-        setSince(new Map(sinceRef.current));
-        if (outcome.kind === "redundant") return;
-
-        setActivity((prev) => {
-          const next = new Map(prev);
-          next.set(outcome.key, evt.activity);
-          activityRef.current = next;
-          return next;
-        });
-      } catch {
-        // Ignore parse errors (e.g. keepalive comments)
-      }
-    };
-
-    const handleError = () => {
-      // Browser auto-reconnects EventSource. After reconnect we may have
-      // missed events — refetch to resync. Debounce-ish: only refetch when
-      // readyState comes back to OPEN (handled by onmessage taking over).
-      // For now, the simple onerror → refetch is good enough.
-    };
-
-    // Refresh the token (rides in the SSE query string) before connecting.
-    void getFreshToken().then((token) => {
-      if (cancelled) return;
-      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
-      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
-      es.onmessage = handleMessage;
-      es.onerror = handleError;
+    setActivity((prev) => {
+      const next = new Map(prev);
+      next.set(outcome.key, evt.activity);
+      activityRef.current = next;
+      return next;
     });
-
-    return () => {
-      cancelled = true;
-      es?.close();
-    };
-  }, [projectId]);
+  });
 
   /**
    * Seed the activity map for `branch` locally, ahead of the backend's SSE
