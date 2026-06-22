@@ -33,7 +33,7 @@
 | **permission mode** | **固定 edit** | edit = `--dangerously-skip-permissions`，子 agent 不产生 `approval_request`，一路跑到完成发 `taskCompleted`，正好绕开"没人接批准"。plan/默认批准流随 scope B 再开。 |
 | **agent 类型** | 默认跟随系统默认（`claude-code`），工具可选 `agentType` 覆盖 | 简单；保留 codex 等扩展口。 |
 | **send 撞上忙碌目标** | **拒绝即返回**（`status==="running"` 不发） | 唤醒回路已把时序串好（指挥官正是在 agent 跑完那刻被唤醒），主流程不会撞忙；真排队是给 v1 不追求的 steering 镀金（YAGNI）。 |
-| **spawn 时已有 active session** | **拒绝**，提示改用 send | 避免误杀用户在 agent 窗口里自己开的 session；两个工具职责干净（"没有就 spawn、有就 send"）。`createNewSession` 的"停旧起新"留作真正需要重开的显式路径。 |
+| **spawn 时该 branch 已有 session** | **仅当它是 active（`!dormant`）才拒绝**，提示改用 send；若是 **dormant**（停掉/重启恢复的 stale 槽位）则先 `deleteSession` 清掉再新建 | 只避免误杀**正在用**的 session；停掉/休眠的旧会话不该挡新任务。**必须先删 dormant**：`createNewSession` 内部只 stop 非 dormant 的旧 session，不删 map 记录，留着会让同 branch 出现两条、`getSessionByBranch` 返回 stale 那条。`dormant` 判定可靠：`stopSession`/`restoreSessionsFromDb` 都把 session 置为 `dormant=true`，`dormant=false ⟺ 活着`。 |
 | **send 时无 session** | **报错**，提示先 spawn | 同上：职责清晰，不自动新建。 |
 
 ---
@@ -45,7 +45,8 @@
 ### 3.1 `spawnAgentSession({ prompt, agentType? })`
 
 1. `existing = agentSessionManager.getSessionByBranch(projectId, branch)`。
-   - `existing` 存在（**含 dormant 休眠**）→ **拒绝**，返回："本工作区已有 agent，请改用 `sendToAgentSession`。"（dormant 场景由 send 处理：`sendUserMessage` 会自动唤醒休眠 session；若在 dormant 上 spawn 会让同 branch 出现两个 session。）
+   - `existing && !existing.dormant`（**有活着的 agent**）→ **拒绝**，返回："本工作区已有 active agent，请改用 `sendToAgentSession`。"
+   - `existing && existing.dormant`（停掉/重启恢复的 stale 槽位）→ `agentSessionManager.deleteSession(existing.id)` 清掉它（否则下一步 `createNewSession` 不删 dormant，会让同 branch 留两条、`getSessionByBranch` 返回 stale 那条），然后继续新建。
 2. `newSessionId = agentSessionManager.createNewSession(projectId, branch, projectPath, false, "edit", agentType ?? 默认)`。
 3. `agentSessionManager.sendUserMessage(newSessionId, prompt, projectPath)` —— 注入首条任务。
 4. `this.registerChatInitiatedAgentTask(newSessionId)` —— 闭合唤醒回路（完成事件 `isChatInitiated=true` → 圆点按工作流延续上色）。

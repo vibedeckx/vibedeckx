@@ -1369,7 +1369,7 @@ export class ChatSessionManager {
           "Use this when this workspace has no coding agent yet and a sub-goal genuinely needs an autonomous, multi-step coding agent (not a one-off terminal/executor action). " +
           "The agent runs in edit mode on this workspace's branch: it executes autonomously and does NOT ask for per-step approval. " +
           "Asynchronous — see async-execution-model: this only kicks the agent off. Its completion arrives later as an '[Agent Event: Task Completed]' message that wakes you. Do NOT claim the task is done based on this tool's return value. " +
-          "If this workspace already has an agent, use sendToAgentSession instead.",
+          "If this workspace already has an active agent, use sendToAgentSession instead.",
         inputSchema: z.object({
           prompt: z
             .string()
@@ -1391,12 +1391,20 @@ export class ChatSessionManager {
             return { success: false, message: "No project path configured for this workspace." };
           }
           const existing = agentSessionManager.getSessionByBranch(projectId, branch);
-          if (existing) {
+          if (existing && !existing.dormant) {
             return {
               success: false,
               message:
-                "This workspace already has a coding agent. Use sendToAgentSession to send it a message instead.",
+                "This workspace already has an active coding agent. Use sendToAgentSession to send it a message instead.",
             };
+          }
+          if (existing) {
+            // A dormant session (stopped, or restored from a prior server run)
+            // still occupies this branch's slot. createNewSession only stops
+            // non-dormant sessions, so leaving it would leave two sessions on
+            // the same branch — and getSessionByBranch returns the first/stale
+            // one. Remove it so this spawn yields a single, fresh session.
+            agentSessionManager.deleteSession(existing.id);
           }
           const newSessionId = agentSessionManager.createNewSession(
             projectId,
