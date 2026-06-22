@@ -1446,7 +1446,7 @@ export class ChatSessionManager {
                 "The coding agent is busy mid-turn. You'll be woken with an '[Agent Event: Task Completed]' message when it finishes — send your message then.",
             };
           }
-          const sent = agentSessionManager.sendUserMessage(target.id, message, project?.path);
+          const sent = agentSessionManager.sendUserMessage(target.id, message, project?.path ?? undefined);
           if (!sent) {
             return { success: false, message: "Failed to deliver the message to the coding agent." };
           }
