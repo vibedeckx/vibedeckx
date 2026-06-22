@@ -12,7 +12,7 @@ import { z } from "zod";
 import { resolveChatModel } from "./utils/chat-model.js";
 import WsWebSocket from "ws";
 import type WebSocket from "ws";
-import type { AgentMessage, AgentSessionStatus } from "./agent-types.js";
+import type { AgentMessage, AgentSessionStatus, AgentType } from "./agent-types.js";
 import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult } from "./conversation-patch.js";
@@ -1356,6 +1356,61 @@ export class ChatSessionManager {
           }
 
           return { local: localResult, remote: remoteResult };
+        },
+      }),
+
+      spawnAgentSession: tool({
+        description:
+          "Start a brand-new coding agent in THIS workspace and hand it a task. " +
+          "Use this when this workspace has no coding agent yet and a sub-goal genuinely needs an autonomous, multi-step coding agent (not a one-off terminal/executor action). " +
+          "The agent runs in edit mode on this workspace's branch: it executes autonomously and does NOT ask for per-step approval. " +
+          "Asynchronous — see async-execution-model: this only kicks the agent off. Its completion arrives later as an '[Agent Event: Task Completed]' message that wakes you. Do NOT claim the task is done based on this tool's return value. " +
+          "If this workspace already has an agent, use sendToAgentSession instead.",
+        inputSchema: z.object({
+          prompt: z
+            .string()
+            .min(1)
+            .describe(
+              "The task / sub-goal to hand to the new coding agent. Because it runs autonomously in edit mode, spell out any irreversible or destructive-operation boundaries it must respect.",
+            ),
+          agentType: z
+            .enum(["claude-code", "codex"])
+            .optional()
+            .describe("Which agent to spawn. Defaults to claude-code."),
+        }),
+        execute: async ({ prompt, agentType }) => {
+          if (!sessionId) {
+            return { success: false, message: "No session context available." };
+          }
+          const project = storage.projects.getById(projectId);
+          if (!project?.path) {
+            return { success: false, message: "No project path configured for this workspace." };
+          }
+          const existing = agentSessionManager.getSessionByBranch(projectId, branch);
+          if (existing) {
+            return {
+              success: false,
+              message:
+                "This workspace already has a coding agent. Use sendToAgentSession to send it a message instead.",
+            };
+          }
+          const newSessionId = agentSessionManager.createNewSession(
+            projectId,
+            branch,
+            project.path,
+            false,
+            "edit",
+            (agentType as AgentType | undefined) ?? "claude-code",
+          );
+          agentSessionManager.sendUserMessage(newSessionId, prompt, project.path);
+          this.registerChatInitiatedAgentTask(newSessionId);
+          this.setEventListening(sessionId, true);
+          return {
+            success: true,
+            agentSessionId: newSessionId,
+            message:
+              "Coding agent started and given the task. It runs autonomously; you'll be woken with an '[Agent Event: Task Completed]' message when it finishes. Do not claim completion yet.",
+          };
         },
       }),
 
