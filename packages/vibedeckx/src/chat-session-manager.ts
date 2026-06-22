@@ -22,6 +22,7 @@ import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { proxyToRemote, proxyToRemoteAuto } from "./utils/remote-proxy.js";
+import { createRemoteAgentSession, ensureRemoteAgentStream } from "./remote-agent-sessions.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
@@ -429,6 +430,97 @@ export class ChatSessionManager {
     // eventDriven=true: classifies the turn as reactive (no orchestrator-dot
     // repaint) AND, in sendMessage, strips the tool set for this turn.
     this.enqueueOrSend(sessionId, capped, true);
+  }
+
+  private async spawnRemoteAgentSession(params: {
+    projectId: string;
+    branch: string | null;
+    agentMode: string;
+    prompt: string;
+    agentType?: string;
+    chatSessionId: string;
+  }): Promise<{ success: boolean; agentSessionId?: string; message: string }> {
+    const { projectId, branch, agentMode, prompt, agentType, chatSessionId } = params;
+
+    const remoteConfig = this.storage.projectRemotes.getByProjectAndServer(projectId, agentMode);
+    if (!remoteConfig) {
+      return { success: false, message: `No remote server configured for this workspace (agent_mode="${agentMode}").` };
+    }
+
+    // Guard: reject only if an existing remote session for this branch is actively running.
+    let staleLocalId: string | null = null;
+    const existing = this.findRemoteSessionForProject(projectId, branch);
+    if (existing) {
+      try {
+        const statusRes = await proxyToRemoteAuto(
+          existing.info.remoteServerId, existing.info.remoteUrl, existing.info.remoteApiKey,
+          "GET", `/api/agent-sessions/${existing.info.remoteSessionId}`, undefined,
+          { reverseConnectManager: this.reverseConnectManager ?? undefined },
+        );
+        const status = statusRes.ok ? (statusRes.data as { session?: { status?: string } }).session?.status : undefined;
+        if (status === "running") {
+          return { success: false, message: "This workspace already has an active coding agent. Use sendToAgentSession to send it a message instead." };
+        }
+      } catch {
+        // Status unknown — treat as not-active and proceed (the stale mapping is replaced below).
+      }
+      staleLocalId = existing.localSessionId;
+    }
+
+    let created;
+    try {
+      created = await createRemoteAgentSession(
+        {
+          remoteSessionMap: this.remoteSessionMap,
+          remoteSessionMappings: this.storage.remoteSessionMappings,
+          remotePatchCache: this.remotePatchCache,
+          agentSessionManager: this.agentSessionManager,
+          reverseConnectManager: this.reverseConnectManager,
+        },
+        { projectId, agentMode, remoteConfig, branch, permissionMode: "edit", agentType },
+      );
+    } catch (error) {
+      return { success: false, message: `Remote server unreachable, could not start the coding agent: ${String(error)}` };
+    }
+    if (!created.ok) {
+      return { success: false, message: `Failed to start the remote coding agent (status ${created.status}).` };
+    }
+
+    // Drop the stale mapping now that a fresh session exists on this branch.
+    if (staleLocalId && staleLocalId !== created.localSessionId) {
+      this.remoteSessionMap.delete(staleLocalId);
+      this.storage.remoteSessionMappings.delete(staleLocalId);
+    }
+
+    // Deliver the first task.
+    try {
+      const msgRes = await proxyToRemoteAuto(
+        agentMode, remoteConfig.server_url ?? "", remoteConfig.server_api_key || "",
+        "POST", `/api/agent-sessions/${created.remoteSession.id}/message`, { content: prompt },
+        { reverseConnectManager: this.reverseConnectManager ?? undefined },
+      );
+      if (!msgRes.ok) {
+        return { success: false, message: `Remote agent started but the task could not be delivered (status ${msgRes.status}).` };
+      }
+    } catch (error) {
+      return { success: false, message: `Remote agent started but the task could not be delivered: ${String(error)}` };
+    }
+
+    ensureRemoteAgentStream(created.localSessionId, {
+      remoteSessionMap: this.remoteSessionMap,
+      remotePatchCache: this.remotePatchCache,
+      reverseConnectManager: this.reverseConnectManager,
+      eventBus: this.eventBus,
+      agentSessionManager: this.agentSessionManager,
+    });
+    this.registerChatInitiatedAgentTask(created.localSessionId);
+    this.setEventListening(chatSessionId, true);
+
+    return {
+      success: true,
+      agentSessionId: created.localSessionId,
+      message: "Coding agent started on the remote server and given the task. It runs autonomously; you'll be woken with an '[Agent Event: Task Completed]' message when it finishes. Do not claim completion yet.",
+    };
   }
 
   private findRemoteSessionForProject(projectId: string, branch?: string | null): { localSessionId: string; info: RemoteSessionInfo } | null {
@@ -1387,6 +1479,10 @@ export class ChatSessionManager {
             return { success: false, message: "No session context available." };
           }
           const project = storage.projects.getById(projectId);
+          const agentMode = project?.agent_mode;
+          if (project && agentMode && agentMode !== "local") {
+            return await this.spawnRemoteAgentSession({ projectId, branch, agentMode, prompt, agentType, chatSessionId: sessionId });
+          }
           if (!project?.path) {
             return { success: false, message: "No project path configured for this workspace." };
           }
