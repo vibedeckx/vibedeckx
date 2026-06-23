@@ -1558,7 +1558,9 @@ export class ChatSessionManager {
             .string()
             .min(1)
             .describe(
-              "The task / sub-goal to hand to the new coding agent. Because it runs autonomously in edit mode, spell out any irreversible or destructive-operation boundaries it must respect.",
+              "The task / sub-goal to hand to the new coding agent. Write it in the user's original language. " +
+                "Describe the problem and goal clearly, but do NOT over-prescribe step-by-step instructions — a capable agent generally solves a well-described problem on its own, and spelling out the steps tends to constrain it. " +
+                "Because it runs autonomously in edit mode, spell out any irreversible or destructive-operation boundaries it must respect.",
             ),
           agentType: z
             .enum(["claude-code", "codex"])
@@ -1623,7 +1625,9 @@ export class ChatSessionManager {
           message: z
             .string()
             .min(1)
-            .describe("The message to send to the coding agent."),
+            .describe(
+              "The message to send to the coding agent. Write it in the user's original language, and describe what you want clearly without over-prescribing the steps — let the agent work out the how.",
+            ),
         }),
         execute: async ({ message }) => {
           if (!sessionId) {
