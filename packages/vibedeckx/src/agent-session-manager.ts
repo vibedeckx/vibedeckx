@@ -25,6 +25,28 @@ import {
 
 // ============ Session Store Types ============
 
+/** Max chars of the agent's final message carried in the taskCompleted event. */
+const SUMMARY_TEXT_CAP = 1500;
+
+/**
+ * Pull the agent's last assistant message out of the store so the orchestrator
+ * chat can summarize a completed task without a round-trip to read history.
+ * Entries are sparse (indices assigned non-contiguously) so scan from the end
+ * skipping holes; truncate to keep the event small and bound injection surface.
+ */
+function extractLastAssistantText(entries: AgentMessage[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || entry.type !== "assistant") continue;
+    const text = entry.content?.trim();
+    if (!text) continue;
+    return text.length > SUMMARY_TEXT_CAP
+      ? text.slice(0, SUMMARY_TEXT_CAP) + "… (truncated — read full history for detail)"
+      : text;
+  }
+  return undefined;
+}
+
 interface MessageStore {
   /** All patches sent for this session (for history replay) */
   patches: Patch[];
@@ -601,12 +623,14 @@ export class AgentSessionManager {
           if (!session.skipDb) {
             this.storage.agentSessions.markCompleted(sessionId, completedAt);
           }
+          const summaryText = extractLastAssistantText(session.store.entries);
           this.broadcastRaw(sessionId, {
             taskCompleted: {
               duration_ms: event.duration_ms,
               cost_usd: event.cost_usd,
               input_tokens: event.input_tokens,
               output_tokens: event.output_tokens,
+              summaryText,
             },
           });
           this.eventBus?.emit({
@@ -618,6 +642,7 @@ export class AgentSessionManager {
             cost_usd: event.cost_usd,
             input_tokens: event.input_tokens,
             output_tokens: event.output_tokens,
+            summaryText,
           });
           this.emitDerivedBranchActivity(session.projectId, session.branch);
 

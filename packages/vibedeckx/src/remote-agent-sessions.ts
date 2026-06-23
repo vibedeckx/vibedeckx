@@ -227,6 +227,7 @@ export function connectPersistentRemoteWs(
           cost_usd: tc?.cost_usd as number | undefined,
           input_tokens: tc?.input_tokens as number | undefined,
           output_tokens: tc?.output_tokens as number | undefined,
+          summaryText: tc?.summaryText as string | undefined,
         });
         agentSessionManager?.emitBranchActivityIfChanged(
           projectId,
