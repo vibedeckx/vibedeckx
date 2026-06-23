@@ -20,6 +20,13 @@ import {
   type BranchSessionSummary,
 } from "@/lib/api";
 
+// How long after creation we assume a session's AI title may still be
+// generating. Within this window an untitled session shows the "Generating
+// title…" loader; past it, an untitled session is treated as permanently
+// untitled and shows its timestamp. Comfortably above the ~1–2s typical
+// generation latency and aligned with the parent's pending-title safety net.
+const TITLE_GENERATION_WINDOW_MS = 30_000;
+
 interface SessionHistoryDropdownProps {
   projectId: string;
   branch: string | null;
@@ -53,6 +60,11 @@ export function SessionHistoryDropdown({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [open, setOpen] = useState(false);
+  // Sessions whose row has landed in the list but is still awaiting its AI
+  // title — surfaced via the self-heal refetch below the moment we observe a
+  // freshly-appeared, untitled row. Drives the "Generating title…" loader so
+  // the trigger doesn't flash the created_at timestamp while generation runs.
+  const [awaitingTitleId, setAwaitingTitleId] = useState<string | null>(null);
 
   // `reloadToken` is the explicit "re-fetch the list now" signal, bumped only
   // from user events (opening the menu, the Refresh item). Funnelling event
@@ -109,10 +121,23 @@ export function SessionHistoryDropdown({
     }
     if (missingSessionReloadRef.current === currentSessionId) return;
     missingSessionReloadRef.current = currentSessionId;
+    const healingId = currentSessionId;
     let ignore = false;
     listBranchSessions(projectId, branch)
       .then((data) => {
-        if (!ignore) setSessions(data.sessions);
+        if (ignore) return;
+        setSessions(data.sessions);
+        // A self-healed row that landed without a title is a freshly
+        // created/surfaced session whose AI title generation is still in
+        // flight (its one-shot `titleUpdated` either hasn't fired yet or won't
+        // be replayed to this late subscriber). Mark it so the trigger keeps
+        // showing the loader instead of flashing the created_at timestamp.
+        const landed = data.sessions.find((s) => s.id === healingId);
+        const titled =
+          !!landed &&
+          (aiTitleOverride?.sessionId === landed.id ||
+            !!(landed.title && landed.title.trim().length > 0));
+        if (landed && !titled) setAwaitingTitleId(healingId);
       })
       .catch((e) => {
         if (!ignore)
@@ -121,7 +146,30 @@ export function SessionHistoryDropdown({
     return () => {
       ignore = true;
     };
-  }, [currentSessionId, sessions, projectId, branch]);
+  }, [currentSessionId, sessions, projectId, branch, aiTitleOverride]);
+
+  // The marker needs no explicit clear-on-resolve / clear-on-switch effect:
+  // `isAwaitingTitle` already returns false once the row has a resolved title
+  // (so the loader yields to the real title on the next render), and it only
+  // matches its own session id (so a stale marker can't affect a different
+  // current session). The one case left is a title that never arrives — handle
+  // that with a single safety timeout so the loader can't spin forever.
+  useEffect(() => {
+    if (!awaitingTitleId) return;
+    const captured = awaitingTitleId;
+    const timer = setTimeout(() => {
+      setAwaitingTitleId((prev) => (prev === captured ? null : prev));
+    }, TITLE_GENERATION_WINDOW_MS);
+    return () => clearTimeout(timer);
+  }, [awaitingTitleId]);
+  useEffect(() => {
+    if (!awaitingTitleId) return;
+    const captured = awaitingTitleId;
+    const timer = setTimeout(() => {
+      setAwaitingTitleId((prev) => (prev === captured ? null : prev));
+    }, TITLE_GENERATION_WINDOW_MS);
+    return () => clearTimeout(timer);
+  }, [awaitingTitleId]);
 
   const handleRename = async (id: string, next: string) => {
     const title = next.trim().length > 0 ? next.trim() : null;
@@ -180,14 +228,33 @@ export function SessionHistoryDropdown({
   const isTitlePending = (sessionId: string) =>
     pendingTitleSessionId !== null && pendingTitleSessionId === sessionId;
 
+  // Does this session have a displayable title yet? (Either a persisted title
+  // or the optimistic WS-delivered override.)
+  const hasResolvedTitle = (s: BranchSessionSummary): boolean =>
+    aiTitleOverride?.sessionId === s.id ||
+    !!(s.title && s.title.trim().length > 0);
+
+  // Show the "Generating title…" loader (instead of the bare timestamp) while a
+  // session has no resolved title yet AND a title is still incoming — either the
+  // parent explicitly armed it (first-message send path) or the self-heal
+  // refetch flagged it as a freshly-appeared untitled row (`awaitingTitleId`).
+  // The latter covers commander-surfaced sessions, which the parent can't arm
+  // (session id + messages land in one commit, so its arming effect's
+  // prev-session guard never fires). Older untitled sessions fall through to
+  // their timestamp.
+  const isAwaitingTitle = (s: BranchSessionSummary): boolean =>
+    !hasResolvedTitle(s) && (isTitlePending(s.id) || awaitingTitleId === s.id);
+
   const currentSession = sessions.find((s) => s.id === currentSessionId);
   // Treat "we have a session id but the local list hasn't caught up" as
   // pending — covers the brief window after a freshly created or freshly
   // switched-to session, where currentSession would otherwise be undefined
-  // and the trigger would fall through to "History".
+  // and the trigger would fall through to "History". Once the row lands but is
+  // still untitled, `isAwaitingTitle` keeps the loader up (rather than flashing
+  // the timestamp) until its AI title arrives.
   const triggerPending =
     currentSessionId !== null &&
-    (isTitlePending(currentSessionId) || !currentSession);
+    (!currentSession || isAwaitingTitle(currentSession));
   // No currentSessionId → user is in the placeholder state after clicking
   // New Conversation; show "New Session" rather than "History".
   const triggerLabel = currentSession
@@ -278,7 +345,7 @@ export function SessionHistoryDropdown({
                       <X className="h-3 w-3" />
                     </button>
                   </div>
-                ) : isTitlePending(s.id) ? (
+                ) : isAwaitingTitle(s) ? (
                   <div className="py-0.5" title="Generating title…">
                     <span
                       className="block h-3 w-40 rounded-sm bg-accent animate-pulse"
