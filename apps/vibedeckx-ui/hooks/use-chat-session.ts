@@ -210,12 +210,15 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   // carries an expired JWT in its query string. The actual socket setup lives in
   // `openSocket`, reached via a ref to avoid a connectWebSocket↔openSocket
   // dependency cycle.
-  const connectWebSocket = useCallback((sessionId: string) => {
+  // `forceRefresh` forces a network token mint (skipCache) — used when reconnecting
+  // after the server closed the socket, which may be an expired/rejected token.
+  const connectWebSocket = useCallback((sessionId: string, forceRefresh = false) => {
     if (wsRef.current?.readyState === WebSocket.OPEN ||
         wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
     }
-    void getFreshToken().then(() => openSocketRef.current(sessionId));
+    void getFreshToken(forceRefresh ? { skipCache: true } : undefined)
+      .then(() => openSocketRef.current(sessionId));
   }, []);
 
   const openSocket = useCallback((sessionId: string) => {
@@ -377,7 +380,9 @@ export function useChatSession(projectId: string | null, branch: string | null) 
 
       reconnectTimeoutRef.current = setTimeout(() => {
         if (session?.id && !finishedRef.current) {
-          connectWebSocket(session.id);
+          // Server-initiated close — mint a fresh token so a reconnect storm after
+          // a server restart never re-sends the expired JWT that triggered it.
+          connectWebSocket(session.id, true);
         }
       }, delay);
     };

@@ -401,8 +401,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
   // carries an expired JWT. Actual socket setup is in `openSocket`, reached via
   // a ref to keep this callback's deps empty.
-  const connectWebSocket = useCallback((sessionId: string) => {
-    void getFreshToken().then(() => openSocketRef.current(sessionId));
+  // `forceRefresh` forces a network token mint (skipCache) — used when reconnecting
+  // after the server closed the socket, which may be an expired/rejected token.
+  const connectWebSocket = useCallback((sessionId: string, forceRefresh = false) => {
+    void getFreshToken(forceRefresh ? { skipCache: true } : undefined)
+      .then(() => openSocketRef.current(sessionId));
   }, []);
 
   // Connect WebSocket to session
@@ -634,7 +637,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       reconnectTimeoutRef.current = setTimeout(() => {
         const currentSessionId = wsSessionIdRef.current;
         if (currentSessionId && !finishedRef.current) {
-          connectWebSocket(currentSessionId);
+          // Server-initiated close — mint a fresh token so a reconnect storm after
+          // a server restart never re-sends the expired JWT that triggered it.
+          connectWebSocket(currentSessionId, true);
         }
       }, delay);
     };

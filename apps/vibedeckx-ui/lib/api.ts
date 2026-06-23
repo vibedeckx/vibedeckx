@@ -26,23 +26,47 @@ export function setTokenGetter(
   _tokenGetter = fn;
 }
 
-// Returns a guaranteed-valid token. When the cached JWT is still valid this hits
-// Clerk's in-memory cache with zero network cost; only when it's near/after
-// expiry does Clerk fetch a new one. Pass `{ skipCache: true }` to force a
-// network refresh (used on a 401 retry). Always updates `_authToken` so the
-// synchronous WS/SSE readers stay warm.
+// Decode a JWT's `exp` and decide whether it is at/near expiry. The WS/SSE URL
+// builders read the warm `_authToken` cache synchronously, so a stale value here
+// becomes a token the server rejects ("Invalid authentication token"). Returns
+// true for anything we can't vouch for (missing/unparseable token), so the caller
+// forces a refresh instead of risking a dead JWT.
+function tokenExpiringSoon(token: string | null, withinSeconds = 10): boolean {
+  if (!token) return true;
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return true;
+    const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+    const { exp } = JSON.parse(json) as { exp?: number };
+    if (typeof exp !== "number") return false; // no exp claim — assume long-lived
+    return exp * 1000 - Date.now() < withinSeconds * 1000;
+  } catch {
+    return false; // unparseable — let Clerk's own cache logic decide
+  }
+}
+
+// Returns a guaranteed-valid token. When the cached JWT is comfortably valid this
+// hits Clerk's in-memory cache with zero network cost; when it is at/near expiry
+// we force a network mint so the warm cache the synchronous WS/SSE readers see is
+// never an already-expired token. Clerk's own getToken() refresh threshold can lag
+// the server's hard-expiry check, which left the cache holding a dead JWT across a
+// reconnect storm (e.g. after a server restart) — hence the explicit exp check
+// here rather than trusting getToken()'s default caching. Pass `{ skipCache: true }`
+// to force a refresh unconditionally (401 retry, reconnect-after-close).
 export async function getFreshToken(opts?: {
   skipCache?: boolean;
 }): Promise<string | null> {
   if (_tokenGetter) {
     try {
-      const token = await _tokenGetter(opts);
+      const skipCache = opts?.skipCache ?? tokenExpiringSoon(_authToken);
+      const token = await _tokenGetter({ skipCache });
       _authToken = token;
       return token;
     } catch {
-      // Transient getToken() failure — fall back to the last-known token rather
-      // than dropping auth entirely.
-      return _authToken;
+      // Transient getToken() failure. The last-known token only helps while it
+      // still has real life left — handing back an already-expired JWT just earns
+      // an "Invalid token" rejection and a reconnect loop, so drop it in that case.
+      return tokenExpiringSoon(_authToken, 5) ? null : _authToken;
     }
   }
   return _authToken;
