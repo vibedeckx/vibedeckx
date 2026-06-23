@@ -62,10 +62,19 @@ jobs:
           # Install native module dependencies and rebuild for target platform
           cd "staging/${ARCHIVE_NAME}"
           npm install --ignore-scripts --legacy-peer-deps
-          npm rebuild better-sqlite3 node-pty
+          # node-pty ships its own multi-ABI prebuilds/ dir
+          npm rebuild node-pty
 
-          # Patch native module package.json: remove scripts/gypfile, set files to runtime-only
-          # npm pack and npm publish (via bundleDependencies) respect each package's files field
+          # Bundle better-sqlite3 prebuilts for every supported Node ABI and
+          # patch its loader to select at runtime. Replaces `npm rebuild
+          # better-sqlite3`, which produced a single binary locked to the
+          # build host's Node ABI (breaking users on other Node versions).
+          GITHUB_TOKEN="${{ github.token }}" \
+            "$GITHUB_WORKSPACE/scripts/bundle-bs3-prebuilds.sh" node_modules/better-sqlite3 "$CURRENT_PLATFORM"
+
+          # Patch node-pty package.json: remove scripts/gypfile, set files to runtime-only.
+          # npm pack and npm publish (via bundleDependencies) respect each package's files field.
+          # better-sqlite3's package.json is rewritten by the bundle script above.
           node -e "
             const fs = require('fs');
             const platform = '${CURRENT_PLATFORM}';
@@ -76,13 +85,6 @@ jobs:
             delete pty.dependencies;
             pty.files = ['lib/', 'prebuilds/' + platform + '/'];
             fs.writeFileSync('node_modules/node-pty/package.json', JSON.stringify(pty, null, 2) + '\n');
-
-            const bs3 = JSON.parse(fs.readFileSync('node_modules/better-sqlite3/package.json', 'utf8'));
-            delete bs3.scripts;
-            delete bs3.gypfile;
-            bs3.dependencies = { bindings: '*' };
-            bs3.files = ['lib/', 'build/Release/better_sqlite3.node'];
-            fs.writeFileSync('node_modules/better-sqlite3/package.json', JSON.stringify(bs3, null, 2) + '\n');
           "
 
           # Ensure spawn-helper is executable (macOS)
@@ -269,7 +271,7 @@ jobs:
               description: 'AI-powered app generator with project management',
               bin: { vibedeckx: './bin/vibedeckx.mjs' },
               files: ['bin'],
-              engines: { node: '>=20' },
+              engines: { node: '>=22' },
               optionalDependencies: {
                 '@vibedeckx/linux-x64': version,
                 '@vibedeckx/darwin-arm64': version,

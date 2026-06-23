@@ -77,10 +77,18 @@ stage_platform() {
   echo "    Installing native module dependencies..."
   cd "$STAGING"
   npm install --ignore-scripts --legacy-peer-deps 2>&1 | tail -3
-  echo "    Rebuilding native modules (better-sqlite3, node-pty)..."
-  npm rebuild better-sqlite3 node-pty 2>&1 | tail -5
+  echo "    Rebuilding node-pty (ships its own multi-ABI prebuilds)..."
+  npm rebuild node-pty 2>&1 | tail -5
 
-  # Patch native module package.json: set files to runtime-only
+  # Bundle better-sqlite3 prebuilts for every supported Node ABI and patch
+  # its loader to select at runtime. Replaces `npm rebuild better-sqlite3`,
+  # which only produced a single binary locked to the build host's Node ABI.
+  echo "    Bundling better-sqlite3 multi-ABI prebuilts..."
+  "$ROOT_DIR/scripts/bundle-bs3-prebuilds.sh" "$STAGING/node_modules/better-sqlite3" "$PLATFORM"
+
+  # Patch node-pty package.json: set files to runtime-only (its prebuilds/
+  # dir is already multi-ABI). better-sqlite3's package.json is rewritten by
+  # the bundle script above.
   node -e "
     const fs = require('fs');
     const platform = '${PLATFORM}';
@@ -91,13 +99,6 @@ stage_platform() {
     delete pty.dependencies;
     pty.files = ['lib/', 'prebuilds/' + platform + '/'];
     fs.writeFileSync('node_modules/node-pty/package.json', JSON.stringify(pty, null, 2) + '\n');
-
-    const bs3 = JSON.parse(fs.readFileSync('node_modules/better-sqlite3/package.json', 'utf8'));
-    delete bs3.scripts;
-    delete bs3.gypfile;
-    bs3.dependencies = { bindings: '*' };
-    bs3.files = ['lib/', 'build/Release/better_sqlite3.node'];
-    fs.writeFileSync('node_modules/better-sqlite3/package.json', JSON.stringify(bs3, null, 2) + '\n');
   "
 
   # Ensure spawn-helper is executable (macOS)
@@ -183,7 +184,7 @@ if [ "$MODE" = "npm-platform" ]; then
       description: 'AI-powered app generator with project management',
       bin: { vibedeckx: './bin/vibedeckx.mjs' },
       files: ['bin'],
-      engines: { node: '>=20' },
+      engines: { node: '>=22' },
       optionalDependencies: {
         '@vibedeckx/linux-x64': '${VERSION}',
         '@vibedeckx/darwin-arm64': '${VERSION}',
