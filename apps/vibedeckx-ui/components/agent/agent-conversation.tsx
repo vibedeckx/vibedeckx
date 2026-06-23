@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
 import { useAgentSession } from "@/hooks/use-agent-session";
+import { useSurfaceCommanderSession } from "@/hooks/use-surface-commander-session";
 import type { AgentMessage, ContentPart, UploadedPaste, AgentSession } from "@/hooks/use-agent-session";
 import { AgentMessageItem } from "./agent-message";
 import { Conversation, ConversationContent, ConversationScrollButton } from "@/components/ai-elements/conversation";
@@ -182,6 +183,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       setPendingTitleSessionId(null);
     },
   });
+
+  // Surface a commander-spawned session into this open window (auto-swap).
+  useSurfaceCommanderSession(
+    projectId,
+    branch,
+    session?.id ?? null,
+    (id) => setSessionUrlParam?.(id),
+  );
 
   // Fetch available agent providers on mount
   useEffect(() => {
