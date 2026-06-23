@@ -1,5 +1,6 @@
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { ConversationPatch } from "./conversation-patch.js";
+import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
 import type { AgentMessage } from "./agent-types.js";
 import type { Storage } from "./storage/types.js";
 import type { RemoteSessionInfo } from "./server-types.js";
@@ -454,5 +455,76 @@ export function ensureRemoteAgentStream(localSessionId: string, deps: EnsureStre
     deps.reverseConnectManager ?? undefined,
     deps.eventBus ?? undefined,
     deps.agentSessionManager,
+  );
+}
+
+export interface RemoteSessionTitleDeps {
+  storage: Storage;
+  agentSessionManager: AgentSessionManager;
+  remotePatchCache: RemotePatchCache;
+  reverseConnectManager: ReverseConnectManager | null;
+}
+
+/**
+ * For a remote session, generate a title locally (using the local chat_provider
+ * config — the same one main chat uses), then PATCH it to the remote DB and
+ * broadcast `titleUpdated` to local subscribers so the history dropdown
+ * refreshes. Falls back to a snippet of the user's first message when no chat
+ * model is configured or the AI call fails.
+ *
+ * Shared by the UI message route and the commander's spawn/send tools so that
+ * commander-created remote sessions get titles too (they proxy `/message`
+ * directly, bypassing the route that used to own this). Idempotent per local
+ * session id via `markTitleResolved` (in-memory) + `remoteSessionMappings`
+ * (across restarts), so calling it on every delivered message is safe.
+ */
+export async function generateAndPushRemoteSessionTitle(
+  deps: RemoteSessionTitleDeps,
+  localSessionId: string,
+  userText: string,
+  remoteInfo: RemoteSessionInfo,
+  userId: string,
+): Promise<void> {
+  if (userText.trim().length === 0) return;
+  // Cheap in-memory dedupe within this process lifetime.
+  if (!deps.agentSessionManager.markTitleResolved(localSessionId)) return;
+  // Persistent dedupe across restarts: if a previous server lifetime already
+  // resolved this session's title, don't regenerate (the new title would be
+  // derived from a non-first message and would clobber the original).
+  if (deps.storage.remoteSessionMappings.isTitleResolved(localSessionId)) return;
+
+  let aiTitle: string | null = null;
+  try {
+    aiTitle = await generateSessionTitle(deps.storage, userText, userId);
+  } catch (error) {
+    console.warn(
+      `[SessionTitle] AI title generation threw for ${localSessionId}:`,
+      (error as Error).message,
+    );
+  }
+  const finalTitle = aiTitle && aiTitle.length > 0 ? aiTitle : snippetTitle(userText);
+  if (!finalTitle) return;
+
+  const result = await proxyToRemoteAuto(
+    remoteInfo.remoteServerId,
+    remoteInfo.remoteUrl,
+    remoteInfo.remoteApiKey,
+    "PATCH",
+    `/api/agent-sessions/${remoteInfo.remoteSessionId}/title`,
+    { title: finalTitle },
+    { reverseConnectManager: deps.reverseConnectManager ?? undefined },
+  );
+  if (!result.ok) {
+    console.warn(
+      `[SessionTitle] Failed to PATCH remote title for ${localSessionId}:`,
+      result.status,
+      result.errorCode,
+    );
+    return;
+  }
+  deps.storage.remoteSessionMappings.markTitleResolved(localSessionId);
+  deps.remotePatchCache.broadcast(
+    localSessionId,
+    JSON.stringify({ titleUpdated: { title: finalTitle } }),
   );
 }

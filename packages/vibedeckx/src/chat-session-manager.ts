@@ -22,7 +22,7 @@ import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { proxyToRemote, proxyToRemoteAuto } from "./utils/remote-proxy.js";
-import { createRemoteAgentSession, ensureRemoteAgentStream } from "./remote-agent-sessions.js";
+import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "./remote-agent-sessions.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
@@ -506,6 +506,25 @@ export class ChatSessionManager {
       return { success: false, message: `Remote agent started but the task could not be delivered: ${String(error)}` };
     }
 
+    // Generate a session title from the first task (the commander proxies
+    // /message directly, bypassing the UI route that normally triggers this).
+    // Fire-and-forget; idempotent per session id.
+    const spawnedInfo = this.remoteSessionMap.get(created.localSessionId);
+    if (spawnedInfo) {
+      void generateAndPushRemoteSessionTitle(
+        {
+          storage: this.storage,
+          agentSessionManager: this.agentSessionManager,
+          remotePatchCache: this.remotePatchCache,
+          reverseConnectManager: this.reverseConnectManager,
+        },
+        created.localSessionId,
+        prompt,
+        spawnedInfo,
+        "local",
+      );
+    }
+
     ensureRemoteAgentStream(created.localSessionId, {
       remoteSessionMap: this.remoteSessionMap,
       remotePatchCache: this.remotePatchCache,
@@ -563,6 +582,21 @@ export class ChatSessionManager {
     } catch (error) {
       return { success: false, message: `Failed to deliver the message to the remote coding agent: ${String(error)}` };
     }
+
+    // Title generation for sessions that never got one (idempotent — no-op once
+    // the title is already resolved, e.g. for sessions spawned by the commander).
+    void generateAndPushRemoteSessionTitle(
+      {
+        storage: this.storage,
+        agentSessionManager: this.agentSessionManager,
+        remotePatchCache: this.remotePatchCache,
+        reverseConnectManager: this.reverseConnectManager,
+      },
+      target.localSessionId,
+      message,
+      target.info,
+      "local",
+    );
 
     ensureRemoteAgentStream(target.localSessionId, {
       remoteSessionMap: this.remoteSessionMap,

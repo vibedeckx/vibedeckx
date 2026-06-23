@@ -8,14 +8,10 @@ import { projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
-import {
-  extractUserText,
-  generateSessionTitle,
-  snippetTitle,
-} from "../utils/session-title.js";
+import { extractUserText } from "../utils/session-title.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
-import { createRemoteAgentSession } from "../remote-agent-sessions.js";
+import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -84,64 +80,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const project = fastify.storage.projects.getById(projectId, userId);
     if (!project) return null;
     return remoteInfo;
-  }
-
-  /**
-   * For a remote session, generate a title locally (using the local
-   * chat_provider config — the same one main chat uses), then push it to the
-   * remote DB and broadcast `titleUpdated` to local subscribers so the
-   * dropdown refreshes. Falls back to a snippet of the user's first message
-   * when no chat model is configured or the AI call fails.
-   *
-   * Idempotent per local session id via AgentSessionManager.markTitleResolved.
-   */
-  async function generateAndPushRemoteSessionTitle(
-    localSessionId: string,
-    userText: string,
-    remoteInfo: RemoteSessionInfo,
-    userId: string,
-  ): Promise<void> {
-    if (userText.trim().length === 0) return;
-    // Cheap in-memory dedupe within this process lifetime.
-    if (!fastify.agentSessionManager.markTitleResolved(localSessionId)) return;
-    // Persistent dedupe across restarts: if a previous server lifetime already
-    // resolved this session's title, don't regenerate (the new title would be
-    // derived from a non-first message and would clobber the original).
-    if (fastify.storage.remoteSessionMappings.isTitleResolved(localSessionId)) return;
-
-    let aiTitle: string | null = null;
-    try {
-      aiTitle = await generateSessionTitle(fastify.storage, userText, userId);
-    } catch (error) {
-      console.warn(
-        `[SessionTitle] AI title generation threw for ${localSessionId}:`,
-        (error as Error).message,
-      );
-    }
-    const finalTitle = aiTitle && aiTitle.length > 0 ? aiTitle : snippetTitle(userText);
-    if (!finalTitle) return;
-
-    const result = await proxyAuto(
-      remoteInfo.remoteServerId,
-      remoteInfo.remoteUrl,
-      remoteInfo.remoteApiKey,
-      "PATCH",
-      `/api/agent-sessions/${remoteInfo.remoteSessionId}/title`,
-      { title: finalTitle },
-    );
-    if (!result.ok) {
-      console.warn(
-        `[SessionTitle] Failed to PATCH remote title for ${localSessionId}:`,
-        result.status,
-        result.errorCode,
-      );
-      return;
-    }
-    fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
-    fastify.remotePatchCache.broadcast(
-      localSessionId,
-      JSON.stringify({ titleUpdated: { title: finalTitle } }),
-    );
   }
 
   // List available agent providers
@@ -766,6 +704,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // chat_provider config as main chat), then PATCHes the result back to
       // the remote. Fire-and-forget so it doesn't delay the response.
       void generateAndPushRemoteSessionTitle(
+        {
+          storage: fastify.storage,
+          agentSessionManager: fastify.agentSessionManager,
+          remotePatchCache: fastify.remotePatchCache,
+          reverseConnectManager: fastify.reverseConnectManager,
+        },
         req.params.sessionId,
         extractUserText(content),
         remoteInfo,
