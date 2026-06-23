@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { ChevronDown, Pencil, Trash2, Check, X, Star } from "lucide-react";
 import {
   DropdownMenu,
@@ -88,6 +88,40 @@ export function SessionHistoryDropdown({
       ignore = true;
     };
   }, [projectId, branch, refreshKey, reloadToken]);
+
+  // Self-heal a stale list: when the displayed session isn't in our fetched
+  // list, refetch once so its row appears. This covers a commander-spawned
+  // session auto-surfaced into the open window — its one-shot `titleUpdated` WS
+  // broadcast (the usual `refreshKey` trigger) isn't replayed to subscribers
+  // that attach after it fires, so this window can miss it and the trigger would
+  // otherwise sit on a "Generating title…" placeholder (via `!currentSession`)
+  // until the user manually opens the menu. A ref guard ensures we only attempt
+  // one refetch per missing session id, so a session that genuinely never lands
+  // (cross-branch / remote edge cases) can't spin an infinite refetch loop. We
+  // fetch inline (rather than via reload()) so setSessions stays inside the
+  // async callback — a synchronous setState here would cascade re-renders.
+  const missingSessionReloadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentSessionId) return;
+    if (sessions.some((s) => s.id === currentSessionId)) {
+      missingSessionReloadRef.current = null;
+      return;
+    }
+    if (missingSessionReloadRef.current === currentSessionId) return;
+    missingSessionReloadRef.current = currentSessionId;
+    let ignore = false;
+    listBranchSessions(projectId, branch)
+      .then((data) => {
+        if (!ignore) setSessions(data.sessions);
+      })
+      .catch((e) => {
+        if (!ignore)
+          console.error("[SessionHistoryDropdown] missing-session refresh failed:", e);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [currentSessionId, sessions, projectId, branch]);
 
   const handleRename = async (id: string, next: string) => {
     const title = next.trim().length > 0 ? next.trim() : null;
