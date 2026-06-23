@@ -73,6 +73,19 @@ interface ChatSession {
    * per-turn). Null before the first turn.
    */
   turnStartedAt: number | null;
+  /**
+   * The coding-agent session this chat workspace is currently working with,
+   * by exact identity. Set when the chat spawns/targets an agent and when a
+   * `session:taskCompleted` event for this workspace arrives. Read first by
+   * getAgentConversation so it resolves the right session directly instead of
+   * guessing from (projectId, branch) — which returns the wrong session once a
+   * workspace accumulates many historical remote-session mappings. A local
+   * agent-session UUID (local mode) or a `remote-…` localSessionId (remote
+   * mode); both forms are resolvable by getAgentConversation. Null until the
+   * chat first spawns an agent or hears an event for it (e.g. after restart,
+   * since chat sessions are in-memory only).
+   */
+  lastAgentSessionId: string | null;
 }
 
 /**
@@ -269,6 +282,18 @@ export class ChatSessionManager {
     this.chatInitiatedAgentTasks.add(agentSessionId);
   }
 
+  /**
+   * Remember, per chat workspace, which coding-agent session it is currently
+   * working with so getAgentConversation can resolve it by exact identity.
+   * `agentSessionId` is a local agent-session UUID (local mode) or a `remote-…`
+   * localSessionId (remote mode). No-op if the chat session is unknown.
+   */
+  private trackAgentSessionForChat(chatSessionId: string | undefined, agentSessionId: string): void {
+    if (!chatSessionId) return;
+    const chat = this.sessions.get(chatSessionId);
+    if (chat) chat.lastAgentSessionId = agentSessionId;
+  }
+
   private setupEventListeners(): void {
     if (!this.eventBus) return;
     this.eventBus.subscribe((event: GlobalEvent) => {
@@ -297,6 +322,10 @@ export class ChatSessionManager {
         console.log(`[ChatSession] handleSessionTaskCompleted: session object not found for id=${sessionId}`);
         return;
       }
+      // Record which agent session this workspace is working with, regardless
+      // of whether event-listening is on, so getAgentConversation can resolve
+      // it by exact identity rather than guessing from (projectId, branch).
+      session.lastAgentSessionId = event.sessionId;
       if (!session.eventListeningEnabled) {
         console.log(`[ChatSession] handleSessionTaskCompleted: eventListening disabled for session ${sessionId}`);
         return;
@@ -540,6 +569,7 @@ export class ChatSessionManager {
       agentSessionManager: this.agentSessionManager,
     });
     this.registerChatInitiatedAgentTask(created.localSessionId);
+    this.trackAgentSessionForChat(chatSessionId, created.localSessionId);
     this.setEventListening(chatSessionId, true);
 
     return {
@@ -613,6 +643,7 @@ export class ChatSessionManager {
       agentSessionManager: this.agentSessionManager,
     });
     this.registerChatInitiatedAgentTask(target.localSessionId);
+    this.trackAgentSessionForChat(chatSessionId, target.localSessionId);
     this.setEventListening(chatSessionId, true);
 
     return {
@@ -625,25 +656,26 @@ export class ChatSessionManager {
     // Session IDs use format: remote-{serverId}-{projectId}-{remoteSessionId}
     // Match any session that contains the projectId segment
     const projectSegment = `-${projectId}-`;
+    let branchMatch: { localSessionId: string; info: RemoteSessionInfo } | null = null;
     let fallback: { localSessionId: string; info: RemoteSessionInfo } | null = null;
 
+    // The map is hydrated from DB in rowid (creation) order and live sessions
+    // are appended, so the LAST match is the most recent. Keep the last match
+    // (don't return on the first) — a workspace accumulates many historical
+    // mappings and the oldest is almost always dead.
     for (const [key, info] of this.remoteSessionMap) {
       if (key.startsWith("remote-") && key.includes(projectSegment)) {
-        // Exact branch match
         if (info.branch === (branch ?? null)) {
-          return { localSessionId: key, info };
+          branchMatch = { localSessionId: key, info };
         }
-        // Keep first match as fallback in case no branch match
-        if (!fallback) {
-          fallback = { localSessionId: key, info };
-        }
+        fallback = { localSessionId: key, info };
       }
     }
 
-    if (fallback) {
+    if (!branchMatch && fallback) {
       console.log(`[ChatSession] findRemoteSessionForProject: no exact branch match for branch=${branch ?? "null"}, using fallback session=${fallback.localSessionId} (branch=${fallback.info.branch ?? "null"})`);
     }
-    return fallback;
+    return branchMatch ?? fallback;
   }
 
   /**
@@ -1138,6 +1170,7 @@ export class ChatSessionManager {
       taskCompleted: false,
       eventDrivenTurn: false,
       turnStartedAt: null,
+      lastAgentSessionId: null,
     };
 
     this.sessions.set(id, session);
@@ -1447,9 +1480,19 @@ export class ChatSessionManager {
             .describe("Number of recent messages to return"),
         }),
         execute: async ({ tailMessages }) => {
+          // The exact agent session this chat is working with, if known
+          // (spawned here, or surfaced via a recent agent event). Preferred
+          // over a (projectId, branch) guess, which returns the wrong session
+          // once a workspace accumulates many historical session mappings.
+          const trackedId = sessionId ? this.sessions.get(sessionId)?.lastAgentSessionId ?? null : null;
+
           // Collect local session
           let localResult: { sessionId: string; status: string; totalMessages: number; messages: unknown[] } | null = null;
-          let agentSession = agentSessionManager.getSessionByBranch(projectId, branch);
+          let agentSession =
+            (trackedId && !trackedId.startsWith("remote-")
+              ? agentSessionManager.getSession(trackedId)
+              : null)
+            ?? agentSessionManager.getSessionByBranch(projectId, branch);
           if (!agentSession) {
             const projectSessions = agentSessionManager.getSessionsByProject(projectId);
             agentSession = projectSessions.find(s => s.status === "running")
@@ -1467,10 +1510,18 @@ export class ChatSessionManager {
             };
           }
 
-          // Collect remote session
+          // Collect remote session. Prefer the tracked remote id over a
+          // (projectId, branch) match, which can resolve to a stale mapping.
           let remoteResult: { sessionId: string; status: string; totalMessages: number; messages: unknown[]; note?: string } | null = null;
-          const remote = this.findRemoteSessionForProject(projectId, branch);
-          console.log(`[ChatSession] getAgentConversation: projectId=${projectId}, branch=${branch ?? "null"}, remote=${remote ? remote.localSessionId : "null"}, remoteBranch=${remote?.info.branch ?? "null"}`);
+          let remote: { localSessionId: string; info: RemoteSessionInfo } | null = null;
+          if (trackedId && trackedId.startsWith("remote-")) {
+            const info = this.remoteSessionMap.get(trackedId);
+            if (info) remote = { localSessionId: trackedId, info };
+          }
+          if (!remote) {
+            remote = this.findRemoteSessionForProject(projectId, branch);
+          }
+          console.log(`[ChatSession] getAgentConversation: projectId=${projectId}, branch=${branch ?? "null"}, tracked=${trackedId ?? "null"}, remote=${remote ? remote.localSessionId : "null"}, remoteBranch=${remote?.info.branch ?? "null"}`);
           if (remote) {
             try {
               const result = await proxyToRemote(
@@ -1612,6 +1663,7 @@ export class ChatSessionManager {
           );
           agentSessionManager.sendUserMessage(newSessionId, prompt, project.path);
           this.registerChatInitiatedAgentTask(newSessionId);
+          this.trackAgentSessionForChat(sessionId, newSessionId);
           this.setEventListening(sessionId, true);
           return {
             success: true,
@@ -1666,6 +1718,7 @@ export class ChatSessionManager {
             return { success: false, message: "Failed to deliver the message to the coding agent." };
           }
           this.registerChatInitiatedAgentTask(target.id);
+          this.trackAgentSessionForChat(sessionId, target.id);
           this.setEventListening(sessionId, true);
           return {
             success: true,
