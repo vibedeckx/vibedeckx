@@ -31,7 +31,16 @@ export function useSurfaceCommanderSession(
       projectId: string;
       branch: string | null;
       sessionId: string;
+      status: "running" | "stopped" | "error";
     };
+    // Only surface newly-active sessions. A `stopped`/`error` event must NOT
+    // pull the panel back: clicking "New Conversation" stops the prior session
+    // (even when idle) to avoid an orphan process, which emits a `stopped`
+    // event for that just-closed id. With the panel already cleared
+    // (currentSessionId === null) that id would otherwise pass the dedup guard
+    // below and get surfaced right back into the URL — re-loading the session
+    // the user just dismissed. Commander spawns always emit `running` first.
+    if (evt.status !== "running") return;
     // Only this workspace (normalize null branches before comparing).
     if (!projectId || evt.projectId !== projectId) return;
     if ((evt.branch ?? null) !== (branch ?? null)) return;
