@@ -102,6 +102,11 @@ stage_platform() {
 
   # Ensure spawn-helper is executable (macOS)
   find node_modules/node-pty -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
+
+  # Guard: fail loudly if a native module got compiled from source against a
+  # too-new glibc (instead of using an official prebuilt). See check-glibc.sh.
+  echo "    Verifying glibc baseline of native modules..."
+  "$ROOT_DIR/scripts/check-glibc.sh" "$STAGING/node_modules"
 }
 
 # ─── npm pack (main thin wrapper) ───────────────────────────────────

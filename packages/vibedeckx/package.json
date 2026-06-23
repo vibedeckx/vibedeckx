@@ -33,7 +33,7 @@
     "@opentelemetry/sdk-node": "^0.216.0",
     "@stricli/core": "^1.2.0",
     "ai": "^6.0.77",
-    "better-sqlite3": "^11.6.0",
+    "better-sqlite3": "^12.11.1",
     "fastify": "^5.6.1",
     "fastify-plugin": "^5.1.0",
     "https-proxy-agent": "^7.0.6",

@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: linux-x64
           - os: macos-latest
             platform: darwin-arm64
@@ -87,6 +87,10 @@ jobs:
 
           # Ensure spawn-helper is executable (macOS)
           find node_modules/node-pty -name "spawn-helper" -exec chmod +x {} \; 2>/dev/null || true
+
+          # Guard: fail the build if a native module was compiled from source
+          # against a too-new glibc instead of using an official prebuilt.
+          "$GITHUB_WORKSPACE/scripts/check-glibc.sh" node_modules
 
           # --- Archive: inject bin for npx, include sourcemap, create via npm pack ---
           VERSION="$VERSION" node -e "
