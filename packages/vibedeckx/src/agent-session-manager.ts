@@ -247,6 +247,7 @@ export class AgentSessionManager {
     skipDb: boolean = false,
     permissionMode: "plan" | "edit" = "edit",
     agentType: AgentType = "claude-code",
+    announceRunning: boolean = false,
   ): string {
     // Defense-in-depth: if there's an existing non-dormant session on the same
     // project+branch, its child process may still be alive (stream-json agents
@@ -312,6 +313,26 @@ export class AgentSessionManager {
     // Spawn agent process
     this.spawnAgent(session, absoluteWorktreePath);
     console.log(`[AgentSession] createNewSession: id=${sessionId}, projectId=${projectId}, branch=${branchKey}`);
+
+    // Announce the freshly-running session over the event bus so live
+    // consumers can react to it — in particular the agent panel's
+    // commander-surface hook (useSurfaceCommanderSession), which swaps an open
+    // window (incl. a blank "New Conversation" placeholder) onto a session a
+    // commander just spawned on this workspace. Without this, createNewSession
+    // emits no `session:status` event: status is already "running" so the
+    // subsequent sendUserMessage skips its emit, and spawnAgent only emits on
+    // error/exit — so the new session would silently land in the history
+    // dropdown without surfacing.
+    //
+    // Gated behind `announceRunning` (only the commander spawn opts in): the
+    // interactive REST create paths must NOT emit here, or the running event
+    // could beat their own HTTP response to the browser and surface-then-reload
+    // the very window that just created the session. spawnAgent flips status to
+    // "error" (and emits its own event) when the cwd is missing, so only
+    // announce a session that actually came up running.
+    if (announceRunning && session.status === "running") {
+      this.eventBus?.emit({ type: "session:status", projectId, branch, sessionId, status: "running" });
+    }
 
     // The new session has fresh updated_at and no timestamps, so the branch
     // resets to idle (see computeBranchActivity). Emit so SSE consumers don't

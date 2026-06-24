@@ -599,6 +599,22 @@ export class ChatSessionManager {
     this.trackAgentSessionForChat(chatSessionId, created.localSessionId);
     this.setEventListening(chatSessionId, true);
 
+    // Announce the new session on the LOCAL event bus so an open agent window
+    // on this workspace (incl. a blank "New Conversation" placeholder) surfaces
+    // it — same intent as the local-spawn `announceRunning` path. The
+    // remote→local status bridge (statusEventFromRemotePatch) can't carry this:
+    // a freshly spawned remote session never streams a `/status: running` patch
+    // (the remote's createNewSession doesn't broadcast one, and its
+    // sendUserMessage skips the broadcast because status is already "running"),
+    // so without this emit the session would only ever land in the dropdown.
+    this.eventBus?.emit({
+      type: "session:status",
+      projectId,
+      branch,
+      sessionId: created.localSessionId,
+      status: "running",
+    });
+
     return {
       success: true,
       agentSessionId: created.localSessionId,
@@ -1691,6 +1707,10 @@ export class ChatSessionManager {
             false,
             "edit",
             (agentType as AgentType | undefined) ?? "claude-code",
+            // Announce over the event bus so an open agent window on this
+            // workspace (incl. a blank "New Conversation" placeholder) surfaces
+            // this spawned session instead of leaving it only in the dropdown.
+            true,
           );
           agentSessionManager.sendUserMessage(newSessionId, prompt, project.path);
           this.registerChatInitiatedAgentTask(newSessionId);
