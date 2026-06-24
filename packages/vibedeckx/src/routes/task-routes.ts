@@ -9,7 +9,7 @@ import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // List tasks for a project (ordered by position)
-  fastify.get<{ Params: { projectId: string } }>(
+  fastify.get<{ Params: { projectId: string }; Querystring: { includeArchived?: string } }>(
     "/api/projects/:projectId/tasks",
     async (req, reply) => {
       const userId = requireAuth(req, reply);
@@ -19,7 +19,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
-      const tasks = fastify.storage.tasks.getByProjectId(req.params.projectId);
+      const includeArchived = req.query.includeArchived === "true";
+      const tasks = fastify.storage.tasks.getByProjectId(req.params.projectId, { includeArchived });
       return reply.code(200).send({ tasks });
     }
   );
@@ -82,8 +83,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { title?: string; description?: string | null; status?: string; priority?: string; assigned_branch?: string | null; position?: number };
   }>("/api/tasks/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const existing = fastify.storage.tasks.getById(req.params.id);
     if (!existing) {
+      return reply.code(404).send({ error: "Task not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
       return reply.code(404).send({ error: "Task not found" });
     }
 
@@ -100,13 +107,53 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Delete task
   fastify.delete<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const existing = fastify.storage.tasks.getById(req.params.id);
     if (!existing) {
+      return reply.code(404).send({ error: "Task not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
       return reply.code(404).send({ error: "Task not found" });
     }
 
     fastify.storage.tasks.delete(req.params.id);
     return reply.code(200).send({ success: true });
+  });
+
+  // Archive task
+  fastify.post<{ Params: { id: string } }>("/api/tasks/:id/archive", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const existing = fastify.storage.tasks.getById(req.params.id);
+    if (!existing) {
+      return reply.code(404).send({ error: "Task not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Task not found" });
+    }
+
+    const task = fastify.storage.tasks.archive(req.params.id);
+    return reply.code(200).send({ task });
+  });
+
+  // Unarchive task
+  fastify.post<{ Params: { id: string } }>("/api/tasks/:id/unarchive", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const existing = fastify.storage.tasks.getById(req.params.id);
+    if (!existing) {
+      return reply.code(404).send({ error: "Task not found" });
+    }
+    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Task not found" });
+    }
+
+    const task = fastify.storage.tasks.unarchive(req.params.id);
+    return reply.code(200).send({ task });
   });
 
   // Reorder tasks
