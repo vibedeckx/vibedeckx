@@ -30,7 +30,7 @@ export function ToolApprovalCard({
   input,
   resolved,
 }: ToolApprovalCardProps) {
-  const [submitting, setSubmitting] = useState(false);
+  const [pending, setPending] = useState<null | "approve" | "deny">(null);
 
   const label =
     tool === "spawnAgentSession"
@@ -40,12 +40,13 @@ export function ToolApprovalCard({
   const message = extractMessage(input);
 
   const decide = async (approved: boolean) => {
-    if (submitting || resolved) return;
-    setSubmitting(true);
+    if (pending || resolved) return;
+    const action = approved ? "approve" : "deny";
+    setPending(action);
     try {
       await api.chatToolApproval(sessionId, approvalId, approved);
     } finally {
-      setSubmitting(false);
+      setPending(null);
     }
   };
 
@@ -75,18 +76,22 @@ export function ToolApprovalCard({
                 : "bg-red-600 hover:bg-red-700 text-white"
             }
           >
-            <CheckCircle2 className="h-3 w-3 mr-1" />
+            {resolved === "approved" ? (
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+            ) : (
+              <XCircle className="h-3 w-3 mr-1" />
+            )}
             {resolved === "approved" ? "Approved — sent." : "Denied — not sent."}
           </Badge>
         ) : (
           <div className="flex gap-2">
             <Button
               onClick={() => decide(true)}
-              disabled={submitting}
+              disabled={pending !== null}
               className="bg-green-600 hover:bg-green-700 text-white"
               size="sm"
             >
-              {submitting ? (
+              {pending === "approve" ? (
                 <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
               ) : (
                 <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
@@ -95,11 +100,11 @@ export function ToolApprovalCard({
             </Button>
             <Button
               onClick={() => decide(false)}
-              disabled={submitting}
+              disabled={pending !== null}
               variant="destructive"
               size="sm"
             >
-              {submitting ? (
+              {pending === "deny" ? (
                 <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
               ) : (
                 <XCircle className="h-3.5 w-3.5 mr-1" />

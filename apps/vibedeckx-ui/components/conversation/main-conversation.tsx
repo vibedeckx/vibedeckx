@@ -299,10 +299,11 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             }
 
             if (msg.type === "tool_approval_request") {
+              if (!session) return null;
               return (
                 <ToolApprovalCard
                   key={index}
-                  sessionId={session!.id}
+                  sessionId={session.id}
                   approvalId={msg.approvalId}
                   tool={msg.tool}
                   input={msg.input}
