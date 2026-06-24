@@ -303,6 +303,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE tasks ADD COLUMN assigned_branch TEXT DEFAULT NULL");
   }
 
+  // Migration: add archived_at column to tasks table
+  const taskArchivedInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+  const hasArchivedAtColumn = taskArchivedInfo.some((col) => col.name === "archived_at");
+  if (!hasArchivedAtColumn) {
+    db.exec("ALTER TABLE tasks ADD COLUMN archived_at INTEGER DEFAULT NULL");
+  }
+
   // Migration: rename worktree_path to branch in agent_sessions
   const sessionTableInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   const hasWorktreePathColumn = sessionTableInfo.some((col) => col.name === "worktree_path");
@@ -1712,9 +1719,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getByProjectId: (projectId: string) => {
+      getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => {
+        const where = opts?.includeArchived
+          ? `project_id = @project_id`
+          : `project_id = @project_id AND archived_at IS NULL`;
         return db
-          .prepare<{ project_id: string }, Task>(`SELECT * FROM tasks WHERE project_id = @project_id ORDER BY position ASC`)
+          .prepare<{ project_id: string }, Task>(`SELECT * FROM tasks WHERE ${where} ORDER BY position ASC`)
           .all({ project_id: projectId });
       },
 
@@ -1759,6 +1769,18 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
         updates.push('updated_at = CURRENT_TIMESTAMP');
         db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = @id`).run(params);
+        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
+      },
+
+      archive: (id: string) => {
+        db.prepare(`UPDATE tasks SET archived_at = @now, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
+          .run({ id, now: Date.now() });
+        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
+      },
+
+      unarchive: (id: string) => {
+        db.prepare(`UPDATE tasks SET archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
+          .run({ id });
         return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
       },
 
