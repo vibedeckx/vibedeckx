@@ -222,7 +222,43 @@ workspace 的设计必须**为上层递归留好口子**：同一套三原语、
 
 ---
 
-## 8. 待定 / 后续探讨
+## 8. 北极星文案 ↔ 兑现条件（开发指引，非当前宣传）
+
+> 状态：**尚未公开宣传**。这些文案不是现在就拿去获客，而是先作为**北极星**写下来——
+> 等功能齐全后再上 landing page；当下它的作用是**给开发当靶子**。
+
+### 8.1 原则：landing page 卖"结果和感觉"，不卖"架构"
+
+"三层递归指挥官 / workspace→project→global" 是**怎么造**的内部概念，**不该**出现在
+首屏。陌生人买的是**结果与体感**——"我像 manager 一样带一群 agent，却不会失控"。
+架构是给已经信了的人看的（愿景区块 / 博客 / docs）；结果是给陌生人看的（首屏）。
+**营销叙事跟着"信任解锁"的节奏走，而不是跟着架构走**（呼应 §6 冷水二、§7 build order）。
+
+同一个东西的两种语言：
+
+| 内部设计语言（不上首屏） | Landing page 语言（北极星） |
+|---|---|
+| 三层递归指挥官 | **"From one agent to a whole team — you stay in command."** |
+| 注意力杠杆 / selective autonomy | **"Set the goal. Approve the plan. It runs the rest."** |
+| 事件驱动唤醒 + 分级保守批准 | **"It only interrupts you when it matters."** |
+
+### 8.2 每句承诺钉一个"兑现条件"——让文案变成"完成定义"
+
+北极星要能反推出"做完什么才配说这句话"，否则只是口号墙。营销语言 ↔ 验收标准 ↔
+build order，三者对齐成一条线：
+
+| 北极星文案 | 兑现条件（= 验收线） | 对应层 |
+|---|---|---|
+| **"Set the goal. Approve the plan. It runs the rest."** | plan-first 拆解 + 用户确认 + 放养执行 跑通 | Workspace（§3） |
+| **"From one agent to a whole team."** | 并行铺多 branch + 协调依赖/合并 | Project（§4） |
+| **"It only interrupts you when it matters."** | 事件驱动唤醒 + 分级保守批准 真能挡住噪音 | **贯穿所有层**——即 §6 冷水一的"升级判断质量"，产品生死线 |
+
+> 含义：这三句话不只是 landing page 草稿，而是**开发路线图的"完成定义"**。每造完一层，
+> 对照它那句承诺是否真的能说出口——能，才算这层达标。
+
+---
+
+## 9. 待定 / 后续探讨
 
 - **升级判断策略**（冷水一）：指挥官"什么值得打扰用户"的具体规则与可调性——产品生死线。
 - **作战图（subtask board）的具体形态**：字段、状态机、依赖表达、UI 呈现。
