@@ -23,7 +23,8 @@ export type AgentMessage =
   | { type: 'error'; message: string; timestamp: number }
   | { type: 'system'; content: string; timestamp: number }
   | { type: 'turn_end'; timestamp: number }
-  | { type: 'approval_request'; requestType: 'command' | 'fileChange'; requestId: string; command?: string; cwd?: string; changes?: Array<{path: string; diff?: string; kind: string}>; timestamp: number };
+  | { type: 'approval_request'; requestType: 'command' | 'fileChange'; requestId: string; command?: string; cwd?: string; changes?: Array<{path: string; diff?: string; kind: string}>; timestamp: number }
+  | { type: 'tool_approval_request'; tool: string; input: unknown; approvalId: string; resolved?: 'approved' | 'denied'; timestamp: number };
 
 // ============ Claude Code JSON Protocol Types ============
 

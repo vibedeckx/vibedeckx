@@ -15,7 +15,8 @@ export type AgentMessage =
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }
   | { type: "error"; message: string; timestamp: number }
   | { type: "system"; content: string; timestamp: number }
-  | { type: "turn_end"; timestamp: number };
+  | { type: "turn_end"; timestamp: number }
+  | { type: "tool_approval_request"; tool: string; input: unknown; approvalId: string; resolved?: "approved" | "denied"; timestamp: number };
 
 export type AgentSessionStatus = "running" | "stopped" | "error";
 

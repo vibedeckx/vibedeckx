@@ -8,6 +8,7 @@
 
 import { randomUUID } from "crypto";
 import { streamText, tool, stepCountIs } from "ai";
+import type { ModelMessage } from "ai";
 import { z } from "zod";
 import { resolveChatModel } from "./utils/chat-model.js";
 import WsWebSocket from "ws";
@@ -31,6 +32,19 @@ import type { BrowserManager, BrowserError } from "./browser-manager.js";
 
 
 // ============ Types ============
+
+interface PendingApproval {
+  /** The messages array passed into the paused streamText (conversation up to the tool call). */
+  baseMessages: ModelMessage[];
+  /** result.response.messages from the paused stream (assistant text + tool-call). */
+  responseMessages: ModelMessage[];
+  /** Every approvalId awaited this turn. Resume only fires once all are decided. */
+  approvalIds: string[];
+  /** approvalId -> approved. Populated as decisions arrive. */
+  decisions: Map<string, boolean>;
+  /** approvalId -> store entry index, for marking the card resolved. */
+  entryIndexByApprovalId: Map<string, number>;
+}
 
 interface ChatStore {
   patches: Patch[];
@@ -86,6 +100,19 @@ interface ChatSession {
    * since chat sessions are in-memory only).
    */
   lastAgentSessionId: string | null;
+  /**
+   * True while the current turn was woken by a system/agent event (content
+   * sniffed via isSystemEventMessage), independent of eventDrivenTurn's
+   * dot-painting override. Gates needsApproval on the agent-delegation tools
+   * so event-driven outbound sends require user confirmation.
+   */
+  wokenByEvent: boolean;
+  /**
+   * Set when the current turn paused on one or more tool-approval-requests.
+   * Holds everything needed to resume the stream once the user decides.
+   * Null whenever no approval is pending.
+   */
+  pendingApproval: PendingApproval | null;
 }
 
 /**
@@ -1171,6 +1198,8 @@ export class ChatSessionManager {
       eventDrivenTurn: false,
       turnStartedAt: null,
       lastAgentSessionId: null,
+      wokenByEvent: false,
+      pendingApproval: null,
     };
 
     this.sessions.set(id, session);
