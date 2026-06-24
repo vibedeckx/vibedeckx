@@ -86,6 +86,28 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ ok: true });
   });
 
+  // Decide a parked tool-approval-request (event-driven outbound send)
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { approvalId: string; approved: boolean };
+  }>("/api/chat-sessions/:sessionId/tool-approval", async (req, reply) => {
+    const { sessionId } = req.params;
+    const { approvalId, approved } = req.body;
+
+    const session = getAuthorizedSession(req, reply, sessionId);
+    if (!session) return;
+
+    if (typeof approvalId !== "string" || typeof approved !== "boolean") {
+      return reply.code(400).send({ error: "approvalId (string) and approved (boolean) are required" });
+    }
+
+    const ok = fastify.chatSessionManager.resolveToolApproval(sessionId, approvalId, approved);
+    if (!ok) {
+      return reply.code(404).send({ error: "No matching pending approval" });
+    }
+    return reply.send({ ok: true });
+  });
+
   // Toggle event listening for a chat session
   fastify.post<{
     Params: { sessionId: string };
