@@ -1610,6 +1610,16 @@ export const api = {
     if (!res.ok) throw new Error("Failed to reset chat session");
   },
 
+  // Chat Tool Approval
+  async chatToolApproval(sessionId: string, approvalId: string, approved: boolean): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/chat-sessions/${sessionId}/tool-approval`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approvalId, approved }),
+    });
+    if (!res.ok) throw new Error("Tool approval failed");
+  },
+
   // Settings API
   async getProxySettings(): Promise<ProxyConfig> {
     const res = await authFetch(`${getApiBase()}/api/settings/proxy`);
