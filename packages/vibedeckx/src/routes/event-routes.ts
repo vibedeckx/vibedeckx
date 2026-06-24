@@ -68,9 +68,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       reply.raw.write(`data: ${JSON.stringify(toWireEvent(event))}\n\n`);
     });
 
-    // Keepalive every 15 seconds
+    // Heartbeat every 15 seconds. A real `data:` event (not an SSE comment) so
+    // the browser surfaces it to EventSource.onmessage — letting the client
+    // detect a silently-dead ("zombie") connection by the *absence* of pings,
+    // which a comment-line keepalive can't do (EventSource never delivers
+    // comments). Consumers filter by their own `type`, so a `ping` is ignored.
     const keepalive = setInterval(() => {
-      reply.raw.write(":keepalive\n\n");
+      reply.raw.write(`data: ${JSON.stringify({ type: "ping" })}\n\n`);
     }, 15000);
 
     // Cleanup on client disconnect

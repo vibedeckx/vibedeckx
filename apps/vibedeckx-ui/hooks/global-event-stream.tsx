@@ -5,7 +5,9 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 import { getFreshToken } from "@/lib/api";
@@ -24,15 +26,40 @@ function getApiBase(): string {
 export type GlobalEvent = { type?: string; [key: string]: unknown };
 type Listener = (data: GlobalEvent) => void;
 
+// Connection liveness for display:
+//   - connecting — opening or (auto-)reconnecting, no live stream yet
+//   - live       — open and receiving data (events or heartbeats)
+//   - stale      — open but silent past the heartbeat deadline (zombie socket);
+//                  shown to the user, recovered by a manual reconnect click
+export type ConnectionState = "connecting" | "live" | "stale";
+
 interface GlobalEventStreamValue {
   subscribe: (listener: Listener) => () => void;
+  /** Force-close and immediately re-open the stream (manual recovery). */
+  reconnect: () => void;
+}
+
+interface ConnectionStatusValue {
+  state: ConnectionState;
+  /** Epoch ms of the last received frame (event or ping), or null pre-connect. */
+  lastEventAt: number | null;
 }
 
 const GlobalEventStreamContext = createContext<GlobalEventStreamValue | null>(
   null,
 );
+const ConnectionStatusContext = createContext<ConnectionStatusValue | null>(
+  null,
+);
 
 const MAX_RETRY_MS = 5000;
+// Backend sends a `{type:"ping"}` heartbeat every 15s. If we hear nothing —
+// not even a ping — for this long, the connection is silently dead (a zombie
+// socket that never fired `onerror`, e.g. after sleep / network change). We
+// surface it as `stale`; recovery is a manual click here (no watchdog-driven
+// auto-reconnect yet). `onerror` still auto-reconnects clean drops.
+const STALE_AFTER_MS = 40000;
+const WATCHDOG_INTERVAL_MS = 5000;
 
 /**
  * Owns the single `/api/events` SSE connection for the whole app. The backend
@@ -52,10 +79,18 @@ const MAX_RETRY_MS = 5000;
  *     tokenless stream in auth mode would 401 (and EventSource won't retry a
  *     non-2xx response), so we wait for a token before connecting. In solo
  *     (no-auth) mode there is no token and that is correct.
+ *
+ * Liveness is published via a second context (`useConnectionStatus`): `onerror`
+ * handles clean drops (auto-reconnect), and a heartbeat watchdog flags the
+ * zombie case (open-but-silent) as `stale` for the header indicator.
  */
 export function GlobalEventStreamProvider({ children }: { children: ReactNode }) {
   const { config, loading } = useAppConfig();
   const listenersRef = useRef<Set<Listener>>(new Set());
+
+  const [state, setState] = useState<ConnectionState>("connecting");
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
+  const lastEventAtRef = useRef<number | null>(null);
 
   const subscribe = useCallback((listener: Listener) => {
     listenersRef.current.add(listener);
@@ -64,7 +99,20 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     };
   }, []);
 
+  // Any frame (real event or ping) proves the stream is alive.
+  const markAlive = useCallback(() => {
+    const now = Date.now();
+    lastEventAtRef.current = now;
+    setLastEventAt(now);
+    setState((prev) => (prev === "live" ? prev : "live"));
+  }, []);
+
   const authEnabled = !!config?.authEnabled && !!config?.clerkPublishableKey;
+
+  // Holds the latest "force a fresh reconnect now" closure, set by the effect
+  // so the stable `reconnect` callback below can reach the live connection.
+  const reconnectRef = useRef<() => void>(() => {});
+  const reconnect = useCallback(() => reconnectRef.current(), []);
 
   useEffect(() => {
     if (loading) return;
@@ -74,8 +122,18 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
+    function teardown() {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      es?.close();
+      es = null;
+    }
+
     function scheduleReconnect() {
       if (cancelled) return;
+      setState("connecting");
       const delay = Math.min(1000 * 2 ** attempt, MAX_RETRY_MS);
       attempt += 1;
       retryTimer = setTimeout(connect, delay);
@@ -98,16 +156,20 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
 
       es.onopen = () => {
         attempt = 0;
+        markAlive();
       };
 
       es.onmessage = (event) => {
+        markAlive();
         let data: GlobalEvent;
         try {
           data = JSON.parse(event.data) as GlobalEvent;
         } catch {
-          // Ignore keepalive comments / non-JSON frames.
+          // Non-JSON frame — still proof of life, but nothing to dispatch.
           return;
         }
+        // Heartbeat: keeps the connection observably alive; not a real event.
+        if (data.type === "ping") return;
         for (const listener of listenersRef.current) {
           try {
             listener(data);
@@ -126,18 +188,52 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
       };
     }
 
+    // Watchdog: a silently-dead connection never fires `onerror`, so detect it
+    // by the absence of frames (the 15s backend heartbeat included) and flag it
+    // `stale` for the indicator. We do NOT auto-reconnect here — recovery is the
+    // user clicking the stale pill (see ConnectionStatusIndicator).
+    const watchdog = setInterval(() => {
+      if (cancelled) return;
+      const last = lastEventAtRef.current;
+      if (last === null) return; // never connected yet — `connecting` covers it
+      if (Date.now() - last > STALE_AFTER_MS) {
+        setState((prev) => (prev === "connecting" ? prev : "stale"));
+      }
+    }, WATCHDOG_INTERVAL_MS);
+
+    reconnectRef.current = () => {
+      if (cancelled) return;
+      teardown();
+      attempt = 0;
+      setState("connecting");
+      void connect();
+    };
+
     void connect();
 
     return () => {
       cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      es?.close();
+      clearInterval(watchdog);
+      teardown();
     };
-  }, [loading, authEnabled]);
+  }, [loading, authEnabled, markAlive]);
+
+  // Stable so `useGlobalEventStream` consumers don't re-subscribe on every
+  // heartbeat (subscribe + reconnect are both memoized).
+  const streamValue = useMemo<GlobalEventStreamValue>(
+    () => ({ subscribe, reconnect }),
+    [subscribe, reconnect],
+  );
+  const statusValue = useMemo<ConnectionStatusValue>(
+    () => ({ state, lastEventAt }),
+    [state, lastEventAt],
+  );
 
   return (
-    <GlobalEventStreamContext.Provider value={{ subscribe }}>
-      {children}
+    <GlobalEventStreamContext.Provider value={streamValue}>
+      <ConnectionStatusContext.Provider value={statusValue}>
+        {children}
+      </ConnectionStatusContext.Provider>
     </GlobalEventStreamContext.Provider>
   );
 }
@@ -158,4 +254,21 @@ export function useGlobalEventStream(listener: Listener): void {
     if (!ctx) return;
     return ctx.subscribe((data) => listenerRef.current(data));
   }, [ctx]);
+}
+
+/**
+ * Read the shared stream's liveness for display (header indicator). `reconnect`
+ * force-reopens the connection — the manual recovery for a `stale` (zombie)
+ * stream.
+ */
+export function useConnectionStatus(): ConnectionStatusValue & {
+  reconnect: () => void;
+} {
+  const status = useContext(ConnectionStatusContext);
+  const stream = useContext(GlobalEventStreamContext);
+  return {
+    state: status?.state ?? "connecting",
+    lastEventAt: status?.lastEventAt ?? null,
+    reconnect: stream?.reconnect ?? (() => {}),
+  };
 }

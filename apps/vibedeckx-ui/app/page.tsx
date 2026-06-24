@@ -28,6 +28,7 @@ import type { ExecutionMode, Task, Worktree } from '@/lib/api';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
 import { CompletionNotificationsMenu } from '@/components/layout/completion-notifications-menu';
+import { ConnectionStatusIndicator } from '@/components/layout/connection-status-indicator';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
 import {
@@ -408,6 +409,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             </h1>
           </div>
           <div className="flex items-center gap-1">
+            <ConnectionStatusIndicator />
             <CompletionNotificationsMenu
               notifications={notifications}
               unreadCount={unreadCount}
