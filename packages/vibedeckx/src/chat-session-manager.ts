@@ -2610,6 +2610,21 @@ export class ChatSessionManager {
       }));
 
     // 4. Stream response
+    await this.runStream(session, messages);
+
+    return true;
+  }
+
+  /**
+   * Run one `streamText` pass against a caller-supplied messages array.
+   * Sets `session.abortController` and `session.turnStartedAt`, drives the
+   * full stream loop (text-delta / tool-call / tool-result), finalizes the
+   * partial assistant message, runs the no-tool-call watchdog, and drains
+   * the queue in `finally`. Extracted from `sendMessage` so it can also be
+   * called by the approval-resume path (Task 4/5).
+   */
+  private async runStream(session: ChatSession, messages: ModelMessage[]): Promise<void> {
+    const sessionId = session.id;
     const abortController = new AbortController();
     session.abortController = abortController;
     // Anchor for turn-attribution in getExecutorStatus. Set here, after the
@@ -2632,7 +2647,15 @@ export class ChatSessionManager {
       // privileged tool set (runInTerminal, openPreview, getPageContent, …) to
       // these turns — they exist only to be summarized, so a prompt injection
       // in a previewed page cannot drive tool execution.
-      const isBrowserEvent = content.startsWith(BROWSER_EVENT_PREFIX);
+      // Derive isBrowserEvent from the last user message in the messages array
+      // (the same message that sendMessage used content.startsWith() on).
+      const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+      const lastUserText = typeof lastUserMsg?.content === "string"
+        ? lastUserMsg.content
+        : Array.isArray(lastUserMsg?.content)
+          ? lastUserMsg.content.filter((p): p is { type: "text"; text: string } => p.type === "text").map((p) => p.text).join("")
+          : "";
+      const isBrowserEvent = lastUserText.startsWith(BROWSER_EVENT_PREFIX);
       const result = streamText({
         model: resolveChatModel(this.storage),
         system: isBrowserEvent
@@ -2861,8 +2884,6 @@ export class ChatSessionManager {
       console.log(`[ChatSession] sendMessage finished for ${sessionId}, draining queue (${queueLen} items), subscribers=${session.subscribers.size}`);
       this.drainQueue(sessionId);
     }
-
-    return true;
   }
 
   // ---- Stop generation ----
