@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { GlobalEvent } from "../event-bus.js";
+import { CLERK_CLOCK_SKEW_MS } from "./ws-authz.js";
 import "../server-types.js";
 
 // tailOutput carries raw process output (stdout/stderr/PTY tail) for the
@@ -37,12 +38,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const { verifyToken } = await import("@clerk/backend");
           const payload = await verifyToken(token, {
             secretKey: process.env.CLERK_SECRET_KEY!,
+            clockSkewInMs: CLERK_CLOCK_SKEW_MS,
           });
           if (!payload.sub) {
             return reply.code(401).send({ error: "Unauthorized" });
           }
           userId = payload.sub;
-        } catch {
+        } catch (err) {
+          // Preserve Clerk's reason (clock-skew hook for B) — see ws-authz.ts.
+          const reason = (err as { reason?: string })?.reason;
+          if (reason) console.log(`[EventsSSE] token verification failed: ${reason}`);
           return reply.code(401).send({ error: "Unauthorized" });
         }
       }

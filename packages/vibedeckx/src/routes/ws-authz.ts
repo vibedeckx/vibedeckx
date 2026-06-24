@@ -20,6 +20,16 @@ type RejectableSocket = {
 };
 
 /**
+ * Clock-skew tolerance for Clerk session-token verification. Clerk's default is
+ * 5s, but a 60s session token can be rejected as expired (or not-yet-active)
+ * when the verifying server's clock drifts even a few seconds relative to the
+ * issuing clock — e.g. an NTP-less VM that resumed from sleep. 30s absorbs
+ * realistic drift; the only cost is a token staying valid up to ~30s past its
+ * nominal expiry. Applied to every Clerk `verifyToken` call (WS + SSE).
+ */
+export const CLERK_CLOCK_SKEW_MS = 30_000;
+
+/**
  * Verify a Clerk session token for WebSocket connections.
  * Returns the userId if valid, null otherwise.
  */
@@ -28,9 +38,15 @@ export async function verifyWsToken(token: string): Promise<string | null> {
     const { verifyToken } = await import("@clerk/backend");
     const payload = await verifyToken(token, {
       secretKey: process.env.CLERK_SECRET_KEY!,
+      clockSkewInMs: CLERK_CLOCK_SKEW_MS,
     });
     return payload.sub ?? null;
-  } catch {
+  } catch (err) {
+    // Preserve Clerk's failure reason — `token-not-active-yet` / `token-expired`
+    // are strong clock-skew signals and are the hook a future client-facing
+    // "your clock is off by N seconds" message (B) would key off.
+    const reason = (err as { reason?: string })?.reason;
+    if (reason) console.log(`[WsAuth] token verification failed: ${reason}`);
     return null;
   }
 }
