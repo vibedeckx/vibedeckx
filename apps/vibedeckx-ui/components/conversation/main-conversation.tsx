@@ -18,6 +18,7 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
+import { ToolApprovalCard } from "./tool-approval-card";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -294,6 +295,19 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                     </pre>
                   </details>
                 </div>
+              );
+            }
+
+            if (msg.type === "tool_approval_request") {
+              return (
+                <ToolApprovalCard
+                  key={index}
+                  sessionId={session!.id}
+                  approvalId={msg.approvalId}
+                  tool={msg.tool}
+                  input={msg.input}
+                  resolved={msg.resolved}
+                />
               );
             }
 
