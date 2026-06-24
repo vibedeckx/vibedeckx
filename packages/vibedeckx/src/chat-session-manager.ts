@@ -2982,8 +2982,22 @@ export class ChatSessionManager {
 
   stopGeneration(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session || !session.abortController) return false;
+    if (!session) return false;
 
+    // Parked-for-approval turn: no live stream to abort. Tear down
+    // explicitly (the runStream finally won't run again) and process any
+    // events that queued during the wait.
+    if (session.pendingApproval) {
+      session.pendingApproval = null;
+      session.abortController = null;
+      session.status = "stopped";
+      this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
+      this.emitChatActivity(session, "stopped");
+      this.drainQueue(sessionId);
+      return true;
+    }
+
+    if (!session.abortController) return false;
     session.abortController.abort();
     // User explicitly stopped the orchestrator — flip the dot to amber
     // so it's visually distinct from "completed" (cyan) and "running"
@@ -3006,6 +3020,7 @@ export class ChatSessionManager {
       session.abortController.abort();
       session.abortController = null;
     }
+    session.pendingApproval = null;
 
     // Clear the message store
     session.store.patches = [];
