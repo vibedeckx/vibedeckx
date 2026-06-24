@@ -387,6 +387,7 @@ export interface Task {
   priority: TaskPriority;
   assigned_branch: string | null;
   position: number;
+  archived_at: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -1195,8 +1196,9 @@ export const api = {
   },
 
   // Task API
-  async getTasks(projectId: string): Promise<Task[]> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks`);
+  async getTasks(projectId: string, opts?: { includeArchived?: boolean }): Promise<Task[]> {
+    const qs = opts?.includeArchived ? "?includeArchived=true" : "";
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks${qs}`);
     if (!res.ok) {
       const error = await res.json();
       throw new Error(error.error);
@@ -1247,6 +1249,26 @@ export const api = {
       const error = await res.json();
       throw new Error(error.error);
     }
+  },
+
+  async archiveTask(id: string): Promise<Task> {
+    const res = await authFetch(`${getApiBase()}/api/tasks/${id}/archive`, { method: "POST" });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.task;
+  },
+
+  async unarchiveTask(id: string): Promise<Task> {
+    const res = await authFetch(`${getApiBase()}/api/tasks/${id}/unarchive`, { method: "POST" });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.task;
   },
 
   async reorderTasks(projectId: string, orderedIds: string[]): Promise<void> {

@@ -15,7 +15,7 @@ export function useTasks(projectId: string | null) {
     }
 
     try {
-      const data = await api.getTasks(projectId);
+      const data = await api.getTasks(projectId, { includeArchived: true });
       setTasks(data);
     } catch (error) {
       console.error("Failed to fetch tasks:", error);
@@ -77,6 +77,30 @@ export function useTasks(projectId: string | null) {
     }
   }, [tasks]);
 
+  const archive = useCallback(async (id: string) => {
+    const previousTasks = tasks;
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, archived_at: Date.now() } : t)));
+    try {
+      const task = await api.archiveTask(id);
+      setTasks((prev) => prev.map((t) => (t.id === id ? task : t)));
+    } catch (error) {
+      console.error("Failed to archive task:", error);
+      setTasks(previousTasks);
+    }
+  }, [tasks]);
+
+  const unarchive = useCallback(async (id: string) => {
+    const previousTasks = tasks;
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, archived_at: null } : t)));
+    try {
+      const task = await api.unarchiveTask(id);
+      setTasks((prev) => prev.map((t) => (t.id === id ? task : t)));
+    } catch (error) {
+      console.error("Failed to unarchive task:", error);
+      setTasks(previousTasks);
+    }
+  }, [tasks]);
+
   const reorderTasks = useCallback(
     async (orderedIds: string[]) => {
       if (!projectId) return;
@@ -103,6 +127,8 @@ export function useTasks(projectId: string | null) {
     createTask,
     updateTask,
     deleteTask,
+    archive,
+    unarchive,
     reorderTasks,
     refetch: fetchTasks,
   };
