@@ -2790,7 +2790,45 @@ export class ChatSessionManager {
         this.broadcastPatch(session, patch);
       }
 
-      // 6. Watchdog — structural invariant check.
+      // 6a. Approval park — if the model called a needsApproval tool the
+      // stream stopped at the tool-approval-request boundary. Surface a
+      // card per request and PARK the turn (keep abortController set so
+      // concurrent events queue; the finally guard below skips teardown).
+      // resolveToolApproval resumes once the user decides.
+      const finalContent = await result.content;
+      const approvalRequests = finalContent.filter(
+        (p): p is Extract<typeof p, { type: "tool-approval-request" }> =>
+          p.type === "tool-approval-request",
+      );
+      if (approvalRequests.length > 0) {
+        const responseMessages = (await result.response).messages;
+        const pending: PendingApproval = {
+          baseMessages: messages,
+          responseMessages,
+          approvalIds: [],
+          decisions: new Map(),
+          entryIndexByApprovalId: new Map(),
+        };
+        for (const req of approvalRequests) {
+          const entryIndex = session.store.nextIndex;
+          const entry: AgentMessage = {
+            type: "tool_approval_request",
+            tool: req.toolCall.toolName,
+            input: req.toolCall.input,
+            approvalId: req.approvalId,
+            timestamp: Date.now(),
+          };
+          this.pushEntry(session, entry);
+          pending.approvalIds.push(req.approvalId);
+          pending.entryIndexByApprovalId.set(req.approvalId, entryIndex);
+        }
+        session.pendingApproval = pending;
+        // Parked: do NOT change status, do NOT null abortController, do NOT
+        // push turn_end, do NOT drain. The finally guard below handles this.
+        return;
+      }
+
+      // 6b. Watchdog — structural invariant check.
       //
       // Every chat turn must invoke at least one tool (any real tool or
       // `complete_task`). Zero tool-calls means the model violated the
@@ -2864,25 +2902,31 @@ export class ChatSessionManager {
         this.pushEntry(session, errorMsg);
       }
     } finally {
-      session.abortController = null;
-      session.status = "stopped";
-      this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
+      if (session.pendingApproval) {
+        // Turn suspended awaiting user approval — keep abortController set so
+        // concurrent events queue (drained on resume); skip status/turn_end/drain.
+        console.log(`[ChatSession] runStream parked for approval ${sessionId}`);
+      } else {
+        session.abortController = null;
+        session.status = "stopped";
+        this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
 
-      // Mark the end of this turn so the UI can render a divider. Every
-      // stream (normal, aborted, or errored) reaches this point, so a
-      // turn_end entry here separates each turn from the next — including
-      // the most recent one at the bottom. Skip if the last entry is
-      // already a turn_end (defends against an empty stream producing a
-      // bare double divider).
-      const lastEntry = session.store.entries[session.store.nextIndex - 1];
-      if (lastEntry && lastEntry.type !== "turn_end") {
-        this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
+        // Mark the end of this turn so the UI can render a divider. Every
+        // stream (normal, aborted, or errored) reaches this point, so a
+        // turn_end entry here separates each turn from the next — including
+        // the most recent one at the bottom. Skip if the last entry is
+        // already a turn_end (defends against an empty stream producing a
+        // bare double divider).
+        const lastEntry = session.store.entries[session.store.nextIndex - 1];
+        if (lastEntry && lastEntry.type !== "turn_end") {
+          this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
+        }
+
+        // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
+        const queueLen = this.messageQueue.get(sessionId)?.length ?? 0;
+        console.log(`[ChatSession] sendMessage finished for ${sessionId}, draining queue (${queueLen} items), subscribers=${session.subscribers.size}`);
+        this.drainQueue(sessionId);
       }
-
-      // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
-      const queueLen = this.messageQueue.get(sessionId)?.length ?? 0;
-      console.log(`[ChatSession] sendMessage finished for ${sessionId}, draining queue (${queueLen} items), subscribers=${session.subscribers.size}`);
-      this.drainQueue(sessionId);
     }
   }
 
