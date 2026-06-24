@@ -1454,6 +1454,7 @@ export class ChatSessionManager {
     // per turn, after session.turnStartedAt is set, so this is stable and
     // correct for the current turn.
     const turnStartedAt = (sessionId ? this.sessions.get(sessionId)?.turnStartedAt : null) ?? null;
+    const wokenByEvent = (sessionId ? this.sessions.get(sessionId)?.wokenByEvent : false) ?? false;
     const agentSessionManager = this.agentSessionManager;
     const remoteExecutorMap = this.remoteExecutorMap;
     const reverseConnectManager = this.reverseConnectManager;
@@ -1654,6 +1655,7 @@ export class ChatSessionManager {
             .optional()
             .describe("Which agent to spawn. Defaults to claude-code."),
         }),
+        needsApproval: wokenByEvent,
         execute: async ({ prompt, agentType }) => {
           if (!sessionId) {
             return { success: false, message: "No session context available." };
@@ -1717,6 +1719,7 @@ export class ChatSessionManager {
               "The message to send to the coding agent. Write it in the user's original language, and describe what you want clearly without over-prescribing the steps — let the agent work out the how.",
             ),
         }),
+        needsApproval: wokenByEvent,
         execute: async ({ message }) => {
           if (!sessionId) {
             return { success: false, message: "No session context available." };
@@ -2581,6 +2584,10 @@ export class ChatSessionManager {
     // continuations) drive violet/cyan. An explicit `eventDriven` from the
     // caller wins over content sniffing.
     session.eventDrivenTurn = eventDriven ?? isSystemEventMessage(content);
+    // Gate signal for outbound agent-delegation tools. Pure content sniff —
+    // unlike eventDrivenTurn, NOT overridden by the eventDriven param, so
+    // chat-initiated agent completions (eventDrivenTurn=false) are still gated.
+    session.wokenByEvent = isSystemEventMessage(content);
     // A new turn is starting — clear the prior turn's completion so the
     // dot returns to "main-running" (violet). `complete_task` means "this
     // response is finished, over to you" (cyan); the next turn is fresh
