@@ -13,20 +13,23 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Trash2, GitBranch } from "lucide-react";
+import { Trash2, GitBranch, Archive, ArchiveRestore } from "lucide-react";
 import { statusConfig, priorityConfig, statusOptions, priorityOptions } from "./task-utils";
 
 interface TaskRowProps {
   task: Task;
   onUpdate: (id: string, opts: { title?: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => void;
   onDelete: (id: string) => void;
+  onArchive: (id: string) => void;
+  onUnarchive: (id: string) => void;
+  archivedView: boolean;
   onClick?: (task: Task) => void;
   worktrees: Worktree[];
   assignedBranches: Set<string | null>;
   onAssign: (taskId: string, branch: string | null) => void;
 }
 
-export function TaskRow({ task, onUpdate, onDelete, onClick, worktrees, assignedBranches, onAssign }: TaskRowProps) {
+export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign }: TaskRowProps) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleValue, setTitleValue] = useState(task.title);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -183,14 +186,38 @@ export function TaskRow({ task, onUpdate, onDelete, onClick, worktrees, assigned
         {new Date(task.created_at).toLocaleDateString()}
       </TableCell>
       <TableCell className="w-10" onClick={(e) => e.stopPropagation()}>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
-          onClick={() => onDelete(task.id)}
-        >
-          <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          {archivedView ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+              title="Unarchive"
+              onClick={() => onUnarchive(task.id)}
+            >
+              <ArchiveRestore className="h-3.5 w-3.5 text-muted-foreground" />
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+              title="Archive"
+              onClick={() => onArchive(task.id)}
+            >
+              <Archive className="h-3.5 w-3.5 text-muted-foreground" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+            title="Delete"
+            onClick={() => onDelete(task.id)}
+          >
+            <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+          </Button>
+        </div>
       </TableCell>
     </TableRow>
   );

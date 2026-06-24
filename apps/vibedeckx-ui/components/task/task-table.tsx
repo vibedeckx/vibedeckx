@@ -22,11 +22,14 @@ interface TaskTableProps {
   tasks: Task[];
   onUpdate: (id: string, opts: { title?: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => void;
   onDelete: (id: string) => void;
+  onArchive: (id: string) => void;
+  onUnarchive: (id: string) => void;
+  archivedView: boolean;
   worktrees: Worktree[];
   onAssign: (taskId: string, branch: string | null) => void;
 }
 
-export function TaskTable({ tasks, onUpdate, onDelete, worktrees, onAssign }: TaskTableProps) {
+export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign }: TaskTableProps) {
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -99,6 +102,9 @@ export function TaskTable({ tasks, onUpdate, onDelete, worktrees, onAssign }: Ta
             task={task}
             onUpdate={onUpdate}
             onDelete={onDelete}
+            onArchive={onArchive}
+            onUnarchive={onUnarchive}
+            archivedView={archivedView}
             onClick={(t) => { setSelectedTask(t); setDetailOpen(true); }}
             worktrees={worktrees}
             assignedBranches={assignedBranches}

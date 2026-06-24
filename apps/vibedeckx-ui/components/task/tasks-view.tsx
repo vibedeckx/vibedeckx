@@ -8,7 +8,7 @@ import { TaskForm } from "./task-form";
 import { PageHeader, FilterBar, FilterChip } from "@/components/layout";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 
-type StatusFilter = "all" | TaskStatus;
+type StatusFilter = "all" | TaskStatus | "archived";
 
 const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -16,6 +16,7 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "in_progress", label: "Doing" },
   { value: "done", label: "Done" },
   { value: "cancelled", label: "Cancelled" },
+  { value: "archived", label: "Archived" },
 ];
 
 interface TasksViewProps {
@@ -26,9 +27,11 @@ interface TasksViewProps {
   onCreateTask: (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority }) => Promise<Task | null>;
   onUpdateTask: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task | null>;
   onDeleteTask: (id: string) => Promise<void>;
+  onArchiveTask: (id: string) => Promise<void>;
+  onUnarchiveTask: (id: string) => Promise<void>;
 }
 
-export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask }: TasksViewProps) {
+export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask }: TasksViewProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
@@ -36,17 +39,23 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
     onUpdateTask(taskId, { assigned_branch: branch });
   };
 
-  // Counts per status drive the mono count badges on each chip.
-  const counts = useMemo(() => {
-    const c: Record<StatusFilter, number> = { all: tasks.length, todo: 0, in_progress: 0, done: 0, cancelled: 0 };
-    for (const t of tasks) c[t.status]++;
-    return c;
-  }, [tasks]);
+  const activeTasks = useMemo(() => tasks.filter((t) => t.archived_at === null), [tasks]);
+  const archivedTasks = useMemo(() => tasks.filter((t) => t.archived_at !== null), [tasks]);
 
-  const filteredTasks = useMemo(
-    () => (statusFilter === "all" ? tasks : tasks.filter((t) => t.status === statusFilter)),
-    [tasks, statusFilter],
-  );
+  // Counts per chip. Status counts come from active tasks; "archived" counts the archived bucket.
+  const counts = useMemo(() => {
+    const c: Record<StatusFilter, number> = { all: activeTasks.length, todo: 0, in_progress: 0, done: 0, cancelled: 0, archived: archivedTasks.length };
+    for (const t of activeTasks) c[t.status]++;
+    return c;
+  }, [activeTasks, archivedTasks]);
+
+  const filteredTasks = useMemo(() => {
+    if (statusFilter === "archived") return archivedTasks;
+    if (statusFilter === "all") return activeTasks;
+    return activeTasks.filter((t) => t.status === statusFilter);
+  }, [activeTasks, archivedTasks, statusFilter]);
+
+  const archivedView = statusFilter === "archived";
 
   if (!projectId) {
     return (
@@ -65,7 +74,7 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
     <div className="flex flex-col h-full">
       <PageHeader
         title="Tasks"
-        count={tasks.length}
+        count={activeTasks.length}
         actions={
           <Button size="sm" onClick={() => setFormOpen(true)} className="shadow-sm">
             <Plus className="h-3.5 w-3.5 mr-1.5" />
@@ -97,6 +106,9 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
             tasks={filteredTasks}
             onUpdate={onUpdateTask}
             onDelete={onDeleteTask}
+            onArchive={onArchiveTask}
+            onUnarchive={onUnarchiveTask}
+            archivedView={archivedView}
             worktrees={worktrees}
             onAssign={handleAssign}
           />

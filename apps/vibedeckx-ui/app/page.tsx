@@ -106,7 +106,7 @@ export default function Home() {
   } = useProjects(urlProject);
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
-  const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
+  const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
 
   const {
     activity: branchActivity,
@@ -544,6 +544,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
               onCreateTask={createTask}
               onUpdateTask={updateTask}
               onDeleteTask={deleteTask}
+              onArchiveTask={archive}
+              onUnarchiveTask={unarchive}
             />
           </div>
 
