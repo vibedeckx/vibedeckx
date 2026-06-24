@@ -8,7 +8,7 @@
 
 import { randomUUID } from "crypto";
 import { streamText, tool, stepCountIs } from "ai";
-import type { ModelMessage } from "ai";
+import type { ModelMessage, ToolApprovalResponse } from "ai";
 import { z } from "zod";
 import { resolveChatModel } from "./utils/chat-model.js";
 import WsWebSocket from "ws";
@@ -2612,6 +2612,54 @@ export class ChatSessionManager {
     // 4. Stream response
     await this.runStream(session, messages);
 
+    return true;
+  }
+
+  /**
+   * Record a user's decision on a parked tool-approval-request. Idempotent
+   * first-wins per approvalId. When every approval awaited this turn has been
+   * decided, append tool-approval-response messages and resume the stream so
+   * approved tools execute and the model continues.
+   */
+  resolveToolApproval(sessionId: string, approvalId: string, approved: boolean): boolean {
+    const session = this.sessions.get(sessionId);
+    const pending = session?.pendingApproval;
+    if (!session || !pending) return false;
+    if (!pending.approvalIds.includes(approvalId)) return false;
+    if (pending.decisions.has(approvalId)) return true; // first-wins: already decided
+
+    pending.decisions.set(approvalId, approved);
+
+    // Mark the card entry resolved so all clients render the final state.
+    const entryIndex = pending.entryIndexByApprovalId.get(approvalId);
+    if (entryIndex !== undefined) {
+      const entry = session.store.entries[entryIndex];
+      if (entry && entry.type === "tool_approval_request") {
+        const resolved: AgentMessage = { ...entry, resolved: approved ? "approved" : "denied" };
+        session.store.entries[entryIndex] = resolved;
+        const patch = ConversationPatch.replaceEntry(entryIndex, resolved);
+        session.store.patches.push(patch);
+        this.broadcastPatch(session, patch);
+      }
+    }
+
+    // Wait until every parked approval is decided before resuming.
+    if (pending.decisions.size < pending.approvalIds.length) return true;
+
+    const approvals: ToolApprovalResponse[] = pending.approvalIds.map((id) => ({
+      type: "tool-approval-response" as const,
+      approvalId: id,
+      approved: pending.decisions.get(id) ?? false,
+    }));
+    const resumeMessages: ModelMessage[] = [
+      ...pending.baseMessages,
+      ...pending.responseMessages,
+      { role: "tool", content: approvals },
+    ];
+    session.pendingApproval = null; // clear BEFORE resuming so the resumed turn's finally tears down normally
+    this.runStream(session, resumeMessages).catch((err) => {
+      console.error(`[ChatSession] resume after approval failed for ${sessionId}:`, err);
+    });
     return true;
   }
 
