@@ -69,9 +69,10 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             Mission control for your <em>coding&nbsp;agents.</em>
           </h1>
           <p className="lede">
-            Stop guessing which of a dozen terminal windows is doing what. Every agent
-            gets a named workspace, live status at a glance, and a ping when it&rsquo;s
-            done — run them in parallel, across any environment, from any device.
+            Run a fleet of AI coding agents — Claude Code, Codex, your own — that
+            write, test, and ship code for you. Vibedeckx is the cockpit you command
+            them all from: every agent in its own workspace, live status at a glance,
+            and a ping the moment one&rsquo;s done.
           </p>
           <div className="hero-cta">
             <button onClick={onSignIn} className="btn btn-primary btn-lg">
