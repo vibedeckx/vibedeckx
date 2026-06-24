@@ -130,15 +130,17 @@ export function ProjectInfoView({
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
 
+  const activeTasks = useMemo(() => tasks.filter((t) => t.archived_at === null), [tasks]);
+
   const sortedTasks = useMemo(() => {
-    return [...tasks].sort((a, b) => {
+    return [...activeTasks].sort((a, b) => {
       const s = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
       if (s !== 0) return s;
       const p = PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
       if (p !== 0) return p;
       return b.updated_at.localeCompare(a.updated_at);
     });
-  }, [tasks]);
+  }, [activeTasks]);
 
   const visibleTasks = sortedTasks.slice(0, 5);
 
@@ -192,7 +194,7 @@ export function ProjectInfoView({
               <CardHeader>
                 <CardTitle className="text-sm flex items-center justify-between">
                   <span>Tasks</span>
-                  <span className="text-xs font-normal text-muted-foreground">{tasks.length}</span>
+                  <span className="text-xs font-normal text-muted-foreground">{activeTasks.length}</span>
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -227,9 +229,9 @@ export function ProjectInfoView({
                     })}
                   </ul>
                 )}
-                {tasks.length > visibleTasks.length && (
+                {activeTasks.length > visibleTasks.length && (
                   <p className="text-xs text-muted-foreground mt-3">
-                    +{tasks.length - visibleTasks.length} more
+                    +{activeTasks.length - visibleTasks.length} more
                   </p>
                 )}
               </CardContent>
