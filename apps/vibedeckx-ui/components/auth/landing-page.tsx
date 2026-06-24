@@ -26,6 +26,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             <span>vibedeckx</span>
           </a>
           <nav className="nav-links">
+            <a href="#commander">Commander</a>
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
             {/* TODO: re-enable once Pricing section is live */}
@@ -352,6 +353,117 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
           </div>
           <div className="annot a3">
             <span className="badge">03</span> Diff-first review · approve to merge
+          </div>
+        </div>
+      </section>
+
+      {/* ───── The commander ───── */}
+      <section id="commander" className="commander">
+        <div className="wrap">
+          <div className="section-head">
+            <span className="kicker">The commander</span>
+            <h2>
+              Set the goal. Approve the plan.
+              <br />
+              <em>It runs the rest.</em>
+            </h2>
+            <p>
+              Main Chat isn&rsquo;t just another agent — it&rsquo;s the commander. Hand
+              it a goal and it breaks the work into a plan you approve, then dispatches
+              and drives a fleet of agents to carry it out — looping you in only when a
+              call is yours to make.
+            </p>
+          </div>
+
+          {/* Commander deck */}
+          <div className="cmd-deck">
+            <div className="cmd-deck-head">
+              <Logo size={16} live={false} stripes="off" />
+              <span>
+                main chat · <span className="star">commander</span>
+              </span>
+              <span className="right">
+                <span className="bdot green" /> plan approved · running
+              </span>
+            </div>
+
+            <div className="cmd-body">
+              <div className="cmd-goal">
+                <span className="who">YOU</span>
+                <span className="msg">
+                  Ship <b>dark mode</b> across the web app — theme tokens, every
+                  component, and a settings toggle that persists.
+                </span>
+              </div>
+
+              <div className="cmd-plan">
+                <div className="cmd-plan-head">
+                  <span>Mission plan</span>
+                  <span className="count">5 steps · 3 agents</span>
+                </div>
+
+                <div className="cmd-step done">
+                  <span className="ck">✓</span>
+                  <span className="txt">Audit styles &amp; extract theme tokens</span>
+                  <span className="who-pill">done</span>
+                </div>
+                <div className="cmd-step work">
+                  <span className="ck" />
+                  <span className="txt">Refactor 18 components onto tokens</span>
+                  <span className="who-pill green">web-ui · sonnet-4.5</span>
+                </div>
+                <div className="cmd-step work">
+                  <span className="ck" />
+                  <span className="txt">Wire the settings toggle + persistence</span>
+                  <span className="who-pill green">web-ui · codex-1</span>
+                </div>
+                <div className="cmd-step ask">
+                  <span className="ck">!</span>
+                  <div className="txt">
+                    Drop legacy <code>theme.css</code>{" "}
+                    <span className="del">−420</span>
+                    <div className="ask-row">
+                      <span className="ask-label">Destructive — your call</span>
+                      <button className="btn cmd-approve">Approve</button>
+                      <button className="btn cmd-deny">Deny</button>
+                    </div>
+                  </div>
+                </div>
+                <div className="cmd-step queued">
+                  <span className="ck" />
+                  <span className="txt">Visual-regression sweep across breakpoints</span>
+                  <span className="who-pill">queued</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Three promises */}
+          <div className="cmd-promises">
+            <div className="cmd-promise">
+              <span className="n">01</span>
+              <h4>Set the goal. Approve the plan.</h4>
+              <p>
+                Describe the outcome. The commander decomposes it into a plan you can
+                see and sign off on — never a black box.
+              </p>
+            </div>
+            <div className="cmd-promise">
+              <span className="n">02</span>
+              <h4>From one agent to a whole team.</h4>
+              <p>
+                It dispatches and drives a fleet of agents in parallel — each in its own
+                workspace — and keeps them on track.
+              </p>
+            </div>
+            <div className="cmd-promise">
+              <span className="n">03</span>
+              <h4>It only interrupts you when it matters.</h4>
+              <p>
+                It runs on its own and surfaces just the decisions that are yours — an
+                approval, a failure, a fork in the road.
+              </p>
+            </div>
           </div>
         </div>
       </section>
@@ -1475,6 +1587,188 @@ const vdxStyles = `
     color: var(--vdx-accent);
     letter-spacing: 0.04em;
     text-transform: uppercase;
+  }
+
+  /* The commander */
+  .vdx-lp .commander { padding: 96px 0 24px; position: relative; }
+  .vdx-lp .commander .section-head { margin-bottom: 42px; }
+  .vdx-lp .commander .section-head h2 em {
+    font-style: normal;
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-weight: 500;
+    font-size: 0.86em;
+    color: var(--vdx-accent);
+    letter-spacing: -0.02em;
+  }
+
+  .vdx-lp .cmd-deck {
+    max-width: 720px;
+    margin: 0 auto;
+    border: 1px solid var(--vdx-line-strong);
+    border-radius: 14px;
+    background: var(--vdx-surface);
+    box-shadow: var(--vdx-shadow-xl);
+    overflow: hidden;
+  }
+  .vdx-lp .cmd-deck-head {
+    display: flex; align-items: center; gap: 9px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--vdx-line);
+    background: var(--vdx-surface-2);
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 11.5px;
+    color: var(--vdx-fg-muted);
+  }
+  .vdx-lp .cmd-deck-head .star { color: var(--vdx-accent); font-weight: 600; }
+  .vdx-lp .cmd-deck-head .right {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+    color: var(--vdx-green); font-size: 11px;
+  }
+
+  .vdx-lp .cmd-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+  /* goal bubble */
+  .vdx-lp .cmd-goal { display: flex; gap: 10px; align-items: flex-start; }
+  .vdx-lp .cmd-goal .who {
+    flex-shrink: 0;
+    width: 26px; height: 26px; border-radius: 7px;
+    background: var(--vdx-fg); color: var(--vdx-bg);
+    display: grid; place-items: center;
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 8.5px; font-weight: 700; letter-spacing: 0.02em;
+  }
+  .vdx-lp .cmd-goal .msg {
+    background: var(--vdx-bg-2);
+    border: 1px solid var(--vdx-line);
+    border-radius: 9px;
+    padding: 9px 12px;
+    font-size: 13.5px;
+    color: var(--vdx-fg);
+    line-height: 1.5;
+  }
+  .vdx-lp .cmd-goal .msg b { font-weight: 600; }
+
+  /* plan */
+  .vdx-lp .cmd-plan {
+    border: 1px solid var(--vdx-line);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--vdx-surface);
+  }
+  .vdx-lp .cmd-plan-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--vdx-line-2);
+    background: var(--vdx-bg-2);
+    font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--vdx-fg-muted);
+  }
+  .vdx-lp .cmd-plan-head .count {
+    margin-left: auto;
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 10px; letter-spacing: 0; text-transform: none;
+    color: var(--vdx-fg-subtle);
+  }
+  .vdx-lp .cmd-step {
+    display: flex; align-items: center; gap: 11px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--vdx-line-2);
+    font-size: 12.5px;
+    color: var(--vdx-fg-2);
+  }
+  .vdx-lp .cmd-step:last-child { border-bottom: none; }
+  .vdx-lp .cmd-step .ck {
+    width: 16px; height: 16px; border-radius: 999px; flex-shrink: 0;
+    border: 1.5px solid var(--vdx-line-strong);
+    display: grid; place-items: center;
+    font-size: 9px; line-height: 1; color: transparent;
+    align-self: flex-start; margin-top: 1px;
+  }
+  .vdx-lp .cmd-step .txt { flex: 1; line-height: 1.45; }
+  .vdx-lp .cmd-step .txt code {
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 11px; background: var(--vdx-surface-2);
+    padding: 0 4px; border-radius: 4px; border: 1px solid var(--vdx-line-2);
+  }
+  .vdx-lp .cmd-step .txt .del { color: var(--vdx-rose); font-family: var(--font-jetbrains-mono), monospace; font-size: 10.5px; margin-left: 4px; }
+  .vdx-lp .cmd-step .who-pill {
+    flex-shrink: 0;
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 9.5px;
+    padding: 2px 6px; border-radius: 5px;
+    background: var(--vdx-surface-2);
+    border: 1px solid var(--vdx-line);
+    color: var(--vdx-fg-muted);
+  }
+  .vdx-lp .cmd-step .who-pill.green { background: var(--vdx-green-tint); border-color: transparent; color: var(--vdx-green); }
+
+  .vdx-lp .cmd-step.done .ck { background: var(--vdx-green); border-color: var(--vdx-green); color: #fff; }
+  .vdx-lp .cmd-step.done .txt { color: var(--vdx-fg-muted); text-decoration: line-through; text-decoration-color: var(--vdx-line-strong); }
+  .vdx-lp .cmd-step.work .ck { border-color: var(--vdx-green); position: relative; }
+  .vdx-lp .cmd-step.work .ck::after {
+    content: ''; position: absolute; inset: 2.5px; border-radius: 999px;
+    background: var(--vdx-green); animation: vdx-blink 1.3s steps(1) infinite;
+  }
+  .vdx-lp .cmd-step.ask {
+    background: var(--vdx-amber-tint);
+    border-color: transparent;
+  }
+  .vdx-lp .cmd-step.ask .ck {
+    background: var(--vdx-amber); border-color: var(--vdx-amber);
+    color: oklch(0.25 0.04 75); font-weight: 700;
+  }
+  .vdx-lp .cmd-step.ask .txt { color: var(--vdx-fg); }
+  .vdx-lp .cmd-step .ask-row {
+    display: flex; align-items: center; gap: 7px; margin-top: 8px;
+  }
+  .vdx-lp .cmd-step .ask-label {
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: oklch(from var(--vdx-amber) 0.42 c h);
+    margin-right: auto;
+  }
+  .vdx-lp .cmd-step .btn.cmd-approve {
+    padding: 3px 10px; font-size: 11px;
+    background: var(--vdx-fg); border-color: var(--vdx-fg); color: var(--vdx-bg);
+  }
+  .vdx-lp .cmd-step .btn.cmd-deny {
+    padding: 3px 10px; font-size: 11px;
+    background: transparent; border-color: transparent;
+    color: oklch(from var(--vdx-amber) 0.42 c h);
+  }
+  .vdx-lp .cmd-step.queued .txt { color: var(--vdx-fg-muted); }
+
+  /* three promises */
+  .vdx-lp .cmd-promises {
+    max-width: 720px; margin: 26px auto 0;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+  }
+  .vdx-lp .cmd-promise {
+    border: 1px solid var(--vdx-line);
+    border-radius: 11px;
+    background: var(--vdx-surface);
+    padding: 18px 16px 16px;
+  }
+  .vdx-lp .cmd-promise .n {
+    font-family: var(--font-jetbrains-mono), monospace;
+    font-size: 11px; font-weight: 600;
+    color: var(--vdx-accent);
+    background: var(--vdx-accent-tint);
+    padding: 2px 6px; border-radius: 5px;
+  }
+  .vdx-lp .cmd-promise h4 {
+    margin: 12px 0 6px;
+    font-size: 14.5px; font-weight: 600;
+    letter-spacing: -0.012em; line-height: 1.25;
+    color: var(--vdx-fg);
+  }
+  .vdx-lp .cmd-promise p {
+    margin: 0; font-size: 12.5px; line-height: 1.5;
+    color: var(--vdx-fg-muted); text-wrap: pretty;
+  }
+  @media (max-width: 760px) {
+    .vdx-lp .cmd-promises { grid-template-columns: 1fr; }
   }
 
   /* Feature grid */
