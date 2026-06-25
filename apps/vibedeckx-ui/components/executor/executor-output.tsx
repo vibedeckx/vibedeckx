@@ -5,11 +5,18 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Circle, Square } from "lucide-react";
+import { Circle, Square, Info, Copy } from "lucide-react";
 import { toast } from "sonner";
 import type { LogMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useTerminalSettings } from "@/hooks/use-terminal-settings";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 // Strip ANSI escape sequences (CSI, OSC, and single-char escapes) for
 // clipboard-friendly plain text.
@@ -28,6 +35,14 @@ interface ExecutorOutputProps {
   onInput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   muteInput?: boolean;
+  // Debug/identification metadata for the process this window is rendering.
+  // Surfaced via the info button so the processId can be matched against the
+  // `[diag:mux]` / SSE console logs and the `/api/executor-logs/stream` frames.
+  processId?: string | null;
+  executorId?: string;
+  target?: string;
+  status?: string;
+  exitCode?: number | null;
 }
 
 // Always use xterm.js for rendering to properly interpret ANSI escape codes
@@ -38,6 +53,11 @@ export function ExecutorOutput({
   onInput,
   onResize,
   muteInput,
+  processId,
+  executorId,
+  target,
+  status,
+  exitCode,
 }: ExecutorOutputProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -256,6 +276,24 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     };
   }, []);
 
+  const statusLabel =
+    status === "closed" && exitCode !== null
+      ? `closed · exit ${exitCode}`
+      : status ?? null;
+
+  const infoRows: Array<{ label: string; value: string | null }> = [
+    { label: "Process", value: processId ?? null },
+    { label: "Executor", value: executorId ?? null },
+    { label: "Target", value: target ?? null },
+    { label: "Status", value: statusLabel },
+  ];
+
+  const copyValue = (label: string, value: string | null) => {
+    if (!value) return;
+    void navigator.clipboard.writeText(value);
+    toast.success(`${label} copied`);
+  };
+
   return (
     <div
       className={cn(
@@ -264,24 +302,66 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       )}
     >
       <div ref={containerRef} className="h-full w-full" />
-      <button
-        type="button"
-        onClick={handleCaptureToggle}
-        title={isCapturing ? "Stop capture & copy to clipboard" : "Start capturing output"}
-        aria-label={isCapturing ? "Stop capture and copy" : "Start capturing output"}
-        className={cn(
-          "absolute top-2 right-3 z-10 flex h-6 w-6 items-center justify-center rounded",
-          "bg-zinc-900/70 backdrop-blur-sm border border-zinc-700/60",
-          "text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors",
-          isCapturing && "text-red-400 border-red-500/70 hover:text-red-300"
-        )}
-      >
-        {isCapturing ? (
-          <Square className="h-3 w-3 fill-current" />
-        ) : (
-          <Circle className="h-3 w-3" />
-        )}
-      </button>
+      <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              title="Process info"
+              aria-label="Show process info"
+              className={cn(
+                "flex h-6 w-6 items-center justify-center rounded",
+                "bg-zinc-900/70 backdrop-blur-sm border border-zinc-700/60",
+                "text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+              )}
+            >
+              <Info className="h-3 w-3" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-72">
+            <DropdownMenuLabel className="text-xs text-muted-foreground">
+              Process info
+            </DropdownMenuLabel>
+            {infoRows.map((row) => (
+              <DropdownMenuItem
+                key={row.label}
+                disabled={!row.value}
+                // Keep the menu open after copying so several values can be
+                // grabbed in one pass.
+                onSelect={(e) => {
+                  e.preventDefault();
+                  copyValue(row.label, row.value);
+                }}
+                className="flex items-center justify-between gap-3 font-mono text-xs"
+              >
+                <span className="shrink-0 text-muted-foreground">{row.label}</span>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate">{row.value ?? "—"}</span>
+                  {row.value && <Copy className="h-3 w-3 shrink-0 opacity-60" />}
+                </span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <button
+          type="button"
+          onClick={handleCaptureToggle}
+          title={isCapturing ? "Stop capture & copy to clipboard" : "Start capturing output"}
+          aria-label={isCapturing ? "Stop capture and copy" : "Start capturing output"}
+          className={cn(
+            "flex h-6 w-6 items-center justify-center rounded",
+            "bg-zinc-900/70 backdrop-blur-sm border border-zinc-700/60",
+            "text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors",
+            isCapturing && "text-red-400 border-red-500/70 hover:text-red-300"
+          )}
+        >
+          {isCapturing ? (
+            <Square className="h-3 w-3 fill-current" />
+          ) : (
+            <Circle className="h-3 w-3" />
+          )}
+        </button>
+      </div>
     </div>
   );
 }

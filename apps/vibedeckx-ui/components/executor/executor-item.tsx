@@ -287,6 +287,11 @@ export function ExecutorItem({
                 onInput={sendInput}
                 onResize={sendResize}
                 muteInput={replayingHistory}
+                processId={localProcessId}
+                executorId={executor.id}
+                target={executorMode ?? "local"}
+                status={status}
+                exitCode={exitCode}
               />
             </div>
           </CollapsibleContent>
