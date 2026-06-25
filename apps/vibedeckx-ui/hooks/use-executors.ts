@@ -246,7 +246,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
 
   // Create executor in the active group
   const createExecutor = useCallback(
-    async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; disabled?: boolean }) => {
+    async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => {
       if (!projectId || !groupId) return null;
 
       try {

@@ -502,6 +502,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE executors ADD COLUMN disabled_targets TEXT DEFAULT '[]'");
   }
   if (execColsForDisabled.some((c) => c.name === "disabled")) {
+    // ADD COLUMN stays outside the transaction below; the txn does only the
+    // idempotent data backfill + DROP. If a crash lands between them, the next
+    // startup finds disabled_targets already present (skips ADD) but disabled
+    // still present (re-runs the deterministic backfill) — safe to re-enter.
     const migrateDisabled = db.transaction(() => {
       const disabledRows = db
         .prepare("SELECT id, project_id FROM executors WHERE disabled = 1")

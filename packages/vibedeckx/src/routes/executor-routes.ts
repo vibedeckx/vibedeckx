@@ -148,8 +148,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       : undefined;
 
     // Per-target disable toggle: read the current set, add/remove this one
-    // target, and persist the whole array. Server-side RMW so the client never
-    // clobbers the set and concurrent toggles can't race on a stale array.
+    // target, and persist the whole array. Server-side RMW so the client
+    // doesn't have to send (and risk clobbering) the whole set. Note: the read
+    // and write are not in a single transaction, so two concurrent toggles on
+    // the same executor are last-write-wins — acceptable for a single-user UI.
     let disabledTargetsUpdate: { disabled_targets: string[] } | undefined;
     if (target !== undefined && disabled !== undefined) {
       const current = new Set(existing.disabled_targets);
