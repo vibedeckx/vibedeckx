@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { toast } from "sonner";
 import { api, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
 import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
@@ -272,6 +273,9 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
         return executor;
       } catch (error) {
         console.error("Failed to update executor:", error);
+        toast.error("Failed to update executor", {
+          description: error instanceof Error ? error.message : undefined,
+        });
         return null;
       }
     },
