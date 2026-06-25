@@ -323,9 +323,9 @@ export interface Executor {
   cwd: string | null;
   pty: boolean;
   position: number;
-  // When true the executor cannot be started — the Start button is disabled
-  // and the backend rejects start requests. Toggled from the executor's menu.
-  disabled: boolean;
+  // Target ids ("local" or a remote_server_id) on which this executor is
+  // disabled. The UI checks membership for the currently-selected target.
+  disabled_targets: string[];
   created_at: string;
   // Per-target "Last run" data, keyed by target identifier ("local" or a
   // remote_server_id). The UI looks up the entry for the currently selected
@@ -977,7 +977,7 @@ export const api = {
 
   async createExecutor(
     projectId: string,
-    opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; disabled?: boolean; group_id: string }
+    opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; group_id: string }
   ): Promise<Executor> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executors`, {
       method: "POST",
@@ -994,7 +994,7 @@ export const api = {
 
   async updateExecutor(
     id: string,
-    opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled?: boolean }
+    opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; target?: string; disabled?: boolean }
   ): Promise<Executor> {
     const res = await authFetch(`${getApiBase()}/api/executors/${id}`, {
       method: "PUT",

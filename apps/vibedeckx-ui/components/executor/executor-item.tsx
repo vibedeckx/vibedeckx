@@ -42,7 +42,7 @@ interface ExecutorItemProps {
   onOpenChange: (open: boolean) => void;
   onStart: () => Promise<string | null>;
   onStop: (processId?: string) => Promise<void>;
-  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; disabled?: boolean }) => Promise<unknown>;
+  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; target?: string; disabled?: boolean }) => Promise<unknown>;
   onDelete: () => Promise<void>;
   onProcessFinished: (processId: string | null) => void;
 }
@@ -148,7 +148,7 @@ export function ExecutorItem({
   };
 
   const isRunning = executor.isRunning;
-  const isDisabled = !!executor.disabled;
+  const isDisabled = executor.isDisabled;
 
   const lastRunLabel = executor.lastStartedAt
     ? new Date(executor.lastStartedAt).toLocaleString(undefined, {
@@ -249,7 +249,7 @@ export function ExecutorItem({
                       <Pencil className="h-4 w-4 mr-2" />
                       Edit
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onUpdate({ disabled: !isDisabled })}>
+                    <DropdownMenuItem onClick={() => onUpdate({ target: executorMode ?? "local", disabled: !isDisabled })}>
                       {isDisabled ? (
                         <>
                           <CircleCheck className="h-4 w-4 mr-2" />

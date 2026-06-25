@@ -69,6 +69,8 @@ export interface ExecutorWithProcess extends Executor {
   // target only — never the global most-recent across all targets.
   lastProcessId: string | null;
   lastStartedAt: string | null;
+  // Whether this executor is disabled on the currently-selected target.
+  isDisabled: boolean;
 }
 
 export function useExecutors(projectId: string | null, groupId: string | null | undefined, executorMode?: string) {
@@ -263,7 +265,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   const updateExecutor = useCallback(
     async (
       id: string,
-      opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled?: boolean }
+      opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; target?: string; disabled?: boolean }
     ) => {
       try {
         const executor = await api.updateExecutor(id, opts);
@@ -445,6 +447,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
       isRunning: !!match,
       lastProcessId: lastRun?.process_id ?? null,
       lastStartedAt: lastRun?.started_at ?? null,
+      isDisabled: executor.disabled_targets.includes(targetMode),
     };
   });
 
