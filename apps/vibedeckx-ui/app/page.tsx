@@ -408,7 +408,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               VibeDeck<span className="text-primary font-bold">X</span>
             </h1>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2.5">
             <ConnectionStatusIndicator />
             <CompletionNotificationsMenu
               notifications={notifications}
