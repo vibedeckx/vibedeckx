@@ -46,6 +46,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       cwd TEXT,
       pty INTEGER DEFAULT 1,
       position INTEGER DEFAULT 0,
+      disabled INTEGER DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (group_id) REFERENCES executor_groups(id) ON DELETE CASCADE
@@ -224,6 +225,12 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const hasPromptProviderColumn = tableInfo.some((col) => col.name === "prompt_provider");
   if (!hasPromptProviderColumn) {
     db.exec("ALTER TABLE executors ADD COLUMN prompt_provider TEXT DEFAULT NULL");
+  }
+
+  // Migration: add disabled column to executors table
+  const hasDisabledColumn = tableInfo.some((col) => col.name === "disabled");
+  if (!hasDisabledColumn) {
+    db.exec("ALTER TABLE executors ADD COLUMN disabled INTEGER DEFAULT 0");
   }
 
   // Migration: add remote project columns to existing projects table if not present
@@ -685,12 +692,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
   });
 
   // Helper type and mapper for executor rows
-  type ExecutorRow = { id: string; project_id: string; group_id: string; name: string; command: string; executor_type: string; prompt_provider: string | null; cwd: string | null; pty: number; position: number; created_at: string };
+  type ExecutorRow = { id: string; project_id: string; group_id: string; name: string; command: string; executor_type: string; prompt_provider: string | null; cwd: string | null; pty: number; position: number; disabled: number; created_at: string };
   const mapExecutorRow = (row: ExecutorRow): Executor => ({
     ...row,
     executor_type: (row.executor_type || 'command') as ExecutorType,
     prompt_provider: (row.prompt_provider as PromptProvider) ?? null,
     pty: row.pty === 1,
+    disabled: row.disabled === 1,
   });
 
   return {
@@ -1204,7 +1212,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     executors: {
-      create: ({ id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty }) => {
+      create: ({ id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty, disabled }) => {
         // Get max position for this group
         const maxPos = db.prepare<{ group_id: string }, { max_pos: number | null }>(
           `SELECT MAX(position) as max_pos FROM executors WHERE group_id = @group_id`
@@ -1212,8 +1220,8 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         const position = (maxPos?.max_pos ?? -1) + 1;
 
         db.prepare(
-          `INSERT INTO executors (id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty, position) VALUES (@id, @project_id, @group_id, @name, @command, @executor_type, @prompt_provider, @cwd, @pty, @position)`
-        ).run({ id, project_id, group_id, name, command, executor_type: executor_type ?? 'command', prompt_provider: prompt_provider ?? null, cwd: cwd ?? null, pty: pty !== false ? 1 : 0, position });
+          `INSERT INTO executors (id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty, position, disabled) VALUES (@id, @project_id, @group_id, @name, @command, @executor_type, @prompt_provider, @cwd, @pty, @position, @disabled)`
+        ).run({ id, project_id, group_id, name, command, executor_type: executor_type ?? 'command', prompt_provider: prompt_provider ?? null, cwd: cwd ?? null, pty: pty !== false ? 1 : 0, position, disabled: disabled ? 1 : 0 });
 
         const row = db
           .prepare<{ id: string }, ExecutorRow>(`SELECT * FROM executors WHERE id = @id`)
@@ -1242,7 +1250,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? mapExecutorRow(row) : undefined;
       },
 
-      update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean }) => {
+      update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled?: boolean }) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -1269,6 +1277,10 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         if (opts.pty !== undefined) {
           updates.push('pty = @pty');
           params.pty = opts.pty ? 1 : 0;
+        }
+        if (opts.disabled !== undefined) {
+          updates.push('disabled = @disabled');
+          params.disabled = opts.disabled ? 1 : 0;
         }
 
         if (updates.length === 0) {

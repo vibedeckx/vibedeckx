@@ -78,6 +78,9 @@ export interface Executor {
   cwd: string | null;
   pty: boolean;
   position: number;
+  // When true the executor cannot be started from the UI or API. Used to mark
+  // executors (often on a shared remote) that should not be run by mistake.
+  disabled: boolean;
   created_at: string;
 }
 
@@ -258,11 +261,11 @@ export interface Storage {
     delete: (id: string) => void;
   };
   executors: {
-    create: (opts: { id: string; project_id: string; group_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Executor;
+    create: (opts: { id: string; project_id: string; group_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; disabled?: boolean }) => Executor;
     getByProjectId: (projectId: string) => Executor[];
     getByGroupId: (groupId: string) => Executor[];
     getById: (id: string) => Executor | undefined;
-    update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean }) => Executor | undefined;
+    update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled?: boolean }) => Executor | undefined;
     delete: (id: string) => void;
     reorder: (groupId: string, orderedIds: string[]) => void;
   };

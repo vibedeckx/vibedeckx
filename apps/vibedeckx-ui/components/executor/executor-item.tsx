@@ -23,6 +23,8 @@ import {
   Pencil,
   Trash2,
   GripVertical,
+  Ban,
+  CircleCheck,
 } from "lucide-react";
 import { ExecutorOutput } from "./executor-output";
 import { ExecutorForm } from "./executor-form";
@@ -40,7 +42,7 @@ interface ExecutorItemProps {
   onOpenChange: (open: boolean) => void;
   onStart: () => Promise<string | null>;
   onStop: (processId?: string) => Promise<void>;
-  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null }) => Promise<unknown>;
+  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; disabled?: boolean }) => Promise<unknown>;
   onDelete: () => Promise<void>;
   onProcessFinished: (processId: string | null) => void;
 }
@@ -146,6 +148,7 @@ export function ExecutorItem({
   };
 
   const isRunning = executor.isRunning;
+  const isDisabled = !!executor.disabled;
 
   const lastRunLabel = executor.lastStartedAt
     ? new Date(executor.lastStartedAt).toLocaleString(undefined, {
@@ -179,21 +182,30 @@ export function ExecutorItem({
                 ) : (
                   <ChevronRight className="h-4 w-4" />
                 )}
-                <span className="font-medium">{executor.name}</span>
-                <Badge
-                  variant={isRunning ? "default" : "secondary"}
-                  className={cn(
-                    isRunning && "bg-green-600 hover:bg-green-600"
-                  )}
-                >
-                  {isRunning
-                    ? "Running"
-                    : exitCode !== null
-                    ? exitCode === 0
-                      ? "Completed"
-                      : "Failed"
-                    : "Stopped"}
-                </Badge>
+                <span className={cn("font-medium", isDisabled && "text-muted-foreground line-through")}>
+                  {executor.name}
+                </span>
+                {isDisabled ? (
+                  <Badge variant="outline" className="text-muted-foreground border-muted-foreground/40 gap-1">
+                    <Ban className="h-3 w-3" />
+                    Disabled
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant={isRunning ? "default" : "secondary"}
+                    className={cn(
+                      isRunning && "bg-green-600 hover:bg-green-600"
+                    )}
+                  >
+                    {isRunning
+                      ? "Running"
+                      : exitCode !== null
+                      ? exitCode === 0
+                        ? "Completed"
+                        : "Failed"
+                      : "Stopped"}
+                  </Badge>
+                )}
               </div>
               <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                 {lastRunLabel && (
@@ -218,6 +230,8 @@ export function ExecutorItem({
                   <Button
                     size="sm"
                     onClick={handleStart}
+                    disabled={isDisabled}
+                    title={isDisabled ? "Executor is disabled" : undefined}
                     className="w-20"
                   >
                     <Play className="h-3 w-3 mr-1" />
@@ -234,6 +248,19 @@ export function ExecutorItem({
                     <DropdownMenuItem onClick={() => setEditDialogOpen(true)}>
                       <Pencil className="h-4 w-4 mr-2" />
                       Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onUpdate({ disabled: !isDisabled })}>
+                      {isDisabled ? (
+                        <>
+                          <CircleCheck className="h-4 w-4 mr-2" />
+                          Enable
+                        </>
+                      ) : (
+                        <>
+                          <Ban className="h-4 w-4 mr-2" />
+                          Disable
+                        </>
+                      )}
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       onClick={onDelete}

@@ -243,7 +243,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
 
   // Create executor in the active group
   const createExecutor = useCallback(
-    async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => {
+    async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; disabled?: boolean }) => {
       if (!projectId || !groupId) return null;
 
       try {
@@ -262,7 +262,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   const updateExecutor = useCallback(
     async (
       id: string,
-      opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean }
+      opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled?: boolean }
     ) => {
       try {
         const executor = await api.updateExecutor(id, opts);
