@@ -41,7 +41,7 @@ interface RunningProcess {
   skipDb: boolean;
 }
 
-const LOG_RETENTION_MS = 5 * 60 * 1000; // 5 minutes
+const LOG_RETENTION_MS = 30 * 60 * 1000; // keep a finished process's logs replayable for 30 min after exit
 const TERMINAL_MAX_LOG_ENTRIES = 5000;
 
 /**
