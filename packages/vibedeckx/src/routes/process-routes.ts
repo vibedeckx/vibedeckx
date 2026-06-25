@@ -32,7 +32,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       cwd: resolvedCwd,
       pty: pty !== false,
       position: 0,
-      disabled: false,
+      disabled_targets: [],
       created_at: new Date().toISOString(),
     };
 
@@ -57,13 +57,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const project = fastify.storage.projects.getById(executor.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
-    }
-
-    // Disabled executors must not run on any target (local or remote). The flag
-    // is stored on the locally-held executor config, so this gate applies even
-    // when execution would otherwise be proxied to a remote server.
-    if (executor.disabled) {
-      return reply.code(409).send({ error: "Executor is disabled" });
     }
 
     const branch = req.body?.branch;
@@ -93,6 +86,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
         console.log(`[API] Auto-resolved executor_mode from 'local' to '${fallback.remote_server_id}' (no local path)`);
       }
+    }
+
+    // Block start only on the resolved target. An executor disabled on "local"
+    // can still run on a remote, and vice-versa. Evaluated on the controller
+    // before any proxy, so it covers both local and remote starts.
+    if (executor.disabled_targets.includes(executorMode)) {
+      return reply.code(409).send({ error: "Executor is disabled for this target" });
     }
 
     // When remote, resolve connection info from project_remotes table

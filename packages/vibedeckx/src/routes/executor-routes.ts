@@ -86,7 +86,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create Executor
   fastify.post<{
     Params: { projectId: string };
-    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; disabled?: boolean; group_id: string };
+    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; group_id: string };
   }>("/api/projects/:projectId/executors", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -96,7 +96,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { name, command, executor_type, prompt_provider, cwd, pty, disabled, group_id } = req.body;
+    const { name, command, executor_type, prompt_provider, cwd, pty, group_id } = req.body;
     if (!group_id) {
       return reply.code(400).send({ error: "group_id is required" });
     }
@@ -115,7 +115,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       prompt_provider: parsedType === 'prompt' ? parsedProvider : null,
       cwd,
       pty,
-      disabled,
     });
 
     return reply.code(201).send({ executor });
@@ -124,7 +123,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 更新 Executor
   fastify.put<{
     Params: { id: string };
-    Body: { name?: string; command?: string; executor_type?: string; prompt_provider?: string; cwd?: string | null; pty?: boolean; disabled?: boolean };
+    Body: { name?: string; command?: string; executor_type?: string; prompt_provider?: string; cwd?: string | null; pty?: boolean; target?: string; disabled?: boolean };
   }>("/api/executors/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -140,17 +139,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { executor_type, prompt_provider, ...rest } = req.body;
+    const { executor_type, prompt_provider, target, disabled, ...rest } = req.body;
     const parsedType = executor_type !== undefined
       ? (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType
       : undefined;
     const parsedProvider = prompt_provider !== undefined
       ? (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider
       : undefined;
+
+    // Per-target disable toggle: read the current set, add/remove this one
+    // target, and persist the whole array. Server-side RMW so the client never
+    // clobbers the set and concurrent toggles can't race on a stale array.
+    let disabledTargetsUpdate: { disabled_targets: string[] } | undefined;
+    if (target !== undefined && disabled !== undefined) {
+      const current = new Set(existing.disabled_targets);
+      if (disabled) current.add(target);
+      else current.delete(target);
+      disabledTargetsUpdate = { disabled_targets: [...current] };
+    }
+
     const updateOpts = {
       ...rest,
       ...(parsedType !== undefined ? { executor_type: parsedType } : {}),
       ...(parsedProvider !== undefined ? { prompt_provider: parsedProvider } : {}),
+      ...(disabledTargetsUpdate ?? {}),
     };
     const executor = fastify.storage.executors.update(req.params.id, updateOpts);
     return reply.code(200).send({ executor });
