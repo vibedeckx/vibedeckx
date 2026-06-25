@@ -138,6 +138,18 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     fetchRunningProcesses();
   }, [fetchRunningProcesses]);
 
+  // Reconcile on project switch. The hook isn't remounted when projectId
+  // changes (the prop just updates), so the mount fetch above never re-runs.
+  // An executor:stopped emitted while we were viewing another project is
+  // dropped by the projectId filter in the SSE handler below (SSE has no
+  // replay), so without this the stale "running" entry survives the round
+  // trip and the Stop button stays red. Re-fetching rebuilds runningProcesses
+  // from the authoritative REST snapshot.
+  useEffect(() => {
+    if (!projectId) return;
+    fetchRunningProcesses();
+  }, [projectId, fetchRunningProcesses]);
+
   // Reconcile stale running-process state when the browser tab regains focus.
   // SSE events emitted while the tab was backgrounded may have been lost.
   useEffect(() => {

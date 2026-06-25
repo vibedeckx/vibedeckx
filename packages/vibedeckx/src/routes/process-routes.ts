@@ -129,14 +129,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (result.ok) {
         const remoteData = result.data as { processId: string };
         const localProcessId = `remote-${executor.id}-${remoteData.processId}`;
-        fastify.remoteExecutorMap.set(localProcessId, {
+        const remoteInfo = {
           remoteServerId: executorMode,
           remoteUrl: remoteConfig.server_url ?? "",
           remoteApiKey: remoteConfig.server_api_key || "",
           remoteProcessId: remoteData.processId,
           executorId: executor.id,
           projectId: project.id,
-        });
+        };
+        fastify.remoteExecutorMap.set(localProcessId, remoteInfo);
+        // Detect completion independently of any frontend log-proxy connection,
+        // so executor:stopped fires (and the map is cleared) even if the user
+        // navigates away before the process finishes.
+        fastify.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
         fastify.storage.remoteExecutorProcesses.insert(localProcessId, {
           remoteServerId: executorMode,
           remoteUrl: remoteConfig.server_url ?? "",

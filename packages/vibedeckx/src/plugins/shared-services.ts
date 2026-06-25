@@ -11,6 +11,7 @@ import { setGlobalProxyManager, proxyToRemoteAuto } from "../utils/remote-proxy.
 import { RemotePatchCache } from "../remote-patch-cache.js";
 import { ReverseConnectManager } from "../reverse-connect-manager.js";
 import { BrowserManager } from "../browser-manager.js";
+import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -81,6 +82,10 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
 
   const reverseConnectManager = new ReverseConnectManager();
   const browserManager = new BrowserManager();
+  // Watches remote executor processes for completion independently of any
+  // frontend log-proxy subscription (see RemoteExecutorMonitor). Shared across
+  // all remoteExecutorMap.set sites (panel start, boot recovery, chat).
+  const remoteExecutorMonitor = new RemoteExecutorMonitor(reverseConnectManager, eventBus, opts.storage, remoteExecutorMap);
   const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
   // Restore persisted remote executors by verifying against a connected
   // server's running process list and repopulating remoteExecutorMap.
@@ -134,7 +139,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
               console.log(`[SharedServices] Registered server alias: ${row.remote_server_id} → ${connectedServerId}`);
             }
             // Restore with original server ID (frontend matches against project.executor_mode)
-            remoteExecutorMap.set(row.local_process_id, {
+            const restoredInfo = {
               remoteServerId: row.remote_server_id,
               remoteUrl: row.remote_url,
               remoteApiKey: row.remote_api_key,
@@ -142,7 +147,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
               executorId: row.executor_id,
               projectId: row.project_id ?? undefined,
               branch: row.branch,
-            });
+            };
+            remoteExecutorMap.set(row.local_process_id, restoredInfo);
+            // Watch so a finish AFTER restart is still observed without an
+            // active frontend log proxy.
+            remoteExecutorMonitor.watch(row.local_process_id, restoredInfo);
             eventBus.emit({
               type: "executor:started",
               projectId: row.project_id ?? "",
@@ -182,6 +191,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("agentSessionManager", agentSessionManager);
   fastify.decorate("chatSessionManager", chatSessionManager);
   fastify.decorate("remoteExecutorMap", remoteExecutorMap);
+  fastify.decorate("remoteExecutorMonitor", remoteExecutorMonitor);
   fastify.decorate("remoteSessionMap", remoteSessionMap);
   fastify.decorate("eventBus", eventBus);
   fastify.decorate("proxyManager", proxyManager);
@@ -190,6 +200,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("browserManager", browserManager);
   agentSessionManager.setEventBus(eventBus);
   chatSessionManager.setEventBus(eventBus);
+  chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);
   processManager.setEventBus(eventBus);
 
   // Restore remote executor processes from DB in the background.
@@ -219,6 +230,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     agentSessionManager.shutdown();
     processManager.shutdown();
     remotePatchCache.shutdown();
+    remoteExecutorMonitor.shutdown();
     reverseConnectManager.shutdown();
     await browserManager.shutdown();
   });

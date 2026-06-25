@@ -27,6 +27,7 @@ import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemot
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
+import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
 
@@ -210,8 +211,8 @@ export class ChatSessionManager {
     sessionId: string;
   }>();
 
-  /** processId → cleanup function for remote executor monitors */
-  private remoteExecutorMonitors = new Map<string, () => void>();
+  /** Shared remote-executor completion watcher (injected post-construction). */
+  private remoteExecutorMonitor: RemoteExecutorMonitor | null = null;
 
   /**
    * sessionId → queued messages waiting to be sent after the current stream
@@ -284,6 +285,10 @@ export class ChatSessionManager {
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
     this.setupEventListeners();
+  }
+
+  setRemoteExecutorMonitor(monitor: RemoteExecutorMonitor): void {
+    this.remoteExecutorMonitor = monitor;
   }
 
   setEventListening(sessionId: string, enabled: boolean): boolean {
@@ -1094,102 +1099,6 @@ export class ChatSessionManager {
     console.log(`[ChatSession] Started remote terminal watcher for terminal=${terminalId} session=${sessionId}`);
   }
 
-  /**
-   * Open a lightweight server-side WebSocket to a remote executor's log stream
-   * to detect when it finishes. Without this, `executor:stopped` is only emitted
-   * when a frontend client connects the log proxy — which may not happen until
-   * the user switches browser tabs.
-   */
-  private monitorRemoteExecutor(localProcessId: string, remoteInfo: RemoteExecutorInfo): void {
-    // Avoid double-monitoring (e.g. if the frontend proxy is already connected)
-    if (this.remoteExecutorMonitors.has(localProcessId)) return;
-
-    let remoteWs: WsWebSocket | VirtualWsAdapter;
-
-    const useVirtual = this.reverseConnectManager?.isConnected(remoteInfo.remoteServerId);
-
-    if (useVirtual && this.reverseConnectManager) {
-      const channelId = randomUUID();
-      const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
-      const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-      const adapter = new VirtualWsAdapter(
-        (data) => this.reverseConnectManager!.sendChannelData(remoteInfo.remoteServerId, channelId, data),
-        () => this.reverseConnectManager!.closeChannel(remoteInfo.remoteServerId, channelId),
-      );
-      this.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
-      this.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
-      remoteWs = adapter;
-      setTimeout(() => adapter.emit("open"), 0);
-    } else {
-      if (!remoteInfo.remoteUrl) {
-        console.log(`[ChatSession] monitorRemoteExecutor: no direct URL for ${localProcessId}, skipping`);
-        return;
-      }
-      const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
-      const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-      const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-      const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-      remoteWs = new WsWebSocket(remoteWsUrl);
-    }
-
-    const cleanup = () => {
-      this.remoteExecutorMonitors.delete(localProcessId);
-      try { remoteWs.close(); } catch { /* already closed */ }
-    };
-
-    // Collect output from remote log messages to include in the event
-    const outputChunks: string[] = [];
-
-    remoteWs.on("message", (data) => {
-      try {
-        const parsed = JSON.parse(data.toString());
-        // Accumulate output from pty/stdout/stderr messages
-        if ((parsed.type === "pty" || parsed.type === "stdout" || parsed.type === "stderr") && parsed.data) {
-          outputChunks.push(parsed.data);
-        }
-        if (parsed.type === "finished") {
-          const info = this.remoteExecutorMap.get(localProcessId);
-          if (info && !info.stoppedEmitted) {
-            info.stoppedEmitted = true;
-            // Build tail output from collected chunks, strip ANSI codes
-            let raw = outputChunks.join("");
-            raw = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
-            const tailOutput = raw.length > 10000 ? raw.slice(-10000) : raw;
-            this.eventBus?.emit({
-              type: "executor:stopped",
-              projectId: info.projectId ?? "",
-              executorId: info.executorId,
-              processId: localProcessId,
-              exitCode: parsed.exitCode ?? 0,
-              target: info.remoteServerId,
-              tailOutput,
-            });
-          }
-          this.remoteExecutorMap.delete(localProcessId);
-          // Soft-delete: keep the DB row so "Last run" + post-finish log
-          // replay survive past the process's lifecycle.
-          this.storage.remoteExecutorProcesses.markFinished(
-            localProcessId,
-            typeof parsed.exitCode === 'number' ? parsed.exitCode : 0,
-          );
-          cleanup();
-        }
-      } catch { /* ignore parse errors */ }
-    });
-
-    remoteWs.on("close", () => {
-      cleanup();
-    });
-
-    remoteWs.on("error", (error) => {
-      console.error(`[ChatSession] monitorRemoteExecutor error for ${localProcessId}:`, error);
-      cleanup();
-    });
-
-    this.remoteExecutorMonitors.set(localProcessId, cleanup);
-    console.log(`[ChatSession] Started remote executor monitor for ${localProcessId}`);
-  }
-
   // ---- Session lifecycle ----
 
   getOrCreateSession(projectId: string, branch: string | null, userId: string): string {
@@ -1991,7 +1900,7 @@ export class ChatSessionManager {
 
             // Monitor remote process so executor:stopped fires even if no
             // frontend client connects the log WebSocket proxy.
-            this.monitorRemoteExecutor(localProcessId, {
+            this.remoteExecutorMonitor?.watch(localProcessId, {
               remoteServerId: resolvedRemote,
               remoteUrl: remoteConfig.server_url ?? "",
               remoteApiKey: remoteConfig.server_api_key || "",

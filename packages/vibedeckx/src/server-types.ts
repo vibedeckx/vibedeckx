@@ -7,6 +7,7 @@ import type { ProxyManager } from "./utils/proxy-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { BrowserManager } from "./browser-manager.js";
+import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -35,6 +36,7 @@ declare module "fastify" {
     agentSessionManager: AgentSessionManager;
     chatSessionManager: ChatSessionManager;
     remoteExecutorMap: Map<string, RemoteExecutorInfo>;
+    remoteExecutorMonitor: RemoteExecutorMonitor;
     remoteSessionMap: Map<string, RemoteSessionInfo>;
     eventBus: EventBus;
     proxyManager: ProxyManager;
