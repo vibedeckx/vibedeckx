@@ -56,6 +56,13 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
     const parsed = parseFileHref(href);
     if (!parsed) return [node]; // external / anchor link — leave as-is
     const matches = resolve(parsed.rawPath);
+    // TEMP DEBUG — remove after diagnosing file-ref rendering
+    console.log("[fileref-debug] transformAnchor", {
+      href,
+      rawPath: parsed.rawPath,
+      indexNull: !opts.index,
+      matches: matches.length,
+    });
     if (matches.length === 0) return node.children ?? []; // unwrap broken file link
     return [makeAnchor(matches, parsed.line, node.children ?? [])];
   }

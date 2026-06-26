@@ -24,10 +24,20 @@ export function useFileRefIndex({ projectId, branch, target }: Args): FileRefInd
     api
       .listProjectFiles(projectId, branch, target)
       .then((res) => {
+        // TEMP DEBUG — remove after diagnosing file-ref rendering
+        console.log("[fileref-debug] index loaded", {
+          projectId,
+          branch,
+          target,
+          files: res.files.length,
+          truncated: res.truncated,
+          sample: res.files.slice(0, 3),
+        });
         if (key === keyRef.current) setIndex(buildFileRefIndex(res.files));
       })
-      .catch(() => {
-        /* leave null — graceful degradation */
+      .catch((err) => {
+        // TEMP DEBUG — this error was previously swallowed silently
+        console.error("[fileref-debug] listProjectFiles FAILED", { projectId, branch, target }, err);
       });
   }, [projectId, branch, target]);
 
