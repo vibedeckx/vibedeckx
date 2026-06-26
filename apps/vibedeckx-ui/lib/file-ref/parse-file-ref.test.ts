@@ -37,6 +37,37 @@ describe("scanFileRefs", () => {
   });
 });
 
+describe("scanFileRefs — markdown-link literals", () => {
+  it("collapses [label](path:line) into one ref with the label as display", () => {
+    const s = "see [compaction.ts](packages/eve/src/execution/compaction.ts:18) ok";
+    const refs = scanFileRefs(s);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].rawPath).toBe("packages/eve/src/execution/compaction.ts");
+    expect(refs[0].line).toBe(18);
+    expect(refs[0].display).toBe("compaction.ts");
+    expect(s.slice(refs[0].start, refs[0].end)).toBe(
+      "[compaction.ts](packages/eve/src/execution/compaction.ts:18)",
+    );
+  });
+
+  it("does not also emit the bare path/label inside the link literal", () => {
+    const refs = scanFileRefs("[x](a/b/c.ts:3)");
+    expect(refs).toHaveLength(1);
+    expect(refs[0].display).toBe("x");
+    expect(refs[0].rawPath).toBe("a/b/c.ts");
+  });
+
+  it("ignores [label](target) whose target is not a file", () => {
+    expect(scanFileRefs("[docs](https://example.com)")).toHaveLength(0);
+    expect(scanFileRefs("[x](nope)")).toHaveLength(0);
+  });
+
+  it("still scans bare paths outside of a link literal", () => {
+    const refs = scanFileRefs("[x](a/b.ts) and lib/c.ts:9");
+    expect(refs.map((r) => r.rawPath).sort()).toEqual(["a/b.ts", "lib/c.ts"].sort());
+  });
+});
+
 describe("parseFileHref", () => {
   it("parses a relative file href with a line", () => {
     expect(parseFileHref("packages/eve/x/todo.ts:56")).toEqual({

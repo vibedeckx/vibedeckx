@@ -40,9 +40,8 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
       const matches = resolve(r.rawPath);
       if (matches.length === 0) continue;
       if (r.start > pos) out.push({ type: "text", value: value.slice(pos, r.start) });
-      out.push(
-        makeAnchor(matches, r.line, [{ type: "text", value: value.slice(r.start, r.end) }]),
-      );
+      const display = r.display ?? value.slice(r.start, r.end);
+      out.push(makeAnchor(matches, r.line, [{ type: "text", value: display }]));
       pos = r.end;
       linked = true;
     }

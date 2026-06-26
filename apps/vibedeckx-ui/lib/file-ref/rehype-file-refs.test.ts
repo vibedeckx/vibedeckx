@@ -33,6 +33,18 @@ describe("rehypeFileRefs", () => {
     expect(kids[2]).toEqual(txt(" now"));
   });
 
+  it("collapses a literal [label](path:line) inside inline code into one clean anchor", () => {
+    const tree = el("code", {}, [txt("[compaction.ts](src/a.ts:18)")]);
+    rehypeFileRefs({ index })(tree as any);
+    const kids = (tree as any).children;
+    expect(kids).toHaveLength(1);
+    expect(kids[0].tagName).toBe("a");
+    expect(JSON.parse(kids[0].properties.dataFilePaths)).toEqual(["src/a.ts"]);
+    expect(kids[0].properties.dataFileLine).toBe("18");
+    // Display text is the label, and the literal [ ]( ) are gone.
+    expect(kids[0].children).toEqual([txt("compaction.ts")]);
+  });
+
   it("leaves unresolved tokens as plain text", () => {
     const tree = el("p", {}, [txt("open zzz.ts here")]);
     rehypeFileRefs({ index })(tree as any);
