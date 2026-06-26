@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { MessageResponse } from "@/components/ai-elements/message";
+import { AgentMarkdown } from "./agent-markdown";
 import { defaultRemarkPlugins } from "streamdown";
 import { useAgentConversation } from "./agent-conversation";
 import { AskUserQuestion } from "./ask-user-question";
@@ -229,7 +230,7 @@ function AssistantMessage({ content }: { content: string }) {
           className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
           style={{ fontSize: "var(--conv-font-size, 14px)" }}
         >
-          <MessageResponse>{content ?? ""}</MessageResponse>
+          <AgentMarkdown>{content ?? ""}</AgentMarkdown>
         </div>
       </div>
     </div>
