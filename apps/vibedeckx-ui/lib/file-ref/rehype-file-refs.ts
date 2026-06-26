@@ -1,0 +1,99 @@
+import type { FileRefIndex } from "./file-ref-index";
+import { scanFileRefs, parseFileHref } from "./parse-file-ref";
+
+interface HastNode {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+}
+
+export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
+  const resolve = (p: string): string[] => (opts.index ? opts.index.resolve(p) : []);
+
+  function makeAnchor(
+    paths: string[],
+    line: number | null,
+    children: HastNode[],
+  ): HastNode {
+    return {
+      type: "element",
+      tagName: "a",
+      properties: {
+        className: ["file-ref"],
+        href: "#",
+        dataFilePaths: JSON.stringify(paths),
+        ...(line != null ? { dataFileLine: String(line) } : {}),
+      },
+      children,
+    };
+  }
+
+  function expandText(value: string): HastNode[] {
+    const refs = scanFileRefs(value);
+    if (refs.length === 0) return [{ type: "text", value }];
+    const out: HastNode[] = [];
+    let pos = 0;
+    let linked = false;
+    for (const r of refs) {
+      const matches = resolve(r.rawPath);
+      if (matches.length === 0) continue;
+      if (r.start > pos) out.push({ type: "text", value: value.slice(pos, r.start) });
+      out.push(
+        makeAnchor(matches, r.line, [{ type: "text", value: value.slice(r.start, r.end) }]),
+      );
+      pos = r.end;
+      linked = true;
+    }
+    if (!linked) return [{ type: "text", value }];
+    if (pos < value.length) out.push({ type: "text", value: value.slice(pos) });
+    return out;
+  }
+
+  function transformAnchor(node: HastNode): HastNode[] {
+    const href = String(node.properties?.href ?? "");
+    let parsed = parseFileHref(href);
+
+    // If parseFileHref rejected it but it looks like a file ref (not a URL), try manual parsing
+    if (!parsed && !href.includes("://") && /\.[A-Za-z0-9]+|\//.test(href)) {
+      const m = /^(.*?)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)?$/.exec(href);
+      if (m && m[1]) {
+        parsed = { rawPath: m[1], line: m[2] ? Number(m[2]) : m[3] ? Number(m[3]) : null };
+      }
+    }
+
+    if (!parsed) return [node]; // external / anchor link — leave as-is
+    const matches = resolve(parsed.rawPath);
+    if (matches.length === 0) return node.children ?? []; // unwrap broken file link
+    return [makeAnchor(matches, parsed.line, node.children ?? [])];
+  }
+
+  function processChildren(parent: HastNode, insidePre: boolean = false): void {
+    if (!parent.children) return;
+    const newInsidePre = insidePre || parent.tagName === "pre";
+    const out: HastNode[] = [];
+    for (const child of parent.children) {
+      if (child.type === "text") {
+        if (!newInsidePre) {
+          out.push(...expandText(child.value ?? ""));
+        } else {
+          out.push(child);
+        }
+      } else if (child.type === "element" && child.tagName === "pre") {
+        processChildren(child, true); // pass true to indicate we're inside pre
+        out.push(child);
+      } else if (child.type === "element" && child.tagName === "a" && !newInsidePre) {
+        out.push(...transformAnchor(child));
+      } else {
+        processChildren(child, newInsidePre);
+        out.push(child);
+      }
+    }
+    parent.children = out;
+  }
+
+  return (tree: HastNode): void => {
+    processChildren(tree);
+  };
+}
