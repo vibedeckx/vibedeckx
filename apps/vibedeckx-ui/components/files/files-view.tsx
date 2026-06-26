@@ -19,9 +19,10 @@ interface FilesViewProps {
   projectId: string | null;
   project?: Project | null;
   selectedBranch?: string | null;
+  navRequest?: { path: string; line: number | null; nonce: number } | null;
 }
 
-export function FilesView({ projectId, project, selectedBranch }: FilesViewProps) {
+export function FilesView({ projectId, project, selectedBranch, navRequest }: FilesViewProps) {
   // Determine target based on project config — if no local path, try remote
   const target = project && !project.path ? "remote" as const : undefined;
 
@@ -73,6 +74,15 @@ export function FilesView({ projectId, project, selectedBranch }: FilesViewProps
   useEffect(() => {
     fetchRoot();
   }, [fetchRoot]);
+
+  // Drive jump-to-file requests coming from agent-message file links.
+  useEffect(() => {
+    if (!navRequest) return;
+    if (navRequest.line != null) jumpTo(navRequest.path, navRequest.line);
+    else navigate(navRequest.path);
+    // Only react to a new request (nonce), not to identity churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navRequest?.nonce]);
 
   // Refresh both the tree and the search cache so re-fetch picks up new files.
   const handleRefresh = useCallback(() => {

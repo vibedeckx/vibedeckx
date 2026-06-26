@@ -1,6 +1,6 @@
 'use client';
 
-import { type ReactNode, useState, useEffect, useCallback } from 'react';
+import { type ReactNode, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { Terminal, GitBranch, SquareTerminal, Bot, Globe, FolderOpen } from 'lucide-react';
 import { ExecutorPanel } from '@/components/executor';
@@ -9,6 +9,8 @@ import { TerminalPanel } from '@/components/terminal';
 import { PreviewPanel } from '@/components/preview';
 import { FilesView } from '@/components/files';
 import type { Project, ExecutionMode } from '@/lib/api';
+import { FileNavigationProvider } from '@/components/agent/file-navigation-context';
+import { useFileRefIndex } from '@/hooks/use-file-ref-index';
 
 interface RightPanelProps {
   projectId: string | null;
@@ -44,7 +46,26 @@ function usePersistedTab(projectId: string | null, branch: string | null | undef
 export function RightPanel({ projectId, selectedBranch, onMergeRequest, project, onExecutorModeChange, agentSlot }: RightPanelProps) {
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
 
+  const target = project && !project.path ? ("remote" as const) : undefined;
+  const index = useFileRefIndex({ projectId, branch: selectedBranch, target });
+
+  const navNonce = useRef(0);
+  const [navRequest, setNavRequest] = useState<
+    { path: string; line: number | null; nonce: number } | null
+  >(null);
+
+  const openFile = useCallback(
+    (path: string, line: number | null = null) => {
+      setActiveTab("files");
+      setNavRequest({ path, line, nonce: ++navNonce.current });
+    },
+    [setActiveTab],
+  );
+
+  const navValue = useMemo(() => ({ openFile, index }), [openFile, index]);
+
   return (
+    <FileNavigationProvider value={navValue}>
     <div className="h-full flex flex-col">
       {/* Tab Bar */}
       <div className="flex items-center px-3 gap-4 border-b border-border">
@@ -122,9 +143,11 @@ export function RightPanel({ projectId, selectedBranch, onMergeRequest, project,
             projectId={projectId}
             project={project}
             selectedBranch={selectedBranch}
+            navRequest={navRequest}
           />
         </div>
       </div>
     </div>
+    </FileNavigationProvider>
   );
 }
