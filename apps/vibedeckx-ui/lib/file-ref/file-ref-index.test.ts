@@ -38,4 +38,22 @@ describe("buildFileRefIndex.resolve", () => {
     expect(idx.resolve("nope.ts")).toEqual([]);
     expect(idx.resolve("")).toEqual([]);
   });
+
+  it("matches an absolute path whose tail is a repo file (remote working dir)", () => {
+    expect(
+      idx.resolve("/src/eve/packages/eve/src/execution/compaction.ts"),
+    ).toEqual(["packages/eve/src/execution/compaction.ts"]);
+  });
+
+  it("ignores leading slashes when the remainder is an exact repo path", () => {
+    expect(idx.resolve("//packages/eve/src/execution/compaction.ts")).toEqual([
+      "packages/eve/src/execution/compaction.ts",
+    ]);
+  });
+
+  it("disambiguates an absolute path to the correct same-basename file", () => {
+    expect(idx.resolve("/remote/root/apps/ui/todo.ts")).toEqual([
+      "apps/ui/todo.ts",
+    ]);
+  });
 });
