@@ -63,17 +63,6 @@ export function useFileRefIndex({ projectId, branch, target }: Args): FileRefInd
     loadFilesWithRetry(() => api.listProjectFiles(projectId, branch, target), {
       cancelled: () => key !== keyRef.current,
     }).then((res) => {
-      // TEMP DEBUG — remove after diagnosing cross-project file mixing
-      console.log("[fileref-mix] load landed", {
-        requestedProjectId: projectId,
-        branch,
-        target,
-        key,
-        keyRefNow: keyRef.current,
-        stale: key !== keyRef.current,
-        files: res?.files.length ?? null,
-        sample: res?.files.slice(0, 4),
-      });
       if (key !== keyRef.current || !res) return;
       setIndex(buildFileRefIndex(res.files));
     });
