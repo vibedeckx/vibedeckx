@@ -10,7 +10,12 @@ interface HastNode {
 }
 
 export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
-  const resolve = (p: string): string[] => (opts.index ? opts.index.resolve(p) : []);
+  const resolve = (p: string): string[] => {
+    const r = opts.index ? opts.index.resolve(p) : [];
+    // TEMP DEBUG — remove after diagnosing cross-project file mixing
+    console.log("[fileref-mix] resolve", { rawPath: p, indexNull: !opts.index, matches: r });
+    return r;
+  };
 
   function makeAnchor(
     paths: string[],
