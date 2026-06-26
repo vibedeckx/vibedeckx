@@ -22,7 +22,7 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
       tagName: "a",
       properties: {
         className: ["file-ref"],
-        href: "#",
+        href: "#file-ref",
         dataFilePaths: JSON.stringify(paths),
         ...(line != null ? { dataFileLine: String(line) } : {}),
       },
