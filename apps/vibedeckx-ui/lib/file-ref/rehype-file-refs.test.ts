@@ -80,4 +80,26 @@ describe("rehypeFileRefs", () => {
     const a = (tree as any).children[1];
     expect(JSON.parse(a.properties.dataFilePaths)).toEqual(["src/a.ts", "lib/a.ts"]);
   });
+
+  it("leaves mailto and pure-anchor links untouched", () => {
+    const tree = el("p", {}, [
+      el("a", { href: "mailto:a@b.com" }, [txt("mail")]),
+      el("a", { href: "#section" }, [txt("anchor")]),
+    ]);
+    rehypeFileRefs({ index })(tree as any);
+    const kids = (tree as any).children;
+    expect(kids[0].properties.href).toBe("mailto:a@b.com");
+    expect(kids[0].properties.dataFilePaths).toBeUndefined();
+    expect(kids[1].properties.href).toBe("#section");
+    expect(kids[1].properties.dataFilePaths).toBeUndefined();
+  });
+
+  it("with a null index, leaves text plain and unwraps relative links", () => {
+    const tree = el("p", {}, [
+      txt("see src/a.ts:18 "),
+      el("a", { href: "src/a.ts:18" }, [txt("link")]),
+    ]);
+    rehypeFileRefs({ index: null })(tree as any);
+    expect((tree as any).children).toEqual([txt("see src/a.ts:18 "), txt("link")]);
+  });
 });

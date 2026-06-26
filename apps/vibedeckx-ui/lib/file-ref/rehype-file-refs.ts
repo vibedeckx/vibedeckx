@@ -53,16 +53,7 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
 
   function transformAnchor(node: HastNode): HastNode[] {
     const href = String(node.properties?.href ?? "");
-    let parsed = parseFileHref(href);
-
-    // If parseFileHref rejected it but it looks like a file ref (not a URL), try manual parsing
-    if (!parsed && !href.includes("://") && /\.[A-Za-z0-9]+|\//.test(href)) {
-      const m = /^(.*?)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)?$/.exec(href);
-      if (m && m[1]) {
-        parsed = { rawPath: m[1], line: m[2] ? Number(m[2]) : m[3] ? Number(m[3]) : null };
-      }
-    }
-
+    const parsed = parseFileHref(href);
     if (!parsed) return [node]; // external / anchor link — leave as-is
     const matches = resolve(parsed.rawPath);
     if (matches.length === 0) return node.children ?? []; // unwrap broken file link

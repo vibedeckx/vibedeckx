@@ -50,4 +50,9 @@ describe("parseFileHref", () => {
     expect(parseFileHref("mailto:a@b.com")).toBeNull();
     expect(parseFileHref("#section")).toBeNull();
   });
+
+  it("parses a relative href whose basename looks like a scheme", () => {
+    expect(parseFileHref("gone.ts:9")).toEqual({ rawPath: "gone.ts", line: 9 });
+    expect(parseFileHref("src/a.ts")).toEqual({ rawPath: "src/a.ts", line: null });
+  });
 });
