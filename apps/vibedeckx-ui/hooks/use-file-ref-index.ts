@@ -8,6 +8,12 @@ interface Args {
   projectId: string | null;
   branch?: string | null;
   target?: "local" | "remote";
+  // Only load when the workspace view is actually active. The panel is kept
+  // mounted (hidden via CSS) on other views like project-info, so without this
+  // gate it would fetch the default checkout's file list the moment a project is
+  // opened — wasted work, since there's no agent conversation to resolve against
+  // until a workspace is shown. Defaults to enabled.
+  enabled?: boolean;
 }
 
 type FileListResult = { files: string[]; truncated: boolean };
@@ -52,13 +58,21 @@ export async function loadFilesWithRetry(
 // per project/branch/target and builds a resolution index. Returns null while
 // loading or on persistent failure (refs stay plain text and upgrade to links
 // when the index arrives).
-export function useFileRefIndex({ projectId, branch, target }: Args): FileRefIndex | null {
+export function useFileRefIndex({
+  projectId,
+  branch,
+  target,
+  enabled = true,
+}: Args): FileRefIndex | null {
   const [index, setIndex] = useState<FileRefIndex | null>(null);
   const keyRef = useRef(0);
 
   useEffect(() => {
     setIndex(null);
-    if (!projectId) return;
+    // Skip until the workspace view is active (see `enabled`). `branch` may be
+    // null here — that's the default checkout (main), which we DO want to load —
+    // so gate on `enabled`, not on branch presence.
+    if (!enabled || !projectId) return;
     const key = ++keyRef.current;
     loadFilesWithRetry(() => api.listProjectFiles(projectId, branch, target), {
       cancelled: () => key !== keyRef.current,
@@ -66,7 +80,7 @@ export function useFileRefIndex({ projectId, branch, target }: Args): FileRefInd
       if (key !== keyRef.current || !res) return;
       setIndex(buildFileRefIndex(res.files));
     });
-  }, [projectId, branch, target]);
+  }, [projectId, branch, target, enabled]);
 
   return index;
 }

@@ -515,6 +515,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               <ResizablePanel defaultSize={67} minSize={25}>
                 <div className="h-full flex flex-col overflow-hidden">
                   <RightPanel
+                    active={activeView === 'workspace'}
                     projectId={currentProject?.id ?? null}
                     selectedBranch={selectedBranch}
                     onMergeRequest={handleMergeRequest}

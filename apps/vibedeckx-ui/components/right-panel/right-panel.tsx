@@ -19,6 +19,9 @@ interface RightPanelProps {
   project?: Project | null;
   onExecutorModeChange?: (mode: ExecutionMode) => void;
   agentSlot?: ReactNode;
+  // Whether the workspace view is currently shown. The panel stays mounted
+  // (hidden via CSS) on other views, so this gates the file-ref index load.
+  active?: boolean;
 }
 
 type TabType = 'agent' | 'executors' | 'diff' | 'terminal' | 'preview' | 'files';
@@ -43,11 +46,11 @@ function usePersistedTab(projectId: string | null, branch: string | null | undef
   return [activeTab, setActiveTab];
 }
 
-export function RightPanel({ projectId, selectedBranch, onMergeRequest, project, onExecutorModeChange, agentSlot }: RightPanelProps) {
+export function RightPanel({ projectId, selectedBranch, onMergeRequest, project, onExecutorModeChange, agentSlot, active = true }: RightPanelProps) {
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
 
   const target = project && !project.path ? ("remote" as const) : undefined;
-  const index = useFileRefIndex({ projectId, branch: selectedBranch, target });
+  const index = useFileRefIndex({ projectId, branch: selectedBranch, target, enabled: active });
 
   const navNonce = useRef(0);
   const [navRequest, setNavRequest] = useState<
