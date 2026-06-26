@@ -91,7 +91,9 @@ export default function Home() {
   const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
   const agentRef = useRef<AgentConversationHandle>(null);
-  const prevProjectId = useRef<string | undefined>(undefined);
+  // The project id we last reset the branch for. State (not a ref) so the
+  // render-time reset below is concurrent-safe.
+  const [branchResetProjectId, setBranchResetProjectId] = useState<string | undefined>(undefined);
   const [startingTask, startTaskTransition] = useTransition();
 
   const {
@@ -104,6 +106,20 @@ export default function Home() {
     deleteProject,
     selectProject,
   } = useProjects(urlProject);
+
+  // Reset the selected branch the instant the project changes — DURING render,
+  // not in an effect. An effect runs after this render commits and after child
+  // effects fire, so children (file-ref index, rules, commands) would observe a
+  // mismatched (newProject, oldBranch) pair for one render and query the new
+  // project with the PREVIOUS project's branch — e.g. asking project "eve" for
+  // its files on branch "dev3", which it doesn't have, yielding an empty list.
+  // Skip the initial undefined→id load so a URL-restored branch survives.
+  if (currentProject?.id !== branchResetProjectId) {
+    if (branchResetProjectId !== undefined) {
+      setSelectedBranch(null);
+    }
+    setBranchResetProjectId(currentProject?.id);
+  }
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
@@ -241,14 +257,6 @@ export default function Home() {
     // there's no branch-activity transition to seed here.
     updateTask(taskId, { assigned_branch: null });
   }, [updateTask]);
-
-  // Reset branch selection when switching between projects (not on initial load)
-  useEffect(() => {
-    if (prevProjectId.current !== undefined && prevProjectId.current !== currentProject?.id) {
-      setSelectedBranch(null);
-    }
-    prevProjectId.current = currentProject?.id;
-  }, [currentProject?.id]);
 
   // A cross-project notification click sets this to the branch we want selected
   // once the target project's worktrees finish loading. Without it, the
