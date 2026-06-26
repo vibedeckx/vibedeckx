@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert } from "lucide-react";
+import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { AgentMarkdown } from "./agent-markdown";
@@ -30,7 +30,7 @@ import { SkillToolUseUI, SkillToolResultUI } from "./skill-tools";
 import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools";
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { VPasteChip, splitVPasteMarkers } from "./vpaste-chip";
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 
 interface AgentMessageProps {
   message: AgentMessage;
@@ -219,19 +219,41 @@ function AssistantMessage({ content }: { content: string }) {
   const iconColor = isCodex ? "text-green-500" : "text-violet-500";
   const textColor = isCodex ? "text-green-500" : "text-violet-500";
 
+  // Debug aid: toggle a single message between rendered markdown and its raw
+  // source (the exact string fed to the renderer). Per-message, default rendered.
+  const [showSource, setShowSource] = useState(false);
+
   return (
-    <div className="flex gap-3 py-3">
+    <div className="group flex gap-3 py-3">
       <div className={`flex-shrink-0 w-7 h-7 rounded-lg ${iconBg} flex items-center justify-center`}>
         <Bot className={`w-3.5 h-3.5 ${iconColor}`} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className={`text-sm font-medium ${textColor} mb-1`}>{label}</p>
-        <div
-          className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
-          style={{ fontSize: "var(--conv-font-size, 14px)" }}
-        >
-          <AgentMarkdown>{content ?? ""}</AgentMarkdown>
+        <div className="flex items-center gap-2 mb-1">
+          <p className={`text-sm font-medium ${textColor}`}>{label}</p>
+          <button
+            type="button"
+            onClick={() => setShowSource((v) => !v)}
+            title={showSource ? "View rendered" : "View source"}
+            aria-label={showSource ? "View rendered" : "View source"}
+            aria-pressed={showSource}
+            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+          >
+            {showSource ? <Eye className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
+          </button>
         </div>
+        {showSource ? (
+          <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/50 rounded-md p-3 overflow-x-auto text-foreground select-text">
+            {content ?? ""}
+          </pre>
+        ) : (
+          <div
+            className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+            style={{ fontSize: "var(--conv-font-size, 14px)" }}
+          >
+            <AgentMarkdown>{content ?? ""}</AgentMarkdown>
+          </div>
+        )}
       </div>
     </div>
   );
