@@ -1,5 +1,7 @@
 export interface FileRefIndex {
   resolve(rawPath: string): string[];
+  // TEMP DEBUG — number of files this index was built from (diagnosing eve switch)
+  _debugSize?: number;
 }
 
 function basenameOf(p: string): string {
@@ -18,6 +20,8 @@ export function buildFileRefIndex(files: string[]): FileRefIndex {
   }
 
   return {
+    // TEMP DEBUG
+    _debugSize: files.length,
     resolve(rawPath: string): string[] {
       if (!rawPath) return [];
       // Normalize away leading slashes so absolute paths an agent emits (e.g. a
