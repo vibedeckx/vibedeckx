@@ -57,3 +57,21 @@ describe("buildFileRefIndex.resolve", () => {
     ]);
   });
 });
+
+describe("buildFileRefIndex cache identity (cross-project processor cache)", () => {
+  it("gives each built index a distinct, serializable version", () => {
+    const a = buildFileRefIndex(["packages/a/x.ts"]);
+    const b = buildFileRefIndex(["apps/b/y.ts", "apps/b/z.ts"]);
+    expect(a.version).not.toBe(b.version);
+  });
+
+  it("serializes distinctly under JSON.stringify({ index }) — the key Streamdown's processor cache uses", () => {
+    // The resolve function is dropped by JSON.stringify, so `version` is the
+    // only thing keeping two projects' indexes from colliding to the same `{}`.
+    const a = buildFileRefIndex(["packages/a/x.ts"]);
+    const b = buildFileRefIndex(["apps/b/y.ts"]);
+    expect(JSON.stringify({ index: a })).not.toBe(JSON.stringify({ index: b }));
+    // …and both differ from the no-index (null) key.
+    expect(JSON.stringify({ index: a })).not.toBe(JSON.stringify({ index: null }));
+  });
+});

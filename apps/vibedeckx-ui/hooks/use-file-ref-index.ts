@@ -60,35 +60,11 @@ export function useFileRefIndex({ projectId, branch, target }: Args): FileRefInd
     setIndex(null);
     if (!projectId) return;
     const key = ++keyRef.current;
-    // TEMP DEBUG — remove after diagnosing eve switch index-null
-    console.log("[fileref-mix] effect run", { key, projectId, branch, target });
-    const fetchFiles = () =>
-      api.listProjectFiles(projectId, branch, target).then(
-        (r) => {
-          console.log("[fileref-mix] fetch OK", { key, branch, files: r.files.length });
-          return r;
-        },
-        (e) => {
-          console.log("[fileref-mix] fetch THREW", { key, branch, err: String(e) });
-          throw e;
-        },
-      );
-    loadFilesWithRetry(fetchFiles, {
+    loadFilesWithRetry(() => api.listProjectFiles(projectId, branch, target), {
       cancelled: () => key !== keyRef.current,
     }).then((res) => {
-      const willSet = key === keyRef.current && !!res;
-      console.log("[fileref-mix] load landed", {
-        projectId,
-        branch,
-        key,
-        keyRefNow: keyRef.current,
-        stale: key !== keyRef.current,
-        resWasNull: res === null,
-        files: res?.files.length ?? null,
-        willSetIndex: willSet,
-      });
-      if (!willSet) return;
-      setIndex(buildFileRefIndex(res!.files));
+      if (key !== keyRef.current || !res) return;
+      setIndex(buildFileRefIndex(res.files));
     });
   }, [projectId, branch, target]);
 

@@ -1,8 +1,19 @@
 export interface FileRefIndex {
   resolve(rawPath: string): string[];
-  // TEMP DEBUG — number of files this index was built from (diagnosing eve switch)
-  _debugSize?: number;
+  // Serializable identity for this index. Streamdown (the markdown renderer)
+  // caches its unified processor in a module-level singleton keyed by
+  // JSON.stringify of the rehype plugin options — for us `{ index }`. A
+  // FileRefIndex's only other member is the `resolve` FUNCTION, which
+  // JSON.stringify drops, so without this field every non-null index would
+  // serialize to `{}` and collide on that key. The first project to render
+  // would occupy the cache slot and every other project would reuse its
+  // processor — bound to the wrong project's file list (project A linking to
+  // B's files, B unable to resolve its own). A unique string per build keeps
+  // the cache keys distinct so each project gets its own processor.
+  version: string;
 }
+
+let nextIndexVersion = 0;
 
 function basenameOf(p: string): string {
   const i = p.lastIndexOf("/");
@@ -10,6 +21,7 @@ function basenameOf(p: string): string {
 }
 
 export function buildFileRefIndex(files: string[]): FileRefIndex {
+  const version = `idx-${++nextIndexVersion}`;
   const fullPaths = new Set(files);
   const byBasename = new Map<string, string[]>();
   for (const f of files) {
@@ -20,8 +32,7 @@ export function buildFileRefIndex(files: string[]): FileRefIndex {
   }
 
   return {
-    // TEMP DEBUG
-    _debugSize: files.length,
+    version,
     resolve(rawPath: string): string[] {
       if (!rawPath) return [];
       // Normalize away leading slashes so absolute paths an agent emits (e.g. a

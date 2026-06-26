@@ -10,17 +10,7 @@ interface HastNode {
 }
 
 export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
-  const resolve = (p: string): string[] => {
-    const r = opts.index ? opts.index.resolve(p) : [];
-    // TEMP DEBUG — remove after diagnosing eve switch
-    console.log("[fileref-resolve]", {
-      rawPath: p,
-      indexNull: !opts.index,
-      indexSize: opts.index?._debugSize ?? null,
-      matches: r.length,
-    });
-    return r;
-  };
+  const resolve = (p: string): string[] => (opts.index ? opts.index.resolve(p) : []);
 
   function makeAnchor(
     paths: string[],

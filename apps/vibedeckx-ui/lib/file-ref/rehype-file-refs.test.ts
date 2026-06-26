@@ -4,6 +4,7 @@ import type { FileRefIndex } from "./file-ref-index";
 
 // Stub index: src/a.ts is unique; a.ts is ambiguous; everything else unknown.
 const index: FileRefIndex = {
+  version: "stub",
   resolve: (p) =>
     p === "src/a.ts"
       ? ["src/a.ts"]
