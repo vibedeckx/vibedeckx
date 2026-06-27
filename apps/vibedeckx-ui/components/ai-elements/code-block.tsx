@@ -93,11 +93,15 @@ export async function highlightCode(
   showLineNumbers = false,
   foldStartLines?: Set<number>
 ) {
+  // Each transformer unshifts its cell to the front, so the LAST one added ends
+  // up leftmost. Order the result [line number][fold chevron][code] (VSCode-like,
+  // chevron between the gutter number and the code) by adding the fold gutter
+  // BEFORE the line number.
   const transformers: ShikiTransformer[] = [lineDataTransformer];
-  if (showLineNumbers) transformers.push(lineNumberTransformer);
   if (foldStartLines && foldStartLines.size > 0) {
     transformers.push(makeFoldGutterTransformer(foldStartLines));
   }
+  if (showLineNumbers) transformers.push(lineNumberTransformer);
 
   return await Promise.all([
     codeToHtml(code, {
