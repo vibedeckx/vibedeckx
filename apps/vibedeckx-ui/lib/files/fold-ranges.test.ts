@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeFoldRanges } from "./fold-ranges";
+import { computeFoldRanges, mergeFoldRanges } from "./fold-ranges";
 
 describe("computeFoldRanges", () => {
   it("produces nested ranges for indented blocks (1-based, end inclusive)", () => {
@@ -41,5 +41,54 @@ describe("computeFoldRanges", () => {
   it("does not create a range when there is nothing to hide", () => {
     const src = ["if (x) {", "}"].join("\n");
     expect(computeFoldRanges(src)).toEqual([]);
+  });
+});
+
+describe("mergeFoldRanges", () => {
+  it("keeps one range per start line, earlier provider winning", () => {
+    // First list = higher precedence (e.g. bracket over indentation).
+    const merged = mergeFoldRanges(
+      [{ startLine: 1, endLine: 9 }],
+      [{ startLine: 1, endLine: 5 }]
+    );
+    expect(merged).toEqual([{ startLine: 1, endLine: 9 }]);
+  });
+
+  it("keeps properly nested ranges", () => {
+    const merged = mergeFoldRanges([
+      { startLine: 1, endLine: 10 },
+      { startLine: 3, endLine: 6 },
+    ]);
+    expect(merged).toEqual([
+      { startLine: 1, endLine: 10 },
+      { startLine: 3, endLine: 6 },
+    ]);
+  });
+
+  it("keeps disjoint ranges", () => {
+    const merged = mergeFoldRanges([
+      { startLine: 1, endLine: 3 },
+      { startLine: 5, endLine: 8 },
+    ]);
+    expect(merged).toEqual([
+      { startLine: 1, endLine: 3 },
+      { startLine: 5, endLine: 8 },
+    ]);
+  });
+
+  it("drops a range that crosses (partially overlaps) an accepted one", () => {
+    const merged = mergeFoldRanges([
+      { startLine: 1, endLine: 5 },
+      { startLine: 3, endLine: 8 }, // crosses out of {1,5}
+    ]);
+    expect(merged).toEqual([{ startLine: 1, endLine: 5 }]);
+  });
+
+  it("drops degenerate ranges (end <= start)", () => {
+    const merged = mergeFoldRanges([
+      { startLine: 4, endLine: 4 },
+      { startLine: 2, endLine: 1 },
+    ]);
+    expect(merged).toEqual([]);
   });
 });

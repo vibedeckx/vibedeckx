@@ -18,9 +18,9 @@ function indentOf(line: string): number | null {
 
 // Indentation-based folding: a line opens a region when following lines are
 // indented deeper, and the region runs until the indent returns to the header's
-// level or less. Language-agnostic; good enough as an MVP before bracket- or
-// syntax-aware folding is layered on the same token model.
-export function computeFoldRanges(code: string): FoldRange[] {
+// level or less. Language-agnostic — the universal fallback, and the only
+// provider for indentation-significant languages (Python, YAML, …).
+export function indentationFoldRanges(code: string): FoldRange[] {
   const lines = code.split("\n");
   const ranges: FoldRange[] = [];
   // Open headers, increasing indent up the stack. 0-based line numbers.
@@ -46,4 +46,74 @@ export function computeFoldRanges(code: string): FoldRange[] {
   while (stack.length) close(stack.pop()!);
 
   return ranges;
+}
+
+// Bracket/syntax folding from the symbol-token index — match {} [] () pairs but
+// ONLY where the token index classifies the position as "code", so brackets
+// inside strings/comments are ignored. This is the whole reason it depends on
+// the token model. TODO: implement once the token index is shared into CodeBlock
+// (see notes in the symbol-click-gate memory). Returns [] for now so the
+// orchestrator's merge degrades to pure indentation.
+export function bracketFoldRanges(
+  code: string,
+  tokenIndex: unknown
+): FoldRange[] {
+  // TODO: stack-match {} [] () pairs, counting only positions the token index
+  // marks as "code" (skip brackets in strings/comments). See the symbol-click
+  // -gate memory for the planned token-index-into-CodeBlock wiring.
+  void code;
+  void tokenIndex;
+  return [];
+}
+
+// Merge fold ranges from multiple providers into a single valid fold tree.
+// Earlier lists win on conflicts (pass higher-precedence providers first, e.g.
+// bracket before indentation). Two invariants the fold UI relies on:
+//   1. At most one range per start line — the apply step keys a Map by startLine
+//      and the gutter stamps one chevron per line.
+//   2. Properly nested (no partial overlaps) — so collapsing regions composes
+//      instead of hiding unrelated lines.
+export function mergeFoldRanges(...lists: FoldRange[][]): FoldRange[] {
+  const byStart = new Map<number, FoldRange>();
+  for (const range of lists.flat()) {
+    if (range.endLine <= range.startLine) continue; // degenerate
+    if (!byStart.has(range.startLine)) byStart.set(range.startLine, range);
+  }
+  // Outer-first ordering so the stack below represents current ancestors.
+  const sorted = [...byStart.values()].sort(
+    (a, b) => a.startLine - b.startLine || b.endLine - a.endLine
+  );
+  const out: FoldRange[] = [];
+  const stack: FoldRange[] = [];
+  for (const range of sorted) {
+    while (stack.length && stack[stack.length - 1].endLine < range.startLine) {
+      stack.pop();
+    }
+    const parent = stack[stack.length - 1];
+    if (parent && range.endLine > parent.endLine) continue; // crosses → drop
+    out.push(range);
+    stack.push(range);
+  }
+  return out;
+}
+
+export interface ComputeFoldOptions {
+  language?: string;
+  // The symbol-token index for `code`, enabling bracket folding. Untyped here to
+  // avoid a hard dep cycle with symbol-tokens; the bracket provider narrows it.
+  tokenIndex?: unknown;
+}
+
+// Orchestrator: run the providers and merge them into one valid fold tree.
+// Bracket goes first so it wins per-line conflicts; it's a no-op until a token
+// index is wired through, so today the result is pure indentation. When bracket
+// returns ranges, indentation will fill the gaps it misses (JSX, comment blocks).
+export function computeFoldRanges(
+  code: string,
+  opts: ComputeFoldOptions = {}
+): FoldRange[] {
+  return mergeFoldRanges(
+    bracketFoldRanges(code, opts.tokenIndex),
+    indentationFoldRanges(code)
+  );
 }
