@@ -14,8 +14,8 @@ import {
   Copy,
   Code,
   Eye,
-  FoldVertical,
-  UnfoldVertical,
+  ListCollapse,
+  ListTree,
 } from "lucide-react";
 import rehypeSlug from "rehype-slug";
 import { defaultRehypePlugins } from "streamdown";
@@ -595,7 +595,7 @@ export function FilePreview({
                 onClick={() => codeBlockRef.current?.foldAll()}
                 title="Fold all"
               >
-                <FoldVertical className="h-3.5 w-3.5" />
+                <ListCollapse className="h-3.5 w-3.5" />
               </Button>
               <Button
                 variant="ghost"
@@ -604,7 +604,7 @@ export function FilePreview({
                 onClick={() => codeBlockRef.current?.expandAll()}
                 title="Expand all"
               >
-                <UnfoldVertical className="h-3.5 w-3.5" />
+                <ListTree className="h-3.5 w-3.5" />
               </Button>
             </>
           )}
