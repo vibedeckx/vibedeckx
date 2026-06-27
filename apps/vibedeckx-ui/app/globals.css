@@ -212,37 +212,37 @@
 .code-fold-toggle {
   cursor: pointer;
   color: var(--muted-foreground);
-  opacity: 0; /* VSCode-like: hidden until its line is hovered */
+  opacity: 0;
   transition: opacity 0.1s ease;
 }
-/* Reveal the chevron when hovering its line; keep collapsed markers visible so
-   folded regions stay discoverable. */
-[data-line]:hover .code-fold-toggle,
+/* VSCode-like: chevrons stay hidden while reading; hovering anywhere over the
+   code block reveals the WHOLE column at once. Collapsed markers stay visible
+   so folded regions remain discoverable. */
+pre:hover .code-fold-toggle,
 .code-line-collapsed .code-fold-toggle {
-  opacity: 0.75;
+  opacity: 0.7;
 }
 .code-fold-toggle:hover {
   opacity: 1;
 }
-/* Thin line chevron (VSCode-style), drawn from two borders and rotated per
-   state instead of a filled glyph. The small top/left nudges optically centre
-   the rotated square; tune if it looks off. */
+/* Open, thin chevron (lucide/VSCode shape) via an SVG mask, so it inherits the
+   text colour and stays crisp. One down-chevron, rotated to point right when
+   the region is collapsed. */
 .code-fold-toggle::before {
   content: "";
   display: inline-block;
-  width: 0.34em;
-  height: 0.34em;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
+  width: 0.95em;
+  height: 0.95em;
   vertical-align: middle;
-  position: relative;
-  top: -0.1em;
-  transform: rotate(45deg); /* points down = expanded */
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23fff'%20stroke-width='2.25'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='m6%209%206%206%206-6'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23fff'%20stroke-width='2.25'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='m6%209%206%206%206-6'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  transition: transform 0.1s ease;
 }
 .code-line-collapsed .code-fold-toggle::before {
-  top: 0;
-  left: -0.1em;
-  transform: rotate(-45deg); /* points right = collapsed */
+  transform: rotate(-90deg); /* down → right when collapsed */
 }
 .code-line-collapsed::after {
   content: " ⋯";
