@@ -203,8 +203,8 @@
 .code-fold-toggle,
 .code-fold-spacer {
   display: inline-block;
-  width: 1.3em;
-  margin-right: 0.35em;
+  width: 0.8em;
+  margin-right: 0.1em;
   text-align: center;
   user-select: none;
   -webkit-user-select: none;
@@ -212,17 +212,37 @@
 .code-fold-toggle {
   cursor: pointer;
   color: var(--muted-foreground);
-  opacity: 0.6;
+  opacity: 0; /* VSCode-like: hidden until its line is hovered */
+  transition: opacity 0.1s ease;
+}
+/* Reveal the chevron when hovering its line; keep collapsed markers visible so
+   folded regions stay discoverable. */
+[data-line]:hover .code-fold-toggle,
+.code-line-collapsed .code-fold-toggle {
+  opacity: 0.75;
 }
 .code-fold-toggle:hover {
   opacity: 1;
 }
+/* Thin line chevron (VSCode-style), drawn from two borders and rotated per
+   state instead of a filled glyph. The small top/left nudges optically centre
+   the rotated square; tune if it looks off. */
 .code-fold-toggle::before {
-  content: "▾";
-  font-size: 1.05em;
+  content: "";
+  display: inline-block;
+  width: 0.34em;
+  height: 0.34em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  vertical-align: middle;
+  position: relative;
+  top: -0.1em;
+  transform: rotate(45deg); /* points down = expanded */
 }
 .code-line-collapsed .code-fold-toggle::before {
-  content: "▸";
+  top: 0;
+  left: -0.1em;
+  transform: rotate(-45deg); /* points right = collapsed */
 }
 .code-line-collapsed::after {
   content: " ⋯";

@@ -57,7 +57,7 @@ const lineNumberTransformer: ShikiTransformer = {
         className: [
           "inline-block",
           "min-w-10",
-          "mr-4",
+          "mr-2",
           "text-right",
           "select-none",
           "text-muted-foreground",
