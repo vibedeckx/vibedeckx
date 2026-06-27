@@ -1,0 +1,49 @@
+# Vibedeckx systemd unit — TEMPLATE
+#
+# This is a template. Tokens like __INSTALL_DIR__ are filled in by deploy/install.sh.
+# To install manually, copy this file to /etc/systemd/system/vibedeckx.service and
+# replace every __TOKEN__ with a real value.
+#
+# SAFE TO COMMIT: this file contains only paths, never secrets.
+# Secrets (Clerk keys) live in the EnvironmentFile on the server, NOT in the repo.
+# TLS private key (cf-origin.key) lives next to the working dir, NOT in the repo.
+
+[Unit]
+Description=Vibedeckx server
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__
+
+# Relative cert/data paths would resolve against WorkingDirectory, but we use
+# absolute paths so they keep working under ProtectSystem=strict / ReadWritePaths.
+ExecStart=__BIN__ start \
+  --auth \
+  --data-dir=__INSTALL_DIR__/data \
+  --host __HOST__ \
+  --port __PORT__ \
+  --cert __INSTALL_DIR__/cf-origin.pem \
+  --key __INSTALL_DIR__/cf-origin.key \
+  --client-ca __INSTALL_DIR__/cloudflare-aop-ca.pem
+
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+
+# Clerk secrets (CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY) for --auth.
+# Created from deploy/vibedeckx.env.example, chmod 600, NOT committed.
+EnvironmentFile=__ENV_FILE__
+
+# --- Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Only the data dir needs to be writable (SQLite). Everything else is read-only.
+ReadWritePaths=__INSTALL_DIR__/data
+
+[Install]
+WantedBy=multi-user.target
