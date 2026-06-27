@@ -19,7 +19,7 @@ SKIP_PACK=false
 
 # Detect version + platform the same way pack.sh does.
 VERSION="$(node -e "console.log(require('${PKG_JSON}').version)")"
-case "$(uname -s)" in linux) OS=linux ;; darwin) OS=darwin ;; *) echo "Unsupported OS"; exit 1 ;; esac
+case "$(uname -s | tr '[:upper:]' '[:lower:]')" in linux) OS=linux ;; darwin) OS=darwin ;; *) echo "Unsupported OS"; exit 1 ;; esac
 case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported arch"; exit 1 ;; esac
 PLATFORM="${OS}-${ARCH}"
 TARBALL="vibedeckx-${VERSION}-${PLATFORM}.tar.gz"
