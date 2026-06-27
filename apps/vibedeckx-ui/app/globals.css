@@ -202,13 +202,18 @@
    or the selection highlight, which both count text nodes only. */
 .code-fold-toggle,
 .code-fold-spacer {
-  display: inline-block;
-  /* Wide enough that the whole column is a hover target (so hovering anywhere in
-     the gutter reveals the arrows), while the chevron itself is right-aligned to
-     sit close to the code. */
+  /* A flex box that fills the full line height, so the WHOLE column is a hover
+     target. (An empty inline cell has zero height — only the chevron itself
+     would be hoverable, which is the bug we're fixing.) The chevron is pushed to
+     the right so it sits close to the code. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
   width: 1.4em;
+  height: 1.5em; /* fallback for browsers without the lh unit */
+  height: 1lh;
   margin-right: 0.15em;
-  text-align: right;
+  vertical-align: top;
   user-select: none;
   -webkit-user-select: none;
 }
