@@ -74,7 +74,10 @@ fi
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Seeding env file at ${ENV_FILE} (EDIT IT with real Clerk keys)..."
   install -d -m 755 "$(dirname "${ENV_FILE}")"
-  install -m 600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${ENV_EXAMPLE}" "${ENV_FILE}"
+  tmp_env="$(mktemp)"
+  sed -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" "${ENV_EXAMPLE}" > "${tmp_env}"
+  install -m 600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp_env}" "${ENV_FILE}"
+  rm -f "${tmp_env}"
 else
   echo "Env file ${ENV_FILE} already exists — leaving it untouched."
 fi

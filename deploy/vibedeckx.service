@@ -18,22 +18,17 @@ User=__USER__
 Group=__USER__
 WorkingDirectory=__INSTALL_DIR__
 
-# Relative cert/data paths would resolve against WorkingDirectory, but we use
-# absolute paths so they keep working under ProtectSystem=strict / ReadWritePaths.
-ExecStart=__BIN__ start \
-  --auth \
-  --data-dir=__INSTALL_DIR__/data \
-  --host __HOST__ \
-  --port __PORT__ \
-  --cert __INSTALL_DIR__/cf-origin.pem \
-  --key __INSTALL_DIR__/cf-origin.key \
-  --client-ca __INSTALL_DIR__/cloudflare-aop-ca.pem
+# TLS paths come from the EnvironmentFile (VIBEDECKX_TLS_CERT / _KEY / _CLIENT_CA),
+# keeping this line clean. --data-dir has no env fallback so it stays here; the
+# absolute path keeps it working under ProtectSystem=strict / ReadWritePaths.
+ExecStart=__BIN__ start --auth --host __HOST__ --port __PORT__ --data-dir=__INSTALL_DIR__/data
 
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
 
-# Clerk secrets (CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY) for --auth.
+# Clerk secrets (CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY) for --auth, plus the
+# TLS path vars (VIBEDECKX_TLS_CERT / _KEY / _CLIENT_CA).
 # Created from deploy/vibedeckx.env.example, chmod 600, NOT committed.
 EnvironmentFile=__ENV_FILE__
 

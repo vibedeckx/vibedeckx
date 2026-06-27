@@ -47,6 +47,12 @@ vibedeckx start --auth --data-dir=<dir>/data --host 0.0.0.0 --port 8444 \
   --client-ca <dir>/cloudflare-aop-ca.pem
 ```
 
+The TLS paths aren't on the unit's `ExecStart` line — they live in the env file
+as `VIBEDECKX_TLS_CERT` / `VIBEDECKX_TLS_KEY` / `VIBEDECKX_TLS_CLIENT_CA`
+(read at `command.ts:15-17`), so `ExecStart` stays as just
+`vibedeckx start --auth --host 0.0.0.0 --port 8444 --data-dir=<dir>/data`.
+`--data-dir` has no env fallback, so it remains a flag.
+
 ## Notes
 
 - **Relative vs absolute paths.** The CLI resolves relative cert/`--data-dir`
@@ -59,6 +65,7 @@ vibedeckx start --auth --data-dir=<dir>/data --host 0.0.0.0 --port 8444 \
 - **Data migration.** If you already have a SQLite db from a previous
   `--data-dir=./data`, point `INSTALL_DIR` so `<INSTALL_DIR>/data` is that same
   directory, or move the db there first — otherwise you'll start with an empty db.
-- **TLS via env instead of flags.** You can set `VIBEDECKX_TLS_CERT` /
-  `VIBEDECKX_TLS_KEY` / `VIBEDECKX_TLS_CLIENT_CA` in the env file and drop the
-  matching flags from the unit. Functionally identical.
+- **TLS via env (default here).** The TLS paths live in the env file as
+  `VIBEDECKX_TLS_CERT` / `VIBEDECKX_TLS_KEY` / `VIBEDECKX_TLS_CLIENT_CA` rather
+  than as `--cert/--key/--client-ca` flags. Functionally identical; you can move
+  them back onto `ExecStart` if you prefer flags.
