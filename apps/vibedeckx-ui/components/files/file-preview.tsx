@@ -8,11 +8,23 @@ import {
   useState,
   type AnchorHTMLAttributes,
 } from "react";
-import { Download, FileWarning, Copy, Code, Eye } from "lucide-react";
+import {
+  Download,
+  FileWarning,
+  Copy,
+  Code,
+  Eye,
+  FoldVertical,
+  UnfoldVertical,
+} from "lucide-react";
 import rehypeSlug from "rehype-slug";
 import { defaultRehypePlugins } from "streamdown";
 import { Button } from "@/components/ui/button";
-import { CodeBlock, CodeBlockCopyButton } from "@/components/ai-elements/code-block";
+import {
+  CodeBlock,
+  CodeBlockCopyButton,
+  type CodeBlockHandle,
+} from "@/components/ai-elements/code-block";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -308,6 +320,7 @@ export function FilePreview({
   // without being recreated. Null until built (and on build failure) — in which
   // case every identifier stays clickable, the prior behavior.
   const tokenIndexRef = useRef<SymbolTokenIndex | null>(null);
+  const codeBlockRef = useRef<CodeBlockHandle>(null);
 
   // Single + double click are distinguished by MouseEvent.detail (no timer):
   //   detail 1 (single click) → custom amber highlight + popover
@@ -543,6 +556,13 @@ export function FilePreview({
   const canToggleMarkdown =
     isMarkdown(filePath) && !fileContent.tooLarge && !fileContent.binary && !!fileContent.content;
   const showRendered = canToggleMarkdown && viewMode === "rendered";
+  // The foldable source CodeBlock is on screen (not rendered markdown, binary,
+  // or an oversized file) — gate the Fold/Expand-all controls on this.
+  const showingCode =
+    !fileContent.tooLarge &&
+    !fileContent.binary &&
+    !showRendered &&
+    fileContent.content !== null;
 
   return (
     <div className="flex flex-col h-full">
@@ -565,6 +585,28 @@ export function FilePreview({
             >
               {showRendered ? <Code className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             </Button>
+          )}
+          {showingCode && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => codeBlockRef.current?.foldAll()}
+                title="Fold all"
+              >
+                <FoldVertical className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => codeBlockRef.current?.expandAll()}
+                title="Expand all"
+              >
+                <UnfoldVertical className="h-3.5 w-3.5" />
+              </Button>
+            </>
           )}
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleCopyPath} title="Copy path">
             <Copy className="h-3.5 w-3.5" />
@@ -633,6 +675,7 @@ export function FilePreview({
             onClick={handleClick}
           >
             <CodeBlock
+              ref={codeBlockRef}
               code={fileContent.content}
               language={getLanguage(filePath)}
               showLineNumbers

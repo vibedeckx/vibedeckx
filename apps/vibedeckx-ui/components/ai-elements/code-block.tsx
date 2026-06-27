@@ -6,9 +6,11 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import {
   type ComponentProps,
   createContext,
+  forwardRef,
   type HTMLAttributes,
   useContext,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -117,17 +119,28 @@ export async function highlightCode(
   ]);
 }
 
-export const CodeBlock = ({
-  code,
-  language,
-  showLineNumbers = false,
-  scrollToLine,
-  scrollKey,
-  foldable = false,
-  className,
-  children,
-  ...props
-}: CodeBlockProps) => {
+// Imperative controls for the fold gutter, so a sibling (the Files header's
+// Fold/Expand-all buttons) can drive collapse state that lives in here.
+export interface CodeBlockHandle {
+  foldAll: () => void;
+  expandAll: () => void;
+}
+
+export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
+  function CodeBlock(
+    {
+      code,
+      language,
+      showLineNumbers = false,
+      scrollToLine,
+      scrollKey,
+      foldable = false,
+      className,
+      children,
+      ...props
+    },
+    ref
+  ) {
   const [html, setHtml] = useState<string>("");
   const [darkHtml, setDarkHtml] = useState<string>("");
   const mounted = useRef(false);
@@ -152,6 +165,17 @@ export const CodeBlock = ({
     line: number | null | undefined;
     key: number | undefined;
   }>({ line: scrollToLine, key: scrollKey });
+
+  // Fold all = collapse every region header (nested ones hide inside their
+  // parents, leaving the file's top-level structure). Expand all = clear.
+  useImperativeHandle(
+    ref,
+    () => ({
+      foldAll: () => setCollapsed(new Set(foldRanges.map((r) => r.startLine))),
+      expandAll: () => setCollapsed(new Set()),
+    }),
+    [foldRanges]
+  );
 
   useEffect(() => {
     highlightCode(code, language, showLineNumbers, foldStartLines).then(
@@ -301,7 +325,8 @@ export const CodeBlock = ({
       </div>
     </CodeBlockContext.Provider>
   );
-};
+  }
+);
 
 export type CodeBlockCopyButtonProps = ComponentProps<typeof Button> & {
   onCopy?: () => void;
