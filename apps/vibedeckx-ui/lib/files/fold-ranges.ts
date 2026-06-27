@@ -61,6 +61,13 @@ export function bracketFoldRanges(
   // TODO: stack-match {} [] () pairs, counting only positions the token index
   // marks as "code" (skip brackets in strings/comments). See the symbol-click
   // -gate memory for the planned token-index-into-CodeBlock wiring.
+  //
+  // END SEMANTICS — MUST match indentationFoldRanges: endLine is the LAST HIDDEN
+  // line, i.e. the line *before* the closer, so the closing `}`/`]`/`)` stays
+  // visible (`foo() {` collapses to `foo() {…}`). Diverging here would make the
+  // same block emit two ranges differing by one line, which mergeFoldRanges
+  // would treat as a same-start conflict instead of deduping it away. Match the
+  // convention and identical blocks collapse to one range for free.
   void code;
   void tokenIndex;
   return [];
@@ -90,6 +97,12 @@ export function mergeFoldRanges(...lists: FoldRange[][]): FoldRange[] {
       stack.pop();
     }
     const parent = stack[stack.length - 1];
+    // Crossing resolution is OUTER-WINS (the earlier-starting range is kept),
+    // NOT precedence-aware — provider identity is already gone by here. Fine
+    // because crossings only arise from a mis-segmented provider (mixed tabs,
+    // odd dedent) and keeping the larger enclosing range is the safe default. If
+    // bracket should beat indentation even on a crossing, accept providers in
+    // priority order and reject a range that crosses any already-accepted one.
     if (parent && range.endLine > parent.endLine) continue; // crosses → drop
     out.push(range);
     stack.push(range);
