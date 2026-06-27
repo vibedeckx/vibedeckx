@@ -203,9 +203,12 @@
 .code-fold-toggle,
 .code-fold-spacer {
   display: inline-block;
-  width: 0.8em;
-  margin-right: 0.1em;
-  text-align: center;
+  /* Wide enough that the whole column is a hover target (so hovering anywhere in
+     the gutter reveals the arrows), while the chevron itself is right-aligned to
+     sit close to the code. */
+  width: 1.4em;
+  margin-right: 0.15em;
+  text-align: right;
   user-select: none;
   -webkit-user-select: none;
 }
