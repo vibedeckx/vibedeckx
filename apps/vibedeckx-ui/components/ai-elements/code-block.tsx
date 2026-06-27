@@ -9,10 +9,12 @@ import {
   type HTMLAttributes,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import { type BundledLanguage, codeToHtml, type ShikiTransformer } from "shiki";
+import { computeFoldRanges, type FoldRange } from "@/lib/files/fold-ranges";
 
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
@@ -22,6 +24,9 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   // renders. `scrollKey` lets the same line (or a repeat jump) re-trigger.
   scrollToLine?: number | null;
   scrollKey?: number;
+  // Render a fold gutter (indentation-based) with collapsible regions. Opt-in so
+  // chat code blocks stay untouched; the Files preview turns it on.
+  foldable?: boolean;
 };
 
 type CodeBlockContextType = {
@@ -61,14 +66,38 @@ const lineNumberTransformer: ShikiTransformer = {
   },
 };
 
+// Prepend a fixed-width gutter cell to every line: a clickable chevron on lines
+// that open a fold region, an empty spacer elsewhere (so line numbers stay
+// aligned). The cell holds no text — the chevron/placeholder glyphs are drawn by
+// CSS `::before`/`::after` so they never perturb the symbol-click column math or
+// the selection highlight, both of which count DOM text only.
+function makeFoldGutterTransformer(foldStartLines: Set<number>): ShikiTransformer {
+  return {
+    name: "fold-gutter",
+    line(node, line) {
+      node.children.unshift({
+        type: "element",
+        tagName: "span",
+        properties: foldStartLines.has(line)
+          ? { className: ["code-fold-toggle"], "data-fold-start": String(line) }
+          : { className: ["code-fold-spacer"] },
+        children: [],
+      });
+    },
+  };
+}
+
 export async function highlightCode(
   code: string,
   language: BundledLanguage,
-  showLineNumbers = false
+  showLineNumbers = false,
+  foldStartLines?: Set<number>
 ) {
-  const transformers: ShikiTransformer[] = showLineNumbers
-    ? [lineDataTransformer, lineNumberTransformer]
-    : [lineDataTransformer];
+  const transformers: ShikiTransformer[] = [lineDataTransformer];
+  if (showLineNumbers) transformers.push(lineNumberTransformer);
+  if (foldStartLines && foldStartLines.size > 0) {
+    transformers.push(makeFoldGutterTransformer(foldStartLines));
+  }
 
   return await Promise.all([
     codeToHtml(code, {
@@ -90,6 +119,7 @@ export const CodeBlock = ({
   showLineNumbers = false,
   scrollToLine,
   scrollKey,
+  foldable = false,
   className,
   children,
   ...props
@@ -99,19 +129,87 @@ export const CodeBlock = ({
   const mounted = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // Foldable regions for this file and the set of collapsed header lines. Both
+  // are no-ops unless `foldable`.
+  const foldRanges = useMemo<FoldRange[]>(
+    () => (foldable ? computeFoldRanges(code) : []),
+    [foldable, code]
+  );
+  const foldStartLines = useMemo(
+    () => new Set(foldRanges.map((r) => r.startLine)),
+    [foldRanges]
+  );
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
+  // Props whose changes adjust collapse state. Handled in the render phase below
+  // (React's "adjust state on prop change" pattern) rather than in effects, to
+  // avoid cascading effect renders.
+  const [prevCode, setPrevCode] = useState(code);
+  const [prevScroll, setPrevScroll] = useState<{
+    line: number | null | undefined;
+    key: number | undefined;
+  }>({ line: scrollToLine, key: scrollKey });
+
   useEffect(() => {
-    highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
-      if (!mounted.current) {
-        setHtml(light);
-        setDarkHtml(dark);
-        mounted.current = true;
+    highlightCode(code, language, showLineNumbers, foldStartLines).then(
+      ([light, dark]) => {
+        if (!mounted.current) {
+          setHtml(light);
+          setDarkHtml(dark);
+          mounted.current = true;
+        }
       }
-    });
+    );
 
     return () => {
       mounted.current = false;
     };
-  }, [code, language, showLineNumbers]);
+  }, [code, language, showLineNumbers, foldStartLines]);
+
+  // Apply the collapse state to the live DOM: hide the lines inside each
+  // collapsed region and tag the header line so CSS can flip its chevron and
+  // append a "⋯" placeholder. Re-runs after every re-highlight (the HTML string
+  // is rebuilt) and on every toggle. Both light/dark copies are addressed.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const rangeByStart = new Map(foldRanges.map((r) => [r.startLine, r]));
+    const hidden = new Set<number>();
+    for (const start of collapsed) {
+      const range = rangeByStart.get(start);
+      if (!range) continue;
+      for (let ln = range.startLine + 1; ln <= range.endLine; ln++) hidden.add(ln);
+    }
+    for (const el of root.querySelectorAll<HTMLElement>("[data-line]")) {
+      const ln = Number(el.getAttribute("data-line"));
+      el.style.display = hidden.has(ln) ? "none" : "";
+      el.classList.toggle("code-line-collapsed", collapsed.has(ln));
+    }
+  }, [collapsed, foldRanges, html, darkHtml]);
+
+  // Toggle a region when its chevron is clicked. A native (capture-free) listener
+  // on the root lets us stopPropagation before the symbol-nav onClick on an
+  // ancestor sees it, so folding never opens the definition popover. Delegated,
+  // so it survives the HTML being rebuilt on re-highlight.
+  useEffect(() => {
+    if (!foldable) return;
+    const root = rootRef.current;
+    if (!root) return;
+    const onClick = (e: MouseEvent) => {
+      const toggle = (e.target as HTMLElement)?.closest?.("[data-fold-start]");
+      if (!toggle) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const start = Number(toggle.getAttribute("data-fold-start"));
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        if (next.has(start)) next.delete(start);
+        else next.add(start);
+        return next;
+      });
+    };
+    root.addEventListener("click", onClick);
+    return () => root.removeEventListener("click", onClick);
+  }, [foldable]);
 
   // Scroll the target line into view and briefly highlight it, once the
   // highlighted HTML is in the DOM. CodeBlock renders two copies (light/dark);
@@ -141,6 +239,33 @@ export const CodeBlock = ({
       nodes.forEach((n) => n.classList.remove("code-line-highlight"));
     };
   }, [scrollToLine, scrollKey, html, darkHtml]);
+
+  // Reset collapse state when a different file's code loads.
+  if (code !== prevCode) {
+    setPrevCode(code);
+    setCollapsed(new Set());
+  }
+
+  // On a new jump request, expand any collapsed region containing the target so
+  // the scroll effect lands on a visible line rather than a display:none one.
+  if (prevScroll.line !== scrollToLine || prevScroll.key !== scrollKey) {
+    setPrevScroll({ line: scrollToLine, key: scrollKey });
+    if (scrollToLine != null && collapsed.size > 0) {
+      let changed = false;
+      const next = new Set(collapsed);
+      for (const range of foldRanges) {
+        if (
+          next.has(range.startLine) &&
+          scrollToLine > range.startLine &&
+          scrollToLine <= range.endLine
+        ) {
+          next.delete(range.startLine);
+          changed = true;
+        }
+      }
+      if (changed) setCollapsed(next);
+    }
+  }
 
   return (
     <CodeBlockContext.Provider value={{ code }}>

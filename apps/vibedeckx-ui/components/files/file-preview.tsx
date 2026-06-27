@@ -636,6 +636,7 @@ export function FilePreview({
               code={fileContent.content}
               language={getLanguage(filePath)}
               showLineNumbers
+              foldable
               scrollToLine={scrollToLine}
               scrollKey={scrollKey}
               className="border-0 rounded-none"

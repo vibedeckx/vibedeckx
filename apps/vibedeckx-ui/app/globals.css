@@ -195,3 +195,36 @@
   box-shadow: inset 3px 0 0 0 var(--primary);
   transition: background-color 0.4s ease;
 }
+
+/* Fold gutter. Both cells are empty DOM elements with a fixed width so line
+   numbers stay aligned; the chevron and "⋯" placeholder are drawn with
+   pseudo-elements (no DOM text) so they don't affect symbol-click column math
+   or the selection highlight, which both count text nodes only. */
+.code-fold-toggle,
+.code-fold-spacer {
+  display: inline-block;
+  width: 1.1em;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.code-fold-toggle {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  opacity: 0.5;
+}
+.code-fold-toggle:hover {
+  opacity: 1;
+}
+.code-fold-toggle::before {
+  content: "▾";
+  font-size: 0.7em;
+}
+.code-line-collapsed .code-fold-toggle::before {
+  content: "▸";
+}
+.code-line-collapsed::after {
+  content: " ⋯";
+  color: var(--muted-foreground);
+  opacity: 0.7;
+}
