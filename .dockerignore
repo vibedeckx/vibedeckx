@@ -1,0 +1,23 @@
+# Keep the Docker build context small. The image only needs dist-out/<tarball>.
+**/node_modules
+.git
+**/.next
+**/out
+**/dist
+.dev
+.worktrees
+.superpowers
+.vibedeckx
+apps
+packages
+plans
+docs
+*.log
+# SQLite data is bind-mounted at runtime, never built into the image.
+data
+deploy/data
+# Never ship secrets/certs into the build context.
+deploy/docker.env
+deploy/certs
+**/*.pem
+**/*.key

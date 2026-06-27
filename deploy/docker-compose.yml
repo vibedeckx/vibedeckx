@@ -1,0 +1,51 @@
+# Vibedeckx — run config. Build is handled separately by deploy/build.sh
+# (which produces the image `vibedeckx:local`); this file only RUNS it.
+#
+# Designed to be copied to a standalone runtime dir with certs/ and data/
+# next to it — it references the image by name, so it needs no source tree:
+#
+#   /opt/vibedeckx/
+#   ├── docker-compose.yml        (this file)
+#   ├── docker.env                (Clerk secrets, chmod 600)
+#   ├── certs/
+#   │   ├── cf-origin.pem
+#   │   ├── cf-origin.key
+#   │   └── cloudflare-aop-ca.pem
+#   └── data/                     (existing SQLite db)
+#
+# Build once from the repo:  ./deploy/build.sh
+# Then from the runtime dir: docker compose up -d
+services:
+  vibedeckx:
+    # Prebuilt image from deploy/build.sh. Override with VIBEDECKX_IMAGE if you
+    # push to a registry.
+    image: ${VIBEDECKX_IMAGE:-vibedeckx:local}
+    restart: unless-stopped
+
+    # Direct host bind — no NAT hop, native network perf. `ports:` must stay unset.
+    network_mode: host
+
+    # ENTRYPOINT is `vibedeckx start`; these flags are appended.
+    command:
+      - --auth
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8444"
+      - --data-dir
+      - /data
+
+    environment:
+      NODE_ENV: production
+      VIBEDECKX_TLS_CERT: /certs/cf-origin.pem
+      VIBEDECKX_TLS_KEY: /certs/cf-origin.key
+      VIBEDECKX_TLS_CLIENT_CA: /certs/cloudflare-aop-ca.pem
+
+    # Clerk secrets. Lives next to this file in the runtime dir.
+    env_file:
+      - ./docker.env
+
+    volumes:
+      # data/ and certs/ sit next to this compose file by default.
+      - ${VIBEDECKX_DATA_DIR:-./data}:/data
+      - ${VIBEDECKX_CERTS_DIR:-./certs}:/certs:ro
