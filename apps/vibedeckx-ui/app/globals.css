@@ -215,10 +215,10 @@
   opacity: 0;
   transition: opacity 0.1s ease;
 }
-/* VSCode-like: chevrons stay hidden while reading; hovering anywhere over the
-   code block reveals the WHOLE column at once. Collapsed markers stay visible
-   so folded regions remain discoverable. */
-pre:hover .code-fold-toggle,
+/* Chevrons stay hidden while reading; hovering the fold COLUMN (any gutter cell,
+   toggle or spacer) reveals the whole column at once — not the rest of the code.
+   Collapsed markers stay visible so folded regions remain discoverable. */
+code:has(.code-fold-toggle:hover, .code-fold-spacer:hover) .code-fold-toggle,
 .code-line-collapsed .code-fold-toggle {
   opacity: 0.7;
 }
