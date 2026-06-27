@@ -20,6 +20,11 @@ import { api, type FileContentResponse } from "@/lib/api";
 import type { BundledLanguage } from "shiki";
 import { SymbolNavPopover } from "./symbol-nav-popover";
 import { ImagePreview } from "./image-preview";
+import {
+  classifyColumn,
+  tokenizeFile,
+  type SymbolTokenIndex,
+} from "@/lib/files/symbol-tokens";
 
 // Raster image extensions previewed inline (when the backend flags the file
 // binary). Larger than this cap, the bytes aren't fetched — a download card is
@@ -120,7 +125,14 @@ const WORD_CHAR = /[A-Za-z0-9_$]/;
 
 // Find the identifier under a viewport point (used for single-click, which has no
 // native selection to read). Returns the word + its stable line+col anchor.
-function wordFromPoint(x: number, y: number): { word: string; anchor: LineColAnchor } | null {
+// When a token index is supplied, words that aren't real symbols (inside a
+// comment/string, or a language keyword) are rejected so the popover only opens
+// on something worth a definition/reference lookup.
+function wordFromPoint(
+  x: number,
+  y: number,
+  index?: SymbolTokenIndex | null
+): { word: string; anchor: LineColAnchor } | null {
   const doc = document as Document & {
     caretRangeFromPoint?: (x: number, y: number) => Range | null;
     caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
@@ -154,6 +166,16 @@ function wordFromPoint(x: number, y: number): { word: string; anchor: LineColAnc
   range.setEnd(node, end);
   const anchor = anchorFromRange(range);
   if (!anchor) return null;
+  // Reject non-symbols when we have a token index. The line element carries a
+  // synthetic line-number prefix (the bare number CodeBlock stamps via its
+  // line-number transformer), so the source column is the in-line character
+  // offset minus that prefix's length. A null classification (line/col not
+  // covered, or index not built yet) leaves the click allowed.
+  if (index) {
+    const sourceCol = anchor.start - anchor.line.length;
+    const kind = classifyColumn(index, Number(anchor.line), sourceCol);
+    if (kind && kind !== "code") return null;
+  }
   return { word, anchor };
 }
 
@@ -281,6 +303,12 @@ export function FilePreview({
     selectWord: boolean;
   } | null>(null);
 
+  // Per-file token scopes, built off-thread by Shiki, used to gate clicks to
+  // real symbols. Held in a ref so the click handler reads the latest index
+  // without being recreated. Null until built (and on build failure) — in which
+  // case every identifier stays clickable, the prior behavior.
+  const tokenIndexRef = useRef<SymbolTokenIndex | null>(null);
+
   // Single + double click are distinguished by MouseEvent.detail (no timer):
   //   detail 1 (single click) → custom amber highlight + popover
   //   detail 2 (double click) → real native selection + popover (no amber)
@@ -297,7 +325,7 @@ export function FilePreview({
     }
     const existing = window.getSelection();
     if (existing && !existing.isCollapsed) return; // drag-select
-    const found = wordFromPoint(e.clientX, e.clientY);
+    const found = wordFromPoint(e.clientX, e.clientY, tokenIndexRef.current);
     if (!found) return;
     // Kill the native (blue) selection now so it can't flash before the highlight.
     existing?.removeAllRanges();
@@ -338,6 +366,33 @@ export function FilePreview({
     CSS.highlights.set(SYMBOL_HL, new Highlight(range));
     return clearSymbolHighlight;
   }, [symbolNav]);
+
+  // Build the token scope index for the open file (source preview only). Clears
+  // immediately on file change so a stale index can't gate the next file, then
+  // fills in asynchronously once Shiki tokenizes.
+  useEffect(() => {
+    tokenIndexRef.current = null;
+    const content = fileContent?.content;
+    if (
+      !filePath ||
+      content == null ||
+      fileContent?.binary ||
+      fileContent?.tooLarge
+    ) {
+      return;
+    }
+    let cancelled = false;
+    tokenizeFile(content, getLanguage(filePath))
+      .then((idx) => {
+        if (!cancelled) tokenIndexRef.current = idx;
+      })
+      .catch(() => {
+        // Leave the gate open (every word clickable) on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, fileContent]);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
 
