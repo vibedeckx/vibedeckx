@@ -48,7 +48,7 @@ function readBlob(): StoredBlob {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return emptyBlob();
     const parsed = JSON.parse(raw) as StoredBlob;
-    if (!parsed || parsed.v !== SCHEMA_VERSION || typeof parsed.views !== "object") {
+    if (!parsed || parsed.v !== SCHEMA_VERSION || !parsed.views || typeof parsed.views !== "object") {
       return emptyBlob();
     }
     return parsed;
