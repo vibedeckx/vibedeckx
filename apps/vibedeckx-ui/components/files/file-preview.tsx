@@ -346,14 +346,11 @@ export function FilePreview({
         setSymbolNav((prev) => (prev ? { ...prev, selectWord: true } : prev));
         return;
       }
-      // A non-symbol (keyword/string/comment): no popover opened, so the click
-      // point is clear. The browser's native double-click in this white-space:pre
-      // block greedily includes the trailing whitespace (Shiki emits it as a
-      // leading space on the next token). Tighten the selection to the word only,
-      // SYNCHRONOUSLY here (not in a setState updater, which runs in the render
-      // phase after a paint and so flashes the wider selection first). wordFromPoint
-      // without the token index skips the symbol gate but still trims to a bare
-      // identifier.
+      // A non-symbol (keyword/string/comment): no popover opened. The native
+      // double-click selection was suppressed on mousedown (handleMouseDown), so
+      // nothing is selected yet — establish a tight word-only range here.
+      // wordFromPoint without the token index skips the symbol gate but still trims
+      // to a bare identifier.
       const found = wordFromPoint(e.clientX, e.clientY);
       const range = found ? rangeFromAnchor(found.anchor) : null;
       if (range) {
@@ -375,6 +372,17 @@ export function FilePreview({
       anchor: found.anchor,
       selectWord: false,
     });
+  }, []);
+
+  // Suppress the browser's native double-click word selection at its source. The
+  // selection is made on the second mousedown and painted while the button is
+  // held — and in this white-space:pre block it greedily includes the trailing
+  // whitespace (Shiki emits it as a leading space on the next token), so it would
+  // visibly flash a too-wide selection before the click handler could correct it.
+  // preventDefault here stops it; handleClick then lays down a tight word range.
+  // Only for the second click (detail 2) — single clicks/drags select normally.
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.detail >= 2) e.preventDefault();
   }, []);
 
   // Apply the symbol affordance after the popover mounts (the re-render swaps the
@@ -698,6 +706,7 @@ export function FilePreview({
         ) : fileContent.content !== null ? (
           <div
             className="h-full [&_pre]:text-[length:var(--files-content-font-size,14px)]! [&_code]:text-[length:var(--files-content-font-size,14px)]!"
+            onMouseDown={handleMouseDown}
             onClick={handleClick}
           >
             <CodeBlock
