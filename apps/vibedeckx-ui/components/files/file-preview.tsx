@@ -289,6 +289,11 @@ interface FilePreviewProps {
   scrollToLine?: number | null;
   scrollKey?: number;
   onJump: (file: string, line: number) => void;
+  // Restore a saved scroll offset for the open file; restoreScrollKey bumps per
+  // restore so the same offset re-applies. onScroll reports live scrolling up.
+  restoreScrollTop?: number | null;
+  restoreScrollKey?: number;
+  onScroll?: (top: number) => void;
 }
 
 export function FilePreview({
@@ -302,6 +307,9 @@ export function FilePreview({
   scrollToLine,
   scrollKey,
   onJump,
+  restoreScrollTop,
+  restoreScrollKey,
+  onScroll,
 }: FilePreviewProps) {
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [prevFilePath, setPrevFilePath] = useState(filePath);
@@ -484,6 +492,78 @@ export function FilePreview({
   // Tear down a pending re-alignment if the preview unmounts mid-window.
   useEffect(() => () => realignCleanupRef.current?.(), []);
 
+  // The scroll container (the overflow-auto content div below). Capturing and
+  // restoring scrollTop here covers both source code and rendered markdown — the
+  // CodeBlock's inner divs auto-size to content, so this is the only scroller.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // True while a restore is programmatically driving scrollTop, so partial
+  // (pre-render) offsets don't get reported back and overwrite the saved value.
+  const restoringScrollRef = useRef(false);
+  const onScrollRef = useRef(onScroll);
+  // eslint-disable-next-line react-hooks/refs -- stable ref-sync pattern: keep latest callback without recreating handlers
+  onScrollRef.current = onScroll;
+  const scrollReportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A saved offset waiting to be applied once the content (and thus the scroll
+  // container) is in the DOM — on restore the preview first renders a loading
+  // state with no container.
+  const pendingRestoreRef = useRef<number | null>(null);
+
+  const handleContainerScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    if (restoringScrollRef.current) return;
+    const top = e.currentTarget.scrollTop;
+    if (scrollReportTimerRef.current) clearTimeout(scrollReportTimerRef.current);
+    scrollReportTimerRef.current = setTimeout(() => onScrollRef.current?.(top), 200);
+  }, []);
+
+  // Record a restore request; applied by the effect below once content lands.
+  useEffect(() => {
+    if (restoreScrollKey === undefined) return;
+    pendingRestoreRef.current = restoreScrollTop ?? 0;
+  }, [restoreScrollKey, restoreScrollTop]);
+
+  // Reset to top when a different file opens, so a fresh open doesn't inherit
+  // the previous file's offset. Declared BEFORE the restore-apply effect so that
+  // on a mount-restore (filePath + content change together) restore wins.
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = 0;
+  }, [filePath]);
+
+  // Apply a pending restore once the scroll container exists, holding the offset
+  // through async render growth (Shiki/markdown). Mirrors scrollToHashTarget.
+  // Intentionally keyed on [fileContent]: reads pendingRestoreRef/restoreScrollTop
+  // via ref/closure — the two-effect pattern requires this dep skew so the restore
+  // runs only after content (and thus the scroll container) is in the DOM.
+  useEffect(() => {
+    const target = pendingRestoreRef.current;
+    if (target == null) return;
+    const el = scrollContainerRef.current;
+    if (!el) return; // preview still loading — retry when content arrives
+    pendingRestoreRef.current = null;
+    if (!target) return; // 0 → already reset to top
+    restoringScrollRef.current = true;
+    const align = () => {
+      el.scrollTop = target;
+    };
+    align();
+    const observer = new ResizeObserver(align);
+    observer.observe(el.firstElementChild ?? el);
+    const stop = () => {
+      restoringScrollRef.current = false;
+      observer.disconnect();
+      window.clearTimeout(timer);
+      el.removeEventListener("wheel", stop);
+      el.removeEventListener("touchmove", stop);
+      el.removeEventListener("keydown", stop);
+    };
+    // Real-content height settles within ~1s; give restore a little more.
+    const timer = window.setTimeout(stop, 1500);
+    el.addEventListener("wheel", stop, { passive: true });
+    el.addEventListener("touchmove", stop, { passive: true });
+    el.addEventListener("keydown", stop);
+    return stop;
+  }, [fileContent]);
+
   // Streamdown ships no rehype-slug, so rendered headings have no `id` for an
   // in-document link ([xxx](#yyy)) to scroll to. Append rehype-slug after the
   // default plugins (so it runs after rehype-sanitize and its ids aren't
@@ -654,7 +734,7 @@ export function FilePreview({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto" ref={scrollContainerRef} onScroll={handleContainerScroll}>
         {fileContent.tooLarge ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
             <FileWarning className="h-10 w-10" />
