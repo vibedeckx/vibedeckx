@@ -322,6 +322,14 @@ export function FilePreview({
   const tokenIndexRef = useRef<SymbolTokenIndex | null>(null);
   const codeBlockRef = useRef<CodeBlockHandle>(null);
 
+  // Mirror the popover-open state into a ref so the click handler can read it
+  // synchronously (its deps are empty). React flushes this effect before the next
+  // discrete click, so it reflects the committed state by the time a click fires.
+  const symbolNavOpenRef = useRef(false);
+  useEffect(() => {
+    symbolNavOpenRef.current = symbolNav !== null;
+  }, [symbolNav]);
+
   // Single + double click are distinguished by MouseEvent.detail (no timer):
   //   detail 1 (single click) → custom amber highlight + popover
   //   detail 2 (double click) → real native selection + popover (no amber)
@@ -329,31 +337,29 @@ export function FilePreview({
   // to read). A drag-select (non-collapsed selection on a plain click) is ignored.
   const handleClick = useCallback((e: React.MouseEvent) => {
     if (e.detail >= 2) {
-      // Second click of a double-click. `prev` (the committed state) tells us
-      // whether the first click opened the symbol popover.
-      setSymbolNav((prev) => {
-        const sel = window.getSelection();
-        if (prev) {
-          // A symbol: upgrade the open popover to a real native selection. Reuse
-          // the FIRST click's stored anchor (the effect lays it down) — the popover
-          // may cover the point, so re-detecting from coordinates could hit it.
-          sel?.removeAllRanges();
-          return { ...prev, selectWord: true };
-        }
-        // A non-symbol (keyword/string/comment): no popover opened, so the click
-        // point is clear. The browser's native double-click in this white-space:pre
-        // block greedily includes the trailing whitespace (Shiki emits it as a
-        // leading space on the next token), so re-detect the word and tighten the
-        // selection to just it. wordFromPoint without the token index skips the
-        // symbol gate but still trims to a bare identifier.
-        const found = wordFromPoint(e.clientX, e.clientY);
-        const range = found ? rangeFromAnchor(found.anchor) : null;
-        if (range) {
-          sel?.removeAllRanges();
-          sel?.addRange(range);
-        }
-        return prev;
-      });
+      const sel = window.getSelection();
+      if (symbolNavOpenRef.current) {
+        // A symbol: upgrade the open popover to a real native selection. Reuse the
+        // FIRST click's stored anchor (the effect lays it down) — the popover may
+        // cover the point, so re-detecting from coordinates could hit it.
+        sel?.removeAllRanges();
+        setSymbolNav((prev) => (prev ? { ...prev, selectWord: true } : prev));
+        return;
+      }
+      // A non-symbol (keyword/string/comment): no popover opened, so the click
+      // point is clear. The browser's native double-click in this white-space:pre
+      // block greedily includes the trailing whitespace (Shiki emits it as a
+      // leading space on the next token). Tighten the selection to the word only,
+      // SYNCHRONOUSLY here (not in a setState updater, which runs in the render
+      // phase after a paint and so flashes the wider selection first). wordFromPoint
+      // without the token index skips the symbol gate but still trims to a bare
+      // identifier.
+      const found = wordFromPoint(e.clientX, e.clientY);
+      const range = found ? rangeFromAnchor(found.anchor) : null;
+      if (range) {
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
       return;
     }
     const existing = window.getSelection();
