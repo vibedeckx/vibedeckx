@@ -55,6 +55,9 @@ export function FilesView({ projectId, project, selectedBranch, navRequest }: Fi
     canGoBack,
     canGoForward,
     fetchRoot,
+    refresh,
+    reportScroll,
+    restoreScroll,
     toggleDirectory,
     navigate,
     jumpTo,
@@ -84,11 +87,12 @@ export function FilesView({ projectId, project, selectedBranch, navRequest }: Fi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navRequest?.nonce]);
 
-  // Refresh both the tree and the search cache so re-fetch picks up new files.
+  // Refresh re-fetches the tree, the open file's content, and the search cache —
+  // keeping the current file open (just reloading it from disk).
   const handleRefresh = useCallback(() => {
-    fetchRoot();
+    refresh();
     search.refresh();
-  }, [fetchRoot, search]);
+  }, [refresh, search]);
 
   // Open a search hit in the preview pane, then clear the query so the tree returns.
   const handleSelectResult = useCallback((path: string) => {
@@ -304,6 +308,9 @@ export function FilesView({ projectId, project, selectedBranch, navRequest }: Fi
               scrollToLine={jumpTarget?.line ?? null}
               scrollKey={jumpTarget?.nonce}
               onJump={jumpTo}
+              restoreScrollTop={restoreScroll?.top ?? null}
+              restoreScrollKey={restoreScroll?.nonce}
+              onScroll={reportScroll}
             />
           </div>
         </ResizablePanel>
