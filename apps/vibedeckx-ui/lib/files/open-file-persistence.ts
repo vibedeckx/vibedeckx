@@ -67,11 +67,21 @@ function writeBlob(blob: StoredBlob): void {
 
 export function loadView(key: string): PersistedFileView | null {
   const rec = readBlob().views[key];
-  if (!rec) return null;
+  if (
+    !rec ||
+    typeof rec !== "object" ||
+    (rec.selectedFile !== null && typeof rec.selectedFile !== "string") ||
+    !rec.history ||
+    typeof rec.history !== "object" ||
+    !Array.isArray(rec.history.entries) ||
+    typeof rec.history.index !== "number"
+  ) {
+    return null;
+  }
   return {
     selectedFile: rec.selectedFile,
     history: rec.history,
-    scrollTop: rec.scrollTop,
+    scrollTop: typeof rec.scrollTop === "number" && Number.isFinite(rec.scrollTop) ? rec.scrollTop : 0,
   };
 }
 
