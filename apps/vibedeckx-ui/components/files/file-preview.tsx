@@ -329,17 +329,30 @@ export function FilePreview({
   // to read). A drag-select (non-collapsed selection on a plain click) is ignored.
   const handleClick = useCallback((e: React.MouseEvent) => {
     if (e.detail >= 2) {
-      // Second click of a double-click: upgrade the already-open popover to a real
-      // native selection. Reuse the FIRST click's anchor — the popover now covers
-      // the point, so re-detecting from coordinates would hit the popover itself.
-      // Only act when the first click actually opened the popover (a symbol). For a
-      // non-symbol, the first click is gated out and no popover opens, so leave the
-      // browser's native double-click word selection alone — clearing it here would
-      // make the word visibly select and then immediately deselect.
+      // Second click of a double-click. `prev` (the committed state) tells us
+      // whether the first click opened the symbol popover.
       setSymbolNav((prev) => {
-        if (!prev) return prev;
-        window.getSelection()?.removeAllRanges();
-        return { ...prev, selectWord: true };
+        const sel = window.getSelection();
+        if (prev) {
+          // A symbol: upgrade the open popover to a real native selection. Reuse
+          // the FIRST click's stored anchor (the effect lays it down) — the popover
+          // may cover the point, so re-detecting from coordinates could hit it.
+          sel?.removeAllRanges();
+          return { ...prev, selectWord: true };
+        }
+        // A non-symbol (keyword/string/comment): no popover opened, so the click
+        // point is clear. The browser's native double-click in this white-space:pre
+        // block greedily includes the trailing whitespace (Shiki emits it as a
+        // leading space on the next token), so re-detect the word and tighten the
+        // selection to just it. wordFromPoint without the token index skips the
+        // symbol gate but still trims to a bare identifier.
+        const found = wordFromPoint(e.clientX, e.clientY);
+        const range = found ? rangeFromAnchor(found.anchor) : null;
+        if (range) {
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+        }
+        return prev;
       });
       return;
     }
