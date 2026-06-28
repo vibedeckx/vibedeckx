@@ -332,8 +332,15 @@ export function FilePreview({
       // Second click of a double-click: upgrade the already-open popover to a real
       // native selection. Reuse the FIRST click's anchor — the popover now covers
       // the point, so re-detecting from coordinates would hit the popover itself.
-      window.getSelection()?.removeAllRanges();
-      setSymbolNav((prev) => (prev ? { ...prev, selectWord: true } : prev));
+      // Only act when the first click actually opened the popover (a symbol). For a
+      // non-symbol, the first click is gated out and no popover opens, so leave the
+      // browser's native double-click word selection alone — clearing it here would
+      // make the word visibly select and then immediately deselect.
+      setSymbolNav((prev) => {
+        if (!prev) return prev;
+        window.getSelection()?.removeAllRanges();
+        return { ...prev, selectWord: true };
+      });
       return;
     }
     const existing = window.getSelection();
