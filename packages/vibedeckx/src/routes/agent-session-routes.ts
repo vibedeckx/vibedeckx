@@ -87,7 +87,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const providers = getAllProviders().map((provider) => ({
       type: provider.getAgentType(),
       displayName: provider.getDisplayName(),
-      available: provider.detectBinary() !== null,
+      available: provider.isAvailable?.() ?? provider.detectBinary() !== null,
     }));
     return reply.code(200).send({ providers });
   });

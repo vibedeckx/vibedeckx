@@ -38,6 +38,14 @@ export interface AgentProvider {
   /** Detect the agent binary on the system. Returns path or null if not found. */
   detectBinary(): string | null;
 
+  /**
+   * Whether this provider can actually run (and thus be selected in the UI).
+   * Distinct from detectBinary(): a provider may have no native binary on PATH
+   * yet still be runnable via an npx fallback in buildSpawnConfig(). Defaults to
+   * detectBinary() !== null when not implemented.
+   */
+  isAvailable?(): boolean;
+
   /** Build the spawn configuration for launching the agent process. */
   buildSpawnConfig(cwd: string, permissionMode: "plan" | "edit"): SpawnConfig;
 
@@ -68,6 +76,13 @@ export interface AgentProvider {
 
   /** Human-readable display name for this agent. */
   getDisplayName(): string;
+
+  /**
+   * Install/setup instructions shown to the user when the agent process fails
+   * to start (e.g. neither a native binary nor the npx fallback is runnable).
+   * Optional — providers without a clear install path can omit it.
+   */
+  getInstallHint?(): string;
 
   /** The agent type identifier. */
   getAgentType(): AgentType;

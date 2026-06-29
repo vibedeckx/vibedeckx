@@ -73,6 +73,7 @@ interface RunningSession {
   skipDb: boolean; // Skip DB operations for remote path-based sessions
   permissionMode: "plan" | "edit"; // Claude Code permission mode
   agentType: AgentType; // Which agent provider to use
+  producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
 }
 
 export class AgentSessionManager {
@@ -429,6 +430,11 @@ export class AgentSessionManager {
 
     const config = provider.buildSpawnConfig(cwd, session.permissionMode);
 
+    // Per-spawn state for diagnosing startup failures (e.g. agent not installed).
+    session.producedOutput = false;
+    let stderrTail = "";
+    let spawnFailed = false;
+
     const childProcess = spawn(config.command, config.args, {
       cwd,
       env: { ...process.env, FORCE_COLOR: "1", ...config.env },
@@ -458,7 +464,9 @@ export class AgentSessionManager {
     childProcess.stderr?.on("data", (data: Buffer) => {
       const text = data.toString();
       console.log(`[AgentSession] stderr: ${text}`);
-      // Don't treat all stderr as errors - Claude Code uses it for progress
+      // Don't treat all stderr as errors - Claude Code uses it for progress.
+      // Keep a capped tail so we can surface it if the process fails to start.
+      stderrTail = (stderrTail + text).slice(-4000);
     });
 
     // Handle process exit
@@ -475,6 +483,18 @@ export class AgentSessionManager {
       session.status = code === 0 ? "stopped" : "error";
       if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, session.status);
 
+      // A non-zero exit with no agent output means the process never really
+      // started — most often the agent isn't installed (and the npx fallback
+      // couldn't run/download it). The "error" handler already reports ENOENT;
+      // for other startup failures, surface a friendly hint here.
+      if (code !== 0 && !spawnFailed && !session.producedOutput) {
+        this.pushEntry(session.id, {
+          type: "error",
+          message: this.buildStartupFailureMessage(session.agentType, stderrTail),
+          timestamp: Date.now(),
+        }, true);
+      }
+
       // Send status patch and finished signal
       this.broadcastPatch(session.id, ConversationPatch.updateStatus(session.status));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: session.status });
@@ -484,11 +504,18 @@ export class AgentSessionManager {
     // Handle spawn errors
     childProcess.on("error", (error) => {
       console.error(`[AgentSession] Process ${session.id} error:`, error);
+      spawnFailed = true;
       session.status = "error";
       if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, "error");
+      // ENOENT means the command (native binary or `npx`) wasn't found — almost
+      // always the agent isn't installed. Show install instructions instead of
+      // the cryptic "spawn npx ENOENT".
+      const isNotFound = (error as NodeJS.ErrnoException).code === "ENOENT";
       this.pushEntry(session.id, {
         type: "error",
-        message: error.message,
+        message: isNotFound
+          ? this.buildStartupFailureMessage(session.agentType, stderrTail)
+          : error.message,
         timestamp: Date.now(),
       }, true);
     });
@@ -515,6 +542,11 @@ export class AgentSessionManager {
       if (!line.trim()) continue;
 
       const events = provider.parseStdoutLine(line, session.id);
+      if (events.length > 0) {
+        // The process produced real agent output, so it started successfully —
+        // a later non-zero exit is a runtime error, not a "not installed" case.
+        session.producedOutput = true;
+      }
       for (const event of events) {
         this.processAgentEvent(session.id, event);
       }
@@ -763,6 +795,21 @@ export class AgentSessionManager {
   /**
    * Push a new entry with ADD patch
    */
+  /**
+   * Build a user-facing message for when an agent process fails to start.
+   * Includes the provider's install hint plus any captured stderr tail.
+   */
+  private buildStartupFailureMessage(agentType: AgentType, stderrTail: string): string {
+    const provider = getProvider(agentType);
+    const name = provider.getDisplayName();
+    const hint = provider.getInstallHint?.();
+    let msg = `Couldn't start ${name}.`;
+    if (hint) msg += `\n\n${hint}`;
+    const details = stderrTail.trim();
+    if (details) msg += `\n\nDetails:\n${details}`;
+    return msg;
+  }
+
   private pushEntry(
     sessionId: string,
     message: AgentMessage,

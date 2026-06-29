@@ -14,6 +14,10 @@ export class ClaudeCodeProvider implements AgentProvider {
     return "Claude Code";
   }
 
+  getInstallHint(): string {
+    return "Claude Code doesn't seem to be installed. Install it with `npm i -g @anthropic-ai/claude-code`, or make sure the `claude` binary is on your PATH. (It also runs via `npx`, which requires network access on first use.)";
+  }
+
   detectBinary(): string | null {
     if (this.binaryPath !== undefined) {
       return this.binaryPath;
@@ -31,6 +35,12 @@ export class ClaudeCodeProvider implements AgentProvider {
       console.log(`[ClaudeCodeProvider] Native claude binary not found, will use npx`);
     }
     return this.binaryPath;
+  }
+
+  isAvailable(): boolean {
+    // Always runnable: buildSpawnConfig falls back to `npx @anthropic-ai/claude-code`
+    // when no native `claude` binary is on PATH.
+    return true;
   }
 
   buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit"): SpawnConfig {

@@ -713,7 +713,7 @@ function ErrorMessage({ message }: { message: string }) {
       <div className="flex-1 min-w-0 overflow-hidden">
         <p className="text-sm font-medium text-red-500 mb-1">Error</p>
         <p
-          className="text-red-500/80 break-words"
+          className="text-red-500/80 break-words whitespace-pre-wrap"
           style={{ fontSize: "var(--conv-font-size, 14px)" }}
         >
           {message}

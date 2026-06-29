@@ -30,6 +30,10 @@ export class CodexProvider implements AgentProvider {
     return "Codex";
   }
 
+  getInstallHint(): string {
+    return "Codex doesn't seem to be installed. Install it with `npm i -g @openai/codex`, or make sure the `codex` binary is on your PATH. (It also runs via `npx`, which requires network access on first use.)";
+  }
+
   detectBinary(): string | null {
     if (this.binaryPath !== undefined) {
       return this.binaryPath;
@@ -47,6 +51,12 @@ export class CodexProvider implements AgentProvider {
       console.log(`[CodexProvider] Native codex binary not found, will use npx`);
     }
     return this.binaryPath;
+  }
+
+  isAvailable(): boolean {
+    // Always runnable: buildSpawnConfig falls back to `npx @openai/codex`
+    // when no native `codex` binary is on PATH.
+    return true;
   }
 
   buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit"): SpawnConfig {
