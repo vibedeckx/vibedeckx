@@ -29,4 +29,4 @@ EXPOSE 8444
 #   VIBEDECKX_TLS_CERT / VIBEDECKX_TLS_KEY / VIBEDECKX_TLS_CLIENT_CA
 #   CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY
 ENTRYPOINT ["vibedeckx", "start"]
-CMD ["--auth", "--host", "0.0.0.0", "--port", "8444", "--data-dir", "/data"]
+CMD ["--auth", "--no-local-projects", "--host", "0.0.0.0", "--port", "8444", "--data-dir", "/data"]
