@@ -43,6 +43,7 @@ declare module "fastify" {
     remotePatchCache: RemotePatchCache;
     reverseConnectManager: ReverseConnectManager;
     authEnabled: boolean;
+    noLocalProjects: boolean;
     browserManager: BrowserManager;
   }
 }

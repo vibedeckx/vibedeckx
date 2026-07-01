@@ -102,9 +102,10 @@ export interface TLSOptions {
   clientCA?: string | Buffer;
 }
 
-export const createServer = async (opts: { storage: Storage; authEnabled?: boolean; acceptRemote?: boolean; tls?: TLSOptions }) => {
+export const createServer = async (opts: { storage: Storage; authEnabled?: boolean; acceptRemote?: boolean; noLocalProjects?: boolean; tls?: TLSOptions }) => {
   const authEnabled = opts.authEnabled ?? false;
   const acceptRemote = opts.acceptRemote ?? false;
+  const noLocalProjects = opts.noLocalProjects ?? false;
   const tls = opts.tls;
 
   // Validate Clerk env vars when auth is enabled
@@ -151,6 +152,9 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
 
   // Decorate authEnabled so routes can access it
   server.decorate("authEnabled", authEnabled);
+
+  // Decorate noLocalProjects so project routes can reject local-path creation
+  server.decorate("noLocalProjects", noLocalProjects);
 
   // CORS - must be set before all routes
   server.addHook("onRequest", (req, reply, done) => {
@@ -234,6 +238,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.get("/api/config", async () => ({
     authEnabled,
     clerkPublishableKey: authEnabled ? process.env.CLERK_PUBLISHABLE_KEY : undefined,
+    localProjectsEnabled: !noLocalProjects,
   }));
 
   // Register plugins and routes

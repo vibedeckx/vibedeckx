@@ -67,6 +67,11 @@ const startCommand = buildCommand({
         brief: "Allow other vibedeckx servers to use this instance as a remote provider (exposes /api/path/*, /api/browse, /api/execute-one-shot)",
         optional: true,
       },
+      "no-local-projects": {
+        kind: "boolean",
+        brief: "Disable creation of local-folder projects (for SaaS/hosted deployments). Remote projects are unaffected.",
+        optional: true,
+      },
       cert: {
         kind: "parsed",
         parse: String,
@@ -96,6 +101,7 @@ const startCommand = buildCommand({
     // flag is recognized and documented.
     "env-file": string | undefined;
     "accept-remote": boolean | undefined;
+    "no-local-projects": boolean | undefined;
     cert: string | undefined;
     key: string | undefined;
     "client-ca": string | undefined;
@@ -104,6 +110,7 @@ const startCommand = buildCommand({
     const host = flags.host ?? "127.0.0.1";
     const authEnabled = flags.auth ?? false;
     const acceptRemote = flags["accept-remote"] ?? false;
+    const noLocalProjects = flags["no-local-projects"] ?? false;
     const tls = loadTLSOptions(flags);
 
     // Binding beyond loopback puts the (per-route-unauthenticated) executor API
@@ -147,7 +154,7 @@ const startCommand = buildCommand({
       ? path.join(flags["data-dir"], "data.sqlite")
       : DB_PATH;
     const storage = await createSqliteStorage(dbPath);
-    const server = await createServer({ storage, authEnabled, acceptRemote, tls });
+    const server = await createServer({ storage, authEnabled, acceptRemote, noLocalProjects, tls });
 
     const url = await server.start(port, host);
     console.log(`Server running at ${url}`);
