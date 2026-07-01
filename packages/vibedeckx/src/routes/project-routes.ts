@@ -119,6 +119,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Project name is required" });
     }
 
+    if (fastify.noLocalProjects && projectPath && projectPath.trim().length > 0) {
+      return reply.code(400).send({ error: "Local projects are disabled on this server" });
+    }
 
     if (remotePath && (!remoteUrl || !remoteApiKey)) {
       return reply.code(400).send({ error: "Remote URL and API key are required when remote path is provided" });
@@ -169,6 +172,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { name, path: newPath, remotePath, remoteUrl, remoteApiKey, agentMode, executorMode, syncUpConfig, syncDownConfig } = req.body;
+
+    // Block setting/adding a local path when local projects are disabled.
+    // Existing local paths are untouched: only guard when the caller sends a new non-empty path.
+    if (fastify.noLocalProjects && newPath !== undefined && newPath !== null && newPath.trim().length > 0) {
+      return reply.code(400).send({ error: "Local projects are disabled on this server" });
+    }
 
     // Secret-confusion guard: the stored remote_api_key is bound to the URL it was
     // entered for. Repointing remote_url while omitting remoteApiKey would otherwise
