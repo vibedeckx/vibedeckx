@@ -28,7 +28,7 @@ export function useAppConfig() {
         // Only fall back to no-auth mode when we had nothing cached; otherwise
         // keep the persisted config rather than flapping the UI on a transient
         // network error.
-        if (!persisted) setConfig({ authEnabled: false });
+        if (!persisted) setConfig({ authEnabled: false, localProjectsEnabled: true });
       })
       .finally(() => setLoading(false));
   }, []);

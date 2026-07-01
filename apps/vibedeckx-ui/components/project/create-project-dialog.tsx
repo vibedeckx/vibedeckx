@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FolderOpen, Loader2, Check, X, Plus, Trash2, Server, Globe } from "lucide-react";
 import { api, type RemoteServer, type Project } from "@/lib/api";
+import { useAppConfig } from "@/hooks/use-app-config";
 import { RemoteDirectoryBrowser } from "./remote-directory-browser";
 
 interface CreateProjectDialogProps {
@@ -36,6 +37,10 @@ export function CreateProjectDialog({
   onOpenChange,
   onProjectCreated,
 }: CreateProjectDialogProps) {
+  const { config } = useAppConfig();
+  // Missing field (older server) → default to enabled.
+  const localProjectsEnabled = config?.localProjectsEnabled !== false;
+
   // Project name
   const [name, setName] = useState("");
 
@@ -200,7 +205,11 @@ export function CreateProjectDialog({
     }
 
     if (!hasLocalPath && !hasRemotes) {
-      setError("Please provide a local folder, remote server, or both");
+      setError(
+        localProjectsEnabled
+          ? "Please provide a local folder, remote server, or both"
+          : "Please add a remote server"
+      );
       return;
     }
 
@@ -255,20 +264,22 @@ export function CreateProjectDialog({
           </div>
 
           {/* Local Folder Section */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Local Folder</label>
-            <div className="flex gap-2">
-              <Input
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                placeholder="/path/to/project (optional)"
-                className="flex-1"
-              />
-              <Button variant="outline" onClick={handleSelectFolder}>
-                <FolderOpen className="h-4 w-4" />
-              </Button>
+          {localProjectsEnabled && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Local Folder</label>
+              <div className="flex gap-2">
+                <Input
+                  value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  placeholder="/path/to/project (optional)"
+                  className="flex-1"
+                />
+                <Button variant="outline" onClick={handleSelectFolder}>
+                  <FolderOpen className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Remote Servers Section */}
           <div className="space-y-3">

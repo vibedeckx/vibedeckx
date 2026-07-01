@@ -89,6 +89,8 @@ export async function getAuthHeaders(
 export interface AppConfig {
   authEnabled: boolean;
   clerkPublishableKey?: string;
+  // Absent on older servers / persisted configs — treat missing as enabled.
+  localProjectsEnabled?: boolean;
 }
 
 let _cachedConfig: AppConfig | null = null;
