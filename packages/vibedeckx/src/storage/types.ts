@@ -96,6 +96,43 @@ export interface ExecutorProcess {
   finished_at: string | null;
 }
 
+export type ScheduledTaskRunType = 'command' | 'prompt';
+export type ScheduledTaskCwdMode = 'branch' | 'directory';
+export type ScheduledTaskRunStatus = 'running' | 'completed' | 'failed' | 'timeout' | 'killed' | 'skipped';
+
+export interface ScheduledTask {
+  id: string;
+  project_id: string;
+  name: string;
+  cron_expr: string;
+  /** IANA timezone name the cron expression is evaluated in, e.g. "Asia/Shanghai". */
+  timezone: string;
+  enabled: boolean;
+  run_type: ScheduledTaskRunType;
+  /** Shell command (run_type=command) or prompt text (run_type=prompt). */
+  content: string;
+  cwd_mode: ScheduledTaskCwdMode;
+  /** cwd_mode=branch: worktree branch to run in; null = main worktree. */
+  branch: string | null;
+  /** cwd_mode=directory: absolute path to run in. */
+  directory: string | null;
+  timeout_seconds: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduledTaskRun {
+  id: string;
+  schedule_id: string;
+  status: ScheduledTaskRunStatus;
+  exit_code: number | null;
+  /** Captured output (ANSI included), capped. Omitted (null) by list queries. */
+  output: string | null;
+  process_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
 export interface RemoteExecutorProcessRow {
   local_process_id: string;
   remote_server_id: string;
@@ -278,6 +315,25 @@ export interface Storage {
     getLastByExecutorIds: (executorIds: string[]) => ExecutorProcess[];
     updateStatus: (id: string, status: ExecutorProcessStatus, exitCode?: number) => void;
     updatePid: (id: string, pid: number) => void;
+  };
+  scheduledTasks: {
+    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean }) => ScheduledTask;
+    getByProjectId: (projectId: string) => ScheduledTask[];
+    getById: (id: string) => ScheduledTask | undefined;
+    getAllEnabled: () => ScheduledTask[];
+    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number }) => ScheduledTask | undefined;
+    delete: (id: string) => void;
+  };
+  scheduledTaskRuns: {
+    create: (opts: { id: string; schedule_id: string; status?: ScheduledTaskRunStatus; process_id?: string | null }) => ScheduledTaskRun;
+    getById: (id: string) => ScheduledTaskRun | undefined;
+    /** Newest first. Never includes the output column (always null) — use getById for output. */
+    getByScheduleId: (scheduleId: string, limit?: number) => ScheduledTaskRun[];
+    /** Most recent run per schedule for the given IDs (output omitted). */
+    getLastByScheduleIds: (scheduleIds: string[]) => Record<string, ScheduledTaskRun>;
+    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null }) => void;
+    /** Delete all but the newest `keep` runs for a schedule. */
+    prune: (scheduleId: string, keep: number) => void;
   };
   remoteExecutorProcesses: {
     insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null; machineId?: string | null }): void;
