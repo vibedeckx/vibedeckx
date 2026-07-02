@@ -420,6 +420,54 @@ export interface Command {
   updated_at: string;
 }
 
+export type ScheduleRunStatus = "running" | "completed" | "failed" | "timeout" | "killed" | "skipped";
+
+export interface ScheduleRun {
+  id: string;
+  schedule_id: string;
+  status: ScheduleRunStatus;
+  exit_code: number | null;
+  /** Only populated by getScheduleRun; list endpoints return null. */
+  output?: string | null;
+  process_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface Schedule {
+  id: string;
+  project_id: string;
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  enabled: boolean;
+  run_type: "command" | "prompt";
+  content: string;
+  cwd_mode: "branch" | "directory";
+  branch: string | null;
+  directory: string | null;
+  timeout_seconds: number;
+  created_at: string;
+  updated_at: string;
+  // Enriched by GET /api/projects/:id/schedules
+  last_run?: ScheduleRun | null;
+  next_run_at?: string | null;
+  running?: boolean;
+}
+
+export interface ScheduleInput {
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  enabled?: boolean;
+  run_type: "command" | "prompt";
+  content: string;
+  cwd_mode: "branch" | "directory";
+  branch?: string | null;
+  directory?: string | null;
+  timeout_seconds?: number;
+}
+
 export interface DiffLine {
   type: 'context' | 'add' | 'delete';
   content: string;
@@ -1400,6 +1448,81 @@ export const api = {
       const error = await res.json();
       throw new Error(error.error);
     }
+  },
+
+  async getSchedules(projectId: string): Promise<Schedule[]> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/schedules`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.schedules;
+  },
+
+  async createSchedule(projectId: string, opts: ScheduleInput): Promise<Schedule> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.schedule;
+  },
+
+  async updateSchedule(id: string, opts: Partial<ScheduleInput>): Promise<Schedule> {
+    const res = await authFetch(`${getApiBase()}/api/schedules/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.schedule;
+  },
+
+  async deleteSchedule(id: string): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/schedules/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+  },
+
+  async runScheduleNow(id: string): Promise<{ runId: string }> {
+    const res = await authFetch(`${getApiBase()}/api/schedules/${id}/run`, { method: "POST" });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  async getScheduleRuns(id: string): Promise<ScheduleRun[]> {
+    const res = await authFetch(`${getApiBase()}/api/schedules/${id}/runs`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.runs;
+  },
+
+  async getScheduleRun(runId: string): Promise<ScheduleRun> {
+    const res = await authFetch(`${getApiBase()}/api/schedule-runs/${runId}`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    const data = await res.json();
+    return data.run;
   },
 
   // File Browser API
