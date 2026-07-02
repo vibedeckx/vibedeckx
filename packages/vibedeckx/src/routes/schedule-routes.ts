@@ -126,11 +126,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!existing) return;
 
       const b = req.body ?? {};
+      // Timezone: if provided, coerce blank/whitespace-only to the existing
+      // value — mirroring POST's fallback to "UTC" on create — so a blank
+      // string can't slip past validateCron's `if (timezone)` skip and get
+      // persisted, later breaking croner's Cron() constructor at schedule time.
+      // undefined (field omitted) stays undefined so update() leaves the
+      // column untouched, same as every other optional field here.
+      const resolvedTimezone = b.timezone !== undefined ? (b.timezone.trim() || existing.timezone) : undefined;
       // Validate the merged (existing + patch) shape so partial updates can't
       // produce an invalid combination (e.g. cwd_mode=directory without directory).
       const merged = {
         cron_expr: b.cron_expr?.trim() ?? existing.cron_expr,
-        timezone: b.timezone?.trim() ?? existing.timezone,
+        timezone: resolvedTimezone ?? existing.timezone,
         run_type: b.run_type ?? existing.run_type,
         content: b.content ?? existing.content,
         cwd_mode: b.cwd_mode ?? existing.cwd_mode,
@@ -144,7 +151,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const schedule = fastify.storage.scheduledTasks.update(req.params.id, {
         name: b.name?.trim(),
         cron_expr: b.cron_expr?.trim(),
-        timezone: b.timezone?.trim(),
+        timezone: resolvedTimezone,
         enabled: b.enabled,
         run_type: b.run_type as ScheduledTaskRunType | undefined,
         content: b.content,

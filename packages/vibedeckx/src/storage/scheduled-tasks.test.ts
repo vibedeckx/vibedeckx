@@ -105,12 +105,39 @@ describe("scheduledTasks storage", () => {
 
   it("prune keeps only the newest N runs", () => {
     createTask();
+    // Non-running statuses: prune now never deletes 'running' rows (see next
+    // test), so these need a terminal status to exercise the keep-newest-N path.
     for (let i = 0; i < 5; i++) {
-      storage.scheduledTaskRuns.create({ id: `r${i}`, schedule_id: "s1" });
+      storage.scheduledTaskRuns.create({ id: `r${i}`, schedule_id: "s1", status: "completed" });
     }
     storage.scheduledTaskRuns.prune("s1", 2);
     const remaining = storage.scheduledTaskRuns.getByScheduleId("s1");
     expect(remaining.map((r) => r.id)).toEqual(["r4", "r3"]);
+  });
+
+  it("prune never deletes a 'running' row, even when it falls outside the keep-newest-N window", () => {
+    createTask();
+    // The running row is created first, so it is the OLDEST row overall
+    // (rowid tiebreak) — simulating a long-running run that predates a burst
+    // of newer 'skipped' rows from the scheduler's overlap-skip path.
+    storage.scheduledTaskRuns.create({ id: "running-1", schedule_id: "s1", status: "running" });
+    for (let i = 0; i < 55; i++) {
+      storage.scheduledTaskRuns.create({ id: `r${i}`, schedule_id: "s1", status: "completed" });
+    }
+
+    storage.scheduledTaskRuns.prune("s1", 50);
+
+    // The keep-newest-N subquery has no status filter, so by recency alone the
+    // running row (oldest) and the 5 oldest completed rows (r0..r4) fall
+    // outside the top-50 window. The DELETE's `status != 'running'` guard
+    // means only the 5 oldest completed rows actually get removed — the
+    // running row survives regardless of its position in the recency window.
+    const remaining = storage.scheduledTaskRuns.getByScheduleId("s1", 100);
+    expect(remaining).toHaveLength(51);
+    const remainingIds = new Set(remaining.map((r) => r.id));
+    expect(remainingIds.has("running-1")).toBe(true);
+    for (let i = 0; i < 5; i++) expect(remainingIds.has(`r${i}`)).toBe(false);
+    for (let i = 5; i < 55; i++) expect(remainingIds.has(`r${i}`)).toBe(true);
   });
 
   it("deleting a schedule cascades to its runs", () => {

@@ -654,7 +654,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       name TEXT NOT NULL,
       cron_expr TEXT NOT NULL,
       timezone TEXT NOT NULL,
-      enabled INTEGER DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
       run_type TEXT NOT NULL DEFAULT 'command',
       content TEXT NOT NULL,
       cwd_mode TEXT NOT NULL DEFAULT 'branch',
@@ -1547,8 +1547,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         ).run({ id, status: opts.status, exit_code: opts.exit_code ?? null, output: opts.output ?? null });
       },
       prune: (scheduleId, keep) => {
+        // Never delete a 'running' row: the overlap-skip path in the scheduler
+        // inserts a 'skipped' row + prunes on every overlapping cron fire, so a
+        // frequent cron + a long-running job can otherwise push the active
+        // 'running' row out of the keep-newest-N window mid-flight, deleting it
+        // out from under the run (finish() then silently no-ops).
         db.prepare(
-          `DELETE FROM scheduled_task_runs WHERE schedule_id = @schedule_id AND id NOT IN (
+          `DELETE FROM scheduled_task_runs WHERE schedule_id = @schedule_id AND status != 'running' AND id NOT IN (
              SELECT id FROM scheduled_task_runs WHERE schedule_id = @schedule_id ORDER BY started_at DESC, rowid DESC LIMIT @keep
            )`
         ).run({ schedule_id: scheduleId, keep });
