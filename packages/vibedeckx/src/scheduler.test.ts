@@ -5,6 +5,7 @@ import path from "path";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage, Executor } from "./storage/types.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
+import { EventBus, type GlobalEvent } from "./event-bus.js";
 import { SchedulerService, validateCron } from "./scheduler.js";
 
 describe("validateCron", () => {
@@ -102,12 +103,27 @@ describe("SchedulerService.runNow", () => {
     expect(run?.exit_code).toBe(3);
   });
 
-  it("skips (and records the skip) when a run is already active", () => {
+  it("skips (and records the skip) when a run is already active, and emits schedule:run-finished", () => {
+    const events: GlobalEvent[] = [];
+    const eventBus = new EventBus();
+    eventBus.subscribe((e) => events.push(e));
+    scheduler.setEventBus(eventBus);
+
     scheduler.runNow("s1");
     const second = scheduler.runNow("s1");
     expect(second).toMatchObject({ skipped: true });
     const runs = storage.scheduledTaskRuns.getByScheduleId("s1");
     expect(runs.some((r) => r.status === "skipped")).toBe(true);
+
+    const skipRunId = (second as { runId: string }).runId;
+    expect(events).toContainEqual({
+      type: "schedule:run-finished",
+      projectId: "proj-1",
+      scheduleId: "s1",
+      runId: skipRunId,
+      status: "skipped",
+      exitCode: null,
+    });
   });
 
   it("kills and marks timeout when the run exceeds timeout_seconds", () => {
@@ -145,5 +161,62 @@ describe("SchedulerService.runNow", () => {
     expect(pm.started).toHaveLength(0);
     const runs = storage.scheduledTaskRuns.getByScheduleId("s1");
     expect(runs[0].status).toBe("failed");
+  });
+
+  it("caps persisted output at 200_000 characters, keeping the tail", () => {
+    const result = scheduler.runNow("s1") as { runId: string };
+    pm.emit("proc-1", { type: "stdout", data: "A".repeat(150_000) });
+    pm.emit("proc-1", { type: "stdout", data: "B".repeat(150_000) });
+    pm.emit("proc-1", { type: "finished", exitCode: 0 });
+
+    const run = storage.scheduledTaskRuns.getById(result.runId);
+    expect(run?.output).toHaveLength(200_000);
+    // Total emitted was 300_000 chars ("A"*150_000 + "B"*150_000); the tail
+    // 200_000 chars drop the first 100_000 "A"s and keep the rest.
+    expect(run?.output?.slice(0, 50_000)).toBe("A".repeat(50_000));
+    expect(run?.output?.slice(50_000)).toBe("B".repeat(150_000));
+  });
+
+  it("prunes run history to the most recent 50 rows per schedule", () => {
+    // Seed 55 old run rows directly (bypassing the scheduler) so we don't
+    // have to execute 51 real runs.
+    const oldIds: string[] = [];
+    for (let i = 0; i < 55; i++) {
+      const id = `old-${i}`;
+      storage.scheduledTaskRuns.create({ id, schedule_id: "s1", status: "completed" });
+      oldIds.push(id);
+    }
+    expect(storage.scheduledTaskRuns.getByScheduleId("s1", 1000)).toHaveLength(55);
+
+    // Trigger one real run so the scheduler's own prune() call fires.
+    const result = scheduler.runNow("s1") as { runId: string };
+    pm.emit("proc-1", { type: "finished", exitCode: 0 });
+
+    const runs = storage.scheduledTaskRuns.getByScheduleId("s1", 1000);
+    expect(runs.length).toBeLessThanOrEqual(50);
+    // The oldest rows (inserted first) must be the ones pruned away.
+    expect(storage.scheduledTaskRuns.getById(oldIds[0])).toBeUndefined();
+    expect(storage.scheduledTaskRuns.getById(result.runId)).toBeDefined();
+  });
+
+  it("shutdown cancels the in-flight run's timeout timer instead of writing a late 'timeout' status", () => {
+    vi.useFakeTimers();
+    try {
+      const result = scheduler.runNow("s1") as { runId: string };
+      expect(scheduler.isRunning("s1")).toBe(true);
+
+      scheduler.shutdown();
+      // A timer tick past the original timeout must not fire after shutdown:
+      // no processManager.stop() call, and the run row must not be
+      // (re)written with a 'timeout' status — it stays 'running' for the
+      // startup fixup to mark 'killed' on next boot.
+      vi.advanceTimersByTime(61_000);
+
+      expect(pm.stopped).not.toContain("proc-1");
+      const run = storage.scheduledTaskRuns.getById(result.runId);
+      expect(run?.status).toBe("running");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

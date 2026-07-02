@@ -36,6 +36,13 @@ export class SchedulerService {
   private jobs = new Map<string, Cron>();
   /** scheduleId -> runId of the currently active run (overlap guard). */
   private activeRuns = new Map<string, string>();
+  /**
+   * scheduleId -> cleanup for the in-flight run's timeout timer + process
+   * subscription. Registered when a run starts, removed when it finalizes.
+   * shutdown() invokes and clears all of these so no orphaned timer can fire
+   * (and write a bogus 'timeout' status) after the service has stopped.
+   */
+  private activeRunCleanups = new Map<string, () => void>();
   private eventBus?: EventBus;
   private stopped = false;
 
@@ -89,8 +96,15 @@ export class SchedulerService {
     this.stopped = true;
     for (const job of this.jobs.values()) job.stop();
     this.jobs.clear();
-    // In-flight child processes are killed by ProcessManager.shutdown();
-    // their run rows are marked 'killed' by the sqlite startup fixup on next boot.
+    // Cancel every in-flight run's timeout timer and process subscription so
+    // neither can fire after shutdown (an orphaned timer would otherwise call
+    // processManager.stop() and write a 'timeout' row post-close). We
+    // deliberately do NOT write a terminal status here: the row stays
+    // 'running' and is marked 'killed' by the sqlite startup fixup on next
+    // boot, once the in-flight child processes are killed by
+    // ProcessManager.shutdown().
+    for (const cleanup of this.activeRunCleanups.values()) cleanup();
+    this.activeRunCleanups.clear();
   }
 
   private scheduleJob(task: ScheduledTask): void {
@@ -128,6 +142,7 @@ export class SchedulerService {
     if (this.activeRuns.has(scheduleId)) {
       this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "skipped" });
       this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
+      this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status: "skipped", exitCode: null });
       return { runId, skipped: true };
     }
 
@@ -189,12 +204,20 @@ export class SchedulerService {
     let timer: NodeJS.Timeout | undefined;
     let unsubscribe: (() => void) | null = null;
 
+    // Cancels the timeout timer + process subscription without touching
+    // storage or the event bus. Shared by the normal finalize path and by
+    // shutdown()'s abort path so both leave no dangling timer/subscription.
+    const releaseRunResources = () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe?.();
+    };
+
     const finalize = (status: ScheduledTaskRunStatus, exitCode: number | null) => {
       if (finalized) return;
       finalized = true;
-      if (timer) clearTimeout(timer);
-      unsubscribe?.();
+      releaseRunResources();
       this.activeRuns.delete(scheduleId);
+      this.activeRunCleanups.delete(scheduleId);
       this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
       this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status, exitCode });
@@ -221,6 +244,17 @@ export class SchedulerService {
       finalize("timeout", null);
     }, task.timeout_seconds * 1000);
     timer.unref(); // don't hold the event loop open for a sleeping timer
+
+    // Registered so shutdown() can cancel this run's timer/subscription
+    // instead of letting it fire (and touch storage) after teardown.
+    this.activeRunCleanups.set(scheduleId, () => {
+      if (finalized) return;
+      finalized = true;
+      releaseRunResources();
+      this.activeRuns.delete(scheduleId);
+      this.activeRunCleanups.delete(scheduleId);
+      // Deliberately no storage.finish()/eventBus.emit() here — see shutdown().
+    });
 
     return { runId, skipped: false };
   }
