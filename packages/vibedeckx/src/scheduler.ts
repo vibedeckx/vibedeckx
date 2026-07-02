@@ -89,6 +89,7 @@ export class SchedulerService {
   }
 
   runNow(scheduleId: string): RunNowResult {
+    if (this.stopped) return { error: "Scheduler stopped" };
     return this.executeRun(scheduleId);
   }
 

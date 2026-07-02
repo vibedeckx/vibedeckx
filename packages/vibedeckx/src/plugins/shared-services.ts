@@ -12,6 +12,7 @@ import { RemotePatchCache } from "../remote-patch-cache.js";
 import { ReverseConnectManager } from "../reverse-connect-manager.js";
 import { BrowserManager } from "../browser-manager.js";
 import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
+import { SchedulerService } from "../scheduler.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -22,6 +23,7 @@ interface SharedServicesOptions {
 
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
   const processManager = new ProcessManager(opts.storage);
+  const scheduler = new SchedulerService(opts.storage, processManager);
   const agentSessionManager = new AgentSessionManager(opts.storage);
   agentSessionManager.restoreSessionsFromDb();
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
@@ -198,10 +200,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("remotePatchCache", remotePatchCache);
   fastify.decorate("reverseConnectManager", reverseConnectManager);
   fastify.decorate("browserManager", browserManager);
+  fastify.decorate("scheduler", scheduler);
   agentSessionManager.setEventBus(eventBus);
   chatSessionManager.setEventBus(eventBus);
   chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);
   processManager.setEventBus(eventBus);
+  scheduler.setEventBus(eventBus);
+  scheduler.start();
 
   // Restore remote executor processes from DB in the background.
   // Only processes direct-URL servers here; reverse-connect servers are
@@ -227,6 +232,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
 
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {
+    scheduler.shutdown();
     agentSessionManager.shutdown();
     processManager.shutdown();
     remotePatchCache.shutdown();

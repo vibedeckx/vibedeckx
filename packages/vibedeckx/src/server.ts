@@ -31,6 +31,7 @@ import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
 import browserRoutes from "./routes/browser-routes.js";
 import browserProxyRoutes from "./routes/browser-proxy-routes.js";
+import scheduleRoutes from "./routes/schedule-routes.js";
 import { getAuth, clerkClient } from "@clerk/fastify";
 import "./server-types.js";
 
@@ -291,6 +292,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.register(projectRemoteRoutes);
   server.register(executorGroupRoutes);
   server.register(executorRoutes);
+  server.register(scheduleRoutes);
   server.register(processRoutes);
   server.register(worktreeRoutes);
   server.register(diffRoutes);

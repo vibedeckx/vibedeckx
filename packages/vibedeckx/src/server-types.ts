@@ -8,6 +8,7 @@ import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
+import type { SchedulerService } from "./scheduler.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -45,5 +46,6 @@ declare module "fastify" {
     authEnabled: boolean;
     noLocalProjects: boolean;
     browserManager: BrowserManager;
+    scheduler: SchedulerService;
   }
 }

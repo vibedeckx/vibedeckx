@@ -219,4 +219,11 @@ describe("SchedulerService.runNow", () => {
       vi.useRealTimers();
     }
   });
+
+  it("rejects runNow after shutdown instead of re-registering cleanup state", () => {
+    scheduler.shutdown();
+    const result = scheduler.runNow("s1");
+    expect(result).toMatchObject({ error: "Scheduler stopped" });
+    expect(pm.started).toHaveLength(0);
+  });
 });
