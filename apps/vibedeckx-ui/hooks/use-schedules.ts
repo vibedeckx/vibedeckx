@@ -7,40 +7,59 @@ import { useGlobalEventStream } from "@/hooks/global-event-stream";
 /**
  * Schedules for a project. Refetches on any schedule:* SSE event for the
  * project, so run status dots and next_run_at stay live.
+ *
+ * `loading` reflects only the initial fetch for the current projectId;
+ * background refetches (SSE events, post-mutation) update `schedules`
+ * silently. `projectIdRef` and `generationRef` are updated together,
+ * atomically, whenever projectId changes. Every refetch path reads the
+ * *current* project + generation off those refs (never a closed-over
+ * `projectId`) so a response is only applied if its generation is still
+ * current — this also covers a mutation's refetch() call whose promise
+ * chain started against an older project before a switch.
  */
 export function useSchedules(projectId: string | null) {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const refetch = useCallback(async () => {
-    if (!projectId) {
-      setSchedules([]);
-      setLoading(false);
+  const projectIdRef = useRef(projectId);
+  const generationRef = useRef(0);
+
+  const load = useCallback(async (forProjectId: string | null, generation: number, showLoading: boolean) => {
+    if (!forProjectId) {
+      if (generationRef.current === generation) {
+        setSchedules([]);
+        setLoading(false);
+      }
       return;
     }
-
+    if (showLoading) setLoading(true);
     try {
-      setLoading(true);
-      const data = await api.getSchedules(projectId);
-      setSchedules(data);
+      const data = await api.getSchedules(forProjectId);
+      if (generationRef.current === generation) setSchedules(data);
     } catch (err) {
       console.error("Failed to fetch schedules:", err);
     } finally {
-      setLoading(false);
+      if (showLoading && generationRef.current === generation) setLoading(false);
     }
-  }, [projectId]);
-
-  useEffect(() => {
-    void refetch();
-  }, [refetch]);
-
-  const projectIdRef = useRef(projectId);
-  const refetchRef = useRef(refetch);
+  }, []);
 
   useEffect(() => {
     projectIdRef.current = projectId;
+    generationRef.current += 1;
+    void load(projectId, generationRef.current, true);
+  }, [projectId, load]);
+
+  const refetch = useCallback(async () => {
+    const forProjectId = projectIdRef.current;
+    if (!forProjectId) return;
+    await load(forProjectId, generationRef.current, false);
+  }, [load]);
+
+  const refetchRef = useRef(refetch);
+
+  useEffect(() => {
     refetchRef.current = refetch;
-  }, [projectId, refetch]);
+  }, [refetch]);
 
   useGlobalEventStream((raw) => {
     const data = raw as { type?: string; projectId?: string };
