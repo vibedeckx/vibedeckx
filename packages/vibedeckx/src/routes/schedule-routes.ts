@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
+import path from "path";
 import type { ScheduledTask, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import { validateCron } from "../scheduler.js";
@@ -28,6 +29,7 @@ function validateResolved(b: { cron_expr: string; timezone: string; run_type: st
   if (!CWD_MODES.includes(b.cwd_mode as ScheduledTaskCwdMode)) return `cwd_mode must be one of: ${CWD_MODES.join(", ")}`;
   if (!b.content.trim()) return "content is required";
   if (b.cwd_mode === "directory" && !b.directory?.trim()) return "directory is required when cwd_mode is 'directory'";
+  if (b.cwd_mode === "directory" && b.directory?.trim() && !path.isAbsolute(b.directory)) return "directory must be an absolute path";
   if (!Number.isInteger(b.timeout_seconds) || b.timeout_seconds <= 0) return "timeout_seconds must be a positive integer";
   const cronError = validateCron(b.cron_expr, b.timezone);
   if (cronError) return `Invalid cron expression: ${cronError}`;
