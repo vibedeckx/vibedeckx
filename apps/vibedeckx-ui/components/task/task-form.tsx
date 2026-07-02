@@ -63,7 +63,7 @@ export function TaskForm({ open, onOpenChange, onSubmit }: TaskFormProps) {
               placeholder="Describe the task..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="max-h-[40vh]"
+              className="max-h-[40vh] focus-visible:border-input focus-visible:ring-0"
               rows={3}
               autoFocus
             />
