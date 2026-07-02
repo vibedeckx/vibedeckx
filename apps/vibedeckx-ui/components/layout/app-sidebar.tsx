@@ -4,10 +4,10 @@ import { Columns3, ListTodo, FolderOpen, Plus, Trash2, Globe, Settings } from "l
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-import type { Worktree, Project } from "@/lib/api";
+import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 
-export type ActiveView = "workspace" | "tasks" | "remote-servers" | "settings" | "project-info";
+export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info";
 
 interface AppSidebarProps {
   activeView: ActiveView;
@@ -23,6 +23,10 @@ interface AppSidebarProps {
   projects?: Project[];
   onSelectProject?: (project: Project) => void;
   onCreateProjectOpen?: () => void;
+  schedules?: Schedule[];
+  selectedScheduleId?: string | null;
+  onScheduleSelect?: (id: string) => void;
+  onCreateScheduleOpen?: () => void;
 }
 
 function StatusDot({ status }: { status?: WorkspaceStatus }) {
@@ -59,6 +63,33 @@ function StatusDot({ status }: { status?: WorkspaceStatus }) {
     return <span className={cn(base, "bg-amber-500")} />;
   }
   return <span className={cn(base, "bg-lime-400")} />;
+}
+
+// Last-run status for a scheduled task; blue pulse while a run is active
+// (same visual language as StatusDot, plus red for failures).
+function ScheduleDot({ schedule }: { schedule: Schedule }) {
+  const base = "relative h-[7px] w-[7px] rounded-full shrink-0";
+  if (schedule.running) {
+    return (
+      <span className={cn(base, "bg-blue-500")}>
+        <span
+          className="absolute inset-[-2px] rounded-full bg-blue-500"
+          style={{ animation: "status-dot-pulse 1.6s ease-out infinite", opacity: 0.5 }}
+        />
+      </span>
+    );
+  }
+  const last = schedule.last_run;
+  if (!last || last.status === "skipped") {
+    return <span className={cn(base, "bg-muted-foreground/40")} />;
+  }
+  if (last.status === "completed") {
+    return <span className={cn(base, "bg-emerald-500")} />;
+  }
+  if (last.status === "failed" || last.status === "timeout" || last.status === "killed") {
+    return <span className={cn(base, "bg-red-500")} />;
+  }
+  return <span className={cn(base, "bg-blue-500")} />;
 }
 
 function ProjectStatusDot({ project }: { project: Project }) {
@@ -142,6 +173,10 @@ export function AppSidebar({
   projects,
   onSelectProject,
   onCreateProjectOpen,
+  schedules,
+  selectedScheduleId,
+  onScheduleSelect,
+  onCreateScheduleOpen,
 }: AppSidebarProps) {
   return (
     <nav className="w-[220px] border-r border-border bg-sidebar flex flex-col overflow-hidden">
@@ -217,6 +252,50 @@ export function AppSidebar({
             }}
           />
         </div>
+      </SidebarSection>
+
+      {/* Schedule Section — cron tasks for the current project */}
+      <SidebarSection>
+        <SectionLabel
+          action={
+            currentProject ? (
+              <button
+                onClick={onCreateScheduleOpen}
+                className="p-0.5 rounded hover:bg-muted hover:text-foreground transition-colors text-muted-foreground"
+                title="Create scheduled task"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            ) : undefined
+          }
+        >
+          Schedule
+        </SectionLabel>
+        {currentProject && schedules && schedules.length > 0 && (
+          <div className="flex flex-col gap-px">
+            {schedules.map((s) => {
+              const isActive = activeView === "schedules" && selectedScheduleId === s.id;
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => onScheduleSelect?.(s.id)}
+                  className={cn(
+                    "w-full min-w-0 flex items-center gap-2 rounded-[5px] px-2 py-1 text-[11.5px] transition-colors overflow-hidden",
+                    !isActive && "text-foreground/80 hover:bg-muted",
+                    isActive && "bg-accent text-accent-foreground font-medium",
+                    !s.enabled && "opacity-50"
+                  )}
+                >
+                  <ScheduleDot schedule={s} />
+                  <span className="truncate text-left">{s.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {currentProject && schedules && schedules.length === 0 && (
+          <span className="block px-2 mt-1 text-[11.5px] text-muted-foreground/60">No scheduled tasks</span>
+        )}
       </SidebarSection>
 
       {/* Workspace Section — branches as mono tree */}

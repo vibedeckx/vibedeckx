@@ -7,6 +7,8 @@ import { ProjectInfoView } from '@/components/project/project-info-view';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
 import { useTasks } from '@/hooks/use-tasks';
+import { useSchedules } from '@/hooks/use-schedules';
+import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
 import { Plus } from 'lucide-react';
@@ -123,6 +125,17 @@ export default function Home() {
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
+
+  const {
+    schedules,
+    loading: schedulesLoading,
+    createSchedule,
+    updateSchedule,
+    deleteSchedule,
+    runNow: runScheduleNow,
+  } = useSchedules(currentProject?.id ?? null);
+  const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
+  const [scheduleCreateOpen, setScheduleCreateOpen] = useState(false);
 
   const {
     activity: branchActivity,
@@ -451,6 +464,16 @@ Please proceed step by step and let me know if there are any issues or conflicts
             projects={projects}
             onSelectProject={selectProject}
             onCreateProjectOpen={() => setCreateDialogOpen(true)}
+            schedules={schedules}
+            selectedScheduleId={selectedScheduleId}
+            onScheduleSelect={(id) => {
+              setSelectedScheduleId(id);
+              setActiveView("schedules");
+            }}
+            onCreateScheduleOpen={() => {
+              setActiveView("schedules");
+              setScheduleCreateOpen(true);
+            }}
           />
 
           {/* Welcome state — shown for project-dependent views when no project exists */}
@@ -572,6 +595,28 @@ Please proceed step by step and let me know if there are any issues or conflicts
                   setActiveView('workspace');
                 }}
                 onProjectUpdated={updateProject}
+              />
+            </div>
+          )}
+
+          {/* Schedules View — only mounted when active to avoid background polling */}
+          {activeView === 'schedules' && !needsProject && currentProject && (
+            <div className="flex-1 overflow-hidden">
+              <SchedulesView
+                schedules={schedules}
+                loading={schedulesLoading}
+                selectedId={selectedScheduleId}
+                onSelect={setSelectedScheduleId}
+                worktrees={worktrees}
+                onCreate={createSchedule}
+                onUpdate={updateSchedule}
+                onDelete={async (id) => {
+                  await deleteSchedule(id);
+                  if (selectedScheduleId === id) setSelectedScheduleId(null);
+                }}
+                onRunNow={runScheduleNow}
+                createOpen={scheduleCreateOpen}
+                onCreateOpenChange={setScheduleCreateOpen}
               />
             </div>
           )}
