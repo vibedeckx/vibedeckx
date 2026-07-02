@@ -10,7 +10,9 @@ export type GlobalEvent =
   | { type: "task:updated"; projectId: string; task: Record<string, unknown> }
   | { type: "task:deleted"; projectId: string; taskId: string }
   | { type: "executor:started"; projectId: string; executorId: string; processId: string; target?: string }
-  | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string };
+  | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string }
+  | { type: "schedule:run-started"; projectId: string; scheduleId: string; runId: string }
+  | { type: "schedule:run-finished"; projectId: string; scheduleId: string; runId: string; status: string; exitCode: number | null };
 
 export class EventBus {
   private emitter = new EventEmitter();
