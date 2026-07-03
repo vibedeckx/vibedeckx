@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { Schedule, ScheduleInput, Worktree } from "@/lib/api";
+import { api, type ProjectRemote, type Schedule, type ScheduleInput, type Worktree } from "@/lib/api";
 
 // Radix Select items can't have an empty-string value; sentinel for the main worktree.
 const MAIN = "__main__";
@@ -24,6 +24,7 @@ export function ScheduleFormDialog({
   onSubmit,
   initial,
   worktrees,
+  projectId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -31,10 +32,13 @@ export function ScheduleFormDialog({
   /** Set when editing an existing schedule. */
   initial?: Schedule | null;
   worktrees: Worktree[];
+  projectId?: string;
 }) {
   const [name, setName] = useState("");
   const [cronExpr, setCronExpr] = useState("0 9 * * *");
   const [timezone, setTimezone] = useState("");
+  const [target, setTarget] = useState<string>("local");
+  const [remotes, setRemotes] = useState<ProjectRemote[]>([]);
   const [runType, setRunType] = useState<"command" | "prompt">("command");
   const [content, setContent] = useState("");
   const [cwdMode, setCwdMode] = useState<"branch" | "directory">("branch");
@@ -51,6 +55,7 @@ export function ScheduleFormDialog({
     setName(initial?.name ?? "");
     setCronExpr(initial?.cron_expr ?? "0 9 * * *");
     setTimezone(initial?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+    setTarget(initial?.target ?? "local");
     setRunType(initial?.run_type ?? "command");
     setContent(initial?.content ?? "");
     setCwdMode(initial?.cwd_mode ?? "branch");
@@ -58,6 +63,17 @@ export function ScheduleFormDialog({
     setDirectory(initial?.directory ?? "");
     setTimeoutMinutes(String(Math.round((initial?.timeout_seconds ?? 1800) / 60)));
   }, [open, initial]);
+
+  // Load the project's configured remotes while the dialog is open, for the Target selector.
+  useEffect(() => {
+    let cancelled = false;
+    if (open && projectId) {
+      api.getProjectRemotes(projectId)
+        .then((r) => { if (!cancelled) setRemotes(r); })
+        .catch((err) => console.error("Failed to load project remotes:", err));
+    }
+    return () => { cancelled = true; };
+  }, [open, projectId]);
 
   const handleSubmit = async () => {
     if (!name.trim() || !content.trim()) {
@@ -80,6 +96,7 @@ export function ScheduleFormDialog({
         name: name.trim(),
         cron_expr: cronExpr.trim(),
         timezone: timezone.trim() || "UTC",
+        target,
         run_type: runType,
         content,
         cwd_mode: cwdMode,
@@ -146,6 +163,23 @@ export function ScheduleFormDialog({
             />
           </div>
 
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Target</label>
+            <Select value={target} onValueChange={setTarget} disabled={loading}>
+              <SelectTrigger size="sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="local">Local</SelectItem>
+                {remotes.map((r) => (
+                  <SelectItem key={r.remote_server_id} value={r.remote_server_id}>
+                    {r.server_name ?? r.server_url ?? r.remote_server_id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <label className="text-sm font-medium">Runs in</label>
@@ -161,21 +195,33 @@ export function ScheduleFormDialog({
             </div>
             <div className="space-y-2">
               {cwdMode === "branch" ? (
-                <>
-                  <label className="text-sm font-medium">Branch</label>
-                  <Select value={branch} onValueChange={setBranch} disabled={loading}>
-                    <SelectTrigger size="sm">
-                      <SelectValue placeholder="Select branch" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {worktrees.map((wt) => (
-                        <SelectItem key={wt.branch ?? MAIN} value={wt.branch ?? MAIN}>
-                          {wt.branch ?? "main"}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </>
+                target === "local" ? (
+                  <>
+                    <label className="text-sm font-medium">Branch</label>
+                    <Select value={branch} onValueChange={setBranch} disabled={loading}>
+                      <SelectTrigger size="sm">
+                        <SelectValue placeholder="Select branch" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {worktrees.map((wt) => (
+                          <SelectItem key={wt.branch ?? MAIN} value={wt.branch ?? MAIN}>
+                            {wt.branch ?? "main"}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </>
+                ) : (
+                  <>
+                    <label className="text-sm font-medium">Workspace (branch on remote)</label>
+                    <Input
+                      placeholder="main"
+                      value={branch === MAIN ? "" : branch}
+                      onChange={(e) => setBranch(e.target.value || MAIN)}
+                      disabled={loading}
+                    />
+                  </>
+                )
               ) : (
                 <>
                   <label className="text-sm font-medium">Directory</label>

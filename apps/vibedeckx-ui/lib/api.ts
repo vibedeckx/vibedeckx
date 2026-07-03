@@ -440,6 +440,7 @@ export interface Schedule {
   name: string;
   cron_expr: string;
   timezone: string;
+  target: string;
   enabled: boolean;
   run_type: "command" | "prompt";
   content: string;
@@ -459,6 +460,7 @@ export interface ScheduleInput {
   name: string;
   cron_expr: string;
   timezone: string;
+  target: string;
   enabled?: boolean;
   run_type: "command" | "prompt";
   content: string;
