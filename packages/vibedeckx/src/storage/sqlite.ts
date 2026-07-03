@@ -654,6 +654,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       name TEXT NOT NULL,
       cron_expr TEXT NOT NULL,
       timezone TEXT NOT NULL,
+      target TEXT NOT NULL DEFAULT 'local',
       enabled INTEGER NOT NULL DEFAULT 1,
       run_type TEXT NOT NULL DEFAULT 'command',
       content TEXT NOT NULL,
@@ -684,6 +685,12 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   // Server died mid-run: 'running' rows from a previous instance are orphans
   // (same idiom as the executor_processes fixup earlier in this function).
   db.exec("UPDATE scheduled_task_runs SET status = 'killed', finished_at = CURRENT_TIMESTAMP WHERE status = 'running'");
+
+  // Add scheduled_tasks.target for DBs created before remote-schedule support.
+  const scheduledTaskCols = db.prepare("PRAGMA table_info(scheduled_tasks)").all() as { name: string }[];
+  if (!scheduledTaskCols.some((c) => c.name === "target")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN target TEXT NOT NULL DEFAULT 'local'");
+  }
 
   // Re-enable FK enforcement for runtime operations
   db.pragma("foreign_keys = ON");
@@ -766,7 +773,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     disabled_targets: row.disabled_targets ? JSON.parse(row.disabled_targets) as string[] : [],
   });
 
-  type ScheduledTaskRow = { id: string; project_id: string; name: string; cron_expr: string; timezone: string; enabled: number; run_type: string; content: string; cwd_mode: string; branch: string | null; directory: string | null; timeout_seconds: number; created_at: string; updated_at: string };
+  type ScheduledTaskRow = { id: string; project_id: string; name: string; cron_expr: string; timezone: string; target: string; enabled: number; run_type: string; content: string; cwd_mode: string; branch: string | null; directory: string | null; timeout_seconds: number; created_at: string; updated_at: string };
   const mapScheduledTaskRow = (row: ScheduledTaskRow): ScheduledTask => ({
     ...row,
     enabled: row.enabled === 1,
@@ -1453,12 +1460,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     scheduledTasks: {
-      create: ({ id, project_id, name, cron_expr, timezone, run_type, content, cwd_mode, branch, directory, timeout_seconds, enabled }) => {
+      create: ({ id, project_id, name, cron_expr, timezone, run_type, content, cwd_mode, branch, directory, timeout_seconds, enabled, target }) => {
         db.prepare(
-          `INSERT INTO scheduled_tasks (id, project_id, name, cron_expr, timezone, enabled, run_type, content, cwd_mode, branch, directory, timeout_seconds)
-           VALUES (@id, @project_id, @name, @cron_expr, @timezone, @enabled, @run_type, @content, @cwd_mode, @branch, @directory, @timeout_seconds)`
+          `INSERT INTO scheduled_tasks (id, project_id, name, cron_expr, timezone, target, enabled, run_type, content, cwd_mode, branch, directory, timeout_seconds)
+           VALUES (@id, @project_id, @name, @cron_expr, @timezone, @target, @enabled, @run_type, @content, @cwd_mode, @branch, @directory, @timeout_seconds)`
         ).run({
           id, project_id, name, cron_expr, timezone,
+          target: target ?? 'local',
           enabled: enabled === false ? 0 : 1,
           run_type, content, cwd_mode,
           branch: branch ?? null,
@@ -1488,6 +1496,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         if (opts.name !== undefined) { sets.push("name = @name"); params.name = opts.name; }
         if (opts.cron_expr !== undefined) { sets.push("cron_expr = @cron_expr"); params.cron_expr = opts.cron_expr; }
         if (opts.timezone !== undefined) { sets.push("timezone = @timezone"); params.timezone = opts.timezone; }
+        if (opts.target !== undefined) { sets.push("target = @target"); params.target = opts.target; }
         if (opts.enabled !== undefined) { sets.push("enabled = @enabled"); params.enabled = opts.enabled ? 1 : 0; }
         if (opts.run_type !== undefined) { sets.push("run_type = @run_type"); params.run_type = opts.run_type; }
         if (opts.content !== undefined) { sets.push("content = @content"); params.content = opts.content; }

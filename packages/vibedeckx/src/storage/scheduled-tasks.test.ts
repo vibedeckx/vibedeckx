@@ -146,4 +146,30 @@ describe("scheduledTasks storage", () => {
     storage.scheduledTasks.delete("s1");
     expect(storage.scheduledTaskRuns.getById("r1")).toBeUndefined();
   });
+
+  it("defaults target to 'local' and round-trips a remote target", () => {
+    const t = createTask();
+    expect(t.target).toBe("local");
+
+    const remote = storage.scheduledTasks.create({
+      id: "s-remote",
+      project_id: projectId,
+      name: "remote scan",
+      cron_expr: "0 9 * * *",
+      timezone: "UTC",
+      run_type: "command",
+      content: "echo hi",
+      cwd_mode: "branch",
+      target: "remote-server-1",
+    });
+    expect(remote.target).toBe("remote-server-1");
+    expect(storage.scheduledTasks.getById("s-remote")?.target).toBe("remote-server-1");
+  });
+
+  it("update can change target", () => {
+    createTask();
+    const updated = storage.scheduledTasks.update("s1", { target: "remote-server-2" });
+    expect(updated?.target).toBe("remote-server-2");
+    expect(storage.scheduledTasks.getById("s1")?.target).toBe("remote-server-2");
+  });
 });

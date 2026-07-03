@@ -107,6 +107,8 @@ export interface ScheduledTask {
   cron_expr: string;
   /** IANA timezone name the cron expression is evaluated in, e.g. "Asia/Shanghai". */
   timezone: string;
+  /** 'local' or a remote_server_id — where the run's process is spawned. */
+  target: string;
   enabled: boolean;
   run_type: ScheduledTaskRunType;
   /** Shell command (run_type=command) or prompt text (run_type=prompt). */
@@ -317,11 +319,11 @@ export interface Storage {
     updatePid: (id: string, pid: number) => void;
   };
   scheduledTasks: {
-    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean }) => ScheduledTask;
+    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => ScheduledTask;
     getByProjectId: (projectId: string) => ScheduledTask[];
     getById: (id: string) => ScheduledTask | undefined;
     getAllEnabled: () => ScheduledTask[];
-    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number }) => ScheduledTask | undefined;
+    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => ScheduledTask | undefined;
     delete: (id: string) => void;
   };
   scheduledTaskRuns: {
