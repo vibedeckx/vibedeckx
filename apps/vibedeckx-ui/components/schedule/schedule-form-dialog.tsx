@@ -165,9 +165,9 @@ export function ScheduleFormDialog({
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Target</label>
-            <Select value={target} onValueChange={setTarget} disabled={loading}>
+            <Select value={target} onValueChange={(v) => { setTarget(v); setBranch(MAIN); }} disabled={loading}>
               <SelectTrigger size="sm">
-                <SelectValue />
+                <SelectValue placeholder="Local" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="local">Local</SelectItem>
@@ -217,7 +217,7 @@ export function ScheduleFormDialog({
                     <Input
                       placeholder="main"
                       value={branch === MAIN ? "" : branch}
-                      onChange={(e) => setBranch(e.target.value || MAIN)}
+                      onChange={(e) => setBranch(e.target.value.trim() ? e.target.value : MAIN)}
                       disabled={loading}
                     />
                   </>
