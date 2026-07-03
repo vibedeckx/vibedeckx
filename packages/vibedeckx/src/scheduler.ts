@@ -6,6 +6,10 @@ import type { Storage, Executor, ScheduledTask, ScheduledTaskRunStatus } from ".
 import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { EventBus } from "./event-bus.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
+import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
+import type { ReverseConnectManager } from "./reverse-connect-manager.js";
+import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
+import type { RemoteExecutorInfo } from "./server-types.js";
 
 /** Max characters of captured output persisted per run. */
 const OUTPUT_CAP = 200_000;
@@ -32,6 +36,14 @@ export function validateCron(expr: string, timezone?: string): string | null {
 
 export type RunNowResult = { runId: string; skipped: boolean } | { error: string };
 
+export interface SchedulerRemoteDeps {
+  reverseConnectManager: ReverseConnectManager;
+  remoteExecutorMap: Map<string, RemoteExecutorInfo>;
+  remoteExecutorMonitor: RemoteExecutorMonitor;
+  /** Injectable for tests; defaults to the real proxyToRemoteAuto. */
+  proxy?: typeof proxyToRemoteAuto;
+}
+
 export class SchedulerService {
   private jobs = new Map<string, Cron>();
   /** scheduleId -> runId of the currently active run (overlap guard). */
@@ -49,6 +61,7 @@ export class SchedulerService {
   constructor(
     private storage: Storage,
     private processManager: ProcessManager,
+    private remote?: SchedulerRemoteDeps,
   ) {}
 
   setEventBus(eventBus: EventBus): void {
@@ -88,7 +101,7 @@ export class SchedulerService {
     return this.activeRuns.has(scheduleId);
   }
 
-  runNow(scheduleId: string): RunNowResult {
+  async runNow(scheduleId: string): Promise<RunNowResult> {
     if (this.stopped) return { error: "Scheduler stopped" };
     return this.executeRun(scheduleId);
   }
@@ -112,10 +125,13 @@ export class SchedulerService {
     try {
       const job = new Cron(task.cron_expr, { timezone: task.timezone, catch: true }, () => {
         if (this.stopped) return;
-        const result = this.executeRun(task.id);
-        if ("error" in result) {
-          console.error(`[Scheduler] Run of ${task.id} failed to start: ${result.error}`);
-        }
+        void this.executeRun(task.id).then((result) => {
+          if ("error" in result) {
+            console.error(`[Scheduler] Run of ${task.id} failed to start: ${result.error}`);
+          }
+        }).catch((err) => {
+          console.error(`[Scheduler] Run of ${task.id} threw: ${err}`);
+        });
       });
       this.jobs.set(task.id, job);
     } catch (err) {
@@ -133,7 +149,7 @@ export class SchedulerService {
     return { error: message };
   }
 
-  private executeRun(scheduleId: string): RunNowResult {
+  private async executeRun(scheduleId: string): Promise<RunNowResult> {
     const task = this.storage.scheduledTasks.getById(scheduleId);
     if (!task) return { error: "Schedule not found" };
 
@@ -145,6 +161,10 @@ export class SchedulerService {
       this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status: "skipped", exitCode: null });
       return { runId, skipped: true };
+    }
+
+    if (task.target !== "local") {
+      return this.executeRemoteRun(task, runId);
     }
 
     // Resolve the working directory.
@@ -255,6 +275,122 @@ export class SchedulerService {
       this.activeRuns.delete(scheduleId);
       this.activeRunCleanups.delete(scheduleId);
       // Deliberately no storage.finish()/eventBus.emit() here — see shutdown().
+    });
+
+    return { runId, skipped: false };
+  }
+
+  private async executeRemoteRun(task: ScheduledTask, runId: string): Promise<RunNowResult> {
+    if (!this.remote) {
+      return this.failWithoutStart(task, runId, "Remote execution is not configured on this server");
+    }
+    const remoteConfig = this.storage.projectRemotes.getByProjectAndServer(task.project_id, task.target);
+    if (!remoteConfig) {
+      return this.failWithoutStart(task, runId, `Remote server config not found for target ${task.target}`);
+    }
+
+    // Derive the remote working-directory args from cwd_mode.
+    let remotePath: string;
+    let remoteBranch: string | null;
+    if (task.cwd_mode === "directory") {
+      if (!task.directory || !path.isAbsolute(task.directory)) {
+        return this.failWithoutStart(task, runId, `Schedule directory must be an absolute path: ${task.directory ?? "(unset)"}`);
+      }
+      remotePath = task.directory;
+      remoteBranch = null;
+    } else {
+      remotePath = remoteConfig.remote_path;
+      remoteBranch = task.branch;
+    }
+
+    const proxy = this.remote.proxy ?? proxyToRemoteAuto;
+    const serverUrl = remoteConfig.server_url ?? "";
+    const serverKey = remoteConfig.server_api_key || "";
+
+    let result;
+    try {
+      result = await proxy(
+        task.target, serverUrl, serverKey, "POST", "/api/path/execute",
+        {
+          path: remotePath,
+          command: task.content,
+          executor_type: task.run_type,
+          prompt_provider: task.run_type === "prompt" ? "claude" : null,
+          branch: remoteBranch ?? undefined,
+          pty: true,
+        },
+        { reverseConnectManager: this.remote.reverseConnectManager },
+      );
+    } catch (err) {
+      return this.failWithoutStart(task, runId, `Remote start failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const processId = (result.data as { processId?: unknown } | null)?.processId;
+    if (!result.ok || typeof processId !== "string") {
+      return this.failWithoutStart(task, runId, `Remote start rejected (status ${result.status})`);
+    }
+    const remoteProcessId = processId;
+    const localProcessId = `remote-schedule-${task.id}-${remoteProcessId}`;
+
+    const remoteInfo: RemoteExecutorInfo = {
+      remoteServerId: task.target,
+      remoteUrl: serverUrl,
+      remoteApiKey: serverKey,
+      remoteProcessId,
+      executorId: `schedule-${task.id}`,
+      projectId: task.project_id,
+    };
+    this.remote.remoteExecutorMap.set(localProcessId, remoteInfo);
+    this.remote.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
+
+    this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id, status: "running", process_id: localProcessId });
+    this.activeRuns.set(task.id, runId);
+    this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId: task.id, runId });
+
+    let finalized = false;
+    let timer: NodeJS.Timeout | undefined;
+    let unsubscribe: (() => void) | undefined;
+
+    const releaseRunResources = () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe?.();
+    };
+
+    const finalize = (status: ScheduledTaskRunStatus, exitCode: number | null, output: string) => {
+      if (finalized) return;
+      finalized = true;
+      releaseRunResources();
+      this.activeRuns.delete(task.id);
+      this.activeRunCleanups.delete(task.id);
+      this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
+      this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
+      this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status, exitCode });
+    };
+
+    // Remote processes are not in the local ProcessManager; RemoteExecutorMonitor
+    // emits executor:stopped on the bus when the remote finishes (with tailOutput).
+    unsubscribe = this.eventBus?.subscribe((e) => {
+      if (e.type === "executor:stopped" && e.processId === localProcessId) {
+        finalize(e.exitCode === 0 ? "completed" : "failed", e.exitCode, e.tailOutput ?? "");
+      }
+    });
+
+    timer = setTimeout(() => {
+      void proxy(
+        task.target, serverUrl, serverKey, "POST",
+        `/api/executor-processes/${remoteProcessId}/stop`, undefined,
+        { reverseConnectManager: this.remote!.reverseConnectManager },
+      ).catch(() => {});
+      finalize("timeout", null, "");
+    }, task.timeout_seconds * 1000);
+    timer.unref();
+
+    this.activeRunCleanups.set(task.id, () => {
+      if (finalized) return;
+      finalized = true;
+      releaseRunResources();
+      this.activeRuns.delete(task.id);
+      this.activeRunCleanups.delete(task.id);
     });
 
     return { runId, skipped: false };

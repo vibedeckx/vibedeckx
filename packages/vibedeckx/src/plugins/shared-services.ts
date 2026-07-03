@@ -23,7 +23,6 @@ interface SharedServicesOptions {
 
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
   const processManager = new ProcessManager(opts.storage);
-  const scheduler = new SchedulerService(opts.storage, processManager);
   const agentSessionManager = new AgentSessionManager(opts.storage);
   agentSessionManager.restoreSessionsFromDb();
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
@@ -88,6 +87,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // frontend log-proxy subscription (see RemoteExecutorMonitor). Shared across
   // all remoteExecutorMap.set sites (panel start, boot recovery, chat).
   const remoteExecutorMonitor = new RemoteExecutorMonitor(reverseConnectManager, eventBus, opts.storage, remoteExecutorMap);
+  const scheduler = new SchedulerService(opts.storage, processManager, {
+    reverseConnectManager,
+    remoteExecutorMap,
+    remoteExecutorMonitor,
+  });
   const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
   // Restore persisted remote executors by verifying against a connected
   // server's running process list and repopulating remoteExecutorMap.

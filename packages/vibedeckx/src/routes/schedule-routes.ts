@@ -187,7 +187,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const existing = getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
       if (!existing) return;
 
-      const result = fastify.scheduler.runNow(req.params.id);
+      const result = await fastify.scheduler.runNow(req.params.id);
       if ("error" in result) return reply.code(400).send({ error: result.error });
       if (result.skipped) return reply.code(409).send({ error: "A run is already in progress" });
       return reply.code(200).send({ runId: result.runId });
