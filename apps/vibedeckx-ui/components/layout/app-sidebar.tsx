@@ -287,7 +287,10 @@ export function AppSidebar({
                   )}
                 >
                   <ScheduleDot schedule={s} />
-                  <span className="truncate text-left">{s.name}</span>
+                  <span className="truncate text-left flex-1">{s.name}</span>
+                  {s.target !== "local" && (
+                    <Globe className="h-2.5 w-2.5 shrink-0 text-violet-500" aria-label="remote" />
+                  )}
                 </button>
               );
             })}

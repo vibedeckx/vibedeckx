@@ -603,6 +603,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
           {activeView === 'schedules' && !needsProject && currentProject && (
             <div className="flex-1 overflow-hidden">
               <SchedulesView
+                projectId={currentProject?.id ?? ""}
                 schedules={schedules}
                 loading={schedulesLoading}
                 selectedId={selectedScheduleId}

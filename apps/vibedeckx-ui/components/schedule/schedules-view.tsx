@@ -39,6 +39,7 @@ function fmtDuration(run: ScheduleRun): string {
 }
 
 export function SchedulesView({
+  projectId,
   schedules,
   loading,
   selectedId,
@@ -51,6 +52,7 @@ export function SchedulesView({
   createOpen,
   onCreateOpenChange,
 }: {
+  projectId: string;
   schedules: Schedule[];
   loading: boolean;
   selectedId: string | null;
@@ -127,7 +129,7 @@ export function SchedulesView({
         <Button size="sm" onClick={() => onCreateOpenChange(true)}>
           New Scheduled Task
         </Button>
-        <ScheduleFormDialog open={createOpen} onOpenChange={onCreateOpenChange} onSubmit={async (input) => { await onCreate(input); }} worktrees={worktrees} />
+        <ScheduleFormDialog open={createOpen} onOpenChange={onCreateOpenChange} onSubmit={async (input) => { await onCreate(input); }} worktrees={worktrees} projectId={projectId} />
       </div>
     );
   }
@@ -169,9 +171,14 @@ export function SchedulesView({
               <span className="text-muted-foreground">Type: </span>
               {selected.run_type === "command" ? "Command" : "Prompt (Claude)"}
             </div>
-            <div>
+            <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground">Runs in: </span>
               {selected.cwd_mode === "branch" ? `workspace ${selected.branch ?? "main"}` : selected.directory}
+              {selected.target !== "local" && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-600">
+                  remote
+                </span>
+              )}
             </div>
             <div className="col-span-2 font-mono text-xs text-muted-foreground truncate" title={selected.content}>
               {selected.content}
@@ -224,6 +231,7 @@ export function SchedulesView({
               await onUpdate(selected.id, input);
             }}
             worktrees={worktrees}
+            projectId={projectId}
           />
         </>
       )}
@@ -236,6 +244,7 @@ export function SchedulesView({
           onSelect(created.id);
         }}
         worktrees={worktrees}
+        projectId={projectId}
       />
 
       <Dialog open={viewRun !== null} onOpenChange={(o) => !o && setViewRun(null)}>
