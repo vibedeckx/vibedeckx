@@ -21,6 +21,7 @@ interface ScheduleBody {
   branch?: string | null;
   directory?: string | null;
   timeout_seconds?: number;
+  target?: string;
 }
 
 /** Cross-field validation shared by create and update. Returns an error string or null. */
@@ -98,6 +99,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const error = validateResolved(resolved);
       if (error) return reply.code(400).send({ error });
 
+      const target = b.target ?? "local";
+      if (target !== "local" && !fastify.storage.projectRemotes.getByProjectAndServer(req.params.projectId, target)) {
+        return reply.code(400).send({ error: "Unknown remote target" });
+      }
+
       const schedule = fastify.storage.scheduledTasks.create({
         id: randomUUID(),
         project_id: req.params.projectId,
@@ -111,6 +117,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         directory: resolved.directory,
         timeout_seconds: resolved.timeout_seconds,
         enabled: b.enabled ?? true,
+        target,
       });
       fastify.scheduler.reschedule(schedule.id);
       return reply.code(201).send({ schedule });
@@ -148,6 +155,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const error = validateResolved(merged);
       if (error) return reply.code(400).send({ error });
 
+      const nextTarget = b.target !== undefined ? b.target : existing.target;
+      if (nextTarget !== "local" && !fastify.storage.projectRemotes.getByProjectAndServer(existing.project_id, nextTarget)) {
+        return reply.code(400).send({ error: "Unknown remote target" });
+      }
+
       const schedule = fastify.storage.scheduledTasks.update(req.params.id, {
         name: b.name?.trim(),
         cron_expr: b.cron_expr?.trim(),
@@ -159,6 +171,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         branch: b.branch,
         directory: b.directory,
         timeout_seconds: b.timeout_seconds,
+        target: b.target,
       });
       fastify.scheduler.reschedule(req.params.id);
       return reply.code(200).send({ schedule });
