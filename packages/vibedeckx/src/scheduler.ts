@@ -307,6 +307,14 @@ export class SchedulerService {
     const serverUrl = remoteConfig.server_url ?? "";
     const serverKey = remoteConfig.server_api_key || "";
 
+    // Reserve the overlap slot SYNCHRONOUSLY, before the async proxy start.
+    // Unlike the local branch (which runs to activeRuns.set without yielding),
+    // this method awaits the network round-trip below; without reserving here a
+    // second concurrent trigger (double-clicked Run Now, or Run Now racing a
+    // cron tick) would also pass the caller's overlap guard and spawn a second
+    // remote process. The two post-await failure returns release this slot.
+    this.activeRuns.set(task.id, runId);
+
     let result;
     try {
       result = await proxy(
@@ -322,11 +330,13 @@ export class SchedulerService {
         { reverseConnectManager: this.remote.reverseConnectManager },
       );
     } catch (err) {
+      this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, `Remote start failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const processId = (result.data as { processId?: unknown } | null)?.processId;
     if (!result.ok || typeof processId !== "string") {
+      this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, `Remote start rejected (status ${result.status})`);
     }
     const remoteProcessId = processId;
@@ -344,7 +354,6 @@ export class SchedulerService {
     this.remote.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
 
     this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id, status: "running", process_id: localProcessId });
-    this.activeRuns.set(task.id, runId);
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId: task.id, runId });
 
     let finalized = false;

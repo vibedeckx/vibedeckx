@@ -311,6 +311,15 @@ describe("SchedulerService remote runs", () => {
     expect(storage.scheduledTaskRuns.getByScheduleId("s1")[0].status).toBe("failed");
   });
 
+  it("overlap guard holds across the async remote start (concurrent triggers → one runs, one skips)", async () => {
+    const [r1, r2] = await Promise.all([scheduler.runNow("s1"), scheduler.runNow("s1")]);
+    const results = [r1, r2];
+    expect(results.filter((r) => "skipped" in r && r.skipped === true)).toHaveLength(1);
+    expect(results.filter((r) => "skipped" in r && r.skipped === false)).toHaveLength(1);
+    // Only ONE remote process was actually started.
+    expect(proxyCalls.filter((c) => c.path === "/api/path/execute")).toHaveLength(1);
+  });
+
   it("on timeout, proxies the remote stop endpoint and records timeout", async () => {
     vi.useFakeTimers();
     try {
