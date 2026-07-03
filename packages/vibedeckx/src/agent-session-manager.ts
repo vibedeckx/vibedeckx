@@ -564,6 +564,27 @@ export class AgentSessionManager {
 
     const timestamp = Date.now();
 
+    // A turn can start without any user message going through this server:
+    // Claude Code auto-resumes the same process when a background task
+    // (background subagent, run_in_background command) completes. The prior
+    // turn's `result` already flipped status to "stopped", so live activity
+    // from the process must flip it back or the UI Stop button stays
+    // disabled for the whole resumed turn. Stray flushes from a manually
+    // stopped process can't reach here — handleStdout drops dormant output.
+    if (
+      session.status !== "running" &&
+      (event.type === "text" ||
+        event.type === "thinking" ||
+        event.type === "tool_use" ||
+        event.type === "tool_result" ||
+        event.type === "approval_request")
+    ) {
+      session.status = "running";
+      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
+      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
+    }
+
     switch (event.type) {
       case "text":
         this.updateAssistantMessage(sessionId, event.content, timestamp);
