@@ -23,7 +23,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, MoreHorizontal } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, Split } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -821,10 +821,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                         >
                           {isBranching
                             ? <Loader2 className="h-4 w-4 animate-spin" />
-                            : <MoreHorizontal className="h-4 w-4" />}
+                            : <Split className="h-4 w-4" />}
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-56 p-1.5">
+                      <DropdownMenuContent align="start" className="w-44 p-1.5">
                         <DropdownMenuLabel className="px-2 py-1.5">
                           <div className="text-xs font-medium">Branch conversation</div>
                         </DropdownMenuLabel>
@@ -841,7 +841,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                             <Bot className="h-3 w-3" />
                           </div>
                           <span className="min-w-0 flex-1 truncate">{currentAgentName}</span>
-                          <span className="shrink-0 text-[11px] text-muted-foreground">(current)</span>
+                          <span className="shrink-0 text-[11px] text-muted-foreground">current</span>
                         </DropdownMenuItem>
                         {alternateBranchProviders.length > 0 && (
                           <>
