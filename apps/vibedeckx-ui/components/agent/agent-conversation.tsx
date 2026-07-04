@@ -23,7 +23,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, GitBranch, ChevronRight } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, MoreHorizontal } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -806,32 +806,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     conversation into a new session, optionally under a
                     different coding agent. */}
                 {session && status !== "running" && !isLoading && messages.length > 0 && (
-                  <div className="flex items-center gap-1.5 pt-3 pb-1">
+                  <div className="mt-3 border-t border-border/50 pt-1.5 pb-1">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
-                          variant="outline"
-                          size="sm"
+                          variant="ghost"
+                          size="icon"
                           className={cn(
-                            "h-8 gap-0 overflow-hidden rounded-full border-border/70 bg-background px-0 text-xs shadow-sm transition-colors",
-                            "hover:border-border hover:bg-muted/60"
+                            "h-7 w-7 rounded-md text-muted-foreground transition-colors",
+                            "hover:bg-muted hover:text-foreground"
                           )}
                           disabled={isBranching}
+                          aria-label="Branch conversation"
                         >
-                          <span className={cn(
-                            "ml-1 flex h-6 w-6 items-center justify-center rounded-full",
-                            agentType === "codex"
-                              ? "bg-emerald-500/10 text-emerald-600"
-                              : "bg-violet-500/10 text-violet-600"
-                          )}>
-                            {isBranching
-                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              : <GitBranch className="h-3.5 w-3.5" />}
-                          </span>
-                          <span className="px-2 font-medium">Branch</span>
-                          <span className="flex h-8 w-7 items-center justify-center border-l border-border/60 bg-muted/30">
-                            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                          </span>
+                          {isBranching
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <MoreHorizontal className="h-4 w-4" />}
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-56 p-1.5">
@@ -850,8 +840,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                           )}>
                             <Bot className="h-3 w-3" />
                           </div>
-                          <span className="min-w-0 flex-1 truncate">Current agent · {currentAgentName}</span>
-                          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0 flex-1 truncate">{currentAgentName}</span>
+                          <span className="shrink-0 text-[11px] text-muted-foreground">(current)</span>
                         </DropdownMenuItem>
                         {alternateBranchProviders.length > 0 && (
                           <>
@@ -870,8 +860,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                                 )}>
                                   <Bot className="h-3 w-3" />
                                 </div>
-                                <span className="min-w-0 flex-1 truncate">Branch with {p.displayName}</span>
-                                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                <span className="min-w-0 flex-1 truncate">{p.displayName}</span>
                               </DropdownMenuItem>
                             ))}
                           </>
