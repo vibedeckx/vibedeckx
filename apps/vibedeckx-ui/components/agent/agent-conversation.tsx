@@ -753,7 +753,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       {/* Messages area */}
       <div className="flex-1 min-h-0 relative">
         <Conversation className="h-full" initial="instant">
-          <ConversationContent className="gap-1 p-4">
+          <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar">
             {!session && messages.length === 0 ? (
               <div className="text-center py-16">
                 {isLoading || (projectId && !isInitialized) ? (

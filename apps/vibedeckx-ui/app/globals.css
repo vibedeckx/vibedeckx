@@ -185,6 +185,23 @@
   background: rgb(127, 127, 127);
 }
 
+/* Scroll areas that sit flush against the window edge (e.g. the agent session
+   panel): the OS window-resize hotzone overlaps a 6px edge-hugging scrollbar,
+   making it nearly impossible to grab. Widen the hit target to 14px while a
+   transparent border + content-box clip keeps the visible thumb at the same
+   6px, inset 4px from the edge and clear of the resize zone. Must stay AFTER
+   the `.scrolling` rule above: its `background` shorthand resets
+   background-clip, and at equal specificity the later rule wins. */
+.edge-scrollbar::-webkit-scrollbar {
+  width: 14px;
+}
+
+.edge-scrollbar::-webkit-scrollbar-thumb {
+  border: 4px solid transparent;
+  border-radius: 7px;
+  background-clip: content-box;
+}
+
 /* Transient highlight applied to a Shiki line when a symbol jump scrolls to it.
    The Shiki `code` element is `display: grid`, so each `.line` is already a
    full-width row — no `display: block` needed (it would re-introduce the
