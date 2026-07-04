@@ -270,16 +270,20 @@ export class AgentSessionManager {
     agentType: AgentType = "claude-code",
     announceRunning: boolean = false,
   ): string {
-    // Defense-in-depth: if there's an existing non-dormant session on the same
-    // project+branch, its child process may still be alive (stream-json agents
-    // keep the CLI waiting on stdin between turns while reporting status
-    // "stopped"). Spawning a new process without stopping it would leak the
-    // old one. The frontend is supposed to stop first, but can't reliably tell
-    // from status alone — so we enforce it here.
-    const existing = this.getSessionByBranch(projectId, branch);
-    if (existing && !existing.dormant) {
-      console.log(`[AgentSession] createNewSession: stopping prior session ${existing.id} on same branch to prevent process leak`);
-      this.stopSession(existing.id);
+    // Defense-in-depth: if there are existing non-dormant sessions on the same
+    // project+branch, their child processes may still be alive (stream-json
+    // agents keep the CLI waiting on stdin between turns while reporting status
+    // "stopped"). Spawning a new process without stopping them would leak the
+    // old ones. The frontend is supposed to stop first, but can't reliably tell
+    // from status alone — so we enforce it here. Must sweep ALL matches, not
+    // getSessionByBranch's first (= oldest) one: old sessions stay in the map
+    // forever, so once a dormant one exists on the branch it shadows the live
+    // one and its process leaks on every subsequent New Conversation.
+    for (const other of this.sessions.values()) {
+      if (other.projectId === projectId && other.branch === branch && !other.dormant) {
+        console.log(`[AgentSession] createNewSession: stopping prior session ${other.id} on same branch to prevent process leak`);
+        this.stopSession(other.id);
+      }
     }
 
     const sessionId = randomUUID();
