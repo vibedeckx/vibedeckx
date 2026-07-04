@@ -85,6 +85,18 @@ export class CodexProvider implements AgentProvider {
 
     const state = this.getSessionState(sessionId);
 
+    // (a') Error response: has id + error, no method. Diagnostic logging only
+    // for now — these were previously dropped with zero trace, which makes a
+    // rejected thread/start or turn/start look like a silently hung session.
+    if (msg.id != null && !msg.method && msg.error !== undefined) {
+      const reqMethod = state.pendingRequests.get(Number(msg.id));
+      state.pendingRequests.delete(Number(msg.id));
+      console.error(
+        `[CodexProvider] JSON-RPC error response for ${reqMethod ?? "unknown request"} (id=${msg.id}, session=${sessionId}): ${JSON.stringify(msg.error)}`,
+      );
+      return [];
+    }
+
     // (a) Response: has id + result, no method
     if (msg.id != null && !msg.method && msg.result !== undefined) {
       const reqMethod = state.pendingRequests.get(Number(msg.id));
@@ -230,6 +242,9 @@ export class CodexProvider implements AgentProvider {
     }
 
     if (turn.status === "completed" && !hadFinalMessage) {
+      console.log(
+        `[CodexProvider] turn/completed (turnId=${turnId}) suppressed — no final agentMessage seen this turn (session stays "running")`,
+      );
       return [];
     }
 
@@ -352,6 +367,15 @@ export class CodexProvider implements AgentProvider {
 
     // Initialized but threadId not yet available (race: user sent message before thread/start responded)
     // Buffer content — will be sent when parseStdoutLine receives thread/start response
+    if (state.pendingTurnContent !== null) {
+      console.warn(
+        `[CodexProvider] formatUserInput: overwriting previously buffered turn content for session ${sessionId} — thread/start response still missing`,
+      );
+    } else {
+      console.warn(
+        `[CodexProvider] formatUserInput: no threadId yet for session ${sessionId} — buffering turn content until thread/start responds`,
+      );
+    }
     state.pendingTurnContent = content;
     return "";
   }

@@ -1045,6 +1045,15 @@ export class AgentSessionManager {
     try {
       const provider = getProvider(session.agentType);
       const formatted = provider.formatUserInput(content, session.id);
+      if (formatted.length === 0) {
+        console.warn(
+          `[AgentSession] sendUserMessage: provider returned empty stdin payload for ${session.agentType} session ${sessionId} — nothing written to agent`,
+        );
+        return true;
+      }
+      console.log(
+        `[AgentSession] sendUserMessage: wrote ${formatted.length}B to ${session.agentType} stdin (session=${sessionId})`,
+      );
       session.process.stdin.write(formatted);
       return true;
     } catch (error) {
