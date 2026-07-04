@@ -23,15 +23,17 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, GitBranch } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, GitBranch, ChevronRight } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
@@ -324,6 +326,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       setIsBranching(false);
     }
   };
+  const currentAgentName =
+    providers.find((p) => p.type === agentType)?.displayName
+    ?? (agentType === "codex" ? "Codex" : "Claude Code");
+  const availableBranchProviders = providers.filter((p) => p.available);
+  const alternateBranchProviders = availableBranchProviders.filter((p) => p.type !== agentType);
 
   const handleQuote = useCallback((text: string) => {
     setInput(formatAsQuote(text) + input);
@@ -800,45 +807,71 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     different coding agent. */}
                 {session && status !== "running" && !isLoading && messages.length > 0 && (
                   <div className="flex items-center gap-1.5 pt-3 pb-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={() => handleBranch()}
-                      disabled={isBranching}
-                    >
-                      {isBranching
-                        ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                        : <GitBranch className="h-3 w-3 mr-1" />}
-                      Branch
-                    </Button>
-                    {providers.filter((p) => p.available).length > 1 && (
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-1.5"
-                            disabled={isBranching}
-                            title="Branch with a different agent"
-                          >
-                            <ChevronDown className="h-3 w-3" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start">
-                          {providers.filter((p) => p.available).map((p) => (
-                            <DropdownMenuItem
-                              key={p.type}
-                              className="text-xs"
-                              onSelect={() => handleBranch(p.type)}
-                            >
-                              <GitBranch className="h-3 w-3 mr-1.5" />
-                              Branch with {p.displayName}
-                            </DropdownMenuItem>
-                          ))}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    )}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1.5 text-xs"
+                          disabled={isBranching}
+                        >
+                          {isBranching
+                            ? <Loader2 className="h-3 w-3 animate-spin" />
+                            : <GitBranch className="h-3 w-3" />}
+                          Branch...
+                          <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-72 p-1.5">
+                        <DropdownMenuLabel className="px-2 py-1.5">
+                          <div className="text-xs font-medium">Branch conversation</div>
+                        </DropdownMenuLabel>
+                        <DropdownMenuItem
+                          className="h-auto cursor-pointer items-center gap-3 rounded-md px-2 py-2"
+                          onSelect={() => handleBranch()}
+                        >
+                          <div className={cn(
+                            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md border",
+                            agentType === "codex"
+                              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+                              : "border-violet-500/30 bg-violet-500/10 text-violet-600"
+                          )}>
+                            <Bot className="h-3.5 w-3.5" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-medium">Current agent</div>
+                            <div className="truncate text-[11px] text-muted-foreground">{currentAgentName}</div>
+                          </div>
+                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                        </DropdownMenuItem>
+                        {alternateBranchProviders.length > 0 && (
+                          <>
+                            <DropdownMenuSeparator className="my-1" />
+                            {alternateBranchProviders.map((p) => (
+                              <DropdownMenuItem
+                                key={p.type}
+                                className="h-auto cursor-pointer items-center gap-3 rounded-md px-2 py-2"
+                                onSelect={() => handleBranch(p.type)}
+                              >
+                                <div className={cn(
+                                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md border",
+                                  p.type === "codex"
+                                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+                                    : "border-violet-500/30 bg-violet-500/10 text-violet-600"
+                                )}>
+                                  <Bot className="h-3.5 w-3.5" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-xs font-medium">{p.displayName}</div>
+                                  <div className="text-[11px] text-muted-foreground">Switch agent for this branch</div>
+                                </div>
+                                <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                              </DropdownMenuItem>
+                            ))}
+                          </>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 )}
               </AgentConversationContext.Provider>
