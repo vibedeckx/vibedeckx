@@ -85,16 +85,27 @@ export class CodexProvider implements AgentProvider {
 
     const state = this.getSessionState(sessionId);
 
-    // (a') Error response: has id + error, no method. Diagnostic logging only
-    // for now — these were previously dropped with zero trace, which makes a
-    // rejected thread/start or turn/start look like a silently hung session.
+    // (a') Error response: has id + error, no method. Every request we send
+    // (initialize / thread/start / turn/start) is turn-fatal on failure, so
+    // surface it as an error result — previously these were dropped with zero
+    // trace, which made a rejected turn/start look like a silently hung
+    // session.
     if (msg.id != null && !msg.method && msg.error !== undefined) {
       const reqMethod = state.pendingRequests.get(Number(msg.id));
       state.pendingRequests.delete(Number(msg.id));
       console.error(
         `[CodexProvider] JSON-RPC error response for ${reqMethod ?? "unknown request"} (id=${msg.id}, session=${sessionId}): ${JSON.stringify(msg.error)}`,
       );
-      return [];
+      if (reqMethod === "thread/start") {
+        // The buffered first turn can never be flushed without a threadId
+        state.pendingTurnContent = null;
+      }
+      const errText = typeof msg.error?.message === "string" ? msg.error.message : JSON.stringify(msg.error);
+      return [{
+        type: "result",
+        subtype: "error",
+        error: `Codex ${reqMethod ?? "request"} failed: ${errText}`,
+      }];
     }
 
     // (a) Response: has id + result, no method

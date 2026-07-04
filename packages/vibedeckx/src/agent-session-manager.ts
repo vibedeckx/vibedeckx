@@ -763,6 +763,17 @@ export class AgentSessionManager {
           }, true);
         }
 
+        if (event.subtype === "error") {
+          // The turn is over even though it failed — without this the UI
+          // keeps a perpetual "running" dot after an error result.
+          if (session.status !== "stopped") {
+            session.status = "stopped";
+            if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+            this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+            this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
+          }
+        }
+
         if (event.subtype === "success") {
           // Intermediate turn: the agent handed work to background tasks and
           // ended its turn to wait — Claude Code will inject the completion
@@ -1499,6 +1510,15 @@ export class AgentSessionManager {
     if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, "running");
     this.broadcastPatch(session.id, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
+
+    // Provider per-session state belongs to the previous (killed) process.
+    // Without this reset, getInitializationMessages sees initialized=true and
+    // the fresh process never receives initialize/thread-start — Codex then
+    // rejects every turn/start with "Not initialized" (mirrors restartSession
+    // step 6).
+    const provider = getProvider(session.agentType);
+    provider.onSessionDestroyed?.(session.id);
+    provider.onSessionCreated?.(session.id, session.permissionMode);
 
     // Spawn Claude Code process
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
