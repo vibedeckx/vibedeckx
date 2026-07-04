@@ -113,7 +113,32 @@ export class ClaudeCodeProvider implements AgentProvider {
     }
 
     if (msg.type === "system") {
-      const systemMsg = msg as { type: "system"; message?: string };
+      const systemMsg = msg as {
+        type: "system";
+        subtype?: string;
+        message?: string;
+        task_id?: string;
+        task_type?: string;
+        description?: string;
+        status?: string;
+      };
+      // Background-task lifecycle events (`--verbose` stream-json). task_started
+      // fires when the agent launches background work (task_type "local_agent"
+      // for background subagents, "local_bash" for background commands);
+      // task_notification fires when it finishes — right before the harness
+      // auto-resumes the main agent. These feed the session manager's pending-
+      // background-task ledger, which defers completion handling on `result`.
+      if (systemMsg.subtype === "task_started" && systemMsg.task_id) {
+        return [{
+          type: "task_started",
+          taskId: systemMsg.task_id,
+          taskType: systemMsg.task_type,
+          description: systemMsg.description,
+        }];
+      }
+      if (systemMsg.subtype === "task_notification" && systemMsg.task_id) {
+        return [{ type: "task_finished", taskId: systemMsg.task_id, status: systemMsg.status }];
+      }
       if (systemMsg.message) {
         return [{ type: "system", content: systemMsg.message }];
       }

@@ -74,6 +74,16 @@ interface RunningSession {
   permissionMode: "plan" | "edit"; // Claude Code permission mode
   agentType: AgentType; // Which agent provider to use
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
+  /**
+   * Pending background tasks (background subagents / run_in_background
+   * commands) launched by the agent, keyed by the harness task_id. Fed by
+   * task_started / task_finished events. A `result` that arrives while this
+   * set is non-empty is an intermediate turn — the process auto-resumes when
+   * the task completes — so completion side effects (taskCompleted broadcast,
+   * markCompleted, status→stopped) are deferred until a result with an empty
+   * ledger. Reset per spawn and cleared on stopSession.
+   */
+  backgroundTasks: Set<string>;
 }
 
 export class AgentSessionManager {
@@ -303,6 +313,7 @@ export class AgentSessionManager {
       skipDb,
       permissionMode,
       agentType,
+      backgroundTasks: new Set(),
     };
 
     this.sessions.set(sessionId, session);
@@ -432,6 +443,9 @@ export class AgentSessionManager {
 
     // Per-spawn state for diagnosing startup failures (e.g. agent not installed).
     session.producedOutput = false;
+    // A fresh process has no background tasks — a stale ledger from a previous
+    // process would wedge completion detection in "intermediate turn" forever.
+    session.backgroundTasks.clear();
     let stderrTail = "";
     let spawnFailed = false;
 
@@ -481,6 +495,7 @@ export class AgentSessionManager {
       }
 
       session.status = code === 0 ? "stopped" : "error";
+      session.backgroundTasks.clear();
       if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, session.status);
 
       // A non-zero exit with no agent output means the process never really
@@ -679,6 +694,19 @@ export class AgentSessionManager {
         }, true);
         break;
 
+      // Background-task ledger. Inner tasks launched by subagents also emit
+      // these events; their started/notification pairs balance out, so we
+      // count everything rather than trying to establish parentage.
+      case "task_started":
+        session.backgroundTasks.add(event.taskId);
+        console.log(`[AgentSession] Background task started: ${event.taskId} (${event.taskType ?? "?"}) — ${session.backgroundTasks.size} pending in ${sessionId}`);
+        break;
+
+      case "task_finished":
+        session.backgroundTasks.delete(event.taskId);
+        console.log(`[AgentSession] Background task finished: ${event.taskId} (${event.status ?? "?"}) — ${session.backgroundTasks.size} pending in ${sessionId}`);
+        break;
+
       case "error":
         this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
@@ -703,6 +731,19 @@ export class AgentSessionManager {
         }
 
         if (event.subtype === "success") {
+          // Intermediate turn: the agent handed work to background tasks and
+          // ended its turn to wait — Claude Code will inject the completion
+          // notification and auto-resume this same process. Treat completion
+          // (taskCompleted, markCompleted, status→stopped, auto task-done) as
+          // deferred until a result arrives with an empty ledger. Status stays
+          // "running": semantically true (background work is executing inside
+          // the process) and it keeps the Stop button usable. If a
+          // notification never arrives, the session honestly shows "running"
+          // and Stop/process-exit clears the state.
+          if (session.backgroundTasks.size > 0) {
+            console.log(`[AgentSession] result with ${session.backgroundTasks.size} background task(s) pending — intermediate turn, deferring completion for ${sessionId}`);
+            break;
+          }
           console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
           const completedAt = Date.now();
           if (!session.skipDb) {
@@ -1123,6 +1164,8 @@ export class AgentSessionManager {
       // Mark as dormant so the next message triggers wakeDormantSession
       // (which spawns a new process and replays the full conversation context).
       session.dormant = true;
+      // Killing the process kills its background tasks with it.
+      session.backgroundTasks.clear();
       session.status = "stopped";
       if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
@@ -1510,6 +1553,7 @@ export class AgentSessionManager {
         skipDb: false,
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
+        backgroundTasks: new Set(),
       };
 
       this.sessions.set(dbSession.id, runningSession);

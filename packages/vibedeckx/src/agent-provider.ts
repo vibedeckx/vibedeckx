@@ -28,6 +28,13 @@ export type ParsedAgentEvent =
   | { type: "system"; content: string }
   | { type: "error"; message: string }
   | { type: "result"; subtype: "success" | "error"; error?: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number }
+  // Background-task lifecycle (Claude Code `system/task_started` and
+  // `system/task_notification` stream events). The session manager keeps a
+  // per-session ledger of these so a `result` arriving while background tasks
+  // are still pending is treated as an intermediate turn (the process will
+  // auto-resume when the task completes), not a session completion.
+  | { type: "task_started"; taskId: string; taskType?: string; description?: string }
+  | { type: "task_finished"; taskId: string; status?: string }
   | { type: "approval_request"; requestType: "command"; requestId: string; command: string; cwd?: string }
   | { type: "approval_request"; requestType: "fileChange"; requestId: string; changes: Array<{path: string; diff?: string; kind: string}> }
   | { type: "stdin_write"; content: string };
