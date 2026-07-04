@@ -63,6 +63,17 @@ export function ExecutorOutput({
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const lastLogIndexRef = useRef(0);
+  // Count of replayed-history chunks still queued in xterm's write buffer.
+  // xterm parses write() data asynchronously (12ms time slices), so responses
+  // it generates to query sequences embedded in replayed history (DA1, CPR,
+  // OSC 10/11, DECRQM…) are emitted via onData AFTER history_end has flipped
+  // muteInput back to false. Forwarding those responses to the idle shell
+  // makes readline echo them as garbage ("0;276;0c10;rgb:fafa/…"), which then
+  // lands in the server-side log history and replays forever. The counter is
+  // incremented before each historical write and decremented in that write's
+  // parse-completion callback — which xterm fires strictly after all onData
+  // events for the chunk — so the mute covers exactly the replayed bytes.
+  const historyParseMuteRef = useRef(0);
   const muteInputRef = useRef(muteInput);
   if (muteInputRef.current !== muteInput) {
     console.log(`[ExecutorOutput] muteInput changed: ${muteInputRef.current} → ${muteInput}`);
@@ -181,7 +192,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // Handle user input (only in PTY mode)
     if (isPty && onInput) {
       terminal.onData((data) => {
-        if (!muteInputRef.current) {
+        if (!muteInputRef.current && historyParseMuteRef.current === 0) {
           onInput(data);
         }
       });
@@ -199,6 +210,9 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       terminalRef.current = null;
       fitAddonRef.current = null;
       lastLogIndexRef.current = 0;
+      // Disposing drops queued write callbacks — a stuck counter would mute
+      // the next terminal instance forever.
+      historyParseMuteRef.current = 0;
     };
   }, [isPty, onInput, onResize]);
 
@@ -219,20 +233,40 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // "write data discarded, use flow control to avoid losing data", which
     // bubbles out of React's commit phase into the error boundary. One write
     // per effect run keeps the buffer to a single chunk.
-    let pending = "";
+    // Historical (replayed) bytes are written separately from live bytes so
+    // the history-parse mute counter covers exactly the replay. Within one
+    // batch all historical entries precede live ones (history only exists at
+    // the start of a connection), so writing hist-then-live preserves order.
+    let pendingHistorical = "";
+    let pendingLive = "";
     for (let i = lastLogIndexRef.current; i < logs.length; i++) {
       const log = logs[i];
       // PTY/stdout/stderr are all written verbatim (ANSI interpreted by xterm).
       if (log.type === "pty" || log.type === "stdout" || log.type === "stderr") {
-        pending += log.data;
+        if (log.historical) {
+          pendingHistorical += log.data;
+        } else {
+          pendingLive += log.data;
+        }
       }
     }
     lastLogIndexRef.current = logs.length;
-    if (pending) {
+    if (pendingHistorical) {
+      historyParseMuteRef.current++;
       try {
-        terminalRef.current.write(pending);
+        terminalRef.current.write(pendingHistorical, () => {
+          historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
+        });
       } catch (err) {
+        historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
         // Last-resort guard: never let a terminal write crash the React tree.
+        console.error("[ExecutorOutput] terminal write failed", err);
+      }
+    }
+    if (pendingLive) {
+      try {
+        terminalRef.current.write(pendingLive);
+      } catch (err) {
         console.error("[ExecutorOutput] terminal write failed", err);
       }
     }

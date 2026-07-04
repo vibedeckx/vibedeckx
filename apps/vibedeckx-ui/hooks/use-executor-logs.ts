@@ -146,7 +146,15 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
               receivedLiveData = true;
               reconnectAttemptRef.current = 0;
             }
-            setLogs((prev) => [...prev, msg]);
+            // Tag replayed entries at receipt time (historyEnded is a
+            // synchronous closure variable, immune to React state batching) so
+            // the renderer can mute xterm's query responses for exactly the
+            // replayed bytes — see ExecutorOutput.
+            const tagged: LogMessage =
+              msg.type === "stdout" || msg.type === "stderr" || msg.type === "pty"
+                ? { ...msg, historical: !historyEnded }
+                : msg;
+            setLogs((prev) => [...prev, tagged]);
           }
         } catch (error) {
           console.error("Failed to parse WebSocket message:", error);

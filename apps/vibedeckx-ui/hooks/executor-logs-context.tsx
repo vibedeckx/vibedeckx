@@ -101,7 +101,12 @@ export function ExecutorLogsProvider({
       const prev = statesRef.current.get(processId) ?? EMPTY_STATE;
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { processId: _omit, ...logMsg } = m;
-      update(processId, { logs: [...prev.logs, logMsg as LogMessage] });
+      // Tag replayed entries at receipt time (statesRef updates synchronously)
+      // so the renderer can mute xterm's query responses for exactly the
+      // replayed bytes — see ExecutorOutput.
+      update(processId, {
+        logs: [...prev.logs, { ...logMsg, historical: prev.replayingHistory } as LogMessage],
+      });
     }
   }, [update]);
 

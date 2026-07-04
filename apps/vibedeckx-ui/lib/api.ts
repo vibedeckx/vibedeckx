@@ -359,9 +359,13 @@ export interface TerminalSession {
 }
 
 export type LogMessage =
-  | { type: "stdout"; data: string }
-  | { type: "stderr"; data: string }
-  | { type: "pty"; data: string }
+  // `historical` is a frontend-only tag set at WS-receipt time (before
+  // history_end arrives). xterm parses writes asynchronously, so query
+  // responses to replayed history fire after history_end has already been
+  // processed — the renderer needs to know per-entry which data is replay.
+  | { type: "stdout"; data: string; historical?: boolean }
+  | { type: "stderr"; data: string; historical?: boolean }
+  | { type: "pty"; data: string; historical?: boolean }
   | { type: "finished"; exitCode: number | null }
   | { type: "init"; isPty: boolean }
   | { type: "error"; message: string }
