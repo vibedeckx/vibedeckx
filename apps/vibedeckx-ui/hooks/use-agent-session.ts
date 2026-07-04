@@ -186,6 +186,25 @@ async function restartSessionApi(sessionId: string, agentType?: AgentType): Prom
   }
 }
 
+async function switchAgentTypeApi(sessionId: string, agentType: AgentType): Promise<void> {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/agent-type`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentType }),
+  });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (body.error) detail = body.error;
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail || `Failed to switch agent [${response.status}]`);
+  }
+}
+
 async function stopSessionApi(sessionId: string): Promise<void> {
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/stop`, {
     method: "POST",
@@ -836,9 +855,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
    *
    * This is now narrowed to the agent-type dropdown: it keeps the same
    * sessionId but stops the existing process, clears its entries, and respawns
-   * under the new agent type. Called from `agent-conversation.tsx` when the
-   * user switches between Claude Code and Codex on a session that has not yet
-   * received any messages (the dropdown is disabled otherwise).
+   * under the new agent type. DESTRUCTIVE — wipes the conversation. The agent
+   * switcher no longer uses this; it calls switchAgentType, which preserves
+   * history. Kept for programmatic full-reset use cases.
    */
   const restartSession = useCallback(async (agentType?: AgentType) => {
     if (!session?.id) return;
@@ -865,6 +884,35 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       console.error("[AgentSession] Failed to restart session:", e);
     } finally {
       setIsLoading(false);
+    }
+  }, [session?.id, projectId, branch, explicitSessionId]);
+
+  // Switch coding agent (preserves conversation history — the session goes
+  // dormant server-side and the next message wakes it under the new agent
+  // with a full context replay). Returns null on success, an error message
+  // on failure (e.g. 409 while a turn is running).
+  const switchAgentType = useCallback(async (agentType: AgentType): Promise<string | null> => {
+    if (!session?.id) return "No active session";
+
+    setError(null);
+
+    try {
+      await switchAgentTypeApi(session.id, agentType);
+      // Update session locally and cache — history is preserved
+      setSession((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev, agentType };
+        if (projectId) {
+          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
+          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+        }
+        return updated;
+      });
+      return null;
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : "Failed to switch agent";
+      console.error("[AgentSession] Failed to switch agent:", e);
+      return errorMsg;
     }
   }, [session?.id, projectId, branch, explicitSessionId]);
 
@@ -1151,6 +1199,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     uploadPaste,
     stopSession,
     restartSession,
+    switchAgentType,
     startNewConversation,
     ensureSession,
     switchMode,

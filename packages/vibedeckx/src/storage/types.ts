@@ -395,6 +395,7 @@ export interface Storage {
      */
     updateStatusPreservingTimestamp: (id: string, status: AgentSessionStatus) => void;
     updatePermissionMode: (id: string, mode: string) => void;
+    updateAgentType: (id: string, agent_type: string) => void;
     updateTitle: (id: string, title: string | null) => void;
     /** Mark or unmark the session as favorited. Does not touch updated_at. */
     setFavorited: (id: string, favorited: boolean) => void;

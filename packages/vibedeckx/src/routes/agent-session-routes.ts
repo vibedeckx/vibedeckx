@@ -863,6 +863,50 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Switch the coding agent of an existing session WITHOUT clearing history.
+  // The session goes dormant; the next user message wakes it under the new
+  // agent with a full conversation-context replay. Refused with 409 while a
+  // turn is running on a session that already has history.
+  fastify.post<{ Params: { sessionId: string }; Body: { agentType?: string } }>(
+    "/api/agent-sessions/:sessionId/agent-type",
+    async (req, reply) => {
+      const { agentType } = (req.body || {}) as { agentType?: string };
+      if (!agentType) {
+        return reply.code(400).send({ error: "agentType is required" });
+      }
+
+      if (req.params.sessionId.startsWith("remote-")) {
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          remoteInfo.remoteUrl,
+          remoteInfo.remoteApiKey,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/agent-type`,
+          { agentType }
+        );
+        return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      const outcome = fastify.agentSessionManager.switchAgentType(
+        req.params.sessionId,
+        agentType as AgentType
+      );
+      if (outcome === "not_found") {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+      if (outcome === "busy") {
+        return reply.code(409).send({ error: "Agent is currently running — stop it before switching" });
+      }
+      return reply.code(200).send({ success: true, agentType });
+    }
+  );
+
   // Branch an Agent Session: create a new dormant session that copies the
   // source session's conversation history. The user continues in the copy
   // (optionally with a different agent type) while the original stays intact.

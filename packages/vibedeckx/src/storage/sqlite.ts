@@ -1778,6 +1778,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         ).run({ id, mode });
       },
 
+      updateAgentType: (id: string, agent_type: string) => {
+        db.prepare(
+          `UPDATE agent_sessions SET agent_type = @agent_type, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
+        ).run({ id, agent_type });
+      },
+
       updateTitle: (id: string, title: string | null) => {
         db.prepare(
           `UPDATE agent_sessions SET title = @title, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`

@@ -298,7 +298,7 @@ export class AgentSessionManager {
         project_id: projectId,
         branch: branchKey,
         permission_mode: permissionMode,
-        // agent_type passed to storage after Phase 4 migration (task 4.2/4.3)
+        agent_type: agentType,
       });
     }
 
@@ -1345,6 +1345,7 @@ export class AgentSessionManager {
     getProvider(session.agentType).onSessionDestroyed?.(sessionId);
     if (agentType) {
       session.agentType = agentType;
+      if (!session.skipDb) this.storage.agentSessions.updateAgentType(sessionId, agentType);
     }
     getProvider(session.agentType).onSessionCreated?.(sessionId, session.permissionMode);
 
@@ -1354,6 +1355,62 @@ export class AgentSessionManager {
     this.spawnAgent(session, absoluteWorktreePath);
 
     return true;
+  }
+
+  /**
+   * Switch a session's coding agent WITHOUT touching its conversation history.
+   * Kills the current process (if any) and puts the session into the dormant
+   * state; the next user message goes through wakeDormantSession, which spawns
+   * the new agent and replays the full conversation context — the same path
+   * branch sessions use, so cross-agent continuation is already proven.
+   *
+   * Refused ("busy") while a turn is in flight on a session that has history:
+   * switching mid-run would orphan the in-flight work. A fresh session that is
+   * "running" but has no entries yet (idle process waiting for the first
+   * message) is safe to switch.
+   */
+  switchAgentType(sessionId: string, agentType: AgentType): "ok" | "not_found" | "busy" {
+    const session = this.sessions.get(sessionId);
+    if (!session) return "not_found";
+    if (session.agentType === agentType) return "ok";
+
+    const hasHistory = session.store.entries.some(Boolean);
+    if (session.status === "running" && hasHistory) return "busy";
+
+    console.log(`[AgentSession] Switching session ${sessionId} agent ${session.agentType} → ${agentType} (dormant, history preserved)`);
+
+    // Kill the idle process — clear session.process first so the close
+    // handler skips its own status/broadcast cleanup (same as stopSession).
+    const proc = session.process;
+    session.process = null;
+    this.killProcess(proc);
+
+    this.finalizeStreamingEntry(session);
+    session.store.currentAssistantIndex = null;
+    session.buffer = "";
+    session.backgroundTasks.clear();
+
+    getProvider(session.agentType).onSessionDestroyed?.(sessionId);
+    session.agentType = agentType;
+    if (!session.skipDb) this.storage.agentSessions.updateAgentType(sessionId, agentType);
+
+    // Visible confirmation in the conversation; replayed to the new agent as
+    // part of the context like other system entries ("Session stopped by user.")
+    this.pushEntry(sessionId, {
+      type: "system",
+      content: `Coding agent switched to ${agentType === "codex" ? "Codex" : "Claude Code"}.`,
+      timestamp: Date.now(),
+    });
+
+    session.dormant = true;
+    if (session.status !== "stopped") {
+      session.status = "stopped";
+      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
+    }
+
+    return "ok";
   }
 
   /**

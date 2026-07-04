@@ -166,7 +166,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     sendMessage,
     uploadPaste,
     stopSession,
-    restartSession,
+    switchAgentType,
     startNewConversation,
     ensureSession,
     switchMode,
@@ -581,10 +581,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
-                  disabled={session !== null && messages.length > 0}
+                  disabled={isLoading || (status === "running" && messages.length > 0)}
                   className={cn(
                     "inline-flex items-center gap-1 rounded-md border bg-muted/50 px-2 py-0.5 text-xs font-medium transition-colors hover:bg-muted",
-                    session !== null && messages.length > 0 && "opacity-50 cursor-not-allowed"
+                    (isLoading || (status === "running" && messages.length > 0)) && "opacity-50 cursor-not-allowed"
                   )}
                 >
                   {providers.find(p => p.type === agentType)?.displayName ?? (agentType === "codex" ? "Codex" : "Claude Code")}
@@ -594,11 +594,21 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               <DropdownMenuContent align="start">
                 <DropdownMenuRadioGroup
                   value={agentType}
-                  onValueChange={(v) => {
+                  onValueChange={async (v) => {
                     const newType = v as AgentType;
-                    setAgentType(newType);
-                    if (session) {
-                      restartSession(newType);
+                    if (!session) {
+                      // No session yet — just pick the agent for the upcoming one
+                      setAgentType(newType);
+                      return;
+                    }
+                    // Non-destructive switch: history is preserved; the next
+                    // message wakes the session under the new agent with full
+                    // context replay. The server rejects with 409 mid-run.
+                    const errMsg = await switchAgentType(newType);
+                    if (errMsg) {
+                      toast.error("Failed to switch agent", { description: errMsg });
+                    } else {
+                      setAgentType(newType);
                     }
                   }}
                 >
