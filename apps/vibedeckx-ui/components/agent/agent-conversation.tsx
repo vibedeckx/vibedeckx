@@ -23,12 +23,13 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, GitBranch } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
@@ -40,7 +41,7 @@ import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
-import { getAgentProviders, translateText } from "@/lib/api";
+import { getAgentProviders, translateText, branchAgentSession } from "@/lib/api";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
@@ -304,6 +305,24 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     await acceptPlan(planContent);
     setPermissionMode("edit");
     onStatusChange?.();  // Agent will now implement the plan → signal "working"
+  };
+
+  const [isBranching, setIsBranching] = useState(false);
+  const handleBranch = async (branchAgentType?: AgentType) => {
+    if (!session || isBranching) return;
+    setIsBranching(true);
+    try {
+      const result = await branchAgentSession(session.id, branchAgentType);
+      // Refresh the session dropdown so the "Branch - ..." entry shows up,
+      // then switch this window to the new session.
+      setTitleRefreshKey((k) => k + 1);
+      setSessionUrlParam?.(result.session.id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to branch conversation";
+      toast.error("Branch failed", { description: msg });
+    } finally {
+      setIsBranching(false);
+    }
   };
 
   const handleQuote = useCallback((text: string) => {
@@ -765,6 +784,53 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     </div>
                   )}
                 </div>
+                {/* Post-run actions — shown once the agent has finished (status
+                    back to stopped with history present). Branch copies the
+                    conversation into a new session, optionally under a
+                    different coding agent. */}
+                {session && status !== "running" && !isLoading && messages.length > 0 && (
+                  <div className="flex items-center gap-1.5 pt-3 pb-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => handleBranch()}
+                      disabled={isBranching}
+                    >
+                      {isBranching
+                        ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        : <GitBranch className="h-3 w-3 mr-1" />}
+                      Branch
+                    </Button>
+                    {providers.filter((p) => p.available).length > 1 && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-1.5"
+                            disabled={isBranching}
+                            title="Branch with a different agent"
+                          >
+                            <ChevronDown className="h-3 w-3" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start">
+                          {providers.filter((p) => p.available).map((p) => (
+                            <DropdownMenuItem
+                              key={p.type}
+                              className="text-xs"
+                              onSelect={() => handleBranch(p.type)}
+                            >
+                              <GitBranch className="h-3 w-3 mr-1.5" />
+                              Branch with {p.displayName}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
+                  </div>
+                )}
               </AgentConversationContext.Provider>
             )}
 

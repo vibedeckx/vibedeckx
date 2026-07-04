@@ -1551,6 +1551,55 @@ export class AgentSessionManager {
   }
 
   /**
+   * Rebuild an in-memory MessageStore (entries, replay patches, tool tracker,
+   * index provider) from persisted entry rows. Shared by startup restore and
+   * branchSession — entry indices are preserved so replay patches match the
+   * original conversation exactly.
+   */
+  private rebuildStoreFromRows(
+    rows: Array<{ entry_index: number; data: string }>,
+    sessionIdForLog: string,
+  ): MessageStore {
+    const indexProvider = new EntryIndexProvider();
+    const toolTracker = new EntryTracker(indexProvider);
+    const store: MessageStore = {
+      patches: [],
+      entries: [],
+      indexProvider,
+      toolTracker,
+      currentAssistantIndex: null,
+    };
+
+    let maxIndex = -1;
+    for (const row of rows) {
+      try {
+        const message = JSON.parse(row.data) as AgentMessage;
+        const idx = row.entry_index;
+        store.entries[idx] = message;
+
+        // Generate ADD patch for history replay
+        const patch = ConversationPatch.addEntry(idx, message);
+        store.patches.push(patch);
+
+        // Rebuild tool tracker for tool_use and tool_result entries
+        if (message.type === "tool_use" && message.toolUseId) {
+          toolTracker.set(`tool_use:${message.toolUseId}`, idx);
+        } else if (message.type === "tool_result" && message.toolUseId) {
+          toolTracker.set(`tool_result:${message.toolUseId}`, idx);
+        }
+
+        if (idx > maxIndex) maxIndex = idx;
+      } catch (error) {
+        console.error(`[AgentSession] Failed to parse entry for session ${sessionIdForLog}:`, error);
+      }
+    }
+
+    // Set index provider to continue after the max restored index
+    indexProvider.setIndex(maxIndex + 1);
+    return store;
+  }
+
+  /**
    * Restore sessions from database on startup.
    * Creates dormant RunningSession objects with process=null for sessions that have entries.
    */
@@ -1566,43 +1615,7 @@ export class AgentSessionManager {
       // Skip sessions with no entries (stale metadata)
       if (entries.length === 0) continue;
 
-      // Rebuild MessageStore
-      const indexProvider = new EntryIndexProvider();
-      const toolTracker = new EntryTracker(indexProvider);
-      const store: MessageStore = {
-        patches: [],
-        entries: [],
-        indexProvider,
-        toolTracker,
-        currentAssistantIndex: null,
-      };
-
-      let maxIndex = -1;
-      for (const row of entries) {
-        try {
-          const message = JSON.parse(row.data) as AgentMessage;
-          const idx = row.entry_index;
-          store.entries[idx] = message;
-
-          // Generate ADD patch for history replay
-          const patch = ConversationPatch.addEntry(idx, message);
-          store.patches.push(patch);
-
-          // Rebuild tool tracker for tool_use and tool_result entries
-          if (message.type === "tool_use" && message.toolUseId) {
-            toolTracker.set(`tool_use:${message.toolUseId}`, idx);
-          } else if (message.type === "tool_result" && message.toolUseId) {
-            toolTracker.set(`tool_result:${message.toolUseId}`, idx);
-          }
-
-          if (idx > maxIndex) maxIndex = idx;
-        } catch (error) {
-          console.error(`[AgentSession] Failed to parse entry for session ${dbSession.id}:`, error);
-        }
-      }
-
-      // Set index provider to continue after the max restored index
-      indexProvider.setIndex(maxIndex + 1);
+      const store = this.rebuildStoreFromRows(entries, dbSession.id);
 
       const permissionMode = (dbSession.permission_mode === "plan" ? "plan" : "edit") as "plan" | "edit";
 
@@ -1639,6 +1652,102 @@ export class AgentSessionManager {
     if (restoredCount > 0) {
       console.log(`[AgentSession] Restored ${restoredCount} dormant session(s) from database`);
     }
+  }
+
+  /**
+   * Create a new dormant session that copies another session's conversation
+   * history ("branch"). The new session gets its own DB row, copied entry
+   * rows (indices preserved), a rebuilt in-memory store, and a
+   * "Branch - <source title>" title. No process is spawned — the first user
+   * message goes through wakeDormantSession, which replays the full copied
+   * context to a fresh process, so a branch also works with a different
+   * agent type than the source.
+   * Returns the new session id, or null when the source is unknown or has
+   * no persisted history to copy.
+   */
+  branchSession(sourceSessionId: string, agentTypeOverride?: AgentType): string | null {
+    const source = this.sessions.get(sourceSessionId);
+    const sourceRow = this.storage.agentSessions.getById(sourceSessionId);
+    if (!source && !sourceRow) return null;
+    // skipDb sessions have no persisted entries to copy
+    if (source?.skipDb) return null;
+
+    // Flush any in-flight streaming assistant entry so the copy is complete
+    if (source) this.finalizeStreamingEntry(source);
+
+    const entryRows = this.storage.agentSessions.getEntries(sourceSessionId);
+    if (entryRows.length === 0) return null;
+
+    const projectId = source?.projectId ?? sourceRow!.project_id;
+    const branch = source?.branch ?? (sourceRow!.branch || null);
+    const permissionMode = source?.permissionMode
+      ?? ((sourceRow?.permission_mode === "plan" ? "plan" : "edit") as "plan" | "edit");
+    const agentType = agentTypeOverride
+      ?? source?.agentType
+      ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
+
+    const newId = randomUUID();
+    this.storage.agentSessions.create({
+      id: newId,
+      project_id: projectId,
+      branch: branch ?? "",
+      permission_mode: permissionMode,
+      agent_type: agentType,
+    });
+    // create() writes status='running' (it exists for the spawn path); a
+    // branched session is dormant until the first user message wakes it.
+    this.storage.agentSessions.updateStatusPreservingTimestamp(newId, "stopped");
+
+    for (const row of entryRows) {
+      this.storage.agentSessions.upsertEntry(newId, row.entry_index, row.data);
+    }
+
+    // "Branch - <source title>", falling back to a first-user-message snippet
+    // when the source's AI title never resolved.
+    let baseTitle = sourceRow?.title ?? null;
+    if (!baseTitle) {
+      for (const row of entryRows) {
+        try {
+          const msg = JSON.parse(row.data) as AgentMessage;
+          if (msg.type === "user") {
+            baseTitle = snippetTitle(extractUserText(msg.content));
+            break;
+          }
+        } catch { /* skip unparsable rows */ }
+      }
+    }
+    this.storage.agentSessions.updateTitle(newId, `Branch - ${baseTitle || "Conversation"}`);
+    // The title is final — claim the one-shot slot so the AI title generator
+    // never fires for this session.
+    this.markTitleResolved(newId);
+
+    const store = this.rebuildStoreFromRows(entryRows, newId);
+
+    const branched: RunningSession = {
+      id: newId,
+      projectId,
+      branch,
+      process: null,
+      dormant: true,
+      store,
+      subscribers: new Set(),
+      status: "stopped",
+      buffer: "",
+      skipDb: false,
+      permissionMode,
+      agentType,
+      backgroundTasks: new Set(),
+      bgSpawnHintsThisTurn: 0,
+      taskStartedThisTurn: 0,
+    };
+    this.sessions.set(newId, branched);
+
+    // The branched session is now the branch's latest (fresh updated_at, no
+    // completion timestamps) — re-derive the workspace dot like createNewSession.
+    this.emitDerivedBranchActivity(projectId, branch);
+
+    console.log(`[AgentSession] branchSession: ${sourceSessionId} → ${newId} (entries=${entryRows.length}, agentType=${agentType})`);
+    return newId;
   }
 
   /**

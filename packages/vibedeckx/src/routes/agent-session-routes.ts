@@ -863,6 +863,98 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Branch an Agent Session: create a new dormant session that copies the
+  // source session's conversation history. The user continues in the copy
+  // (optionally with a different agent type) while the original stays intact.
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { agentType?: string };
+  }>(
+    "/api/agent-sessions/:sessionId/branch",
+    async (req, reply) => {
+      const { agentType } = (req.body || {}) as { agentType?: string };
+
+      if (req.params.sessionId.startsWith("remote-")) {
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          remoteInfo.remoteUrl,
+          remoteInfo.remoteApiKey,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/branch`,
+          { agentType }
+        );
+        if (!result.ok) {
+          return reply.code(proxyStatus(result)).send(result.data);
+        }
+
+        const remoteData = result.data as { session: { id: string }; messages: unknown[] };
+        const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
+        const localSessionId = `remote-${remoteInfo.remoteServerId}-${projectId}-${remoteData.session.id}`;
+        fastify.remoteSessionMap.set(localSessionId, {
+          remoteServerId: remoteInfo.remoteServerId,
+          remoteUrl: remoteInfo.remoteUrl,
+          remoteApiKey: remoteInfo.remoteApiKey,
+          remoteSessionId: remoteData.session.id,
+          branch: remoteInfo.branch ?? null,
+        });
+        fastify.storage.remoteSessionMappings.upsert(
+          localSessionId, projectId, remoteInfo.remoteServerId, remoteData.session.id, remoteInfo.branch ?? null,
+        );
+        // The remote already wrote the final "Branch - ..." title — claim both
+        // title-generation guards so the first message here doesn't clobber it.
+        fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
+        fastify.agentSessionManager.markTitleResolved(localSessionId);
+
+        // Seed remotePatchCache with the copied messages so WS replay has data
+        // immediately (mirrors the create/findExisting proxy paths).
+        if (remoteData.messages && remoteData.messages.length > 0) {
+          const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
+          if (cacheEntry.messages.length === 0) {
+            for (let i = 0; i < remoteData.messages.length; i++) {
+              const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
+              fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
+            }
+          }
+        }
+
+        return reply.code(200).send({
+          session: { ...remoteData.session, id: localSessionId, projectId },
+          messages: remoteData.messages,
+        });
+      }
+
+      const newSessionId = fastify.agentSessionManager.branchSession(
+        req.params.sessionId,
+        agentType as AgentType | undefined,
+      );
+      if (!newSessionId) {
+        return reply.code(404).send({ error: "Session not found or has no history to branch" });
+      }
+
+      const session = fastify.agentSessionManager.getSession(newSessionId);
+      const messages = fastify.agentSessionManager.getMessages(newSessionId);
+      const dbRow = fastify.storage.agentSessions.getById(newSessionId);
+      return reply.code(200).send({
+        session: {
+          id: newSessionId,
+          projectId: session?.projectId,
+          branch: session?.branch ?? null,
+          status: session?.status || "stopped",
+          permissionMode: session?.permissionMode || "edit",
+          agentType: session?.agentType || "claude-code",
+          title: dbRow?.title ?? null,
+        },
+        messages,
+      });
+    }
+  );
+
   // Switch Agent Session permission mode
   fastify.post<{
     Params: { sessionId: string };

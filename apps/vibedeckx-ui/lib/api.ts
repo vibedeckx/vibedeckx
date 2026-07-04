@@ -735,6 +735,25 @@ export async function createNewAgentSession(
   return res.json();
 }
 
+// Branch an agent session: creates a new session that copies the source
+// session's conversation history ("Branch - <title>"). Optionally switches
+// the coding agent for the new session.
+export async function branchAgentSession(
+  sessionId: string,
+  agentType?: string
+): Promise<{
+  session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string; title?: string | null };
+  messages: unknown[];
+}> {
+  const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/branch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentType }),
+  });
+  if (!res.ok) throw new Error(`branchAgentSession failed: ${res.status}`);
+  return res.json();
+}
+
 // Rename (or clear) the title of an agent session
 export async function renameSession(sessionId: string, title: string | null): Promise<void> {
   const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/title`, {
