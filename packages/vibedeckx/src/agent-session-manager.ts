@@ -583,6 +583,17 @@ export class AgentSessionManager {
       if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
+
+      // Also repaint the workspace dot: `working` requires
+      // last_user_message_at > last_completed_at, but the resume carries no
+      // user message (the provider drops stream-json `user` lines), so bump
+      // the timestamp to the wake moment. This also re-arms the
+      // completed transition, so the bell/sound fire again when the resumed
+      // turn ends — at the cost of one ring per intermediate turn.
+      if (!session.skipDb) {
+        this.storage.agentSessions.markUserMessage(sessionId, timestamp);
+        this.emitDerivedBranchActivity(session.projectId, session.branch);
+      }
     }
 
     switch (event.type) {
