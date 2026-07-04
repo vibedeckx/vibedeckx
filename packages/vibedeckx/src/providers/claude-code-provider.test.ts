@@ -98,6 +98,30 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(provider.parseStdoutLine(TASK_PROGRESS, SESSION)).toEqual([]);
   });
 
+  it("parses system/task_updated with terminal status as redundant task_finished", () => {
+    const line = JSON.stringify({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "aa462d9841ec77a13",
+      patch: { status: "completed", end_time: 1783126857624 },
+      uuid: "37f09ecf-3516-4e4e-a886-43999351dcdb",
+      session_id: "c80619f4-511a-4dba-9a4d-4c1d499c40af",
+    });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([
+      { type: "task_finished", taskId: "aa462d9841ec77a13", status: "completed" },
+    ]);
+  });
+
+  it("ignores system/task_updated with a non-terminal status", () => {
+    const line = JSON.stringify({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "aa462d9841ec77a13",
+      patch: { status: "in_progress" },
+    });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([]);
+  });
+
   it("still surfaces plain system messages with a message field", () => {
     const line = JSON.stringify({ type: "system", subtype: "info", message: "hello" });
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([

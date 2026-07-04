@@ -139,6 +139,17 @@ export class ClaudeCodeProvider implements AgentProvider {
       if (systemMsg.subtype === "task_notification" && systemMsg.task_id) {
         return [{ type: "task_finished", taskId: systemMsg.task_id, status: systemMsg.status }];
       }
+      // Redundant clear channel: task_updated with a terminal patch.status
+      // fires alongside task_notification for the same task. The ledger is a
+      // Set (idempotent delete), so parsing both means a future rename of
+      // either event name alone can't wedge the ledger.
+      if (systemMsg.subtype === "task_updated" && systemMsg.task_id) {
+        const patchStatus = (msg as { patch?: { status?: string } }).patch?.status;
+        if (patchStatus && ["completed", "failed", "cancelled", "canceled", "killed", "error"].includes(patchStatus)) {
+          return [{ type: "task_finished", taskId: systemMsg.task_id, status: patchStatus }];
+        }
+        return [];
+      }
       if (systemMsg.message) {
         return [{ type: "system", content: systemMsg.message }];
       }

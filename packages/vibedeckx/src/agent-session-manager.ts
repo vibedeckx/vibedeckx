@@ -84,6 +84,16 @@ interface RunningSession {
    * ledger. Reset per spawn and cleared on stopSession.
    */
   backgroundTasks: Set<string>;
+  /**
+   * Protocol-drift detection, both counted since the last `result`. A
+   * `run_in_background: true` tool_use input is a model request parameter
+   * (very unlikely to change shape); if a turn contains one but no
+   * task_started system event arrived, the CLI's task-lifecycle event names
+   * have probably changed — warn loudly instead of silently reverting to
+   * premature-completion behavior.
+   */
+  bgSpawnHintsThisTurn: number;
+  taskStartedThisTurn: number;
 }
 
 export class AgentSessionManager {
@@ -314,6 +324,8 @@ export class AgentSessionManager {
       permissionMode,
       agentType,
       backgroundTasks: new Set(),
+      bgSpawnHintsThisTurn: 0,
+      taskStartedThisTurn: 0,
     };
 
     this.sessions.set(sessionId, session);
@@ -617,6 +629,13 @@ export class AgentSessionManager {
         break;
 
       case "tool_use": {
+        // Drift-detection hint: the model requested background execution.
+        if (
+          typeof event.input === "object" && event.input !== null &&
+          (event.input as Record<string, unknown>).run_in_background === true
+        ) {
+          session.bgSpawnHintsThisTurn++;
+        }
         this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
         const tuKey = `tool_use:${event.toolUseId}`;
@@ -699,6 +718,7 @@ export class AgentSessionManager {
       // count everything rather than trying to establish parentage.
       case "task_started":
         session.backgroundTasks.add(event.taskId);
+        session.taskStartedThisTurn++;
         console.log(`[AgentSession] Background task started: ${event.taskId} (${event.taskType ?? "?"}) — ${session.backgroundTasks.size} pending in ${sessionId}`);
         break;
 
@@ -719,6 +739,19 @@ export class AgentSessionManager {
 
       case "result":
         console.log(`[Agent:result] sessionId=${sessionId} subtype=${event.subtype} prevStatus=${session.status}`);
+        // Protocol-drift check: the model asked for background execution this
+        // turn, but no task_started system event ever arrived. Most likely
+        // the CLI renamed its task-lifecycle events — the pending-task ledger
+        // is blind, so completion below fires prematurely (pre-ledger
+        // behavior). Warn loudly so it doesn't degrade silently.
+        if (session.bgSpawnHintsThisTurn > 0 && session.taskStartedThisTurn === 0) {
+          console.warn(
+            `[AgentSession] PROTOCOL DRIFT? Saw ${session.bgSpawnHintsThisTurn} run_in_background tool_use(s) this turn but no task_started event — ` +
+            `the Claude Code CLI's task-lifecycle stream events may have changed; background-task completion deferral is inactive. (session=${sessionId})`,
+          );
+        }
+        session.bgSpawnHintsThisTurn = 0;
+        session.taskStartedThisTurn = 0;
         this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
 
@@ -1554,6 +1587,8 @@ export class AgentSessionManager {
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
         backgroundTasks: new Set(),
+        bgSpawnHintsThisTurn: 0,
+        taskStartedThisTurn: 0,
       };
 
       this.sessions.set(dbSession.id, runningSession);
