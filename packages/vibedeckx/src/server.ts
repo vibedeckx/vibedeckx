@@ -1,5 +1,5 @@
 import fastify from "fastify";
-import type { FastifyRequest, FastifyReply } from "fastify";
+import type { FastifyRequest, FastifyReply, FastifyBaseLogger } from "fastify";
 import { fastifyStatic } from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyMultipart from "@fastify/multipart";
@@ -33,6 +33,7 @@ import browserRoutes from "./routes/browser-routes.js";
 import browserProxyRoutes from "./routes/browser-proxy-routes.js";
 import scheduleRoutes from "./routes/schedule-routes.js";
 import { getAuth, clerkClient } from "@clerk/fastify";
+import { getLogger } from "./logger.js";
 import "./server-types.js";
 
 // API Key from environment variable for remote access authentication
@@ -132,6 +133,13 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   const server = fastify({
     maxParamLength: 500,
     bodyLimit: 16 * 1024 * 1024,
+    // Route Fastify's own errors (hook/handler failures, previously silent)
+    // into the shared rotating-file logger; keep per-request access logging
+    // off — it would drown real signal at info level. Cast to the base logger
+    // type so the FastifyInstance generic doesn't specialize to this pino
+    // version's Logger type across every consumer.
+    loggerInstance: getLogger().child({ mod: "http" }) as FastifyBaseLogger,
+    disableRequestLogging: true,
     ...(tls && {
       https: {
         cert: tls.cert,

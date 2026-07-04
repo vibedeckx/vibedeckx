@@ -22,6 +22,15 @@ services:
     image: ${VIBEDECKX_IMAGE:-vibedeckx:local}
     restart: unless-stopped
 
+    # Durable logs live in /data/logs (rotating files, kept 14 × 10MB) — see
+    # --log-level in `vibedeckx start --help`. This only caps the duplicate
+    # stdout copy so `docker logs` stays usable without growing unbounded.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
     # Direct host bind — no NAT hop, native network perf. `ports:` must stay unset.
     network_mode: host
 

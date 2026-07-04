@@ -40,7 +40,7 @@ Alternatives rejected:
   - Creates `<dataDir>/logs/` (default dataDir: `~/.vibedeckx`, Docker: `/data`).
   - Root pino logger over `pino.multistream`:
     - **stdout**: `pino-pretty` inline stream (`sync: true`, colorize only when TTY, `ignore: pid,hostname`) — keeps terminal and `docker logs` line-oriented and readable.
-    - **file**: `rotating-file-stream` writing NDJSON to `<dataDir>/logs/vibedeckx.log`, rotated **daily and at 10MB**, keeping **14 rotated files**, gzip-compressing rotated files.
+    - **file**: `rotating-file-stream` writing NDJSON to `<dataDir>/logs/vibedeckx.log`, rotated **daily and at 10MB**, keeping **14 rotated files** (uncompressed — bounded at ~140MB worst case; avoids compression edge cases in slim containers).
   - Level: `--log-level` flag > `VIBEDECKX_LOG_LEVEL` env > `info`. Invalid values fall back to `info` with a warning.
   - Installs the **console bridge**: replaces `console.log/info` → `logger.info`, `console.warn` → `logger.warn`, `console.error` → `logger.error`, `console.debug` → `logger.debug`. Arguments are rendered with `util.format` (Error objects keep their stacks).
   - Installs `uncaughtException` / `unhandledRejection` handlers: log at `fatal`, then `process.exit(1)` — preserves current crash semantics while capturing the trace to file.

@@ -4,7 +4,8 @@ import { buildApplication, buildCommand, buildRouteMap } from "@stricli/core";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import { createServer, type TLSOptions } from "./server.js";
 import { ReverseConnectClient } from "./reverse-connect-client.js";
-import { DB_PATH, DEFAULT_PORT } from "./constants.js";
+import { DEFAULT_PORT, VIBEDECKX_HOME } from "./constants.js";
+import { setupLogging, shutdownLogging } from "./logger.js";
 import open from "open";
 
 function loadTLSOptions(flags: {
@@ -90,6 +91,12 @@ const startCommand = buildCommand({
         brief: "Path to client CA bundle (PEM) for mTLS, e.g. Cloudflare Authenticated Origin Pulls. Requires --cert/--key. Env: VIBEDECKX_TLS_CLIENT_CA",
         optional: true,
       },
+      "log-level": {
+        kind: "parsed",
+        parse: String,
+        brief: "Log level: trace, debug, info, warn, error, fatal, silent (default: info). Env: VIBEDECKX_LOG_LEVEL. Logs are written to <data-dir>/logs/ with daily/10MB rotation.",
+        optional: true,
+      },
     },
   },
   func: async (flags: {
@@ -105,7 +112,11 @@ const startCommand = buildCommand({
     cert: string | undefined;
     key: string | undefined;
     "client-ca": string | undefined;
+    "log-level": string | undefined;
   }) => {
+    const dataDir = flags["data-dir"] ?? VIBEDECKX_HOME;
+    setupLogging({ dataDir, level: flags["log-level"] });
+
     const port = flags.port ?? DEFAULT_PORT;
     const host = flags.host ?? "127.0.0.1";
     const authEnabled = flags.auth ?? false;
@@ -150,9 +161,7 @@ const startCommand = buildCommand({
 
     console.log(`Starting vibedeckx${acceptRemote ? " (accepting remote clients)" : ""}${tls ? " (HTTPS)" : ""}...`);
 
-    const dbPath = flags["data-dir"]
-      ? path.join(flags["data-dir"], "data.sqlite")
-      : DB_PATH;
+    const dbPath = path.join(dataDir, "data.sqlite");
     const storage = await createSqliteStorage(dbPath);
     const server = await createServer({ storage, authEnabled, acceptRemote, noLocalProjects, tls });
 
@@ -189,6 +198,8 @@ const startCommand = buildCommand({
       } catch (err) {
         console.error("Error during shutdown:", err);
       }
+      // Last: flush buffered log lines to disk before the hard exit.
+      await shutdownLogging().catch(() => {});
       process.exit(0);
     };
 
@@ -231,16 +242,23 @@ const connectCommand = buildCommand({
         brief: "Path to a .env file loaded at startup (default: <data-dir or ~/.vibedeckx>/.env). Shell-set variables take precedence.",
         optional: true,
       },
+      "log-level": {
+        kind: "parsed",
+        parse: String,
+        brief: "Log level: trace, debug, info, warn, error, fatal, silent (default: info). Env: VIBEDECKX_LOG_LEVEL. Logs are written to <data-dir>/logs/ with daily/10MB rotation.",
+        optional: true,
+      },
     },
   },
-  func: async (flags: { "connect-to": string; token: string; port: number | undefined; "data-dir": string | undefined; "env-file": string | undefined }) => {
+  func: async (flags: { "connect-to": string; token: string; port: number | undefined; "data-dir": string | undefined; "env-file": string | undefined; "log-level": string | undefined }) => {
+    const dataDir = flags["data-dir"] ?? VIBEDECKX_HOME;
+    setupLogging({ dataDir, level: flags["log-level"] });
+
     const requestedPort = flags.port ?? 0;
 
     console.log("Starting vibedeckx in reverse-connect mode...");
 
-    const dbPath = flags["data-dir"]
-      ? path.join(flags["data-dir"], "data.sqlite")
-      : DB_PATH;
+    const dbPath = path.join(dataDir, "data.sqlite");
     const storage = await createSqliteStorage(dbPath);
     // Reverse-connect mode is inherently a remote-provider role: the inbound
     // server proxies requests through the tunnel into this instance, so the
@@ -287,6 +305,8 @@ const connectCommand = buildCommand({
       } catch (err) {
         console.error("Error during shutdown:", err);
       }
+      // Last: flush buffered log lines to disk before the hard exit.
+      await shutdownLogging().catch(() => {});
       process.exit(0);
     };
 
