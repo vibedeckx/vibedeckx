@@ -120,3 +120,225 @@ here as findings for a follow-up task rather than silently ignored.
 - `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json` — clean, no errors.
 - `pnpm --filter vibedeckx test` — 82/82 passing (6 test files: `logger.test.ts`, `branch-activity.test.ts`, `scheduler.test.ts`, `storage/scheduled-tasks.test.ts`, `providers/claude-code-provider.test.ts`, `providers/codex-provider.test.ts` — none of them exercise the files touched by this task's push-downs, so they're a regression check on the rest of the storage layer rather than direct coverage of the new methods).
 - Zero changes to the legacy DDL/migration block in `createDatabase()`; no existing `Storage` method signature was modified — all seven new methods are additive.
+
+---
+
+## Task 9: Real-database smoke test + delivery notes
+
+Final task of the storage-async/Kysely rewrite (Tasks 1-8 all merged as of
+`6afd167`: async `Storage` interface, ~40 caller files converted, 7+1 atomic
+storage methods from the race audit above, the entire query layer ported to
+Kysely across six repository factories, legacy DDL/migrations untouched,
+209/209 tests, tsc clean both ends). This section records the real-database
+smoke-test evidence and closes out the delivery.
+
+### Smoke-test evidence
+
+**Build**: `pnpm build` (backend `tsc`+esbuild, frontend `next build` static
+export, `copy:ui`) — exit 0.
+
+**Database under test**: a consistent point-in-time copy of the live
+production database at `~/.vibedeckx/data.sqlite` (122,896,384 bytes),
+taken with `sqlite3 ... ".backup"` into an isolated `$SMOKE_HOME` (the
+original file, its `-wal`, and its `-shm` were never opened for writing by
+this task — confirmed by comparing `data.sqlite`'s mtime before/after against
+the running dev server's own independent writes). Row counts of the major
+tables in the copy, captured before any smoke-test writes:
+
+| Table | Rows |
+|---|---|
+| `projects` | 22 |
+| `executor_groups` | 2 |
+| `executors` | 7 |
+| `executor_processes` | 31 |
+| `remote_executor_processes` | 0 |
+| `agent_sessions` | 914 |
+| `agent_session_entries` | 116,580 |
+| `remote_session_mappings` | 0 |
+| `tasks` | 1 |
+| `rules` | 0 |
+| `commands` | 0 |
+| `scheduled_tasks` | 0 |
+| `scheduled_task_runs` | 0 |
+| `global_settings` | 1 |
+| `remote_servers` | 1 |
+| `project_remotes` | 0 |
+| `machine_identity` | 0 |
+
+**Boot**: `HOME=$SMOKE_HOME node packages/vibedeckx/dist/bin.js --port 3210`
+started cleanly — `[AgentSession] Restored 849 dormant session(s) from
+database` (849 of 914 `agent_sessions` rows have ≥1 entry; the other 65 are
+skipped-as-stale by design), `[SharedServices] Hydrated 0 remote session
+mapping(s)`, `[Scheduler] Started with 0 scheduled task(s)`, `699 routes
+registered`. No migration errors; the only `ERROR`-level log line is the
+pre-existing, unrelated Fastify `FSTDEP022` router-options deprecation
+warning (present on every boot regardless of this task).
+
+**Read/write surface exercised** (all against the copy, on port 3210):
+- `GET /api/projects` → 22 legacy projects listed; `GET /api/projects/:id` →
+  single get OK; `POST /api/projects` (`smoke-proj`) → 201, then re-`GET
+  /api/projects` shows it → `WRITE-OK`.
+- **Watch item 1 (position-assignment subquery)**: project
+  `a267dba1-2a78-4b9f-94e2-c98282e814ab` (the `vibedeckx` project itself) has
+  one real pre-existing task at `position=1`. `POST .../tasks` with no
+  `position` in the body landed the new row at `position=2` (max+1),
+  confirmed by re-listing. That project had zero pre-existing rules/commands
+  in production, so two rules and two commands were created back-to-back in
+  the same project to exercise the same correlated-subquery path against a
+  self-created "pre-existing" row: rule 1 → `position=0`, rule 2 →
+  `position=1`; command 1 → `position=0`, command 2 → `position=1`. All four
+  confirm `coalesce(max(position),-1)+1` lands after the true max in every
+  case.
+- **Watch item 2 (`rules.reorder` ignores its `branch` param)**: preserved
+  quirk, not touched — no action taken per the brief.
+- **Watch item 3 (`remoteExecutorProcesses.insert` `.orReplace()`)**: the
+  production copy has **zero** `remote_executor_processes` rows, so
+  `GET /api/executor-processes/running` returning `{"processes":[]}` is the
+  only *organic* evidence (endpoint doesn't error on an empty table — that
+  table is read at boot via `remoteExecutorProcesses.getRunning()` into the
+  in-memory `remoteExecutorMap`, and per-request via
+  `getLastByExecutorIdsGroupedByServer` in the executor list route). To
+  positively verify the Kysely read path against a real row shape (not just
+  "doesn't error on empty"), one synthetic `project_remotes` row and one
+  synthetic `remote_executor_processes` row (matching the real schema
+  exactly, referencing a real executor/remote-server id from the copy) were
+  inserted directly into the throwaway copy via the `sqlite3` CLI while the
+  server held it open (WAL mode tolerates this). `GET
+  /api/projects/:id/executors` then correctly surfaced
+  `last_runs["b9dd1c65-…"]` alongside the executor's real `last_runs.local`
+  entry — confirming `getLastByExecutorIdsGroupedByServer`'s Kysely query
+  reads the table correctly. (This exercises the *read* side; the
+  `.orReplace()` *write* semantics themselves are already covered by Task 6's
+  38 characterization tests, part of the 209/209 passing suite.)
+- **Watch item 4 (agent session history replay, Task 7 ms timestamps)**:
+  `GET /api/projects/a267dba1…/agent-sessions` (main branch) returned 3
+  sessions with real titles ("Current CPU Load", "what day is it today",
+  "Model Inquiry") and millisecond-epoch `last_user_message_at` /
+  `last_completed_at` fields. `GET /api/agent-sessions/:sessionId` for one of
+  them returned the full 6-message history (`type:"user"`, correct
+  `timestamp`), served from the dormant in-memory session rebuilt at boot by
+  `restoreSessionsFromDb` → `getEntries` → `rebuildStoreFromRows` — i.e. this
+  is a live round-trip through the ms-timestamp entries table this task
+  series ported to Kysely in Task 7.
+- **Watch item 5 (scheduled tasks)**: `GET .../schedules` on the empty table
+  returned `{"schedules":[]}` cleanly; a schedule was then created
+  (`*/5 * * * *`) and the list re-fetched — `next_run_at` computed correctly
+  (`2026-07-05T11:10:00.000Z`, the next 5-minute boundary), proving
+  `fastify.scheduler.nextRunAt()` (croner) works against a Kysely-backed
+  `scheduledTasks`/`scheduledTaskRuns` pair with no scheduler startup errors.
+
+**Cleanup**: server killed, `$SMOKE_HOME` (including the DB copy) deleted,
+no stray files left in `/tmp` by this task. The original
+`~/.vibedeckx/data.sqlite` was never opened for writing by this task.
+
+### `DIALECT` marker inventory
+
+`grep -rn "DIALECT" packages/vibedeckx/src/storage/`:
+
+```
+storage/dialect.ts:15:   * DIALECT: sqlite rowid; the pg backend will need a monotonic column —
+storage/repositories/executors.ts:251:      // DIALECT-OK: ANSI window function (ROW_NUMBER), supported by both
+storage/repositories/executors.ts:356:      // DIALECT-OK: ANSI window function. ROW_NUMBER partitioned by
+```
+
+One marker flags a genuine sqlite-only dependency (`rowIdDesc()`'s use of
+`rowid` — see the pg-era follow-up list below); the other two are
+`DIALECT-OK` notes confirming the `ROW_NUMBER()` window-function usage in
+`executors.ts` is portable ANSI SQL, not a sqlite-specific construct — left
+in place as forward documentation rather than something requiring a
+pg-specific branch.
+
+### Restructured call sites from Task 1 (summary)
+
+Task 1 flipped the entire `Storage` interface to `Promise<T>` and converted
+~42 caller files. Only **one** true constructor/getter restructure was
+needed — everywhere else, storage-touching initialization was already a
+separate method callable as `async`:
+
+- `routes/executor-stream-handlers.ts`, `attachRemoteProcessStream` — its two
+  callers in `websocket-routes.ts` require a *synchronous* `ProcessStreamHandle`
+  return, but the body needed an async DB lookup before it could decide the
+  process's remote/local shape. Restructured to return a thin synchronous
+  `outerHandle` immediately (queues `handleInput` calls + a
+  `cleanupRequested` flag), while an async IIFE does the real setup (DB
+  lookup, WS/adapter connection, event handlers) and populates the real
+  handle when ready — flushing queued input, honoring an early `cleanup()`.
+
+Fire-and-forget boundaries (genuinely-sync call sites, e.g. raw
+`childProcess.on(...)` event callbacks, that stayed non-`async` and instead
+got `.catch(...)` attached to the now-Promise-returning storage calls inside
+them, since nothing downstream can await them):
+- `agent-session-manager.ts` `spawnAgent`'s `childProcess.on("close"/"error", ...)`
+  startup-failure/spawn-error `pushEntry` calls.
+- `process-manager.ts` and `remote-executor-monitor.ts` event-callback
+  storage writes (`onExit`/`close`/`error` handlers; `markFinished(...)` in a
+  WS `"message"` handler).
+- `plugins/shared-services.ts` `reverseConnectManager.setStatusChangeHandler`
+  callback (wrapped in an async IIFE + `.catch`).
+
+Everything else in the 42-file conversion was mechanical `async`/`await`
+propagation (recipe 2) or `.map`/`Promise.all` conversions (recipe 3) with no
+structural change — see `task-1-report.md` for the full file list and the two
+post-review fixes (persistEntry's four-write chain in
+`agent-session-manager.ts`; an unguarded async WS handler in
+`routes/reverse-connect-routes.ts`).
+
+### pg-era follow-ups already recorded in the ledger/notes
+
+Carried forward here for one place to look before starting a Postgres
+backend:
+
+1. **`handleStdout` per-session serialization.** `agent-session-manager.ts`'s
+   `handleStdout` calls storage fire-and-forget per stdout chunk. Fine under
+   better-sqlite3 (each write resolves synchronously from the JS event
+   loop's perspective, so writes for one session's chunks can't interleave
+   with each other in a way that corrupts ordering) — but a real
+   asynchronous pg driver needs explicit per-session serialization (e.g. an
+   await-chain/mutex keyed by session id) so concurrent chunks for the same
+   session can't write out of order. (`.superpowers/sdd/progress.md`, Task 1
+   minor-findings.)
+2. **`settings.update` pg `FOR UPDATE` caveat.** The Task 5 Kysely port wraps
+   the read-modify-write in `kdb.transaction().execute(...)`, which
+   serializes concurrent read-modify-write under better-sqlite3 (single
+   connection, transactions execute one at a time) — but on Postgres a bare
+   transaction does **not** serialize concurrent RMW at the default READ
+   COMMITTED isolation level; the pg backend additionally needs
+   `SELECT ... FOR UPDATE` (or equivalent row locking) inside the
+   transaction. Same caveat applies to every other JS
+   read-then-decide-then-write atomic method ported under the Task 5 porting
+   rule: `executors.setTargetDisabled`, `tasks.completeIfAssigned`.
+3. **`.orReplace()` is sqlite-specific.** Task 6's
+   `remoteExecutorProcesses.insert` uses Kysely's `.orReplace()`, which
+   Kysely documents as sqlite-only syntax. The pg port needs a different
+   upsert (`.onConflict(oc => oc.column(...).doUpdateSet(...))` or similar) —
+   this task's real-DB smoke run confirmed the *read* side
+   (`getLastByExecutorIdsGroupedByServer`, `getRunning`) is dialect-neutral
+   Kysely already; only the insert's conflict-resolution clause needs a
+   pg-specific rewrite.
+4. **`rowIdDesc()` tiebreaker needs a monotonic column on pg.** `dialect.ts`'s
+   `rowIdDesc()` returns raw `rowid desc` for the sqlite recency tiebreaker
+   (same-timestamp rows). Postgres has no stable `rowid` equivalent exposed
+   this way — the pg `DialectHelpers` implementation will need a real
+   monotonic column (e.g. an `INTEGER GENERATED ALWAYS AS IDENTITY` /
+   `bigserial` insertion-order column) added to every table that currently
+   relies on `rowIdDesc()` for tiebreaking, plus a migration to backfill it.
+
+### Full verification battery (Task 9)
+
+- `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json` → **PASS**, zero
+  output.
+- `cd apps/vibedeckx-ui && npx tsc --noEmit` → **PASS**, zero output.
+- `pnpm --filter vibedeckx test` → **PASS**, 209/209 tests, 10/10 files.
+- `pnpm --filter vibedeckx-ui lint` → **FAILS** (76 errors, 34 warnings), but
+  this is **pre-existing and unrelated** to this task series: `git diff
+  --stat 5076523..HEAD -- apps/vibedeckx-ui` is empty — zero lines of
+  frontend code were touched across all nine tasks of this rewrite (it's a
+  backend-only storage/Kysely port). The failing files
+  (`hooks/use-theme.tsx`, `lib/file-ref/rehype-file-refs*.test.ts`, etc.) are
+  byte-identical to the series' base commit (`5076523`). Frontend lint was
+  never gated by any of Tasks 1-8 (grep confirms this is the first task in
+  the series to even invoke it). Left unfixed as out-of-scope pre-existing
+  debt rather than folded into this delivery's diff.
+
+No regressions were found against the real production database; no source
+changes were made by this task.
