@@ -296,6 +296,17 @@ export interface Storage {
     getByProjectId: (projectId: string) => Promise<ExecutorGroup[]>;
     getById: (id: string) => Promise<ExecutorGroup | undefined>;
     getByBranch: (projectId: string, branch: string) => Promise<ExecutorGroup | undefined>;
+    /**
+     * Atomically create a group for (project_id, branch) unless one already
+     * exists there. The existence check and insert happen inside one storage
+     * call (backed by the table's UNIQUE(project_id, branch) constraint), so
+     * two concurrent creates for the same branch can no longer both observe
+     * "none exists" before either insert lands — the loser gets back the
+     * winner's row with `created: false` instead of an unhandled constraint-
+     * violation error. Callers that want the previous "409 Conflict" behavior
+     * should branch on `created`.
+     */
+    createIfBranchFree: (opts: { id: string; project_id: string; name: string; branch: string }) => Promise<{ created: boolean; group: ExecutorGroup }>;
     update: (id: string, opts: { name?: string }) => Promise<ExecutorGroup | undefined>;
     delete: (id: string) => Promise<void>;
   };
@@ -305,6 +316,15 @@ export interface Storage {
     getByGroupId: (groupId: string) => Promise<Executor[]>;
     getById: (id: string) => Promise<Executor | undefined>;
     update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => Promise<Executor | undefined>;
+    /**
+     * Atomically add/remove a single target from `disabled_targets` — the
+     * read-modify-write of the JSON array happens inside one storage call, so
+     * two concurrent toggles of *different* targets on the same executor no
+     * longer risk one clobbering the other (previously a caller-side
+     * read-then-write with an intervening await). Returns undefined if the
+     * executor doesn't exist.
+     */
+    setTargetDisabled: (id: string, target: string, disabled: boolean) => Promise<Executor | undefined>;
     delete: (id: string) => Promise<void>;
     reorder: (groupId: string, orderedIds: string[]) => Promise<void>;
   };
@@ -317,6 +337,14 @@ export interface Storage {
     getLastByExecutorIds: (executorIds: string[]) => Promise<ExecutorProcess[]>;
     updateStatus: (id: string, status: ExecutorProcessStatus, exitCode?: number) => Promise<void>;
     updatePid: (id: string, pid: number) => Promise<void>;
+    /**
+     * Mark a process "killed" only if it is still recorded as "running".
+     * Used by the PID-based fallback stop path (no in-memory confirmation
+     * the process is still alive), so a genuine concurrent completion/failure
+     * status written by the process's own exit handler around the same time
+     * can't be clobbered by a stale "killed" write.
+     */
+    markKilledIfRunning: (id: string) => Promise<void>;
   };
   scheduledTasks: {
     create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => Promise<ScheduledTask>;
@@ -377,6 +405,18 @@ export interface Storage {
     /** Pin a fingerprint→(publicKey, owner) on first connect. No-op if present. */
     pin(machineId: string, publicKey: string, userId: string): Promise<void>;
     touch(machineId: string): Promise<void>;
+    /**
+     * Atomically pin-if-absent (TOFU) and verify ownership of a machine
+     * fingerprint in one storage call, then touch `last_seen_at`. Closes the
+     * race where two concurrent first-connects for the same fingerprint under
+     * two different owners could both observe "unpinned" (via separate get()
+     * calls) before either pin() landed — with this method the insert and the
+     * ownership readback are one atomic step, so only one caller's userId can
+     * ever win the first claim. Returns whether `userId` is the (possibly
+     * just-claimed) owner, the definitive owner id either way, and whether
+     * this call was the one that performed the first-time pin.
+     */
+    claimOrVerify(machineId: string, publicKey: string, userId: string): Promise<{ owned: boolean; ownerId: string; created: boolean }>;
   };
   agentSessions: {
     create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => Promise<AgentSession>;
@@ -421,6 +461,27 @@ export interface Storage {
     get: (key: string) => Promise<string | undefined>;
     set: (key: string, value: string) => Promise<void>;
     delete: (key: string) => Promise<void>;
+    /**
+     * Atomically fetch the value for `key`, generating and persisting it via
+     * `factory()` on first use (INSERT OR IGNORE + re-read, all inside one
+     * storage call). Closes the race where two concurrent first-users of a
+     * lazily-initialized settings value (e.g. a generated key pair) could
+     * each see it missing and each generate + persist their own value, with
+     * the loser's generated value silently discarded — worse, a caller that
+     * cached its own locally-generated value instead of the persisted one
+     * would disagree with what's on disk.
+     */
+    getOrCreate: (key: string, factory: () => string) => Promise<string>;
+    /**
+     * Atomically read-modify-write a settings JSON blob: `mergeFn` receives
+     * the current raw value (or undefined if unset) and returns the new raw
+     * value to persist. The read and write happen inside one storage call
+     * with no intervening await, closing the lost-update race a caller's own
+     * `get()` + merge-in-JS + `set()` sequence has under concurrent writers.
+     * `mergeFn` may throw (e.g. on validation failure) to abort without
+     * writing — the rejection propagates to the caller unchanged.
+     */
+    update: (key: string, mergeFn: (current: string | undefined) => string) => Promise<string>;
   };
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;
@@ -431,6 +492,16 @@ export interface Storage {
     unarchive: (id: string) => Promise<Task | undefined>;
     delete: (id: string) => Promise<void>;
     reorder: (projectId: string, orderedIds: string[]) => Promise<void>;
+    /**
+     * Atomically complete the first non-done, non-archived task assigned to
+     * `branch` (same selection order as `getByProjectId` — position ASC), if
+     * any. Used by session-completion auto-close, which previously did
+     * `getByProjectId` + in-memory `.find()` + `update()` across two awaits —
+     * a concurrent edit to the found task (reassignment, cancellation) in
+     * that window would have been silently overwritten back to "done".
+     * Returns the updated task, or undefined if no task matched.
+     */
+    completeIfAssigned: (projectId: string, branch: string) => Promise<Task | undefined>;
   };
   rules: {
     create: (opts: { id: string; project_id: string; branch: string | null; name: string; content: string; enabled?: boolean }) => Promise<Rule>;

@@ -817,7 +817,11 @@ export class ProcessManager {
       }
     }
 
-    await this.storage.executorProcesses.updateStatus(processId, "killed");
+    // Guarded ("killed" only if still "running") so this doesn't clobber an
+    // accurate completion/failure status the process's own exit handler may
+    // write around the same time — this fallback path has no in-memory
+    // tracking to confirm the process is actually still alive.
+    await this.storage.executorProcesses.markKilledIfRunning(processId);
     return killed;
   }
 

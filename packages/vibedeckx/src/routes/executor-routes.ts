@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
-import type { ExecutorType, PromptProvider } from "../storage/types.js";
+import type { Executor, ExecutorType, PromptProvider } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
@@ -147,26 +147,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
       ? (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider
       : undefined;
 
-    // Per-target disable toggle: read the current set, add/remove this one
-    // target, and persist the whole array. Server-side RMW so the client
-    // doesn't have to send (and risk clobbering) the whole set. Note: the read
-    // and write are not in a single transaction, so two concurrent toggles on
-    // the same executor are last-write-wins — acceptable for a single-user UI.
-    let disabledTargetsUpdate: { disabled_targets: string[] } | undefined;
+    // Per-target disable toggle: add/remove this one target and persist the
+    // whole array. Pushed into a single atomic storage call
+    // (setTargetDisabled) so the client doesn't have to send (and risk
+    // clobbering) the whole set, and — unlike the previous caller-side
+    // read-modify-write with an intervening await — two concurrent toggles of
+    // *different* targets on the same executor can no longer clobber each
+    // other.
+    let executor: Executor | undefined = existing;
     if (target !== undefined && disabled !== undefined) {
-      const current = new Set(existing.disabled_targets);
-      if (disabled) current.add(target);
-      else current.delete(target);
-      disabledTargetsUpdate = { disabled_targets: [...current] };
+      executor = await fastify.storage.executors.setTargetDisabled(req.params.id, target, disabled) ?? executor;
     }
 
     const updateOpts = {
       ...rest,
       ...(parsedType !== undefined ? { executor_type: parsedType } : {}),
       ...(parsedProvider !== undefined ? { prompt_provider: parsedProvider } : {}),
-      ...(disabledTargetsUpdate ?? {}),
     };
-    const executor = await fastify.storage.executors.update(req.params.id, updateOpts);
+    if (Object.keys(updateOpts).length > 0) {
+      executor = await fastify.storage.executors.update(req.params.id, updateOpts) ?? executor;
+    }
     return reply.code(200).send({ executor });
   });
 

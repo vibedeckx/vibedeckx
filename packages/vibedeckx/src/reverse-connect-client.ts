@@ -158,14 +158,17 @@ export class ReverseConnectClient {
   }
 
   private async getOrCreateKeys(): Promise<{ privateKey: KeyObject; publicKeyPem: string }> {
-    const settings = this.localServer.storage.settings;
-    let pem = await settings.get(MACHINE_KEY_SETTING);
-    if (!pem) {
+    // Pushed into a single atomic storage call (settings.getOrCreate): two
+    // concurrent first-time challenges previously could both see the setting
+    // missing and each generate + persist their own keypair, with whichever
+    // set() landed last winning silently — leaving the other reply signed
+    // with a private key that no longer matches what's persisted, undermining
+    // the "stable machine identity across reconnects" this key exists for.
+    const pem = await this.localServer.storage.settings.getOrCreate(MACHINE_KEY_SETTING, () => {
       const { privateKey } = generateKeyPairSync("ed25519");
-      pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-      await settings.set(MACHINE_KEY_SETTING, pem);
       console.log("[ReverseClient] Generated new stable machine identity key");
-    }
+      return privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    });
     const privateKey = createPrivateKey(pem);
     const publicKeyPem = createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString();
     return { privateKey, publicKeyPem };

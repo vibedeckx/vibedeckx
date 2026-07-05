@@ -855,16 +855,17 @@ export class AgentSessionManager {
             this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
           }
 
-          // Auto-update task status to "done" for the branch's assigned task
-          const tasks = await this.storage.tasks.getByProjectId(session.projectId);
+          // Auto-update task status to "done" for the branch's assigned task.
+          // Pushed into a single atomic storage call (find-first-match +
+          // update) so a concurrent edit to the task between the read and
+          // the write can't be silently clobbered back to "done".
           const branchKey = session.branch ?? "";
-          const assignedTask = tasks.find(t => t.assigned_branch === branchKey);
-          if (assignedTask && assignedTask.status !== "done") {
-            await this.storage.tasks.update(assignedTask.id, { status: "done" });
+          const completedTask = await this.storage.tasks.completeIfAssigned(session.projectId, branchKey);
+          if (completedTask) {
             this.eventBus?.emit({
               type: "task:updated",
               projectId: session.projectId,
-              task: { ...assignedTask, status: "done" } as Record<string, unknown>,
+              task: { ...completedTask } as Record<string, unknown>,
             });
           }
         }

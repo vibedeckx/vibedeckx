@@ -1283,6 +1283,26 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ project_id: projectId, branch });
       },
 
+      createIfBranchFree: async ({ id, project_id, name, branch }) => {
+        try {
+          db.prepare(
+            `INSERT INTO executor_groups (id, project_id, name, branch) VALUES (@id, @project_id, @name, @branch)`
+          ).run({ id, project_id, name, branch });
+          const group = db
+            .prepare<{ id: string }, ExecutorGroup>(`SELECT * FROM executor_groups WHERE id = @id`)
+            .get({ id })!;
+          return { created: true, group };
+        } catch (err) {
+          if (!(err instanceof Error) || !/UNIQUE constraint failed/.test(err.message)) throw err;
+          const group = db
+            .prepare<{ project_id: string; branch: string }, ExecutorGroup>(
+              `SELECT * FROM executor_groups WHERE project_id = @project_id AND branch = @branch`
+            )
+            .get({ project_id, branch })!;
+          return { created: false, group };
+        }
+      },
+
       update: async (id: string, opts: { name?: string }) => {
         if (opts.name !== undefined) {
           db.prepare(`UPDATE executor_groups SET name = @name WHERE id = @id`).run({ id, name: opts.name });
@@ -1379,6 +1399,18 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? mapExecutorRow(row) : undefined;
       },
 
+      setTargetDisabled: async (id: string, target: string, disabled: boolean) => {
+        const existing = db.prepare<{ id: string }, ExecutorRow>(`SELECT * FROM executors WHERE id = @id`).get({ id });
+        if (!existing) return undefined;
+        const current = new Set(existing.disabled_targets ? JSON.parse(existing.disabled_targets) as string[] : []);
+        if (disabled) current.add(target);
+        else current.delete(target);
+        db.prepare(`UPDATE executors SET disabled_targets = @disabled_targets WHERE id = @id`)
+          .run({ id, disabled_targets: JSON.stringify([...current]) });
+        const row = db.prepare<{ id: string }, ExecutorRow>(`SELECT * FROM executors WHERE id = @id`).get({ id })!;
+        return mapExecutorRow(row);
+      },
+
       delete: async (id: string) => {
         db.prepare(`DELETE FROM executors WHERE id = @id`).run({ id });
       },
@@ -1456,6 +1488,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         db.prepare(
           `UPDATE executor_processes SET pid = @pid WHERE id = @id`
         ).run({ id, pid });
+      },
+
+      markKilledIfRunning: async (id: string) => {
+        db.prepare(
+          `UPDATE executor_processes SET status = 'killed', exit_code = NULL, finished_at = @finished_at WHERE id = @id AND status = 'running'`
+        ).run({ id, finished_at: new Date().toISOString() });
       },
     },
 
@@ -1695,6 +1733,21 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           `UPDATE machine_identity SET last_seen_at = datetime('now') WHERE machine_id = @machine_id`
         ).run({ machine_id: machineId });
       },
+
+      claimOrVerify: async (machineId: string, publicKey: string, userId: string) => {
+        const insertResult = db.prepare(
+          `INSERT OR IGNORE INTO machine_identity (machine_id, public_key, user_id) VALUES (@machine_id, @public_key, @user_id)`
+        ).run({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "" });
+        db.prepare(
+          `UPDATE machine_identity SET last_seen_at = datetime('now') WHERE machine_id = @machine_id`
+        ).run({ machine_id: machineId });
+        const row = db
+          .prepare<{ machine_id: string }, MachineIdentityRow>(
+            `SELECT * FROM machine_identity WHERE machine_id = @machine_id`
+          )
+          .get({ machine_id: machineId })!;
+        return { owned: row.user_id === (userId ?? ""), ownerId: row.user_id, created: insertResult.changes > 0 };
+      },
     },
 
     agentSessions: {
@@ -1905,6 +1958,33 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       delete: async (key: string) => {
         db.prepare(`DELETE FROM global_settings WHERE key = @key`).run({ key });
       },
+
+      getOrCreate: async (key: string, factory: () => string) => {
+        const existing = db
+          .prepare<{ key: string }, { value: string }>(`SELECT value FROM global_settings WHERE key = @key`)
+          .get({ key });
+        if (existing) return existing.value;
+        const value = factory();
+        db.prepare(
+          `INSERT INTO global_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO NOTHING`
+        ).run({ key, value });
+        const row = db
+          .prepare<{ key: string }, { value: string }>(`SELECT value FROM global_settings WHERE key = @key`)
+          .get({ key })!;
+        return row.value;
+      },
+
+      update: async (key: string, mergeFn: (current: string | undefined) => string) => {
+        const existing = db
+          .prepare<{ key: string }, { value: string }>(`SELECT value FROM global_settings WHERE key = @key`)
+          .get({ key });
+        const next = mergeFn(existing?.value);
+        db.prepare(
+          `INSERT INTO global_settings (key, value) VALUES (@key, @value)
+           ON CONFLICT(key) DO UPDATE SET value = @value`
+        ).run({ key, value: next });
+        return next;
+      },
     },
 
     tasks: {
@@ -2011,6 +2091,20 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           }
         });
         transaction();
+      },
+
+      completeIfAssigned: async (projectId: string, branch: string) => {
+        const row = db
+          .prepare<{ project_id: string; assigned_branch: string }, { id: string }>(
+            `SELECT id FROM tasks
+             WHERE project_id = @project_id AND assigned_branch = @assigned_branch
+               AND archived_at IS NULL AND status != 'done'
+             ORDER BY position ASC LIMIT 1`
+          )
+          .get({ project_id: projectId, assigned_branch: branch });
+        if (!row) return undefined;
+        db.prepare(`UPDATE tasks SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = @id`).run({ id: row.id });
+        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id: row.id });
       },
     },
 

@@ -83,18 +83,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
               return;
             }
 
-            const fingerprint = createHash("sha256").update(publicKey).digest("hex");
-            const existing = await fastify.storage.machineIdentity.get(fingerprint);
-
-            // Cross-tenant guard: a machine already pinned to another owner cannot
-            // be re-claimed under a different token's owner.
-            if (existing && existing.user_id !== ownerId) {
-              console.warn(`[ReverseConnect] Machine ${fingerprint.slice(0, 12)} owner mismatch — rejecting ${serverId}`);
-              socket.close(4003, "Machine owner mismatch");
-              return;
-            }
-
-            // Prove private-key possession over the fresh nonce.
+            // Prove private-key possession over the fresh nonce *before* touching
+            // any machine-identity state — signature validity doesn't depend on
+            // ownership, and we don't want to pin/verify against an unproven key.
             let valid = false;
             try {
               valid = cryptoVerify(null, nonce, publicKey, Buffer.from(signature, "base64"));
@@ -106,13 +97,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
               return;
             }
 
-            // First connect: pin fingerprint→(publicKey, owner). The token, which
-            // determines the owner, bootstraps trust (TOFU).
-            if (!existing) {
-              await fastify.storage.machineIdentity.pin(fingerprint, publicKey, ownerId);
+            const fingerprint = createHash("sha256").update(publicKey).digest("hex");
+            // Atomic pin-if-absent (TOFU) + ownership verification, in one
+            // storage call. Previously this was a get() (cross-tenant guard) then
+            // a conditional pin() across two awaited storage calls — two
+            // concurrent first-connects for the same fingerprint under two
+            // different owners' tokens could both observe "unpinned" before
+            // either pin() landed, letting both slip past the ownership guard.
+            const { owned, created } = await fastify.storage.machineIdentity.claimOrVerify(fingerprint, publicKey, ownerId);
+            if (!owned) {
+              console.warn(`[ReverseConnect] Machine ${fingerprint.slice(0, 12)} owner mismatch — rejecting ${serverId}`);
+              socket.close(4003, "Machine owner mismatch");
+              return;
+            }
+            if (created) {
               console.log(`[ReverseConnect] Pinned new machine identity ${fingerprint.slice(0, 12)} for ${serverId}`);
             }
-            await fastify.storage.machineIdentity.touch(fingerprint);
 
             console.log(`[ReverseConnect] Machine auth verified ${fingerprint.slice(0, 12)} for ${serverId}`);
             fastify.reverseConnectManager.registerConnection(serverId, ws, fingerprint);

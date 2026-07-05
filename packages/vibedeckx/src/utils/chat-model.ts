@@ -124,8 +124,13 @@ function migrateLegacyConfig(parsed: any): ChatProviderConfig {
   return { apiKeys, main, fast: { ...main } };
 }
 
-export async function getChatProviderConfig(storage: Storage): Promise<ChatProviderConfig> {
-  const raw = await storage.settings.get("chat_provider");
+/**
+ * Pure parse/migrate step, split out of `getChatProviderConfig` so a caller
+ * that already has the raw value in hand (e.g. inside an atomic
+ * `settings.update` merge callback) doesn't have to re-fetch it from
+ * storage to interpret it.
+ */
+export function parseChatProviderConfig(raw: string | undefined): ChatProviderConfig {
   if (!raw) return defaultConfig();
   try {
     const parsed = JSON.parse(raw);
@@ -144,6 +149,11 @@ export async function getChatProviderConfig(storage: Storage): Promise<ChatProvi
   } catch {
     return defaultConfig();
   }
+}
+
+export async function getChatProviderConfig(storage: Storage): Promise<ChatProviderConfig> {
+  const raw = await storage.settings.get("chat_provider");
+  return parseChatProviderConfig(raw);
 }
 
 function resolveModel(choice: ModelChoice, apiKeys: Record<ProviderId, string>): AnyLanguageModel {

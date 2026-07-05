@@ -3,6 +3,7 @@ import fp from "fastify-plugin";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
 import {
   getChatProviderConfig,
+  parseChatProviderConfig,
   normalizeModel,
   isProviderId,
   PROVIDER_IDS,
@@ -13,6 +14,10 @@ import {
 } from "../utils/chat-model.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
+
+/** Thrown by the chat-provider PUT handler's merge callback to abort the
+ * atomic settings.update() write and surface a 400 with the given message. */
+class SettingsValidationError extends Error {}
 
 const DEFAULT_PROXY_CONFIG: ProxyConfig = { type: "none", host: "", port: 0 };
 
@@ -255,37 +260,49 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (requireAuth(req, reply) === null) return;
     const { apiKeys, main, fast } = req.body;
 
-    const existing = await getChatProviderConfig(fastify.storage);
+    // Atomic read-modify-write: the merge is computed and persisted inside
+    // one storage call (settings.update), so a concurrent chat-provider PUT
+    // can no longer land between our read of `existing` and our write and
+    // have its apiKey/model change silently reverted (lost update) — this
+    // blob holds provider API keys and main/fast model routing, so losing a
+    // concurrent edit here is a real functional regression, not just cosmetic.
+    let updated!: ChatProviderConfig;
+    try {
+      await fastify.storage.settings.update("chat_provider", (current) => {
+        const existing = parseChatProviderConfig(current);
 
-    // Merge API keys per provider; only providers present in the body are updated.
-    const mergedKeys = { ...existing.apiKeys };
-    if (apiKeys !== undefined) {
-      if (typeof apiKeys !== "object" || apiKeys === null) {
-        return reply.code(400).send({ error: "apiKeys must be an object" });
-      }
-      for (const id of PROVIDER_IDS) {
-        const value = (apiKeys as Record<string, unknown>)[id];
-        if (value !== undefined) {
-          if (typeof value !== "string") {
-            return reply.code(400).send({ error: `apiKeys.${id} must be a string` });
+        // Merge API keys per provider; only providers present in the body are updated.
+        const mergedKeys = { ...existing.apiKeys };
+        if (apiKeys !== undefined) {
+          if (typeof apiKeys !== "object" || apiKeys === null) {
+            throw new SettingsValidationError("apiKeys must be an object");
           }
-          mergedKeys[id] = value;
+          for (const id of PROVIDER_IDS) {
+            const value = (apiKeys as Record<string, unknown>)[id];
+            if (value !== undefined) {
+              if (typeof value !== "string") {
+                throw new SettingsValidationError(`apiKeys.${id} must be a string`);
+              }
+              mergedKeys[id] = value;
+            }
+          }
         }
+
+        const mainResult = parseChoice(main, existing.main, "main");
+        if ("error" in mainResult) throw new SettingsValidationError(mainResult.error);
+        const fastResult = parseChoice(fast, existing.fast, "fast");
+        if ("error" in fastResult) throw new SettingsValidationError(fastResult.error);
+
+        updated = { apiKeys: mergedKeys, main: mainResult, fast: fastResult };
+        return JSON.stringify(updated);
+      });
+    } catch (err) {
+      if (err instanceof SettingsValidationError) {
+        return reply.code(400).send({ error: err.message });
       }
+      throw err;
     }
 
-    const mainResult = parseChoice(main, existing.main, "main");
-    if ("error" in mainResult) return reply.code(400).send({ error: mainResult.error });
-    const fastResult = parseChoice(fast, existing.fast, "fast");
-    if ("error" in fastResult) return reply.code(400).send({ error: fastResult.error });
-
-    const updated: ChatProviderConfig = {
-      apiKeys: mergedKeys,
-      main: mainResult,
-      fast: fastResult,
-    };
-
-    await fastify.storage.settings.set("chat_provider", JSON.stringify(updated));
     console.log(
       `[Settings] Chat provider updated: main=${updated.main.provider}/${updated.main.model}, fast=${updated.fast.provider}/${updated.fast.model}`,
     );

@@ -58,20 +58,25 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { name, branch } = req.body;
-    const existing = await fastify.storage.executorGroups.getByBranch(req.params.projectId, branch);
-    if (existing) {
-      return reply.code(409).send({ error: "An executor group already exists for this branch" });
-    }
-
     const id = randomUUID();
-    const group = await fastify.storage.executorGroups.create({
+    // Atomic check-then-create: the previous getByBranch()-then-create()
+    // sequence had a window (two awaited storage calls) where two concurrent
+    // POSTs for the same branch could both observe "none exists" and both
+    // attempt to insert — the UNIQUE(project_id, branch) constraint stopped
+    // the duplicate row, but the loser got an unhandled 500 instead of the
+    // intended 409. createIfBranchFree() does the check-and-insert in one
+    // storage call and reports which branch happened.
+    const result = await fastify.storage.executorGroups.createIfBranchFree({
       id,
       project_id: req.params.projectId,
       name,
       branch,
     });
+    if (!result.created) {
+      return reply.code(409).send({ error: "An executor group already exists for this branch" });
+    }
 
-    return reply.code(201).send({ group });
+    return reply.code(201).send({ group: result.group });
   });
 
   // Update executor group (rename)
