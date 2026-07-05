@@ -4,13 +4,14 @@ import { Kysely, SqliteDialect } from "kysely";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage } from "./types.js";
+import type { Task, TaskStatus, TaskPriority, Rule, Command, Storage } from "./types.js";
 import type { DB } from "./schema.js";
 import { sqliteHelpers } from "./dialect.js";
 import { createScheduledRepos } from "./repositories/scheduled.js";
 import { createCoreRepos } from "./repositories/core.js";
 import { createRemoteServerRepos } from "./repositories/remote-servers.js";
 import { createExecutorRepos } from "./repositories/executors.js";
+import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -720,196 +721,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createRemoteServerRepos(kdb, h),
     ...createExecutorRepos(kdb, h),
     ...createScheduledRepos(kdb, h),
-
-    agentSessions: {
-      // Millisecond-precision timestamps are set explicitly here (and in the
-      // UPDATE statements below) so existing databases whose DEFAULTs still
-      // resolve to CURRENT_TIMESTAMP also get sub-second writes — this is
-      // what lets getLatestByBranch break ties deterministically.
-      create: async ({ id, project_id, branch, permission_mode, agent_type }) => {
-        db.prepare(
-          `INSERT INTO agent_sessions (id, project_id, branch, status, permission_mode, agent_type, created_at, updated_at)
-           VALUES (@id, @project_id, @branch, 'running', @permission_mode, @agent_type,
-                   strftime('%Y-%m-%d %H:%M:%f', 'now'), strftime('%Y-%m-%d %H:%M:%f', 'now'))`
-        ).run({ id, project_id, branch, permission_mode: permission_mode ?? 'edit', agent_type: agent_type ?? 'claude-code' });
-        return db
-          .prepare<{ id: string }, AgentSession>(`SELECT * FROM agent_sessions WHERE id = @id`)
-          .get({ id })!;
-      },
-
-      getAll: async () => {
-        return db
-          .prepare<{}, AgentSession>(`SELECT * FROM agent_sessions ORDER BY updated_at DESC`)
-          .all({});
-      },
-
-      getById: async (id: string) => {
-        return db
-          .prepare<{ id: string }, AgentSession>(`SELECT * FROM agent_sessions WHERE id = @id`)
-          .get({ id });
-      },
-
-      getByProjectId: async (projectId: string) => {
-        return db
-          .prepare<{ project_id: string }, AgentSession>(
-            `SELECT * FROM agent_sessions WHERE project_id = @project_id ORDER BY updated_at DESC`
-          )
-          .all({ project_id: projectId });
-      },
-
-      getByBranch: async (projectId: string, branch: string) => {
-        return db
-          .prepare<{ project_id: string; branch: string }, AgentSession>(
-            `SELECT * FROM agent_sessions WHERE project_id = @project_id AND branch = @branch
-             ORDER BY updated_at DESC LIMIT 1`
-          )
-          .get({ project_id: projectId, branch });
-      },
-
-      listByBranch: async (projectId: string, branch: string) => {
-        return db
-          .prepare<{ project_id: string; branch: string }, AgentSession>(
-            `SELECT * FROM agent_sessions WHERE project_id = @project_id AND branch = @branch
-             ORDER BY updated_at DESC, created_at DESC`
-          )
-          .all({ project_id: projectId, branch });
-      },
-
-      getLatestByBranch: async (projectId: string, branch: string) => {
-        return db
-          .prepare<{ project_id: string; branch: string }, AgentSession>(
-            `SELECT * FROM agent_sessions WHERE project_id = @project_id AND branch = @branch
-             ORDER BY updated_at DESC, created_at DESC LIMIT 1`
-          )
-          .get({ project_id: projectId, branch });
-      },
-
-      updateStatus: async (id: string, status: AgentSessionStatus) => {
-        db.prepare(
-          `UPDATE agent_sessions SET status = @status, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
-        ).run({ id, status });
-      },
-
-      updateStatusPreservingTimestamp: async (id: string, status: AgentSessionStatus) => {
-        db.prepare(
-          `UPDATE agent_sessions SET status = @status WHERE id = @id`
-        ).run({ id, status });
-      },
-
-      updatePermissionMode: async (id: string, mode: string) => {
-        db.prepare(
-          `UPDATE agent_sessions SET permission_mode = @mode, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
-        ).run({ id, mode });
-      },
-
-      updateAgentType: async (id: string, agent_type: string) => {
-        db.prepare(
-          `UPDATE agent_sessions SET agent_type = @agent_type, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
-        ).run({ id, agent_type });
-      },
-
-      updateTitle: async (id: string, title: string | null) => {
-        db.prepare(
-          `UPDATE agent_sessions SET title = @title, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
-        ).run({ id, title });
-      },
-
-      // Toggle favorite without touching updated_at — favoriting is a passive
-      // bookmark, not a "this session was active" signal, so it must not
-      // disturb the dropdown's recency ordering.
-      setFavorited: async (id: string, favorited: boolean) => {
-        db.prepare(
-          `UPDATE agent_sessions SET favorited_at = @ts WHERE id = @id`
-        ).run({ id, ts: favorited ? Date.now() : null });
-      },
-
-      touchUpdatedAt: async (id: string) => {
-        db.prepare(`UPDATE agent_sessions SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`)
-          .run({ id });
-      },
-
-      markUserMessage: async (id: string, timestampMs: number) => {
-        db.prepare(`UPDATE agent_sessions SET last_user_message_at = @ts WHERE id = @id`)
-          .run({ id, ts: timestampMs });
-      },
-
-      markCompleted: async (id: string, timestampMs: number) => {
-        db.prepare(`UPDATE agent_sessions SET last_completed_at = @ts WHERE id = @id`)
-          .run({ id, ts: timestampMs });
-      },
-
-      delete: async (id: string) => {
-        db.prepare(`DELETE FROM agent_sessions WHERE id = @id`).run({ id });
-      },
-
-      upsertEntry: async (sessionId: string, entryIndex: number, data: string) => {
-        db.prepare(
-          `INSERT INTO agent_session_entries (session_id, entry_index, data)
-           VALUES (@session_id, @entry_index, @data)
-           ON CONFLICT(session_id, entry_index) DO UPDATE SET data = excluded.data`
-        ).run({ session_id: sessionId, entry_index: entryIndex, data });
-      },
-
-      getEntries: async (sessionId: string) => {
-        return db
-          .prepare<{ sid: string }, { entry_index: number; data: string }>(
-            `SELECT entry_index, data FROM agent_session_entries WHERE session_id = @sid ORDER BY entry_index ASC`
-          )
-          .all({ sid: sessionId });
-      },
-
-      deleteEntries: async (sessionId: string) => {
-        db.prepare(`DELETE FROM agent_session_entries WHERE session_id = @id`).run({ id: sessionId });
-      },
-
-      countEntries: async () => {
-        return db.prepare<{}, { session_id: string; cnt: number }>(
-          `SELECT session_id, COUNT(*) as cnt FROM agent_session_entries GROUP BY session_id`
-        ).all({});
-      },
-    },
-
-    remoteSessionMappings: {
-      upsert: async (localSessionId, projectId, remoteServerId, remoteSessionId, branch) => {
-        db.prepare(
-          `INSERT INTO remote_session_mappings (local_session_id, project_id, remote_server_id, remote_session_id, branch)
-           VALUES (@local_session_id, @project_id, @remote_server_id, @remote_session_id, @branch)
-           ON CONFLICT(local_session_id) DO UPDATE SET
-             project_id = @project_id,
-             remote_server_id = @remote_server_id,
-             remote_session_id = @remote_session_id,
-             branch = @branch`
-        ).run({
-          local_session_id: localSessionId,
-          project_id: projectId,
-          remote_server_id: remoteServerId,
-          remote_session_id: remoteSessionId,
-          branch: branch,
-        });
-      },
-
-      getAll: async () => {
-        return db.prepare<{}, { local_session_id: string; project_id: string; remote_server_id: string; remote_session_id: string; branch: string | null }>(
-          `SELECT local_session_id, project_id, remote_server_id, remote_session_id, branch FROM remote_session_mappings`
-        ).all({});
-      },
-
-      delete: async (localSessionId: string) => {
-        db.prepare(`DELETE FROM remote_session_mappings WHERE local_session_id = @id`).run({ id: localSessionId });
-      },
-
-      isTitleResolved: async (localSessionId: string) => {
-        const row = db.prepare<{ id: string }, { title_resolved: number }>(
-          `SELECT title_resolved FROM remote_session_mappings WHERE local_session_id = @id`
-        ).get({ id: localSessionId });
-        return row?.title_resolved === 1;
-      },
-
-      markTitleResolved: async (localSessionId: string) => {
-        db.prepare(`UPDATE remote_session_mappings SET title_resolved = 1 WHERE local_session_id = @id`)
-          .run({ id: localSessionId });
-      },
-    },
+    ...createAgentSessionRepos(kdb, h),
 
     tasks: {
       create: async ({ id, project_id, title, description, status, priority, assigned_branch }) => {
