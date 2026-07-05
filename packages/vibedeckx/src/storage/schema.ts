@@ -3,6 +3,16 @@ import type { ColumnType, Generated } from "kysely";
 /** Boolean column: 0/1 under sqlite, native boolean under pg. Always read via fromDbBool(), write via DialectHelpers.toDbBool(). */
 export type DbBool = ColumnType<number | boolean, number | boolean, number | boolean>;
 
+/**
+ * Boolean column that also has a SQL DEFAULT (optional on insert/update).
+ * NOT `Generated<DbBool>` — Kysely's Selectable/Insertable/Updateable helpers
+ * only unwrap one level of `ColumnType` (see kysely's util/column-type.d.ts:
+ * `SelectType`/`InsertType`/`UpdateType`), so nesting `Generated<>` around the
+ * `DbBool` `ColumnType` leaves the projected field typed as the raw `DbBool`
+ * marker object instead of `number | boolean`. Flattened by hand instead.
+ */
+export type GeneratedDbBool = ColumnType<number | boolean, number | boolean | undefined, number | boolean>;
+
 export interface ProjectsTable {
   id: string;
   name: string;
@@ -37,7 +47,7 @@ export interface ExecutorsTable {
   executor_type: Generated<string>;
   prompt_provider: string | null;
   cwd: string | null;
-  pty: Generated<DbBool>;
+  pty: GeneratedDbBool;
   position: Generated<number>;
   disabled_targets: Generated<string>; // JSON: string[]
   created_at: Generated<string>;
@@ -126,7 +136,7 @@ export interface RulesTable {
   branch: string | null;
   name: string;
   content: string;
-  enabled: Generated<DbBool>;
+  enabled: GeneratedDbBool;
   position: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
@@ -179,7 +189,7 @@ export interface RemoteSessionMappingsTable {
   remote_server_id: string;
   remote_session_id: string;
   branch: string | null;
-  title_resolved: Generated<DbBool>;
+  title_resolved: GeneratedDbBool;
 }
 
 export interface ScheduledTasksTable {
@@ -189,7 +199,7 @@ export interface ScheduledTasksTable {
   cron_expr: string;
   timezone: string;
   target: Generated<string>;
-  enabled: Generated<DbBool>;
+  enabled: GeneratedDbBool;
   run_type: Generated<string>;
   content: string;
   cwd_mode: Generated<string>;

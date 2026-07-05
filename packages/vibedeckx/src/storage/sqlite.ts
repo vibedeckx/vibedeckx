@@ -4,9 +4,10 @@ import { Kysely, SqliteDialect } from "kysely";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer, RemoteExecutorProcessRow, MachineIdentityRow, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus } from "./types.js";
+import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer, RemoteExecutorProcessRow, MachineIdentityRow } from "./types.js";
 import type { DB } from "./schema.js";
 import { sqliteHelpers } from "./dialect.js";
+import { createScheduledRepos } from "./repositories/scheduled.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -704,9 +705,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
   await mkdir(path.dirname(dbPath), { recursive: true });
   const db = createDatabase(dbPath); // legacy DDL/migrations, kept verbatim
-  // Kysely wraps the same better-sqlite3 handle. Not yet used by any query
-  // below (Task 3 is scaffolding only) — repositories start consuming kdb/h
-  // in Task 4+.
+  // Kysely wraps the same better-sqlite3 handle. Ported repository groups
+  // (see storage/repositories/*.ts) consume kdb/h via factory functions
+  // spread into the returned object below; groups not yet ported still use
+  // `db.prepare(...)` directly inline.
   const kdb = new Kysely<DB>({ dialect: new SqliteDialect({ database: db }) });
   const h = sqliteHelpers;
 
@@ -779,20 +781,6 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     prompt_provider: (row.prompt_provider as PromptProvider) ?? null,
     pty: row.pty === 1,
     disabled_targets: row.disabled_targets ? JSON.parse(row.disabled_targets) as string[] : [],
-  });
-
-  type ScheduledTaskRow = { id: string; project_id: string; name: string; cron_expr: string; timezone: string; target: string; enabled: number; run_type: string; content: string; cwd_mode: string; branch: string | null; directory: string | null; timeout_seconds: number; created_at: string; updated_at: string };
-  const mapScheduledTaskRow = (row: ScheduledTaskRow): ScheduledTask => ({
-    ...row,
-    enabled: row.enabled === 1,
-    run_type: row.run_type as ScheduledTaskRunType,
-    cwd_mode: row.cwd_mode as ScheduledTaskCwdMode,
-  });
-
-  type ScheduledTaskRunRow = { id: string; schedule_id: string; status: string; exit_code: number | null; output: string | null; process_id: string | null; started_at: string; finished_at: string | null };
-  const mapScheduledTaskRunRow = (row: ScheduledTaskRunRow): ScheduledTaskRun => ({
-    ...row,
-    status: row.status as ScheduledTaskRunStatus,
   });
 
   return {
@@ -1501,115 +1489,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       },
     },
 
-    scheduledTasks: {
-      create: async ({ id, project_id, name, cron_expr, timezone, run_type, content, cwd_mode, branch, directory, timeout_seconds, enabled, target }) => {
-        db.prepare(
-          `INSERT INTO scheduled_tasks (id, project_id, name, cron_expr, timezone, target, enabled, run_type, content, cwd_mode, branch, directory, timeout_seconds)
-           VALUES (@id, @project_id, @name, @cron_expr, @timezone, @target, @enabled, @run_type, @content, @cwd_mode, @branch, @directory, @timeout_seconds)`
-        ).run({
-          id, project_id, name, cron_expr, timezone,
-          target: target ?? 'local',
-          enabled: enabled === false ? 0 : 1,
-          run_type, content, cwd_mode,
-          branch: branch ?? null,
-          directory: directory ?? null,
-          timeout_seconds: timeout_seconds ?? 1800,
-        });
-        const row = db.prepare<{ id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE id = @id`).get({ id })!;
-        return mapScheduledTaskRow(row);
-      },
-      getByProjectId: async (projectId) => {
-        const rows = db
-          .prepare<{ project_id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE project_id = @project_id ORDER BY created_at ASC, id ASC`)
-          .all({ project_id: projectId });
-        return rows.map(mapScheduledTaskRow);
-      },
-      getById: async (id) => {
-        const row = db.prepare<{ id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE id = @id`).get({ id });
-        return row ? mapScheduledTaskRow(row) : undefined;
-      },
-      getAllEnabled: async () => {
-        const rows = db.prepare<[], ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE enabled = 1`).all();
-        return rows.map(mapScheduledTaskRow);
-      },
-      update: async (id, opts) => {
-        const sets: string[] = [];
-        const params: Record<string, unknown> = { id };
-        if (opts.name !== undefined) { sets.push("name = @name"); params.name = opts.name; }
-        if (opts.cron_expr !== undefined) { sets.push("cron_expr = @cron_expr"); params.cron_expr = opts.cron_expr; }
-        if (opts.timezone !== undefined) { sets.push("timezone = @timezone"); params.timezone = opts.timezone; }
-        if (opts.target !== undefined) { sets.push("target = @target"); params.target = opts.target; }
-        if (opts.enabled !== undefined) { sets.push("enabled = @enabled"); params.enabled = opts.enabled ? 1 : 0; }
-        if (opts.run_type !== undefined) { sets.push("run_type = @run_type"); params.run_type = opts.run_type; }
-        if (opts.content !== undefined) { sets.push("content = @content"); params.content = opts.content; }
-        if (opts.cwd_mode !== undefined) { sets.push("cwd_mode = @cwd_mode"); params.cwd_mode = opts.cwd_mode; }
-        if (opts.branch !== undefined) { sets.push("branch = @branch"); params.branch = opts.branch; }
-        if (opts.directory !== undefined) { sets.push("directory = @directory"); params.directory = opts.directory; }
-        if (opts.timeout_seconds !== undefined) { sets.push("timeout_seconds = @timeout_seconds"); params.timeout_seconds = opts.timeout_seconds; }
-        if (sets.length > 0) {
-          sets.push("updated_at = CURRENT_TIMESTAMP");
-          db.prepare(`UPDATE scheduled_tasks SET ${sets.join(", ")} WHERE id = @id`).run(params);
-        }
-        const row = db.prepare<{ id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE id = @id`).get({ id });
-        return row ? mapScheduledTaskRow(row) : undefined;
-      },
-      delete: async (id) => {
-        db.prepare(`DELETE FROM scheduled_tasks WHERE id = @id`).run({ id });
-      },
-    },
-
-    scheduledTaskRuns: {
-      create: async ({ id, schedule_id, status, process_id }) => {
-        db.prepare(
-          `INSERT INTO scheduled_task_runs (id, schedule_id, status, process_id, finished_at)
-           VALUES (@id, @schedule_id, @status, @process_id, CASE WHEN @status = 'running' THEN NULL ELSE CURRENT_TIMESTAMP END)`
-        ).run({ id, schedule_id, status: status ?? "running", process_id: process_id ?? null });
-        const row = db.prepare<{ id: string }, ScheduledTaskRunRow>(`SELECT * FROM scheduled_task_runs WHERE id = @id`).get({ id })!;
-        return mapScheduledTaskRunRow(row);
-      },
-      getById: async (id) => {
-        const row = db.prepare<{ id: string }, ScheduledTaskRunRow>(`SELECT * FROM scheduled_task_runs WHERE id = @id`).get({ id });
-        return row ? mapScheduledTaskRunRow(row) : undefined;
-      },
-      getByScheduleId: async (scheduleId, limit = 50) => {
-        const rows = db.prepare<{ schedule_id: string; limit: number }, ScheduledTaskRunRow>(
-          `SELECT id, schedule_id, status, exit_code, NULL AS output, process_id, started_at, finished_at
-           FROM scheduled_task_runs WHERE schedule_id = @schedule_id
-           ORDER BY started_at DESC, rowid DESC LIMIT @limit`
-        ).all({ schedule_id: scheduleId, limit });
-        return rows.map(mapScheduledTaskRunRow);
-      },
-      getLastByScheduleIds: async (scheduleIds) => {
-        const stmt = db.prepare<{ schedule_id: string }, ScheduledTaskRunRow>(
-          `SELECT id, schedule_id, status, exit_code, NULL AS output, process_id, started_at, finished_at
-           FROM scheduled_task_runs WHERE schedule_id = @schedule_id
-           ORDER BY started_at DESC, rowid DESC LIMIT 1`
-        );
-        const result: Record<string, ScheduledTaskRun> = {};
-        for (const sid of scheduleIds) {
-          const row = stmt.get({ schedule_id: sid });
-          if (row) result[sid] = mapScheduledTaskRunRow(row);
-        }
-        return result;
-      },
-      finish: async (id, opts) => {
-        db.prepare(
-          `UPDATE scheduled_task_runs SET status = @status, exit_code = @exit_code, output = @output, finished_at = CURRENT_TIMESTAMP WHERE id = @id`
-        ).run({ id, status: opts.status, exit_code: opts.exit_code ?? null, output: opts.output ?? null });
-      },
-      prune: async (scheduleId, keep) => {
-        // Never delete a 'running' row: the overlap-skip path in the scheduler
-        // inserts a 'skipped' row + prunes on every overlapping cron fire, so a
-        // frequent cron + a long-running job can otherwise push the active
-        // 'running' row out of the keep-newest-N window mid-flight, deleting it
-        // out from under the run (finish() then silently no-ops).
-        db.prepare(
-          `DELETE FROM scheduled_task_runs WHERE schedule_id = @schedule_id AND status != 'running' AND id NOT IN (
-             SELECT id FROM scheduled_task_runs WHERE schedule_id = @schedule_id ORDER BY started_at DESC, rowid DESC LIMIT @keep
-           )`
-        ).run({ schedule_id: scheduleId, keep });
-      },
-    },
+    ...createScheduledRepos(kdb, h),
 
     remoteExecutorProcesses: {
       insert: async (localProcessId, info) => {
