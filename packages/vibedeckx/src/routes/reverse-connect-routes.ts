@@ -60,58 +60,67 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }, MACHINE_HANDSHAKE_TIMEOUT_MS);
 
         async function onChallengeReply(data: import("ws").RawData) {
-          let frame: { type?: string; publicKey?: string; signature?: string };
+          // Top-level guard: this async handler is registered on a raw ws
+          // "message" event (the emitter ignores the returned promise), so a
+          // rejection from any awaited storage call below would otherwise
+          // become an unhandled rejection and can kill the process.
           try {
-            frame = JSON.parse(data.toString());
-          } catch {
-            return;
-          }
-          if (frame?.type !== "machine_auth" || settled) return;
-          settled = true;
-          clearTimeout(timer);
-          socket.off("message", onChallengeReply);
+            let frame: { type?: string; publicKey?: string; signature?: string };
+            try {
+              frame = JSON.parse(data.toString());
+            } catch {
+              return;
+            }
+            if (frame?.type !== "machine_auth" || settled) return;
+            settled = true;
+            clearTimeout(timer);
+            socket.off("message", onChallengeReply);
 
-          const publicKey = frame.publicKey;
-          const signature = frame.signature;
-          if (!publicKey || !signature) {
-            socket.close(4003, "Malformed machine auth");
-            return;
-          }
+            const publicKey = frame.publicKey;
+            const signature = frame.signature;
+            if (!publicKey || !signature) {
+              socket.close(4003, "Malformed machine auth");
+              return;
+            }
 
-          const fingerprint = createHash("sha256").update(publicKey).digest("hex");
-          const existing = await fastify.storage.machineIdentity.get(fingerprint);
+            const fingerprint = createHash("sha256").update(publicKey).digest("hex");
+            const existing = await fastify.storage.machineIdentity.get(fingerprint);
 
-          // Cross-tenant guard: a machine already pinned to another owner cannot
-          // be re-claimed under a different token's owner.
-          if (existing && existing.user_id !== ownerId) {
-            console.warn(`[ReverseConnect] Machine ${fingerprint.slice(0, 12)} owner mismatch — rejecting ${serverId}`);
-            socket.close(4003, "Machine owner mismatch");
-            return;
-          }
+            // Cross-tenant guard: a machine already pinned to another owner cannot
+            // be re-claimed under a different token's owner.
+            if (existing && existing.user_id !== ownerId) {
+              console.warn(`[ReverseConnect] Machine ${fingerprint.slice(0, 12)} owner mismatch — rejecting ${serverId}`);
+              socket.close(4003, "Machine owner mismatch");
+              return;
+            }
 
-          // Prove private-key possession over the fresh nonce.
-          let valid = false;
-          try {
-            valid = cryptoVerify(null, nonce, publicKey, Buffer.from(signature, "base64"));
-          } catch {
-            valid = false;
-          }
-          if (!valid) {
-            socket.close(4003, "Bad machine signature");
-            return;
-          }
+            // Prove private-key possession over the fresh nonce.
+            let valid = false;
+            try {
+              valid = cryptoVerify(null, nonce, publicKey, Buffer.from(signature, "base64"));
+            } catch {
+              valid = false;
+            }
+            if (!valid) {
+              socket.close(4003, "Bad machine signature");
+              return;
+            }
 
-          // First connect: pin fingerprint→(publicKey, owner). The token, which
-          // determines the owner, bootstraps trust (TOFU).
-          if (!existing) {
-            await fastify.storage.machineIdentity.pin(fingerprint, publicKey, ownerId);
-            console.log(`[ReverseConnect] Pinned new machine identity ${fingerprint.slice(0, 12)} for ${serverId}`);
-          }
-          await fastify.storage.machineIdentity.touch(fingerprint);
+            // First connect: pin fingerprint→(publicKey, owner). The token, which
+            // determines the owner, bootstraps trust (TOFU).
+            if (!existing) {
+              await fastify.storage.machineIdentity.pin(fingerprint, publicKey, ownerId);
+              console.log(`[ReverseConnect] Pinned new machine identity ${fingerprint.slice(0, 12)} for ${serverId}`);
+            }
+            await fastify.storage.machineIdentity.touch(fingerprint);
 
-          console.log(`[ReverseConnect] Machine auth verified ${fingerprint.slice(0, 12)} for ${serverId}`);
-          fastify.reverseConnectManager.registerConnection(serverId, ws, fingerprint);
-          await fastify.storage.remoteServers.updateStatus(serverId, "online");
+            console.log(`[ReverseConnect] Machine auth verified ${fingerprint.slice(0, 12)} for ${serverId}`);
+            fastify.reverseConnectManager.registerConnection(serverId, ws, fingerprint);
+            await fastify.storage.remoteServers.updateStatus(serverId, "online");
+          } catch (err) {
+            console.error(`[ReverseConnect] Machine challenge handling failed for ${serverId}:`, err);
+            try { socket.close(4003, "Machine auth error"); } catch { /* already closed */ }
+          }
         }
 
         socket.on("message", onChallengeReply);

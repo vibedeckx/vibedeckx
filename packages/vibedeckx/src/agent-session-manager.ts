@@ -339,7 +339,7 @@ export class AgentSessionManager {
     provider.onSessionCreated?.(sessionId, permissionMode);
 
     // Spawn agent process
-    this.spawnAgent(session, absoluteWorktreePath);
+    await this.spawnAgent(session, absoluteWorktreePath);
     console.log(`[AgentSession] createNewSession: id=${sessionId}, projectId=${projectId}, branch=${branchKey}`);
 
     // Announce the freshly-running session over the event bus so live
@@ -435,7 +435,7 @@ export class AgentSessionManager {
   /**
    * Spawn agent process using the provider for this session's agent type
    */
-  private spawnAgent(session: RunningSession, cwd: string): void {
+  private async spawnAgent(session: RunningSession, cwd: string): Promise<void> {
     const provider = getProvider(session.agentType);
     console.log(`[AgentSession] Spawning ${provider.getDisplayName()} in ${cwd}`);
 
@@ -444,11 +444,11 @@ export class AgentSessionManager {
       console.error(`[AgentSession] ERROR: cwd does not exist: ${cwd}`);
       session.status = "error";
       if (!session.skipDb) {
-        this.storage.agentSessions.updateStatus(session.id, "error").catch((err) => {
+        await this.storage.agentSessions.updateStatus(session.id, "error").catch((err) => {
           console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
         });
       }
-      this.pushEntry(session.id, {
+      await this.pushEntry(session.id, {
         type: "error",
         message: `Error: Working directory does not exist: ${cwd}`,
         timestamp: Date.now(),
@@ -529,11 +529,18 @@ export class AgentSessionManager {
       // couldn't run/download it). The "error" handler already reports ENOENT;
       // for other startup failures, surface a friendly hint here.
       if (code !== 0 && !spawnFailed && !session.producedOutput) {
+        // Sync event-callback boundary (EventEmitter ignores returned promises):
+        // fire-and-forget with .catch so a persist failure can't become an
+        // unhandled rejection. persistEntry also swallows storage errors
+        // internally, so ordering vs the broadcasts below is best-effort only —
+        // matching the pre-refactor intent (surface the hint, then finish).
         this.pushEntry(session.id, {
           type: "error",
           message: this.buildStartupFailureMessage(session.agentType, stderrTail),
           timestamp: Date.now(),
-        }, true);
+        }, true).catch((err) => {
+          console.error(`[AgentSession] Failed to push startup-failure entry for ${session.id}:`, err);
+        });
       }
 
       // Send status patch and finished signal
@@ -556,13 +563,17 @@ export class AgentSessionManager {
       // always the agent isn't installed. Show install instructions instead of
       // the cryptic "spawn npx ENOENT".
       const isNotFound = (error as NodeJS.ErrnoException).code === "ENOENT";
+      // Sync event-callback boundary — fire-and-forget with .catch (see the
+      // matching note in the "close" handler above).
       this.pushEntry(session.id, {
         type: "error",
         message: isNotFound
           ? this.buildStartupFailureMessage(session.agentType, stderrTail)
           : error.message,
         timestamp: Date.now(),
-      }, true);
+      }, true).catch((err) => {
+        console.error(`[AgentSession] Failed to push spawn-error entry for ${session.id}:`, err);
+      });
     });
   }
 
@@ -643,7 +654,7 @@ export class AgentSessionManager {
 
     switch (event.type) {
       case "text":
-        this.updateAssistantMessage(sessionId, event.content, timestamp);
+        await this.updateAssistantMessage(sessionId, event.content, timestamp);
         break;
 
       case "tool_use": {
@@ -654,7 +665,7 @@ export class AgentSessionManager {
         ) {
           session.bgSpawnHintsThisTurn++;
         }
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
         const tuKey = `tool_use:${event.toolUseId}`;
         const { index: tuIndex, isNew: tuIsNew } = session.store.toolTracker.getOrCreate(tuKey);
@@ -683,7 +694,7 @@ export class AgentSessionManager {
       }
 
       case "tool_result": {
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
         const trKey = `tool_result:${event.toolUseId}`;
         const { index: trIndex, isNew: trIsNew } = session.store.toolTracker.getOrCreate(trKey);
@@ -712,9 +723,9 @@ export class AgentSessionManager {
       }
 
       case "thinking":
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
-        this.pushEntry(sessionId, {
+        await this.pushEntry(sessionId, {
           type: "thinking",
           content: event.content,
           timestamp,
@@ -722,9 +733,9 @@ export class AgentSessionManager {
         break;
 
       case "system":
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
-        this.pushEntry(sessionId, {
+        await this.pushEntry(sessionId, {
           type: "system",
           content: event.content,
           timestamp,
@@ -746,9 +757,9 @@ export class AgentSessionManager {
         break;
 
       case "error":
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
-        this.pushEntry(sessionId, {
+        await this.pushEntry(sessionId, {
           type: "error",
           message: event.message,
           timestamp,
@@ -770,11 +781,11 @@ export class AgentSessionManager {
         }
         session.bgSpawnHintsThisTurn = 0;
         session.taskStartedThisTurn = 0;
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
 
         if (event.subtype === "error" && event.error) {
-          this.pushEntry(sessionId, {
+          await this.pushEntry(sessionId, {
             type: "error",
             message: event.error,
             timestamp,
@@ -860,10 +871,10 @@ export class AgentSessionManager {
         break;
 
       case "approval_request":
-        this.finalizeStreamingEntry(session);
+        await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
         if (event.requestType === "command") {
-          this.pushEntry(sessionId, {
+          await this.pushEntry(sessionId, {
             type: "approval_request",
             requestType: "command",
             requestId: event.requestId,
@@ -872,7 +883,7 @@ export class AgentSessionManager {
             timestamp,
           }, true);
         } else {
-          this.pushEntry(sessionId, {
+          await this.pushEntry(sessionId, {
             type: "approval_request",
             requestType: "fileChange",
             requestId: event.requestId,
@@ -893,7 +904,7 @@ export class AgentSessionManager {
    * Update or add an assistant message using JSON Patch semantics
    * This is the key method that handles streaming updates correctly
    */
-  private updateAssistantMessage(sessionId: string, content: string, timestamp: number): void {
+  private async updateAssistantMessage(sessionId: string, content: string, timestamp: number): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -922,7 +933,7 @@ export class AgentSessionManager {
       content,
       timestamp,
     };
-    const index = this.pushEntry(sessionId, message, true);
+    const index = await this.pushEntry(sessionId, message, true);
     // Remember this index for streaming updates
     store.currentAssistantIndex = index;
   }
@@ -945,12 +956,12 @@ export class AgentSessionManager {
     return msg;
   }
 
-  private pushEntry(
+  private async pushEntry(
     sessionId: string,
     message: AgentMessage,
     broadcast: boolean = true,
     userId: string = "local",
-  ): number {
+  ): Promise<number> {
     const session = this.sessions.get(sessionId);
     if (!session) return -1;
 
@@ -968,7 +979,7 @@ export class AgentSessionManager {
 
     // Persist to DB (skip streaming assistant text — those get finalized later)
     if (!session.skipDb && message.type !== "assistant") {
-      this.persistEntry(session, index, message, userId);
+      await this.persistEntry(session, index, message, userId);
     }
 
     if (broadcast) {
@@ -1013,13 +1024,13 @@ export class AgentSessionManager {
   /**
    * Finalize and persist the current streaming assistant message
    */
-  private finalizeStreamingEntry(session: RunningSession): void {
+  private async finalizeStreamingEntry(session: RunningSession): Promise<void> {
     const index = session.store.currentAssistantIndex;
     if (index === null || session.skipDb) return;
 
     const entry = session.store.entries[index];
     if (entry) {
-      this.persistEntry(session, index, entry);
+      await this.persistEntry(session, index, entry);
     }
   }
 
@@ -1060,11 +1071,11 @@ export class AgentSessionManager {
     }
 
     // Clear current assistant key - user message breaks streaming
-    this.finalizeStreamingEntry(session);
+    await this.finalizeStreamingEntry(session);
     session.store.currentAssistantIndex = null;
 
     // Add user message with ADD patch
-    this.pushEntry(sessionId, {
+    await this.pushEntry(sessionId, {
       type: "user",
       content,
       timestamp: Date.now(),
@@ -1222,11 +1233,11 @@ export class AgentSessionManager {
       this.killProcess(proc);
 
       // Finalize any in-flight streaming assistant text
-      this.finalizeStreamingEntry(session);
+      await this.finalizeStreamingEntry(session);
       session.store.currentAssistantIndex = null;
 
       // Add a system message so the UI shows the stop event in the conversation
-      this.pushEntry(sessionId, {
+      await this.pushEntry(sessionId, {
         type: "system",
         content: "Session stopped by user.",
         timestamp: Date.now(),
@@ -1366,7 +1377,7 @@ export class AgentSessionManager {
     // 7. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
-    this.spawnAgent(session, absoluteWorktreePath);
+    await this.spawnAgent(session, absoluteWorktreePath);
 
     return true;
   }
@@ -1399,7 +1410,7 @@ export class AgentSessionManager {
     session.process = null;
     this.killProcess(proc);
 
-    this.finalizeStreamingEntry(session);
+    await this.finalizeStreamingEntry(session);
     session.store.currentAssistantIndex = null;
     session.buffer = "";
     session.backgroundTasks.clear();
@@ -1410,7 +1421,7 @@ export class AgentSessionManager {
 
     // Visible confirmation in the conversation; replayed to the new agent as
     // part of the context like other system entries ("Session stopped by user.")
-    this.pushEntry(sessionId, {
+    await this.pushEntry(sessionId, {
       type: "system",
       content: `Coding agent switched to ${agentType === "codex" ? "Codex" : "Claude Code"}.`,
       timestamp: Date.now(),
@@ -1448,7 +1459,7 @@ export class AgentSessionManager {
 
     // 2. Keep message store intact (preserve history in UI)
     // Only reset streaming state and buffer
-    this.finalizeStreamingEntry(session);
+    await this.finalizeStreamingEntry(session);
     session.store.currentAssistantIndex = null;
     session.buffer = "";
     session.dormant = false;
@@ -1468,7 +1479,7 @@ export class AgentSessionManager {
     // 5. Respawn Claude Code with new mode flags
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
-    this.spawnAgent(session, absoluteWorktreePath);
+    await this.spawnAgent(session, absoluteWorktreePath);
 
     // 6. Send initial message or conversation summary
     if (initialMessage) {
@@ -1599,10 +1610,10 @@ export class AgentSessionManager {
 
     // Spawn Claude Code process
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
-    this.spawnAgent(session, absoluteWorktreePath);
+    await this.spawnAgent(session, absoluteWorktreePath);
 
     // Push user message to store (+ persist to DB)
-    this.pushEntry(session.id, {
+    await this.pushEntry(session.id, {
       type: "user",
       content: userMessage,
       timestamp: Date.now(),
@@ -1746,7 +1757,7 @@ export class AgentSessionManager {
     if (source?.skipDb) return null;
 
     // Flush any in-flight streaming assistant entry so the copy is complete
-    if (source) this.finalizeStreamingEntry(source);
+    if (source) await this.finalizeStreamingEntry(source);
 
     const entryRows = await this.storage.agentSessions.getEntries(sourceSessionId);
     if (entryRows.length === 0) return null;
