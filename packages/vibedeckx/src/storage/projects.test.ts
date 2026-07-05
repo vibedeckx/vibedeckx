@@ -149,6 +149,27 @@ describe("projects + settings storage", () => {
     expect(second).toBe("v1-v2");
     expect(await storage.settings.get("merge-key")).toBe("v1-v2");
   });
+
+  it("settings.update: two concurrent read-modify-writes both land (no lost update)", async () => {
+    // Regression test for the atomicity promise in the settings.update
+    // docstring (types.ts): the read and write happen inside one storage call
+    // so a concurrent caller's merge cannot be silently discarded. The Kysely
+    // port initially broke this — each awaited query is a microtask yield
+    // point even on the synchronous better-sqlite3 driver, letting two
+    // update() calls interleave read→read→write→write and drop one merge.
+    await storage.settings.set("concurrent-key", JSON.stringify({ markers: [] as string[] }));
+    const appendMarker = (marker: string) => (current: string | undefined) => {
+      const parsed = JSON.parse(current ?? '{"markers":[]}') as { markers: string[] };
+      parsed.markers.push(marker);
+      return JSON.stringify(parsed);
+    };
+    await Promise.all([
+      storage.settings.update("concurrent-key", appendMarker("A")),
+      storage.settings.update("concurrent-key", appendMarker("B")),
+    ]);
+    const final = JSON.parse((await storage.settings.get("concurrent-key"))!) as { markers: string[] };
+    expect(final.markers.sort()).toEqual(["A", "B"]);
+  });
 });
 
 describe("remoteServers + projectRemotes + machineIdentity storage", () => {

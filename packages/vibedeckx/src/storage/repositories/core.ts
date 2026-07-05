@@ -141,12 +141,31 @@ export const createCoreRepos = (
     },
 
     update: async (key, mergeFn) => {
-      const existing = await kdb.selectFrom("global_settings").select("value").where("key", "=", key).executeTakeFirst();
-      const next = mergeFn(existing?.value);
-      await kdb.insertInto("global_settings").values({ key, value: next })
-        .onConflict((oc) => oc.column("key").doUpdateSet({ value: next }))
-        .execute();
-      return next;
+      // MUST run inside a transaction. This method's atomicity promise
+      // (types.ts settings.update docstring) comes from read-then-merge-then-
+      // write in JS, not from DB-level arbitration. The old inline code was
+      // atomic for free — raw better-sqlite3 calls with zero internal awaits
+      // ran to completion on one event-loop turn. Every Kysely call is a real
+      // Promise, so each await is a microtask yield point EVEN THOUGH the
+      // underlying driver is synchronous: two concurrent update() calls can
+      // interleave read→read→write→write and silently drop one merge (e.g.
+      // two concurrent PUT /api/settings/chat-provider saves losing one
+      // user's API-key edit). The transaction serializes the read-modify-
+      // write under better-sqlite3 (one connection, transactions execute
+      // one-at-a-time).
+      //
+      // pg-era caveat (see race-audit notes): on postgres a transaction alone
+      // does NOT serialize concurrent read-modify-write at default READ
+      // COMMITTED isolation — the pg backend will additionally need
+      // SELECT ... FOR UPDATE (or equivalent row locking) here.
+      return kdb.transaction().execute(async (trx) => {
+        const existing = await trx.selectFrom("global_settings").select("value").where("key", "=", key).executeTakeFirst();
+        const next = mergeFn(existing?.value);
+        await trx.insertInto("global_settings").values({ key, value: next })
+          .onConflict((oc) => oc.column("key").doUpdateSet({ value: next }))
+          .execute();
+        return next;
+      });
     },
   },
 });
