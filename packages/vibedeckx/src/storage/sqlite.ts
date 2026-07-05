@@ -4,7 +4,7 @@ import { Kysely, SqliteDialect } from "kysely";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import type { Task, TaskStatus, TaskPriority, Rule, Command, Storage } from "./types.js";
+import type { Storage } from "./types.js";
 import type { DB } from "./schema.js";
 import { sqliteHelpers } from "./dialect.js";
 import { createScheduledRepos } from "./repositories/scheduled.js";
@@ -12,6 +12,7 @@ import { createCoreRepos } from "./repositories/core.js";
 import { createRemoteServerRepos } from "./repositories/remote-servers.js";
 import { createExecutorRepos } from "./repositories/executors.js";
 import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
+import { createWorkspaceRepos } from "./repositories/workspace.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -709,10 +710,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
   await mkdir(path.dirname(dbPath), { recursive: true });
   const db = createDatabase(dbPath); // legacy DDL/migrations, kept verbatim
-  // Kysely wraps the same better-sqlite3 handle. Ported repository groups
-  // (see storage/repositories/*.ts) consume kdb/h via factory functions
-  // spread into the returned object below; groups not yet ported still use
-  // `db.prepare(...)` directly inline.
+  // Kysely wraps the same better-sqlite3 handle. Every repository group
+  // (see storage/repositories/*.ts) consumes kdb/h via a factory function
+  // spread into the returned object below — the query layer is fully on
+  // Kysely; this file now only owns the legacy DDL (createDatabase) and
+  // this assembly.
   const kdb = new Kysely<DB>({ dialect: new SqliteDialect({ database: db }) });
   const h = sqliteHelpers;
 
@@ -722,280 +724,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createExecutorRepos(kdb, h),
     ...createScheduledRepos(kdb, h),
     ...createAgentSessionRepos(kdb, h),
-
-    tasks: {
-      create: async ({ id, project_id, title, description, status, priority, assigned_branch }) => {
-        const maxPos = db.prepare<{ project_id: string }, { max_pos: number | null }>(
-          `SELECT MAX(position) as max_pos FROM tasks WHERE project_id = @project_id`
-        ).get({ project_id });
-        const position = (maxPos?.max_pos ?? -1) + 1;
-
-        db.prepare(
-          `INSERT INTO tasks (id, project_id, title, description, status, priority, assigned_branch, position)
-           VALUES (@id, @project_id, @title, @description, @status, @priority, @assigned_branch, @position)`
-        ).run({
-          id,
-          project_id,
-          title,
-          description: description ?? null,
-          status: status ?? 'todo',
-          priority: priority ?? 'medium',
-          assigned_branch: assigned_branch ?? null,
-          position,
-        });
-
-        return db
-          .prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`)
-          .get({ id })!;
-      },
-
-      getByProjectId: async (projectId: string, opts?: { includeArchived?: boolean }) => {
-        const where = opts?.includeArchived
-          ? `project_id = @project_id`
-          : `project_id = @project_id AND archived_at IS NULL`;
-        return db
-          .prepare<{ project_id: string }, Task>(`SELECT * FROM tasks WHERE ${where} ORDER BY position ASC`)
-          .all({ project_id: projectId });
-      },
-
-      getById: async (id: string) => {
-        return db
-          .prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`)
-          .get({ id });
-      },
-
-      update: async (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => {
-        const updates: string[] = [];
-        const params: Record<string, unknown> = { id };
-
-        if (opts.title !== undefined) {
-          updates.push('title = @title');
-          params.title = opts.title;
-        }
-        if (opts.description !== undefined) {
-          updates.push('description = @description');
-          params.description = opts.description;
-        }
-        if (opts.status !== undefined) {
-          updates.push('status = @status');
-          params.status = opts.status;
-        }
-        if (opts.priority !== undefined) {
-          updates.push('priority = @priority');
-          params.priority = opts.priority;
-        }
-        if (opts.assigned_branch !== undefined) {
-          updates.push('assigned_branch = @assigned_branch');
-          params.assigned_branch = opts.assigned_branch;
-        }
-        if (opts.position !== undefined) {
-          updates.push('position = @position');
-          params.position = opts.position;
-        }
-
-        if (updates.length === 0) {
-          return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
-        }
-
-        updates.push('updated_at = CURRENT_TIMESTAMP');
-        db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = @id`).run(params);
-        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
-      },
-
-      archive: async (id: string) => {
-        db.prepare(`UPDATE tasks SET archived_at = @now, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
-          .run({ id, now: Date.now() });
-        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
-      },
-
-      unarchive: async (id: string) => {
-        db.prepare(`UPDATE tasks SET archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
-          .run({ id });
-        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
-      },
-
-      delete: async (id: string) => {
-        db.prepare(`DELETE FROM tasks WHERE id = @id`).run({ id });
-      },
-
-      reorder: async (projectId: string, orderedIds: string[]) => {
-        const transaction = db.transaction(() => {
-          for (let i = 0; i < orderedIds.length; i++) {
-            db.prepare(
-              `UPDATE tasks SET position = @position, updated_at = CURRENT_TIMESTAMP WHERE id = @id AND project_id = @project_id`
-            ).run({ id: orderedIds[i], project_id: projectId, position: i });
-          }
-        });
-        transaction();
-      },
-
-      completeIfAssigned: async (projectId: string, branch: string) => {
-        // Mirror the original call site exactly: pick the FIRST matching task
-        // by position (no status filter in the selection), then only complete
-        // it if that first match isn't already done. Filtering on status in
-        // the WHERE clause would change semantics: if the first-by-position
-        // assigned task is already done but a later one isn't, the original
-        // code was a no-op — it must not skip ahead and complete the later one.
-        const row = db
-          .prepare<{ project_id: string; assigned_branch: string }, { id: string; status: string }>(
-            `SELECT id, status FROM tasks
-             WHERE project_id = @project_id AND assigned_branch = @assigned_branch
-               AND archived_at IS NULL
-             ORDER BY position ASC LIMIT 1`
-          )
-          .get({ project_id: projectId, assigned_branch: branch });
-        if (!row || row.status === 'done') return undefined;
-        db.prepare(`UPDATE tasks SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = @id`).run({ id: row.id });
-        return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id: row.id });
-      },
-    },
-
-    rules: {
-      create: async ({ id, project_id, branch, name, content, enabled }) => {
-        const maxPos = db.prepare<{ project_id: string; branch: string | null }, { max_pos: number | null }>(
-          `SELECT MAX(position) as max_pos FROM rules WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL))`
-        ).get({ project_id, branch: branch ?? null });
-        const position = (maxPos?.max_pos ?? -1) + 1;
-
-        db.prepare(
-          `INSERT INTO rules (id, project_id, branch, name, content, enabled, position)
-           VALUES (@id, @project_id, @branch, @name, @content, @enabled, @position)`
-        ).run({
-          id,
-          project_id,
-          branch: branch ?? null,
-          name,
-          content,
-          enabled: enabled === false ? 0 : 1,
-          position,
-        });
-
-        return db
-          .prepare<{ id: string }, Rule>(`SELECT * FROM rules WHERE id = @id`)
-          .get({ id })!;
-      },
-
-      getByWorkspace: async (projectId: string, branch: string | null) => {
-        return db
-          .prepare<{ project_id: string; branch: string | null }, Rule>(
-            `SELECT * FROM rules WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL)) ORDER BY position ASC`
-          )
-          .all({ project_id: projectId, branch: branch ?? null });
-      },
-
-      getById: async (id: string) => {
-        return db
-          .prepare<{ id: string }, Rule>(`SELECT * FROM rules WHERE id = @id`)
-          .get({ id });
-      },
-
-      update: async (id: string, opts: { name?: string; content?: string; enabled?: boolean; position?: number }) => {
-        const updates: string[] = [];
-        const params: Record<string, unknown> = { id };
-
-        if (opts.name !== undefined) {
-          updates.push('name = @name');
-          params.name = opts.name;
-        }
-        if (opts.content !== undefined) {
-          updates.push('content = @content');
-          params.content = opts.content;
-        }
-        if (opts.enabled !== undefined) {
-          updates.push('enabled = @enabled');
-          params.enabled = opts.enabled ? 1 : 0;
-        }
-        if (opts.position !== undefined) {
-          updates.push('position = @position');
-          params.position = opts.position;
-        }
-
-        if (updates.length === 0) {
-          return db.prepare<{ id: string }, Rule>(`SELECT * FROM rules WHERE id = @id`).get({ id });
-        }
-
-        updates.push('updated_at = datetime(\'now\')');
-        db.prepare(`UPDATE rules SET ${updates.join(', ')} WHERE id = @id`).run(params);
-        return db.prepare<{ id: string }, Rule>(`SELECT * FROM rules WHERE id = @id`).get({ id });
-      },
-
-      delete: async (id: string) => {
-        db.prepare(`DELETE FROM rules WHERE id = @id`).run({ id });
-      },
-
-      reorder: async (projectId: string, branch: string | null, orderedIds: string[]) => {
-        const transaction = db.transaction(() => {
-          for (let i = 0; i < orderedIds.length; i++) {
-            db.prepare(
-              `UPDATE rules SET position = @position, updated_at = datetime('now') WHERE id = @id AND project_id = @project_id`
-            ).run({ id: orderedIds[i], project_id: projectId, position: i });
-          }
-        });
-        transaction();
-      },
-    },
-
-    commands: {
-      create: async ({ id, project_id, branch, name, content }) => {
-        const maxPos = db.prepare<{ project_id: string; branch: string | null }, { max_pos: number | null }>(
-          `SELECT MAX(position) as max_pos FROM commands WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL))`
-        ).get({ project_id, branch: branch ?? null });
-        const position = (maxPos?.max_pos ?? -1) + 1;
-
-        db.prepare(
-          `INSERT INTO commands (id, project_id, branch, name, content, position)
-           VALUES (@id, @project_id, @branch, @name, @content, @position)`
-        ).run({ id, project_id, branch: branch ?? null, name, content, position });
-
-        return db
-          .prepare<{ id: string }, Command>(`SELECT * FROM commands WHERE id = @id`)
-          .get({ id })!;
-      },
-
-      getByWorkspace: async (projectId: string, branch: string | null) => {
-        return db
-          .prepare<{ project_id: string; branch: string | null }, Command>(
-            `SELECT * FROM commands WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL)) ORDER BY position ASC`
-          )
-          .all({ project_id: projectId, branch: branch ?? null });
-      },
-
-      getById: async (id: string) => {
-        return db
-          .prepare<{ id: string }, Command>(`SELECT * FROM commands WHERE id = @id`)
-          .get({ id });
-      },
-
-      update: async (id: string, opts: { name?: string; content?: string; position?: number }) => {
-        const updates: string[] = [];
-        const params: Record<string, unknown> = { id };
-
-        if (opts.name !== undefined) {
-          updates.push('name = @name');
-          params.name = opts.name;
-        }
-        if (opts.content !== undefined) {
-          updates.push('content = @content');
-          params.content = opts.content;
-        }
-        if (opts.position !== undefined) {
-          updates.push('position = @position');
-          params.position = opts.position;
-        }
-
-        if (updates.length === 0) {
-          return db.prepare<{ id: string }, Command>(`SELECT * FROM commands WHERE id = @id`).get({ id });
-        }
-
-        updates.push('updated_at = datetime(\'now\')');
-        db.prepare(`UPDATE commands SET ${updates.join(', ')} WHERE id = @id`).run(params);
-        return db.prepare<{ id: string }, Command>(`SELECT * FROM commands WHERE id = @id`).get({ id });
-      },
-
-      delete: async (id: string) => {
-        db.prepare(`DELETE FROM commands WHERE id = @id`).run({ id });
-      },
-    },
+    ...createWorkspaceRepos(kdb, h),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
