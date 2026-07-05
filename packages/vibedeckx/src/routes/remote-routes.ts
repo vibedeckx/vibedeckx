@@ -69,7 +69,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const id = randomUUID();
-    const project = fastify.storage.projects.create({
+    const project = await fastify.storage.projects.create({
       id,
       name,
       remote_path: projectPath,

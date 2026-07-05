@@ -59,8 +59,8 @@ describe("SchedulerService.runNow", () => {
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-schedsvc-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
-    storage.projects.create({ id: "proj-1", name: "p", path: dir });
-    storage.scheduledTasks.create({
+    await storage.projects.create({ id: "proj-1", name: "p", path: dir });
+    await storage.scheduledTasks.create({
       id: "s1", project_id: "proj-1", name: "echo", cron_expr: "0 9 * * *",
       timezone: "UTC", run_type: "command", content: "echo hi",
       cwd_mode: "directory", directory: dir, timeout_seconds: 60,
@@ -69,9 +69,9 @@ describe("SchedulerService.runNow", () => {
     scheduler = new SchedulerService(storage, pm as unknown as ProcessManager);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     scheduler.shutdown();
-    storage.close();
+    await storage.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -89,7 +89,7 @@ describe("SchedulerService.runNow", () => {
     pm.emit("proc-1", { type: "finished", exitCode: 0 });
 
     const runId = (result as { runId: string }).runId;
-    const run = storage.scheduledTaskRuns.getById(runId);
+    const run = await storage.scheduledTaskRuns.getById(runId);
     expect(run?.status).toBe("completed");
     expect(run?.exit_code).toBe(0);
     expect(run?.output).toBe("hello world");
@@ -99,7 +99,7 @@ describe("SchedulerService.runNow", () => {
   it("records failed on non-zero exit", async () => {
     const result = await scheduler.runNow("s1") as { runId: string };
     pm.emit("proc-1", { type: "finished", exitCode: 3 });
-    const run = storage.scheduledTaskRuns.getById(result.runId);
+    const run = await storage.scheduledTaskRuns.getById(result.runId);
     expect(run?.status).toBe("failed");
     expect(run?.exit_code).toBe(3);
   });
@@ -113,7 +113,7 @@ describe("SchedulerService.runNow", () => {
     await scheduler.runNow("s1");
     const second = await scheduler.runNow("s1");
     expect(second).toMatchObject({ skipped: true });
-    const runs = storage.scheduledTaskRuns.getByScheduleId("s1");
+    const runs = await storage.scheduledTaskRuns.getByScheduleId("s1");
     expect(runs.some((r) => r.status === "skipped")).toBe(true);
 
     const skipRunId = (second as { runId: string }).runId;
@@ -131,19 +131,19 @@ describe("SchedulerService.runNow", () => {
     vi.useFakeTimers();
     try {
       const result = await scheduler.runNow("s1") as { runId: string };
-      vi.advanceTimersByTime(61_000);
+      await vi.advanceTimersByTimeAsync(61_000);
       expect(pm.stopped).toContain("proc-1");
-      expect(storage.scheduledTaskRuns.getById(result.runId)?.status).toBe("timeout");
+      expect((await storage.scheduledTaskRuns.getById(result.runId))?.status).toBe("timeout");
       // A late 'finished' after the kill must not overwrite the timeout status
       pm.emit("proc-1", { type: "finished", exitCode: 137 });
-      expect(storage.scheduledTaskRuns.getById(result.runId)?.status).toBe("timeout");
+      expect((await storage.scheduledTaskRuns.getById(result.runId))?.status).toBe("timeout");
     } finally {
       vi.useRealTimers();
     }
   });
 
   it("prompt tasks are fabricated as claude prompt executors", async () => {
-    storage.scheduledTasks.create({
+    await storage.scheduledTasks.create({
       id: "s2", project_id: "proj-1", name: "ai", cron_expr: "0 9 * * *",
       timezone: "UTC", run_type: "prompt", content: "analyze the logs",
       cwd_mode: "directory", directory: dir,
@@ -156,11 +156,11 @@ describe("SchedulerService.runNow", () => {
   });
 
   it("fails without spawning when the directory does not exist", async () => {
-    storage.scheduledTasks.update("s1", { directory: path.join(dir, "missing") });
+    await storage.scheduledTasks.update("s1", { directory: path.join(dir, "missing") });
     const result = await scheduler.runNow("s1");
     expect(result).toMatchObject({ error: expect.stringContaining("does not exist") });
     expect(pm.started).toHaveLength(0);
-    const runs = storage.scheduledTaskRuns.getByScheduleId("s1");
+    const runs = await storage.scheduledTaskRuns.getByScheduleId("s1");
     expect(runs[0].status).toBe("failed");
   });
 
@@ -170,7 +170,7 @@ describe("SchedulerService.runNow", () => {
     pm.emit("proc-1", { type: "stdout", data: "B".repeat(150_000) });
     pm.emit("proc-1", { type: "finished", exitCode: 0 });
 
-    const run = storage.scheduledTaskRuns.getById(result.runId);
+    const run = await storage.scheduledTaskRuns.getById(result.runId);
     expect(run?.output).toHaveLength(200_000);
     // Total emitted was 300_000 chars ("A"*150_000 + "B"*150_000); the tail
     // 200_000 chars drop the first 100_000 "A"s and keep the rest.
@@ -184,20 +184,24 @@ describe("SchedulerService.runNow", () => {
     const oldIds: string[] = [];
     for (let i = 0; i < 55; i++) {
       const id = `old-${i}`;
-      storage.scheduledTaskRuns.create({ id, schedule_id: "s1", status: "completed" });
+      await storage.scheduledTaskRuns.create({ id, schedule_id: "s1", status: "completed" });
       oldIds.push(id);
     }
-    expect(storage.scheduledTaskRuns.getByScheduleId("s1", 1000)).toHaveLength(55);
+    expect(await storage.scheduledTaskRuns.getByScheduleId("s1", 1000)).toHaveLength(55);
 
     // Trigger one real run so the scheduler's own prune() call fires.
     const result = await scheduler.runNow("s1") as { runId: string };
     pm.emit("proc-1", { type: "finished", exitCode: 0 });
+    // finalize() (finish() then prune()) runs fire-and-forget off the
+    // subscribe callback, so give its two chained awaits a chance to settle
+    // before asserting on prune()'s effect.
+    await new Promise((resolve) => setImmediate(resolve));
 
-    const runs = storage.scheduledTaskRuns.getByScheduleId("s1", 1000);
+    const runs = await storage.scheduledTaskRuns.getByScheduleId("s1", 1000);
     expect(runs.length).toBeLessThanOrEqual(50);
     // The oldest rows (inserted first) must be the ones pruned away.
-    expect(storage.scheduledTaskRuns.getById(oldIds[0])).toBeUndefined();
-    expect(storage.scheduledTaskRuns.getById(result.runId)).toBeDefined();
+    expect(await storage.scheduledTaskRuns.getById(oldIds[0])).toBeUndefined();
+    expect(await storage.scheduledTaskRuns.getById(result.runId)).toBeDefined();
   });
 
   it("shutdown cancels the in-flight run's timeout timer instead of writing a late 'timeout' status", async () => {
@@ -211,10 +215,10 @@ describe("SchedulerService.runNow", () => {
       // no processManager.stop() call, and the run row must not be
       // (re)written with a 'timeout' status — it stays 'running' for the
       // startup fixup to mark 'killed' on next boot.
-      vi.advanceTimersByTime(61_000);
+      await vi.advanceTimersByTimeAsync(61_000);
 
       expect(pm.stopped).not.toContain("proc-1");
-      const run = storage.scheduledTaskRuns.getById(result.runId);
+      const run = await storage.scheduledTaskRuns.getById(result.runId);
       expect(run?.status).toBe("running");
     } finally {
       vi.useRealTimers();
@@ -240,10 +244,10 @@ describe("SchedulerService remote runs", () => {
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-sched-remote-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
-    storage.projects.create({ id: "proj-1", name: "p", path: dir });
-    const server = storage.remoteServers.create({ name: "r", url: "http://remote.test", api_key: "K" });
-    storage.projectRemotes.add({ project_id: "proj-1", remote_server_id: server.id, remote_path: "/srv/app" });
-    storage.scheduledTasks.create({
+    await storage.projects.create({ id: "proj-1", name: "p", path: dir });
+    const server = await storage.remoteServers.create({ name: "r", url: "http://remote.test", api_key: "K" });
+    await storage.projectRemotes.add({ project_id: "proj-1", remote_server_id: server.id, remote_path: "/srv/app" });
+    await storage.scheduledTasks.create({
       id: "s1", project_id: "proj-1", name: "remote scan", cron_expr: "0 9 * * *",
       timezone: "UTC", run_type: "command", content: "echo hi",
       cwd_mode: "branch", branch: "main", target: server.id,
@@ -266,9 +270,9 @@ describe("SchedulerService remote runs", () => {
     scheduler.setEventBus(eventBus);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     scheduler.shutdown();
-    storage.close();
+    await storage.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -278,7 +282,7 @@ describe("SchedulerService remote runs", () => {
     const exec = proxyCalls.find((c) => c.path === "/api/path/execute");
     expect(exec).toBeDefined();
     expect(exec!.body).toMatchObject({ path: "/srv/app", branch: "main", command: "echo hi" });
-    const runs = storage.scheduledTaskRuns.getByScheduleId("s1");
+    const runs = await storage.scheduledTaskRuns.getByScheduleId("s1");
     expect(runs[0].status).toBe("running");
     expect(runs[0].process_id).toBe("remote-schedule-s1-rp-1");
     expect(pm.started).toHaveLength(0); // never touches the local ProcessManager
@@ -290,13 +294,13 @@ describe("SchedulerService remote runs", () => {
       type: "executor:stopped", projectId: "proj-1", executorId: "schedule-s1",
       processId: "remote-schedule-s1-rp-1", exitCode: 0, target: "remote", tailOutput: "remote-done",
     } as GlobalEvent);
-    const run = storage.scheduledTaskRuns.getById(result.runId);
+    const run = await storage.scheduledTaskRuns.getById(result.runId);
     expect(run?.status).toBe("completed");
     expect(run?.output).toBe("remote-done");
   });
 
   it("directory mode proxies path=<directory>, branch undefined", async () => {
-    storage.scheduledTasks.update("s1", { cwd_mode: "directory", directory: "/var/log" });
+    await storage.scheduledTasks.update("s1", { cwd_mode: "directory", directory: "/var/log" });
     await scheduler.runNow("s1");
     const exec = proxyCalls.find((c) => c.path === "/api/path/execute")!;
     expect(exec.body).toMatchObject({ path: "/var/log" });
@@ -304,11 +308,11 @@ describe("SchedulerService remote runs", () => {
   });
 
   it("records failed without a proxy call when the remote target is unknown", async () => {
-    storage.scheduledTasks.update("s1", { target: "nonexistent-server" });
+    await storage.scheduledTasks.update("s1", { target: "nonexistent-server" });
     const result = await scheduler.runNow("s1");
     expect(result).toMatchObject({ error: expect.stringContaining("Remote server config not found") });
     expect(proxyCalls).toHaveLength(0);
-    expect(storage.scheduledTaskRuns.getByScheduleId("s1")[0].status).toBe("failed");
+    expect((await storage.scheduledTaskRuns.getByScheduleId("s1"))[0].status).toBe("failed");
   });
 
   it("overlap guard holds across the async remote start (concurrent triggers → one runs, one skips)", async () => {
@@ -323,11 +327,11 @@ describe("SchedulerService remote runs", () => {
   it("on timeout, proxies the remote stop endpoint and records timeout", async () => {
     vi.useFakeTimers();
     try {
-      storage.scheduledTasks.update("s1", { timeout_seconds: 1 });
+      await storage.scheduledTasks.update("s1", { timeout_seconds: 1 });
       const result = await scheduler.runNow("s1") as { runId: string };
       await vi.advanceTimersByTimeAsync(1100);
       expect(proxyCalls.some((c) => c.path === "/api/executor-processes/rp-1/stop")).toBe(true);
-      expect(storage.scheduledTaskRuns.getById(result.runId)?.status).toBe("timeout");
+      expect((await storage.scheduledTaskRuns.getById(result.runId))?.status).toBe("timeout");
     } finally {
       vi.useRealTimers();
     }

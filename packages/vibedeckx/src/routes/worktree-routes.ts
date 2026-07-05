@@ -14,9 +14,9 @@ interface RemoteConfig {
   remotePath: string;
 }
 
-function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): RemoteConfig[] {
+async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): Promise<RemoteConfig[]> {
   // Check project_remotes table first (new approach)
-  const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+  const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
   if (remotes.length > 0) {
     return remotes.map((r) => ({
       serverId: r.remote_server_id,
@@ -38,8 +38,8 @@ function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): Remote
 }
 
 /** Returns the primary (first) remote config, or null. Used by endpoints that operate on a single remote. */
-function getRemoteConfig(fastify: FastifyInstance, project: Project): RemoteConfig | null {
-  const all = getAllRemoteConfigs(fastify, project);
+async function getRemoteConfig(fastify: FastifyInstance, project: Project): Promise<RemoteConfig | null> {
+  const all = await getAllRemoteConfigs(fastify, project);
   return all.length > 0 ? all[0] : null;
 }
 
@@ -227,13 +227,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
 
     // Proxy to remote if this is a remote-only project
-    const remoteConfig = getRemoteConfig(fastify, project);
+    const remoteConfig = await getRemoteConfig(fastify, project);
     if (!project.path && remoteConfig) {
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
@@ -269,14 +269,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
 
     const target = req.query.target || "local";
     const hasLocal = !!project.path;
-    const remoteConfig = getRemoteConfig(fastify, project);
+    const remoteConfig = await getRemoteConfig(fastify, project);
     const hasRemote = !!remoteConfig;
 
     const proxyBranchesToRemote = async () => {
@@ -335,7 +335,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -351,7 +351,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const hasLocal = !!project.path;
-    const remoteConfigs = getAllRemoteConfigs(fastify, project);
+    const remoteConfigs = await getAllRemoteConfigs(fastify, project);
     const hasRemote = remoteConfigs.length > 0;
 
     // Helper to delete worktree on a single remote
@@ -517,7 +517,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -544,7 +544,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Determine targets
     const hasLocal = !!project.path;
-    const remoteConfigs = getAllRemoteConfigs(fastify, project);
+    const remoteConfigs = await getAllRemoteConfigs(fastify, project);
     const hasRemote = remoteConfigs.length > 0;
     let targets: ("local" | "remote")[];
 

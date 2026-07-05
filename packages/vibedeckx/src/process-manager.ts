@@ -139,12 +139,12 @@ export class ProcessManager {
    * @param skipDb - When true, skip database operations (used for remote path-based execution
    *                 where the executor doesn't exist in the local DB)
    */
-  start(executor: Executor, projectPath: string, skipDb = false): string {
+  async start(executor: Executor, projectPath: string, skipDb = false): Promise<string> {
     const processId = crypto.randomUUID();
 
     // Create process record in database (skip for remote path-based execution)
     if (!skipDb) {
-      this.storage.executorProcesses.create({
+      await this.storage.executorProcesses.create({
         id: processId,
         executor_id: executor.id,
       });
@@ -195,7 +195,7 @@ export class ProcessManager {
           ? (runningProcess.process as IPty).pid
           : (runningProcess.process as ChildProcess).pid;
         if (pid) {
-          this.storage.executorProcesses.updatePid(processId, pid);
+          await this.storage.executorProcesses.updatePid(processId, pid);
         }
       }
     }
@@ -417,7 +417,9 @@ export class ProcessManager {
       console.log(`[diag:remote-stop] ${new Date().toISOString()} PTY onExit (this machine's process truly exited) processId=${processId} executorId=${runningProcess.executorId} code=${code} — if seen on the REMOTE machine, the executor genuinely finished (mechanism B), not a transport drop`);
 
       if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, status, code);
+        this.storage.executorProcesses.updateStatus(processId, status, code).catch((err) => {
+          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
+        });
       }
 
       const msg: LogMessage = { type: "finished", exitCode: code };
@@ -493,7 +495,9 @@ export class ProcessManager {
       console.log(`[ProcessManager] Process ${processId} exited with code ${exitCode}`);
 
       if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, status, exitCode);
+        this.storage.executorProcesses.updateStatus(processId, status, exitCode).catch((err) => {
+          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
+        });
       }
 
       const msg: LogMessage = { type: "finished", exitCode };
@@ -516,7 +520,9 @@ export class ProcessManager {
       this.broadcast(processId, msg);
 
       if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, "failed", 1);
+        this.storage.executorProcesses.updateStatus(processId, "failed", 1).catch((err) => {
+          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
+        });
       }
 
       const finishMsg: LogMessage = { type: "finished", exitCode: 1 };
@@ -691,7 +697,9 @@ export class ProcessManager {
       console.log(`[ProcessManager] Stream process ${processId} exited with code ${exitCode}`);
 
       if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, status, exitCode);
+        this.storage.executorProcesses.updateStatus(processId, status, exitCode).catch((err) => {
+          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
+        });
       }
 
       const msg: LogMessage = { type: 'finished', exitCode };
@@ -714,7 +722,9 @@ export class ProcessManager {
       this.broadcast(processId, msg);
 
       if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, 'failed', 1);
+        this.storage.executorProcesses.updateStatus(processId, 'failed', 1).catch((err) => {
+          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
+        });
       }
 
       const finishMsg: LogMessage = { type: 'finished', exitCode: 1 };
@@ -727,7 +737,7 @@ export class ProcessManager {
   /**
    * Stop a running process
    */
-  stop(processId: string): boolean {
+  async stop(processId: string): Promise<boolean> {
     const runningProcess = this.processes.get(processId);
     if (!runningProcess) {
       console.log(`[ProcessManager] Process ${processId} not found in memory map. Map has ${this.processes.size} entries: [${Array.from(this.processes.keys()).join(", ")}]`);
@@ -761,7 +771,7 @@ export class ProcessManager {
     }
 
     if (killed && !runningProcess.skipDb) {
-      this.storage.executorProcesses.updateStatus(processId, "killed");
+      await this.storage.executorProcesses.updateStatus(processId, "killed");
     }
 
     return killed;
@@ -782,8 +792,8 @@ export class ProcessManager {
   /**
    * Try to stop a process by looking up its PID in the database (for orphaned processes after server restart)
    */
-  private stopByPid(processId: string): boolean {
-    const dbProcess = this.storage.executorProcesses.getById(processId);
+  private async stopByPid(processId: string): Promise<boolean> {
+    const dbProcess = await this.storage.executorProcesses.getById(processId);
     if (!dbProcess || !dbProcess.pid) {
       console.log(`[ProcessManager] Process ${processId} not found in DB or has no PID (status=${dbProcess?.status})`);
       return false;
@@ -807,7 +817,7 @@ export class ProcessManager {
       }
     }
 
-    this.storage.executorProcesses.updateStatus(processId, "killed");
+    await this.storage.executorProcesses.updateStatus(processId, "killed");
     return killed;
   }
 

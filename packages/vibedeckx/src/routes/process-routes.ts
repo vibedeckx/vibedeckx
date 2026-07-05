@@ -37,7 +37,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     };
 
     try {
-      const processId = fastify.processManager.start(tempExecutor, resolvedBase, true);
+      const processId = await fastify.processManager.start(tempExecutor, resolvedBase, true);
       return reply.code(200).send({ processId });
     } catch (error) {
       return reply.code(500).send({ error: String(error) });
@@ -49,12 +49,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const executor = fastify.storage.executors.getById(req.params.id);
+    const executor = await fastify.storage.executors.getById(req.params.id);
     if (!executor) {
       return reply.code(404).send({ error: "Executor not found" });
     }
 
-    const project = fastify.storage.projects.getById(executor.project_id, userId);
+    const project = await fastify.storage.projects.getById(executor.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -67,23 +67,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Fallback: legacy "remote" value → resolve to actual remote server ID
     if (useRemoteExecutor && executorMode === 'remote') {
-      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
       if (remotes.length > 0) {
         const fallback = remotes[0];
         executorMode = fallback.remote_server_id;
-        fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
+        await fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
         console.log(`[API] Auto-resolved executor_mode from 'remote' to '${fallback.remote_server_id}' (legacy value)`);
       }
     }
 
     // Fallback: if local mode but no local path, try to find a remote to use
     if (!useRemoteExecutor && !project.path) {
-      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
       if (remotes.length > 0) {
         const fallback = remotes[0];
         useRemoteExecutor = true;
         executorMode = fallback.remote_server_id;
-        fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
+        await fastify.storage.projects.update(project.id, { executor_mode: fallback.remote_server_id });
         console.log(`[API] Auto-resolved executor_mode from 'local' to '${fallback.remote_server_id}' (no local path)`);
       }
     }
@@ -97,7 +97,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // When remote, resolve connection info from project_remotes table
     const remoteConfig = useRemoteExecutor
-      ? fastify.storage.projectRemotes.getByProjectAndServer(project.id, executorMode)
+      ? await fastify.storage.projectRemotes.getByProjectAndServer(project.id, executorMode)
       : undefined;
 
     console.log(`[API] POST executors/${req.params.id}/start: ` +
@@ -142,7 +142,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // so executor:stopped fires (and the map is cleared) even if the user
         // navigates away before the process finishes.
         fastify.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
-        fastify.storage.remoteExecutorProcesses.insert(localProcessId, {
+        await fastify.storage.remoteExecutorProcesses.insert(localProcessId, {
           remoteServerId: executorMode,
           remoteUrl: remoteConfig.server_url ?? "",
           remoteApiKey: remoteConfig.server_api_key || "",
@@ -171,7 +171,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const basePath = resolveWorktreePath(project.path, branch ?? null);
 
     try {
-      const processId = fastify.processManager.start(executor, basePath);
+      const processId = await fastify.processManager.start(executor, basePath);
       return reply.code(200).send({ processId });
     } catch (error) {
       console.error("[API] Failed to start executor:", error);
@@ -211,12 +211,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
           fastify.remoteExecutorMap.delete(req.params.processId);
           // Preserve the DB row so the UI can show "Last run" + reconnect to
           // the buffered output via getById fallback in the WS route.
-          fastify.storage.remoteExecutorProcesses.markFinished(req.params.processId, 0, 'killed');
+          await fastify.storage.remoteExecutorProcesses.markFinished(req.params.processId, 0, 'killed');
         }
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      const stopped = fastify.processManager.stop(req.params.processId);
+      const stopped = await fastify.processManager.stop(req.params.processId);
       console.log(`[API] Stop result: ${stopped}`);
       if (!stopped) {
         return reply.code(404).send({ error: "Process not found or already stopped" });
@@ -234,10 +234,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // them. userId === undefined means no auth scope is in effect (solo/no-auth,
     // or a validated remote-proxy api key on a single-tenant remote node) — in
     // that case everything is returned, preserving the recovery/restore path.
-    const ownsProject = (projectId: string | null | undefined): boolean => {
+    const ownsProject = async (projectId: string | null | undefined): Promise<boolean> => {
       if (userId === undefined) return true;
       if (!projectId) return false;
-      return !!fastify.storage.projects.getById(projectId, userId);
+      return !!(await fastify.storage.projects.getById(projectId, userId));
     };
 
     const runningProcessIds = fastify.processManager.getRunningProcessIds();
@@ -245,10 +245,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // which have no DB record — skipDb=true)
     const processes: Array<Record<string, unknown>> = [];
     for (const id of runningProcessIds) {
-      const dbProcess = fastify.storage.executorProcesses.getById(id);
+      const dbProcess = await fastify.storage.executorProcesses.getById(id);
       if (dbProcess) {
-        const executor = fastify.storage.executors.getById(dbProcess.executor_id);
-        if (!ownsProject(executor?.project_id)) continue;
+        const executor = await fastify.storage.executors.getById(dbProcess.executor_id);
+        if (!(await ownsProject(executor?.project_id))) continue;
         processes.push({ ...dbProcess, target: "local" });
       } else {
         // Temp process with no DB record and thus no owner attribution. Only
@@ -260,7 +260,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Remote processes (tracked in remoteExecutorMap, a global cross-tenant map)
     for (const [localProcessId, info] of fastify.remoteExecutorMap) {
-      if (!ownsProject(info.projectId)) continue;
+      if (!(await ownsProject(info.projectId))) continue;
       processes.push({
         id: localProcessId,
         executor_id: info.executorId,

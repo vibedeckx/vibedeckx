@@ -37,7 +37,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (userId === null) return;
 
     const { projectId } = req.params;
-    const project = fastify.storage.projects.getById(projectId, userId);
+    const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

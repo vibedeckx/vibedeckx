@@ -124,8 +124,8 @@ function migrateLegacyConfig(parsed: any): ChatProviderConfig {
   return { apiKeys, main, fast: { ...main } };
 }
 
-export function getChatProviderConfig(storage: Storage): ChatProviderConfig {
-  const raw = storage.settings.get("chat_provider");
+export async function getChatProviderConfig(storage: Storage): Promise<ChatProviderConfig> {
+  const raw = await storage.settings.get("chat_provider");
   if (!raw) return defaultConfig();
   try {
     const parsed = JSON.parse(raw);
@@ -159,8 +159,8 @@ export function isModelConfigured(config: ChatProviderConfig, choice: ModelChoic
 }
 
 /** Resolve the primary chat model — used by the main chat session. */
-export function resolveChatModel(storage: Storage): AnyLanguageModel {
-  const config = getChatProviderConfig(storage);
+export async function resolveChatModel(storage: Storage): Promise<AnyLanguageModel> {
+  const config = await getChatProviderConfig(storage);
   return resolveModel(config.main, config.apiKeys);
 }
 
@@ -168,7 +168,7 @@ export function resolveChatModel(storage: Storage): AnyLanguageModel {
  * Resolve the "fast" chat model — used by lightweight background features
  * (translate, agent session titles).
  */
-export function resolveFastChatModel(storage: Storage): AnyLanguageModel {
-  const config = getChatProviderConfig(storage);
+export async function resolveFastChatModel(storage: Storage): Promise<AnyLanguageModel> {
+  const config = await getChatProviderConfig(storage);
   return resolveModel(config.fast, config.apiKeys);
 }

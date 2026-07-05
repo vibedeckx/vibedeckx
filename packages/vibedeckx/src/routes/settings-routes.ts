@@ -102,7 +102,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Get proxy settings
   fastify.get("/api/settings/proxy", async (req, reply) => {
     if (requireAuth(req, reply) === null) return;
-    const saved = fastify.storage.settings.get("proxy");
+    const saved = await fastify.storage.settings.get("proxy");
     if (!saved) {
       return reply.code(200).send(DEFAULT_PROXY_CONFIG);
     }
@@ -140,7 +140,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       port: type === "none" ? 0 : port,
     };
 
-    fastify.storage.settings.set("proxy", JSON.stringify(config));
+    await fastify.storage.settings.set("proxy", JSON.stringify(config));
     fastify.proxyManager.updateConfig(config);
 
     console.log(`[Settings] Proxy updated: ${config.type}${config.type !== "none" ? ` ${config.host}:${config.port}` : ""}`);
@@ -245,7 +245,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   fastify.get("/api/settings/chat-provider", async (req, reply) => {
     if (requireAuth(req, reply) === null) return;
-    const config = getChatProviderConfig(fastify.storage);
+    const config = await getChatProviderConfig(fastify.storage);
     return reply.code(200).send(serializeConfig(config));
   });
 
@@ -255,7 +255,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (requireAuth(req, reply) === null) return;
     const { apiKeys, main, fast } = req.body;
 
-    const existing = getChatProviderConfig(fastify.storage);
+    const existing = await getChatProviderConfig(fastify.storage);
 
     // Merge API keys per provider; only providers present in the body are updated.
     const mergedKeys = { ...existing.apiKeys };
@@ -285,7 +285,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       fast: fastResult,
     };
 
-    fastify.storage.settings.set("chat_provider", JSON.stringify(updated));
+    await fastify.storage.settings.set("chat_provider", JSON.stringify(updated));
     console.log(
       `[Settings] Chat provider updated: main=${updated.main.provider}/${updated.main.model}, fast=${updated.fast.provider}/${updated.fast.model}`,
     );
@@ -297,7 +297,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   fastify.get("/api/settings/terminal", async (req, reply) => {
     if (requireAuth(req, reply) === null) return;
-    const saved = fastify.storage.settings.get("terminal");
+    const saved = await fastify.storage.settings.get("terminal");
     if (!saved) {
       return reply.code(200).send(DEFAULT_TERMINAL_SETTINGS);
     }
@@ -337,7 +337,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const saved = fastify.storage.settings.get("terminal");
+    const saved = await fastify.storage.settings.get("terminal");
     const existing: TerminalSettings = (() => {
       if (!saved) return DEFAULT_TERMINAL_SETTINGS;
       try {
@@ -360,7 +360,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       fontFamily: (fontFamily ?? existing.fontFamily).trim(),
     };
 
-    fastify.storage.settings.set("terminal", JSON.stringify(updated));
+    await fastify.storage.settings.set("terminal", JSON.stringify(updated));
     console.log(`[Settings] Terminal updated: scrollback=${updated.scrollback}, fontSize=${updated.fontSize}, fontFamily="${updated.fontFamily}"`);
 
     return reply.code(200).send(updated);
@@ -370,7 +370,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   fastify.get("/api/settings/conversation", async (req, reply) => {
     if (requireAuth(req, reply) === null) return;
-    const saved = fastify.storage.settings.get("conversation");
+    const saved = await fastify.storage.settings.get("conversation");
     return reply.code(200).send(readStoredConversationSettings(saved));
   });
 
@@ -397,7 +397,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (err) return reply.code(400).send({ error: err });
     }
 
-    const existing = readStoredConversationSettings(fastify.storage.settings.get("conversation"));
+    const existing = readStoredConversationSettings(await fastify.storage.settings.get("conversation"));
     const updated: ConversationSettings = {
       agentFontSize: agentFontSize ?? existing.agentFontSize,
       chatFontSize: chatFontSize ?? existing.chatFontSize,
@@ -405,7 +405,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       filesContentFontSize: filesContentFontSize ?? existing.filesContentFontSize,
     };
 
-    fastify.storage.settings.set("conversation", JSON.stringify(updated));
+    await fastify.storage.settings.set("conversation", JSON.stringify(updated));
     console.log(
       `[Settings] Conversation updated: agentFontSize=${updated.agentFontSize}, chatFontSize=${updated.chatFontSize}, filesTreeFontSize=${updated.filesTreeFontSize}, filesContentFontSize=${updated.filesContentFontSize}`,
     );

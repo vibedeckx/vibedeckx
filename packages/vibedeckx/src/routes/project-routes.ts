@@ -21,7 +21,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get("/api/projects", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const projects = fastify.storage.projects.getAll(userId).map(sanitizeProject);
+    const projects = (await fastify.storage.projects.getAll(userId)).map(sanitizeProject);
     return reply.code(200).send({ projects });
   });
 
@@ -29,7 +29,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>("/api/projects/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -128,14 +128,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (projectPath) {
-      const existing = fastify.storage.projects.getByPath(projectPath);
+      const existing = await fastify.storage.projects.getByPath(projectPath);
       if (existing) {
         return reply.code(409).send({ error: "Project with this path already exists" });
       }
     }
 
     const id = randomUUID();
-    const project = fastify.storage.projects.create({
+    const project = await fastify.storage.projects.create({
       id,
       name,
       path: projectPath || null,
@@ -166,7 +166,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -199,7 +199,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     if (!effectivePath && !effectiveRemotePath) {
       // Also check project_remotes table — multi-remote projects use it instead of legacy remote_path
-      const remotes = fastify.storage.projectRemotes.getByProject(req.params.id);
+      const remotes = await fastify.storage.projectRemotes.getByProject(req.params.id);
       if (remotes.length === 0) {
         return reply.code(400).send({ error: "Project must have at least one of local path or remote path" });
       }
@@ -210,7 +210,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (newPath && newPath !== project.path) {
-      const existing = fastify.storage.projects.getByPath(newPath);
+      const existing = await fastify.storage.projects.getByPath(newPath);
       if (existing && existing.id !== req.params.id) {
         return reply.code(409).send({ error: "Another project already uses this path" });
       }
@@ -238,7 +238,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (syncUpConfig !== undefined) updateOpts.sync_up_config = syncUpConfig;
     if (syncDownConfig !== undefined) updateOpts.sync_down_config = syncDownConfig;
 
-    const updated = fastify.storage.projects.update(req.params.id, updateOpts, userId);
+    const updated = await fastify.storage.projects.update(req.params.id, updateOpts, userId);
     if (!updated) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -250,12 +250,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string } }>("/api/projects/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    fastify.storage.projects.delete(req.params.id, userId);
+    await fastify.storage.projects.delete(req.params.id, userId);
     return reply.code(200).send({ success: true });
   });
 
@@ -266,7 +266,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:id/execute-sync", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -279,7 +279,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     let remotePath: string | undefined;
 
     if (remoteServerId) {
-      const pr = fastify.storage.projectRemotes.getByProjectAndServer(project.id, remoteServerId);
+      const pr = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, remoteServerId);
       if (!pr) {
         return reply.code(404).send({ error: "Remote not linked to project" });
       }
@@ -368,7 +368,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>("/api/projects/:id/files", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }

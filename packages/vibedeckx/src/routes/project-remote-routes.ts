@@ -18,10 +18,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (userId === null) return;
 
       const { id } = request.params;
-      const project = fastify.storage.projects.getById(id, userId);
+      const project = await fastify.storage.projects.getById(id, userId);
       if (!project)
         return reply.code(404).send({ error: "Project not found" });
-      const remotes = fastify.storage.projectRemotes.getByProject(id);
+      const remotes = await fastify.storage.projectRemotes.getByProject(id);
       return reply.send(remotes.map(sanitizeProjectRemote));
     }
   );
@@ -48,15 +48,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
           .code(400)
           .send({ error: "remoteServerId and remotePath are required" });
 
-      const project = fastify.storage.projects.getById(id, userId);
+      const project = await fastify.storage.projects.getById(id, userId);
       if (!project)
         return reply.code(404).send({ error: "Project not found" });
 
-      const server = fastify.storage.remoteServers.getById(remoteServerId, userId);
+      const server = await fastify.storage.remoteServers.getById(remoteServerId, userId);
       if (!server)
         return reply.code(404).send({ error: "Remote server not found" });
 
-      const existing = fastify.storage.projectRemotes.getByProjectAndServer(
+      const existing = await fastify.storage.projectRemotes.getByProjectAndServer(
         id,
         remoteServerId
       );
@@ -65,7 +65,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           .code(409)
           .send({ error: "This remote server is already associated with the project" });
 
-      const projectRemote = fastify.storage.projectRemotes.add({
+      const projectRemote = await fastify.storage.projectRemotes.add({
         project_id: id,
         remote_server_id: remoteServerId,
         remote_path: remotePath,
@@ -93,7 +93,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           syncDownConfig?: SyncButtonConfig | null;
         };
 
-      const updated = fastify.storage.projectRemotes.update(rid, {
+      const updated = await fastify.storage.projectRemotes.update(rid, {
         remote_path: remotePath,
         sort_order: sortOrder,
         sync_up_config: syncUpConfig,
@@ -113,7 +113,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (userId === null) return;
 
       const { rid } = request.params;
-      const removed = fastify.storage.projectRemotes.remove(rid);
+      const removed = await fastify.storage.projectRemotes.remove(rid);
       if (!removed)
         return reply.code(404).send({ error: "Project remote not found" });
       return reply.send({ success: true });

@@ -7,15 +7,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Authenticate and verify the caller owns (or, in solo mode, that there
   // exists) the project before touching BrowserManager. Returns the projectId
   // on success, or null after sending the appropriate error response.
-  const ensureProjectAccess = (
+  const ensureProjectAccess = async (
     req: FastifyRequest<{ Params: { id: string } }>,
     reply: FastifyReply,
-  ): string | null => {
+  ): Promise<string | null> => {
     const userId = requireAuth(req, reply);
     if (userId === null) return null;
 
     const projectId = req.params.id;
-    const project = fastify.storage.projects.getById(projectId, userId);
+    const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) {
       reply.code(404).send({ error: "Project not found" });
       return null;
@@ -29,7 +29,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { branch?: string };
   }>("/api/projects/:id/browser", async (req, reply) => {
-    const projectId = ensureProjectAccess(req, reply);
+    const projectId = await ensureProjectAccess(req, reply);
     if (projectId === null) return;
     const { branch } = req.body || {};
 
@@ -49,7 +49,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{
     Params: { id: string };
   }>("/api/projects/:id/browser", async (req, reply) => {
-    const projectId = ensureProjectAccess(req, reply);
+    const projectId = await ensureProjectAccess(req, reply);
     if (projectId === null) return;
     const session = fastify.browserManager.getSession(projectId);
 
@@ -64,7 +64,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{
     Params: { id: string };
   }>("/api/projects/:id/browser", async (req, reply) => {
-    const projectId = ensureProjectAccess(req, reply);
+    const projectId = await ensureProjectAccess(req, reply);
     if (projectId === null) return;
     const stopped = await fastify.browserManager.stopSession(projectId);
 
@@ -80,7 +80,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { url: string };
   }>("/api/projects/:id/browser/navigate", async (req, reply) => {
-    const projectId = ensureProjectAccess(req, reply);
+    const projectId = await ensureProjectAccess(req, reply);
     if (projectId === null) return;
     const { url } = req.body;
 
@@ -105,7 +105,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { type: string; data: Record<string, unknown> };
   }>("/api/projects/:id/browser/error", async (req, reply) => {
-    const projectId = ensureProjectAccess(req, reply);
+    const projectId = await ensureProjectAccess(req, reply);
     if (projectId === null) return;
     const { type, data } = req.body;
 

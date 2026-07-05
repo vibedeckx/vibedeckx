@@ -10,13 +10,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
 
       const branch = req.query.branch ?? null;
-      const commands = fastify.storage.commands.getByWorkspace(req.params.projectId, branch);
+      const commands = await fastify.storage.commands.getByWorkspace(req.params.projectId, branch);
       return reply.code(200).send({ commands });
     }
   );
@@ -27,7 +27,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/commands", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -38,7 +38,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const id = randomUUID();
-    const command = fastify.storage.commands.create({
+    const command = await fastify.storage.commands.create({
       id,
       project_id: req.params.projectId,
       branch: branch ?? null,
@@ -55,16 +55,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/commands/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.commands.getById(req.params.id);
+    const existing = await fastify.storage.commands.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Command not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Command not found" });
     }
 
-    const command = fastify.storage.commands.update(req.params.id, {
+    const command = await fastify.storage.commands.update(req.params.id, {
       name: req.body.name,
       content: req.body.content,
       position: req.body.position,
@@ -75,16 +75,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string } }>("/api/commands/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.commands.getById(req.params.id);
+    const existing = await fastify.storage.commands.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Command not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Command not found" });
     }
 
-    fastify.storage.commands.delete(req.params.id);
+    await fastify.storage.commands.delete(req.params.id);
     return reply.code(200).send({ success: true });
   });
 };

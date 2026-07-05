@@ -41,13 +41,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Resolve a schedule by id and enforce project ownership (same idiom as
   // command-routes PUT/DELETE: child fetched unscoped, parent project scoped
   // by userId). Sends the 404 itself and returns null when not accessible.
-  const getAuthorizedSchedule = (id: string, userId: string | undefined, reply: FastifyReply): ScheduledTask | null => {
-    const schedule = fastify.storage.scheduledTasks.getById(id);
+  const getAuthorizedSchedule = async (id: string, userId: string | undefined, reply: FastifyReply): Promise<ScheduledTask | null> => {
+    const schedule = await fastify.storage.scheduledTasks.getById(id);
     if (!schedule) {
       reply.code(404).send({ error: "Schedule not found" });
       return null;
     }
-    const project = fastify.storage.projects.getById(schedule.project_id, userId);
+    const project = await fastify.storage.projects.getById(schedule.project_id, userId);
     if (!project) {
       reply.code(404).send({ error: "Schedule not found" });
       return null;
@@ -60,11 +60,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) return reply.code(404).send({ error: "Project not found" });
 
-      const schedules = fastify.storage.scheduledTasks.getByProjectId(req.params.projectId);
-      const lastRuns = fastify.storage.scheduledTaskRuns.getLastByScheduleIds(schedules.map((s) => s.id));
+      const schedules = await fastify.storage.scheduledTasks.getByProjectId(req.params.projectId);
+      const lastRuns = await fastify.storage.scheduledTaskRuns.getLastByScheduleIds(schedules.map((s) => s.id));
       return reply.code(200).send({
         schedules: schedules.map((s) => ({
           ...s,
@@ -81,7 +81,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) return reply.code(404).send({ error: "Project not found" });
 
       const b = req.body ?? {};
@@ -100,11 +100,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (error) return reply.code(400).send({ error });
 
       const target = b.target ?? "local";
-      if (target !== "local" && !fastify.storage.projectRemotes.getByProjectAndServer(req.params.projectId, target)) {
+      if (target !== "local" && !(await fastify.storage.projectRemotes.getByProjectAndServer(req.params.projectId, target))) {
         return reply.code(400).send({ error: "Unknown remote target" });
       }
 
-      const schedule = fastify.storage.scheduledTasks.create({
+      const schedule = await fastify.storage.scheduledTasks.create({
         id: randomUUID(),
         project_id: req.params.projectId,
         name: b.name.trim(),
@@ -119,7 +119,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         enabled: b.enabled ?? true,
         target,
       });
-      fastify.scheduler.reschedule(schedule.id);
+      await fastify.scheduler.reschedule(schedule.id);
       return reply.code(201).send({ schedule });
     }
   );
@@ -129,7 +129,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const existing = getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
+      const existing = await getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
       if (!existing) return;
 
       const b = req.body ?? {};
@@ -156,11 +156,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (error) return reply.code(400).send({ error });
 
       const nextTarget = b.target !== undefined ? b.target : existing.target;
-      if (nextTarget !== "local" && !fastify.storage.projectRemotes.getByProjectAndServer(existing.project_id, nextTarget)) {
+      if (nextTarget !== "local" && !(await fastify.storage.projectRemotes.getByProjectAndServer(existing.project_id, nextTarget))) {
         return reply.code(400).send({ error: "Unknown remote target" });
       }
 
-      const schedule = fastify.storage.scheduledTasks.update(req.params.id, {
+      const schedule = await fastify.storage.scheduledTasks.update(req.params.id, {
         name: b.name?.trim(),
         cron_expr: b.cron_expr?.trim(),
         timezone: resolvedTimezone,
@@ -173,7 +173,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         timeout_seconds: b.timeout_seconds,
         target: b.target,
       });
-      fastify.scheduler.reschedule(req.params.id);
+      await fastify.scheduler.reschedule(req.params.id);
       return reply.code(200).send({ schedule });
     }
   );
@@ -183,11 +183,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const existing = getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
+      const existing = await getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
       if (!existing) return;
 
       fastify.scheduler.unschedule(req.params.id);
-      fastify.storage.scheduledTasks.delete(req.params.id);
+      await fastify.storage.scheduledTasks.delete(req.params.id);
       return reply.code(204).send();
     }
   );
@@ -197,7 +197,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const existing = getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
+      const existing = await getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
       if (!existing) return;
 
       const result = await fastify.scheduler.runNow(req.params.id);
@@ -212,10 +212,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const existing = getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
+      const existing = await getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
       if (!existing) return;
 
-      return reply.code(200).send({ runs: fastify.storage.scheduledTaskRuns.getByScheduleId(req.params.id) });
+      return reply.code(200).send({ runs: await fastify.storage.scheduledTaskRuns.getByScheduleId(req.params.id) });
     }
   );
 
@@ -224,10 +224,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const run = fastify.storage.scheduledTaskRuns.getById(req.params.id);
+      const run = await fastify.storage.scheduledTaskRuns.getById(req.params.id);
       if (!run) return reply.code(404).send({ error: "Run not found" });
       // Ownership: run -> schedule -> project (scoped by userId)
-      const schedule = getAuthorizedSchedule(run.schedule_id, userId ?? undefined, reply);
+      const schedule = await getAuthorizedSchedule(run.schedule_id, userId ?? undefined, reply);
       if (!schedule) return;
 
       return reply.code(200).send({ run });

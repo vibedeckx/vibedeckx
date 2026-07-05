@@ -15,14 +15,14 @@ import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
-function resolveProjectPath(
+async function resolveProjectPath(
   projectId: string,
-  storage: { projects: { getById: (id: string) => { path: string | null } | undefined } }
-): string | null {
+  storage: { projects: { getById: (id: string) => Promise<{ path: string | null } | undefined> } }
+): Promise<string | null> {
   if (projectId.startsWith("path:")) {
     return projectId.slice(5);
   }
-  const project = storage.projects.getById(projectId);
+  const project = await storage.projects.getById(projectId);
   return project?.path ?? null;
 }
 
@@ -70,14 +70,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
    * per-user ownership. Do NOT pass `resolveUserId(...)` here — that collapses
    * `undefined` to `"local"`, which would not match solo projects (user_id="").
    */
-  function getAuthorizedRemoteSessionInfo(
+  async function getAuthorizedRemoteSessionInfo(
     sessionId: string,
     userId: string | undefined,
-  ): RemoteSessionInfo | null {
+  ): Promise<RemoteSessionInfo | null> {
     const remoteInfo = fastify.remoteSessionMap.get(sessionId);
     if (!remoteInfo) return null;
     const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
-    const project = fastify.storage.projects.getById(projectId, userId);
+    const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return null;
     return remoteInfo;
   }
@@ -106,16 +106,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
       console.log(`[API] POST /api/path/agent-sessions: path=${projectPath}, branch=${branch}, pseudoProjectId=${pseudoProjectId}`);
 
       // Ensure a project row exists for the pseudo project ID so the FK constraint is satisfied
-      if (!fastify.storage.projects.getById(pseudoProjectId)) {
+      if (!(await fastify.storage.projects.getById(pseudoProjectId))) {
         // Check if a project with this path already exists (avoids UNIQUE constraint on path)
-        const existingByPath = fastify.storage.projects.getByPath(projectPath);
+        const existingByPath = await fastify.storage.projects.getByPath(projectPath);
         if (existingByPath) {
           // Reuse the existing project's ID for FK references
           pseudoProjectId = existingByPath.id;
         } else {
           const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
           try {
-            fastify.storage.projects.create({
+            await fastify.storage.projects.create({
               id: pseudoProjectId,
               name,
               path: projectPath,
@@ -129,7 +129,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      const sessionId = fastify.agentSessionManager.findExistingSession(
+      const sessionId = await fastify.agentSessionManager.findExistingSession(
         pseudoProjectId,
         branch ?? null,
         projectPath,
@@ -180,7 +180,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!projectPath) {
         return reply.code(400).send({ error: "path is required" });
       }
-      const existing = fastify.storage.projects.getByPath(projectPath);
+      const existing = await fastify.storage.projects.getByPath(projectPath);
       if (!existing) {
         // No project registered at that path yet — nothing to list.
         return reply.code(200).send({ sessions: [] });
@@ -188,13 +188,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // Always filter by branch. A missing param means the main/default branch,
       // stored with the empty-string sentinel (""). Mirrors the project-id route;
       // falling back to getByProjectId() here would leak every branch's sessions.
-      const dbSessions = fastify.storage.agentSessions.listByBranch(
+      const dbSessions = await fastify.storage.agentSessions.listByBranch(
         existing.id,
         typeof req.query.branch === "string" ? req.query.branch : "",
       );
 
       const countMap = new Map(
-        fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
+        (await fastify.storage.agentSessions.countEntries()).map(r => [r.session_id, r.cnt])
       );
       // Hide empty sessions from history — only sessions that actually held a
       // conversation should appear in the dropdown.
@@ -219,21 +219,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     let pseudoProjectId = `path:${projectPath}`;
-    if (!fastify.storage.projects.getById(pseudoProjectId)) {
-      const existingByPath = fastify.storage.projects.getByPath(projectPath);
+    if (!(await fastify.storage.projects.getById(pseudoProjectId))) {
+      const existingByPath = await fastify.storage.projects.getByPath(projectPath);
       if (existingByPath) {
         pseudoProjectId = existingByPath.id;
       } else {
         const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
         try {
-          fastify.storage.projects.create({ id: pseudoProjectId, name, path: projectPath });
+          await fastify.storage.projects.create({ id: pseudoProjectId, name, path: projectPath });
         } catch (err: unknown) {
           if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
         }
       }
     }
 
-    const sessionId = fastify.agentSessionManager.createNewSession(
+    const sessionId = await fastify.agentSessionManager.createNewSession(
       pseudoProjectId,
       branch ?? null,
       projectPath,
@@ -261,7 +261,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -269,7 +269,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const useRemoteAgent = project.agent_mode !== "local";
 
       if (useRemoteAgent) {
-        const remoteConfig = fastify.storage.projectRemotes.getByProjectAndServer(project.id, project.agent_mode);
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, project.agent_mode);
         if (!remoteConfig) {
           // Remote misconfigured — return empty so the dropdown just shows nothing rather than 4xx.
           return reply.code(200).send({ sessions: [] });
@@ -291,7 +291,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return reply.code(proxyStatus(result)).send(result.data);
         }
         const data = result.data as { sessions: Array<{ id: string; status: string; branch?: string | null; entry_count?: number; [k: string]: unknown }> };
-        const mapped = data.sessions.map(s => {
+        const mapped = await Promise.all(data.sessions.map(async (s) => {
           const localSessionId = `remote-${project.agent_mode}-${project.id}-${s.id}`;
           // Populate remoteSessionMap + persist so the user can navigate to ANY
           // session in the dropdown (including ones created on the remote
@@ -306,11 +306,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
               branch: s.branch ?? null,
             });
           }
-          fastify.storage.remoteSessionMappings.upsert(
+          await fastify.storage.remoteSessionMappings.upsert(
             localSessionId, project.id, project.agent_mode, s.id, s.branch ?? null,
           );
           return { ...s, id: localSessionId, entry_count: s.entry_count ?? 0 };
-        });
+        }));
         return reply.code(200).send({ sessions: mapped });
       }
 
@@ -321,13 +321,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // Always filter by branch. A missing param means the main/default branch,
       // which is stored with the empty-string sentinel (""). Falling back to
       // getByProjectId() here would leak sessions from every branch into the list.
-      const dbSessions = fastify.storage.agentSessions.listByBranch(
+      const dbSessions = await fastify.storage.agentSessions.listByBranch(
         req.params.projectId,
         typeof req.query.branch === "string" ? req.query.branch : "",
       );
 
       const countMap = new Map(
-        fastify.storage.agentSessions.countEntries().map(r => [r.session_id, r.cnt])
+        (await fastify.storage.agentSessions.countEntries()).map(r => [r.session_id, r.cnt])
       );
       // Hide empty sessions from history — only sessions that actually held a
       // conversation should appear in the dropdown.
@@ -349,7 +349,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/agent-sessions", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -361,31 +361,31 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Fallback: legacy "remote" value → resolve to actual remote server ID
     if (useRemoteAgent && agentMode === 'remote') {
-      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
       if (remotes.length > 0) {
         const fallback = remotes[0];
         agentMode = fallback.remote_server_id;
-        fastify.storage.projects.update(project.id, { agent_mode: fallback.remote_server_id });
+        await fastify.storage.projects.update(project.id, { agent_mode: fallback.remote_server_id });
         console.log(`[API] Auto-resolved agent_mode from 'remote' to '${fallback.remote_server_id}' (legacy value)`);
       }
     }
 
     // Fallback: if local mode but no local path, try to find a remote to use
     if (!useRemoteAgent && !project.path) {
-      const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+      const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
       if (remotes.length > 0) {
         const fallback = remotes[0];
         useRemoteAgent = true;
         agentMode = fallback.remote_server_id;
         // Fix the persisted agent_mode so future requests use the correct mode
-        fastify.storage.projects.update(project.id, { agent_mode: fallback.remote_server_id });
+        await fastify.storage.projects.update(project.id, { agent_mode: fallback.remote_server_id });
         console.log(`[API] Auto-resolved agent_mode from 'local' to '${fallback.remote_server_id}' (no local path)`);
       }
     }
 
     // When remote, resolve connection info from project_remotes table
     const remoteConfig = useRemoteAgent
-      ? fastify.storage.projectRemotes.getByProjectAndServer(project.id, agentMode)
+      ? await fastify.storage.projectRemotes.getByProjectAndServer(project.id, agentMode)
       : undefined;
 
     console.log(`[API] POST agent-sessions: projectId=${req.params.projectId}, ` +
@@ -424,7 +424,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             remoteSessionId: remoteData.session.id,
             branch: branch ?? null,
           });
-          fastify.storage.remoteSessionMappings.upsert(
+          await fastify.storage.remoteSessionMappings.upsert(
             localSessionId, project.id, agentMode, remoteData.session.id, branch ?? null,
           );
 
@@ -467,7 +467,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     console.log(`[API] Loading LOCAL agent session: projectId=${req.params.projectId}, branch=${branch ?? null}, path=${project.path}`);
 
     try {
-      const sessionId = fastify.agentSessionManager.findExistingSession(
+      const sessionId = await fastify.agentSessionManager.findExistingSession(
         req.params.projectId,
         branch ?? null,
         project.path,
@@ -510,7 +510,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/agent-sessions/new", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -520,7 +520,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const useRemoteAgent = agentMode !== 'local';
 
     if (useRemoteAgent) {
-      const remoteConfig = fastify.storage.projectRemotes.getByProjectAndServer(project.id, agentMode);
+      const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, agentMode);
       if (!remoteConfig) {
         return reply.code(400).send({ error: `Remote server configuration not found for agent_mode="${agentMode}"` });
       }
@@ -560,7 +560,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const sessionId = fastify.agentSessionManager.createNewSession(
+      const sessionId = await fastify.agentSessionManager.createNewSession(
         req.params.projectId,
         branch ?? null,
         project.path,
@@ -593,7 +593,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -668,7 +668,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (req.params.sessionId.startsWith("remote-")) {
-      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, authResult);
+      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, authResult);
       if (!remoteInfo) {
         console.log(`[API] /message 404: remote session not found. Known keys: [${[...fastify.remoteSessionMap.keys()].join(', ')}]`);
         return reply.code(404).send({ error: "Remote session not found" });
@@ -722,13 +722,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const session = fastify.agentSessionManager.getSession(req.params.sessionId);
     let projectPathForWake: string | undefined;
     if (session?.dormant) {
-      projectPathForWake = resolveProjectPath(session.projectId, fastify.storage) ?? undefined;
+      projectPathForWake = (await resolveProjectPath(session.projectId, fastify.storage)) ?? undefined;
       if (!projectPathForWake) {
         return reply.code(400).send({ error: "Cannot wake session: project has no local path" });
       }
     }
 
-    const success = fastify.agentSessionManager.sendUserMessage(
+    const success = await fastify.agentSessionManager.sendUserMessage(
       req.params.sessionId,
       content,
       projectPathForWake,
@@ -757,7 +757,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (req.params.sessionId.startsWith("remote-")) {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
       if (!remoteInfo) {
         return reply.code(404).send({ error: "Remote session not found" });
       }
@@ -799,7 +799,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -813,7 +813,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      const stopped = fastify.agentSessionManager.stopSession(req.params.sessionId);
+      const stopped = await fastify.agentSessionManager.stopSession(req.params.sessionId);
       if (!stopped) {
         return reply.code(404).send({ error: "Session not found" });
       }
@@ -828,7 +828,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -849,13 +849,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Session not found" });
       }
 
-      const projectPath = resolveProjectPath(session.projectId, fastify.storage);
+      const projectPath = await resolveProjectPath(session.projectId, fastify.storage);
       if (!projectPath) {
         return reply.code(404).send({ error: "Project not found or has no local path" });
       }
 
       const { agentType } = (req.body || {}) as { agentType?: string };
-      const restarted = fastify.agentSessionManager.restartSession(req.params.sessionId, projectPath, agentType as AgentType | undefined);
+      const restarted = await fastify.agentSessionManager.restartSession(req.params.sessionId, projectPath, agentType as AgentType | undefined);
       if (!restarted) {
         return reply.code(500).send({ error: "Failed to restart session" });
       }
@@ -878,7 +878,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -893,7 +893,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      const outcome = fastify.agentSessionManager.switchAgentType(
+      const outcome = await fastify.agentSessionManager.switchAgentType(
         req.params.sessionId,
         agentType as AgentType
       );
@@ -921,7 +921,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -947,12 +947,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
           remoteSessionId: remoteData.session.id,
           branch: remoteInfo.branch ?? null,
         });
-        fastify.storage.remoteSessionMappings.upsert(
+        await fastify.storage.remoteSessionMappings.upsert(
           localSessionId, projectId, remoteInfo.remoteServerId, remoteData.session.id, remoteInfo.branch ?? null,
         );
         // The remote already wrote the final "Branch - ..." title — claim both
         // title-generation guards so the first message here doesn't clobber it.
-        fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
+        await fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
         fastify.agentSessionManager.markTitleResolved(localSessionId);
 
         // Seed remotePatchCache with the copied messages so WS replay has data
@@ -973,7 +973,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      const newSessionId = fastify.agentSessionManager.branchSession(
+      const newSessionId = await fastify.agentSessionManager.branchSession(
         req.params.sessionId,
         agentType as AgentType | undefined,
       );
@@ -983,7 +983,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const session = fastify.agentSessionManager.getSession(newSessionId);
       const messages = fastify.agentSessionManager.getMessages(newSessionId);
-      const dbRow = fastify.storage.agentSessions.getById(newSessionId);
+      const dbRow = await fastify.storage.agentSessions.getById(newSessionId);
       return reply.code(200).send({
         session: {
           id: newSessionId,
@@ -1014,7 +1014,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1034,12 +1034,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Session not found" });
       }
 
-      const projectPath = resolveProjectPath(session.projectId, fastify.storage);
+      const projectPath = await resolveProjectPath(session.projectId, fastify.storage);
       if (!projectPath) {
         return reply.code(404).send({ error: "Project not found or has no local path" });
       }
 
-      const switched = fastify.agentSessionManager.switchMode(req.params.sessionId, projectPath, mode);
+      const switched = await fastify.agentSessionManager.switchMode(req.params.sessionId, projectPath, mode);
       if (!switched) {
         return reply.code(500).send({ error: "Failed to switch mode" });
       }
@@ -1062,7 +1062,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1082,12 +1082,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Session not found" });
       }
 
-      const projectPath = resolveProjectPath(session.projectId, fastify.storage);
+      const projectPath = await resolveProjectPath(session.projectId, fastify.storage);
       if (!projectPath) {
         return reply.code(404).send({ error: "Project not found or has no local path" });
       }
 
-      const accepted = fastify.agentSessionManager.acceptPlanAndRestart(
+      const accepted = await fastify.agentSessionManager.acceptPlanAndRestart(
         req.params.sessionId,
         projectPath,
         planContent
@@ -1117,7 +1117,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1156,7 +1156,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
-        const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
@@ -1168,12 +1168,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
         fastify.remoteSessionMap.delete(req.params.sessionId);
-        fastify.storage.remoteSessionMappings.delete(req.params.sessionId);
+        await fastify.storage.remoteSessionMappings.delete(req.params.sessionId);
         fastify.remotePatchCache.delete(req.params.sessionId);
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      const deleted = fastify.agentSessionManager.deleteSession(req.params.sessionId);
+      const deleted = await fastify.agentSessionManager.deleteSession(req.params.sessionId);
       if (!deleted) {
         return reply.code(404).send({ error: "Session not found" });
       }
@@ -1193,7 +1193,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (req.params.sessionId.startsWith("remote-")) {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
       if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
@@ -1206,9 +1206,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
-    const session = fastify.storage.agentSessions.getById(req.params.sessionId);
+    const session = await fastify.storage.agentSessions.getById(req.params.sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
-    fastify.storage.agentSessions.updateTitle(req.params.sessionId, title);
+    await fastify.storage.agentSessions.updateTitle(req.params.sessionId, title);
     return reply.code(200).send({ success: true, title });
   });
 
@@ -1224,7 +1224,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (req.params.sessionId.startsWith("remote-")) {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const remoteInfo = getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
       if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
@@ -1237,9 +1237,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
-    const session = fastify.storage.agentSessions.getById(req.params.sessionId);
+    const session = await fastify.storage.agentSessions.getById(req.params.sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
-    fastify.storage.agentSessions.setFavorited(req.params.sessionId, favorited);
+    await fastify.storage.agentSessions.setFavorited(req.params.sessionId, favorited);
     return reply.code(200).send({ success: true, favorited });
   });
 };

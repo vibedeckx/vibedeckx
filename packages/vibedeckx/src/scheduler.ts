@@ -69,17 +69,17 @@ export class SchedulerService {
   }
 
   /** Schedule all enabled tasks. Call once at startup. */
-  start(): void {
-    for (const task of this.storage.scheduledTasks.getAllEnabled()) {
+  async start(): Promise<void> {
+    for (const task of await this.storage.scheduledTasks.getAllEnabled()) {
       this.scheduleJob(task);
     }
     console.log(`[Scheduler] Started with ${this.jobs.size} scheduled task(s)`);
   }
 
   /** (Re)compute the cron job for a schedule after create/update/toggle. */
-  reschedule(scheduleId: string): void {
+  async reschedule(scheduleId: string): Promise<void> {
     this.unschedule(scheduleId);
-    const task = this.storage.scheduledTasks.getById(scheduleId);
+    const task = await this.storage.scheduledTasks.getById(scheduleId);
     if (task && task.enabled) {
       this.scheduleJob(task);
     }
@@ -141,24 +141,24 @@ export class SchedulerService {
   }
 
   /** Record a run that failed before a process could be spawned. */
-  private failWithoutStart(task: ScheduledTask, runId: string, message: string): RunNowResult {
-    this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id });
-    this.storage.scheduledTaskRuns.finish(runId, { status: "failed", output: message });
-    this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
+  private async failWithoutStart(task: ScheduledTask, runId: string, message: string): Promise<RunNowResult> {
+    await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id });
+    await this.storage.scheduledTaskRuns.finish(runId, { status: "failed", output: message });
+    await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
     this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status: "failed", exitCode: null });
     return { error: message };
   }
 
   private async executeRun(scheduleId: string): Promise<RunNowResult> {
-    const task = this.storage.scheduledTasks.getById(scheduleId);
+    const task = await this.storage.scheduledTasks.getById(scheduleId);
     if (!task) return { error: "Schedule not found" };
 
     const runId = randomUUID();
 
     // Overlap policy: skip (recorded) when the previous run is still going.
     if (this.activeRuns.has(scheduleId)) {
-      this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "skipped" });
-      this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
+      await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "skipped" });
+      await this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status: "skipped", exitCode: null });
       return { runId, skipped: true };
     }
@@ -175,7 +175,7 @@ export class SchedulerService {
       }
       cwd = task.directory;
     } else {
-      const project = this.storage.projects.getById(task.project_id);
+      const project = await this.storage.projects.getById(task.project_id);
       if (!project?.path) {
         return this.failWithoutStart(task, runId, "Project has no local path");
       }
@@ -211,12 +211,12 @@ export class SchedulerService {
 
     let processId: string;
     try {
-      processId = this.processManager.start(executor, cwd, true);
+      processId = await this.processManager.start(executor, cwd, true);
     } catch (err) {
       return this.failWithoutStart(task, runId, `Failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "running", process_id: processId });
+    await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "running", process_id: processId });
     this.activeRuns.set(scheduleId, runId);
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId, runId });
 
@@ -233,14 +233,14 @@ export class SchedulerService {
       unsubscribe?.();
     };
 
-    const finalize = (status: ScheduledTaskRunStatus, exitCode: number | null) => {
+    const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null) => {
       if (finalized) return;
       finalized = true;
       releaseRunResources();
       this.activeRuns.delete(scheduleId);
       this.activeRunCleanups.delete(scheduleId);
-      this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
-      this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
+      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
+      await this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status, exitCode });
     };
 
@@ -250,19 +250,25 @@ export class SchedulerService {
         // Trim lazily at 2x cap to avoid re-slicing on every chunk.
         if (output.length > OUTPUT_CAP * 2) output = output.slice(-OUTPUT_CAP);
       } else if (msg.type === "finished") {
-        finalize(msg.exitCode === 0 ? "completed" : "failed", msg.exitCode);
+        void finalize(msg.exitCode === 0 ? "completed" : "failed", msg.exitCode).catch((err) => {
+          console.error(`[Scheduler] finalize failed for run ${runId}: ${err}`);
+        });
       }
     });
     if (!unsubscribe) {
       // Process vanished before we could observe it — should not happen
       // (subscribe runs in the same tick as start), but don't leak activeRuns.
-      finalize("failed", null);
+      await finalize("failed", null);
       return { runId, skipped: false };
     }
 
     timer = setTimeout(() => {
-      this.processManager.stop(processId);
-      finalize("timeout", null);
+      void (async () => {
+        await this.processManager.stop(processId);
+        await finalize("timeout", null);
+      })().catch((err) => {
+        console.error(`[Scheduler] timeout handling failed for run ${runId}: ${err}`);
+      });
     }, task.timeout_seconds * 1000);
     timer.unref(); // don't hold the event loop open for a sleeping timer
 
@@ -281,11 +287,26 @@ export class SchedulerService {
   }
 
   private async executeRemoteRun(task: ScheduledTask, runId: string): Promise<RunNowResult> {
+    // Reserve the overlap slot SYNCHRONOUSLY, as the very first step of this
+    // method — before ANY `await`, including the storage lookup right below.
+    // Unlike the local branch (which runs to this same point without
+    // yielding), this method's very first line used to already be past every
+    // synchronous check in the caller (executeRun), so a second concurrent
+    // trigger (double-clicked Run Now, or Run Now racing a cron tick) could
+    // never observe an unreserved slot. Once `projectRemotes.getByProjectAndServer`
+    // became async, inserting the reservation after it would reopen exactly
+    // that race — a second call could pass executeRun's `activeRuns.has` guard
+    // before this method reserves the slot. Every early-return below must
+    // release this slot.
+    this.activeRuns.set(task.id, runId);
+
     if (!this.remote) {
+      this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, "Remote execution is not configured on this server");
     }
-    const remoteConfig = this.storage.projectRemotes.getByProjectAndServer(task.project_id, task.target);
+    const remoteConfig = await this.storage.projectRemotes.getByProjectAndServer(task.project_id, task.target);
     if (!remoteConfig) {
+      this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, `Remote server config not found for target ${task.target}`);
     }
 
@@ -294,6 +315,7 @@ export class SchedulerService {
     let remoteBranch: string | null;
     if (task.cwd_mode === "directory") {
       if (!task.directory || !path.isAbsolute(task.directory)) {
+        this.activeRuns.delete(task.id);
         return this.failWithoutStart(task, runId, `Schedule directory must be an absolute path: ${task.directory ?? "(unset)"}`);
       }
       remotePath = task.directory;
@@ -306,14 +328,6 @@ export class SchedulerService {
     const proxy = this.remote.proxy ?? proxyToRemoteAuto;
     const serverUrl = remoteConfig.server_url ?? "";
     const serverKey = remoteConfig.server_api_key || "";
-
-    // Reserve the overlap slot SYNCHRONOUSLY, before the async proxy start.
-    // Unlike the local branch (which runs to activeRuns.set without yielding),
-    // this method awaits the network round-trip below; without reserving here a
-    // second concurrent trigger (double-clicked Run Now, or Run Now racing a
-    // cron tick) would also pass the caller's overlap guard and spawn a second
-    // remote process. The two post-await failure returns release this slot.
-    this.activeRuns.set(task.id, runId);
 
     let result;
     try {
@@ -353,7 +367,7 @@ export class SchedulerService {
     this.remote.remoteExecutorMap.set(localProcessId, remoteInfo);
     this.remote.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
 
-    this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id, status: "running", process_id: localProcessId });
+    await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id, status: "running", process_id: localProcessId });
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId: task.id, runId });
 
     let finalized = false;
@@ -365,14 +379,14 @@ export class SchedulerService {
       unsubscribe?.();
     };
 
-    const finalize = (status: ScheduledTaskRunStatus, exitCode: number | null, output: string) => {
+    const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null, output: string) => {
       if (finalized) return;
       finalized = true;
       releaseRunResources();
       this.activeRuns.delete(task.id);
       this.activeRunCleanups.delete(task.id);
-      this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
-      this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
+      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
+      await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status, exitCode });
     };
 
@@ -380,7 +394,9 @@ export class SchedulerService {
     // emits executor:stopped on the bus when the remote finishes (with tailOutput).
     unsubscribe = this.eventBus?.subscribe((e) => {
       if (e.type === "executor:stopped" && e.processId === localProcessId) {
-        finalize(e.exitCode === 0 ? "completed" : "failed", e.exitCode, e.tailOutput ?? "");
+        void finalize(e.exitCode === 0 ? "completed" : "failed", e.exitCode, e.tailOutput ?? "").catch((err) => {
+          console.error(`[Scheduler] finalize failed for run ${runId}: ${err}`);
+        });
       }
     });
 
@@ -390,7 +406,9 @@ export class SchedulerService {
         `/api/executor-processes/${remoteProcessId}/stop`, undefined,
         { reverseConnectManager: this.remote!.reverseConnectManager },
       ).catch(() => {});
-      finalize("timeout", null, "");
+      void finalize("timeout", null, "").catch((err) => {
+        console.error(`[Scheduler] timeout finalize failed for run ${runId}: ${err}`);
+      });
     }, task.timeout_seconds * 1000);
     timer.unref();
 

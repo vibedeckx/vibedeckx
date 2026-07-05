@@ -108,7 +108,9 @@ export class RemoteExecutorMonitor {
           this.storage.remoteExecutorProcesses.markFinished(
             localProcessId,
             typeof parsed.exitCode === "number" ? parsed.exitCode : 0,
-          );
+          ).catch((err) => {
+            console.error(`[RemoteExecutorMonitor] Failed to mark process ${localProcessId} finished:`, err);
+          });
           cleanup();
         }
       } catch { /* ignore parse errors */ }

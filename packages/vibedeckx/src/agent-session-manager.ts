@@ -138,11 +138,11 @@ export class AgentSessionManager {
    * can't derive it from local DB (e.g. forwarding from a remote backend)
    * should use `emitBranchActivityIfChanged` instead.
    */
-  emitDerivedBranchActivity(
+  async emitDerivedBranchActivity(
     projectId: string,
     branch: string | null,
-  ): BranchActivityState | null {
-    const sessions = this.storage.agentSessions.listByBranch(projectId, branch ?? "");
+  ): Promise<BranchActivityState | null> {
+    const sessions = await this.storage.agentSessions.listByBranch(projectId, branch ?? "");
     const derived = computeBranchActivity(sessions).get(branch ?? "")
                   ?? { activity: "idle", since: Date.now() };
     return this.emitBranchActivityIfChanged(projectId, branch, derived);
@@ -220,16 +220,16 @@ export class AgentSessionManager {
    * 2. skipDb fallback (remote path-based pseudo-projects): scan `this.sessions`.
    * 3. No match anywhere → null.
    */
-  findExistingSession(
+  async findExistingSession(
     projectId: string,
     branch: string | null,
     projectPath: string,
     skipDb = false,
     permissionMode: "plan" | "edit" = "edit",
-  ): string | null {
+  ): Promise<string | null> {
     console.log(`[findExisting] ENTER projectId=${projectId} branch=${branch ?? "<null>"} skipDb=${skipDb} sessionsMapSize=${this.sessions.size}`);
     if (!skipDb) {
-      const latestDbRow = this.storage.agentSessions.getLatestByBranch(
+      const latestDbRow = await this.storage.agentSessions.getLatestByBranch(
         projectId,
         branch ?? ""
       );
@@ -261,7 +261,7 @@ export class AgentSessionManager {
    * Unlike getOrCreateSession, this never reuses an existing row for the branch.
    * Used by "New Conversation" flow where the user explicitly wants a fresh conversation.
    */
-  createNewSession(
+  async createNewSession(
     projectId: string,
     branch: string | null,
     projectPath: string,
@@ -269,7 +269,7 @@ export class AgentSessionManager {
     permissionMode: "plan" | "edit" = "edit",
     agentType: AgentType = "claude-code",
     announceRunning: boolean = false,
-  ): string {
+  ): Promise<string> {
     // Defense-in-depth: if there are existing non-dormant sessions on the same
     // project+branch, their child processes may still be alive (stream-json
     // agents keep the CLI waiting on stdin between turns while reporting status
@@ -282,7 +282,7 @@ export class AgentSessionManager {
     for (const other of this.sessions.values()) {
       if (other.projectId === projectId && other.branch === branch && !other.dormant) {
         console.log(`[AgentSession] createNewSession: stopping prior session ${other.id} on same branch to prevent process leak`);
-        this.stopSession(other.id);
+        await this.stopSession(other.id);
       }
     }
 
@@ -293,7 +293,7 @@ export class AgentSessionManager {
     const absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
 
     if (!skipDb) {
-      this.storage.agentSessions.create({
+      await this.storage.agentSessions.create({
         id: sessionId,
         project_id: projectId,
         branch: branchKey,
@@ -365,7 +365,7 @@ export class AgentSessionManager {
     // The new session has fresh updated_at and no timestamps, so the branch
     // resets to idle (see computeBranchActivity). Emit so SSE consumers don't
     // sit on a stale "completed" until the next user message arrives.
-    this.emitDerivedBranchActivity(projectId, branch);
+    await this.emitDerivedBranchActivity(projectId, branch);
 
     return sessionId;
   }
@@ -380,17 +380,17 @@ export class AgentSessionManager {
    *   running session
    * Returns the session id.
    */
-  private reuseExistingSession(
+  private async reuseExistingSession(
     session: RunningSession,
     projectPath: string,
     permissionMode: "plan" | "edit"
-  ): string {
+  ): Promise<string> {
     const entriesCount = session.store.entries.filter(Boolean).length;
     if (session.dormant) {
       if (session.permissionMode !== permissionMode) {
         session.permissionMode = permissionMode;
         if (!session.skipDb) {
-          this.storage.agentSessions.updatePermissionMode(session.id, permissionMode);
+          await this.storage.agentSessions.updatePermissionMode(session.id, permissionMode);
         }
       }
       console.log(`[AgentSession] Returning dormant session ${session.id} (entries=${entriesCount})`);
@@ -406,7 +406,7 @@ export class AgentSessionManager {
     if (session.status === "running" || processAlive) {
       if (session.permissionMode !== permissionMode) {
         console.log(`[AgentSession] Session ${session.id} exists with mode ${session.permissionMode}, switching to ${permissionMode}`);
-        this.switchMode(session.id, projectPath, permissionMode);
+        await this.switchMode(session.id, projectPath, permissionMode);
       }
       console.log(`[AgentSession] Returning existing session ${session.id} (status=${session.status}, processAlive=${processAlive}, entries=${entriesCount})`);
       return session.id;
@@ -414,7 +414,7 @@ export class AgentSessionManager {
 
     // Dead session (process exited, not dormant) — restart so callers always get a running session
     console.log(`[AgentSession] Session ${session.id} is ${session.status} (entries=${entriesCount} — WILL BE CLEARED), restarting`);
-    this.restartSession(session.id, projectPath);
+    await this.restartSession(session.id, projectPath);
     return session.id;
   }
 
@@ -443,7 +443,11 @@ export class AgentSessionManager {
     if (!existsSync(cwd)) {
       console.error(`[AgentSession] ERROR: cwd does not exist: ${cwd}`);
       session.status = "error";
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, "error");
+      if (!session.skipDb) {
+        this.storage.agentSessions.updateStatus(session.id, "error").catch((err) => {
+          console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
+        });
+      }
       this.pushEntry(session.id, {
         type: "error",
         message: `Error: Working directory does not exist: ${cwd}`,
@@ -487,7 +491,9 @@ export class AgentSessionManager {
 
     // Handle stdout (JSON messages from Claude)
     childProcess.stdout?.on("data", (data: Buffer) => {
-      this.handleStdout(session, data.toString());
+      this.handleStdout(session, data.toString()).catch((err) => {
+        console.error(`[AgentSession] Error handling stdout for ${session.id}:`, err);
+      });
     });
 
     // Handle stderr (errors and debug info)
@@ -512,7 +518,11 @@ export class AgentSessionManager {
 
       session.status = code === 0 ? "stopped" : "error";
       session.backgroundTasks.clear();
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, session.status);
+      if (!session.skipDb) {
+        this.storage.agentSessions.updateStatus(session.id, session.status).catch((err) => {
+          console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
+        });
+      }
 
       // A non-zero exit with no agent output means the process never really
       // started — most often the agent isn't installed (and the npx fallback
@@ -537,7 +547,11 @@ export class AgentSessionManager {
       console.error(`[AgentSession] Process ${session.id} error:`, error);
       spawnFailed = true;
       session.status = "error";
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, "error");
+      if (!session.skipDb) {
+        this.storage.agentSessions.updateStatus(session.id, "error").catch((err) => {
+          console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
+        });
+      }
       // ENOENT means the command (native binary or `npx`) wasn't found — almost
       // always the agent isn't installed. Show install instructions instead of
       // the cryptic "spawn npx ENOENT".
@@ -555,7 +569,7 @@ export class AgentSessionManager {
   /**
    * Handle stdout data from agent process
    */
-  private handleStdout(session: RunningSession, data: string): void {
+  private async handleStdout(session: RunningSession, data: string): Promise<void> {
     // Ignore output from a process that has been stopped — the process may
     // still flush data to stdout while shutting down after SIGTERM.
     if (session.dormant) return;
@@ -579,7 +593,7 @@ export class AgentSessionManager {
         session.producedOutput = true;
       }
       for (const event of events) {
-        this.processAgentEvent(session.id, event);
+        await this.processAgentEvent(session.id, event);
       }
     }
   }
@@ -589,7 +603,7 @@ export class AgentSessionManager {
    * Routes each ParsedAgentEvent to the appropriate message store / broadcast action.
    * Includes input_tokens/output_tokens in taskCompleted broadcast for token reporting.
    */
-  private processAgentEvent(sessionId: string, event: ParsedAgentEvent): void {
+  private async processAgentEvent(sessionId: string, event: ParsedAgentEvent): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -611,7 +625,7 @@ export class AgentSessionManager {
         event.type === "approval_request")
     ) {
       session.status = "running";
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
+      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "running");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
 
@@ -622,8 +636,8 @@ export class AgentSessionManager {
       // completed transition, so the bell/sound fire again when the resumed
       // turn ends — at the cost of one ring per intermediate turn.
       if (!session.skipDb) {
-        this.storage.agentSessions.markUserMessage(sessionId, timestamp);
-        this.emitDerivedBranchActivity(session.projectId, session.branch);
+        await this.storage.agentSessions.markUserMessage(sessionId, timestamp);
+        await this.emitDerivedBranchActivity(session.projectId, session.branch);
       }
     }
 
@@ -663,7 +677,7 @@ export class AgentSessionManager {
           this.broadcastPatch(sessionId, patch);
         }
         if (!session.skipDb) {
-          this.persistEntry(session, tuIndex, tuMessage);
+          await this.persistEntry(session, tuIndex, tuMessage);
         }
         break;
       }
@@ -692,7 +706,7 @@ export class AgentSessionManager {
           this.broadcastPatch(sessionId, patch);
         }
         if (!session.skipDb) {
-          this.persistEntry(session, trIndex, trMessage);
+          await this.persistEntry(session, trIndex, trMessage);
         }
         break;
       }
@@ -772,7 +786,7 @@ export class AgentSessionManager {
           // keeps a perpetual "running" dot after an error result.
           if (session.status !== "stopped") {
             session.status = "stopped";
-            if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+            if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
             this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
             this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
           }
@@ -795,7 +809,7 @@ export class AgentSessionManager {
           console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
           const completedAt = Date.now();
           if (!session.skipDb) {
-            this.storage.agentSessions.markCompleted(sessionId, completedAt);
+            await this.storage.agentSessions.markCompleted(sessionId, completedAt);
           }
           const summaryText = extractLastAssistantText(session.store.entries);
           this.broadcastRaw(sessionId, {
@@ -818,24 +832,24 @@ export class AgentSessionManager {
             output_tokens: event.output_tokens,
             summaryText,
           });
-          this.emitDerivedBranchActivity(session.projectId, session.branch);
+          await this.emitDerivedBranchActivity(session.projectId, session.branch);
 
           // Turn finished — process stays alive (stream-json) waiting for next
           // input, but status now reflects "between turns" so UI affordances
           // like "New Conversation" don't prompt for a running confirmation.
           if (session.status !== "stopped") {
             session.status = "stopped";
-            if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+            if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
             this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
             this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
           }
 
           // Auto-update task status to "done" for the branch's assigned task
-          const tasks = this.storage.tasks.getByProjectId(session.projectId);
+          const tasks = await this.storage.tasks.getByProjectId(session.projectId);
           const branchKey = session.branch ?? "";
           const assignedTask = tasks.find(t => t.assigned_branch === branchKey);
           if (assignedTask && assignedTask.status !== "done") {
-            this.storage.tasks.update(assignedTask.id, { status: "done" });
+            await this.storage.tasks.update(assignedTask.id, { status: "done" });
             this.eventBus?.emit({
               type: "task:updated",
               projectId: session.projectId,
@@ -967,22 +981,22 @@ export class AgentSessionManager {
   /**
    * Persist a single entry to the database
    */
-  private persistEntry(
+  private async persistEntry(
     session: RunningSession,
     index: number,
     message: AgentMessage,
     userId: string = "local",
-  ): void {
+  ): Promise<void> {
     if (session.skipDb) return;
     try {
-      this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
-      this.storage.agentSessions.touchUpdatedAt(session.id);
+      await this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
+      await this.storage.agentSessions.touchUpdatedAt(session.id);
       if (message.type === "user") {
         const now = Date.now();
-        this.storage.agentSessions.markUserMessage(session.id, now);
-        this.emitDerivedBranchActivity(session.projectId, session.branch);
+        await this.storage.agentSessions.markUserMessage(session.id, now);
+        await this.emitDerivedBranchActivity(session.projectId, session.branch);
         if (!this.suppressTitleGeneration) {
-          const dbRow = this.storage.agentSessions.getById(session.id);
+          const dbRow = await this.storage.agentSessions.getById(session.id);
           if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
             const text = extractUserText(message.content);
             if (text.trim().length > 0 && this.markTitleResolved(session.id)) {
@@ -1012,12 +1026,12 @@ export class AgentSessionManager {
   /**
    * Send a user message to the agent
    */
-  sendUserMessage(
+  async sendUserMessage(
     sessionId: string,
     content: string | ContentPart[],
     projectPath?: string,
     userId: string = "local",
-  ): boolean {
+  ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
 
@@ -1027,7 +1041,7 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Cannot wake dormant session ${sessionId} without projectPath`);
         return false;
       }
-      this.wakeDormantSession(session, projectPath, content, userId);
+      await this.wakeDormantSession(session, projectPath, content, userId);
       return true;
     }
 
@@ -1040,7 +1054,7 @@ export class AgentSessionManager {
     // so subscribers see the transition.
     if (session.status !== "running") {
       session.status = "running";
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
+      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "running");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
     }
@@ -1185,7 +1199,7 @@ export class AgentSessionManager {
    * next user message will spawn a fresh process with full context replay.
    * The WebSocket stays alive so the UI remains connected.
    */
-  stopSession(sessionId: string): boolean {
+  async stopSession(sessionId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -1224,7 +1238,7 @@ export class AgentSessionManager {
       // Killing the process kills its background tasks with it.
       session.backgroundTasks.clear();
       session.status = "stopped";
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
       // The derived activity is "stopped" iff the user's last message hadn't
@@ -1236,7 +1250,7 @@ export class AgentSessionManager {
       // Both rules live in `computeBranchActivity`; this site doesn't
       // re-derive them inline.
       if (!session.skipDb) {
-        const emitted = this.emitDerivedBranchActivity(session.projectId, session.branch);
+        const emitted = await this.emitDerivedBranchActivity(session.projectId, session.branch);
         if (emitted?.activity === "stopped") {
           // Mirror over the per-session WS so the local-side bridge for
           // remote sessions can re-emit on the local EventBus (parallel to
@@ -1269,7 +1283,7 @@ export class AgentSessionManager {
    *    session by id to reach its subscriber set).
    * 5. sessions.delete — remove from in-memory map
    */
-  deleteSession(sessionId: string): boolean {
+  async deleteSession(sessionId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -1277,12 +1291,12 @@ export class AgentSessionManager {
     getProvider(session.agentType).onSessionDestroyed?.(sessionId);
 
     // 1. Stop the process (safe if already stopped/dormant)
-    this.stopSession(sessionId);
+    await this.stopSession(sessionId);
 
     // 2-3. Clear DB rows (skip for remote path-based sessions)
     if (!session.skipDb) {
-      this.storage.agentSessions.deleteEntries(sessionId);
-      this.storage.agentSessions.delete(sessionId);
+      await this.storage.agentSessions.deleteEntries(sessionId);
+      await this.storage.agentSessions.delete(sessionId);
     }
 
     // 4. Signal terminal state so subscribers stop reconnecting — must run
@@ -1297,7 +1311,7 @@ export class AgentSessionManager {
     //    flip (e.g. removing the only stopped session, leaving a completed
     //    one, should turn the dot green). Dedupe handles the no-change case.
     if (!session.skipDb) {
-      this.emitDerivedBranchActivity(session.projectId, session.branch);
+      await this.emitDerivedBranchActivity(session.projectId, session.branch);
     }
     return true;
   }
@@ -1306,7 +1320,7 @@ export class AgentSessionManager {
    * Restart a session (stop process, clear history, respawn)
    * Returns the same session ID with a fresh conversation
    */
-  restartSession(sessionId: string, projectPath: string, agentType?: AgentType): boolean {
+  async restartSession(sessionId: string, projectPath: string, agentType?: AgentType): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -1319,7 +1333,7 @@ export class AgentSessionManager {
 
     // 2. Clear persisted entries
     if (!session.skipDb) {
-      this.storage.agentSessions.deleteEntries(sessionId);
+      await this.storage.agentSessions.deleteEntries(sessionId);
     }
 
     // 3. Clear message store
@@ -1337,7 +1351,7 @@ export class AgentSessionManager {
 
     // 5. Update status to running
     session.status = "running";
-    if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
+    if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "running");
     this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
@@ -1345,7 +1359,7 @@ export class AgentSessionManager {
     getProvider(session.agentType).onSessionDestroyed?.(sessionId);
     if (agentType) {
       session.agentType = agentType;
-      if (!session.skipDb) this.storage.agentSessions.updateAgentType(sessionId, agentType);
+      if (!session.skipDb) await this.storage.agentSessions.updateAgentType(sessionId, agentType);
     }
     getProvider(session.agentType).onSessionCreated?.(sessionId, session.permissionMode);
 
@@ -1369,7 +1383,7 @@ export class AgentSessionManager {
    * "running" but has no entries yet (idle process waiting for the first
    * message) is safe to switch.
    */
-  switchAgentType(sessionId: string, agentType: AgentType): "ok" | "not_found" | "busy" {
+  async switchAgentType(sessionId: string, agentType: AgentType): Promise<"ok" | "not_found" | "busy"> {
     const session = this.sessions.get(sessionId);
     if (!session) return "not_found";
     if (session.agentType === agentType) return "ok";
@@ -1392,7 +1406,7 @@ export class AgentSessionManager {
 
     getProvider(session.agentType).onSessionDestroyed?.(sessionId);
     session.agentType = agentType;
-    if (!session.skipDb) this.storage.agentSessions.updateAgentType(sessionId, agentType);
+    if (!session.skipDb) await this.storage.agentSessions.updateAgentType(sessionId, agentType);
 
     // Visible confirmation in the conversation; replayed to the new agent as
     // part of the context like other system entries ("Session stopped by user.")
@@ -1405,7 +1419,7 @@ export class AgentSessionManager {
     session.dormant = true;
     if (session.status !== "stopped") {
       session.status = "stopped";
-      if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "stopped");
+      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
     }
@@ -1416,12 +1430,12 @@ export class AgentSessionManager {
   /**
    * Switch permission mode for a session (preserves conversation history)
    */
-  switchMode(
+  async switchMode(
     sessionId: string,
     projectPath: string,
     newMode: "plan" | "edit",
     initialMessage?: string
-  ): boolean {
+  ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -1442,12 +1456,12 @@ export class AgentSessionManager {
     // 3. Set new permission mode + persist
     session.permissionMode = newMode;
     if (!session.skipDb) {
-      this.storage.agentSessions.updatePermissionMode(session.id, newMode);
+      await this.storage.agentSessions.updatePermissionMode(session.id, newMode);
     }
 
     // 4. Update status to running, broadcast
     session.status = "running";
-    if (!session.skipDb) this.storage.agentSessions.updateStatus(sessionId, "running");
+    if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "running");
     this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
@@ -1460,7 +1474,9 @@ export class AgentSessionManager {
     if (initialMessage) {
       // Wait a bit for process to be ready, then send
       setTimeout(() => {
-        this.sendUserMessage(sessionId, initialMessage);
+        this.sendUserMessage(sessionId, initialMessage).catch((err) => {
+          console.error(`[AgentSession] Failed to send initial message for ${sessionId}:`, err);
+        });
       }, 500);
     } else {
       // Build full conversation context from existing entries
@@ -1489,7 +1505,7 @@ export class AgentSessionManager {
     sessionId: string,
     projectPath: string,
     planContent: string
-  ): boolean {
+  ): Promise<boolean> {
     return this.switchMode(sessionId, projectPath, "edit", planContent);
   }
 
@@ -1558,17 +1574,17 @@ export class AgentSessionManager {
   /**
    * Wake a dormant session: spawn process, send full context + user message
    */
-  private wakeDormantSession(
+  private async wakeDormantSession(
     session: RunningSession,
     projectPath: string,
     userMessage: string | ContentPart[],
     userId: string = "local",
-  ): void {
+  ): Promise<void> {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
     session.dormant = false;
     session.status = "running";
-    if (!session.skipDb) this.storage.agentSessions.updateStatus(session.id, "running");
+    if (!session.skipDb) await this.storage.agentSessions.updateStatus(session.id, "running");
     this.broadcastPatch(session.id, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
@@ -1660,15 +1676,15 @@ export class AgentSessionManager {
    * Restore sessions from database on startup.
    * Creates dormant RunningSession objects with process=null for sessions that have entries.
    */
-  restoreSessionsFromDb(): void {
-    const allSessions = this.storage.agentSessions.getAll();
+  async restoreSessionsFromDb(): Promise<void> {
+    const allSessions = await this.storage.agentSessions.getAll();
     let restoredCount = 0;
 
     for (const dbSession of allSessions) {
       // Skip sessions already in memory
       if (this.sessions.has(dbSession.id)) continue;
 
-      const entries = this.storage.agentSessions.getEntries(dbSession.id);
+      const entries = await this.storage.agentSessions.getEntries(dbSession.id);
       // Skip sessions with no entries (stale metadata)
       if (entries.length === 0) continue;
 
@@ -1701,7 +1717,7 @@ export class AgentSessionManager {
       // not a real status event, and `updateStatus` would rewrite `updated_at`
       // for every restored row, corrupting the ordering used by
       // `getLatestByBranch`.
-      this.storage.agentSessions.updateStatusPreservingTimestamp(dbSession.id, "stopped");
+      await this.storage.agentSessions.updateStatusPreservingTimestamp(dbSession.id, "stopped");
 
       restoredCount++;
     }
@@ -1722,9 +1738,9 @@ export class AgentSessionManager {
    * Returns the new session id, or null when the source is unknown or has
    * no persisted history to copy.
    */
-  branchSession(sourceSessionId: string, agentTypeOverride?: AgentType): string | null {
+  async branchSession(sourceSessionId: string, agentTypeOverride?: AgentType): Promise<string | null> {
     const source = this.sessions.get(sourceSessionId);
-    const sourceRow = this.storage.agentSessions.getById(sourceSessionId);
+    const sourceRow = await this.storage.agentSessions.getById(sourceSessionId);
     if (!source && !sourceRow) return null;
     // skipDb sessions have no persisted entries to copy
     if (source?.skipDb) return null;
@@ -1732,7 +1748,7 @@ export class AgentSessionManager {
     // Flush any in-flight streaming assistant entry so the copy is complete
     if (source) this.finalizeStreamingEntry(source);
 
-    const entryRows = this.storage.agentSessions.getEntries(sourceSessionId);
+    const entryRows = await this.storage.agentSessions.getEntries(sourceSessionId);
     if (entryRows.length === 0) return null;
 
     const projectId = source?.projectId ?? sourceRow!.project_id;
@@ -1744,7 +1760,7 @@ export class AgentSessionManager {
       ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
 
     const newId = randomUUID();
-    this.storage.agentSessions.create({
+    await this.storage.agentSessions.create({
       id: newId,
       project_id: projectId,
       branch: branch ?? "",
@@ -1753,10 +1769,10 @@ export class AgentSessionManager {
     });
     // create() writes status='running' (it exists for the spawn path); a
     // branched session is dormant until the first user message wakes it.
-    this.storage.agentSessions.updateStatusPreservingTimestamp(newId, "stopped");
+    await this.storage.agentSessions.updateStatusPreservingTimestamp(newId, "stopped");
 
     for (const row of entryRows) {
-      this.storage.agentSessions.upsertEntry(newId, row.entry_index, row.data);
+      await this.storage.agentSessions.upsertEntry(newId, row.entry_index, row.data);
     }
 
     // "Branch - <source title>", falling back to a first-user-message snippet
@@ -1773,7 +1789,7 @@ export class AgentSessionManager {
         } catch { /* skip unparsable rows */ }
       }
     }
-    this.storage.agentSessions.updateTitle(newId, `Branch - ${baseTitle || "Conversation"}`);
+    await this.storage.agentSessions.updateTitle(newId, `Branch - ${baseTitle || "Conversation"}`);
     // The title is final — claim the one-shot slot so the AI title generator
     // never fires for this session.
     this.markTitleResolved(newId);
@@ -1801,7 +1817,7 @@ export class AgentSessionManager {
 
     // The branched session is now the branch's latest (fresh updated_at, no
     // completion timestamps) — re-derive the workspace dot like createNewSession.
-    this.emitDerivedBranchActivity(projectId, branch);
+    await this.emitDerivedBranchActivity(projectId, branch);
 
     console.log(`[AgentSession] branchSession: ${sourceSessionId} → ${newId} (entries=${entryRows.length}, agentType=${agentType})`);
     return newId;
@@ -1845,10 +1861,10 @@ export class AgentSessionManager {
     if (!finalTitle) return;
 
     try {
-      const dbRow = this.storage.agentSessions.getById(session.id);
+      const dbRow = await this.storage.agentSessions.getById(session.id);
       // Respect any title the user (or another writer) has set in the meantime.
       if (!dbRow || (dbRow.title !== null && dbRow.title !== undefined)) return;
-      this.storage.agentSessions.updateTitle(session.id, finalTitle);
+      await this.storage.agentSessions.updateTitle(session.id, finalTitle);
       this.broadcastRaw(session.id, { titleUpdated: { title: finalTitle } });
     } catch (error) {
       console.error(`[AgentSession] Failed to persist generated title for ${session.id}:`, error);

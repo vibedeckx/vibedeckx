@@ -11,13 +11,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
 
       const branch = req.query.branch ?? null;
-      const rules = fastify.storage.rules.getByWorkspace(req.params.projectId, branch);
+      const rules = await fastify.storage.rules.getByWorkspace(req.params.projectId, branch);
       return reply.code(200).send({ rules });
     }
   );
@@ -29,7 +29,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/rules", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -40,7 +40,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const id = randomUUID();
-    const rule = fastify.storage.rules.create({
+    const rule = await fastify.storage.rules.create({
       id,
       project_id: req.params.projectId,
       branch: branch ?? null,
@@ -59,16 +59,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/rules/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.rules.getById(req.params.id);
+    const existing = await fastify.storage.rules.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Rule not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Rule not found" });
     }
 
-    const rule = fastify.storage.rules.update(req.params.id, {
+    const rule = await fastify.storage.rules.update(req.params.id, {
       name: req.body.name,
       content: req.body.content,
       enabled: req.body.enabled,
@@ -81,16 +81,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string } }>("/api/rules/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.rules.getById(req.params.id);
+    const existing = await fastify.storage.rules.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Rule not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Rule not found" });
     }
 
-    fastify.storage.rules.delete(req.params.id);
+    await fastify.storage.rules.delete(req.params.id);
     return reply.code(200).send({ success: true });
   });
 
@@ -102,7 +102,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/rules/reorder", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -113,7 +113,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const branch = req.query.branch ?? null;
-    fastify.storage.rules.reorder(req.params.projectId, branch, orderedIds);
+    await fastify.storage.rules.reorder(req.params.projectId, branch, orderedIds);
     return reply.code(200).send({ success: true });
   });
 };

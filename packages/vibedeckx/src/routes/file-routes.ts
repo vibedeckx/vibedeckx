@@ -12,9 +12,9 @@ import { requireAuth } from "../server.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 
-function getRemoteConfig(fastify: FastifyInstance, project: Project) {
+async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   // Check project_remotes table first (new approach)
-  const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+  const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
   if (remotes.length > 0) {
     const primary = remotes[0]; // sorted by sort_order
     return {
@@ -510,7 +510,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "No files provided" });
     }
 
-    const project = fastify.storage.projects.getByPath(projectPath);
+    const project = await fastify.storage.projects.getByPath(projectPath);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -598,7 +598,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -612,7 +612,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
@@ -671,7 +671,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -683,7 +683,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
@@ -724,7 +724,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -741,7 +741,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
@@ -805,7 +805,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -822,7 +822,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const useRemote = req.query.target === "remote" || (!req.query.target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
@@ -865,7 +865,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -882,7 +882,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
@@ -977,7 +977,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -1006,7 +1006,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
@@ -1065,7 +1065,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.id, userId);
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -1080,7 +1080,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const useRemote = target === "remote" || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = getRemoteConfig(fastify, project);
+      const remoteConfig = await getRemoteConfig(fastify, project);
       if (!remoteConfig) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }

@@ -14,7 +14,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     fastify.get<{ Querystring: { token?: string } }>(
       "/api/reverse-connect",
       { websocket: true },
-      (socket, req) => {
+      async (socket, req) => {
         const token = (req.query as { token?: string }).token;
         if (!token) {
           socket.send(JSON.stringify({ error: "Token required" }));
@@ -22,7 +22,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
-        const server = fastify.storage.remoteServers.getByToken(token);
+        const server = await fastify.storage.remoteServers.getByToken(token);
         if (!server) {
           socket.send(JSON.stringify({ error: "Invalid token" }));
           socket.close(4001, "Invalid token");
@@ -39,23 +39,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         const ws = socket as unknown as import("ws").default;
         const serverId = server.id;
-        const ownerId = fastify.storage.remoteServers.getOwnerId(serverId) ?? "";
+        const ownerId = (await fastify.storage.remoteServers.getOwnerId(serverId)) ?? "";
         const nonce = randomBytes(32);
         let settled = false;
 
-        const registerUnauthenticated = () => {
+        const registerUnauthenticated = async () => {
           if (settled) return;
           settled = true;
           socket.off("message", onChallengeReply);
           // Legacy / no-key remote: register without a machine identity. Recovery
           // falls back to exact server-ID matching with no aliasing (safe).
           fastify.reverseConnectManager.registerConnection(serverId, ws);
-          fastify.storage.remoteServers.updateStatus(serverId, "online");
+          await fastify.storage.remoteServers.updateStatus(serverId, "online");
         };
 
-        const timer = setTimeout(registerUnauthenticated, MACHINE_HANDSHAKE_TIMEOUT_MS);
+        const timer = setTimeout(() => {
+          registerUnauthenticated().catch((err) => {
+            console.error(`[ReverseConnect] Failed to register unauthenticated connection for ${serverId}:`, err);
+          });
+        }, MACHINE_HANDSHAKE_TIMEOUT_MS);
 
-        function onChallengeReply(data: import("ws").RawData) {
+        async function onChallengeReply(data: import("ws").RawData) {
           let frame: { type?: string; publicKey?: string; signature?: string };
           try {
             frame = JSON.parse(data.toString());
@@ -75,7 +79,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           }
 
           const fingerprint = createHash("sha256").update(publicKey).digest("hex");
-          const existing = fastify.storage.machineIdentity.get(fingerprint);
+          const existing = await fastify.storage.machineIdentity.get(fingerprint);
 
           // Cross-tenant guard: a machine already pinned to another owner cannot
           // be re-claimed under a different token's owner.
@@ -100,14 +104,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // First connect: pin fingerprint→(publicKey, owner). The token, which
           // determines the owner, bootstraps trust (TOFU).
           if (!existing) {
-            fastify.storage.machineIdentity.pin(fingerprint, publicKey, ownerId);
+            await fastify.storage.machineIdentity.pin(fingerprint, publicKey, ownerId);
             console.log(`[ReverseConnect] Pinned new machine identity ${fingerprint.slice(0, 12)} for ${serverId}`);
           }
-          fastify.storage.machineIdentity.touch(fingerprint);
+          await fastify.storage.machineIdentity.touch(fingerprint);
 
           console.log(`[ReverseConnect] Machine auth verified ${fingerprint.slice(0, 12)} for ${serverId}`);
           fastify.reverseConnectManager.registerConnection(serverId, ws, fingerprint);
-          fastify.storage.remoteServers.updateStatus(serverId, "online");
+          await fastify.storage.remoteServers.updateStatus(serverId, "online");
         }
 
         socket.on("message", onChallengeReply);

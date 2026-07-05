@@ -26,14 +26,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
 
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
 
       const executors = req.query.groupId
-        ? fastify.storage.executors.getByGroupId(req.query.groupId)
-        : fastify.storage.executors.getByProjectId(req.params.projectId);
+        ? await fastify.storage.executors.getByGroupId(req.query.groupId)
+        : await fastify.storage.executors.getByProjectId(req.params.projectId);
 
       // Build a per-target "Last run" map for each executor so the UI can show
       // the correct timestamp when the user switches between local/remote tabs
@@ -43,13 +43,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const executorIds = executors.map((e) => e.id);
       const hasLocal = !!project.path;
       const hasRemotes =
-        fastify.storage.projectRemotes.getByProject(req.params.projectId).length > 0;
+        (await fastify.storage.projectRemotes.getByProject(req.params.projectId)).length > 0;
 
       const localRows = hasLocal && executorIds.length > 0
-        ? fastify.storage.executorProcesses.getLastByExecutorIds(executorIds)
+        ? await fastify.storage.executorProcesses.getLastByExecutorIds(executorIds)
         : [];
       const remoteRows = hasRemotes && executorIds.length > 0
-        ? fastify.storage.remoteExecutorProcesses.getLastByExecutorIdsGroupedByServer(executorIds)
+        ? await fastify.storage.remoteExecutorProcesses.getLastByExecutorIdsGroupedByServer(executorIds)
         : [];
 
       const lastRunsByExecutor = new Map<string, Record<string, { started_at: string; process_id: string }>>();
@@ -91,7 +91,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -105,7 +105,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const parsedProvider = (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider;
 
     const id = randomUUID();
-    const executor = fastify.storage.executors.create({
+    const executor = await fastify.storage.executors.create({
       id,
       project_id: req.params.projectId,
       group_id,
@@ -128,13 +128,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const existing = fastify.storage.executors.getById(req.params.id);
+    const existing = await fastify.storage.executors.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Executor not found" });
     }
     // Confirm the caller owns the executor's project — otherwise one tenant
     // could rewrite another tenant's executor command by id.
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -166,7 +166,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       ...(parsedProvider !== undefined ? { prompt_provider: parsedProvider } : {}),
       ...(disabledTargetsUpdate ?? {}),
     };
-    const executor = fastify.storage.executors.update(req.params.id, updateOpts);
+    const executor = await fastify.storage.executors.update(req.params.id, updateOpts);
     return reply.code(200).send({ executor });
   });
 
@@ -175,17 +175,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const existing = fastify.storage.executors.getById(req.params.id);
+    const existing = await fastify.storage.executors.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Executor not found" });
     }
     // Confirm the caller owns the executor's project before deleting it.
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    fastify.storage.executors.delete(req.params.id);
+    await fastify.storage.executors.delete(req.params.id);
     return reply.code(200).send({ success: true });
   });
 
@@ -197,7 +197,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -210,7 +210,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "groupId is required" });
     }
 
-    const existingExecutors = fastify.storage.executors.getByGroupId(groupId);
+    const existingExecutors = await fastify.storage.executors.getByGroupId(groupId);
     const existingIds = new Set(existingExecutors.map(e => e.id));
     for (const id of orderedIds) {
       if (!existingIds.has(id)) {
@@ -218,7 +218,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    fastify.storage.executors.reorder(groupId, orderedIds);
+    await fastify.storage.executors.reorder(groupId, orderedIds);
     return reply.code(200).send({ success: true });
   });
 };

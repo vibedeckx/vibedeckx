@@ -194,7 +194,7 @@ const startCommand = buildCommand({
 
       try {
         await server.close(); // triggers onClose hooks that kill child processes
-        storage.close();
+        await storage.close();
       } catch (err) {
         console.error("Error during shutdown:", err);
       }
@@ -301,7 +301,7 @@ const connectCommand = buildCommand({
       try {
         client.shutdown();
         await server.close();
-        storage.close();
+        await storage.close();
       } catch (err) {
         console.error("Error during shutdown:", err);
       }

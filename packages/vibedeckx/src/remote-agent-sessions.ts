@@ -68,7 +68,7 @@ export async function createRemoteAgentSession(
     remoteSessionId: remoteData.session.id,
     branch: branch ?? null,
   });
-  deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteData.session.id, branch ?? null);
+  await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteData.session.id, branch ?? null);
 
   if (remoteData.messages && remoteData.messages.length > 0) {
     const cacheEntry = deps.remotePatchCache.getOrCreate(localSessionId);
@@ -492,7 +492,7 @@ export async function generateAndPushRemoteSessionTitle(
   // Persistent dedupe across restarts: if a previous server lifetime already
   // resolved this session's title, don't regenerate (the new title would be
   // derived from a non-first message and would clobber the original).
-  if (deps.storage.remoteSessionMappings.isTitleResolved(localSessionId)) return;
+  if (await deps.storage.remoteSessionMappings.isTitleResolved(localSessionId)) return;
 
   let aiTitle: string | null = null;
   try {
@@ -523,7 +523,7 @@ export async function generateAndPushRemoteSessionTitle(
     );
     return;
   }
-  deps.storage.remoteSessionMappings.markTitleResolved(localSessionId);
+  await deps.storage.remoteSessionMappings.markTitleResolved(localSessionId);
   deps.remotePatchCache.broadcast(
     localSessionId,
     JSON.stringify({ titleUpdated: { title: finalTitle } }),

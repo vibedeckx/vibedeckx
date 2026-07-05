@@ -24,7 +24,7 @@ interface SharedServicesOptions {
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
   const processManager = new ProcessManager(opts.storage);
   const agentSessionManager = new AgentSessionManager(opts.storage);
-  agentSessionManager.restoreSessionsFromDb();
+  await agentSessionManager.restoreSessionsFromDb();
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
 
   const remoteSessionMap = new Map<string, RemoteSessionInfo>();
@@ -33,8 +33,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // looked up from project_remotes (the authoritative source — no duplication).
   // Skip rows whose project_remotes row is gone (stale; will be cleaned up the
   // next time the user explicitly deletes the session).
-  for (const row of opts.storage.remoteSessionMappings.getAll()) {
-    const remote = opts.storage.projectRemotes.getByProjectAndServer(
+  for (const row of await opts.storage.remoteSessionMappings.getAll()) {
+    const remote = await opts.storage.projectRemotes.getByProjectAndServer(
       row.project_id,
       row.remote_server_id,
     );
@@ -57,7 +57,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
 
   // Initialize proxy manager from stored settings
   const proxyManager = new ProxyManager();
-  const savedProxy = opts.storage.settings.get("proxy");
+  const savedProxy = await opts.storage.settings.get("proxy");
   if (savedProxy) {
     try {
       const config = JSON.parse(savedProxy) as ProxyConfig;
@@ -100,7 +100,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   async function restoreRemoteExecutorsForServer(connectedServerId: string, machineId?: string, directUrl?: string): Promise<void> {
     // Only inspect rows still flagged 'running'. Finished rows are kept for
     // "Last run" lookup but should not be re-validated against the remote.
-    const runningRows = opts.storage.remoteExecutorProcesses.getRunning();
+    const runningRows = await opts.storage.remoteExecutorProcesses.getRunning();
     const unrestoredRows = runningRows.filter(r => !remoteExecutorMap.has(r.local_process_id));
     if (unrestoredRows.length === 0) return;
 
@@ -169,7 +169,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
           } else if (row.remote_server_id === connectedServerId) {
             // The remote no longer has this process — mark it finished so the
             // row stays for "Last run" lookup but isn't re-validated next time.
-            opts.storage.remoteExecutorProcesses.markFinished(row.local_process_id, undefined, 'killed');
+            await opts.storage.remoteExecutorProcesses.markFinished(row.local_process_id, undefined, 'killed');
             console.log(`[SharedServices] Marked stale remote executor as finished: ${row.local_process_id}`);
           }
         }
@@ -182,14 +182,16 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   }
 
   reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
-    opts.storage.remoteServers.updateStatus(remoteServerId, status);
-    // When a reverse connection comes online, restore any persisted remote executors
-    if (status === "online") {
-      const machineId = reverseConnectManager.getMachineId(remoteServerId);
-      restoreRemoteExecutorsForServer(remoteServerId, machineId).catch(err => {
-        console.warn(`[SharedServices] Failed to restore remote executors on reconnect for ${remoteServerId}: ${err}`);
-      });
-    }
+    void (async () => {
+      await opts.storage.remoteServers.updateStatus(remoteServerId, status);
+      // When a reverse connection comes online, restore any persisted remote executors
+      if (status === "online") {
+        const machineId = reverseConnectManager.getMachineId(remoteServerId);
+        await restoreRemoteExecutorsForServer(remoteServerId, machineId);
+      }
+    })().catch(err => {
+      console.warn(`[SharedServices] Failed to handle status change for ${remoteServerId}: ${err}`);
+    });
   });
 
   fastify.decorate("storage", opts.storage);
@@ -210,13 +212,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);
   processManager.setEventBus(eventBus);
   scheduler.setEventBus(eventBus);
-  scheduler.start();
+  await scheduler.start();
 
   // Restore remote executor processes from DB in the background.
   // Only processes direct-URL servers here; reverse-connect servers are
   // restored when they reconnect (via the status change handler above).
   void (async () => {
-    const savedRows = opts.storage.remoteExecutorProcesses.getRunning();
+    const savedRows = await opts.storage.remoteExecutorProcesses.getRunning();
     // Only process rows with a direct URL — reverse-connect rows (empty URL)
     // will be restored when their connection comes online
     const directUrlRows = savedRows.filter(r => r.remote_url);

@@ -377,7 +377,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Ownership: the proxy tunnels into the project's reverse-connected remote
     // (reaching 127.0.0.1:<port> on that host), so a caller must own the project.
     // In solo no-auth mode userId is undefined and getById resolves unscoped.
-    if (!fastify.storage.projects.getById(projectId, userId)) {
+    if (!(await fastify.storage.projects.getById(projectId, userId))) {
       return reply.code(404).send({ error: "Project not found" });
     }
     const targetUrl = extractTargetUrl(req.url, projectId);
@@ -387,7 +387,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const projectRemotes = fastify.storage.projectRemotes.getByProject(projectId);
+      const projectRemotes = await fastify.storage.projectRemotes.getByProject(projectId);
       const resolved = resolveTarget(targetUrl, projectRemotes, fastify.reverseConnectManager);
       const targetOrigin = resolved.userOrigin;
       const proxyPrefix = `/api/projects/${projectId}/browser/proxy/`;
@@ -474,7 +474,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // the channel pipes into the project's reverse-connected remote.
     const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
     if (!principal) return;
-    if (principal.userId !== null && !fastify.storage.projects.getById(projectId, principal.userId)) {
+    if (principal.userId !== null && !(await fastify.storage.projects.getById(projectId, principal.userId))) {
       try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* closed */ }
       try { socket.close(); } catch { /* already closed */ }
       return;
@@ -492,7 +492,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     console.log(`[BrowserProxy] WS proxy: ${targetWsUrl}`);
 
     // Resolve hostname to remote server
-    const projectRemotes = fastify.storage.projectRemotes.getByProject(projectId);
+    const projectRemotes = await fastify.storage.projectRemotes.getByProject(projectId);
     const resolved = resolveTarget(targetWsUrl, projectRemotes, fastify.reverseConnectManager);
     const rcm = fastify.reverseConnectManager;
 

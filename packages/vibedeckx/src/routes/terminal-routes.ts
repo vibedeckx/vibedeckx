@@ -7,9 +7,9 @@ import { requireAuth } from "../server.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 
-function getRemoteConfig(fastify: FastifyInstance, project: Project, remoteServerId?: string) {
+async function getRemoteConfig(fastify: FastifyInstance, project: Project, remoteServerId?: string) {
   // Check project_remotes table first (new approach)
-  const remotes = fastify.storage.projectRemotes.getByProject(project.id);
+  const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
   if (remotes.length > 0) {
     const target = remoteServerId
       ? remotes.find((r) => r.remote_server_id === remoteServerId)
@@ -83,7 +83,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
 
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -130,7 +130,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -139,7 +139,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const explicitLocation = req.body?.location;
 
     const executorMode = project.executor_mode;
-    const remoteConfig = getRemoteConfig(fastify, project, req.body?.remote_server_id);
+    const remoteConfig = await getRemoteConfig(fastify, project, req.body?.remote_server_id);
 
     const useRemote =
       explicitLocation === "remote" ||
@@ -188,7 +188,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           projectId: req.params.projectId,
           branch: branch ?? null,
         });
-        fastify.storage.remoteExecutorProcesses.insert(localId, {
+        await fastify.storage.remoteExecutorProcesses.insert(localId, {
           remoteServerId: remoteConfig.serverId,
           remoteUrl: remoteConfig.url,
           remoteApiKey: remoteConfig.apiKey,
@@ -258,7 +258,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         // Verify the caller owns the project this terminal belongs to. In
         // no-auth solo mode userId is undefined and getById does not filter.
-        if (remoteInfo.projectId && !fastify.storage.projects.getById(remoteInfo.projectId, userId)) {
+        if (remoteInfo.projectId && !(await fastify.storage.projects.getById(remoteInfo.projectId, userId))) {
           return reply.code(404).send({ error: "Remote terminal not found" });
         }
 
@@ -273,7 +273,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         );
 
         fastify.remoteExecutorMap.delete(terminalId);
-        fastify.storage.remoteExecutorProcesses.delete(terminalId);
+        await fastify.storage.remoteExecutorProcesses.delete(terminalId);
 
         if (!result.ok) {
           return reply.code(proxyStatus(result)).send(result.data);
@@ -287,11 +287,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // before calling the generic stop(). Without these checks the route was a
       // cross-project process-kill primitive under --auth.
       const projectId = fastify.processManager.getTerminalProjectId(terminalId);
-      if (!projectId || !fastify.storage.projects.getById(projectId, userId)) {
+      if (!projectId || !(await fastify.storage.projects.getById(projectId, userId))) {
         return reply.code(404).send({ error: "Terminal not found or already closed" });
       }
 
-      const stopped = fastify.processManager.stop(terminalId);
+      const stopped = await fastify.processManager.stop(terminalId);
       if (!stopped) {
         return reply.code(404).send({ error: "Terminal not found or already closed" });
       }

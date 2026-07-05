@@ -60,12 +60,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!projectPath) {
         return reply.code(400).send({ error: "path is required" });
       }
-      const project = fastify.storage.projects.getByPath(projectPath);
+      const project = await fastify.storage.projects.getByPath(projectPath);
       if (!project) {
         // No project row yet — no activity to report.
         return reply.code(200).send({ branches: [] } satisfies BranchActivityResponse);
       }
-      const sessions = fastify.storage.agentSessions.getByProjectId(project.id);
+      const sessions = await fastify.storage.agentSessions.getByProjectId(project.id);
       const computed = computeBranchActivity(sessions);
       const orchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
       return reply.code(200).send(toResponse(overlayOrchestratorActivity(computed, orchestrator)));
@@ -79,7 +79,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
 
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
@@ -94,7 +94,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const overlayResponse = (computed: Map<string, BranchActivityState>) =>
           toResponse(overlayOrchestratorActivity(computed, localOrchestrator));
 
-        const remoteConfig = fastify.storage.projectRemotes.getByProjectAndServer(
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
           project.id, project.agent_mode,
         );
         if (!remoteConfig) {
@@ -124,7 +124,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      const sessions = fastify.storage.agentSessions.getByProjectId(project.id);
+      const sessions = await fastify.storage.agentSessions.getByProjectId(project.id);
       const computed = computeBranchActivity(sessions);
       const orchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
       return reply.code(200).send(toResponse(overlayOrchestratorActivity(computed, orchestrator)));

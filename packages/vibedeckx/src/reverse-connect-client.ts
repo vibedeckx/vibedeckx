@@ -130,7 +130,7 @@ export class ReverseConnectClient {
         this.handlePing(frame);
         break;
       case "machine_challenge":
-        this.handleMachineChallenge(frame);
+        await this.handleMachineChallenge(frame);
         break;
       default:
         break;
@@ -142,9 +142,9 @@ export class ReverseConnectClient {
    * challenge nonce. The hub uses the public key's fingerprint to recognize
    * this machine across remote_servers.id changes.
    */
-  private handleMachineChallenge(frame: MachineChallengeFrame): void {
+  private async handleMachineChallenge(frame: MachineChallengeFrame): Promise<void> {
     try {
-      const { privateKey, publicKeyPem } = this.getOrCreateKeys();
+      const { privateKey, publicKeyPem } = await this.getOrCreateKeys();
       const signature = cryptoSign(null, Buffer.from(frame.nonce, "base64"), privateKey);
       const reply: MachineAuthFrame = {
         type: "machine_auth",
@@ -157,13 +157,13 @@ export class ReverseConnectClient {
     }
   }
 
-  private getOrCreateKeys(): { privateKey: KeyObject; publicKeyPem: string } {
+  private async getOrCreateKeys(): Promise<{ privateKey: KeyObject; publicKeyPem: string }> {
     const settings = this.localServer.storage.settings;
-    let pem = settings.get(MACHINE_KEY_SETTING);
+    let pem = await settings.get(MACHINE_KEY_SETTING);
     if (!pem) {
       const { privateKey } = generateKeyPairSync("ed25519");
       pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-      settings.set(MACHINE_KEY_SETTING, pem);
+      await settings.set(MACHINE_KEY_SETTING, pem);
       console.log("[ReverseClient] Generated new stable machine identity key");
     }
     const privateKey = createPrivateKey(pem);

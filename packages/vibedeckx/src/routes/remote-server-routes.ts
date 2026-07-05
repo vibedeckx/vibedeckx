@@ -15,7 +15,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get("/api/remote-servers", async (request, reply) => {
     const userId = requireAuth(request, reply);
     if (userId === null) return;
-    const servers = fastify.storage.remoteServers.getAll(userId);
+    const servers = await fastify.storage.remoteServers.getAll(userId);
     return reply.send(servers.map(sanitizeServer));
   });
 
@@ -34,7 +34,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (connectionMode !== "inbound" && !url)
       return reply.code(400).send({ error: "url is required for outbound servers" });
     try {
-      const server = fastify.storage.remoteServers.create({
+      const server = await fastify.storage.remoteServers.create({
         name,
         url: url || null,
         api_key: apiKey,
@@ -61,7 +61,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         url?: string;
         apiKey?: string;
       };
-      const server = fastify.storage.remoteServers.update(id, {
+      const server = await fastify.storage.remoteServers.update(id, {
         name,
         url,
         api_key: apiKey,
@@ -79,7 +79,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
-      const deleted = fastify.storage.remoteServers.delete(id, userId);
+      const deleted = await fastify.storage.remoteServers.delete(id, userId);
       if (!deleted)
         return reply.code(404).send({ error: "Server not found" });
       return reply.send({ success: true });
@@ -93,7 +93,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
-      const server = fastify.storage.remoteServers.getById(id, userId);
+      const server = await fastify.storage.remoteServers.getById(id, userId);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
 
@@ -128,13 +128,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
-      const server = fastify.storage.remoteServers.getById(id, userId);
+      const server = await fastify.storage.remoteServers.getById(id, userId);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
       if (server.connection_mode !== "inbound")
         return reply.code(400).send({ error: "Token generation is only available for inbound servers" });
 
-      const token = fastify.storage.remoteServers.generateToken(id, userId);
+      const token = await fastify.storage.remoteServers.generateToken(id, userId);
       if (!token)
         return reply.code(500).send({ error: "Failed to generate token" });
 
@@ -155,7 +155,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (userId === null) return;
       const { id } = request.params;
       const { path: browsePath } = (request.body as { path?: string }) ?? {};
-      const server = fastify.storage.remoteServers.getById(id, userId);
+      const server = await fastify.storage.remoteServers.getById(id, userId);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
 
@@ -189,7 +189,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const { id } = request.params;
       const { parentPath, name } =
         (request.body as { parentPath?: string; name?: string }) ?? {};
-      const server = fastify.storage.remoteServers.getById(id, userId);
+      const server = await fastify.storage.remoteServers.getById(id, userId);
       if (!server) return reply.code(404).send({ error: "Server not found" });
 
       try {
@@ -216,16 +216,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
-      const server = fastify.storage.remoteServers.getById(id, userId);
+      const server = await fastify.storage.remoteServers.getById(id, userId);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
 
       if (fastify.reverseConnectManager.isConnected(id)) {
         fastify.reverseConnectManager.unregisterConnection(id);
-        fastify.storage.remoteServers.updateStatus(id, "offline");
+        await fastify.storage.remoteServers.updateStatus(id, "offline");
       }
 
-      const revoked = fastify.storage.remoteServers.revokeToken(id, userId);
+      const revoked = await fastify.storage.remoteServers.revokeToken(id, userId);
       return reply.send({ success: revoked });
     }
   );

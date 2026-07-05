@@ -12,12 +12,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
 
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
 
-      const groups = fastify.storage.executorGroups.getByProjectId(req.params.projectId);
+      const groups = await fastify.storage.executorGroups.getByProjectId(req.params.projectId);
       return reply.code(200).send({ groups });
     }
   );
@@ -29,13 +29,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
 
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
 
       const branch = req.query.branch ?? "";
-      const group = fastify.storage.executorGroups.getByBranch(req.params.projectId, branch);
+      const group = await fastify.storage.executorGroups.getByBranch(req.params.projectId, branch);
       if (!group) {
         return reply.code(404).send({ error: "Executor group not found for this branch" });
       }
@@ -52,19 +52,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
 
     const { name, branch } = req.body;
-    const existing = fastify.storage.executorGroups.getByBranch(req.params.projectId, branch);
+    const existing = await fastify.storage.executorGroups.getByBranch(req.params.projectId, branch);
     if (existing) {
       return reply.code(409).send({ error: "An executor group already exists for this branch" });
     }
 
     const id = randomUUID();
-    const group = fastify.storage.executorGroups.create({
+    const group = await fastify.storage.executorGroups.create({
       id,
       project_id: req.params.projectId,
       name,
@@ -79,12 +79,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { name?: string };
   }>("/api/executor-groups/:id", async (req, reply) => {
-    const existing = fastify.storage.executorGroups.getById(req.params.id);
+    const existing = await fastify.storage.executorGroups.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Executor group not found" });
     }
 
-    const group = fastify.storage.executorGroups.update(req.params.id, req.body);
+    const group = await fastify.storage.executorGroups.update(req.params.id, req.body);
     return reply.code(200).send({ group });
   });
 
@@ -92,12 +92,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string } }>(
     "/api/executor-groups/:id",
     async (req, reply) => {
-      const existing = fastify.storage.executorGroups.getById(req.params.id);
+      const existing = await fastify.storage.executorGroups.getById(req.params.id);
       if (!existing) {
         return reply.code(404).send({ error: "Executor group not found" });
       }
 
-      fastify.storage.executorGroups.delete(req.params.id);
+      await fastify.storage.executorGroups.delete(req.params.id);
       return reply.code(200).send({ success: true });
     }
   );

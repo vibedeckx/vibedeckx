@@ -14,13 +14,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const project = fastify.storage.projects.getById(req.params.projectId, userId);
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
       if (!project) {
         return reply.code(404).send({ error: "Project not found" });
       }
 
       const includeArchived = req.query.includeArchived === "true";
-      const tasks = fastify.storage.tasks.getByProjectId(req.params.projectId, { includeArchived });
+      const tasks = await fastify.storage.tasks.getByProjectId(req.params.projectId, { includeArchived });
       return reply.code(200).send({ tasks });
     }
   );
@@ -32,7 +32,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/tasks", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -46,7 +46,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!title) {
       try {
         const { text } = await generateText({
-          model: resolveFastChatModel(fastify.storage),
+          model: await resolveFastChatModel(fastify.storage),
           prompt: `Generate a concise task title (under 10 words) that captures the essence of this task description. Return only the title text, nothing else.\n\nDescription: ${description}`,
           experimental_telemetry: {
             isEnabled: true,
@@ -65,7 +65,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const id = randomUUID();
-    const task = fastify.storage.tasks.create({
+    const task = await fastify.storage.tasks.create({
       id,
       project_id: req.params.projectId,
       title,
@@ -85,16 +85,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/tasks/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.tasks.getById(req.params.id);
+    const existing = await fastify.storage.tasks.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Task not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Task not found" });
     }
 
-    const task = fastify.storage.tasks.update(req.params.id, {
+    const task = await fastify.storage.tasks.update(req.params.id, {
       title: req.body.title,
       description: req.body.description,
       status: req.body.status as 'todo' | 'in_progress' | 'done' | 'cancelled' | undefined,
@@ -109,16 +109,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.tasks.getById(req.params.id);
+    const existing = await fastify.storage.tasks.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Task not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Task not found" });
     }
 
-    fastify.storage.tasks.delete(req.params.id);
+    await fastify.storage.tasks.delete(req.params.id);
     return reply.code(200).send({ success: true });
   });
 
@@ -126,16 +126,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Params: { id: string } }>("/api/tasks/:id/archive", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.tasks.getById(req.params.id);
+    const existing = await fastify.storage.tasks.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Task not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Task not found" });
     }
 
-    const task = fastify.storage.tasks.archive(req.params.id);
+    const task = await fastify.storage.tasks.archive(req.params.id);
     return reply.code(200).send({ task });
   });
 
@@ -143,16 +143,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Params: { id: string } }>("/api/tasks/:id/unarchive", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const existing = fastify.storage.tasks.getById(req.params.id);
+    const existing = await fastify.storage.tasks.getById(req.params.id);
     if (!existing) {
       return reply.code(404).send({ error: "Task not found" });
     }
-    const project = fastify.storage.projects.getById(existing.project_id, userId);
+    const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Task not found" });
     }
 
-    const task = fastify.storage.tasks.unarchive(req.params.id);
+    const task = await fastify.storage.tasks.unarchive(req.params.id);
     return reply.code(200).send({ task });
   });
 
@@ -163,7 +163,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/tasks/reorder", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const project = fastify.storage.projects.getById(req.params.projectId, userId);
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -173,7 +173,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "orderedIds must be an array" });
     }
 
-    const existingTasks = fastify.storage.tasks.getByProjectId(req.params.projectId);
+    const existingTasks = await fastify.storage.tasks.getByProjectId(req.params.projectId);
     const existingIds = new Set(existingTasks.map(t => t.id));
     for (const id of orderedIds) {
       if (!existingIds.has(id)) {
@@ -181,7 +181,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    fastify.storage.tasks.reorder(req.params.projectId, orderedIds);
+    await fastify.storage.tasks.reorder(req.params.projectId, orderedIds);
     return reply.code(200).send({ success: true });
   });
 };

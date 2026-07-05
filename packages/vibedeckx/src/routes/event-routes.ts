@@ -65,12 +65,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Subscribe to all events, filtered to the subscriber's tenant
     const unsubscribe = fastify.eventBus.subscribe((event) => {
-      // Every GlobalEvent carries a projectId; Clerk users only see events for
-      // projects they own. Trusted principals (userId === null) see everything.
-      if (userId !== null && !fastify.storage.projects.getById(event.projectId, userId)) {
-        return;
-      }
-      reply.raw.write(`data: ${JSON.stringify(toWireEvent(event))}\n\n`);
+      void (async () => {
+        // Every GlobalEvent carries a projectId; Clerk users only see events for
+        // projects they own. Trusted principals (userId === null) see everything.
+        if (userId !== null && !(await fastify.storage.projects.getById(event.projectId, userId))) {
+          return;
+        }
+        reply.raw.write(`data: ${JSON.stringify(toWireEvent(event))}\n\n`);
+      })().catch((err) => {
+        console.error(`[EventsSSE] Failed to filter/write event:`, err);
+      });
     });
 
     // Heartbeat every 15 seconds. A real `data:` event (not an SSE comment) so

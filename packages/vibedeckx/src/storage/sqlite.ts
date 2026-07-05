@@ -789,7 +789,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
   return {
     projects: {
-      create: ({ id, name, path: projectPath, remote_path, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config }, userId?: string) => {
+      create: async ({ id, name, path: projectPath, remote_path, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config }, userId?: string) => {
         const is_remote = remote_url ? 1 : 0;
         db.prepare(
           `INSERT INTO projects (id, name, path, remote_path, is_remote, remote_url, remote_api_key, agent_mode, executor_mode, sync_up_config, sync_down_config, user_id)
@@ -815,7 +815,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return toProject(row);
       },
 
-      getAll: (userId?: string) => {
+      getAll: async (userId?: string) => {
         // Exclude path:* pseudo-projects: these are bookkeeping rows inserted
         // by /api/path/agent-sessions* to satisfy agent_sessions' FK when this
         // instance is being used as a remote provider. They have no user-facing
@@ -834,7 +834,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return rows.map(toProject);
       },
 
-      getById: (id: string, userId?: string) => {
+      getById: async (id: string, userId?: string) => {
         if (userId) {
           const row = db
             .prepare<{ id: string; user_id: string }, ProjectRow>(`SELECT * FROM projects WHERE id = @id AND user_id = @user_id`)
@@ -847,14 +847,14 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? toProject(row) : undefined;
       },
 
-      getByPath: (projectPath: string) => {
+      getByPath: async (projectPath: string) => {
         const row = db
           .prepare<{ path: string }, ProjectRow>(`SELECT * FROM projects WHERE path = @path`)
           .get({ path: projectPath });
         return row ? toProject(row) : undefined;
       },
 
-      update: (id: string, opts: { name?: string; path?: string | null; remote_path?: string | null; remote_url?: string | null; remote_api_key?: string | null; agent_mode?: ExecutionMode; executor_mode?: ExecutionMode; sync_up_config?: SyncButtonConfig | null; sync_down_config?: SyncButtonConfig | null }, userId?: string) => {
+      update: async (id: string, opts: { name?: string; path?: string | null; remote_path?: string | null; remote_url?: string | null; remote_api_key?: string | null; agent_mode?: ExecutionMode; executor_mode?: ExecutionMode; sync_up_config?: SyncButtonConfig | null; sync_down_config?: SyncButtonConfig | null }, userId?: string) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -914,7 +914,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? toProject(row) : undefined;
       },
 
-      delete: (id: string, userId?: string) => {
+      delete: async (id: string, userId?: string) => {
         if (userId) {
           db.prepare(`DELETE FROM projects WHERE id = @id AND user_id = @user_id`).run({ id, user_id: userId });
         } else {
@@ -924,7 +924,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     remoteServers: {
-      create: (server: { name: string; url: string | null; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer => {
+      create: async (server: { name: string; url: string | null; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer> => {
         const id = crypto.randomUUID();
         const connectionMode = server.connection_mode ?? 'outbound';
         db.prepare(
@@ -936,7 +936,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!);
       },
 
-      getAll: (userId?: string): RemoteServer[] => {
+      getAll: async (userId?: string): Promise<RemoteServer[]> => {
         if (userId) {
           return db
             .prepare<{ user_id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE user_id = @user_id ORDER BY created_at DESC`)
@@ -949,7 +949,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .map(toRemoteServer);
       },
 
-      getById: (id: string, userId?: string): RemoteServer | undefined => {
+      getById: async (id: string, userId?: string): Promise<RemoteServer | undefined> => {
         if (userId) {
           const row = db
             .prepare<{ id: string; user_id: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE id = @id AND user_id = @user_id`)
@@ -962,28 +962,28 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? toRemoteServer(row) : undefined;
       },
 
-      getByUrl: (url: string): RemoteServer | undefined => {
+      getByUrl: async (url: string): Promise<RemoteServer | undefined> => {
         const row = db
           .prepare<{ url: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE url = @url`)
           .get({ url });
         return row ? toRemoteServer(row) : undefined;
       },
 
-      getByToken: (token: string): RemoteServer | undefined => {
+      getByToken: async (token: string): Promise<RemoteServer | undefined> => {
         const row = db
           .prepare<{ token: string }, RemoteServerRow>(`SELECT * FROM remote_servers WHERE connect_token = @token`)
           .get({ token });
         return row ? toRemoteServer(row) : undefined;
       },
 
-      getOwnerId: (id: string): string | undefined => {
+      getOwnerId: async (id: string): Promise<string | undefined> => {
         const row = db
           .prepare<{ id: string }, { user_id: string }>(`SELECT user_id FROM remote_servers WHERE id = @id`)
           .get({ id });
         return row?.user_id;
       },
 
-      update: (id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer | undefined => {
+      update: async (id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer | undefined> => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -1018,14 +1018,14 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? toRemoteServer(row) : undefined;
       },
 
-      updateStatus: (id: string, status: RemoteServerStatus): void => {
+      updateStatus: async (id: string, status: RemoteServerStatus): Promise<void> => {
         const updates = status === 'online'
           ? "status = @status, last_connected_at = datetime('now'), updated_at = datetime('now')"
           : "status = @status, updated_at = datetime('now')";
         db.prepare(`UPDATE remote_servers SET ${updates} WHERE id = @id`).run({ id, status });
       },
 
-      generateToken: (id: string, userId?: string): string | undefined => {
+      generateToken: async (id: string, userId?: string): Promise<string | undefined> => {
         const ownerFilter = userId ? ' AND user_id = @user_id' : '';
         const params: Record<string, unknown> = { id };
         if (userId) params.user_id = userId;
@@ -1039,7 +1039,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return token;
       },
 
-      revokeToken: (id: string, userId?: string): boolean => {
+      revokeToken: async (id: string, userId?: string): Promise<boolean> => {
         const ownerFilter = userId ? ' AND user_id = @user_id' : '';
         const params: Record<string, unknown> = { id };
         if (userId) params.user_id = userId;
@@ -1050,7 +1050,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return result.changes > 0;
       },
 
-      delete: (id: string, userId?: string): boolean => {
+      delete: async (id: string, userId?: string): Promise<boolean> => {
         if (userId) {
           const result = db.prepare(`DELETE FROM remote_servers WHERE id = @id AND user_id = @user_id`).run({ id, user_id: userId });
           return result.changes > 0;
@@ -1061,7 +1061,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     projectRemotes: {
-      getByProject: (projectId: string): ProjectRemoteWithServer[] => {
+      getByProject: async (projectId: string): Promise<ProjectRemoteWithServer[]> => {
         type ProjectRemoteRow = {
           id: string;
           project_id: string;
@@ -1099,7 +1099,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         }));
       },
 
-      getByProjectAndServer: (projectId: string, remoteServerId: string): ProjectRemoteWithServer | undefined => {
+      getByProjectAndServer: async (projectId: string, remoteServerId: string): Promise<ProjectRemoteWithServer | undefined> => {
         type ProjectRemoteRow = {
           id: string;
           project_id: string;
@@ -1137,14 +1137,14 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         };
       },
 
-      add: (opts: {
+      add: async (opts: {
         project_id: string;
         remote_server_id: string;
         remote_path: string;
         sort_order?: number;
         sync_up_config?: SyncButtonConfig;
         sync_down_config?: SyncButtonConfig;
-      }): ProjectRemote => {
+      }): Promise<ProjectRemote> => {
         const id = crypto.randomUUID();
         db.prepare(
           `INSERT INTO project_remotes (id, project_id, remote_server_id, remote_path, sort_order, sync_up_config, sync_down_config)
@@ -1182,12 +1182,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         };
       },
 
-      update: (id: string, opts: {
+      update: async (id: string, opts: {
         remote_path?: string;
         sort_order?: number;
         sync_up_config?: SyncButtonConfig | null;
         sync_down_config?: SyncButtonConfig | null;
-      }): ProjectRemote | undefined => {
+      }): Promise<ProjectRemote | undefined> => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -1246,14 +1246,14 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         };
       },
 
-      remove: (id: string): boolean => {
+      remove: async (id: string): Promise<boolean> => {
         const result = db.prepare(`DELETE FROM project_remotes WHERE id = @id`).run({ id });
         return result.changes > 0;
       },
     },
 
     executorGroups: {
-      create: ({ id, project_id, name, branch }) => {
+      create: async ({ id, project_id, name, branch }) => {
         db.prepare(
           `INSERT INTO executor_groups (id, project_id, name, branch) VALUES (@id, @project_id, @name, @branch)`
         ).run({ id, project_id, name, branch });
@@ -1263,19 +1263,19 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getByProjectId: (projectId: string) => {
+      getByProjectId: async (projectId: string) => {
         return db
           .prepare<{ project_id: string }, ExecutorGroup>(`SELECT * FROM executor_groups WHERE project_id = @project_id ORDER BY created_at ASC`)
           .all({ project_id: projectId });
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         return db
           .prepare<{ id: string }, ExecutorGroup>(`SELECT * FROM executor_groups WHERE id = @id`)
           .get({ id });
       },
 
-      getByBranch: (projectId: string, branch: string) => {
+      getByBranch: async (projectId: string, branch: string) => {
         return db
           .prepare<{ project_id: string; branch: string }, ExecutorGroup>(
             `SELECT * FROM executor_groups WHERE project_id = @project_id AND branch = @branch`
@@ -1283,7 +1283,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ project_id: projectId, branch });
       },
 
-      update: (id: string, opts: { name?: string }) => {
+      update: async (id: string, opts: { name?: string }) => {
         if (opts.name !== undefined) {
           db.prepare(`UPDATE executor_groups SET name = @name WHERE id = @id`).run({ id, name: opts.name });
         }
@@ -1292,13 +1292,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id });
       },
 
-      delete: (id: string) => {
+      delete: async (id: string) => {
         db.prepare(`DELETE FROM executor_groups WHERE id = @id`).run({ id });
       },
     },
 
     executors: {
-      create: ({ id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty }) => {
+      create: async ({ id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty }) => {
         // Get max position for this group
         const maxPos = db.prepare<{ group_id: string }, { max_pos: number | null }>(
           `SELECT MAX(position) as max_pos FROM executors WHERE group_id = @group_id`
@@ -1315,28 +1315,28 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return mapExecutorRow(row);
       },
 
-      getByProjectId: (projectId: string) => {
+      getByProjectId: async (projectId: string) => {
         const rows = db
           .prepare<{ project_id: string }, ExecutorRow>(`SELECT * FROM executors WHERE project_id = @project_id ORDER BY position ASC`)
           .all({ project_id: projectId });
         return rows.map(mapExecutorRow);
       },
 
-      getByGroupId: (groupId: string) => {
+      getByGroupId: async (groupId: string) => {
         const rows = db
           .prepare<{ group_id: string }, ExecutorRow>(`SELECT * FROM executors WHERE group_id = @group_id ORDER BY position ASC`)
           .all({ group_id: groupId });
         return rows.map(mapExecutorRow);
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         const row = db
           .prepare<{ id: string }, ExecutorRow>(`SELECT * FROM executors WHERE id = @id`)
           .get({ id });
         return row ? mapExecutorRow(row) : undefined;
       },
 
-      update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => {
+      update: async (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -1379,11 +1379,11 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ? mapExecutorRow(row) : undefined;
       },
 
-      delete: (id: string) => {
+      delete: async (id: string) => {
         db.prepare(`DELETE FROM executors WHERE id = @id`).run({ id });
       },
 
-      reorder: (groupId: string, orderedIds: string[]) => {
+      reorder: async (groupId: string, orderedIds: string[]) => {
         const transaction = db.transaction(() => {
           for (let i = 0; i < orderedIds.length; i++) {
             db.prepare(
@@ -1396,7 +1396,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     executorProcesses: {
-      create: ({ id, executor_id, pid }) => {
+      create: async ({ id, executor_id, pid }) => {
         db.prepare(
           `INSERT INTO executor_processes (id, executor_id, pid, status) VALUES (@id, @executor_id, @pid, 'running')`
         ).run({ id, executor_id, pid: pid ?? null });
@@ -1406,19 +1406,19 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         return db
           .prepare<{ id: string }, ExecutorProcess>(`SELECT * FROM executor_processes WHERE id = @id`)
           .get({ id });
       },
 
-      getRunning: () => {
+      getRunning: async () => {
         return db
           .prepare<{}, ExecutorProcess>(`SELECT * FROM executor_processes WHERE status = 'running'`)
           .all({});
       },
 
-      getLastByExecutorId: (executorId: string) => {
+      getLastByExecutorId: async (executorId: string) => {
         return db
           .prepare<{ executor_id: string }, ExecutorProcess>(
             `SELECT * FROM executor_processes WHERE executor_id = @executor_id ORDER BY started_at DESC LIMIT 1`
@@ -1426,7 +1426,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ executor_id: executorId });
       },
 
-      getLastByExecutorIds: (executorIds: string[]) => {
+      getLastByExecutorIds: async (executorIds: string[]) => {
         if (executorIds.length === 0) return [];
         const params: Record<string, string> = {};
         const placeholders = executorIds.map((id, i) => {
@@ -1445,14 +1445,14 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all(params);
       },
 
-      updateStatus: (id: string, status: ExecutorProcessStatus, exitCode?: number) => {
+      updateStatus: async (id: string, status: ExecutorProcessStatus, exitCode?: number) => {
         const finishedAt = status !== 'running' ? new Date().toISOString() : null;
         db.prepare(
           `UPDATE executor_processes SET status = @status, exit_code = @exit_code, finished_at = @finished_at WHERE id = @id`
         ).run({ id, status, exit_code: exitCode ?? null, finished_at: finishedAt });
       },
 
-      updatePid: (id: string, pid: number) => {
+      updatePid: async (id: string, pid: number) => {
         db.prepare(
           `UPDATE executor_processes SET pid = @pid WHERE id = @id`
         ).run({ id, pid });
@@ -1460,7 +1460,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     scheduledTasks: {
-      create: ({ id, project_id, name, cron_expr, timezone, run_type, content, cwd_mode, branch, directory, timeout_seconds, enabled, target }) => {
+      create: async ({ id, project_id, name, cron_expr, timezone, run_type, content, cwd_mode, branch, directory, timeout_seconds, enabled, target }) => {
         db.prepare(
           `INSERT INTO scheduled_tasks (id, project_id, name, cron_expr, timezone, target, enabled, run_type, content, cwd_mode, branch, directory, timeout_seconds)
            VALUES (@id, @project_id, @name, @cron_expr, @timezone, @target, @enabled, @run_type, @content, @cwd_mode, @branch, @directory, @timeout_seconds)`
@@ -1476,21 +1476,21 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         const row = db.prepare<{ id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE id = @id`).get({ id })!;
         return mapScheduledTaskRow(row);
       },
-      getByProjectId: (projectId) => {
+      getByProjectId: async (projectId) => {
         const rows = db
           .prepare<{ project_id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE project_id = @project_id ORDER BY created_at ASC, id ASC`)
           .all({ project_id: projectId });
         return rows.map(mapScheduledTaskRow);
       },
-      getById: (id) => {
+      getById: async (id) => {
         const row = db.prepare<{ id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE id = @id`).get({ id });
         return row ? mapScheduledTaskRow(row) : undefined;
       },
-      getAllEnabled: () => {
+      getAllEnabled: async () => {
         const rows = db.prepare<[], ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE enabled = 1`).all();
         return rows.map(mapScheduledTaskRow);
       },
-      update: (id, opts) => {
+      update: async (id, opts) => {
         const sets: string[] = [];
         const params: Record<string, unknown> = { id };
         if (opts.name !== undefined) { sets.push("name = @name"); params.name = opts.name; }
@@ -1511,13 +1511,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         const row = db.prepare<{ id: string }, ScheduledTaskRow>(`SELECT * FROM scheduled_tasks WHERE id = @id`).get({ id });
         return row ? mapScheduledTaskRow(row) : undefined;
       },
-      delete: (id) => {
+      delete: async (id) => {
         db.prepare(`DELETE FROM scheduled_tasks WHERE id = @id`).run({ id });
       },
     },
 
     scheduledTaskRuns: {
-      create: ({ id, schedule_id, status, process_id }) => {
+      create: async ({ id, schedule_id, status, process_id }) => {
         db.prepare(
           `INSERT INTO scheduled_task_runs (id, schedule_id, status, process_id, finished_at)
            VALUES (@id, @schedule_id, @status, @process_id, CASE WHEN @status = 'running' THEN NULL ELSE CURRENT_TIMESTAMP END)`
@@ -1525,11 +1525,11 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         const row = db.prepare<{ id: string }, ScheduledTaskRunRow>(`SELECT * FROM scheduled_task_runs WHERE id = @id`).get({ id })!;
         return mapScheduledTaskRunRow(row);
       },
-      getById: (id) => {
+      getById: async (id) => {
         const row = db.prepare<{ id: string }, ScheduledTaskRunRow>(`SELECT * FROM scheduled_task_runs WHERE id = @id`).get({ id });
         return row ? mapScheduledTaskRunRow(row) : undefined;
       },
-      getByScheduleId: (scheduleId, limit = 50) => {
+      getByScheduleId: async (scheduleId, limit = 50) => {
         const rows = db.prepare<{ schedule_id: string; limit: number }, ScheduledTaskRunRow>(
           `SELECT id, schedule_id, status, exit_code, NULL AS output, process_id, started_at, finished_at
            FROM scheduled_task_runs WHERE schedule_id = @schedule_id
@@ -1537,7 +1537,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         ).all({ schedule_id: scheduleId, limit });
         return rows.map(mapScheduledTaskRunRow);
       },
-      getLastByScheduleIds: (scheduleIds) => {
+      getLastByScheduleIds: async (scheduleIds) => {
         const stmt = db.prepare<{ schedule_id: string }, ScheduledTaskRunRow>(
           `SELECT id, schedule_id, status, exit_code, NULL AS output, process_id, started_at, finished_at
            FROM scheduled_task_runs WHERE schedule_id = @schedule_id
@@ -1550,12 +1550,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         }
         return result;
       },
-      finish: (id, opts) => {
+      finish: async (id, opts) => {
         db.prepare(
           `UPDATE scheduled_task_runs SET status = @status, exit_code = @exit_code, output = @output, finished_at = CURRENT_TIMESTAMP WHERE id = @id`
         ).run({ id, status: opts.status, exit_code: opts.exit_code ?? null, output: opts.output ?? null });
       },
-      prune: (scheduleId, keep) => {
+      prune: async (scheduleId, keep) => {
         // Never delete a 'running' row: the overlap-skip path in the scheduler
         // inserts a 'skipped' row + prunes on every overlapping cron fire, so a
         // frequent cron + a long-running job can otherwise push the active
@@ -1570,7 +1570,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     remoteExecutorProcesses: {
-      insert: (localProcessId, info) => {
+      insert: async (localProcessId, info) => {
         db.prepare(
           `INSERT OR REPLACE INTO remote_executor_processes (local_process_id, remote_server_id, remote_url, remote_api_key, remote_process_id, executor_id, project_id, branch, machine_id) VALUES (@local_process_id, @remote_server_id, @remote_url, @remote_api_key, @remote_process_id, @executor_id, @project_id, @branch, @machine_id)`
         ).run({
@@ -1586,11 +1586,11 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         });
       },
 
-      delete: (localProcessId) => {
+      delete: async (localProcessId) => {
         db.prepare(`DELETE FROM remote_executor_processes WHERE local_process_id = @id`).run({ id: localProcessId });
       },
 
-      markFinished: (localProcessId, exitCode, status) => {
+      markFinished: async (localProcessId, exitCode, status) => {
         const finalStatus: ExecutorProcessStatus =
           status ?? ((exitCode === undefined || exitCode === 0) ? 'completed' : 'failed');
         db.prepare(
@@ -1605,7 +1605,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         });
       },
 
-      getById: (localProcessId) => {
+      getById: async (localProcessId) => {
         return db
           .prepare<{ id: string }, RemoteExecutorProcessRow>(
             `SELECT * FROM remote_executor_processes WHERE local_process_id = @id`
@@ -1613,7 +1613,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id: localProcessId });
       },
 
-      getLastByExecutorId: (executorId) => {
+      getLastByExecutorId: async (executorId) => {
         // Skip terminal rows (executor_id = '') and order by started_at DESC.
         if (!executorId) return undefined;
         return db
@@ -1625,7 +1625,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ executor_id: executorId });
       },
 
-      getLastByExecutorIdsGroupedByServer: (executorIds: string[]) => {
+      getLastByExecutorIdsGroupedByServer: async (executorIds: string[]) => {
         if (executorIds.length === 0) return [];
         const params: Record<string, string> = {};
         const placeholders = executorIds.map((id, i) => {
@@ -1649,7 +1649,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all(params);
       },
 
-      getRunning: () => {
+      getRunning: async () => {
         return db
           .prepare<{}, RemoteExecutorProcessRow>(
             `SELECT * FROM remote_executor_processes WHERE status = 'running'`
@@ -1657,7 +1657,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({});
       },
 
-      getRunningByMachine: (machineId: string) => {
+      getRunningByMachine: async (machineId: string) => {
         return db
           .prepare<{ machine_id: string }, RemoteExecutorProcessRow>(
             `SELECT * FROM remote_executor_processes WHERE status = 'running' AND machine_id = @machine_id`
@@ -1665,7 +1665,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ machine_id: machineId });
       },
 
-      getAll: () => {
+      getAll: async () => {
         return db
           .prepare<{}, RemoteExecutorProcessRow>(
             `SELECT * FROM remote_executor_processes`
@@ -1675,7 +1675,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     machineIdentity: {
-      get: (machineId: string) => {
+      get: async (machineId: string) => {
         const row = db
           .prepare<{ machine_id: string }, MachineIdentityRow>(
             `SELECT * FROM machine_identity WHERE machine_id = @machine_id`
@@ -1684,13 +1684,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return row ?? undefined;
       },
 
-      pin: (machineId: string, publicKey: string, userId: string) => {
+      pin: async (machineId: string, publicKey: string, userId: string) => {
         db.prepare(
           `INSERT OR IGNORE INTO machine_identity (machine_id, public_key, user_id) VALUES (@machine_id, @public_key, @user_id)`
         ).run({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "" });
       },
 
-      touch: (machineId: string) => {
+      touch: async (machineId: string) => {
         db.prepare(
           `UPDATE machine_identity SET last_seen_at = datetime('now') WHERE machine_id = @machine_id`
         ).run({ machine_id: machineId });
@@ -1702,7 +1702,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       // UPDATE statements below) so existing databases whose DEFAULTs still
       // resolve to CURRENT_TIMESTAMP also get sub-second writes — this is
       // what lets getLatestByBranch break ties deterministically.
-      create: ({ id, project_id, branch, permission_mode, agent_type }) => {
+      create: async ({ id, project_id, branch, permission_mode, agent_type }) => {
         db.prepare(
           `INSERT INTO agent_sessions (id, project_id, branch, status, permission_mode, agent_type, created_at, updated_at)
            VALUES (@id, @project_id, @branch, 'running', @permission_mode, @agent_type,
@@ -1713,19 +1713,19 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getAll: () => {
+      getAll: async () => {
         return db
           .prepare<{}, AgentSession>(`SELECT * FROM agent_sessions ORDER BY updated_at DESC`)
           .all({});
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         return db
           .prepare<{ id: string }, AgentSession>(`SELECT * FROM agent_sessions WHERE id = @id`)
           .get({ id });
       },
 
-      getByProjectId: (projectId: string) => {
+      getByProjectId: async (projectId: string) => {
         return db
           .prepare<{ project_id: string }, AgentSession>(
             `SELECT * FROM agent_sessions WHERE project_id = @project_id ORDER BY updated_at DESC`
@@ -1733,7 +1733,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ project_id: projectId });
       },
 
-      getByBranch: (projectId: string, branch: string) => {
+      getByBranch: async (projectId: string, branch: string) => {
         return db
           .prepare<{ project_id: string; branch: string }, AgentSession>(
             `SELECT * FROM agent_sessions WHERE project_id = @project_id AND branch = @branch
@@ -1742,7 +1742,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ project_id: projectId, branch });
       },
 
-      listByBranch: (projectId: string, branch: string) => {
+      listByBranch: async (projectId: string, branch: string) => {
         return db
           .prepare<{ project_id: string; branch: string }, AgentSession>(
             `SELECT * FROM agent_sessions WHERE project_id = @project_id AND branch = @branch
@@ -1751,7 +1751,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ project_id: projectId, branch });
       },
 
-      getLatestByBranch: (projectId: string, branch: string) => {
+      getLatestByBranch: async (projectId: string, branch: string) => {
         return db
           .prepare<{ project_id: string; branch: string }, AgentSession>(
             `SELECT * FROM agent_sessions WHERE project_id = @project_id AND branch = @branch
@@ -1760,31 +1760,31 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ project_id: projectId, branch });
       },
 
-      updateStatus: (id: string, status: AgentSessionStatus) => {
+      updateStatus: async (id: string, status: AgentSessionStatus) => {
         db.prepare(
           `UPDATE agent_sessions SET status = @status, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, status });
       },
 
-      updateStatusPreservingTimestamp: (id: string, status: AgentSessionStatus) => {
+      updateStatusPreservingTimestamp: async (id: string, status: AgentSessionStatus) => {
         db.prepare(
           `UPDATE agent_sessions SET status = @status WHERE id = @id`
         ).run({ id, status });
       },
 
-      updatePermissionMode: (id: string, mode: string) => {
+      updatePermissionMode: async (id: string, mode: string) => {
         db.prepare(
           `UPDATE agent_sessions SET permission_mode = @mode, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, mode });
       },
 
-      updateAgentType: (id: string, agent_type: string) => {
+      updateAgentType: async (id: string, agent_type: string) => {
         db.prepare(
           `UPDATE agent_sessions SET agent_type = @agent_type, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, agent_type });
       },
 
-      updateTitle: (id: string, title: string | null) => {
+      updateTitle: async (id: string, title: string | null) => {
         db.prepare(
           `UPDATE agent_sessions SET title = @title, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`
         ).run({ id, title });
@@ -1793,32 +1793,32 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       // Toggle favorite without touching updated_at — favoriting is a passive
       // bookmark, not a "this session was active" signal, so it must not
       // disturb the dropdown's recency ordering.
-      setFavorited: (id: string, favorited: boolean) => {
+      setFavorited: async (id: string, favorited: boolean) => {
         db.prepare(
           `UPDATE agent_sessions SET favorited_at = @ts WHERE id = @id`
         ).run({ id, ts: favorited ? Date.now() : null });
       },
 
-      touchUpdatedAt: (id: string) => {
+      touchUpdatedAt: async (id: string) => {
         db.prepare(`UPDATE agent_sessions SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = @id`)
           .run({ id });
       },
 
-      markUserMessage: (id: string, timestampMs: number) => {
+      markUserMessage: async (id: string, timestampMs: number) => {
         db.prepare(`UPDATE agent_sessions SET last_user_message_at = @ts WHERE id = @id`)
           .run({ id, ts: timestampMs });
       },
 
-      markCompleted: (id: string, timestampMs: number) => {
+      markCompleted: async (id: string, timestampMs: number) => {
         db.prepare(`UPDATE agent_sessions SET last_completed_at = @ts WHERE id = @id`)
           .run({ id, ts: timestampMs });
       },
 
-      delete: (id: string) => {
+      delete: async (id: string) => {
         db.prepare(`DELETE FROM agent_sessions WHERE id = @id`).run({ id });
       },
 
-      upsertEntry: (sessionId: string, entryIndex: number, data: string) => {
+      upsertEntry: async (sessionId: string, entryIndex: number, data: string) => {
         db.prepare(
           `INSERT INTO agent_session_entries (session_id, entry_index, data)
            VALUES (@session_id, @entry_index, @data)
@@ -1826,7 +1826,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         ).run({ session_id: sessionId, entry_index: entryIndex, data });
       },
 
-      getEntries: (sessionId: string) => {
+      getEntries: async (sessionId: string) => {
         return db
           .prepare<{ sid: string }, { entry_index: number; data: string }>(
             `SELECT entry_index, data FROM agent_session_entries WHERE session_id = @sid ORDER BY entry_index ASC`
@@ -1834,11 +1834,11 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ sid: sessionId });
       },
 
-      deleteEntries: (sessionId: string) => {
+      deleteEntries: async (sessionId: string) => {
         db.prepare(`DELETE FROM agent_session_entries WHERE session_id = @id`).run({ id: sessionId });
       },
 
-      countEntries: () => {
+      countEntries: async () => {
         return db.prepare<{}, { session_id: string; cnt: number }>(
           `SELECT session_id, COUNT(*) as cnt FROM agent_session_entries GROUP BY session_id`
         ).all({});
@@ -1846,7 +1846,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     remoteSessionMappings: {
-      upsert: (localSessionId, projectId, remoteServerId, remoteSessionId, branch) => {
+      upsert: async (localSessionId, projectId, remoteServerId, remoteSessionId, branch) => {
         db.prepare(
           `INSERT INTO remote_session_mappings (local_session_id, project_id, remote_server_id, remote_session_id, branch)
            VALUES (@local_session_id, @project_id, @remote_server_id, @remote_session_id, @branch)
@@ -1864,51 +1864,51 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         });
       },
 
-      getAll: () => {
+      getAll: async () => {
         return db.prepare<{}, { local_session_id: string; project_id: string; remote_server_id: string; remote_session_id: string; branch: string | null }>(
           `SELECT local_session_id, project_id, remote_server_id, remote_session_id, branch FROM remote_session_mappings`
         ).all({});
       },
 
-      delete: (localSessionId: string) => {
+      delete: async (localSessionId: string) => {
         db.prepare(`DELETE FROM remote_session_mappings WHERE local_session_id = @id`).run({ id: localSessionId });
       },
 
-      isTitleResolved: (localSessionId: string) => {
+      isTitleResolved: async (localSessionId: string) => {
         const row = db.prepare<{ id: string }, { title_resolved: number }>(
           `SELECT title_resolved FROM remote_session_mappings WHERE local_session_id = @id`
         ).get({ id: localSessionId });
         return row?.title_resolved === 1;
       },
 
-      markTitleResolved: (localSessionId: string) => {
+      markTitleResolved: async (localSessionId: string) => {
         db.prepare(`UPDATE remote_session_mappings SET title_resolved = 1 WHERE local_session_id = @id`)
           .run({ id: localSessionId });
       },
     },
 
     settings: {
-      get: (key: string) => {
+      get: async (key: string) => {
         const row = db
           .prepare<{ key: string }, { value: string }>(`SELECT value FROM global_settings WHERE key = @key`)
           .get({ key });
         return row?.value;
       },
 
-      set: (key: string, value: string) => {
+      set: async (key: string, value: string) => {
         db.prepare(
           `INSERT INTO global_settings (key, value) VALUES (@key, @value)
            ON CONFLICT(key) DO UPDATE SET value = @value`
         ).run({ key, value });
       },
 
-      delete: (key: string) => {
+      delete: async (key: string) => {
         db.prepare(`DELETE FROM global_settings WHERE key = @key`).run({ key });
       },
     },
 
     tasks: {
-      create: ({ id, project_id, title, description, status, priority, assigned_branch }) => {
+      create: async ({ id, project_id, title, description, status, priority, assigned_branch }) => {
         const maxPos = db.prepare<{ project_id: string }, { max_pos: number | null }>(
           `SELECT MAX(position) as max_pos FROM tasks WHERE project_id = @project_id`
         ).get({ project_id });
@@ -1933,7 +1933,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => {
+      getByProjectId: async (projectId: string, opts?: { includeArchived?: boolean }) => {
         const where = opts?.includeArchived
           ? `project_id = @project_id`
           : `project_id = @project_id AND archived_at IS NULL`;
@@ -1942,13 +1942,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ project_id: projectId });
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         return db
           .prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`)
           .get({ id });
       },
 
-      update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => {
+      update: async (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -1986,23 +1986,23 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
       },
 
-      archive: (id: string) => {
+      archive: async (id: string) => {
         db.prepare(`UPDATE tasks SET archived_at = @now, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
           .run({ id, now: Date.now() });
         return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
       },
 
-      unarchive: (id: string) => {
+      unarchive: async (id: string) => {
         db.prepare(`UPDATE tasks SET archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
           .run({ id });
         return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id });
       },
 
-      delete: (id: string) => {
+      delete: async (id: string) => {
         db.prepare(`DELETE FROM tasks WHERE id = @id`).run({ id });
       },
 
-      reorder: (projectId: string, orderedIds: string[]) => {
+      reorder: async (projectId: string, orderedIds: string[]) => {
         const transaction = db.transaction(() => {
           for (let i = 0; i < orderedIds.length; i++) {
             db.prepare(
@@ -2015,7 +2015,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     rules: {
-      create: ({ id, project_id, branch, name, content, enabled }) => {
+      create: async ({ id, project_id, branch, name, content, enabled }) => {
         const maxPos = db.prepare<{ project_id: string; branch: string | null }, { max_pos: number | null }>(
           `SELECT MAX(position) as max_pos FROM rules WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL))`
         ).get({ project_id, branch: branch ?? null });
@@ -2039,7 +2039,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getByWorkspace: (projectId: string, branch: string | null) => {
+      getByWorkspace: async (projectId: string, branch: string | null) => {
         return db
           .prepare<{ project_id: string; branch: string | null }, Rule>(
             `SELECT * FROM rules WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL)) ORDER BY position ASC`
@@ -2047,13 +2047,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ project_id: projectId, branch: branch ?? null });
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         return db
           .prepare<{ id: string }, Rule>(`SELECT * FROM rules WHERE id = @id`)
           .get({ id });
       },
 
-      update: (id: string, opts: { name?: string; content?: string; enabled?: boolean; position?: number }) => {
+      update: async (id: string, opts: { name?: string; content?: string; enabled?: boolean; position?: number }) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -2083,11 +2083,11 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return db.prepare<{ id: string }, Rule>(`SELECT * FROM rules WHERE id = @id`).get({ id });
       },
 
-      delete: (id: string) => {
+      delete: async (id: string) => {
         db.prepare(`DELETE FROM rules WHERE id = @id`).run({ id });
       },
 
-      reorder: (projectId: string, branch: string | null, orderedIds: string[]) => {
+      reorder: async (projectId: string, branch: string | null, orderedIds: string[]) => {
         const transaction = db.transaction(() => {
           for (let i = 0; i < orderedIds.length; i++) {
             db.prepare(
@@ -2100,7 +2100,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     commands: {
-      create: ({ id, project_id, branch, name, content }) => {
+      create: async ({ id, project_id, branch, name, content }) => {
         const maxPos = db.prepare<{ project_id: string; branch: string | null }, { max_pos: number | null }>(
           `SELECT MAX(position) as max_pos FROM commands WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL))`
         ).get({ project_id, branch: branch ?? null });
@@ -2116,7 +2116,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .get({ id })!;
       },
 
-      getByWorkspace: (projectId: string, branch: string | null) => {
+      getByWorkspace: async (projectId: string, branch: string | null) => {
         return db
           .prepare<{ project_id: string; branch: string | null }, Command>(
             `SELECT * FROM commands WHERE project_id = @project_id AND (branch IS @branch OR (branch IS NULL AND @branch IS NULL)) ORDER BY position ASC`
@@ -2124,13 +2124,13 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
           .all({ project_id: projectId, branch: branch ?? null });
       },
 
-      getById: (id: string) => {
+      getById: async (id: string) => {
         return db
           .prepare<{ id: string }, Command>(`SELECT * FROM commands WHERE id = @id`)
           .get({ id });
       },
 
-      update: (id: string, opts: { name?: string; content?: string; position?: number }) => {
+      update: async (id: string, opts: { name?: string; content?: string; position?: number }) => {
         const updates: string[] = [];
         const params: Record<string, unknown> = { id };
 
@@ -2156,12 +2156,12 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         return db.prepare<{ id: string }, Command>(`SELECT * FROM commands WHERE id = @id`).get({ id });
       },
 
-      delete: (id: string) => {
+      delete: async (id: string) => {
         db.prepare(`DELETE FROM commands WHERE id = @id`).run({ id });
       },
     },
 
-    close: () => {
+    close: async () => {
       db.close();
     },
   };

@@ -90,12 +90,13 @@ export async function authenticateWs(
  * and falls back to the persisted executor_process → executor → project chain so
  * that logs of a recently-finished executor still authorize correctly.
  */
-function localProcessProjectId(fastify: FastifyInstance, processId: string): string | null {
+async function localProcessProjectId(fastify: FastifyInstance, processId: string): Promise<string | null> {
   const live = fastify.processManager.getProcessProjectId(processId);
   if (live) return live;
-  const proc = fastify.storage.executorProcesses.getById(processId);
+  const proc = await fastify.storage.executorProcesses.getById(processId);
   if (!proc) return null;
-  return fastify.storage.executors.getById(proc.executor_id)?.project_id ?? null;
+  const executor = await fastify.storage.executors.getById(proc.executor_id);
+  return executor?.project_id ?? null;
 }
 
 /**
@@ -106,34 +107,35 @@ function localProcessProjectId(fastify: FastifyInstance, processId: string): str
  * `remote_servers` and `projects` are scoped by `user_id` in storage, so a
  * `getById(..., userId)` miss means "not owned by this user".
  */
-export function userOwnsProcess(fastify: FastifyInstance, processId: string, userId: string): boolean {
+export async function userOwnsProcess(fastify: FastifyInstance, processId: string, userId: string): Promise<boolean> {
   if (processId.startsWith("remote-")) {
-    const row = fastify.storage.remoteExecutorProcesses.getById(processId);
+    const row = await fastify.storage.remoteExecutorProcesses.getById(processId);
     const map = fastify.remoteExecutorMap.get(processId);
     const remoteServerId = row?.remote_server_id ?? map?.remoteServerId;
     const projectId = row?.project_id ?? map?.projectId ?? null;
-    if (remoteServerId && fastify.storage.remoteServers.getById(remoteServerId, userId)) return true;
-    if (projectId && fastify.storage.projects.getById(projectId, userId)) return true;
+    if (remoteServerId && await fastify.storage.remoteServers.getById(remoteServerId, userId)) return true;
+    if (projectId && await fastify.storage.projects.getById(projectId, userId)) return true;
     return false;
   }
-  const projectId = localProcessProjectId(fastify, processId);
+  const projectId = await localProcessProjectId(fastify, processId);
   if (!projectId) return false;
-  return !!fastify.storage.projects.getById(projectId, userId);
+  return !!(await fastify.storage.projects.getById(projectId, userId));
 }
 
 /**
  * Whether `userId` owns the agent session `sessionId`. Remote sessions are owned
  * via their remote server; local sessions via their project.
  */
-export function userOwnsSession(fastify: FastifyInstance, sessionId: string, userId: string): boolean {
+export async function userOwnsSession(fastify: FastifyInstance, sessionId: string, userId: string): Promise<boolean> {
   if (sessionId.startsWith("remote-")) {
     const info = fastify.remoteSessionMap.get(sessionId);
-    if (info?.remoteServerId && fastify.storage.remoteServers.getById(info.remoteServerId, userId)) return true;
-    const mapping = fastify.storage.remoteSessionMappings.getAll().find((m) => m.local_session_id === sessionId);
-    if (mapping && fastify.storage.projects.getById(mapping.project_id, userId)) return true;
+    if (info?.remoteServerId && await fastify.storage.remoteServers.getById(info.remoteServerId, userId)) return true;
+    const allMappings = await fastify.storage.remoteSessionMappings.getAll();
+    const mapping = allMappings.find((m) => m.local_session_id === sessionId);
+    if (mapping && await fastify.storage.projects.getById(mapping.project_id, userId)) return true;
     return false;
   }
-  const session = fastify.storage.agentSessions.getById(sessionId);
+  const session = await fastify.storage.agentSessions.getById(sessionId);
   if (!session) return false;
-  return !!fastify.storage.projects.getById(session.project_id, userId);
+  return !!(await fastify.storage.projects.getById(session.project_id, userId));
 }

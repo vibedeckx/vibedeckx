@@ -54,7 +54,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // (no-auth / apiKey proxy) carry userId === null and skip this. Gating the
         // whole connection (not just input) also prevents reading another tenant's
         // terminal output.
-        if (principal.userId !== null && !userOwnsProcess(fastify, processId, principal.userId)) {
+        if (principal.userId !== null && !(await userOwnsProcess(fastify, processId, principal.userId))) {
           console.log(`[WebSocket] Ownership denied for process ${processId} (user=${principal.userId})`);
           try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
           try { socket.close(); } catch { /* already closed */ }
@@ -125,17 +125,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const subs = new Map<string, () => void>(); // processId → cleanup
         const handleInputMap = new Map<string, (msg: InputMessage) => void>();
 
-        const subscribeProcess = (processId: string) => {
+        const subscribeProcess = async (processId: string): Promise<void> => {
           if (subs.has(processId)) return; // 幂等：已订阅则跳过
 
           // Per-process ownership, checked per subscription (one mux connection
           // can subscribe to many processIds). Trusted principals (userId === null)
           // skip this; a Clerk user is refused processes they don't own.
-          if (principal.userId !== null && !userOwnsProcess(fastify, processId, principal.userId)) {
+          if (principal.userId !== null && !(await userOwnsProcess(fastify, processId, principal.userId))) {
             console.log(`[ExecutorMux] Ownership denied for process ${processId} (user=${principal.userId})`);
             try { socket.send(JSON.stringify({ processId, type: "error", message: "Forbidden" })); } catch { /* closed */ }
             return;
           }
+          // Re-check for a race: two "subscribe" messages for the same processId
+          // arriving before the first await above resolves would otherwise both
+          // pass the subs.has() guard and register duplicate streams.
+          if (subs.has(processId)) return;
 
           const send = (msg: StreamMessage) => {
             try { socket.send(JSON.stringify({ processId, ...msg })); } catch { /* closed */ }
@@ -167,7 +171,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
               | { type: "resize"; processId: string; cols: number; rows: number };
 
             if (msg.type === "subscribe") {
-              subscribeProcess(msg.processId);
+              subscribeProcess(msg.processId).catch((err) => {
+                console.error(`[ExecutorMux] Failed to subscribe to ${msg.processId}:`, err);
+              });
             } else if (msg.type === "unsubscribe") {
               subs.get(msg.processId)?.();
               subs.delete(msg.processId);
@@ -235,7 +241,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         // Per-session ownership: a Clerk user may only stream sessions they own.
         // Trusted principals (userId === null) skip this.
-        if (principalUserId !== null && !userOwnsSession(fastify, sessionId, principalUserId)) {
+        if (principalUserId !== null && !(await userOwnsSession(fastify, sessionId, principalUserId))) {
           console.log(`[AgentWS] Ownership denied for session ${sessionId} (user=${principalUserId})`);
           try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
           try { socket.close(); } catch { /* already closed */ }
@@ -337,7 +343,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
           try {
             const message = JSON.parse(data.toString()) as AgentWsInput;
             if (message.type === "user_message") {
-              fastify.agentSessionManager.sendUserMessage(sessionId, message.content);
+              fastify.agentSessionManager.sendUserMessage(sessionId, message.content).catch((err) => {
+                console.error(`[AgentWS] Failed to send user message for ${sessionId}:`, err);
+              });
             }
           } catch (error) {
             console.error("[AgentWS] Failed to parse message:", error);

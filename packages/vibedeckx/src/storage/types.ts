@@ -241,10 +241,10 @@ export interface Storage {
       executor_mode?: ExecutionMode;
       sync_up_config?: SyncButtonConfig;
       sync_down_config?: SyncButtonConfig;
-    }, userId?: string) => Project;
-    getAll: (userId?: string) => Project[];
-    getById: (id: string, userId?: string) => Project | undefined;
-    getByPath: (path: string) => Project | undefined;
+    }, userId?: string) => Promise<Project>;
+    getAll: (userId?: string) => Promise<Project[]>;
+    getById: (id: string, userId?: string) => Promise<Project | undefined>;
+    getByPath: (path: string) => Promise<Project | undefined>;
     update: (id: string, opts: {
       name?: string;
       path?: string | null;
@@ -255,26 +255,26 @@ export interface Storage {
       executor_mode?: ExecutionMode;
       sync_up_config?: SyncButtonConfig | null;
       sync_down_config?: SyncButtonConfig | null;
-    }, userId?: string) => Project | undefined;
-    delete: (id: string, userId?: string) => void;
+    }, userId?: string) => Promise<Project | undefined>;
+    delete: (id: string, userId?: string) => Promise<void>;
   };
   remoteServers: {
-    create(server: { name: string; url: string | null; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer;
-    getAll(userId?: string): RemoteServer[];
-    getById(id: string, userId?: string): RemoteServer | undefined;
-    getByUrl(url: string): RemoteServer | undefined;
-    getByToken(token: string): RemoteServer | undefined;
+    create(server: { name: string; url: string | null; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer>;
+    getAll(userId?: string): Promise<RemoteServer[]>;
+    getById(id: string, userId?: string): Promise<RemoteServer | undefined>;
+    getByUrl(url: string): Promise<RemoteServer | undefined>;
+    getByToken(token: string): Promise<RemoteServer | undefined>;
     /** Owner user_id of a server, unscoped — for ownership checks without a request context. */
-    getOwnerId(id: string): string | undefined;
-    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): RemoteServer | undefined;
-    updateStatus(id: string, status: RemoteServerStatus): void;
-    generateToken(id: string, userId?: string): string | undefined;
-    revokeToken(id: string, userId?: string): boolean;
-    delete(id: string, userId?: string): boolean;
+    getOwnerId(id: string): Promise<string | undefined>;
+    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer | undefined>;
+    updateStatus(id: string, status: RemoteServerStatus): Promise<void>;
+    generateToken(id: string, userId?: string): Promise<string | undefined>;
+    revokeToken(id: string, userId?: string): Promise<boolean>;
+    delete(id: string, userId?: string): Promise<boolean>;
   };
   projectRemotes: {
-    getByProject(projectId: string): ProjectRemoteWithServer[];
-    getByProjectAndServer(projectId: string, remoteServerId: string): ProjectRemoteWithServer | undefined;
+    getByProject(projectId: string): Promise<ProjectRemoteWithServer[]>;
+    getByProjectAndServer(projectId: string, remoteServerId: string): Promise<ProjectRemoteWithServer | undefined>;
     add(opts: {
       project_id: string;
       remote_server_id: string;
@@ -282,90 +282,90 @@ export interface Storage {
       sort_order?: number;
       sync_up_config?: SyncButtonConfig;
       sync_down_config?: SyncButtonConfig;
-    }): ProjectRemote;
+    }): Promise<ProjectRemote>;
     update(id: string, opts: {
       remote_path?: string;
       sort_order?: number;
       sync_up_config?: SyncButtonConfig | null;
       sync_down_config?: SyncButtonConfig | null;
-    }): ProjectRemote | undefined;
-    remove(id: string): boolean;
+    }): Promise<ProjectRemote | undefined>;
+    remove(id: string): Promise<boolean>;
   };
   executorGroups: {
-    create: (opts: { id: string; project_id: string; name: string; branch: string }) => ExecutorGroup;
-    getByProjectId: (projectId: string) => ExecutorGroup[];
-    getById: (id: string) => ExecutorGroup | undefined;
-    getByBranch: (projectId: string, branch: string) => ExecutorGroup | undefined;
-    update: (id: string, opts: { name?: string }) => ExecutorGroup | undefined;
-    delete: (id: string) => void;
+    create: (opts: { id: string; project_id: string; name: string; branch: string }) => Promise<ExecutorGroup>;
+    getByProjectId: (projectId: string) => Promise<ExecutorGroup[]>;
+    getById: (id: string) => Promise<ExecutorGroup | undefined>;
+    getByBranch: (projectId: string, branch: string) => Promise<ExecutorGroup | undefined>;
+    update: (id: string, opts: { name?: string }) => Promise<ExecutorGroup | undefined>;
+    delete: (id: string) => Promise<void>;
   };
   executors: {
-    create: (opts: { id: string; project_id: string; group_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Executor;
-    getByProjectId: (projectId: string) => Executor[];
-    getByGroupId: (groupId: string) => Executor[];
-    getById: (id: string) => Executor | undefined;
-    update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => Executor | undefined;
-    delete: (id: string) => void;
-    reorder: (groupId: string, orderedIds: string[]) => void;
+    create: (opts: { id: string; project_id: string; group_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<Executor>;
+    getByProjectId: (projectId: string) => Promise<Executor[]>;
+    getByGroupId: (groupId: string) => Promise<Executor[]>;
+    getById: (id: string) => Promise<Executor | undefined>;
+    update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => Promise<Executor | undefined>;
+    delete: (id: string) => Promise<void>;
+    reorder: (groupId: string, orderedIds: string[]) => Promise<void>;
   };
   executorProcesses: {
-    create: (opts: { id: string; executor_id: string; pid?: number }) => ExecutorProcess;
-    getById: (id: string) => ExecutorProcess | undefined;
-    getRunning: () => ExecutorProcess[];
-    getLastByExecutorId: (executorId: string) => ExecutorProcess | undefined;
+    create: (opts: { id: string; executor_id: string; pid?: number }) => Promise<ExecutorProcess>;
+    getById: (id: string) => Promise<ExecutorProcess | undefined>;
+    getRunning: () => Promise<ExecutorProcess[]>;
+    getLastByExecutorId: (executorId: string) => Promise<ExecutorProcess | undefined>;
     /** Most recent row per executor for the given IDs. At most one row per executorId in the result. */
-    getLastByExecutorIds: (executorIds: string[]) => ExecutorProcess[];
-    updateStatus: (id: string, status: ExecutorProcessStatus, exitCode?: number) => void;
-    updatePid: (id: string, pid: number) => void;
+    getLastByExecutorIds: (executorIds: string[]) => Promise<ExecutorProcess[]>;
+    updateStatus: (id: string, status: ExecutorProcessStatus, exitCode?: number) => Promise<void>;
+    updatePid: (id: string, pid: number) => Promise<void>;
   };
   scheduledTasks: {
-    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => ScheduledTask;
-    getByProjectId: (projectId: string) => ScheduledTask[];
-    getById: (id: string) => ScheduledTask | undefined;
-    getAllEnabled: () => ScheduledTask[];
-    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => ScheduledTask | undefined;
-    delete: (id: string) => void;
+    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => Promise<ScheduledTask>;
+    getByProjectId: (projectId: string) => Promise<ScheduledTask[]>;
+    getById: (id: string) => Promise<ScheduledTask | undefined>;
+    getAllEnabled: () => Promise<ScheduledTask[]>;
+    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => Promise<ScheduledTask | undefined>;
+    delete: (id: string) => Promise<void>;
   };
   scheduledTaskRuns: {
-    create: (opts: { id: string; schedule_id: string; status?: ScheduledTaskRunStatus; process_id?: string | null }) => ScheduledTaskRun;
-    getById: (id: string) => ScheduledTaskRun | undefined;
+    create: (opts: { id: string; schedule_id: string; status?: ScheduledTaskRunStatus; process_id?: string | null }) => Promise<ScheduledTaskRun>;
+    getById: (id: string) => Promise<ScheduledTaskRun | undefined>;
     /** Newest first. Never includes the output column (always null) — use getById for output. */
-    getByScheduleId: (scheduleId: string, limit?: number) => ScheduledTaskRun[];
+    getByScheduleId: (scheduleId: string, limit?: number) => Promise<ScheduledTaskRun[]>;
     /** Most recent run per schedule for the given IDs (output omitted). */
-    getLastByScheduleIds: (scheduleIds: string[]) => Record<string, ScheduledTaskRun>;
-    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null }) => void;
+    getLastByScheduleIds: (scheduleIds: string[]) => Promise<Record<string, ScheduledTaskRun>>;
+    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null }) => Promise<void>;
     /** Delete all but the newest `keep` runs for a schedule. */
-    prune: (scheduleId: string, keep: number) => void;
+    prune: (scheduleId: string, keep: number) => Promise<void>;
   };
   remoteExecutorProcesses: {
-    insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null; machineId?: string | null }): void;
+    insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null; machineId?: string | null }): Promise<void>;
     /**
      * Hard-delete a row. Use only for stale-row cleanup or transient sessions
      * (e.g. terminals). Use markFinished() when an executor process exits so
      * the row survives for "Last run" lookup and post-finish log replay.
      */
-    delete(localProcessId: string): void;
+    delete(localProcessId: string): Promise<void>;
     /** Mark a row as no longer running while preserving it for history. */
-    markFinished(localProcessId: string, exitCode?: number, status?: ExecutorProcessStatus): void;
-    getById(localProcessId: string): RemoteExecutorProcessRow | undefined;
+    markFinished(localProcessId: string, exitCode?: number, status?: ExecutorProcessStatus): Promise<void>;
+    getById(localProcessId: string): Promise<RemoteExecutorProcessRow | undefined>;
     /** Most recent row for an executor, regardless of status — used for "Last run" lookup. */
-    getLastByExecutorId(executorId: string): RemoteExecutorProcessRow | undefined;
+    getLastByExecutorId(executorId: string): Promise<RemoteExecutorProcessRow | undefined>;
     /**
      * Most recent row per (executor_id, remote_server_id) pair across the given
      * executor IDs. Used by the executor list endpoint to assemble per-target
      * "Last run" data in a single query.
      */
-    getLastByExecutorIdsGroupedByServer(executorIds: string[]): RemoteExecutorProcessRow[];
+    getLastByExecutorIdsGroupedByServer(executorIds: string[]): Promise<RemoteExecutorProcessRow[]>;
     /** Only rows currently marked 'running' — used for restoration on startup/reconnect. */
-    getRunning(): RemoteExecutorProcessRow[];
+    getRunning(): Promise<RemoteExecutorProcessRow[]>;
     /**
      * Running rows anchored to a specific verified machine identity. Used by
      * reverse-connect recovery to safely re-claim a machine's processes after
      * it reconnects under a new remote_servers.id.
      */
-    getRunningByMachine(machineId: string): RemoteExecutorProcessRow[];
+    getRunningByMachine(machineId: string): Promise<RemoteExecutorProcessRow[]>;
     /** All rows including finished — primarily for legacy callers. */
-    getAll(): RemoteExecutorProcessRow[];
+    getAll(): Promise<RemoteExecutorProcessRow[]>;
   };
   /**
    * Stable cryptographic identities for reverse-connect remote machines. Keyed
@@ -373,79 +373,79 @@ export interface Storage {
    * remote_servers record recreation (new id + new token).
    */
   machineIdentity: {
-    get(machineId: string): MachineIdentityRow | undefined;
+    get(machineId: string): Promise<MachineIdentityRow | undefined>;
     /** Pin a fingerprint→(publicKey, owner) on first connect. No-op if present. */
-    pin(machineId: string, publicKey: string, userId: string): void;
-    touch(machineId: string): void;
+    pin(machineId: string, publicKey: string, userId: string): Promise<void>;
+    touch(machineId: string): Promise<void>;
   };
   agentSessions: {
-    create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => AgentSession;
-    getAll: () => AgentSession[];
-    getById: (id: string) => AgentSession | undefined;
-    getByProjectId: (projectId: string) => AgentSession[];
+    create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => Promise<AgentSession>;
+    getAll: () => Promise<AgentSession[]>;
+    getById: (id: string) => Promise<AgentSession | undefined>;
+    getByProjectId: (projectId: string) => Promise<AgentSession[]>;
     /** @deprecated — use listByBranch + getLatestByBranch */
-    getByBranch: (projectId: string, branch: string) => AgentSession | undefined;
-    listByBranch: (projectId: string, branch: string) => AgentSession[];
-    getLatestByBranch: (projectId: string, branch: string) => AgentSession | undefined;
-    updateStatus: (id: string, status: AgentSessionStatus) => void;
+    getByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
+    listByBranch: (projectId: string, branch: string) => Promise<AgentSession[]>;
+    getLatestByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
+    updateStatus: (id: string, status: AgentSessionStatus) => Promise<void>;
     /**
      * Update status without touching `updated_at`. Used by startup restore, where
      * bulk-resetting "running" rows to "stopped" is not a real user-facing event
      * and must not disturb the ordering used by `getLatestByBranch`.
      */
-    updateStatusPreservingTimestamp: (id: string, status: AgentSessionStatus) => void;
-    updatePermissionMode: (id: string, mode: string) => void;
-    updateAgentType: (id: string, agent_type: string) => void;
-    updateTitle: (id: string, title: string | null) => void;
+    updateStatusPreservingTimestamp: (id: string, status: AgentSessionStatus) => Promise<void>;
+    updatePermissionMode: (id: string, mode: string) => Promise<void>;
+    updateAgentType: (id: string, agent_type: string) => Promise<void>;
+    updateTitle: (id: string, title: string | null) => Promise<void>;
     /** Mark or unmark the session as favorited. Does not touch updated_at. */
-    setFavorited: (id: string, favorited: boolean) => void;
-    touchUpdatedAt: (id: string) => void;
+    setFavorited: (id: string, favorited: boolean) => Promise<void>;
+    touchUpdatedAt: (id: string) => Promise<void>;
     /** Set last_user_message_at to the given epoch-ms timestamp. */
-    markUserMessage: (id: string, timestampMs: number) => void;
+    markUserMessage: (id: string, timestampMs: number) => Promise<void>;
     /** Set last_completed_at to the given epoch-ms timestamp. */
-    markCompleted: (id: string, timestampMs: number) => void;
-    delete: (id: string) => void;
-    upsertEntry: (sessionId: string, entryIndex: number, data: string) => void;
-    getEntries: (sessionId: string) => Array<{ entry_index: number; data: string }>;
-    deleteEntries: (sessionId: string) => void;
-    countEntries: () => Array<{ session_id: string; cnt: number }>;
+    markCompleted: (id: string, timestampMs: number) => Promise<void>;
+    delete: (id: string) => Promise<void>;
+    upsertEntry: (sessionId: string, entryIndex: number, data: string) => Promise<void>;
+    getEntries: (sessionId: string) => Promise<Array<{ entry_index: number; data: string }>>;
+    deleteEntries: (sessionId: string) => Promise<void>;
+    countEntries: () => Promise<Array<{ session_id: string; cnt: number }>>;
   };
   remoteSessionMappings: {
-    upsert: (localSessionId: string, projectId: string, remoteServerId: string, remoteSessionId: string, branch: string | null) => void;
-    getAll: () => Array<{ local_session_id: string; project_id: string; remote_server_id: string; remote_session_id: string; branch: string | null }>;
-    delete: (localSessionId: string) => void;
-    isTitleResolved: (localSessionId: string) => boolean;
-    markTitleResolved: (localSessionId: string) => void;
+    upsert: (localSessionId: string, projectId: string, remoteServerId: string, remoteSessionId: string, branch: string | null) => Promise<void>;
+    getAll: () => Promise<Array<{ local_session_id: string; project_id: string; remote_server_id: string; remote_session_id: string; branch: string | null }>>;
+    delete: (localSessionId: string) => Promise<void>;
+    isTitleResolved: (localSessionId: string) => Promise<boolean>;
+    markTitleResolved: (localSessionId: string) => Promise<void>;
   };
   settings: {
-    get: (key: string) => string | undefined;
-    set: (key: string, value: string) => void;
-    delete: (key: string) => void;
+    get: (key: string) => Promise<string | undefined>;
+    set: (key: string, value: string) => Promise<void>;
+    delete: (key: string) => Promise<void>;
   };
   tasks: {
-    create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Task;
-    getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Task[];
-    getById: (id: string) => Task | undefined;
-    update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => Task | undefined;
-    archive: (id: string) => Task | undefined;
-    unarchive: (id: string) => Task | undefined;
-    delete: (id: string) => void;
-    reorder: (projectId: string, orderedIds: string[]) => void;
+    create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;
+    getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
+    getById: (id: string) => Promise<Task | undefined>;
+    update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => Promise<Task | undefined>;
+    archive: (id: string) => Promise<Task | undefined>;
+    unarchive: (id: string) => Promise<Task | undefined>;
+    delete: (id: string) => Promise<void>;
+    reorder: (projectId: string, orderedIds: string[]) => Promise<void>;
   };
   rules: {
-    create: (opts: { id: string; project_id: string; branch: string | null; name: string; content: string; enabled?: boolean }) => Rule;
-    getByWorkspace: (projectId: string, branch: string | null) => Rule[];
-    getById: (id: string) => Rule | undefined;
-    update: (id: string, opts: { name?: string; content?: string; enabled?: boolean; position?: number }) => Rule | undefined;
-    delete: (id: string) => void;
-    reorder: (projectId: string, branch: string | null, orderedIds: string[]) => void;
+    create: (opts: { id: string; project_id: string; branch: string | null; name: string; content: string; enabled?: boolean }) => Promise<Rule>;
+    getByWorkspace: (projectId: string, branch: string | null) => Promise<Rule[]>;
+    getById: (id: string) => Promise<Rule | undefined>;
+    update: (id: string, opts: { name?: string; content?: string; enabled?: boolean; position?: number }) => Promise<Rule | undefined>;
+    delete: (id: string) => Promise<void>;
+    reorder: (projectId: string, branch: string | null, orderedIds: string[]) => Promise<void>;
   };
   commands: {
-    create: (opts: { id: string; project_id: string; branch: string | null; name: string; content: string }) => Command;
-    getByWorkspace: (projectId: string, branch: string | null) => Command[];
-    getById: (id: string) => Command | undefined;
-    update: (id: string, opts: { name?: string; content?: string; position?: number }) => Command | undefined;
-    delete: (id: string) => void;
+    create: (opts: { id: string; project_id: string; branch: string | null; name: string; content: string }) => Promise<Command>;
+    getByWorkspace: (projectId: string, branch: string | null) => Promise<Command[]>;
+    getById: (id: string) => Promise<Command | undefined>;
+    update: (id: string, opts: { name?: string; content?: string; position?: number }) => Promise<Command | undefined>;
+    delete: (id: string) => Promise<void>;
   };
-  close: () => void;
+  close: () => Promise<void>;
 }
