@@ -1284,23 +1284,19 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       },
 
       createIfBranchFree: async ({ id, project_id, name, branch }) => {
-        try {
-          db.prepare(
-            `INSERT INTO executor_groups (id, project_id, name, branch) VALUES (@id, @project_id, @name, @branch)`
-          ).run({ id, project_id, name, branch });
-          const group = db
-            .prepare<{ id: string }, ExecutorGroup>(`SELECT * FROM executor_groups WHERE id = @id`)
-            .get({ id })!;
-          return { created: true, group };
-        } catch (err) {
-          if (!(err instanceof Error) || !/UNIQUE constraint failed/.test(err.message)) throw err;
-          const group = db
-            .prepare<{ project_id: string; branch: string }, ExecutorGroup>(
-              `SELECT * FROM executor_groups WHERE project_id = @project_id AND branch = @branch`
-            )
-            .get({ project_id, branch })!;
-          return { created: false, group };
-        }
+        // INSERT OR IGNORE + re-read: atomic per statement, and portable —
+        // in the Kysely/pg port this becomes
+        // `.onConflict(oc => oc.columns(["project_id","branch"]).doNothing())`,
+        // with no engine-specific error-message matching involved.
+        const result = db.prepare(
+          `INSERT OR IGNORE INTO executor_groups (id, project_id, name, branch) VALUES (@id, @project_id, @name, @branch)`
+        ).run({ id, project_id, name, branch });
+        const group = db
+          .prepare<{ project_id: string; branch: string }, ExecutorGroup>(
+            `SELECT * FROM executor_groups WHERE project_id = @project_id AND branch = @branch`
+          )
+          .get({ project_id, branch })!;
+        return { created: result.changes > 0, group };
       },
 
       update: async (id: string, opts: { name?: string }) => {
@@ -1738,15 +1734,22 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
         const insertResult = db.prepare(
           `INSERT OR IGNORE INTO machine_identity (machine_id, public_key, user_id) VALUES (@machine_id, @public_key, @user_id)`
         ).run({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "" });
-        db.prepare(
-          `UPDATE machine_identity SET last_seen_at = datetime('now') WHERE machine_id = @machine_id`
-        ).run({ machine_id: machineId });
         const row = db
           .prepare<{ machine_id: string }, MachineIdentityRow>(
             `SELECT * FROM machine_identity WHERE machine_id = @machine_id`
           )
           .get({ machine_id: machineId })!;
-        return { owned: row.user_id === (userId ?? ""), ownerId: row.user_id, created: insertResult.changes > 0 };
+        const owned = row.user_id === (userId ?? "");
+        // Only bump last_seen_at for the verified owner — a rejected
+        // owner-mismatch claim must not update the machine's liveness
+        // timestamp (the pre-push-down code only called touch() after the
+        // ownership guard passed).
+        if (owned) {
+          db.prepare(
+            `UPDATE machine_identity SET last_seen_at = datetime('now') WHERE machine_id = @machine_id`
+          ).run({ machine_id: machineId });
+        }
+        return { owned, ownerId: row.user_id, created: insertResult.changes > 0 };
       },
     },
 
@@ -2094,15 +2097,21 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
       },
 
       completeIfAssigned: async (projectId: string, branch: string) => {
+        // Mirror the original call site exactly: pick the FIRST matching task
+        // by position (no status filter in the selection), then only complete
+        // it if that first match isn't already done. Filtering on status in
+        // the WHERE clause would change semantics: if the first-by-position
+        // assigned task is already done but a later one isn't, the original
+        // code was a no-op — it must not skip ahead and complete the later one.
         const row = db
-          .prepare<{ project_id: string; assigned_branch: string }, { id: string }>(
-            `SELECT id FROM tasks
+          .prepare<{ project_id: string; assigned_branch: string }, { id: string; status: string }>(
+            `SELECT id, status FROM tasks
              WHERE project_id = @project_id AND assigned_branch = @assigned_branch
-               AND archived_at IS NULL AND status != 'done'
+               AND archived_at IS NULL
              ORDER BY position ASC LIMIT 1`
           )
           .get({ project_id: projectId, assigned_branch: branch });
-        if (!row) return undefined;
+        if (!row || row.status === 'done') return undefined;
         db.prepare(`UPDATE tasks SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = @id`).run({ id: row.id });
         return db.prepare<{ id: string }, Task>(`SELECT * FROM tasks WHERE id = @id`).get({ id: row.id });
       },

@@ -493,13 +493,16 @@ export interface Storage {
     delete: (id: string) => Promise<void>;
     reorder: (projectId: string, orderedIds: string[]) => Promise<void>;
     /**
-     * Atomically complete the first non-done, non-archived task assigned to
-     * `branch` (same selection order as `getByProjectId` — position ASC), if
-     * any. Used by session-completion auto-close, which previously did
-     * `getByProjectId` + in-memory `.find()` + `update()` across two awaits —
-     * a concurrent edit to the found task (reassignment, cancellation) in
-     * that window would have been silently overwritten back to "done".
-     * Returns the updated task, or undefined if no task matched.
+     * Atomically complete the FIRST non-archived task assigned to `branch`
+     * (same selection order as `getByProjectId` — position ASC), but only if
+     * that first match isn't already "done". If the first-by-position match
+     * is done, this is a no-op even when a later-positioned assigned task
+     * exists that isn't — exactly matching the original `getByProjectId` +
+     * `.find()` + status-guard call site. Used by session-completion
+     * auto-close, which previously did that sequence across two awaits — a
+     * concurrent edit to the found task (reassignment, cancellation) in that
+     * window would have been silently overwritten back to "done". Returns
+     * the updated task, or undefined if nothing was completed.
      */
     completeIfAssigned: (projectId: string, branch: string) => Promise<Task | undefined>;
   };
