@@ -96,7 +96,7 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
         ))}
       </FilterBar>
 
-      <div className="flex-1 overflow-auto px-5">
+      <div className="flex-1 overflow-auto px-5 edge-scrollbar">
         {loading ? (
           <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
             Loading tasks...
