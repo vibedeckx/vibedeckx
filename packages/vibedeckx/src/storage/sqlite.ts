@@ -1,9 +1,12 @@
 import Database from "better-sqlite3";
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
+import { Kysely, SqliteDialect } from "kysely";
 import { mkdir } from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import type { Project, Executor, ExecutorGroup, ExecutorProcess, ExecutorProcessStatus, ExecutorType, PromptProvider, AgentSession, AgentSessionStatus, Task, TaskStatus, TaskPriority, Rule, Command, Storage, ExecutionMode, SyncButtonConfig, RemoteServer, RemoteServerConnectionMode, RemoteServerStatus, ProjectRemote, ProjectRemoteWithServer, RemoteExecutorProcessRow, MachineIdentityRow, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus } from "./types.js";
+import type { DB } from "./schema.js";
+import { sqliteHelpers } from "./dialect.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -700,7 +703,12 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
 export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
   await mkdir(path.dirname(dbPath), { recursive: true });
-  const db = createDatabase(dbPath);
+  const db = createDatabase(dbPath); // legacy DDL/migrations, kept verbatim
+  // Kysely wraps the same better-sqlite3 handle. Not yet used by any query
+  // below (Task 3 is scaffolding only) — repositories start consuming kdb/h
+  // in Task 4+.
+  const kdb = new Kysely<DB>({ dialect: new SqliteDialect({ database: db }) });
+  const h = sqliteHelpers;
 
   // Helper to convert SQLite project row to Project interface
   const toProject = (row: ProjectRow): Project => ({
@@ -2265,7 +2273,10 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     },
 
     close: async () => {
-      db.close();
+      // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
+      // calls db.close() on the wrapped better-sqlite3 handle — no separate
+      // db.close() needed (verified against kysely's SqliteDriver.destroy()).
+      await kdb.destroy();
     },
   };
 };

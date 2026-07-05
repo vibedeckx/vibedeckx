@@ -1,0 +1,232 @@
+import type { ColumnType, Generated } from "kysely";
+
+/** Boolean column: 0/1 under sqlite, native boolean under pg. Always read via fromDbBool(), write via DialectHelpers.toDbBool(). */
+export type DbBool = ColumnType<number | boolean, number | boolean, number | boolean>;
+
+export interface ProjectsTable {
+  id: string;
+  name: string;
+  path: string | null;
+  remote_path: string | null;
+  is_remote: DbBool;
+  remote_url: string | null;
+  remote_api_key: string | null;
+  remote_project_id: string | null;
+  user_id: Generated<string>;
+  agent_mode: string | null;
+  executor_mode: string | null;
+  sync_up_config: string | null;   // JSON: SyncButtonConfig
+  sync_down_config: string | null; // JSON: SyncButtonConfig
+  created_at: Generated<string>;
+}
+
+export interface ExecutorGroupsTable {
+  id: string;
+  project_id: string;
+  name: string;
+  branch: Generated<string>;
+  created_at: Generated<string>;
+}
+
+export interface ExecutorsTable {
+  id: string;
+  project_id: string;
+  group_id: string | null;
+  name: string;
+  command: string;
+  executor_type: Generated<string>;
+  prompt_provider: string | null;
+  cwd: string | null;
+  pty: Generated<DbBool>;
+  position: Generated<number>;
+  disabled_targets: Generated<string>; // JSON: string[]
+  created_at: Generated<string>;
+}
+
+export interface ExecutorProcessesTable {
+  id: string;
+  executor_id: string;
+  pid: number | null;
+  status: Generated<string>;
+  exit_code: number | null;
+  started_at: Generated<string>;
+  finished_at: string | null;
+}
+
+export interface RemoteExecutorProcessesTable {
+  local_process_id: string;
+  remote_server_id: string;
+  remote_url: string;
+  remote_api_key: string;
+  remote_process_id: string;
+  executor_id: string;
+  project_id: string | null;
+  branch: string | null;
+  started_at: Generated<string>;
+  status: Generated<string>;
+  exit_code: number | null;
+  finished_at: string | null;
+  machine_id: string | null;
+}
+
+export interface MachineIdentityTable {
+  machine_id: string;
+  public_key: string;
+  user_id: Generated<string>;
+  created_at: Generated<string>;
+  last_seen_at: string | null;
+}
+
+export interface AgentSessionsTable {
+  id: string;
+  project_id: string;
+  branch: Generated<string>;
+  status: Generated<string>;
+  permission_mode: string | null;
+  agent_type: string | null;
+  title: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  last_user_message_at: number | null;
+  last_completed_at: number | null;
+  favorited_at: number | null;
+}
+
+/**
+ * DEVIATION from the plan doc: the real CREATE TABLE (sqlite.ts:436-446) also
+ * has an autoincrement `id` primary key and a `created_at` column that the
+ * plan's schema omitted. Added here so the Kysely type matches the actual
+ * table shape.
+ */
+export interface AgentSessionEntriesTable {
+  id: Generated<number>;
+  session_id: string;
+  entry_index: number;
+  data: string;
+  created_at: Generated<string>;
+}
+
+export interface TasksTable {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string | null;
+  status: Generated<string>;
+  priority: Generated<string>;
+  assigned_branch: string | null;
+  position: Generated<number>;
+  archived_at: number | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface RulesTable {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  name: string;
+  content: string;
+  enabled: Generated<DbBool>;
+  position: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface CommandsTable {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  name: string;
+  content: string;
+  position: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface GlobalSettingsTable {
+  key: string;
+  value: string;
+}
+
+export interface RemoteServersTable {
+  id: string;
+  name: string;
+  url: string | null;
+  api_key: string | null;
+  connection_mode: Generated<string>;
+  connect_token: string | null;
+  connect_token_created_at: string | null;
+  status: Generated<string>;
+  last_connected_at: string | null;
+  user_id: Generated<string>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface ProjectRemotesTable {
+  id: string;
+  project_id: string;
+  remote_server_id: string;
+  remote_path: string;
+  sort_order: Generated<number>;
+  sync_up_config: string | null;   // JSON: SyncButtonConfig
+  sync_down_config: string | null; // JSON: SyncButtonConfig
+}
+
+export interface RemoteSessionMappingsTable {
+  local_session_id: string;
+  project_id: string;
+  remote_server_id: string;
+  remote_session_id: string;
+  branch: string | null;
+  title_resolved: Generated<DbBool>;
+}
+
+export interface ScheduledTasksTable {
+  id: string;
+  project_id: string;
+  name: string;
+  cron_expr: string;
+  timezone: string;
+  target: Generated<string>;
+  enabled: Generated<DbBool>;
+  run_type: Generated<string>;
+  content: string;
+  cwd_mode: Generated<string>;
+  branch: string | null;
+  directory: string | null;
+  timeout_seconds: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface ScheduledTaskRunsTable {
+  id: string;
+  schedule_id: string;
+  status: Generated<string>;
+  exit_code: number | null;
+  output: string | null;
+  process_id: string | null;
+  started_at: Generated<string>;
+  finished_at: string | null;
+}
+
+export interface DB {
+  projects: ProjectsTable;
+  executor_groups: ExecutorGroupsTable;
+  executors: ExecutorsTable;
+  executor_processes: ExecutorProcessesTable;
+  remote_executor_processes: RemoteExecutorProcessesTable;
+  machine_identity: MachineIdentityTable;
+  agent_sessions: AgentSessionsTable;
+  agent_session_entries: AgentSessionEntriesTable;
+  tasks: TasksTable;
+  rules: RulesTable;
+  commands: CommandsTable;
+  global_settings: GlobalSettingsTable;
+  remote_servers: RemoteServersTable;
+  project_remotes: ProjectRemotesTable;
+  remote_session_mappings: RemoteSessionMappingsTable;
+  scheduled_tasks: ScheduledTasksTable;
+  scheduled_task_runs: ScheduledTaskRunsTable;
+}
