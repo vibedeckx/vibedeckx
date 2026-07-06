@@ -358,7 +358,10 @@ export function AppSidebar({
                   const liveSessions = residentSessions?.get(branchKey) ?? [];
                   const dotStatus = workspaceDotStatus(workspaceStatuses?.get(branchKey), liveSessions.length > 0);
                   return (
-                    <div key={wt.branch ?? "__main__"} className="min-w-0">
+                    <div
+                      key={wt.branch ?? "__main__"}
+                      className={cn("min-w-0 rounded-[3px]", isActive && "bg-accent")}
+                    >
                       <div className="group relative flex items-center min-w-0">
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -368,9 +371,9 @@ export function AppSidebar({
                                 onViewChange("workspace");
                               }}
                               className={cn(
-                                "flex-1 min-w-0 flex items-center gap-2 rounded-[5px] pl-2 pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
+                                "flex-1 min-w-0 flex items-center gap-2 rounded-[3px] pl-2 pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
                                 !isActive && "text-foreground/80 hover:bg-muted",
-                                isActive && "bg-accent text-accent-foreground font-medium"
+                                isActive && "text-accent-foreground font-medium"
                               )}
                             >
                               <StatusDot status={dotStatus} />
@@ -402,14 +405,21 @@ export function AppSidebar({
                                   <button
                                     onClick={() => onResidentSessionSelect?.(session)}
                                     className={cn(
-                                      "min-w-0 flex items-center gap-1.5 rounded-[5px] py-0.5 pl-1.5 pr-2 font-mono text-[11px] transition-colors",
+                                      "min-w-0 flex items-center gap-1.5 rounded-[3px] py-0.5 pl-1.5 pr-2 font-mono text-[11px] transition-colors",
                                       !sessionActive && "text-foreground/70 hover:bg-muted hover:text-foreground",
-                                      sessionActive && "bg-accent text-accent-foreground font-medium"
+                                      sessionActive && "text-accent-foreground font-medium"
                                     )}
                                   >
                                     <span className="shrink-0 text-muted-foreground/70">└</span>
                                     <ResidentSessionDot status={session.status} />
-                                    <span className="truncate text-left">{session.title}</span>
+                                    <span
+                                      className={cn(
+                                        "truncate text-left",
+                                        sessionActive && "rounded-[2px] bg-accent-foreground/15 px-1"
+                                      )}
+                                    >
+                                      {session.title}
+                                    </span>
                                   </button>
                                 </TooltipTrigger>
                                 <TooltipContent side="right">{session.title}</TooltipContent>
