@@ -49,7 +49,7 @@ export function SettingsView() {
         <SettingsSection
           id="agents"
           label="Agents"
-          description="Resident coding-agent process limits for this server."
+          description="Resident coding-agent process limits per workspace branch."
         >
           <AgentProcessSettingsSection />
         </SettingsSection>

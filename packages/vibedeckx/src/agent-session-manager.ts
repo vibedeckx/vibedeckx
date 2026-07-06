@@ -26,6 +26,7 @@ import {
   normalizeAgentProcessSettings,
   pickIdleResidentEvictionCandidate,
   ResidentProcessLimitError,
+  type ResidentProcessScope,
   type RunningResidentProcess,
 } from "./resident-agent-processes.js";
 
@@ -239,9 +240,14 @@ export class AgentSessionManager {
     return session ? this.isProcessAlive(session) : false;
   }
 
-  getRunningResidentProcesses(): RunningResidentProcess[] {
+  getRunningResidentProcesses(scope?: ResidentProcessScope): RunningResidentProcess[] {
     return [...this.sessions.values()]
-      .filter((session) => this.isProcessAlive(session) && session.status === "running")
+      .filter(
+        (session) =>
+          this.isProcessAlive(session) &&
+          session.status === "running" &&
+          (!scope || (session.projectId === scope.projectId && session.branch === scope.branch)),
+      )
       .map((session) => ({
         id: session.id,
         projectId: session.projectId,
@@ -275,11 +281,18 @@ export class AgentSessionManager {
     }
   }
 
-  private async ensureResidentCapacity(options?: { force?: boolean; excludeSessionId?: string }): Promise<void> {
+  private async ensureResidentCapacity(
+    scope: ResidentProcessScope,
+    options?: { force?: boolean; excludeSessionId?: string },
+  ): Promise<void> {
     await this.withCapacityLock(async () => {
       const maxResidentAgentProcesses = await this.getMaxResidentAgentProcesses();
       const live = [...this.sessions.values()].filter(
-        (session) => session.id !== options?.excludeSessionId && this.isProcessAlive(session),
+        (session) =>
+          session.id !== options?.excludeSessionId &&
+          session.projectId === scope.projectId &&
+          session.branch === scope.branch &&
+          this.isProcessAlive(session),
       );
       if (live.length < maxResidentAgentProcesses) return;
 
@@ -291,7 +304,10 @@ export class AgentSessionManager {
           dormant: session.dormant,
           backgroundTaskCount: session.backgroundTasks.size,
           lastActiveAt: session.lastActiveAt,
+          projectId: session.projectId,
+          branch: session.branch,
         })),
+        scope,
       );
       if (candidate) {
         await this.hibernateSession(candidate.id);
@@ -308,7 +324,7 @@ export class AgentSessionManager {
         }
       }
 
-      throw new ResidentProcessLimitError(maxResidentAgentProcesses, this.getRunningResidentProcesses());
+      throw new ResidentProcessLimitError(maxResidentAgentProcesses, this.getRunningResidentProcesses(scope));
     });
   }
 
@@ -376,7 +392,7 @@ export class AgentSessionManager {
     announceRunning: boolean = false,
     force: boolean = false,
   ): Promise<string> {
-    await this.ensureResidentCapacity({ force });
+    await this.ensureResidentCapacity({ projectId, branch }, { force });
 
     const sessionId = randomUUID();
     const branchKey = branch ?? "";
@@ -1526,7 +1542,10 @@ export class AgentSessionManager {
     // 7. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
-    await this.ensureResidentCapacity({ excludeSessionId: session.id });
+    await this.ensureResidentCapacity(
+      { projectId: session.projectId, branch: session.branch },
+      { excludeSessionId: session.id },
+    );
     await this.spawnAgent(session, absoluteWorktreePath);
 
     return true;
@@ -1634,7 +1653,10 @@ export class AgentSessionManager {
     // 5. Respawn Claude Code with new mode flags
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
-    await this.ensureResidentCapacity({ excludeSessionId: session.id });
+    await this.ensureResidentCapacity(
+      { projectId: session.projectId, branch: session.branch },
+      { excludeSessionId: session.id },
+    );
     await this.spawnAgent(session, absoluteWorktreePath);
 
     // 6. Send initial message or conversation summary
@@ -1749,7 +1771,10 @@ export class AgentSessionManager {
   ): Promise<void> {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
-    await this.ensureResidentCapacity({ excludeSessionId: session.id });
+    await this.ensureResidentCapacity(
+      { projectId: session.projectId, branch: session.branch },
+      { excludeSessionId: session.id },
+    );
     session.dormant = false;
     session.status = "running";
     this.touchSession(session);

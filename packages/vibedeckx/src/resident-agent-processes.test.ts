@@ -7,6 +7,16 @@ import {
 } from "./resident-agent-processes.js";
 
 describe("resident agent process helpers", () => {
+  const baseCandidate = {
+    projectId: "project-a",
+    branch: "feature-a",
+    processAlive: true,
+    status: "stopped" as const,
+    dormant: false,
+    backgroundTaskCount: 0,
+    lastActiveAt: 1,
+  };
+
   it("defaults maxResidentAgentProcesses to 3", () => {
     expect(normalizeAgentProcessSettings(undefined)).toEqual(DEFAULT_AGENT_PROCESS_SETTINGS);
   });
@@ -22,21 +32,34 @@ describe("resident agent process helpers", () => {
 
   it("picks only idle live sessions and orders by least recent activity", () => {
     const candidate = pickIdleResidentEvictionCandidate([
-      { id: "running", processAlive: true, status: "running", dormant: false, backgroundTaskCount: 0, lastActiveAt: 10 },
-      { id: "dead", processAlive: false, status: "stopped", dormant: true, backgroundTaskCount: 0, lastActiveAt: 1 },
-      { id: "background", processAlive: true, status: "stopped", dormant: false, backgroundTaskCount: 1, lastActiveAt: 0 },
-      { id: "newer-idle", processAlive: true, status: "stopped", dormant: false, backgroundTaskCount: 0, lastActiveAt: 20 },
-      { id: "oldest-idle", processAlive: true, status: "stopped", dormant: false, backgroundTaskCount: 0, lastActiveAt: 5 },
+      { ...baseCandidate, id: "running", status: "running", lastActiveAt: 10 },
+      { ...baseCandidate, id: "dead", processAlive: false, dormant: true, lastActiveAt: 1 },
+      { ...baseCandidate, id: "background", backgroundTaskCount: 1, lastActiveAt: 0 },
+      { ...baseCandidate, id: "newer-idle", lastActiveAt: 20 },
+      { ...baseCandidate, id: "oldest-idle", lastActiveAt: 5 },
     ]);
 
     expect(candidate?.id).toBe("oldest-idle");
   });
 
+  it("only considers idle residents in the requested workspace branch scope", () => {
+    const candidate = pickIdleResidentEvictionCandidate(
+      [
+        { ...baseCandidate, id: "other-project-oldest", projectId: "project-b", branch: "feature-a", lastActiveAt: 1 },
+        { ...baseCandidate, id: "other-branch-oldest", branch: "feature-b", lastActiveAt: 2 },
+        { ...baseCandidate, id: "same-branch-newer", lastActiveAt: 10 },
+      ],
+      { projectId: "project-a", branch: "feature-a" },
+    );
+
+    expect(candidate?.id).toBe("same-branch-newer");
+  });
+
   it("returns null when every live resident is running", () => {
     expect(
       pickIdleResidentEvictionCandidate([
-        { id: "a", processAlive: true, status: "running", dormant: false, backgroundTaskCount: 0, lastActiveAt: 1 },
-        { id: "b", processAlive: true, status: "running", dormant: false, backgroundTaskCount: 0, lastActiveAt: 2 },
+        { ...baseCandidate, id: "a", status: "running", lastActiveAt: 1 },
+        { ...baseCandidate, id: "b", status: "running", lastActiveAt: 2 },
       ]),
     ).toBeNull();
   });

@@ -1031,7 +1031,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       } catch (error) {
         if (error instanceof ResidentLimitError) {
           const confirmed = window.confirm(
-            `All ${error.maxResidentAgentProcesses} resident agent processes are running. Stop the least recently active running session and start a new conversation?`,
+            `All ${error.maxResidentAgentProcesses} resident agent processes for this workspace branch are running. Stop the least recently active running session in this branch and start a new conversation?`,
           );
           if (!confirmed) throw error;
           data = await createNewAgentSession(projectId, branch, permissionMode, agentType, true);

@@ -29,11 +29,25 @@ export function normalizeAgentProcessSettings(value: unknown): AgentProcessSetti
 
 export interface ResidentProcessCandidate {
   id: string;
+  projectId: string;
+  branch: string | null;
   processAlive: boolean;
   status: AgentSessionStatus;
   dormant: boolean;
   backgroundTaskCount: number;
   lastActiveAt: number;
+}
+
+export interface ResidentProcessScope {
+  projectId: string;
+  branch: string | null;
+}
+
+export function isResidentProcessInScope(
+  candidate: ResidentProcessScope,
+  scope: ResidentProcessScope,
+): boolean {
+  return candidate.projectId === scope.projectId && candidate.branch === scope.branch;
 }
 
 export function isIdleResidentProcess(candidate: ResidentProcessCandidate): boolean {
@@ -47,8 +61,10 @@ export function isIdleResidentProcess(candidate: ResidentProcessCandidate): bool
 
 export function pickIdleResidentEvictionCandidate(
   candidates: ResidentProcessCandidate[],
+  scope?: ResidentProcessScope,
 ): ResidentProcessCandidate | null {
   return candidates
+    .filter((candidate) => !scope || isResidentProcessInScope(candidate, scope))
     .filter(isIdleResidentProcess)
     .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0] ?? null;
 }
