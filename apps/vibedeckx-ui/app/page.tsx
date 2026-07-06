@@ -95,6 +95,7 @@ export default function Home() {
   const [worktreeToDelete, setWorktreeToDelete] = useState<Worktree | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
+  const [activateAgentTabNonce, setActivateAgentTabNonce] = useState(0);
   const agentRef = useRef<AgentConversationHandle>(null);
   // The project id we last reset the branch for. State (not a ref) so the
   // render-time reset below is concurrent-safe.
@@ -237,6 +238,7 @@ export default function Home() {
     setSelectedBranch(resident.branch);
     setSessionUrlParam(resident.id);
     setActiveView('workspace');
+    setActivateAgentTabNonce((nonce) => nonce + 1);
   }, [setSessionUrlParam]);
 
   const handleSessionStarted = useCallback((startedSession: AgentSession) => {
@@ -577,6 +579,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     active={activeView === 'workspace'}
                     projectId={currentProject?.id ?? null}
                     selectedBranch={selectedBranch}
+                    activateAgentTabNonce={activateAgentTabNonce}
                     onMergeRequest={handleMergeRequest}
                     project={currentProject}
                     onExecutorModeChange={handleExecutorModeChange}
