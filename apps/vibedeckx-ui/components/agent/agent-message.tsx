@@ -67,7 +67,7 @@ function renderBody(message: AgentMessage, messageIndex: number) {
       return <UserMessage content={message.content} />;
 
     case "assistant":
-      return <AssistantMessage content={message.content} />;
+      return <AssistantMessage content={message.content} agentType={message.agentType} />;
 
     case "tool_use":
       return <ToolUseMessage tool={message.tool} input={message.input} messageIndex={messageIndex} />;
@@ -182,8 +182,9 @@ function useAgentType(): string {
   }
 }
 
-function AssistantMessage({ content }: { content: string }) {
-  const agentType = useAgentType();
+function AssistantMessage({ content, agentType: messageAgentType }: { content: string; agentType?: string }) {
+  const currentAgentType = useAgentType();
+  const agentType = messageAgentType ?? currentAgentType;
   const isCodex = agentType === "codex";
   const label = isCodex ? "Codex" : "Claude";
   const iconBg = isCodex ? "bg-green-500/10" : "bg-violet-500/10";

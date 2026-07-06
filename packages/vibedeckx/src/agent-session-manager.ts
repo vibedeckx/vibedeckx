@@ -914,9 +914,11 @@ export class AgentSessionManager {
     // Check if we have an ongoing assistant message (streaming update)
     if (store.currentAssistantIndex !== null) {
       const existingIndex = store.currentAssistantIndex;
+      const existing = store.entries[existingIndex];
       const message: AgentMessage = {
         type: "assistant",
         content,
+        agentType: existing?.type === "assistant" ? existing.agentType ?? session.agentType : session.agentType,
         timestamp,
       };
       // Update the entry in our store
@@ -932,6 +934,7 @@ export class AgentSessionManager {
     const message: AgentMessage = {
       type: "assistant",
       content,
+      agentType: session.agentType,
       timestamp,
     };
     const index = await this.pushEntry(sessionId, message, true);
@@ -1916,4 +1919,3 @@ export class AgentSessionManager {
     }
   }
 }
-

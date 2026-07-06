@@ -22,7 +22,7 @@ export type ContentPart = TextPart | ImagePart;
 
 export type AgentMessage =
   | { type: "user"; content: string | ContentPart[]; timestamp: number }
-  | { type: "assistant"; content: string; partial?: boolean; timestamp: number }
+  | { type: "assistant"; content: string; partial?: boolean; agentType?: AgentType; timestamp: number }
   | { type: "tool_use"; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }
   | { type: "thinking"; content: string; timestamp: number }
