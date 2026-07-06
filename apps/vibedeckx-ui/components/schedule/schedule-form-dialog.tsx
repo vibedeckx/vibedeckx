@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, type ProjectRemote, type Schedule, type ScheduleInput, type Worktree } from "@/lib/api";
+import { api, type ProjectRemote, type PromptProvider, type Schedule, type ScheduleInput, type Worktree } from "@/lib/api";
 
 // Radix Select items can't have an empty-string value; sentinel for the main worktree.
 const MAIN = "__main__";
@@ -40,9 +40,11 @@ export function ScheduleFormDialog({
   const [target, setTarget] = useState<string>("local");
   const [remotes, setRemotes] = useState<ProjectRemote[]>([]);
   const [runType, setRunType] = useState<"command" | "prompt">("command");
+  const [promptProvider, setPromptProvider] = useState<PromptProvider>("claude");
   const [content, setContent] = useState("");
   const [cwdMode, setCwdMode] = useState<"branch" | "directory">("branch");
   const [branch, setBranch] = useState<string>(MAIN);
+  const [targetWorktrees, setTargetWorktrees] = useState<Worktree[]>(worktrees);
   const [directory, setDirectory] = useState("");
   const [timeoutMinutes, setTimeoutMinutes] = useState("30");
   const [loading, setLoading] = useState(false);
@@ -57,12 +59,17 @@ export function ScheduleFormDialog({
     setTimezone(initial?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
     setTarget(initial?.target ?? "local");
     setRunType(initial?.run_type ?? "command");
+    setPromptProvider(initial?.prompt_provider ?? "claude");
     setContent(initial?.content ?? "");
     setCwdMode(initial?.cwd_mode ?? "branch");
     setBranch(initial?.branch ?? MAIN);
     setDirectory(initial?.directory ?? "");
     setTimeoutMinutes(String(Math.round((initial?.timeout_seconds ?? 1800) / 60)));
   }, [open, initial]);
+
+  useEffect(() => {
+    if (target === "local") setTargetWorktrees(worktrees);
+  }, [target, worktrees]);
 
   // Load the project's configured remotes while the dialog is open, for the Target selector.
   useEffect(() => {
@@ -74,6 +81,20 @@ export function ScheduleFormDialog({
     }
     return () => { cancelled = true; };
   }, [open, projectId]);
+
+  // Load workspace choices for the selected execution target. Local worktrees
+  // are already supplied by the page; remote targets need a target-scoped fetch.
+  useEffect(() => {
+    let cancelled = false;
+    if (!open || !projectId || target === "local") return;
+    api.getProjectWorktrees(projectId, target)
+      .then((items) => { if (!cancelled) setTargetWorktrees(items); })
+      .catch((err) => {
+        console.error("Failed to load target worktrees:", err);
+        if (!cancelled) setTargetWorktrees([{ branch: null }]);
+      });
+    return () => { cancelled = true; };
+  }, [open, projectId, target]);
 
   const handleSubmit = async () => {
     if (!name.trim() || !content.trim()) {
@@ -98,6 +119,7 @@ export function ScheduleFormDialog({
         timezone: timezone.trim() || "UTC",
         target,
         run_type: runType,
+        prompt_provider: runType === "prompt" ? promptProvider : null,
         content,
         cwd_mode: cwdMode,
         branch: cwdMode === "branch" ? (branch === MAIN ? null : branch) : null,
@@ -139,17 +161,33 @@ export function ScheduleFormDialog({
             </div>
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Type</label>
-            <Select value={runType} onValueChange={(v) => setRunType(v as "command" | "prompt")} disabled={loading}>
-              <SelectTrigger size="sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="command">Command (shell)</SelectItem>
-                <SelectItem value="prompt">Prompt (Claude)</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Type</label>
+              <Select value={runType} onValueChange={(v) => setRunType(v as "command" | "prompt")} disabled={loading}>
+                <SelectTrigger size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="command">Command (shell)</SelectItem>
+                  <SelectItem value="prompt">Prompt</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {runType === "prompt" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Agent</label>
+                <Select value={promptProvider} onValueChange={(v) => setPromptProvider(v as PromptProvider)} disabled={loading}>
+                  <SelectTrigger size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="claude">Claude</SelectItem>
+                    <SelectItem value="codex">Codex</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -195,33 +233,21 @@ export function ScheduleFormDialog({
             </div>
             <div className="space-y-2">
               {cwdMode === "branch" ? (
-                target === "local" ? (
-                  <>
-                    <label className="text-sm font-medium">Branch</label>
-                    <Select value={branch} onValueChange={setBranch} disabled={loading}>
-                      <SelectTrigger size="sm">
-                        <SelectValue placeholder="Select branch" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {worktrees.map((wt) => (
-                          <SelectItem key={wt.branch ?? MAIN} value={wt.branch ?? MAIN}>
-                            {wt.branch ?? "main"}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </>
-                ) : (
-                  <>
-                    <label className="text-sm font-medium">Workspace (branch on remote)</label>
-                    <Input
-                      placeholder="main"
-                      value={branch === MAIN ? "" : branch}
-                      onChange={(e) => setBranch(e.target.value.trim() ? e.target.value : MAIN)}
-                      disabled={loading}
-                    />
-                  </>
-                )
+                <>
+                  <label className="text-sm font-medium">Workspace</label>
+                  <Select value={branch} onValueChange={setBranch} disabled={loading}>
+                    <SelectTrigger size="sm">
+                      <SelectValue placeholder="Select workspace" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {targetWorktrees.map((wt) => (
+                        <SelectItem key={wt.branch ?? MAIN} value={wt.branch ?? MAIN}>
+                          {wt.branch ?? "main"}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </>
               ) : (
                 <>
                   <label className="text-sm font-medium">Directory</label>

@@ -666,6 +666,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       target TEXT NOT NULL DEFAULT 'local',
       enabled INTEGER NOT NULL DEFAULT 1,
       run_type TEXT NOT NULL DEFAULT 'command',
+      prompt_provider TEXT,
       content TEXT NOT NULL,
       cwd_mode TEXT NOT NULL DEFAULT 'branch',
       branch TEXT,
@@ -699,6 +700,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const scheduledTaskCols = db.prepare("PRAGMA table_info(scheduled_tasks)").all() as { name: string }[];
   if (!scheduledTaskCols.some((c) => c.name === "target")) {
     db.exec("ALTER TABLE scheduled_tasks ADD COLUMN target TEXT NOT NULL DEFAULT 'local'");
+  }
+  if (!scheduledTaskCols.some((c) => c.name === "prompt_provider")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN prompt_provider TEXT DEFAULT NULL");
   }
 
   // Re-enable FK enforcement for runtime operations

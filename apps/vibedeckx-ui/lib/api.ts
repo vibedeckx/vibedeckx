@@ -447,6 +447,7 @@ export interface Schedule {
   target: string;
   enabled: boolean;
   run_type: "command" | "prompt";
+  prompt_provider: PromptProvider | null;
   content: string;
   cwd_mode: "branch" | "directory";
   branch: string | null;
@@ -467,6 +468,7 @@ export interface ScheduleInput {
   target: string;
   enabled?: boolean;
   run_type: "command" | "prompt";
+  prompt_provider?: PromptProvider | null;
   content: string;
   cwd_mode: "branch" | "directory";
   branch?: string | null;
@@ -972,8 +974,11 @@ export const api = {
     }
   },
 
-  async getProjectWorktrees(id: string): Promise<Worktree[]> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees`);
+  async getProjectWorktrees(id: string, target?: string): Promise<Worktree[]> {
+    const params = new URLSearchParams();
+    if (target && target !== "local") params.set("target", target);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees${query}`);
     if (!res.ok) {
       return [{ branch: null }];
     }

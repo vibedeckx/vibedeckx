@@ -142,16 +142,16 @@ describe("SchedulerService.runNow", () => {
     }
   });
 
-  it("prompt tasks are fabricated as claude prompt executors", async () => {
+  it("prompt tasks use their configured prompt provider", async () => {
     await storage.scheduledTasks.create({
       id: "s2", project_id: "proj-1", name: "ai", cron_expr: "0 9 * * *",
-      timezone: "UTC", run_type: "prompt", content: "analyze the logs",
+      timezone: "UTC", run_type: "prompt", prompt_provider: "codex", content: "analyze the logs",
       cwd_mode: "directory", directory: dir,
     });
     await scheduler.runNow("s2");
     const started = pm.started[pm.started.length - 1];
     expect(started.executor.executor_type).toBe("prompt");
-    expect(started.executor.prompt_provider).toBe("claude");
+    expect(started.executor.prompt_provider).toBe("codex");
     expect(started.executor.command).toBe("analyze the logs");
   });
 
@@ -305,6 +305,21 @@ describe("SchedulerService remote runs", () => {
     const exec = proxyCalls.find((c) => c.path === "/api/path/execute")!;
     expect(exec.body).toMatchObject({ path: "/var/log" });
     expect((exec.body as { branch?: unknown }).branch).toBeUndefined();
+  });
+
+  it("remote prompt runs proxy their configured prompt provider", async () => {
+    await storage.scheduledTasks.update("s1", {
+      run_type: "prompt",
+      prompt_provider: "codex",
+      content: "inspect remote state",
+    });
+    await scheduler.runNow("s1");
+    const exec = proxyCalls.find((c) => c.path === "/api/path/execute")!;
+    expect(exec.body).toMatchObject({
+      executor_type: "prompt",
+      prompt_provider: "codex",
+      command: "inspect remote state",
+    });
   });
 
   it("records failed without a proxy call when the remote target is unknown", async () => {

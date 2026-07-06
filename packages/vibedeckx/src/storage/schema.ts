@@ -201,6 +201,7 @@ export interface ScheduledTasksTable {
   target: Generated<string>;
   enabled: GeneratedDbBool;
   run_type: Generated<string>;
+  prompt_provider: string | null;
   content: string;
   cwd_mode: Generated<string>;
   branch: string | null;

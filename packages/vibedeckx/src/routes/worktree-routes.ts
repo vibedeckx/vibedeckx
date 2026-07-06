@@ -223,13 +223,29 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // ==================== Project-based worktree API ====================
 
   // 获取项目的 worktrees
-  fastify.get<{ Params: { id: string } }>("/api/projects/:id/worktrees", async (req, reply) => {
+  fastify.get<{ Params: { id: string }; Querystring: { target?: string } }>("/api/projects/:id/worktrees", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
     const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const requestedTarget = req.query.target ?? "local";
+    if (requestedTarget !== "local") {
+      const targetRemote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, requestedTarget);
+      if (!targetRemote) return reply.code(400).send({ error: "Unknown remote target" });
+      const result = await proxyToRemoteAuto(
+        targetRemote.remote_server_id,
+        targetRemote.server_url ?? "",
+        targetRemote.server_api_key ?? "",
+        "GET",
+        `/api/path/worktrees?path=${encodeURIComponent(targetRemote.remote_path)}`,
+        undefined,
+        { reverseConnectManager: fastify.reverseConnectManager }
+      );
+      return reply.code(proxyStatus(result)).send(result.data);
     }
 
     // Proxy to remote if this is a remote-only project

@@ -169,7 +169,7 @@ export function SchedulesView({
           <div className="px-5 py-3 grid grid-cols-2 gap-x-8 gap-y-1 text-sm border-b border-border/50">
             <div>
               <span className="text-muted-foreground">Type: </span>
-              {selected.run_type === "command" ? "Command" : "Prompt (Claude)"}
+              {selected.run_type === "command" ? "Command" : `Prompt (${selected.prompt_provider === "codex" ? "Codex" : "Claude"})`}
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground">Runs in: </span>

@@ -1,12 +1,13 @@
 import { sql, type Kysely, type Selectable } from "kysely";
 import type { DB, ScheduledTasksTable, ScheduledTaskRunsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
-import type { Storage, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus } from "../types.js";
+import type { Storage, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus, PromptProvider } from "../types.js";
 
 const mapTask = (row: Selectable<ScheduledTasksTable>): ScheduledTask => ({
   ...row,
   enabled: fromDbBool(row.enabled),
   run_type: row.run_type as ScheduledTaskRunType,
+  prompt_provider: (row.prompt_provider as PromptProvider) ?? null,
   cwd_mode: row.cwd_mode as ScheduledTaskCwdMode,
 });
 
@@ -30,6 +31,7 @@ export const createScheduledRepos = (
         target: opts.target ?? "local",
         enabled: h.toDbBool(opts.enabled !== false),
         run_type: opts.run_type,
+        prompt_provider: opts.run_type === "prompt" ? (opts.prompt_provider ?? "claude") : null,
         content: opts.content,
         cwd_mode: opts.cwd_mode,
         branch: opts.branch ?? null,
@@ -63,6 +65,7 @@ export const createScheduledRepos = (
       if (opts.target !== undefined) sets.target = opts.target;
       if (opts.enabled !== undefined) sets.enabled = h.toDbBool(opts.enabled);
       if (opts.run_type !== undefined) sets.run_type = opts.run_type;
+      if (opts.prompt_provider !== undefined) sets.prompt_provider = opts.prompt_provider;
       if (opts.content !== undefined) sets.content = opts.content;
       if (opts.cwd_mode !== undefined) sets.cwd_mode = opts.cwd_mode;
       if (opts.branch !== undefined) sets.branch = opts.branch;

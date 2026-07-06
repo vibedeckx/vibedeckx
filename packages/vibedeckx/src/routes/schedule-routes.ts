@@ -2,7 +2,7 @@ import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import path from "path";
-import type { ScheduledTask, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
+import type { PromptProvider, ScheduledTask, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import { validateCron } from "../scheduler.js";
 import "../server-types.js";
@@ -16,6 +16,7 @@ interface ScheduleBody {
   timezone?: string;
   enabled?: boolean;
   run_type?: string;
+  prompt_provider?: string | null;
   content?: string;
   cwd_mode?: string;
   branch?: string | null;
@@ -91,6 +92,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         cron_expr: b.cron_expr.trim(),
         timezone: b.timezone?.trim() || "UTC",
         run_type: b.run_type ?? "command",
+        prompt_provider: (b.prompt_provider === "codex" ? "codex" : "claude") as PromptProvider,
         content: b.content ?? "",
         cwd_mode: b.cwd_mode ?? "branch",
         directory: b.directory ?? null,
@@ -111,6 +113,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         cron_expr: resolved.cron_expr,
         timezone: resolved.timezone,
         run_type: resolved.run_type as ScheduledTaskRunType,
+        prompt_provider: resolved.run_type === "prompt" ? resolved.prompt_provider : null,
         content: resolved.content,
         cwd_mode: resolved.cwd_mode as ScheduledTaskCwdMode,
         branch: b.branch ?? null,
@@ -160,12 +163,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: "Unknown remote target" });
       }
 
+      const parsedProvider = b.prompt_provider !== undefined
+        ? (b.prompt_provider === "codex" ? "codex" : "claude") as PromptProvider
+        : undefined;
+      const nextRunType = b.run_type ?? existing.run_type;
+
       const schedule = await fastify.storage.scheduledTasks.update(req.params.id, {
         name: b.name?.trim(),
         cron_expr: b.cron_expr?.trim(),
         timezone: resolvedTimezone,
         enabled: b.enabled,
         run_type: b.run_type as ScheduledTaskRunType | undefined,
+        prompt_provider: nextRunType === "prompt" ? parsedProvider : null,
         content: b.content,
         cwd_mode: b.cwd_mode as ScheduledTaskCwdMode | undefined,
         branch: b.branch,

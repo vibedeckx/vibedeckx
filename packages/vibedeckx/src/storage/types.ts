@@ -111,6 +111,7 @@ export interface ScheduledTask {
   target: string;
   enabled: boolean;
   run_type: ScheduledTaskRunType;
+  prompt_provider: PromptProvider | null;
   /** Shell command (run_type=command) or prompt text (run_type=prompt). */
   content: string;
   cwd_mode: ScheduledTaskCwdMode;
@@ -347,11 +348,11 @@ export interface Storage {
     markKilledIfRunning: (id: string) => Promise<void>;
   };
   scheduledTasks: {
-    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => Promise<ScheduledTask>;
+    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => Promise<ScheduledTask>;
     getByProjectId: (projectId: string) => Promise<ScheduledTask[]>;
     getById: (id: string) => Promise<ScheduledTask | undefined>;
     getAllEnabled: () => Promise<ScheduledTask[]>;
-    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => Promise<ScheduledTask | undefined>;
+    update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => Promise<ScheduledTask | undefined>;
     delete: (id: string) => Promise<void>;
   };
   scheduledTaskRuns: {

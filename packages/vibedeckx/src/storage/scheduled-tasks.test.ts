@@ -40,9 +40,29 @@ describe("scheduledTasks storage", () => {
     expect(t.branch).toBeNull();
     expect(t.directory).toBeNull();
     expect(t.run_type).toBe("command");
+    expect(t.prompt_provider).toBeNull();
     expect(await storage.scheduledTasks.getByProjectId(projectId)).toHaveLength(1);
     expect((await storage.scheduledTasks.getAllEnabled()).map((x) => x.id)).toContain("s1");
     expect((await storage.scheduledTasks.getById("s1"))?.name).toBe("daily scan");
+  });
+
+  it("round-trips prompt_provider for prompt schedules", async () => {
+    const t = await storage.scheduledTasks.create({
+      id: "s-prompt",
+      project_id: projectId,
+      name: "agent task",
+      cron_expr: "0 9 * * *",
+      timezone: "UTC",
+      run_type: "prompt",
+      prompt_provider: "codex",
+      content: "inspect the repo",
+      cwd_mode: "branch",
+    });
+    expect(t.prompt_provider).toBe("codex");
+
+    const updated = await storage.scheduledTasks.update("s-prompt", { prompt_provider: "claude" });
+    expect(updated?.prompt_provider).toBe("claude");
+    expect((await storage.scheduledTasks.getById("s-prompt"))?.prompt_provider).toBe("claude");
   });
 
   it("update changes fields and getAllEnabled respects enabled=false", async () => {
