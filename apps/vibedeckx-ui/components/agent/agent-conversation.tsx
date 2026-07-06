@@ -88,7 +88,7 @@ interface AgentConversationProps {
   project?: Project | null;
   onAgentModeChange?: (mode: ExecutionMode) => void;
   onTaskCompleted?: () => void;
-  onSessionStarted?: () => void;
+  onSessionStarted?: (session: AgentSession) => void;
   onStatusChange?: () => void;
   onNewConversation?: () => void;
 }

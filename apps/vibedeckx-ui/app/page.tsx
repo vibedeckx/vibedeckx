@@ -21,6 +21,7 @@ import { UserMenu } from '@/components/auth/user-menu';
 import { Logo } from '@/components/brand/logo';
 import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
+import type { AgentSession } from '@/hooks/use-agent-session';
 import { ProjectRemotesProvider } from '@/hooks/project-remotes-context';
 import { MainConversation, type MainConversationHandle } from '@/components/conversation';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
@@ -55,6 +56,7 @@ export default function Home() {
     if (typeof window === 'undefined') return null;
     return new URLSearchParams(window.location.search).get('session');
   });
+  const [residentSessionSeed, setResidentSessionSeed] = useState<ResidentSidebarSession | null>(null);
 
   const setSessionUrlParam = useCallback((sessionId: string | null) => {
     setUrlSessionIdState(sessionId);
@@ -125,7 +127,7 @@ export default function Home() {
   }
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
-  const residentSessions = useResidentSessions(currentProject?.id ?? null, worktrees);
+  const residentSessions = useResidentSessions(currentProject?.id ?? null, worktrees, residentSessionSeed);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
 
   const {
@@ -237,8 +239,18 @@ export default function Home() {
     setActiveView('workspace');
   }, [setSessionUrlParam]);
 
-  const handleSessionStarted = useCallback(() => {
+  const handleSessionStarted = useCallback((startedSession: AgentSession) => {
     refetchBranchActivity();
+    if (startedSession.processAlive === false) return;
+    setResidentSessionSeed({
+      id: startedSession.id,
+      projectId: startedSession.projectId,
+      branch: startedSession.branch,
+      title: 'New Session',
+      status: startedSession.status,
+      processAlive: true,
+      updated_at: new Date().toISOString(),
+    });
   }, [refetchBranchActivity]);
 
   // New Conversation seeds "idle" so the dot turns gray immediately. The

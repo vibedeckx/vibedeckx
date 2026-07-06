@@ -347,7 +347,7 @@ function deduplicatePatches(patches: Patch[]): Patch {
 interface UseAgentSessionOptions {
   sessionId?: string | null; // Explicit session to load; when undefined/null -> latest-for-branch behavior
   onTaskCompleted?: () => void;
-  onSessionStarted?: () => void;
+  onSessionStarted?: (session: AgentSession) => void;
   onTitleUpdated?: (title: string) => void;
 }
 
@@ -702,7 +702,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setSession(cached);
       setStatus(cached.status);
       connectWebSocket(cached.id);
-      onSessionStartedRef.current?.();
+      onSessionStartedRef.current?.(cached);
       startingRef.current = false;
       return cached;
     }
@@ -757,7 +757,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       connectWebSocket(newSession.id);
 
       // Notify caller that session has started (e.g. to refetch workspace statuses)
-      onSessionStartedRef.current?.();
+      onSessionStartedRef.current?.(newSession);
 
       // Return session for immediate use (avoids React state timing issues)
       return newSession;
@@ -1056,7 +1056,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // No longer in placeholder mode — a real session exists now.
       removePlaceholder(workspaceKey(projectId, branch, agentMode));
       connectWebSocket(newSession.id);
-      onSessionStartedRef.current?.();
+      onSessionStartedRef.current?.(newSession);
       return newSession;
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : "Failed to create session";

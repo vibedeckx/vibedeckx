@@ -14,6 +14,17 @@ export interface ResidentSidebarSession {
   updated_at?: string;
 }
 
+export function upsertResidentSession(
+  previous: ResidentSidebarSession[],
+  next: ResidentSidebarSession,
+): ResidentSidebarSession[] {
+  const index = previous.findIndex((session) => session.id === next.id);
+  if (index === -1) return [next, ...previous];
+  const copy = [...previous];
+  copy[index] = next;
+  return copy;
+}
+
 function sessionTitle(session: BranchSessionSummary): string {
   return session.title?.trim() || "New Session";
 }
@@ -21,6 +32,7 @@ function sessionTitle(session: BranchSessionSummary): string {
 export function useResidentSessions(
   projectId: string | null,
   worktrees: Worktree[] | undefined,
+  seedSession?: ResidentSidebarSession | null,
 ): Map<string, ResidentSidebarSession[]> {
   const branches = useMemo(
     () => worktrees?.map((wt) => wt.branch) ?? [],
@@ -61,6 +73,12 @@ export function useResidentSessions(
       cancelled = true;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!seedSession || !seedSession.processAlive) return;
+    if (!projectId || seedSession.projectId !== projectId) return;
+    setSessions((prev) => upsertResidentSession(prev, seedSession));
+  }, [projectId, seedSession]);
 
   useGlobalEventStream((event) => {
     if (!projectId || event.projectId !== projectId) return;
