@@ -406,20 +406,13 @@ export function AppSidebar({
                                     onClick={() => onResidentSessionSelect?.(session)}
                                     className={cn(
                                       "min-w-0 flex items-center gap-1.5 rounded-[3px] py-0.5 pl-1.5 pr-2 font-mono text-[11px] transition-colors",
-                                      !sessionActive && "text-foreground/70 hover:bg-muted hover:text-foreground",
+                                      !sessionActive && "text-foreground/70 hover:text-foreground",
                                       sessionActive && "text-accent-foreground font-medium"
                                     )}
                                   >
                                     <span className="shrink-0 text-muted-foreground/70">└</span>
                                     <ResidentSessionDot status={session.status} />
-                                    <span
-                                      className={cn(
-                                        "truncate text-left",
-                                        sessionActive && "rounded-[2px] bg-accent-foreground/15 px-1"
-                                      )}
-                                    >
-                                      {session.title}
-                                    </span>
+                                    <span className="truncate text-left">{session.title}</span>
                                   </button>
                                 </TooltipTrigger>
                                 <TooltipContent side="right">{session.title}</TooltipContent>
