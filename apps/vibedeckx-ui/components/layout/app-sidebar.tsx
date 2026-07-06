@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
+import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info";
 
@@ -19,6 +20,9 @@ interface AppSidebarProps {
   onCreateWorktreeOpen?: () => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
+  residentSessions?: Map<string, ResidentSidebarSession[]>;
+  selectedSessionId?: string | null;
+  onResidentSessionSelect?: (session: ResidentSidebarSession) => void;
   hasProject?: boolean;
   projects?: Project[];
   onSelectProject?: (project: Project) => void;
@@ -63,6 +67,28 @@ function StatusDot({ status }: { status?: WorkspaceStatus }) {
     return <span className={cn(base, "bg-amber-500")} />;
   }
   return <span className={cn(base, "bg-lime-400")} />;
+}
+
+function ResidentSessionDot({ status }: { status: string }) {
+  const base = "relative h-[7px] w-[7px] rounded-full shrink-0";
+  if (status === "running") {
+    return (
+      <span className={cn(base, "bg-blue-500")}>
+        <span
+          className="absolute inset-[-2px] rounded-full bg-blue-500"
+          style={{ animation: "status-dot-pulse 1.6s ease-out infinite", opacity: 0.5 }}
+        />
+      </span>
+    );
+  }
+  if (status === "error") return <span className={cn(base, "bg-red-500")} />;
+  return <span className={cn(base, "bg-lime-400")} />;
+}
+
+function workspaceDotStatus(status: WorkspaceStatus | undefined, hasResidentSessions: boolean): WorkspaceStatus | undefined {
+  if (!hasResidentSessions) return status;
+  if (status === "main-running" || status === "main-completed") return status;
+  return "idle";
 }
 
 // Last-run status for a scheduled task; blue pulse while a run is active
@@ -169,6 +195,9 @@ export function AppSidebar({
   onCreateWorktreeOpen,
   onDeleteWorktree,
   workspaceStatuses,
+  residentSessions,
+  selectedSessionId,
+  onResidentSessionSelect,
   hasProject = true,
   projects,
   onSelectProject,
@@ -325,38 +354,69 @@ export function AppSidebar({
               <div className="flex flex-col gap-px">
                 {worktrees.map((wt) => {
                   const isActive = activeView === "workspace" && selectedBranch === wt.branch;
+                  const branchKey = wt.branch === null ? "" : wt.branch;
+                  const liveSessions = residentSessions?.get(branchKey) ?? [];
+                  const dotStatus = workspaceDotStatus(workspaceStatuses?.get(branchKey), liveSessions.length > 0);
                   return (
-                    <div key={wt.branch ?? "__main__"} className="group relative flex items-center min-w-0">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
+                    <div key={wt.branch ?? "__main__"} className="min-w-0">
+                      <div className="group relative flex items-center min-w-0">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              onClick={() => {
+                                onBranchChange?.(wt.branch);
+                                onViewChange("workspace");
+                              }}
+                              className={cn(
+                                "flex-1 min-w-0 flex items-center gap-2 rounded-[5px] pl-2 pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
+                                !isActive && "text-foreground/80 hover:bg-muted",
+                                isActive && "bg-accent text-accent-foreground font-medium"
+                              )}
+                            >
+                              <StatusDot status={dotStatus} />
+                              <span className="truncate text-left">{wt.branch ?? "main"}</span>
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="right">{wt.branch ?? "main"}</TooltipContent>
+                        </Tooltip>
+                        {wt.branch !== null && (
                           <button
-                            onClick={() => {
-                              onBranchChange?.(wt.branch);
-                              onViewChange("workspace");
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeleteWorktree?.(wt);
                             }}
-                            className={cn(
-                              "flex-1 min-w-0 flex items-center gap-2 rounded-[5px] pl-2 pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
-                              !isActive && "text-foreground/80 hover:bg-muted",
-                              isActive && "bg-accent text-accent-foreground font-medium"
-                            )}
+                            className="absolute right-1 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive transition-all"
+                            title="Delete worktree"
                           >
-                            <StatusDot status={workspaceStatuses?.get(wt.branch === null ? "" : wt.branch)} />
-                            <span className="truncate text-left">{wt.branch ?? "main"}</span>
+                            <Trash2 className="h-3 w-3" />
                           </button>
-                        </TooltipTrigger>
-                        <TooltipContent side="right">{wt.branch ?? "main"}</TooltipContent>
-                      </Tooltip>
-                      {wt.branch !== null && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDeleteWorktree?.(wt);
-                          }}
-                          className="absolute right-1 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive transition-all"
-                          title="Delete worktree"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
+                        )}
+                      </div>
+                      {liveSessions.length > 0 && (
+                        <div className="ml-4 mt-px flex flex-col gap-px">
+                          {liveSessions.map((session) => {
+                            const sessionActive = activeView === "workspace" && selectedSessionId === session.id;
+                            return (
+                              <Tooltip key={session.id}>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    onClick={() => onResidentSessionSelect?.(session)}
+                                    className={cn(
+                                      "min-w-0 flex items-center gap-1.5 rounded-[5px] py-0.5 pl-1.5 pr-2 font-mono text-[11px] transition-colors",
+                                      !sessionActive && "text-foreground/70 hover:bg-muted hover:text-foreground",
+                                      sessionActive && "bg-accent text-accent-foreground font-medium"
+                                    )}
+                                  >
+                                    <span className="shrink-0 text-muted-foreground/70">└</span>
+                                    <ResidentSessionDot status={session.status} />
+                                    <span className="truncate text-left">{session.title}</span>
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="right">{session.title}</TooltipContent>
+                              </Tooltip>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   );

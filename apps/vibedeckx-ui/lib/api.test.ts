@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getFreshToken, setAuthToken, setTokenGetter } from "@/lib/api";
+import { createNewAgentSession, getFreshToken, ResidentLimitError, setAuthToken, setTokenGetter } from "@/lib/api";
 
 // Build a JWT whose `exp` is `secondsFromNow` away (negative = already expired).
 function makeJwt(secondsFromNow: number): string {
@@ -72,5 +72,29 @@ describe("getFreshToken", () => {
     setTokenGetter(vi.fn().mockRejectedValue(new Error("network")));
 
     expect(await getFreshToken()).toBe(valid);
+  });
+});
+
+describe("createNewAgentSession", () => {
+  it("throws ResidentLimitError with running session details when backend returns resident_limit_reached", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 409,
+      ok: false,
+      json: async () => ({
+        errorCode: "resident_limit_reached",
+        error: "Resident agent process limit reached",
+        maxResidentAgentProcesses: 3,
+        runningSessions: [{ id: "s1", title: "Still running", projectId: "p1", branch: null }],
+      }),
+    } as Response);
+
+    await expect(createNewAgentSession("p1", null, "edit", "claude-code")).rejects.toMatchObject({
+      name: "ResidentLimitError",
+      maxResidentAgentProcesses: 3,
+      runningSessions: [{ id: "s1", title: "Still running", projectId: "p1", branch: null }],
+    });
+
+    global.fetch = originalFetch;
   });
 });

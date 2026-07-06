@@ -12,6 +12,7 @@ import { extractUserText } from "../utils/session-title.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
+import { ResidentProcessLimitError } from "../resident-agent-processes.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -94,9 +95,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Start agent session at a path (path-based, for remote execution)
   fastify.post<{
-    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
+    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean };
   }>("/api/path/agent-sessions", async (req, reply) => {
-    const { path: projectPath, branch, permissionMode, agentType } = req.body;
+    const { path: projectPath, branch, permissionMode, agentType, force } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
@@ -160,6 +161,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           status: effectiveStatus,
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
+          processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
         },
         messages,
       });
@@ -202,7 +204,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         .map(s => {
           const inMemory = fastify.agentSessionManager.getSession(s.id);
           const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
-          return { ...s, status, entry_count: countMap.get(s.id) ?? 0 };
+          return {
+            ...s,
+            status,
+            processAlive: fastify.agentSessionManager.getSessionProcessAlive(s.id),
+            entry_count: countMap.get(s.id) ?? 0,
+          };
         })
         .filter(s => s.entry_count > 0);
       return reply.code(200).send({ sessions });
@@ -211,9 +218,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Path-based: always create a new session (for remote `/new` proxy target)
   fastify.post<{
-    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
+    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean };
   }>("/api/path/agent-sessions/new", async (req, reply) => {
-    const { path: projectPath, branch, permissionMode, agentType } = req.body;
+    const { path: projectPath, branch, permissionMode, agentType, force } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
@@ -233,26 +240,41 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const sessionId = await fastify.agentSessionManager.createNewSession(
-      pseudoProjectId,
-      branch ?? null,
-      projectPath,
-      false,
-      permissionMode || "edit",
-      (agentType as AgentType) || "claude-code"
-    );
-    const session = fastify.agentSessionManager.getSession(sessionId);
-    return reply.code(200).send({
-      session: {
-        id: sessionId,
-        projectId: pseudoProjectId,
-        branch: branch ?? null,
-        status: session?.status || "running",
-        permissionMode: session?.permissionMode || "edit",
-        agentType: session?.agentType || "claude-code",
-      },
-      messages: [],
-    });
+    try {
+      const sessionId = await fastify.agentSessionManager.createNewSession(
+        pseudoProjectId,
+        branch ?? null,
+        projectPath,
+        false,
+        permissionMode || "edit",
+        (agentType as AgentType) || "claude-code",
+        false,
+        force === true,
+      );
+      const session = fastify.agentSessionManager.getSession(sessionId);
+      return reply.code(200).send({
+        session: {
+          id: sessionId,
+          projectId: pseudoProjectId,
+          branch: branch ?? null,
+          status: session?.status || "running",
+          permissionMode: session?.permissionMode || "edit",
+          agentType: session?.agentType || "claude-code",
+          processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(session.id) : false,
+        },
+        messages: [],
+      });
+    } catch (error) {
+      if (error instanceof ResidentProcessLimitError) {
+        return reply.code(409).send({
+          errorCode: error.errorCode,
+          error: error.message,
+          maxResidentAgentProcesses: error.maxResidentAgentProcesses,
+          runningSessions: error.runningSessions,
+        });
+      }
+      throw error;
+    }
   });
 
   // 获取项目的所有 Agent Sessions
@@ -290,7 +312,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           console.error("[API] Remote agent-sessions list proxy error:", result.status, result.data);
           return reply.code(proxyStatus(result)).send(result.data);
         }
-        const data = result.data as { sessions: Array<{ id: string; status: string; branch?: string | null; entry_count?: number; [k: string]: unknown }> };
+        const data = result.data as { sessions: Array<{ id: string; status: string; branch?: string | null; entry_count?: number; processAlive?: boolean; [k: string]: unknown }> };
         const mapped = await Promise.all(data.sessions.map(async (s) => {
           const localSessionId = `remote-${project.agent_mode}-${project.id}-${s.id}`;
           // Populate remoteSessionMap + persist so the user can navigate to ANY
@@ -309,7 +331,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           await fastify.storage.remoteSessionMappings.upsert(
             localSessionId, project.id, project.agent_mode, s.id, s.branch ?? null,
           );
-          return { ...s, id: localSessionId, entry_count: s.entry_count ?? 0 };
+          return { ...s, id: localSessionId, processAlive: s.processAlive ?? false, entry_count: s.entry_count ?? 0 };
         }));
         return reply.code(200).send({ sessions: mapped });
       }
@@ -335,7 +357,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         .map(s => {
           const inMemory = fastify.agentSessionManager.getSession(s.id);
           const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
-          return { ...s, status, entry_count: countMap.get(s.id) ?? 0 };
+          return {
+            ...s,
+            status,
+            processAlive: fastify.agentSessionManager.getSessionProcessAlive(s.id),
+            entry_count: countMap.get(s.id) ?? 0,
+          };
         })
         .filter(s => s.entry_count > 0);
       return reply.code(200).send({ sessions });
@@ -491,10 +518,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
           id: sessionId,
           projectId: req.params.projectId,
           branch: branch ?? null,
-          status: effectiveStatus,
-          permissionMode: session?.permissionMode || "edit",
-          agentType: session?.agentType || "claude-code",
-        },
+              status: effectiveStatus,
+              permissionMode: session?.permissionMode || "edit",
+              agentType: session?.agentType || "claude-code",
+              processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
+            },
         messages,
       });
     } catch (error) {
@@ -506,7 +534,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create a brand-new Agent Session (explicit, always creates)
   fastify.post<{
     Params: { projectId: string };
-    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string };
+    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean };
   }>("/api/projects/:projectId/agent-sessions/new", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -515,7 +543,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { branch, permissionMode, agentType } = req.body;
+    const { branch, permissionMode, agentType, force } = req.body;
     const agentMode = project.agent_mode;
     const useRemoteAgent = agentMode !== 'local';
 
@@ -540,6 +568,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             branch: branch ?? null,
             permissionMode: permissionMode || "edit",
             agentType,
+            force: force === true,
           },
         );
         if (created.ok) {
@@ -566,7 +595,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         project.path,
         false,
         permissionMode || "edit",
-        (agentType as AgentType) || "claude-code"
+        (agentType as AgentType) || "claude-code",
+        false,
+        force === true,
       );
       const session = fastify.agentSessionManager.getSession(sessionId);
       return reply.code(200).send({
@@ -577,10 +608,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
           status: session?.status || "running",
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
+          processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
         },
         messages: [],
       });
     } catch (error) {
+      if (error instanceof ResidentProcessLimitError) {
+        return reply.code(409).send({
+          errorCode: error.errorCode,
+          error: error.message,
+          maxResidentAgentProcesses: error.maxResidentAgentProcesses,
+          runningSessions: error.runningSessions,
+        });
+      }
       console.error("[API] Failed to create new agent session:", error);
       return reply.code(500).send({ error: String(error) });
     }
@@ -633,6 +673,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           status: session.status,
           permissionMode: session.permissionMode,
           agentType: session.agentType || "claude-code",
+          processAlive: fastify.agentSessionManager.getSessionProcessAlive(session.id),
         },
         messages,
       });

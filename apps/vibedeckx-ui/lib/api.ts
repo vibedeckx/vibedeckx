@@ -704,6 +704,9 @@ export interface BranchSessionSummary {
   agent_type?: string;
   entry_count?: number;
   favorited_at?: number | null;
+  branch?: string | null;
+  projectId?: string;
+  processAlive?: boolean;
 }
 
 // List all sessions for a (projectId, branch) pair
@@ -725,17 +728,76 @@ export async function createNewAgentSession(
   projectId: string,
   branch: string | null,
   permissionMode?: "plan" | "edit",
-  agentType?: string
+  agentType?: string,
+  force?: boolean,
 ): Promise<{
-  session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string };
+  session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string; processAlive?: boolean };
   messages: unknown[];
 }> {
   const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions/new`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ branch, permissionMode, agentType }),
+    body: JSON.stringify({ branch, permissionMode, agentType, force }),
   });
-  if (!res.ok) throw new Error(`createNewAgentSession failed: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409 && body?.errorCode === "resident_limit_reached") {
+      throw new ResidentLimitError(
+        body.maxResidentAgentProcesses,
+        Array.isArray(body.runningSessions) ? body.runningSessions : [],
+      );
+    }
+    throw new Error(`createNewAgentSession failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface RunningResidentSession {
+  id: string;
+  projectId?: string;
+  branch?: string | null;
+  title?: string | null;
+  lastActiveAt?: number;
+}
+
+export class ResidentLimitError extends Error {
+  readonly maxResidentAgentProcesses: number;
+  readonly runningSessions: RunningResidentSession[];
+
+  constructor(maxResidentAgentProcesses: number, runningSessions: RunningResidentSession[]) {
+    super("Resident agent process limit reached");
+    this.name = "ResidentLimitError";
+    this.maxResidentAgentProcesses = maxResidentAgentProcesses;
+    this.runningSessions = runningSessions;
+  }
+}
+
+export interface AgentProcessSettings {
+  maxResidentAgentProcesses: number;
+}
+
+export const DEFAULT_AGENT_PROCESS_SETTINGS: AgentProcessSettings = {
+  maxResidentAgentProcesses: 3,
+};
+
+export const AGENT_PROCESS_SETTINGS_LIMITS = {
+  min: 1,
+  max: 10,
+} as const;
+
+export async function getAgentProcessSettings(): Promise<AgentProcessSettings> {
+  const res = await authFetch(`${getApiBase()}/api/settings/agent-processes`);
+  if (!res.ok) throw new Error(`getAgentProcessSettings failed: ${res.status}`);
+  return res.json();
+}
+
+export async function updateAgentProcessSettings(settings: AgentProcessSettings): Promise<AgentProcessSettings> {
+  const res = await authFetch(`${getApiBase()}/api/settings/agent-processes`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw new Error(`updateAgentProcessSettings failed: ${res.status}`);
   return res.json();
 }
 

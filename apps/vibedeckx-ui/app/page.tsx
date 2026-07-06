@@ -29,6 +29,7 @@ import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree } from '@/lib/api';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
+import { useResidentSessions, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
 import { CompletionNotificationsMenu } from '@/components/layout/completion-notifications-menu';
 import { ConnectionStatusIndicator } from '@/components/layout/connection-status-indicator';
 import { useUrlState } from '@/hooks/use-url-state';
@@ -124,6 +125,7 @@ export default function Home() {
   }
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
+  const residentSessions = useResidentSessions(currentProject?.id ?? null, worktrees);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
 
   const {
@@ -228,6 +230,12 @@ export default function Home() {
   const handleTaskCompleted = useCallback(() => {
     refetchTasks();
   }, [refetchTasks]);
+
+  const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
+    setSelectedBranch(resident.branch);
+    setSessionUrlParam(resident.id);
+    setActiveView('workspace');
+  }, [setSessionUrlParam]);
 
   const handleSessionStarted = useCallback(() => {
     refetchBranchActivity();
@@ -460,6 +468,9 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setDeleteWorktreeDialogOpen(true);
             }}
             workspaceStatuses={workspaceStatuses}
+            residentSessions={residentSessions}
+            selectedSessionId={urlSessionId}
+            onResidentSessionSelect={handleResidentSessionSelect}
             hasProject={!needsProject}
             projects={projects}
             onSelectProject={selectProject}

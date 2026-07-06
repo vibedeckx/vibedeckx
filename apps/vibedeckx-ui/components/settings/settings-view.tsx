@@ -1,11 +1,12 @@
 "use client";
 
-import { Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
+import { Bot, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
 import { PageHeader } from "@/components/layout";
 import { AppearanceSettings } from "./appearance-settings";
 import { ChatProviderSettings } from "./chat-provider-settings";
 import { ProxySettings } from "./proxy-settings";
 import { TerminalSettingsSection } from "./terminal-settings";
+import { AgentProcessSettingsSection } from "./agent-process-settings";
 import {
   SettingsLayout,
   SettingsSection,
@@ -15,6 +16,7 @@ import {
 const NAV: SettingsNavItem[] = [
   { id: "appearance", label: "Appearance", Icon: Palette },
   { id: "ai-chat", label: "AI Chat", Icon: Sparkles },
+  { id: "agents", label: "Agents", Icon: Bot },
   { id: "terminal", label: "Terminal", Icon: TerminalSquare },
   { id: "proxy", label: "Proxy", Icon: Network },
 ];
@@ -42,6 +44,14 @@ export function SettingsView() {
           description="Provider, credentials, and default model used for the orchestrator chat."
         >
           <ChatProviderSettings />
+        </SettingsSection>
+
+        <SettingsSection
+          id="agents"
+          label="Agents"
+          description="Resident coding-agent process limits for this server."
+        >
+          <AgentProcessSettingsSection />
         </SettingsSection>
 
         <SettingsSection

@@ -14,6 +14,11 @@ import {
 } from "../utils/chat-model.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
+import {
+  AGENT_PROCESS_SETTINGS_LIMITS,
+  normalizeAgentProcessSettings,
+  type AgentProcessSettings,
+} from "../resident-agent-processes.js";
 
 /** Thrown by the chat-provider PUT handler's merge callback to abort the
  * atomic settings.update() write and surface a 400 with the given message. */
@@ -54,6 +59,15 @@ const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
 
 const CONV_FONT_SIZE_MIN = 12;
 const CONV_FONT_SIZE_MAX = 22;
+
+function readStoredAgentProcessSettings(saved: string | undefined): AgentProcessSettings {
+  if (!saved) return normalizeAgentProcessSettings(undefined);
+  try {
+    return normalizeAgentProcessSettings(JSON.parse(saved));
+  } catch {
+    return normalizeAgentProcessSettings(undefined);
+  }
+}
 
 function validateConvFontSize(value: unknown, field: string): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -104,6 +118,30 @@ function readStoredConversationSettings(saved: string | undefined): Conversation
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  fastify.get("/api/settings/agent-processes", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
+    const saved = await fastify.storage.settings.get("agentProcesses");
+    return reply.code(200).send(readStoredAgentProcessSettings(saved));
+  });
+
+  fastify.put<{ Body: AgentProcessSettings }>("/api/settings/agent-processes", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
+    const value = req.body?.maxResidentAgentProcesses;
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < AGENT_PROCESS_SETTINGS_LIMITS.min ||
+      value > AGENT_PROCESS_SETTINGS_LIMITS.max
+    ) {
+      return reply.code(400).send({
+        error: `maxResidentAgentProcesses must be an integer between ${AGENT_PROCESS_SETTINGS_LIMITS.min} and ${AGENT_PROCESS_SETTINGS_LIMITS.max}`,
+      });
+    }
+    const config = { maxResidentAgentProcesses: value };
+    await fastify.storage.settings.set("agentProcesses", JSON.stringify(config));
+    return reply.code(200).send(config);
+  });
+
   // Get proxy settings
   fastify.get("/api/settings/proxy", async (req, reply) => {
     if (requireAuth(req, reply) === null) return;

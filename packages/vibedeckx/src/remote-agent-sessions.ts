@@ -22,7 +22,7 @@ export interface RemoteAgentSessionDeps {
 }
 
 export type CreateRemoteAgentSessionResult =
-  | { ok: true; localSessionId: string; remoteSession: { id: string }; messages: unknown[] }
+  | { ok: true; localSessionId: string; remoteSession: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] }
   | { ok: false; status: number; data: unknown };
 
 /**
@@ -41,9 +41,10 @@ export async function createRemoteAgentSession(
     branch: string | null;
     permissionMode: "plan" | "edit";
     agentType?: string;
+    force?: boolean;
   },
 ): Promise<CreateRemoteAgentSessionResult> {
-  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType } = params;
+  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, force } = params;
 
   const result = await proxyToRemoteAuto(
     agentMode,
@@ -51,14 +52,14 @@ export async function createRemoteAgentSession(
     remoteConfig.server_api_key || "",
     "POST",
     `/api/path/agent-sessions/new`,
-    { path: remoteConfig.remote_path, branch, permissionMode, agentType },
+    { path: remoteConfig.remote_path, branch, permissionMode, agentType, force },
     { reverseConnectManager: deps.reverseConnectManager ?? undefined },
   );
   if (!result.ok) {
     return { ok: false, status: result.status, data: result.data };
   }
 
-  const remoteData = result.data as { session: { id: string }; messages: unknown[] };
+  const remoteData = result.data as { session: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] };
   const localSessionId = `remote-${agentMode}-${projectId}-${remoteData.session.id}`;
 
   deps.remoteSessionMap.set(localSessionId, {
@@ -180,6 +181,7 @@ export function connectPersistentRemoteWs(
     const kind = "JsonPatch" in parsed ? "JsonPatch"
       : "finished" in parsed ? "finished"
       : "taskCompleted" in parsed ? "taskCompleted"
+      : "processAlive" in parsed ? "processAlive"
       : "branchActivity" in parsed ? "branchActivity"
       : "Ready" in parsed ? "Ready"
       : "error" in parsed ? "error"
@@ -234,6 +236,20 @@ export function connectPersistentRemoteWs(
           branch,
           { activity: "completed", since: Date.now() },
         );
+      }
+    } else if ("processAlive" in parsed) {
+      cache.broadcast(sessionId, raw);
+      if (eventBus) {
+        const pa = parsed.processAlive as { alive?: unknown };
+        if (typeof pa.alive === "boolean") {
+          eventBus.emit({
+            type: "session:process",
+            projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),
+            branch: remoteInfo.branch ?? null,
+            sessionId,
+            alive: pa.alive,
+          });
+        }
       }
     } else if ("branchActivity" in parsed) {
       // Remote signaled a branch:activity transition outside the natural

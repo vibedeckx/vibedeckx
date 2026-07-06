@@ -22,6 +22,12 @@ import {
   type BranchActivity,
   type BranchActivityState,
 } from "./branch-activity.js";
+import {
+  normalizeAgentProcessSettings,
+  pickIdleResidentEvictionCandidate,
+  ResidentProcessLimitError,
+  type RunningResidentProcess,
+} from "./resident-agent-processes.js";
 
 // ============ Session Store Types ============
 
@@ -94,6 +100,7 @@ interface RunningSession {
    */
   bgSpawnHintsThisTurn: number;
   taskStartedThisTurn: number;
+  lastActiveAt: number;
 }
 
 export class AgentSessionManager {
@@ -116,6 +123,7 @@ export class AgentSessionManager {
    * Set to true from `vibedeckx connect` after `createServer`.
    */
   suppressTitleGeneration: boolean = false;
+  private capacityQueue: Promise<void> = Promise.resolve();
 
   constructor(storage: Storage) {
     this.storage = storage;
@@ -207,6 +215,103 @@ export class AgentSessionManager {
     return true;
   }
 
+  private isProcessAlive(session: RunningSession): boolean {
+    return !!session.process && session.process.exitCode === null && !session.dormant;
+  }
+
+  private touchSession(session: RunningSession): void {
+    session.lastActiveAt = Date.now();
+  }
+
+  private emitProcessAlive(session: RunningSession, alive: boolean): void {
+    this.eventBus?.emit({
+      type: "session:process",
+      projectId: session.projectId,
+      branch: session.branch,
+      sessionId: session.id,
+      alive,
+    });
+    this.broadcastRaw(session.id, { processAlive: { alive } });
+  }
+
+  getSessionProcessAlive(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return session ? this.isProcessAlive(session) : false;
+  }
+
+  getRunningResidentProcesses(): RunningResidentProcess[] {
+    return [...this.sessions.values()]
+      .filter((session) => this.isProcessAlive(session) && session.status === "running")
+      .map((session) => ({
+        id: session.id,
+        projectId: session.projectId,
+        branch: session.branch,
+        lastActiveAt: session.lastActiveAt,
+      }))
+      .sort((a, b) => a.lastActiveAt - b.lastActiveAt);
+  }
+
+  private async getMaxResidentAgentProcesses(): Promise<number> {
+    const saved = await this.storage.settings.get("agentProcesses");
+    if (!saved) return normalizeAgentProcessSettings(undefined).maxResidentAgentProcesses;
+    try {
+      return normalizeAgentProcessSettings(JSON.parse(saved)).maxResidentAgentProcesses;
+    } catch {
+      return normalizeAgentProcessSettings(undefined).maxResidentAgentProcesses;
+    }
+  }
+
+  private async withCapacityLock<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.capacityQueue;
+    let release: () => void = () => {};
+    this.capacityQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  private async ensureResidentCapacity(options?: { force?: boolean; excludeSessionId?: string }): Promise<void> {
+    await this.withCapacityLock(async () => {
+      const maxResidentAgentProcesses = await this.getMaxResidentAgentProcesses();
+      const live = [...this.sessions.values()].filter(
+        (session) => session.id !== options?.excludeSessionId && this.isProcessAlive(session),
+      );
+      if (live.length < maxResidentAgentProcesses) return;
+
+      const candidate = pickIdleResidentEvictionCandidate(
+        live.map((session) => ({
+          id: session.id,
+          processAlive: this.isProcessAlive(session),
+          status: session.status,
+          dormant: session.dormant,
+          backgroundTaskCount: session.backgroundTasks.size,
+          lastActiveAt: session.lastActiveAt,
+        })),
+      );
+      if (candidate) {
+        await this.hibernateSession(candidate.id);
+        return;
+      }
+
+      if (options?.force) {
+        const running = live
+          .filter((session) => session.status === "running")
+          .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0];
+        if (running) {
+          await this.stopSession(running.id);
+          return;
+        }
+      }
+
+      throw new ResidentProcessLimitError(maxResidentAgentProcesses, this.getRunningResidentProcesses());
+    });
+  }
+
   /**
    * Find an existing agent session for a branch, or return null. Never creates.
    *
@@ -269,22 +374,9 @@ export class AgentSessionManager {
     permissionMode: "plan" | "edit" = "edit",
     agentType: AgentType = "claude-code",
     announceRunning: boolean = false,
+    force: boolean = false,
   ): Promise<string> {
-    // Defense-in-depth: if there are existing non-dormant sessions on the same
-    // project+branch, their child processes may still be alive (stream-json
-    // agents keep the CLI waiting on stdin between turns while reporting status
-    // "stopped"). Spawning a new process without stopping them would leak the
-    // old ones. The frontend is supposed to stop first, but can't reliably tell
-    // from status alone — so we enforce it here. Must sweep ALL matches, not
-    // getSessionByBranch's first (= oldest) one: old sessions stay in the map
-    // forever, so once a dormant one exists on the branch it shadows the live
-    // one and its process leaks on every subsequent New Conversation.
-    for (const other of this.sessions.values()) {
-      if (other.projectId === projectId && other.branch === branch && !other.dormant) {
-        console.log(`[AgentSession] createNewSession: stopping prior session ${other.id} on same branch to prevent process leak`);
-        await this.stopSession(other.id);
-      }
-    }
+    await this.ensureResidentCapacity({ force });
 
     const sessionId = randomUUID();
     const branchKey = branch ?? "";
@@ -330,6 +422,7 @@ export class AgentSessionManager {
       backgroundTasks: new Set(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
+      lastActiveAt: Date.now(),
     };
 
     this.sessions.set(sessionId, session);
@@ -386,6 +479,7 @@ export class AgentSessionManager {
     permissionMode: "plan" | "edit"
   ): Promise<string> {
     const entriesCount = session.store.entries.filter(Boolean).length;
+    this.touchSession(session);
     if (session.dormant) {
       if (session.permissionMode !== permissionMode) {
         session.permissionMode = permissionMode;
@@ -478,6 +572,9 @@ export class AgentSessionManager {
     });
 
     session.process = childProcess;
+    session.dormant = false;
+    this.touchSession(session);
+    this.emitProcessAlive(session, true);
 
     console.log(`[AgentSession] Process ${session.id} started, PID: ${childProcess.pid}`);
 
@@ -516,6 +613,8 @@ export class AgentSessionManager {
         return;
       }
 
+      session.process = null;
+      this.emitProcessAlive(session, false);
       session.status = code === 0 ? "stopped" : "error";
       session.backgroundTasks.clear();
       if (!session.skipDb) {
@@ -619,6 +718,7 @@ export class AgentSessionManager {
     if (!session) return;
 
     const timestamp = Date.now();
+    session.lastActiveAt = timestamp;
 
     // A turn can start without any user message going through this server:
     // Claude Code auto-resumes the same process when a background task
@@ -1073,6 +1173,7 @@ export class AgentSessionManager {
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
     }
+    this.touchSession(session);
 
     // Clear current assistant key - user message breaks streaming
     await this.finalizeStreamingEntry(session);
@@ -1235,6 +1336,7 @@ export class AgentSessionManager {
       // we handle status + broadcast here instead.
       session.process = null;
       this.killProcess(proc);
+      this.emitProcessAlive(session, false);
 
       // Finalize any in-flight streaming assistant text
       await this.finalizeStreamingEntry(session);
@@ -1282,6 +1384,45 @@ export class AgentSessionManager {
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to stop session:`, error);
+      return false;
+    }
+  }
+
+  private async hibernateSession(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+
+    try {
+      const proc = session.process;
+      session.process = null;
+      this.killProcess(proc);
+      this.emitProcessAlive(session, false);
+
+      await this.finalizeStreamingEntry(session);
+      session.store.currentAssistantIndex = null;
+      session.buffer = "";
+      session.backgroundTasks.clear();
+      session.dormant = true;
+      session.status = "stopped";
+      this.touchSession(session);
+
+      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
+      await this.pushEntry(sessionId, {
+        type: "system",
+        content: "Agent process hibernated to free resident capacity. Send a message to wake it.",
+        timestamp: Date.now(),
+      });
+      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+      this.eventBus?.emit({
+        type: "session:status",
+        projectId: session.projectId,
+        branch: session.branch,
+        sessionId: session.id,
+        status: "stopped",
+      });
+      return true;
+    } catch (error) {
+      console.error(`[AgentSession] Failed to hibernate session:`, error);
       return false;
     }
   }
@@ -1344,7 +1485,10 @@ export class AgentSessionManager {
     console.log(`[AgentSession] Restarting session ${sessionId}`);
 
     // 1. Kill the existing process
-    this.killProcess(session.process);
+    const proc = session.process;
+    session.process = null;
+    this.killProcess(proc);
+    this.emitProcessAlive(session, false);
 
     // 2. Clear persisted entries
     if (!session.skipDb) {
@@ -1359,6 +1503,7 @@ export class AgentSessionManager {
     session.store.currentAssistantIndex = null;
     session.buffer = "";
     session.dormant = false;
+    this.touchSession(session);
 
     // 4. Broadcast clear signal to all subscribers
     const clearPatch = ConversationPatch.clearAll();
@@ -1381,6 +1526,7 @@ export class AgentSessionManager {
     // 7. Calculate absolute worktree path and respawn
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
+    await this.ensureResidentCapacity({ excludeSessionId: session.id });
     await this.spawnAgent(session, absoluteWorktreePath);
 
     return true;
@@ -1413,6 +1559,7 @@ export class AgentSessionManager {
     const proc = session.process;
     session.process = null;
     this.killProcess(proc);
+    this.emitProcessAlive(session, false);
 
     await this.finalizeStreamingEntry(session);
     session.store.currentAssistantIndex = null;
@@ -1459,7 +1606,10 @@ export class AgentSessionManager {
     console.log(`[AgentSession] Switching session ${sessionId} from ${session.permissionMode} to ${newMode}`);
 
     // 1. Kill existing process
-    this.killProcess(session.process);
+    const proc = session.process;
+    session.process = null;
+    this.killProcess(proc);
+    this.emitProcessAlive(session, false);
 
     // 2. Keep message store intact (preserve history in UI)
     // Only reset streaming state and buffer
@@ -1467,6 +1617,7 @@ export class AgentSessionManager {
     session.store.currentAssistantIndex = null;
     session.buffer = "";
     session.dormant = false;
+    this.touchSession(session);
 
     // 3. Set new permission mode + persist
     session.permissionMode = newMode;
@@ -1483,6 +1634,7 @@ export class AgentSessionManager {
     // 5. Respawn Claude Code with new mode flags
     const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
 
+    await this.ensureResidentCapacity({ excludeSessionId: session.id });
     await this.spawnAgent(session, absoluteWorktreePath);
 
     // 6. Send initial message or conversation summary
@@ -1597,8 +1749,10 @@ export class AgentSessionManager {
   ): Promise<void> {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
+    await this.ensureResidentCapacity({ excludeSessionId: session.id });
     session.dormant = false;
     session.status = "running";
+    this.touchSession(session);
     if (!session.skipDb) await this.storage.agentSessions.updateStatus(session.id, "running");
     this.broadcastPatch(session.id, ConversationPatch.updateStatus("running"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
@@ -1723,6 +1877,7 @@ export class AgentSessionManager {
         backgroundTasks: new Set(),
         bgSpawnHintsThisTurn: 0,
         taskStartedThisTurn: 0,
+        lastActiveAt: Date.now(),
       };
 
       this.sessions.set(dbSession.id, runningSession);
@@ -1827,6 +1982,7 @@ export class AgentSessionManager {
       backgroundTasks: new Set(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
+      lastActiveAt: Date.now(),
     };
     this.sessions.set(newId, branched);
 

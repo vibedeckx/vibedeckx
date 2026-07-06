@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError } from "@/lib/api";
 import type { AgentType } from "@/lib/api";
 import {
   workspaceKey,
@@ -39,6 +39,7 @@ export interface AgentSession {
   status: AgentSessionStatus;
   permissionMode?: "plan" | "edit";
   agentType?: AgentType;
+  processAlive?: boolean;
 }
 
 // ============ JSON Patch Types (RFC 6902) ============
@@ -68,6 +69,7 @@ type AgentWsMessage =
   | { finished: true }
   | { error: string }
   | { taskCompleted: { duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number } }
+  | { processAlive: { alive: boolean } }
   | { remoteStatus: RemoteConnectionStatus; attempt?: number }
   | { titleUpdated: { title: string } };
 
@@ -966,25 +968,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     }
   }, [session?.id, projectId, branch, explicitSessionId]);
 
-  // Reset to an empty conversation placeholder. Stops the prior session (if any)
-  // but does NOT create a new session in the database — that happens on first
-  // user message via ensureSession(). Returns null because there's no
-  // sessionId to surface yet.
+  // Reset to an empty conversation placeholder. It does NOT stop the prior
+  // resident process and does NOT create a new session in the database — that
+  // happens on first user message via ensureSession(). Returns null because
+  // there's no sessionId to surface yet.
   const startNewConversation = useCallback(async (): Promise<null> => {
     if (!projectId) return null;
-    // Best-effort stop — we don't want to leave an orphan running in the background.
-    // NOTE: don't guard on status === "running". Between turns, stream-json agents
-    // report status="stopped" while the CLI process is still alive waiting on stdin
-    // (see agent-session-manager.ts around the turn-finished branch). Stopping is
-    // idempotent on the backend, so it's safe to call whenever we have an id.
-    if (session?.id) {
-      try {
-        await stopSessionApi(session.id);
-      } catch (e) {
-        console.warn("[AgentSession] startNewConversation: stop of prior session failed:", e);
-      }
-      sessionCache.delete(getCacheKey(projectId, branch, session.id));
-    }
+    if (session?.id) sessionCache.delete(getCacheKey(projectId, branch, session.id));
     sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
     // Tear down the old session's WebSocket and any pending reconnect timer
     // before clearing UI state. Otherwise the subscribe-replay path can
@@ -1035,7 +1025,20 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsLoading(true);
     setError(null);
     try {
-      const data = await createNewAgentSession(projectId, branch, permissionMode, agentType);
+      let data: Awaited<ReturnType<typeof createNewAgentSession>>;
+      try {
+        data = await createNewAgentSession(projectId, branch, permissionMode, agentType);
+      } catch (error) {
+        if (error instanceof ResidentLimitError) {
+          const confirmed = window.confirm(
+            `All ${error.maxResidentAgentProcesses} resident agent processes are running. Stop the least recently active running session and start a new conversation?`,
+          );
+          if (!confirmed) throw error;
+          data = await createNewAgentSession(projectId, branch, permissionMode, agentType, true);
+        } else {
+          throw error;
+        }
+      }
       const newSession: AgentSession = {
         id: data.session.id,
         projectId: data.session.projectId,
@@ -1043,6 +1046,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         status: data.session.status as AgentSessionStatus,
         permissionMode: (data.session.permissionMode ?? "edit") as "plan" | "edit",
         agentType: (data.session.agentType ?? "claude-code") as AgentType,
+        processAlive: data.session.processAlive ?? true,
       };
       sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), newSession);
       sessionCache.set(getCacheKey(projectId, branch, newSession.id), newSession);
