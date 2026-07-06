@@ -1,6 +1,6 @@
 'use client';
 
-import { type ReactNode, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Fragment, type ReactNode, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { Terminal, GitBranch, SquareTerminal, Bot, Globe, FolderOpen } from 'lucide-react';
 import { ExecutorPanel } from '@/components/executor';
@@ -98,19 +98,21 @@ export function RightPanel({
           { id: 'preview' as const, icon: Globe, label: 'Browser' },
           { id: 'files' as const, icon: FolderOpen, label: 'Files' },
         ]).map(({ id, icon: Icon, label }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={cn(
-              'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
-              activeTab === id
-                ? 'text-foreground border-primary'
-                : 'text-muted-foreground border-transparent hover:text-foreground/70'
-            )}
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {label}
-          </button>
+          <Fragment key={id}>
+            <button
+              onClick={() => setActiveTab(id)}
+              className={cn(
+                'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
+                activeTab === id
+                  ? 'text-foreground border-primary'
+                  : 'text-muted-foreground border-transparent hover:text-foreground/70'
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+            {id === 'agent' && <span className="h-4 w-px bg-border/60 mx-1.5" aria-hidden />}
+          </Fragment>
         ))}
       </div>
 
