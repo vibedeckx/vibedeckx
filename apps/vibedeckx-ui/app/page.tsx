@@ -253,6 +253,19 @@ export default function Home() {
     });
   }, [refetchBranchActivity]);
 
+  const handleSessionTitleUpdated = useCallback((sessionId: string, title: string) => {
+    if (!currentProject?.id || !title.trim()) return;
+    setResidentSessionSeed((prev) => ({
+      id: sessionId,
+      projectId: currentProject.id,
+      branch: prev?.id === sessionId ? prev.branch : selectedBranch,
+      title,
+      status: prev?.id === sessionId ? prev.status : 'running',
+      processAlive: true,
+      updated_at: prev?.id === sessionId ? prev.updated_at : new Date().toISOString(),
+    }));
+  }, [currentProject?.id, selectedBranch]);
+
   // New Conversation seeds "idle" so the dot turns gray immediately. The
   // backend doesn't emit anything when the user clicks New Conv (no DB
   // session is created until the first message), so this optimistic seed
@@ -578,6 +591,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         onAgentModeChange={handleAgentModeChange}
                         onTaskCompleted={handleTaskCompleted}
                         onSessionStarted={handleSessionStarted}
+                        onSessionTitleUpdated={handleSessionTitleUpdated}
                         onStatusChange={handleStatusChange}
                         onNewConversation={handleNewConversation}
                       />

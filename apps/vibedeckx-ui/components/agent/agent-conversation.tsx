@@ -89,6 +89,7 @@ interface AgentConversationProps {
   onAgentModeChange?: (mode: ExecutionMode) => void;
   onTaskCompleted?: () => void;
   onSessionStarted?: (session: AgentSession) => void;
+  onSessionTitleUpdated?: (sessionId: string, title: string) => void;
   onStatusChange?: () => void;
   onNewConversation?: () => void;
 }
@@ -121,7 +122,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onStatusChange, onNewConversation }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onStatusChange, onNewConversation }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -177,10 +178,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     sessionId,
     onTaskCompleted,
     onSessionStarted,
-    onTitleUpdated: (title: string) => {
-      const sid = session?.id;
+    onTitleUpdated: (title: string, titleSessionId: string | null) => {
+      const sid = titleSessionId ?? session?.id;
       if (sid && title) {
         setAiTitleOverride({ sessionId: sid, title });
+        onSessionTitleUpdated?.(sid, title);
       }
       setTitleRefreshKey((k) => k + 1);
       setPendingTitleSessionId(null);

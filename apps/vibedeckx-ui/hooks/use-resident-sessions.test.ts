@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  updateResidentSessionTitle,
   upsertResidentSession,
   type ResidentSidebarSession,
 } from "./use-resident-sessions";
@@ -31,5 +32,21 @@ describe("upsertResidentSession", () => {
     const updated = { ...previous, title: "Updated", status: "running" };
 
     expect(upsertResidentSession([previous], updated)).toEqual([updated]);
+  });
+
+  it("updates a resident session title from the websocket title event", () => {
+    const previous: ResidentSidebarSession = {
+      id: "s1",
+      projectId: "p1",
+      branch: null,
+      title: "New Session",
+      status: "running",
+      processAlive: true,
+    };
+
+    expect(updateResidentSessionTitle([previous], "s1", "Generated title")).toEqual([
+      { ...previous, title: "Generated title" },
+    ]);
+    expect(updateResidentSessionTitle([previous], "missing", "Generated title")).toEqual([previous]);
   });
 });

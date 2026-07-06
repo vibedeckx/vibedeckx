@@ -25,6 +25,16 @@ export function upsertResidentSession(
   return copy;
 }
 
+export function updateResidentSessionTitle(
+  previous: ResidentSidebarSession[],
+  sessionId: string,
+  title: string,
+): ResidentSidebarSession[] {
+  return previous.map((session) =>
+    session.id === sessionId ? { ...session, title } : session,
+  );
+}
+
 function sessionTitle(session: BranchSessionSummary): string {
   return session.title?.trim() || "New Session";
 }

@@ -348,7 +348,7 @@ interface UseAgentSessionOptions {
   sessionId?: string | null; // Explicit session to load; when undefined/null -> latest-for-branch behavior
   onTaskCompleted?: () => void;
   onSessionStarted?: (session: AgentSession) => void;
-  onTitleUpdated?: (title: string) => void;
+  onTitleUpdated?: (title: string, sessionId: string | null) => void;
 }
 
 export function useAgentSession(projectId: string | null, branch: string | null, agentMode?: string, agentType?: AgentType, options?: UseAgentSessionOptions) {
@@ -568,7 +568,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
         // Handle session title (set asynchronously after the first user message)
         if ("titleUpdated" in msg) {
-          onTitleUpdatedRef.current?.(msg.titleUpdated.title);
+          onTitleUpdatedRef.current?.(msg.titleUpdated.title, wsSessionIdRef.current);
           return;
         }
 
