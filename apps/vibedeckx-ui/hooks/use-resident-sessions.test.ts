@@ -34,6 +34,22 @@ describe("upsertResidentSession", () => {
     expect(upsertResidentSession([previous], updated)).toEqual([updated]);
   });
 
+  it("does not downgrade a generated title back to the placeholder title", () => {
+    const previous: ResidentSidebarSession = {
+      id: "s1",
+      projectId: "p1",
+      branch: null,
+      title: "Generated title",
+      status: "stopped",
+      processAlive: true,
+    };
+    const reconnectSeed = { ...previous, title: "New Session", status: "running" };
+
+    expect(upsertResidentSession([previous], reconnectSeed)).toEqual([
+      { ...previous, status: "running" },
+    ]);
+  });
+
   it("updates a resident session title from the websocket title event", () => {
     const previous: ResidentSidebarSession = {
       id: "s1",

@@ -20,8 +20,13 @@ export function upsertResidentSession(
 ): ResidentSidebarSession[] {
   const index = previous.findIndex((session) => session.id === next.id);
   if (index === -1) return [next, ...previous];
+  const existing = previous[index];
+  const title =
+    next.title === "New Session" && existing.title !== "New Session"
+      ? existing.title
+      : next.title;
   const copy = [...previous];
-  copy[index] = next;
+  copy[index] = { ...next, title };
   return copy;
 }
 
