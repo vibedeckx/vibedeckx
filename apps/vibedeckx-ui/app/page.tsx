@@ -41,6 +41,11 @@ import {
   computeWorkspaceStatuses,
 } from '@/lib/workspace-status';
 import {
+  matchesPendingSessionSelection,
+  shouldClearSessionAfterWorkspaceChange,
+  type PendingSessionSelection,
+} from '@/lib/session-url-sync';
+import {
   usePlaceholderWorkspaces,
   workspaceKey,
 } from '@/lib/placeholder-workspaces';
@@ -228,6 +233,8 @@ export default function Home() {
     setOptimisticActivity(selectedBranch, "working");
   }, [selectedBranch, setOptimisticActivity]);
 
+  const pendingSessionSelectionRef = useRef<PendingSessionSelection | null>(null);
+
   // Task panel refresh — sidebar dot is driven by useBranchActivity directly,
   // so this handler no longer has any branch-activity side effect.
   const handleTaskCompleted = useCallback(() => {
@@ -235,11 +242,16 @@ export default function Home() {
   }, [refetchTasks]);
 
   const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
+    pendingSessionSelectionRef.current = {
+      projectId: currentProject?.id,
+      branch: resident.branch,
+      sessionId: resident.id,
+    };
     setSelectedBranch(resident.branch);
     setSessionUrlParam(resident.id);
     setActiveView('workspace');
     setActivateAgentTabNonce((nonce) => nonce + 1);
-  }, [setSessionUrlParam]);
+  }, [currentProject?.id, setSessionUrlParam]);
 
   const handleSessionStarted = useCallback((startedSession: AgentSession) => {
     refetchBranchActivity();
@@ -373,7 +385,29 @@ export default function Home() {
     prevProjectIdRef.current = currentProject?.id;
     hasInitializedUrlSyncRef.current = true;
 
-    if ((branchChanged || projectChanged) && urlSessionId) {
+    const pendingSessionSelection = pendingSessionSelectionRef.current;
+    const matchesPendingSession = matchesPendingSessionSelection(
+      pendingSessionSelection,
+      currentProject?.id,
+      selectedBranch,
+      urlSessionId,
+    );
+
+    if (matchesPendingSession) {
+      pendingSessionSelectionRef.current = null;
+    }
+
+    if (
+      shouldClearSessionAfterWorkspaceChange({
+        branchChanged,
+        projectChanged,
+        urlSessionId,
+        pendingSessionSelection,
+        currentProjectId: currentProject?.id,
+        selectedBranch,
+      })
+    ) {
+      pendingSessionSelectionRef.current = null;
       // Clearing state re-triggers this effect; the URL update happens there.
       setSessionUrlParam(null);
       return;
