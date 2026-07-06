@@ -12,7 +12,7 @@ import { extractUserText } from "../utils/session-title.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
-import { ResidentProcessLimitError } from "../resident-agent-processes.js";
+import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -211,7 +211,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
             entry_count: countMap.get(s.id) ?? 0,
           };
         })
-        .filter(s => s.entry_count > 0);
+        .filter(s => shouldShowBranchSessionInList({
+          entryCount: s.entry_count,
+          processAlive: s.processAlive,
+        }));
       return reply.code(200).send({ sessions });
     }
   );
@@ -364,7 +367,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
             entry_count: countMap.get(s.id) ?? 0,
           };
         })
-        .filter(s => s.entry_count > 0);
+        .filter(s => shouldShowBranchSessionInList({
+          entryCount: s.entry_count,
+          processAlive: s.processAlive,
+        }));
       return reply.code(200).send({ sessions });
     }
   );

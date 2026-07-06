@@ -3,6 +3,7 @@ import {
   DEFAULT_AGENT_PROCESS_SETTINGS,
   normalizeAgentProcessSettings,
   pickIdleResidentEvictionCandidate,
+  shouldShowBranchSessionInList,
 } from "./resident-agent-processes.js";
 
 describe("resident agent process helpers", () => {
@@ -38,5 +39,11 @@ describe("resident agent process helpers", () => {
         { id: "b", processAlive: true, status: "running", dormant: false, backgroundTaskCount: 0, lastActiveAt: 2 },
       ]),
     ).toBeNull();
+  });
+
+  it("keeps live resident sessions visible before their first entry is persisted", () => {
+    expect(shouldShowBranchSessionInList({ entryCount: 0, processAlive: true })).toBe(true);
+    expect(shouldShowBranchSessionInList({ entryCount: 1, processAlive: false })).toBe(true);
+    expect(shouldShowBranchSessionInList({ entryCount: 0, processAlive: false })).toBe(false);
   });
 });

@@ -53,6 +53,12 @@ export function pickIdleResidentEvictionCandidate(
     .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0] ?? null;
 }
 
+export function shouldShowBranchSessionInList(
+  session: { entryCount: number; processAlive: boolean },
+): boolean {
+  return session.entryCount > 0 || session.processAlive;
+}
+
 export interface RunningResidentProcess {
   id: string;
   projectId: string;
