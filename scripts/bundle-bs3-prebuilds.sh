@@ -24,6 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BS3_DIR="${1:?usage: bundle-bs3-prebuilds.sh <better-sqlite3 pkg dir> <platform>}"
 PLATFORM="${2:?usage: bundle-bs3-prebuilds.sh <better-sqlite3 pkg dir> <platform>}"
+BS3_DIR="$(cd "$BS3_DIR" && pwd)"
 
 # Node ABIs (NODE_MODULE_VERSION) to bundle. 127=Node22, 137=Node24,
 # 141=Node25, 147=Node26. 115=Node20 is attempted but better-sqlite3 12.x
@@ -37,7 +38,12 @@ REQUIRED_ABIS="${BS3_REQUIRED_ABIS:-127 137}"
 # new systems and can use Node 22/24, or raise this to opt in).
 GLIBC_BASELINE="${BS3_GLIBC_BASELINE:-2.31}"
 
-VERSION="$(node -e "console.log(require('$BS3_DIR/package.json').version)")"
+VERSION="$(BS3_DIR="$BS3_DIR" node -e "
+  const fs = require('fs');
+  const path = require('path');
+  const pkg = JSON.parse(fs.readFileSync(path.join(process.env.BS3_DIR, 'package.json'), 'utf8'));
+  console.log(pkg.version);
+")"
 BASE_URL="https://github.com/WiseLibs/better-sqlite3/releases/download/v${VERSION}"
 
 echo "    Bundling better-sqlite3@${VERSION} prebuilts for ${PLATFORM} (ABIs: ${ABIS})"
