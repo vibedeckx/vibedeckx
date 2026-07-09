@@ -90,6 +90,7 @@ export const createScheduledRepos = (
         process_id: process_id ?? null,
         exit_code: null,
         output: null,
+        report: null,
         finished_at: st === "running" ? null : sql<string>`CURRENT_TIMESTAMP`,
       }).execute();
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
@@ -101,7 +102,7 @@ export const createScheduledRepos = (
     },
     getByScheduleId: async (scheduleId, limit = 50) => {
       const rows = await kdb.selectFrom("scheduled_task_runs")
-        .select(["id", "schedule_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), "process_id", "started_at", "finished_at"])
+        .select(["id", "schedule_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
         .where("schedule_id", "=", scheduleId)
         .orderBy("started_at", "desc").orderBy(h.rowIdDesc())
         .limit(limit).execute();
@@ -111,7 +112,7 @@ export const createScheduledRepos = (
       const result: Record<string, ScheduledTaskRun> = {};
       for (const sid of scheduleIds) {
         const row = await kdb.selectFrom("scheduled_task_runs")
-          .select(["id", "schedule_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), "process_id", "started_at", "finished_at"])
+          .select(["id", "schedule_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
           .where("schedule_id", "=", sid)
           .orderBy("started_at", "desc").orderBy(h.rowIdDesc())
           .limit(1).executeTakeFirst();
@@ -124,6 +125,7 @@ export const createScheduledRepos = (
         status: opts.status,
         exit_code: opts.exit_code ?? null,
         output: opts.output ?? null,
+        report: opts.report ?? null,
         finished_at: sql<string>`CURRENT_TIMESTAMP`,
       }).where("id", "=", id).execute();
     },

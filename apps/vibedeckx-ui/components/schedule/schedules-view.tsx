@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Play, Pencil, Trash2, CalendarClock } from "lucide-react";
+import { Streamdown } from "streamdown";
 import { cn } from "@/lib/utils";
 import { api, type Schedule, type ScheduleInput, type ScheduleRun, type Worktree } from "@/lib/api";
 import { PageHeader } from "@/components/layout";
@@ -251,13 +252,27 @@ export function SchedulesView({
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>
-              Run output — {viewRun ? fmtTs(viewRun.started_at) : ""}{" "}
+              {viewRun?.report ? "Run report" : "Run output"} — {viewRun ? fmtTs(viewRun.started_at) : ""}{" "}
               {viewRun && <span className={cn("ml-2 px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[viewRun.status])}>{viewRun.status}</span>}
             </DialogTitle>
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
-            {viewRun?.output ? cleanOutput(viewRun.output) : "(no output captured)"}
-          </pre>
+          {viewRun?.report ? (
+            <>
+              <div className="max-h-[50vh] overflow-auto rounded-md border border-border/50 p-3 text-sm">
+                <Streamdown className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">{viewRun.report}</Streamdown>
+              </div>
+              <details>
+                <summary className="text-xs text-muted-foreground cursor-pointer select-none">Raw output</summary>
+                <pre className="mt-2 max-h-[30vh] overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
+                  {viewRun.output ? cleanOutput(viewRun.output) : "(no output captured)"}
+                </pre>
+              </details>
+            </>
+          ) : (
+            <pre className="max-h-[60vh] overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
+              {viewRun?.output ? cleanOutput(viewRun.output) : "(no output captured)"}
+            </pre>
+          )}
         </DialogContent>
       </Dialog>
     </div>

@@ -4,11 +4,12 @@ import type { GlobalEvent } from "../event-bus.js";
 import { CLERK_CLOCK_SKEW_MS } from "./ws-authz.js";
 import "../server-types.js";
 
-// tailOutput carries raw process output (stdout/stderr/PTY tail) for the
-// in-process chat-session-manager consumer only — never expose it over the wire.
+// tailOutput/finalResult carry raw process output (stdout/stderr/PTY tail and
+// the agent's final message) for in-process consumers (chat-session-manager,
+// scheduler) only — never expose them over the wire.
 function toWireEvent(event: GlobalEvent): GlobalEvent {
-  if (event.type === "executor:stopped" && event.tailOutput !== undefined) {
-    const { tailOutput: _tailOutput, ...rest } = event;
+  if (event.type === "executor:stopped" && (event.tailOutput !== undefined || event.finalResult !== undefined)) {
+    const { tailOutput: _tailOutput, finalResult: _finalResult, ...rest } = event;
     return rest;
   }
   return event;

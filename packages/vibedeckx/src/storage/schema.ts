@@ -217,6 +217,7 @@ export interface ScheduledTaskRunsTable {
   status: Generated<string>;
   exit_code: number | null;
   output: string | null;
+  report: string | null;
   process_id: string | null;
   started_at: Generated<string>;
   finished_at: string | null;

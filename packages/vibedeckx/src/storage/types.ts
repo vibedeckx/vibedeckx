@@ -131,6 +131,8 @@ export interface ScheduledTaskRun {
   exit_code: number | null;
   /** Captured output (ANSI included), capped. Omitted (null) by list queries. */
   output: string | null;
+  /** Agent's final message for prompt runs (Markdown). Omitted (null) by list queries. */
+  report: string | null;
   process_id: string | null;
   started_at: string;
   finished_at: string | null;
@@ -362,7 +364,7 @@ export interface Storage {
     getByScheduleId: (scheduleId: string, limit?: number) => Promise<ScheduledTaskRun[]>;
     /** Most recent run per schedule for the given IDs (output omitted). */
     getLastByScheduleIds: (scheduleIds: string[]) => Promise<Record<string, ScheduledTaskRun>>;
-    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null }) => Promise<void>;
+    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null }) => Promise<void>;
     /** Delete all but the newest `keep` runs for a schedule. */
     prune: (scheduleId: string, keep: number) => Promise<void>;
   };

@@ -683,6 +683,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       status TEXT NOT NULL DEFAULT 'running',
       exit_code INTEGER,
       output TEXT,
+      report TEXT,
       process_id TEXT,
       started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       finished_at TIMESTAMP,
@@ -703,6 +704,12 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   }
   if (!scheduledTaskCols.some((c) => c.name === "prompt_provider")) {
     db.exec("ALTER TABLE scheduled_tasks ADD COLUMN prompt_provider TEXT DEFAULT NULL");
+  }
+
+  // Add scheduled_task_runs.report for DBs created before run reports.
+  const scheduledRunCols = db.prepare("PRAGMA table_info(scheduled_task_runs)").all() as { name: string }[];
+  if (!scheduledRunCols.some((c) => c.name === "report")) {
+    db.exec("ALTER TABLE scheduled_task_runs ADD COLUMN report TEXT DEFAULT NULL");
   }
 
   // Re-enable FK enforcement for runtime operations

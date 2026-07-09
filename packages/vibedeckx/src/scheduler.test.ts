@@ -7,7 +7,7 @@ import type { Storage, Executor } from "./storage/types.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
 import { EventBus, type GlobalEvent } from "./event-bus.js";
 import type { RemoteExecutorInfo } from "./server-types.js";
-import { SchedulerService, validateCron } from "./scheduler.js";
+import { SchedulerService, validateCron, REPORT_INSTRUCTION } from "./scheduler.js";
 
 describe("validateCron", () => {
   it("accepts a standard 5-field expression", () => {
@@ -142,7 +142,7 @@ describe("SchedulerService.runNow", () => {
     }
   });
 
-  it("prompt tasks use their configured prompt provider", async () => {
+  it("prompt tasks use their configured prompt provider and get the report instruction", async () => {
     await storage.scheduledTasks.create({
       id: "s2", project_id: "proj-1", name: "ai", cron_expr: "0 9 * * *",
       timezone: "UTC", run_type: "prompt", prompt_provider: "codex", content: "analyze the logs",
@@ -152,7 +152,33 @@ describe("SchedulerService.runNow", () => {
     const started = pm.started[pm.started.length - 1];
     expect(started.executor.executor_type).toBe("prompt");
     expect(started.executor.prompt_provider).toBe("codex");
-    expect(started.executor.command).toBe("analyze the logs");
+    expect(started.executor.command).toBe("analyze the logs" + REPORT_INSTRUCTION);
+  });
+
+  it("command tasks do NOT get the report instruction appended", async () => {
+    await scheduler.runNow("s1");
+    expect(pm.started[0].executor.command).toBe("echo hi");
+  });
+
+  it("stores the finished message's finalResult as the run report", async () => {
+    const result = await scheduler.runNow("s1") as { runId: string };
+    pm.emit("proc-1", { type: "stdout", data: "noise" });
+    pm.emit("proc-1", { type: "finished", exitCode: 0, finalResult: "# Report\nAll good." });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const run = await storage.scheduledTaskRuns.getById(result.runId);
+    expect(run?.report).toBe("# Report\nAll good.");
+    expect(run?.output).toBe("noise");
+    // List queries must omit the report column, like output.
+    const listed = await storage.scheduledTaskRuns.getByScheduleId("s1");
+    expect(listed[0].report).toBeNull();
+  });
+
+  it("leaves report null when the finished message carries no finalResult", async () => {
+    const result = await scheduler.runNow("s1") as { runId: string };
+    pm.emit("proc-1", { type: "finished", exitCode: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect((await storage.scheduledTaskRuns.getById(result.runId))?.report).toBeNull();
   });
 
   it("fails without spawning when the directory does not exist", async () => {
@@ -297,6 +323,18 @@ describe("SchedulerService remote runs", () => {
     const run = await storage.scheduledTaskRuns.getById(result.runId);
     expect(run?.status).toBe("completed");
     expect(run?.output).toBe("remote-done");
+    expect(run?.report).toBeNull();
+  });
+
+  it("stores the executor:stopped event's finalResult as the run report", async () => {
+    const result = await scheduler.runNow("s1") as { runId: string };
+    eventBus.emit({
+      type: "executor:stopped", projectId: "proj-1", executorId: "schedule-s1",
+      processId: "remote-schedule-s1-rp-1", exitCode: 0, target: "remote",
+      tailOutput: "remote-done", finalResult: "## Remote report\nDone.",
+    } as GlobalEvent);
+    const run = await storage.scheduledTaskRuns.getById(result.runId);
+    expect(run?.report).toBe("## Remote report\nDone.");
   });
 
   it("directory mode proxies path=<directory>, branch undefined", async () => {
@@ -307,7 +345,7 @@ describe("SchedulerService remote runs", () => {
     expect((exec.body as { branch?: unknown }).branch).toBeUndefined();
   });
 
-  it("remote prompt runs proxy their configured prompt provider", async () => {
+  it("remote prompt runs proxy their configured prompt provider with the report instruction", async () => {
     await storage.scheduledTasks.update("s1", {
       run_type: "prompt",
       prompt_provider: "codex",
@@ -318,7 +356,7 @@ describe("SchedulerService remote runs", () => {
     expect(exec.body).toMatchObject({
       executor_type: "prompt",
       prompt_provider: "codex",
-      command: "inspect remote state",
+      command: "inspect remote state" + REPORT_INSTRUCTION,
     });
   });
 

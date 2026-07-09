@@ -16,6 +16,20 @@ const OUTPUT_CAP = 200_000;
 /** Run-history rows kept per schedule. */
 const RUNS_KEEP = 50;
 
+/**
+ * Appended to prompt-type schedule content so the agent's final message doubles
+ * as a well-formed run report. The final message is captured structurally
+ * (claude: stream-json `result` field; codex: --output-last-message file) and
+ * persisted to scheduled_task_runs.report — this suffix only shapes its format.
+ */
+export const REPORT_INSTRUCTION =
+  "\n\n---\nWhen the task is complete, end your final message with a concise Markdown report: what you did, files changed, key results, and any problems encountered.";
+
+/** Prompt runs get the report-format instruction; command runs are untouched. */
+function buildRunContent(task: ScheduledTask): string {
+  return task.run_type === "prompt" ? task.content + REPORT_INSTRUCTION : task.content;
+}
+
 /** Returns an error message, or null when the expression (and timezone) are valid. */
 export function validateCron(expr: string, timezone?: string): string | null {
   if (timezone) {
@@ -199,7 +213,7 @@ export class SchedulerService {
       project_id: task.project_id,
       group_id: "",
       name: task.name,
-      command: task.content,
+      command: buildRunContent(task),
       executor_type: task.run_type,
       prompt_provider: task.run_type === "prompt" ? (task.prompt_provider ?? "claude") : null,
       cwd: null,
@@ -233,13 +247,13 @@ export class SchedulerService {
       unsubscribe?.();
     };
 
-    const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null) => {
+    const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null, report?: string) => {
       if (finalized) return;
       finalized = true;
       releaseRunResources();
       this.activeRuns.delete(scheduleId);
       this.activeRunCleanups.delete(scheduleId);
-      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
+      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP), report: report?.slice(0, OUTPUT_CAP) ?? null });
       await this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status, exitCode });
     };
@@ -250,7 +264,7 @@ export class SchedulerService {
         // Trim lazily at 2x cap to avoid re-slicing on every chunk.
         if (output.length > OUTPUT_CAP * 2) output = output.slice(-OUTPUT_CAP);
       } else if (msg.type === "finished") {
-        void finalize(msg.exitCode === 0 ? "completed" : "failed", msg.exitCode).catch((err) => {
+        void finalize(msg.exitCode === 0 ? "completed" : "failed", msg.exitCode, msg.finalResult).catch((err) => {
           console.error(`[Scheduler] finalize failed for run ${runId}: ${err}`);
         });
       }
@@ -335,7 +349,7 @@ export class SchedulerService {
         task.target, serverUrl, serverKey, "POST", "/api/path/execute",
         {
           path: remotePath,
-          command: task.content,
+          command: buildRunContent(task),
           executor_type: task.run_type,
           prompt_provider: task.run_type === "prompt" ? (task.prompt_provider ?? "claude") : null,
           branch: remoteBranch ?? undefined,
@@ -379,22 +393,23 @@ export class SchedulerService {
       unsubscribe?.();
     };
 
-    const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null, output: string) => {
+    const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null, output: string, report?: string) => {
       if (finalized) return;
       finalized = true;
       releaseRunResources();
       this.activeRuns.delete(task.id);
       this.activeRunCleanups.delete(task.id);
-      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP) });
+      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP), report: report?.slice(0, OUTPUT_CAP) ?? null });
       await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status, exitCode });
     };
 
     // Remote processes are not in the local ProcessManager; RemoteExecutorMonitor
-    // emits executor:stopped on the bus when the remote finishes (with tailOutput).
+    // emits executor:stopped on the bus when the remote finishes (with tailOutput
+    // and, when the remote is new enough to forward it, the agent's finalResult).
     unsubscribe = this.eventBus?.subscribe((e) => {
       if (e.type === "executor:stopped" && e.processId === localProcessId) {
-        void finalize(e.exitCode === 0 ? "completed" : "failed", e.exitCode, e.tailOutput ?? "").catch((err) => {
+        void finalize(e.exitCode === 0 ? "completed" : "failed", e.exitCode, e.tailOutput ?? "", e.finalResult).catch((err) => {
           console.error(`[Scheduler] finalize failed for run ${runId}: ${err}`);
         });
       }

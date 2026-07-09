@@ -433,6 +433,8 @@ export interface ScheduleRun {
   exit_code: number | null;
   /** Only populated by getScheduleRun; list endpoints return null. */
   output?: string | null;
+  /** Agent's final message for prompt runs (Markdown). Only populated by getScheduleRun. */
+  report?: string | null;
   process_id: string | null;
   started_at: string;
   finished_at: string | null;

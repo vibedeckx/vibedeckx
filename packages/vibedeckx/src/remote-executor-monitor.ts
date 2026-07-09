@@ -100,6 +100,9 @@ export class RemoteExecutorMonitor {
               exitCode: parsed.exitCode ?? 0,
               target: info.remoteServerId,
               tailOutput,
+              // Structured final message forwarded by the remote's finished
+              // LogMessage; absent when the remote runs an older version.
+              finalResult: typeof parsed.finalResult === "string" ? parsed.finalResult : undefined,
             });
           }
           this.remoteExecutorMap.delete(localProcessId);

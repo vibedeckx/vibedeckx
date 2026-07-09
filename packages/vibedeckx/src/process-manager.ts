@@ -1,5 +1,6 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
-import { existsSync, chmodSync, readdirSync, statSync } from "fs";
+import { existsSync, chmodSync, readdirSync, statSync, readFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
 import path from "path";
 import { createRequire } from "module";
 import * as pty from "node-pty";
@@ -11,7 +12,7 @@ export type LogMessage =
   | { type: "stdout"; data: string }
   | { type: "stderr"; data: string }
   | { type: "pty"; data: string }
-  | { type: "finished"; exitCode: number | null };
+  | { type: "finished"; exitCode: number | null; finalResult?: string };
 
 export type InputMessage =
   | { type: "input"; data: string }
@@ -110,15 +111,18 @@ export class ProcessManager {
    * Build the shell command string for a prompt executor.
    * Supports claude and codex providers.
    */
-  private buildPromptCommand(prompt: string, provider: PromptProvider): string {
+  private buildPromptCommand(prompt: string, provider: PromptProvider, finalResultFile?: string): string {
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
 
     if (provider === 'codex') {
+      // --output-last-message makes codex write the agent's final message to a
+      // file, which we read on exit as the run's structured report.
+      const lastMessageArg = finalResultFile ? ` --output-last-message '${finalResultFile}'` : '';
       const binary = this.detectBinary('codex');
       if (binary) {
-        return `${binary} --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'`;
+        return `${binary} --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'${lastMessageArg}`;
       }
-      return `npx -y @openai/codex --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'`;
+      return `npx -y @openai/codex --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'${lastMessageArg}`;
     }
 
     // Default: claude
@@ -127,6 +131,22 @@ export class ProcessManager {
       return `${binary} -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
     }
     return `npx -y @anthropic-ai/claude-code -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
+  }
+
+  /**
+   * Read (and delete) the scratch file a prompt provider wrote its final
+   * message to. Returns undefined when the file is missing/empty (failed or
+   * interrupted run, or an old provider version without the flag).
+   */
+  private consumeFinalResultFile(file?: string): string | undefined {
+    if (!file) return undefined;
+    try {
+      const content = readFileSync(file, 'utf8').trim();
+      rmSync(file, { force: true });
+      return content || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   setEventBus(eventBus: EventBus): void {
@@ -165,9 +185,14 @@ export class ProcessManager {
       console.log(`[ProcessManager] CWD: ${cwd}`);
       this.startClaudeStreamProcess(processId, executor, cwd, skipDb);
     } else {
-      // For non-claude prompt executors, build the provider-specific command
+      // For non-claude prompt executors, build the provider-specific command.
+      // Codex prompt runs get a scratch file for the agent's final message
+      // (read back on exit as the run's report).
+      const finalResultFile = executor.executor_type === 'prompt' && executor.prompt_provider === 'codex'
+        ? path.join(tmpdir(), `vibedeckx-last-msg-${processId}.txt`)
+        : undefined;
       const effectiveExecutor = executor.executor_type === 'prompt'
-        ? { ...executor, command: this.buildPromptCommand(executor.command, executor.prompt_provider ?? 'claude') }
+        ? { ...executor, command: this.buildPromptCommand(executor.command, executor.prompt_provider ?? 'claude', finalResultFile) }
         : executor;
 
       console.log(`[ProcessManager] Starting process ${processId}`);
@@ -178,12 +203,12 @@ export class ProcessManager {
 
       // Always use PTY mode for proper ANSI color support
       try {
-        this.startPtyProcess(processId, effectiveExecutor, cwd, skipDb);
+        this.startPtyProcess(processId, effectiveExecutor, cwd, skipDb, finalResultFile);
         console.log(`[ProcessManager] PTY mode started successfully`);
       } catch (error) {
         // PTY failed (e.g., native module not compiled), fallback to regular process
         console.warn(`[ProcessManager] PTY spawn failed, falling back to regular process: ${error}`);
-        this.startRegularProcess(processId, effectiveExecutor, cwd, skipDb);
+        this.startRegularProcess(processId, effectiveExecutor, cwd, skipDb, finalResultFile);
       }
     }
 
@@ -331,7 +356,7 @@ export class ProcessManager {
   /**
    * Start a process using node-pty (for interactive commands)
    */
-  private startPtyProcess(processId: string, executor: Executor, cwd: string, skipDb = false): void {
+  private startPtyProcess(processId: string, executor: Executor, cwd: string, skipDb = false, finalResultFile?: string): void {
     // Use user's default shell or fall back to common shell paths
     let shell: string;
     if (process.platform === "win32") {
@@ -378,6 +403,7 @@ export class ProcessManager {
     // so we only emit once output has settled.
     let exitPending: { code: number } | null = null;
     let drainHandle: ReturnType<typeof setImmediate> | null = null;
+    let finalResult: string | undefined;
 
     const emitStopped = () => {
       if (!exitPending) return;
@@ -385,7 +411,7 @@ export class ProcessManager {
       exitPending = null;
       drainHandle = null;
       const tailOutput = this.snapshotTailOutput(runningProcess.logs);
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local", tailOutput });
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local", tailOutput, finalResult });
     };
 
     const scheduleDrain = () => {
@@ -422,7 +448,8 @@ export class ProcessManager {
         });
       }
 
-      const msg: LogMessage = { type: "finished", exitCode: code };
+      finalResult = this.consumeFinalResultFile(finalResultFile);
+      const msg: LogMessage = { type: "finished", exitCode: code, finalResult };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
 
@@ -441,7 +468,7 @@ export class ProcessManager {
   /**
    * Start a process using regular spawn (for non-interactive commands)
    */
-  private startRegularProcess(processId: string, executor: Executor, cwd: string, skipDb = false): void {
+  private startRegularProcess(processId: string, executor: Executor, cwd: string, skipDb = false, finalResultFile?: string): void {
     const childProcess = spawn(executor.command, {
       shell: true,
       cwd,
@@ -500,11 +527,12 @@ export class ProcessManager {
         });
       }
 
-      const msg: LogMessage = { type: "finished", exitCode };
+      const finalResult = this.consumeFinalResultFile(finalResultFile);
+      const msg: LogMessage = { type: "finished", exitCode, finalResult };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
       // close event guarantees all stdio is flushed — safe to snapshot now
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
 
       // Schedule cleanup after retention period
       setTimeout(() => {
@@ -583,6 +611,8 @@ export class ProcessManager {
     let stdoutBuffer = '';
     const prevTextByIndex = new Map<number, string>();
     const seenToolUseIds = new Set<string>();
+    // Final assistant text from the 'result' event — captured as the run's report.
+    let finalResult: string | undefined;
 
     const RESET = '\x1b[0m';
     const DIM = '\x1b[2m';
@@ -676,6 +706,9 @@ export class ProcessManager {
           if (parsed.subtype === 'error') {
             pushLog(`\n${RED}Error: ${parsed.error || 'Unknown error'}${RESET}\n`);
           } else {
+            if (typeof parsed.result === 'string' && parsed.result.trim()) {
+              finalResult = parsed.result;
+            }
             const parts: string[] = [];
             if (parsed.duration_ms) parts.push(`${((parsed.duration_ms as number) / 1000).toFixed(1)}s`);
             if (parsed.cost_usd) parts.push(`$${(parsed.cost_usd as number).toFixed(4)}`);
@@ -702,11 +735,11 @@ export class ProcessManager {
         });
       }
 
-      const msg: LogMessage = { type: 'finished', exitCode };
+      const msg: LogMessage = { type: 'finished', exitCode, finalResult };
       runningProcess.logs.push(msg);
       this.broadcast(processId, msg);
       // close event guarantees all stdio is flushed — safe to snapshot now
-      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
+      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
 
       // Schedule cleanup after retention period
       setTimeout(() => {
