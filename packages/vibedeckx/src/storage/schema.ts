@@ -224,6 +224,21 @@ export interface ScheduledTaskRunsTable {
   finished_at: string | null;
 }
 
+export interface CrossRemoteAuditTable {
+  seq: Generated<number>;
+  id: string;
+  user_id: string;
+  session_id: string;
+  source_remote_id: string | null;
+  target_remote_id: string;
+  tool_name: string;
+  args_summary: string;
+  exit_code: number | null;
+  duration_ms: number;
+  status: string;
+  created_at: string;
+}
+
 export interface DB {
   projects: ProjectsTable;
   executor_groups: ExecutorGroupsTable;
@@ -242,4 +257,5 @@ export interface DB {
   remote_session_mappings: RemoteSessionMappingsTable;
   scheduled_tasks: ScheduledTasksTable;
   scheduled_task_runs: ScheduledTaskRunsTable;
+  cross_remote_audit: CrossRemoteAuditTable;
 }

@@ -12,6 +12,25 @@ export type RemoteServerConnectionMode = 'outbound' | 'inbound';
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
 export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
+export type CrossRemoteAuditStatus = 'ok' | 'error' | 'timeout' | 'denied' | 'offline';
+
+export interface CrossRemoteAuditEntry {
+  user_id: string;
+  session_id: string;
+  source_remote_id: string | null;
+  target_remote_id: string;
+  tool_name: string;
+  args_summary: string;
+  exit_code: number | null;
+  duration_ms: number;
+  status: CrossRemoteAuditStatus;
+}
+
+export interface CrossRemoteAuditRow extends CrossRemoteAuditEntry {
+  id: string;
+  created_at: string;
+}
+
 export interface RemoteServer {
   id: string;
   name: string;
@@ -276,6 +295,10 @@ export interface Storage {
     generateToken(id: string, userId?: string): Promise<string | undefined>;
     revokeToken(id: string, userId?: string): Promise<boolean>;
     delete(id: string, userId?: string): Promise<boolean>;
+  };
+  crossRemoteAudit: {
+    insert(entry: CrossRemoteAuditEntry): Promise<void>;
+    listByTarget(targetRemoteId: string, limit?: number): Promise<CrossRemoteAuditRow[]>;
   };
   projectRemotes: {
     getByProject(projectId: string): Promise<ProjectRemoteWithServer[]>;

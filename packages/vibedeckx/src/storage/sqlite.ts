@@ -13,6 +13,7 @@ import { createRemoteServerRepos } from "./repositories/remote-servers.js";
 import { createExecutorRepos } from "./repositories/executors.js";
 import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 import { createWorkspaceRepos } from "./repositories/workspace.js";
+import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -191,6 +192,28 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       branch TEXT,
       title_resolved INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Audit trail for cross-remote MCP gateway calls (one remote diagnosing
+    -- another through the server-side gateway). No FK to remote_servers:
+    -- audit rows must outlive deletion of the remote they describe. seq is
+    -- the sort key (not created_at) because datetime('now') has one-second
+    -- resolution and audit rows can be inserted multiple times per second.
+    CREATE TABLE IF NOT EXISTS cross_remote_audit (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      user_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      source_remote_id TEXT,
+      target_remote_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      args_summary TEXT NOT NULL,
+      exit_code INTEGER,
+      duration_ms INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
   `);
 
   // Migration: add title_resolved flag to remote_session_mappings so the
@@ -748,6 +771,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createScheduledRepos(kdb, h),
     ...createAgentSessionRepos(kdb, h),
     ...createWorkspaceRepos(kdb, h),
+    ...createCrossRemoteAuditRepo(kdb),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
