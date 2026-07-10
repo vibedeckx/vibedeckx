@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
-import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { proxyToRemoteAuto, type ProxyResult } from "../utils/remote-proxy.js";
 import { getCrossRemoteSecret, verifyCrossRemoteToken, type CrossRemoteTokenPayload } from "../utils/cross-remote-token.js";
 import {
   CROSS_REMOTE_MCP_PATH,
@@ -175,8 +175,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return textResult(JSON.stringify(remotes, null, 2));
     }
 
+    // Object.hasOwn guards against inherited members (toString, constructor, __proto__,
+    // valueOf) that would otherwise read as truthy off TOOL_TIERS's prototype chain and
+    // slip past a bare `if (!tier)` check.
+    if (!Object.hasOwn(TOOL_TIERS, toolName)) return textResult(`Unknown tool: ${toolName}`, true);
     const tier = TOOL_TIERS[toolName];
-    if (!tier) return textResult(`Unknown tool: ${toolName}`, true);
 
     const target = buildTargetCall(toolName, args);
     if (!target) return textResult(`Invalid arguments for ${toolName}`, true);
@@ -196,15 +199,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const result = await proxyToRemoteAuto(
-        resolved.server.id,
-        resolved.server.url ?? "",
-        resolved.server.api_key ?? "",
-        "POST",
-        target.path,
-        target.body,
-        { reverseConnectManager: fastify.reverseConnectManager },
-      );
+      // proxyToRemoteAuto cannot throw for outbound targets (proxyOnce catches internally
+      // and returns { ok: false }), but for inbound (reverse-connect) targets it calls
+      // rcm.sendHttpRequest, which can reject. Treat that rejection exactly like a
+      // !result.ok response so it still gets audited and surfaced as a tool error instead
+      // of escaping as a bare 500.
+      let result: ProxyResult;
+      try {
+        result = await proxyToRemoteAuto(
+          resolved.server.id,
+          resolved.server.url ?? "",
+          resolved.server.api_key ?? "",
+          "POST",
+          target.path,
+          target.body,
+          { reverseConnectManager: fastify.reverseConnectManager },
+        );
+      } catch (err) {
+        result = {
+          ok: false,
+          status: 0,
+          data: { error: err instanceof Error ? err.message : String(err) },
+          errorCode: "network_error",
+        };
+      }
 
       if (!result.ok) {
         await audit(payload, remoteId, toolName, target.summary, "error", null, startedAt);

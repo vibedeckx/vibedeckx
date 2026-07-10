@@ -241,4 +241,79 @@ describe("cross-remote MCP gateway", () => {
     const rows = await storage.crossRemoteAudit.listByTarget(targetId);
     expect(rows[0].args_summary.length).toBe(1024);
   });
+
+  it("rejects a 5th concurrent call for the same session while 4 are in flight, and frees a slot once one completes", async () => {
+    let release!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    proxyToRemoteAuto.mockImplementation(() => pending);
+
+    const inFlight = [1, 2, 3, 4].map(() => call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" }));
+
+    // Wait until all 4 have actually reached the (blocked) transport call, i.e. each has
+    // acquired a concurrency-guard slot, before firing the 5th. Fastify's inject() involves
+    // its own async scheduling, so we can't assume 4 synchronous "fire and forget" calls have
+    // all reached guard.acquire() by the time control returns here — poll for it instead.
+    const deadline = Date.now() + 2000;
+    while (proxyToRemoteAuto.mock.calls.length < 4) {
+      if (Date.now() > deadline) throw new Error("Timed out waiting for 4 in-flight calls to reach the transport");
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    const fifth = await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" });
+    expect(fifth.json().result.isError).toBe(true);
+    expect(fifth.json().result.content[0].text).toContain("Too many concurrent");
+    // The 5th call never touched the transport.
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(4);
+
+    release({
+      ok: true,
+      status: 200,
+      data: { stdout: "", stderr: "", exitCode: 0, timedOut: false, truncated: false },
+    });
+    const settled = await Promise.all(inFlight);
+    for (const res of settled) {
+      expect(res.json().result.isError).toBeUndefined();
+    }
+
+    // A slot was freed by the `finally` release, so a subsequent call succeeds.
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { stdout: "", stderr: "", exitCode: 0, timedOut: false, truncated: false },
+    });
+    const after = await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" });
+    expect(after.json().result.isError).toBeUndefined();
+  });
+
+  it("answers a tools/call with no id (a notification) with 202 and no body, without invoking the tool", async () => {
+    const res = await rpc(tokenFor(), {
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { name: "remote_bash", arguments: { remoteId: targetId, command: "uptime" } },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toBe("");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("catches a rejected proxyToRemoteAuto (inbound transport failure) as a tool error and audits it", async () => {
+    proxyToRemoteAuto.mockRejectedValue(new Error("reverse-connect channel closed"));
+
+    const res = await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().result.isError).toBe(true);
+    expect(res.json().result.content[0].text).not.toMatch(/^Internal Server Error/);
+
+    const rows = await storage.crossRemoteAudit.listByTarget(targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("error");
+  });
+
+  it("rejects an inherited Object.prototype property used as a tool name, without invoking the tool", async () => {
+    const res = await call(tokenFor(), "toString", { remoteId: targetId });
+    expect(res.json().result.isError).toBe(true);
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
 });
