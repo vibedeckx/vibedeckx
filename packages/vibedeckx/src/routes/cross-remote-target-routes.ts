@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { promises as fs } from "fs";
+import type { FileHandle } from "fs/promises";
 import { runOneShot, MAX_OUTPUT_BYTES } from "../utils/one-shot-exec.js";
 
 const DEFAULT_TIMEOUT_SEC = 60;
@@ -48,23 +49,41 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!filePath || !path.isAbsolute(filePath)) {
         return reply.code(400).send({ error: "path must be an absolute path" });
       }
+      if (!Number.isInteger(offset) || offset < 0) {
+        return reply.code(400).send({ error: "offset must be a non-negative integer" });
+      }
+      if (!Number.isInteger(limit) || limit <= 0) {
+        return reply.code(400).send({ error: "limit must be a positive integer" });
+      }
+
+      let handle: FileHandle | undefined;
       try {
         const stat = await fs.stat(filePath);
         if (!stat.isFile()) return reply.code(400).send({ error: "path is not a file" });
 
+        if (offset >= stat.size) {
+          return reply.send({ content: "", truncated: false, size: stat.size });
+        }
+
         const cap = Math.min(limit, MAX_OUTPUT_BYTES);
-        const buffer = await fs.readFile(filePath);
-        const slice = buffer.subarray(offset, offset + cap);
+        handle = await fs.open(filePath, "r");
+        const buffer = Buffer.alloc(cap);
+        const { bytesRead } = await handle.read(buffer, 0, cap, offset);
         return reply.send({
-          content: slice.toString("utf8"),
-          truncated: offset + slice.length < buffer.length,
+          content: buffer.subarray(0, bytesRead).toString("utf8"),
+          truncated: offset + bytesRead < stat.size,
           size: stat.size,
         });
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "ENOENT") return reply.code(404).send({ error: "file not found" });
         if (code === "EACCES") return reply.code(403).send({ error: "permission denied" });
+        if (code === "ENOTDIR") return reply.code(400).send({ error: "path is not a directory" });
         return reply.code(500).send({ error: "failed to read file" });
+      } finally {
+        if (handle) {
+          await handle.close().catch(() => {});
+        }
       }
     },
   );
@@ -110,6 +129,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "ENOENT") return reply.code(404).send({ error: "path not found" });
         if (code === "EACCES") return reply.code(403).send({ error: "permission denied" });
+        if (code === "ENOTDIR") return reply.code(400).send({ error: "path is not a directory" });
         return reply.code(500).send({ error: "failed to stat path" });
       }
     },

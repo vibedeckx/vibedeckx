@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import crossRemoteTargetRoutes from "./cross-remote-target-routes.js";
+import { MAX_OUTPUT_BYTES } from "../utils/one-shot-exec.js";
 
 describe("cross-remote target routes", () => {
   let app: FastifyInstance;
@@ -62,6 +63,75 @@ describe("cross-remote target routes", () => {
   it("read-file rejects a relative path", async () => {
     const res = await post("/api/path/cross-remote/read-file", { path: "relative/x.txt" });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("read-file returns only the capped slice of a file larger than MAX_OUTPUT_BYTES, without reading it whole", async () => {
+    const bigSize = MAX_OUTPUT_BYTES * 3;
+    const bigPath = path.join(dir, "big.log");
+    writeFileSync(bigPath, Buffer.alloc(bigSize, "x"));
+
+    const res = await post("/api/path/cross-remote/read-file", { path: bigPath });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { content: string; truncated: boolean; size: number };
+    expect(Buffer.byteLength(body.content)).toBe(MAX_OUTPUT_BYTES);
+    expect(body.truncated).toBe(true);
+    expect(body.size).toBe(bigSize);
+  });
+
+  it("read-file at an offset beyond EOF returns empty content and truncated: false", async () => {
+    const res = await post("/api/path/cross-remote/read-file", {
+      path: path.join(dir, "hello.txt"),
+      offset: 1000,
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { content: string; truncated: boolean; size: number };
+    expect(body.content).toBe("");
+    expect(body.truncated).toBe(false);
+    expect(body.size).toBe(11);
+  });
+
+  it("read-file rejects a negative offset with 400", async () => {
+    const res = await post("/api/path/cross-remote/read-file", {
+      path: path.join(dir, "hello.txt"),
+      offset: -1,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBeTruthy();
+  });
+
+  it("read-file rejects a non-integer limit with 400", async () => {
+    const res = await post("/api/path/cross-remote/read-file", {
+      path: path.join(dir, "hello.txt"),
+      limit: 1.5,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBeTruthy();
+  });
+
+  it("read-file rejects a non-positive limit with 400", async () => {
+    const res = await post("/api/path/cross-remote/read-file", {
+      path: path.join(dir, "hello.txt"),
+      limit: 0,
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("read-file maps ENOTDIR (path traverses through a file) to 400", async () => {
+    const res = await post("/api/path/cross-remote/read-file", {
+      path: path.join(dir, "hello.txt", "nested"),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBeTruthy();
+  });
+
+  it("stat maps ENOTDIR (path traverses through a file) to 400", async () => {
+    const res = await post("/api/path/cross-remote/stat", {
+      path: path.join(dir, "hello.txt", "nested"),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBeTruthy();
   });
 
   it("list-dir lists entries with types", async () => {
