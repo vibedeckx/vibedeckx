@@ -177,6 +177,7 @@ export class AgentSessionManager {
       branch,
       activity: state.activity,
       since: state.since,
+      sessionId: state.sessionId,
     });
     return state;
   }

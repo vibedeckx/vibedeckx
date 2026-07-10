@@ -23,6 +23,15 @@ export interface BranchActivityState {
   activity: BranchActivity;
   /** Epoch ms of the event that determined this state, or 0 for idle-from-no-events. */
   since: number;
+  /**
+   * Id of the agent session whose timestamps determined this state. Carried on
+   * the `branch:activity` event so a completion notification can deep-link to
+   * the exact session (`?session=<id>`) — with several sessions on one branch,
+   * "latest-for-branch" at click time may not be the session that completed.
+   * Absent for orchestrator `main-*` states (chat sessions aren't agent
+   * sessions) and for idle-with-no-sessions.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -71,15 +80,15 @@ export function computeBranchActivity(
     const lastUser = s.last_user_message_at ?? 0;
     const lastCompleted = s.last_completed_at ?? 0;
     if (lastUser === 0 && lastCompleted === 0) {
-      result.set(branch, { activity: "idle", since: 0 });
+      result.set(branch, { activity: "idle", since: 0, sessionId: s.id });
     } else if (lastUser > lastCompleted) {
       if (s.status === "running") {
-        result.set(branch, { activity: "working", since: lastUser });
+        result.set(branch, { activity: "working", since: lastUser, sessionId: s.id });
       } else {
-        result.set(branch, { activity: "stopped", since: lastUser });
+        result.set(branch, { activity: "stopped", since: lastUser, sessionId: s.id });
       }
     } else {
-      result.set(branch, { activity: "completed", since: lastCompleted });
+      result.set(branch, { activity: "completed", since: lastCompleted, sessionId: s.id });
     }
   }
   return result;

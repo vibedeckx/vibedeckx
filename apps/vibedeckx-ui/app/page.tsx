@@ -241,17 +241,25 @@ export default function Home() {
     refetchTasks();
   }, [refetchTasks]);
 
-  const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
+  // Select a specific session in the given branch: the pending-selection ref
+  // keeps the URL-sync effect from stripping ?session= on the branch change
+  // it causes. Shared by the sidebar resident-session click and the
+  // completion-notification click-through.
+  const selectBranchSession = useCallback((branch: string | null, sessionId: string) => {
     pendingSessionSelectionRef.current = {
       projectId: currentProject?.id,
-      branch: resident.branch,
-      sessionId: resident.id,
+      branch,
+      sessionId,
     };
-    setSelectedBranch(resident.branch);
-    setSessionUrlParam(resident.id);
-    setActiveView('workspace');
+    setSelectedBranch(branch);
+    setSessionUrlParam(sessionId);
     setActivateAgentTabNonce((nonce) => nonce + 1);
   }, [currentProject?.id, setSessionUrlParam]);
+
+  const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
+    selectBranchSession(resident.branch, resident.id);
+    setActiveView('workspace');
+  }, [selectBranchSession]);
 
   const handleSessionStarted = useCallback((startedSession: AgentSession) => {
     refetchBranchActivity();
@@ -318,49 +326,61 @@ export default function Home() {
     updateTask(taskId, { assigned_branch: null });
   }, [updateTask]);
 
-  // A cross-project notification click sets this to the branch we want selected
-  // once the target project's worktrees finish loading. Without it, the
-  // project-change effect above resets selectedBranch to null and the
-  // auto-select effect below picks worktrees[0] before our intended branch can
-  // take hold. `undefined` = no pending navigation.
-  const pendingBranchRef = useRef<string | null | undefined>(undefined);
+  // A cross-project notification click sets this to the workspace (branch +
+  // optional session) we want selected once the target project's worktrees
+  // finish loading. Without it, the project-change effect above resets
+  // selectedBranch to null and the auto-select effect below picks worktrees[0]
+  // before our intended branch can take hold. `undefined` = no pending
+  // navigation.
+  const pendingWorkspaceRef = useRef<
+    { branch: string | null; sessionId: string | null } | undefined
+  >(undefined);
 
   // Auto-select first worktree if current selection is not in the list
   useEffect(() => {
     if (worktreesLoading || worktrees.length === 0) return;
-    // Honor a pending cross-project branch selection before any fallback.
-    const pending = pendingBranchRef.current;
+    // Honor a pending cross-project workspace selection before any fallback.
+    const pending = pendingWorkspaceRef.current;
     if (pending !== undefined) {
-      if (worktrees.some(w => w.branch === pending)) {
-        pendingBranchRef.current = undefined;
-        setSelectedBranch(pending);
+      if (worktrees.some(w => w.branch === pending.branch)) {
+        pendingWorkspaceRef.current = undefined;
+        if (pending.sessionId) {
+          selectBranchSession(pending.branch, pending.sessionId);
+        } else {
+          setSelectedBranch(pending.branch);
+        }
         return;
       }
       // Target branch isn't in the freshly-loaded project — drop it and fall
       // through to the normal auto-select.
-      pendingBranchRef.current = undefined;
+      pendingWorkspaceRef.current = undefined;
     }
     if (!worktrees.some(w => w.branch === selectedBranch)) {
       setSelectedBranch(worktrees[0].branch);
     }
-  }, [worktrees, worktreesLoading, selectedBranch]);
+  }, [worktrees, worktreesLoading, selectedBranch, selectBranchSession]);
 
   // Jump to the workspace a completion notification points at. Same project →
-  // select the branch directly; different project → switch projects and let the
-  // auto-select effect honor pendingBranchRef once its worktrees load.
+  // select the branch (and, when known, the exact completed session) directly;
+  // different project → switch projects and let the auto-select effect honor
+  // pendingWorkspaceRef once its worktrees load.
   const handleNavigateToWorkspace = useCallback(
-    (projectId: string, branch: string | null) => {
+    (projectId: string, branch: string | null, sessionId: string | null = null) => {
       setActiveView('workspace');
       if (projectId === currentProject?.id) {
-        setSelectedBranch(branch);
+        if (sessionId) {
+          selectBranchSession(branch, sessionId);
+        } else {
+          setSelectedBranch(branch);
+        }
         return;
       }
       const target = projects.find((p) => p.id === projectId);
       if (!target) return;
-      pendingBranchRef.current = branch;
+      pendingWorkspaceRef.current = { branch, sessionId };
       selectProject(target);
     },
-    [currentProject?.id, projects, selectProject],
+    [currentProject?.id, projects, selectProject, selectBranchSession],
   );
 
   // Track previous (projectId, branch) so we can detect switches.

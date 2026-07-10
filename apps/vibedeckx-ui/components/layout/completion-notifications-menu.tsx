@@ -16,8 +16,12 @@ interface CompletionNotificationsMenuProps {
   notifications: CompletionNotification[];
   unreadCount: number;
   projects: Project[];
-  /** Switch to the workspace the notification points at. */
-  onNavigate: (projectId: string, branch: string | null) => void;
+  /**
+   * Switch to the workspace the notification points at. `sessionId` is the
+   * completed agent session for the `?session=` deep link — null falls back
+   * to the branch's latest session (chat completions, legacy entries).
+   */
+  onNavigate: (projectId: string, branch: string | null, sessionId: string | null) => void;
   markRead: (id: string) => void;
   markAllRead: () => void;
   remove: (id: string) => void;
@@ -119,7 +123,7 @@ export function CompletionNotificationsMenu({
                   key={n.id}
                   onSelect={() => {
                     markRead(n.id);
-                    onNavigate(n.projectId, n.branch);
+                    onNavigate(n.projectId, n.branch, n.sessionId);
                   }}
                   className={cn(
                     "group flex flex-col items-start gap-0.5 rounded-none px-3 py-2",

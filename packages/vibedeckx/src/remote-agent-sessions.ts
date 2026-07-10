@@ -234,7 +234,7 @@ export function connectPersistentRemoteWs(
         agentSessionManager?.emitBranchActivityIfChanged(
           projectId,
           branch,
-          { activity: "completed", since: Date.now() },
+          { activity: "completed", since: Date.now(), sessionId },
         );
       }
     } else if ("processAlive" in parsed) {
@@ -268,7 +268,9 @@ export function connectPersistentRemoteWs(
           agentSessionManager.emitBranchActivityIfChanged(
             projectIdFromRemoteSessionId(sessionId, remoteInfo),
             remoteInfo.branch ?? null,
-            { activity: ba.activity, since: ba.since },
+            // sessionId is the local `remote-` prefixed id — what the frontend
+            // needs for ?session= deep links, not the remote's raw id.
+            { activity: ba.activity, since: ba.since, sessionId },
           );
         }
       }

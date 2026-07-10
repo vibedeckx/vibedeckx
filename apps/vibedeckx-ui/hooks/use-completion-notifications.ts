@@ -32,6 +32,8 @@ interface BranchActivityEvent {
   branch: string | null;
   activity: BranchActivity;
   since: number;
+  /** Agent session that produced this state — absent on `main-*` (chat) events. */
+  sessionId?: string;
 }
 
 export interface CompletionNotification {
@@ -39,6 +41,12 @@ export interface CompletionNotification {
   id: string;
   projectId: string;
   branch: string | null;
+  /**
+   * The completed agent session, for the click-through deep link
+   * (`?session=<id>`). Null for chat completions and entries persisted before
+   * this field existed — those fall back to branch-level navigation.
+   */
+  sessionId: string | null;
   type: CompletionActivity;
   /** Backend emit time (`since`), epoch ms. */
   at: number;
@@ -47,6 +55,31 @@ export interface CompletionNotification {
 
 function notificationKey(projectId: string, branch: string | null): string {
   return `${projectId}:${branch ?? ''}`;
+}
+
+/**
+ * Build the notification entry for a completion event. Pure — exported for
+ * tests.
+ */
+export function notificationFromEvent(
+  evt: {
+    projectId: string;
+    branch: string | null;
+    activity: CompletionActivity;
+    since: number;
+    sessionId?: string;
+  },
+  read: boolean,
+): CompletionNotification {
+  return {
+    id: notificationKey(evt.projectId, evt.branch),
+    projectId: evt.projectId,
+    branch: evt.branch,
+    sessionId: evt.sessionId ?? null,
+    type: evt.activity,
+    at: evt.since,
+    read,
+  };
 }
 
 const STORAGE_KEY = 'vibedeckx:completion-notifications';
@@ -62,20 +95,37 @@ function isStoredNotification(v: unknown): v is CompletionNotification {
     typeof n.id === 'string' &&
     typeof n.projectId === 'string' &&
     (typeof n.branch === 'string' || n.branch === null) &&
+    // sessionId may be missing on entries persisted before the field existed.
+    (typeof n.sessionId === 'string' || n.sessionId === null || n.sessionId === undefined) &&
     (n.type === 'completed' || n.type === 'main-completed') &&
     typeof n.at === 'number' &&
     typeof n.read === 'boolean'
   );
 }
 
+/**
+ * Parse the persisted notification list, dropping malformed entries and
+ * normalizing pre-sessionId entries to `sessionId: null`. Pure — exported for
+ * tests.
+ */
+export function parseStoredNotifications(raw: string | null): CompletionNotification[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isStoredNotification)
+      .map((n) => ({ ...n, sessionId: n.sessionId ?? null }))
+      .slice(0, MAX_NOTIFICATIONS);
+  } catch {
+    return [];
+  }
+}
+
 function loadStored(): CompletionNotification[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isStoredNotification).slice(0, MAX_NOTIFICATIONS);
+    return parseStoredNotifications(window.localStorage.getItem(STORAGE_KEY));
   } catch {
     return [];
   }
@@ -229,17 +279,10 @@ export function useCompletionNotifications(
 
     const read = activeKeyRef.current === key;
     setNotifications((prev) => {
-      const entry: CompletionNotification = {
-        id: key,
-        projectId: evt.projectId,
-        branch: evt.branch,
-        type,
-        at: evt.since,
-        read,
-      };
+      const entry = notificationFromEvent({ ...evt, activity: type }, read);
       // De-dup: one entry per workspace. A repeat completion replaces the
-      // old entry (updated time/type, re-marked unread unless active) and
-      // floats to the top. Trim to MAX_NOTIFICATIONS now that the list
+      // old entry (updated time/type/session, re-marked unread unless active)
+      // and floats to the top. Trim to MAX_NOTIFICATIONS now that the list
       // persists across sessions.
       const rest = prev.filter((n) => n.id !== key);
       return [entry, ...rest].slice(0, MAX_NOTIFICATIONS);

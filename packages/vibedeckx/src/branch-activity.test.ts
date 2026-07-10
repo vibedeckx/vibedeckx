@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import type { AgentSession } from "./storage/types.js";
+import type { AgentSession, Storage } from "./storage/types.js";
+import { AgentSessionManager } from "./agent-session-manager.js";
+import { EventBus, type GlobalEvent } from "./event-bus.js";
 import {
   BranchActivityDedupe,
   computeBranchActivity,
@@ -29,29 +31,29 @@ describe("computeBranchActivity", () => {
   // ---- The four state-machine transitions ----------------------------------
 
   it("session with no timestamps → idle", () => {
-    const result = computeBranchActivity([session({ branch: "feat-a" })]);
-    expect(result.get("feat-a")).toEqual({ activity: "idle", since: 0 });
+    const result = computeBranchActivity([session({ id: "s1", branch: "feat-a" })]);
+    expect(result.get("feat-a")).toEqual({ activity: "idle", since: 0, sessionId: "s1" });
   });
 
   it("user_message_at > completed_at (or completed_at null) → working", () => {
     const result = computeBranchActivity([
-      session({ branch: "feat-a", last_user_message_at: 1000, last_completed_at: null }),
+      session({ id: "s1", branch: "feat-a", last_user_message_at: 1000, last_completed_at: null }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "working", since: 1000 });
+    expect(result.get("feat-a")).toEqual({ activity: "working", since: 1000, sessionId: "s1" });
   });
 
   it("completed_at > user_message_at → completed", () => {
     const result = computeBranchActivity([
-      session({ branch: "feat-a", last_user_message_at: 1000, last_completed_at: 2000 }),
+      session({ id: "s1", branch: "feat-a", last_user_message_at: 1000, last_completed_at: 2000 }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "completed", since: 2000 });
+    expect(result.get("feat-a")).toEqual({ activity: "completed", since: 2000, sessionId: "s1" });
   });
 
   it("user message after completion → working again", () => {
     const result = computeBranchActivity([
-      session({ branch: "feat-a", last_user_message_at: 3000, last_completed_at: 2000 }),
+      session({ id: "s1", branch: "feat-a", last_user_message_at: 3000, last_completed_at: 2000 }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "working", since: 3000 });
+    expect(result.get("feat-a")).toEqual({ activity: "working", since: 3000, sessionId: "s1" });
   });
 
   it("user-stopped mid-turn (status=stopped, user > completed) → stopped", () => {
@@ -60,20 +62,20 @@ describe("computeBranchActivity", () => {
     // "fresh, never had activity") — `stopped` says "you have unfinished
     // work here, come back to it."
     const result = computeBranchActivity([
-      session({ branch: "feat-a", status: "stopped",
+      session({ id: "s1", branch: "feat-a", status: "stopped",
                 last_user_message_at: 1000, last_completed_at: null }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "stopped", since: 1000 });
+    expect(result.get("feat-a")).toEqual({ activity: "stopped", since: 1000, sessionId: "s1" });
   });
 
   it("errored mid-turn (status=error, user > completed) → stopped", () => {
     // Agent process crashed before completing the user's turn. Same surface
     // as user-stopped: abandoned work, not "still working".
     const result = computeBranchActivity([
-      session({ branch: "feat-a", status: "error",
+      session({ id: "s1", branch: "feat-a", status: "error",
                 last_user_message_at: 3000, last_completed_at: 2000 }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "stopped", since: 3000 });
+    expect(result.get("feat-a")).toEqual({ activity: "stopped", since: 3000, sessionId: "s1" });
   });
 
   it("naturally completed (status=stopped, completed >= user) → completed", () => {
@@ -110,7 +112,7 @@ describe("computeBranchActivity", () => {
                 last_user_message_at: 1000, last_completed_at: 2000 }),
       session({ id: "B", branch: "feat-a", updated_at: "2026-01-01 00:00:01.000" }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "idle", since: 0 });
+    expect(result.get("feat-a")).toEqual({ activity: "idle", since: 0, sessionId: "B" });
   });
 
   it("user messages on new session → working from that session's timestamp", () => {
@@ -120,7 +122,7 @@ describe("computeBranchActivity", () => {
       session({ id: "B", branch: "feat-a", updated_at: "2026-01-01 00:00:01.000",
                 last_user_message_at: 5000 }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "working", since: 5000 });
+    expect(result.get("feat-a")).toEqual({ activity: "working", since: 5000, sessionId: "B" });
   });
 
   it("user messages on older session bumps it to latest", () => {
@@ -131,7 +133,7 @@ describe("computeBranchActivity", () => {
                 last_user_message_at: 7000 }),
       session({ id: "B", branch: "feat-a", updated_at: "2026-01-01 00:00:01.000" }),
     ]);
-    expect(result.get("feat-a")).toEqual({ activity: "working", since: 7000 });
+    expect(result.get("feat-a")).toEqual({ activity: "working", since: 7000, sessionId: "A" });
   });
 
   // ---- Multi-branch & null branch ------------------------------------------
@@ -181,6 +183,56 @@ describe("computeBranchActivity", () => {
     ]);
     // B has newer created_at, no timestamps → idle
     expect(result.get("feat-a")?.activity).toBe("idle");
+  });
+});
+
+describe("computeBranchActivity sessionId", () => {
+  // The completion-notification deep link (?session=<id>) needs to know WHICH
+  // session produced the branch state, not just the branch — with several
+  // sessions running on one branch, "latest-for-branch" at click time can be a
+  // different session than the one that completed.
+
+  it("carries the id of the session that determined the branch state", () => {
+    const result = computeBranchActivity([
+      session({ id: "sess-1", branch: "feat-a",
+                last_user_message_at: 1000, last_completed_at: 2000 }),
+    ]);
+    expect(result.get("feat-a")?.sessionId).toBe("sess-1");
+  });
+
+  it("uses the latest session's id when several sessions share a branch", () => {
+    const result = computeBranchActivity([
+      session({ id: "old", branch: "feat-a", updated_at: "2026-01-01 00:00:00.000",
+                last_user_message_at: 1000, last_completed_at: 2000 }),
+      session({ id: "new", branch: "feat-a", updated_at: "2026-01-02 00:00:00.000",
+                last_user_message_at: 3000, last_completed_at: 4000 }),
+    ]);
+    expect(result.get("feat-a")?.sessionId).toBe("new");
+  });
+});
+
+describe("AgentSessionManager.emitBranchActivityIfChanged", () => {
+  it("includes the state's sessionId in the emitted branch:activity event", () => {
+    const manager = new AgentSessionManager({} as Storage);
+    const bus = new EventBus();
+    manager.setEventBus(bus);
+    const events: GlobalEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    manager.emitBranchActivityIfChanged("proj-1", "feat-a", {
+      activity: "completed",
+      since: 123,
+      sessionId: "sess-9",
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "branch:activity",
+      projectId: "proj-1",
+      branch: "feat-a",
+      activity: "completed",
+      sessionId: "sess-9",
+    });
   });
 });
 

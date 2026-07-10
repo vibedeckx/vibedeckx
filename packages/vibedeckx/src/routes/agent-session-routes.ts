@@ -745,7 +745,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       fastify.agentSessionManager.emitBranchActivityIfChanged(
         projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
         remoteInfo.branch ?? null,
-        { activity: "working", since: Date.now() },
+        { activity: "working", since: Date.now(), sessionId: req.params.sessionId },
       );
       // First-message title generation runs locally (uses the same
       // chat_provider config as main chat), then PATCHes the result back to
