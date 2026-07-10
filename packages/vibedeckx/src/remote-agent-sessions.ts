@@ -70,30 +70,43 @@ export async function createRemoteAgentSession(
     branch: branch ?? null,
   });
 
-  const result = await proxyToRemoteAuto(
-    agentMode,
-    remoteConfig.server_url ?? "",
-    remoteConfig.server_api_key || "",
-    "POST",
-    `/api/path/agent-sessions/new`,
-    { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp },
-    { reverseConnectManager: deps.reverseConnectManager ?? undefined },
-  );
-  if (!result.ok) {
-    deps.remoteSessionMap.delete(localSessionId);
-    return { ok: false, status: result.status, data: result.data };
-  }
+  // Everything after the pre-registration must clean up the map entry on *any*
+  // failure — a returned { ok: false } as well as a thrown transport/DB error.
+  // Otherwise a stale entry keeps a dead session id "usable" to the gateway
+  // (isSessionUsable checks remoteSessionMap.has) until process restart.
+  let remoteData: { session: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] };
+  try {
+    const result = await proxyToRemoteAuto(
+      agentMode,
+      remoteConfig.server_url ?? "",
+      remoteConfig.server_api_key || "",
+      "POST",
+      `/api/path/agent-sessions/new`,
+      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp },
+      { reverseConnectManager: deps.reverseConnectManager ?? undefined },
+    );
+    if (!result.ok) {
+      deps.remoteSessionMap.delete(localSessionId);
+      return { ok: false, status: result.status, data: result.data };
+    }
 
-  const remoteData = result.data as { session: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] };
-  if (remoteData.session.id !== remoteSessionId) {
-    // An older remote that ignores the supplied id. Fail closed: the token we minted
-    // names a session that does not exist, so cross-remote calls would be rejected
-    // anyway, and the map entry we registered would be wrong.
-    deps.remoteSessionMap.delete(localSessionId);
-    return { ok: false, status: 409, data: { error: "Remote returned an unexpected session id; upgrade the remote" } };
-  }
+    remoteData = result.data as { session: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] };
+    if (remoteData.session.id !== remoteSessionId) {
+      // An older remote that ignores the supplied id. Fail closed: the token we minted
+      // names a session that does not exist, so cross-remote calls would be rejected
+      // anyway, and the map entry we registered would be wrong.
+      deps.remoteSessionMap.delete(localSessionId);
+      return { ok: false, status: 409, data: { error: "Remote returned an unexpected session id; upgrade the remote" } };
+    }
 
-  await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null);
+    await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null);
+  } catch (err) {
+    // A thrown transport error (reverse-connect send) or DB write rejection leaves
+    // the pre-registered entry orphaned. Remove it, then rethrow so the caller's
+    // existing 502 behavior is preserved and the original error is not swallowed.
+    deps.remoteSessionMap.delete(localSessionId);
+    throw err;
+  }
 
   if (remoteData.messages && remoteData.messages.length > 0) {
     const cacheEntry = deps.remotePatchCache.getOrCreate(localSessionId);
