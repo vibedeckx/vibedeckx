@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
-import type { RemoteServer } from "../storage/types.js";
+import type { RemoteServer, CrossRemoteAccess } from "../storage/types.js";
 import { proxyToRemote, proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
@@ -9,6 +9,11 @@ function sanitizeServer(server: RemoteServer) {
   const { api_key: _, connect_token: _t, ...safe } = server;
   return safe;
 }
+
+const CROSS_REMOTE_ACCESS_VALUES: readonly CrossRemoteAccess[] = ["off", "read", "exec"];
+
+const isCrossRemoteAccess = (value: unknown): value is CrossRemoteAccess =>
+  typeof value === "string" && (CROSS_REMOTE_ACCESS_VALUES as readonly string[]).includes(value);
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // GET /api/remote-servers — list all (api_key sanitized)
@@ -56,15 +61,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
-      const { name, url, apiKey } = request.body as {
+      const { name, url, apiKey, crossRemoteAccess } = request.body as {
         name?: string;
         url?: string;
         apiKey?: string;
+        crossRemoteAccess?: string;
       };
+
+      if (crossRemoteAccess !== undefined && !isCrossRemoteAccess(crossRemoteAccess)) {
+        return reply.code(400).send({ error: "crossRemoteAccess must be one of: off, read, exec" });
+      }
+
       const server = await fastify.storage.remoteServers.update(id, {
         name,
         url,
         api_key: apiKey,
+        cross_remote_access: crossRemoteAccess,
       }, userId);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
