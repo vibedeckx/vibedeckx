@@ -31,6 +31,7 @@ import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
 import browserRoutes from "./routes/browser-routes.js";
 import browserProxyRoutes from "./routes/browser-proxy-routes.js";
+import crossRemoteTargetRoutes from "./routes/cross-remote-target-routes.js";
 import scheduleRoutes from "./routes/schedule-routes.js";
 import { getAuth, clerkClient } from "@clerk/fastify";
 import { getLogger } from "./logger.js";
@@ -317,6 +318,7 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.register(terminalRoutes);
   server.register(browserRoutes);
   server.register(browserProxyRoutes);
+  server.register(crossRemoteTargetRoutes);
 
   // 提供静态 UI 文件
   server.register(fastifyStatic, {
