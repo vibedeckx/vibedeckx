@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, promises as fsPromises } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import crossRemoteTargetRoutes from "./cross-remote-target-routes.js";
@@ -66,6 +66,11 @@ describe("cross-remote target routes", () => {
   });
 
   it("read-file returns only the capped slice of a file larger than MAX_OUTPUT_BYTES, without reading it whole", async () => {
+    // A regression to `fs.readFile` (whole-file read) would satisfy the response-shape
+    // assertions below just as well as the positional fs.open/handle.read implementation
+    // does, so pin the actual mechanism: the route must never call the whole-file reader.
+    const readFileSpy = vi.spyOn(fsPromises, "readFile");
+
     const bigSize = MAX_OUTPUT_BYTES * 3;
     const bigPath = path.join(dir, "big.log");
     writeFileSync(bigPath, Buffer.alloc(bigSize, "x"));
@@ -77,6 +82,9 @@ describe("cross-remote target routes", () => {
     expect(Buffer.byteLength(body.content)).toBe(MAX_OUTPUT_BYTES);
     expect(body.truncated).toBe(true);
     expect(body.size).toBe(bigSize);
+    expect(readFileSpy).not.toHaveBeenCalled();
+
+    readFileSpy.mockRestore();
   });
 
   it("read-file at an offset beyond EOF returns empty content and truncated: false", async () => {

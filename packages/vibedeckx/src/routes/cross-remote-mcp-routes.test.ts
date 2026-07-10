@@ -166,6 +166,26 @@ describe("cross-remote MCP gateway", () => {
     });
   });
 
+  it("still returns the normal tool result when the audit insert rejects", async () => {
+    const auditError = new Error("audit db unavailable");
+    vi.spyOn(storage.crossRemoteAudit, "insert").mockRejectedValueOnce(auditError);
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { stdout: "linux\n", stderr: "", exitCode: 0, timedOut: false, truncated: false },
+    });
+
+    const res = await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uname" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().result.isError).toBeUndefined();
+    expect(res.json().result.content[0].text).toContain("linux");
+    expect(logSpy).toHaveBeenCalled();
+
+    logSpy.mockRestore();
+  });
+
   it("denies remote_bash against a read-tier target and audits the denial", async () => {
     await storage.remoteServers.update(targetId, { cross_remote_access: "read" }, "user-1");
 
@@ -312,8 +332,21 @@ describe("cross-remote MCP gateway", () => {
   });
 
   it("rejects an inherited Object.prototype property used as a tool name, without invoking the tool", async () => {
+    // Pin the actual gate: TOOL_TIERS has no own "toString" property, so
+    // Object.hasOwn(TOOL_TIERS, "toString") is false and callTool must short-circuit with
+    // the unknown-tool message *before* ever reaching buildTargetCall's "Invalid arguments"
+    // path (which, before the Object.hasOwn fix, is what a bare `if (!tier)` check would
+    // have fallen through to instead, via buildTargetCall's switch default returning null).
     const res = await call(tokenFor(), "toString", { remoteId: targetId });
     expect(res.json().result.isError).toBe(true);
+    expect(res.json().result.content[0].text).toBe("Unknown tool: toString");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("rejects the inherited 'constructor' property used as a tool name, without invoking the tool", async () => {
+    const res = await call(tokenFor(), "constructor", { remoteId: targetId });
+    expect(res.json().result.isError).toBe(true);
+    expect(res.json().result.content[0].text).toBe("Unknown tool: constructor");
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
 });

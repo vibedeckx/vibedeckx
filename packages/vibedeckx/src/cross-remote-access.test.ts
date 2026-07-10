@@ -107,6 +107,13 @@ describe("cross-remote access", () => {
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
     });
 
+    it("denies a target left at the default 'off' tier for an exec-tier tool", async () => {
+      // The read-tier variant above never exercises tierSatisfies('off', 'exec').
+      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const result = await resolveTarget(deps, payload(), b.id, "exec");
+      expect(result).toEqual({ ok: false, reason: "not_accessible" });
+    });
+
     it("denies a target owned by another user", async () => {
       const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-2");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-2");
@@ -121,6 +128,17 @@ describe("cross-remote access", () => {
 
       const result = await resolveTarget(deps, payload({ sourceRemoteServerId: a.id }), a.id, "read");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
+    });
+
+    it("resolves a valid opted-in target when sourceRemoteServerId is null", async () => {
+      // Every other test uses a truthy sourceRemoteServerId, so the
+      // `payload.sourceRemoteServerId &&` short-circuit in the self-target guard is
+      // otherwise never exercised with a null source.
+      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
+
+      const result = await resolveTarget(deps, payload({ sourceRemoteServerId: null }), b.id, "read");
+      expect(result.ok).toBe(true);
     });
 
     it("denies an unknown remote id", async () => {
@@ -163,6 +181,19 @@ describe("cross-remote access", () => {
     it("returns nothing for a user with no opted-in remotes", async () => {
       await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
       expect(await listAccessibleRemotes(deps, payload())).toEqual([]);
+    });
+
+    it("excludes no remotes when sourceRemoteServerId is null", async () => {
+      // With a truthy source, `s.id !== payload.sourceRemoteServerId` excludes exactly the
+      // source. A regression that treated a null source as matching every remote's id
+      // (or vice versa) would silently drop entries here.
+      const a = await storage.remoteServers.create({ name: "a", url: "http://a:5173" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      await storage.remoteServers.update(a.id, { cross_remote_access: "exec" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
+
+      const list = await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: null }));
+      expect(list.map((r) => r.id).sort()).toEqual([a.id, b.id].sort());
     });
   });
 

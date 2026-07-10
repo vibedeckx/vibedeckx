@@ -50,6 +50,12 @@ describe("cross-remote token", () => {
     expect(verifyCrossRemoteToken(SECRET, token, NOW + CROSS_REMOTE_TOKEN_TTL_MS - 1)).toEqual(payload);
   });
 
+  it("rejects a token exactly at its expiry instant", () => {
+    // A `>=` -> `>` regression on the expiry check would let this slip through.
+    const token = signCrossRemoteToken(SECRET, payload, NOW);
+    expect(verifyCrossRemoteToken(SECRET, token, NOW + CROSS_REMOTE_TOKEN_TTL_MS)).toBeNull();
+  });
+
   it("rejects structurally invalid tokens", () => {
     expect(verifyCrossRemoteToken(SECRET, "", NOW)).toBeNull();
     expect(verifyCrossRemoteToken(SECRET, "no-dot", NOW)).toBeNull();

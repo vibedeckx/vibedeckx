@@ -136,11 +136,21 @@ const textResult = (text: string, isError = false) => ({
 const routes: FastifyPluginAsync = async (fastify) => {
   const guard = new SessionConcurrencyGuard();
 
+  // Memoized lazily: the secret is bootstrapped once via settings.getOrCreate and never
+  // rotates at runtime, so there's no invalidation to wire up. Kept lazy (not read at
+  // plugin-registration time) so tests that create the secret after the app is built
+  // still see it on the first authenticated request.
+  let cachedSecret: Promise<string> | undefined;
+  const getSecret = (): Promise<string> => {
+    if (!cachedSecret) cachedSecret = getCrossRemoteSecret(fastify.storage);
+    return cachedSecret;
+  };
+
   const authenticate = async (request: FastifyRequest): Promise<CrossRemoteTokenPayload | null> => {
     const header = request.headers.authorization;
     if (!header?.startsWith("Bearer ")) return null;
 
-    const secret = await getCrossRemoteSecret(fastify.storage);
+    const secret = await getSecret();
     const payload = verifyCrossRemoteToken(secret, header.slice("Bearer ".length), Date.now());
     if (!payload) return null;
     if (!isSessionUsable(fastify as unknown as AccessDeps, payload.sessionId)) return null;
@@ -156,17 +166,25 @@ const routes: FastifyPluginAsync = async (fastify) => {
     exitCode: number | null,
     startedAt: number,
   ) => {
-    await fastify.storage.crossRemoteAudit.insert({
-      user_id: payload.userId,
-      session_id: payload.sessionId,
-      source_remote_id: payload.sourceRemoteServerId,
-      target_remote_id: targetRemoteId,
-      tool_name: toolName,
-      args_summary: summary.slice(0, AUDIT_ARGS_MAX),
-      exit_code: exitCode,
-      duration_ms: Date.now() - startedAt,
-      status,
-    });
+    // Must never throw: the remote call has already executed by every call site (or was
+    // deliberately not attempted), and the caller's response describes that outcome. An
+    // audit-insert failure (e.g. a transient DB error) is a logging concern, not a reason
+    // to turn a real result into a bare 500.
+    try {
+      await fastify.storage.crossRemoteAudit.insert({
+        user_id: payload.userId,
+        session_id: payload.sessionId,
+        source_remote_id: payload.sourceRemoteServerId,
+        target_remote_id: targetRemoteId,
+        tool_name: toolName,
+        args_summary: summary.slice(0, AUDIT_ARGS_MAX),
+        exit_code: exitCode,
+        duration_ms: Date.now() - startedAt,
+        status,
+      });
+    } catch (err) {
+      console.error("[CrossRemoteMCP] Failed to write audit row:", err);
+    }
   };
 
   const callTool = async (payload: CrossRemoteTokenPayload, toolName: string, args: Record<string, unknown>) => {
