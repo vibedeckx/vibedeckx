@@ -42,7 +42,7 @@ No test framework is configured.
 
 ### Backend (`packages/vibedeckx/src/`)
 
-**Server** (`server.ts`): Fastify with CORS, optional API key auth (`VIBEDECKX_API_KEY` env var), WebSocket support, and static file serving of the bundled UI.
+**Server** (`server.ts`): Fastify with CORS, optional API key auth (`VIBEDECKX_API_KEY` env var), WebSocket support, and static file serving of the bundled UI. The cross-remote MCP gateway (letting an agent on one remote diagnose another) requires `VIBEDECKX_PUBLIC_URL` — the SaaS server's publicly reachable base URL (e.g. `https://app.example.com`). Without it no session-scoped token is minted and no `--mcp-config` is injected, so the feature stays off.
 
 **Storage** (`storage/`): SQLite via `better-sqlite3` with WAL mode. Database at `~/.vibedeckx/data.sqlite`. Schema auto-created on startup. `Storage` interface in `types.ts`, implementation in `sqlite.ts`. Entities: projects, executor_groups, executors, executor_processes, agent_sessions, tasks.
 
