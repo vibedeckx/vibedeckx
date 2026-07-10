@@ -7,6 +7,7 @@
  */
 
 import type { AgentType, ContentPart } from "./agent-types.js";
+import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 export type { AgentType };
 
 // ============ SpawnConfig (task 1.3) ============
@@ -54,7 +55,7 @@ export interface AgentProvider {
   isAvailable?(): boolean;
 
   /** Build the spawn configuration for launching the agent process. */
-  buildSpawnConfig(cwd: string, permissionMode: "plan" | "edit"): SpawnConfig;
+  buildSpawnConfig(cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig;
 
   /** Parse a single stdout line into zero or more agent events. */
   parseStdoutLine(line: string, sessionId: string): ParsedAgentEvent[];

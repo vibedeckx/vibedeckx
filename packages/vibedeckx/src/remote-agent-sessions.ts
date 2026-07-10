@@ -12,6 +12,7 @@ import { randomUUID } from "crypto";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import { statusEventFromRemotePatch, projectIdFromRemoteSessionId } from "./routes/remote-status-bridge.js";
 import type { EventBus } from "./event-bus.js";
+import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 
 export interface RemoteAgentSessionDeps {
   remoteSessionMap: Map<string, RemoteSessionInfo>;
@@ -19,6 +20,7 @@ export interface RemoteAgentSessionDeps {
   remotePatchCache: RemotePatchCache;
   agentSessionManager: AgentSessionManager;
   reverseConnectManager: ReverseConnectManager | null;
+  storage: Storage;
 }
 
 export type CreateRemoteAgentSessionResult =
@@ -42,9 +44,31 @@ export async function createRemoteAgentSession(
     permissionMode: "plan" | "edit";
     agentType?: string;
     force?: boolean;
+    userId: string | undefined;
   },
 ): Promise<CreateRemoteAgentSessionResult> {
-  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, force } = params;
+  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, force, userId } = params;
+
+  // The server picks the session id so it can mint a token bound to it before the
+  // remote spawns claude. The remote honours the supplied id.
+  const remoteSessionId = randomUUID();
+  const localSessionId = `remote-${agentMode}-${projectId}-${remoteSessionId}`;
+
+  const crossRemoteMcp = await mintCrossRemoteMcpConfig(
+    { storage: deps.storage },
+    { userId, sessionId: localSessionId, sourceRemoteServerId: agentMode },
+  );
+
+  // Register before the call, not after: createNewSession on the remote spawns claude
+  // before it responds, and claude connects to its MCP servers at startup. A late
+  // registration would make isSessionUsable reject the agent's first tool call.
+  deps.remoteSessionMap.set(localSessionId, {
+    remoteServerId: agentMode,
+    remoteUrl: remoteConfig.server_url ?? "",
+    remoteApiKey: remoteConfig.server_api_key || "",
+    remoteSessionId,
+    branch: branch ?? null,
+  });
 
   const result = await proxyToRemoteAuto(
     agentMode,
@@ -52,24 +76,24 @@ export async function createRemoteAgentSession(
     remoteConfig.server_api_key || "",
     "POST",
     `/api/path/agent-sessions/new`,
-    { path: remoteConfig.remote_path, branch, permissionMode, agentType, force },
+    { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp },
     { reverseConnectManager: deps.reverseConnectManager ?? undefined },
   );
   if (!result.ok) {
+    deps.remoteSessionMap.delete(localSessionId);
     return { ok: false, status: result.status, data: result.data };
   }
 
   const remoteData = result.data as { session: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] };
-  const localSessionId = `remote-${agentMode}-${projectId}-${remoteData.session.id}`;
+  if (remoteData.session.id !== remoteSessionId) {
+    // An older remote that ignores the supplied id. Fail closed: the token we minted
+    // names a session that does not exist, so cross-remote calls would be rejected
+    // anyway, and the map entry we registered would be wrong.
+    deps.remoteSessionMap.delete(localSessionId);
+    return { ok: false, status: 409, data: { error: "Remote returned an unexpected session id; upgrade the remote" } };
+  }
 
-  deps.remoteSessionMap.set(localSessionId, {
-    remoteServerId: agentMode,
-    remoteUrl: remoteConfig.server_url ?? "",
-    remoteApiKey: remoteConfig.server_api_key || "",
-    remoteSessionId: remoteData.session.id,
-    branch: branch ?? null,
-  });
-  await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteData.session.id, branch ?? null);
+  await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null);
 
   if (remoteData.messages && remoteData.messages.length > 0) {
     const cacheEntry = deps.remotePatchCache.getOrCreate(localSessionId);

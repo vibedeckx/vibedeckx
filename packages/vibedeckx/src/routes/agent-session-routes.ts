@@ -13,6 +13,8 @@ import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
+import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
+import { randomUUID } from "crypto";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -221,9 +223,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Path-based: always create a new session (for remote `/new` proxy target)
   fastify.post<{
-    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean };
+    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig };
   }>("/api/path/agent-sessions/new", async (req, reply) => {
-    const { path: projectPath, branch, permissionMode, agentType, force } = req.body;
+    const { path: projectPath, branch, permissionMode, agentType, force, sessionId, crossRemoteMcp } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
@@ -244,7 +246,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const sessionId = await fastify.agentSessionManager.createNewSession(
+      const createdSessionId = await fastify.agentSessionManager.createNewSession(
         pseudoProjectId,
         branch ?? null,
         projectPath,
@@ -253,11 +255,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         (agentType as AgentType) || "claude-code",
         false,
         force === true,
+        { sessionId, crossRemoteMcp },
       );
-      const session = fastify.agentSessionManager.getSession(sessionId);
+      const session = fastify.agentSessionManager.getSession(createdSessionId);
       return reply.code(200).send({
         session: {
-          id: sessionId,
+          id: createdSessionId,
           projectId: pseudoProjectId,
           branch: branch ?? null,
           status: session?.status || "running",
@@ -566,6 +569,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             remotePatchCache: fastify.remotePatchCache,
             agentSessionManager: fastify.agentSessionManager,
             reverseConnectManager: fastify.reverseConnectManager,
+            storage: fastify.storage,
           },
           {
             projectId: project.id,
@@ -575,6 +579,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             permissionMode: permissionMode || "edit",
             agentType,
             force: force === true,
+            userId,
           },
         );
         if (created.ok) {
@@ -595,6 +600,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
+      const preSessionId = randomUUID();
+      const crossRemoteMcp = await mintCrossRemoteMcpConfig(
+        { storage: fastify.storage },
+        { userId, sessionId: preSessionId, sourceRemoteServerId: null },
+      );
+
       const sessionId = await fastify.agentSessionManager.createNewSession(
         req.params.projectId,
         branch ?? null,
@@ -604,6 +615,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         (agentType as AgentType) || "claude-code",
         false,
         force === true,
+        { sessionId: preSessionId, crossRemoteMcp },
       );
       const session = fastify.agentSessionManager.getSession(sessionId);
       return reply.code(200).send({

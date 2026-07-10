@@ -133,4 +133,25 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     const line = JSON.stringify({ type: "system", subtype: "task_notification", status: "completed" });
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([]);
   });
+
+  it("omits --mcp-config when no cross-remote config is given", () => {
+    const provider = new ClaudeCodeProvider();
+    const config = provider.buildSpawnConfig("/tmp", "edit");
+    expect(config.args).not.toContain("--mcp-config");
+  });
+
+  it("appends --mcp-config with the cross-remote server when given", () => {
+    const provider = new ClaudeCodeProvider();
+    const config = provider.buildSpawnConfig("/tmp", "edit", {
+      url: "https://app.example.com/api/cross-remote-mcp",
+      token: "tok",
+    });
+
+    const flagIndex = config.args.indexOf("--mcp-config");
+    expect(flagIndex).toBeGreaterThan(-1);
+
+    const blob = JSON.parse(config.args[flagIndex + 1]);
+    expect(blob.mcpServers["cross-remote"].url).toBe("https://app.example.com/api/cross-remote-mcp");
+    expect(blob.mcpServers["cross-remote"].headers.Authorization).toBe("Bearer tok");
+  });
 });

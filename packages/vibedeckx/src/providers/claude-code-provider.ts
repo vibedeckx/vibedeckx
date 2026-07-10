@@ -2,6 +2,7 @@ import { execFileSync } from "child_process";
 import type { AgentType, ContentPart } from "../agent-types.js";
 import type { ClaudeOutputMessage, ClaudeContentBlock } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
+import { buildMcpConfigArg, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 
 export class ClaudeCodeProvider implements AgentProvider {
   private binaryPath: string | null | undefined = undefined;
@@ -43,7 +44,7 @@ export class ClaudeCodeProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit"): SpawnConfig {
+  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
     const nativeBinary = this.detectBinary();
 
     const permissionFlag = permissionMode === "plan"
@@ -62,6 +63,10 @@ export class ClaudeCodeProvider implements AgentProvider {
       "AskUserQuestion",
       "--verbose",
     ];
+
+    if (crossRemoteMcp) {
+      claudeArgs.push("--mcp-config", buildMcpConfigArg(crossRemoteMcp));
+    }
 
     if (nativeBinary) {
       return { command: nativeBinary, args: claudeArgs };

@@ -11,6 +11,7 @@ import type {
 } from "./agent-types.js";
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
+import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
@@ -102,6 +103,8 @@ interface RunningSession {
   bgSpawnHintsThisTurn: number;
   taskStartedThisTurn: number;
   lastActiveAt: number;
+  /** Injected at spawn, never persisted: a token is useless once the process holding it exits. */
+  crossRemoteMcp?: CrossRemoteMcpConfig;
 }
 
 export class AgentSessionManager {
@@ -392,10 +395,12 @@ export class AgentSessionManager {
     agentType: AgentType = "claude-code",
     announceRunning: boolean = false,
     force: boolean = false,
+    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig } = {},
   ): Promise<string> {
     await this.ensureResidentCapacity({ projectId, branch }, { force });
 
-    const sessionId = randomUUID();
+    // The caller may supply the id so it can mint a session-scoped token before spawn.
+    const sessionId = opts.sessionId ?? randomUUID();
     const branchKey = branch ?? "";
 
     // Calculate absolute worktree path
@@ -435,6 +440,7 @@ export class AgentSessionManager {
       buffer: "",
       skipDb,
       permissionMode,
+      crossRemoteMcp: opts.crossRemoteMcp,
       agentType,
       backgroundTasks: new Set(),
       bgSpawnHintsThisTurn: 0,
@@ -570,7 +576,7 @@ export class AgentSessionManager {
       return;
     }
 
-    const config = provider.buildSpawnConfig(cwd, session.permissionMode);
+    const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp);
 
     // Per-spawn state for diagnosing startup failures (e.g. agent not installed).
     session.producedOutput = false;

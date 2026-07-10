@@ -1,6 +1,7 @@
 import { execFileSync } from "child_process";
 import type { AgentType, ContentPart } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
+import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 
 interface CodexSessionState {
   threadId: string | null;
@@ -59,7 +60,7 @@ export class CodexProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit"): SpawnConfig {
+  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", _crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
     // Store permissionMode for use in formatUserInput's turn/start params (task 5.12)
     this.lastPermissionMode = permissionMode;
     const nativeBinary = this.detectBinary();

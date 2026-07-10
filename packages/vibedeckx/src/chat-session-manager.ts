@@ -546,8 +546,9 @@ export class ChatSessionManager {
           remotePatchCache: this.remotePatchCache,
           agentSessionManager: this.agentSessionManager,
           reverseConnectManager: this.reverseConnectManager,
+          storage: this.storage,
         },
-        { projectId, agentMode, remoteConfig, branch, permissionMode: "edit", agentType },
+        { projectId, agentMode, remoteConfig, branch, permissionMode: "edit", agentType, userId: undefined },
       );
     } catch (error) {
       return { success: false, message: `Remote server unreachable, could not start the coding agent: ${String(error)}` };
