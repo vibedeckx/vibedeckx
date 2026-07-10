@@ -234,6 +234,7 @@ export interface Project {
 
 export type RemoteServerConnectionMode = 'outbound' | 'inbound';
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
+export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
 export interface RemoteServer {
   id: string;
@@ -244,6 +245,7 @@ export interface RemoteServer {
   last_connected_at?: string;
   created_at: string;
   updated_at: string;
+  cross_remote_access: CrossRemoteAccess;
 }
 
 export interface ProjectRemote {
@@ -1995,7 +1997,7 @@ export const api = {
     return data.server;
   },
 
-  async updateRemoteServer(id: string, opts: { name?: string; url?: string; apiKey?: string }): Promise<RemoteServer> {
+  async updateRemoteServer(id: string, opts: { name?: string; url?: string; apiKey?: string; crossRemoteAccess?: CrossRemoteAccess }): Promise<RemoteServer> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -2005,8 +2007,8 @@ export const api = {
       const error = await res.json();
       throw new Error(error.error);
     }
-    const data = await res.json();
-    return data.server;
+    // The PUT handler replies with the sanitized server object directly, not { server }.
+    return (await res.json()) as RemoteServer;
   },
 
   async deleteRemoteServer(id: string): Promise<void> {

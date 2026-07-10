@@ -19,7 +19,14 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { api, type RemoteServer, type RemoteServerConnectionMode } from '@/lib/api';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { api, type RemoteServer, type RemoteServerConnectionMode, type CrossRemoteAccess } from '@/lib/api';
 import {
   Globe,
   Plus,
@@ -228,6 +235,17 @@ export function RemoteServersSettings() {
     setTimeout(() => setTokenCopied(false), 2000);
   };
 
+  // --- Cross-remote access ---
+
+  const handleAccessChange = async (server: RemoteServer, access: CrossRemoteAccess) => {
+    try {
+      const updated = await api.updateRemoteServer(server.id, { crossRemoteAccess: access });
+      setServers((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update access');
+    }
+  };
+
   const renderStatusDot = (server: RemoteServer) => {
     if (server.connection_mode !== 'inbound') return null;
     const isOnline = server.status === 'online';
@@ -306,6 +324,7 @@ export function RemoteServersSettings() {
               <TableHead>Name</TableHead>
               <TableHead>Mode</TableHead>
               <TableHead>URL / Status</TableHead>
+              <TableHead>Cross-remote access</TableHead>
               <TableHead className="w-[180px] text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -331,6 +350,21 @@ export function RemoteServersSettings() {
                   {server.connection_mode === 'inbound'
                     ? (server.status === 'online' ? 'Connected' : 'Waiting for connection...')
                     : server.url}
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={server.cross_remote_access}
+                    onValueChange={(value) => handleAccessChange(server, value as CrossRemoteAccess)}
+                  >
+                    <SelectTrigger className="w-[190px] text-[12.5px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off" className="text-[12.5px]">Off</SelectItem>
+                      <SelectItem value="read" className="text-[12.5px]">Diagnostic read</SelectItem>
+                      <SelectItem value="exec" className="text-[12.5px]">Command execution</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
@@ -376,6 +410,14 @@ export function RemoteServersSettings() {
           </TableBody>
         </Table>
       )}
+
+      <p className="text-xs text-muted-foreground">
+        When enabled, agents running on your other machines can reach this one.
+        <strong> Diagnostic read</strong> exposes files, directories and the process list —
+        including any secrets in logs and config files.
+        <strong> Command execution</strong> additionally allows arbitrary shell commands.
+        Off by default.
+      </p>
 
       {/* Add/Edit Server Dialog */}
       <Dialog open={isFormOpen} onOpenChange={setIsFormOpen}>
