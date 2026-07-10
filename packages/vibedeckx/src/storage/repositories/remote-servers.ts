@@ -7,6 +7,7 @@ import type {
   RemoteServer,
   RemoteServerConnectionMode,
   RemoteServerStatus,
+  CrossRemoteAccess,
   ProjectRemote,
   ProjectRemoteWithServer,
   SyncButtonConfig,
@@ -22,6 +23,7 @@ const mapRemoteServer = (row: Selectable<RemoteServersTable>): RemoteServer => (
   connect_token_created_at: row.connect_token_created_at ?? undefined,
   status: (row.status as RemoteServerStatus) ?? "unknown",
   last_connected_at: row.last_connected_at ?? undefined,
+  cross_remote_access: (row.cross_remote_access as CrossRemoteAccess) ?? "off",
   created_at: row.created_at,
   updated_at: row.updated_at,
 });
@@ -108,6 +110,7 @@ export const createRemoteServerRepos = (
       if (opts.url !== undefined) sets.url = opts.url;
       if (opts.api_key !== undefined) sets.api_key = opts.api_key;
       if (opts.connection_mode !== undefined) sets.connection_mode = opts.connection_mode;
+      if (opts.cross_remote_access !== undefined) sets.cross_remote_access = opts.cross_remote_access;
 
       if (Object.keys(sets).length > 0) {
         sets.updated_at = sql`datetime('now')`;

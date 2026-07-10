@@ -611,6 +611,18 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     }
   }
 
+  // Migration: per-remote cross-remote access tier ('off' | 'read' | 'exec')
+  // Placed after the user_id and url-nullable rebuild migrations above (not immediately
+  // after the reverse-connect block) because those rebuilds recreate remote_servers via
+  // CREATE TABLE remote_servers_new + an explicit INSERT INTO ... SELECT column list. On
+  // a brand-new database both of those migrations always run (a fresh CREATE TABLE has
+  // neither user_id nor a NOT NULL url), and neither rebuild's column list mentions
+  // cross_remote_access, so a column added before them would be silently dropped.
+  const remoteServerAccessInfo = db.prepare("PRAGMA table_info(remote_servers)").all() as { name: string }[];
+  if (!remoteServerAccessInfo.some(col => col.name === "cross_remote_access")) {
+    db.exec("ALTER TABLE remote_servers ADD COLUMN cross_remote_access TEXT NOT NULL DEFAULT 'off'");
+  }
+
   // Reset stale 'online' status for inbound remote_servers from previous server instances.
   // status='online' is only flipped to 'offline' by the WS close handler; if the host crashes
   // before the handler runs, the row stays online forever and the UI shows a green dot for an

@@ -168,6 +168,7 @@ export interface RemoteServersTable {
   connect_token_created_at: string | null;
   status: Generated<string>;
   last_connected_at: string | null;
+  cross_remote_access: Generated<string>;
   user_id: Generated<string>;
   created_at: Generated<string>;
   updated_at: Generated<string>;

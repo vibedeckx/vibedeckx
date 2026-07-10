@@ -10,6 +10,7 @@ export interface SyncButtonConfig {
 
 export type RemoteServerConnectionMode = 'outbound' | 'inbound';
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
+export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
 export interface RemoteServer {
   id: string;
@@ -21,6 +22,7 @@ export interface RemoteServer {
   connect_token_created_at?: string;
   status: RemoteServerStatus;
   last_connected_at?: string;
+  cross_remote_access: CrossRemoteAccess;
   created_at: string;
   updated_at: string;
 }
@@ -269,7 +271,7 @@ export interface Storage {
     getByToken(token: string): Promise<RemoteServer | undefined>;
     /** Owner user_id of a server, unscoped — for ownership checks without a request context. */
     getOwnerId(id: string): Promise<string | undefined>;
-    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer | undefined>;
+    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode; cross_remote_access?: CrossRemoteAccess }, userId?: string): Promise<RemoteServer | undefined>;
     updateStatus(id: string, status: RemoteServerStatus): Promise<void>;
     generateToken(id: string, userId?: string): Promise<string | undefined>;
     revokeToken(id: string, userId?: string): Promise<boolean>;
