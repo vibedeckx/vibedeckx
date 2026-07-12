@@ -51,6 +51,11 @@ services:
       VIBEDECKX_TLS_CERT: /certs/cf-origin.pem
       VIBEDECKX_TLS_KEY: /certs/cf-origin.key
       VIBEDECKX_TLS_CLIENT_CA: /certs/cloudflare-aop-ca.pem
+      # Cross-remote MCP gateway also needs VIBEDECKX_PUBLIC_URL (this server's
+      # public base URL). It's deployment-specific, so set it in docker.env next
+      # to the Clerk keys — see docker.env.example. Unset ⇒ feature stays off.
+      # (Do NOT set it here as ${VIBEDECKX_PUBLIC_URL:-}: an empty environment:
+      # value would override whatever docker.env provides.)
 
     # Clerk secrets. Lives next to this file in the runtime dir.
     env_file:
