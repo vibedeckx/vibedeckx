@@ -27,79 +27,18 @@ export type AgentMessage =
   | { type: 'tool_approval_request'; tool: string; input: unknown; approvalId: string; resolved?: 'approved' | 'denied'; timestamp: number };
 
 // ============ Claude Code JSON Protocol Types ============
-
-/**
- * Messages from Claude Code stdout (stream-json format)
- */
-export type ClaudeOutputMessage =
-  | ClaudeAssistantMessage
-  | ClaudeUserMessage
-  | ClaudeSystemMessage
-  | ClaudeResultMessage
-  | ClaudeUnknownMessage;
-
-export interface ClaudeAssistantMessage {
-  type: 'assistant';
-  message: {
-    id: string;
-    type: 'message';
-    role: 'assistant';
-    content: ClaudeContentBlock[];
-    model: string;
-    stop_reason: string | null;
-    stop_sequence: string | null;
-  };
-  session_id: string;
-}
-
-export interface ClaudeUserMessage {
-  type: 'user';
-  message: {
-    role: 'user';
-    content: string | ClaudeContentBlock[];
-  };
-  session_id: string;
-}
-
-export interface ClaudeSystemMessage {
-  type: 'system';
-  subtype: string;
-  message?: string;
-  session_id?: string;
-}
-
-export interface ClaudeResultMessage {
-  type: 'result';
-  subtype: 'success' | 'error';
-  duration_ms?: number;
-  duration_api_ms?: number;
-  cost_usd?: number;
-  session_id?: string;
-  error?: string;
-}
-
-export interface ClaudeUnknownMessage {
-  type: string;
-  [key: string]: unknown;
-}
-
-export type ClaudeContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string | unknown }
-  | { type: 'thinking'; thinking: string };
-
-export type ClaudeImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
-
-// ============ Messages to Claude Code stdin ============
-
-export interface ClaudeUserInput {
-  type: 'user';
-  message: {
-    role: 'user';
-    content: string | (ClaudeContentBlock | ClaudeImageBlock)[];
-  };
-}
+// Moved to the protocol layer; re-exported here so existing imports keep working.
+export type {
+  ClaudeOutputMessage,
+  ClaudeAssistantMessage,
+  ClaudeUserMessage,
+  ClaudeSystemMessage,
+  ClaudeResultMessage,
+  ClaudeUnknownMessage,
+  ClaudeContentBlock,
+  ClaudeImageBlock,
+  ClaudeUserInput,
+} from "./protocol/claude-code/schema.js";
 
 // ============ Agent Session Types ============
 
