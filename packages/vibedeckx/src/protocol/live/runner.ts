@@ -27,6 +27,7 @@ import {
 import { buildCodexAppServerSpawnConfig } from "../codex/cli.js";
 import {
   buildCodexInput,
+  buildTurnInterrupt,
   parseCodexLine,
   threadStartParamsFor,
   type CodexIncoming,
@@ -325,11 +326,18 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
   const pump = startPump(proc);
 
   let rpcId = 1;
-  let currentTurnId: number | null = null;
+  let threadId: string | null = null;
+  // Codex's UUID for the in-flight turn (from the turn/start response's
+  // result.turn.id, refreshed by params.turnId on notifications). The real
+  // interrupt primitive, turn/interrupt, targets this UUID — the LSP-style
+  // $/cancelRequest against the turn/start JSON-RPC id is a verified no-op
+  // (real codex 0.144.1 responds to turn/start immediately, so there is
+  // never a pending call to cancel while the turn runs).
+  let currentTurnUuid: string | null = null;
   const ctl: CodexControl = {
     cancelTurn: () => {
-      if (currentTurnId != null) {
-        proc.stdin?.write(rpc({ method: CODEX_CLIENT_METHODS.cancelRequest, params: { id: currentTurnId } }));
+      if (threadId && currentTurnUuid) {
+        proc.stdin?.write(buildTurnInterrupt(rpcId++, threadId, currentTurnUuid));
       }
     },
     reply: (rawLine) => { proc.stdin?.write(rawLine); },
@@ -342,6 +350,15 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
       if (seen.has(line)) continue;
       seen.add(line);
       const inc = parseCodexLine(line);
+      // Track the in-flight turn UUID before onIncoming fires, so a handler
+      // may cancelTurn() in direct response to the very line being drained.
+      if (inc.kind === "response") {
+        const t = (inc.result as { turn?: { id?: unknown } } | undefined)?.turn?.id;
+        if (typeof t === "string") currentTurnUuid = t;
+      } else if (inc.kind === "notification") {
+        const t = (inc.params as { turnId?: unknown } | undefined)?.turnId;
+        if (typeof t === "string") currentTurnUuid = t;
+      }
       incoming.push(inc);
       opts.onIncoming?.(inc, ctl);
     }
@@ -359,7 +376,6 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
   };
 
   let timedOut = false;
-  let threadId: string | null = null;
 
   const tsWait = await pump.waitFor(matchesResponse(threadStartId), timeoutMs);
   drain();
@@ -373,7 +389,6 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
   if (threadId && !timedOut) {
     for (const turn of opts.turns) {
       const turnId = rpcId++;
-      currentTurnId = turnId;
       proc.stdin?.write(rpc({ id: turnId, method: CODEX_CLIENT_METHODS.turnStart, params: { threadId, input: buildCodexInput(turn) } }));
       // Wait for turn/completed OR an error response for this turn id; drain
       // continuously so onIncoming can cancel/approve mid-turn.

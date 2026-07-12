@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildApprovalResponse,
-  buildCancelRequest,
   buildCodexInput,
   buildInitialize,
   buildThreadStart,
+  buildTurnInterrupt,
   buildTurnStart,
   parseCodexLine,
   threadStartParamsFor,
@@ -96,12 +96,16 @@ describe("codex message builders", () => {
     ]);
   });
 
-  it("builds $/cancelRequest and approval replies", () => {
-    expect(JSON.parse(buildCancelRequest(5))).toEqual({
+  it("builds turn/interrupt and approval replies", () => {
+    // Real codex interrupt shape (verified live, 0.144.1): a request with its
+    // own JSON-RPC id, targeting the turn UUID — not $/cancelRequest.
+    expect(JSON.parse(buildTurnInterrupt(5, "thread-1", "019f-turn-uuid"))).toEqual({
       jsonrpc: "2.0",
-      method: "$/cancelRequest",
-      params: { id: 5 },
+      id: 5,
+      method: "turn/interrupt",
+      params: { threadId: "thread-1", turnId: "019f-turn-uuid" },
     });
+    expect(buildTurnInterrupt(5, "thread-1", "019f-turn-uuid").endsWith("\n")).toBe(true);
     expect(JSON.parse(buildApprovalResponse("7", "accept"))).toEqual({
       jsonrpc: "2.0",
       id: 7,

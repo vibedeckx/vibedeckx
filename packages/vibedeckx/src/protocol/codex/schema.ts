@@ -16,7 +16,13 @@ export const CODEX_CLIENT_METHODS = {
   initialize: "initialize",
   threadStart: "thread/start",
   turnStart: "turn/start",
-  cancelRequest: "$/cancelRequest",
+  // Interrupting an in-flight turn. NOT LSP-style `$/cancelRequest` — that is
+  // inert against real codex (verified live, 0.144.1): turn/start's JSON-RPC
+  // response returns immediately with an in-progress Turn, so there is no
+  // pending call left to cancel. The real abort primitive is a distinct
+  // request, `turn/interrupt` with params `{ threadId, turnId }` (turn UUID,
+  // not the JSON-RPC id), per `codex app-server generate-json-schema`.
+  turnInterrupt: "turn/interrupt",
 } as const;
 
 export const CODEX_NOTIFICATIONS = {

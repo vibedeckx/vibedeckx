@@ -1358,7 +1358,7 @@ export class AgentSessionManager {
     try {
       const proc = session.process;
 
-      // Try provider-specific interrupt first (e.g. $/cancelRequest for Codex)
+      // Try provider-specific interrupt first (e.g. turn/interrupt for Codex)
       const provider = getProvider(session.agentType);
       const interruptMsg = provider.formatInterrupt?.(sessionId);
       if (interruptMsg && proc?.stdin) {

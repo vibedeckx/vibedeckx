@@ -4,9 +4,9 @@ import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import {
   buildApprovalResponse,
-  buildCancelRequest,
   buildInitialize,
   buildThreadStart,
+  buildTurnInterrupt,
   buildTurnStart,
   parseCodexLine,
 } from "../protocol/codex/codec.js";
@@ -23,6 +23,13 @@ interface CodexSessionState {
   pendingTurnContent: string | ContentPart[] | null;
   lastTokenUsage: { input_tokens?: number; output_tokens?: number };
   turnsWithFinalMessage: Set<string>;
+  /**
+   * Codex's UUID for the in-flight turn (from the turn/start response's
+   * `result.turn.id`, refreshed by `params.turnId` on item/completed).
+   * Needed by formatInterrupt: the real interrupt primitive is
+   * `turn/interrupt { threadId, turnId }`. Cleared on turn/completed.
+   */
+  currentTurnId: string | null;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -79,6 +86,11 @@ export class CodexProvider implements AgentProvider {
           // The buffered first turn can never be flushed without a threadId
           state.pendingTurnContent = null;
         }
+        if (reqMethod === CODEX_CLIENT_METHODS.turnInterrupt) {
+          // A failed interrupt (e.g. the turn finished in the race window) is
+          // not turn-fatal — the turn's own completion/error still arrives.
+          return [];
+        }
         const errText = typeof incoming.error?.message === "string" ? incoming.error.message : JSON.stringify(incoming.error);
         return [{
           type: "result",
@@ -90,7 +102,12 @@ export class CodexProvider implements AgentProvider {
       case "response": {
         const reqMethod = state.pendingRequests.get(Number(incoming.id));
         state.pendingRequests.delete(Number(incoming.id));
-        const result = incoming.result as { thread?: { id?: string } } | undefined;
+        const result = incoming.result as { thread?: { id?: string }; turn?: { id?: string | number } } | undefined;
+        if (reqMethod === CODEX_CLIENT_METHODS.turnStart && result?.turn?.id != null) {
+          // turn/start responds immediately with the in-progress Turn — its
+          // UUID is what turn/interrupt needs to target this turn.
+          state.currentTurnId = String(result.turn.id);
+        }
         if (reqMethod === CODEX_CLIENT_METHODS.threadStart && result?.thread?.id) {
           state.threadId = result.thread.id;
           // Send buffered first turn now that we have threadId
@@ -136,6 +153,13 @@ export class CodexProvider implements AgentProvider {
   private handleItemCompleted(params: any, sessionId: string): ParsedAgentEvent[] {
     const item = params?.item;
     if (!item?.type) return [];
+
+    // Every item notification carries the in-flight turn's UUID — keep it
+    // fresh so formatInterrupt can target the turn (covers sessions where the
+    // turn/start response was missed, e.g. state re-created mid-turn).
+    if (params?.turnId != null) {
+      this.getSessionState(sessionId).currentTurnId = String(params.turnId);
+    }
 
     switch (item.type) {
       case "agentMessage": {
@@ -220,6 +244,8 @@ export class CodexProvider implements AgentProvider {
     if (turnId != null) {
       state.turnsWithFinalMessage.delete(turnId);
     }
+    // Turn is over (one turn in flight per thread) — nothing left to interrupt.
+    state.currentTurnId = null;
 
     if (turn.status === "completed" && !hadFinalMessage) {
       console.log(
@@ -353,12 +379,15 @@ export class CodexProvider implements AgentProvider {
 
   formatInterrupt(sessionId: string): string | null {
     const state = this.getSessionState(sessionId);
-    for (const [id, method] of state.pendingRequests) {
-      if (method === CODEX_CLIENT_METHODS.turnStart) {
-        return buildCancelRequest(id);
-      }
-    }
-    return null;
+    // Real codex interrupts via `turn/interrupt { threadId, turnId }` (turn
+    // UUID). The previous `$/cancelRequest { id: <turn/start rpc id> }` was
+    // verified inert against codex 0.144.1 — turn/start's response returns
+    // immediately, so there was never a pending call to cancel. Returning
+    // null lets the caller fall back to killing the process.
+    if (!state.threadId || !state.currentTurnId) return null;
+    const id = state.rpcIdCounter++;
+    state.pendingRequests.set(id, CODEX_CLIENT_METHODS.turnInterrupt);
+    return buildTurnInterrupt(id, state.threadId, state.currentTurnId);
   }
 
   // ============ Lifecycle hooks ============
@@ -373,6 +402,7 @@ export class CodexProvider implements AgentProvider {
       pendingTurnContent: null,
       lastTokenUsage: {},
       turnsWithFinalMessage: new Set(),
+      currentTurnId: null,
     });
   }
 
@@ -393,6 +423,7 @@ export class CodexProvider implements AgentProvider {
         pendingTurnContent: null,
         lastTokenUsage: {},
         turnsWithFinalMessage: new Set(),
+        currentTurnId: null,
       };
       this.sessions.set(sessionId, state);
     }

@@ -94,8 +94,16 @@ export function buildTurnStart(id: number, threadId: string, content: string | C
   });
 }
 
-export function buildCancelRequest(targetRequestId: number): string {
-  return rpcLine({ method: CODEX_CLIENT_METHODS.cancelRequest, params: { id: targetRequestId } });
+/**
+ * Interrupt the in-flight turn. `turnId` is codex's own turn UUID (from the
+ * turn/start response's `result.turn.id`, or `params.turnId` on any `item/*`
+ * notification) — NOT the JSON-RPC id used to send turn/start. Verified live
+ * against codex 0.144.1: this terminates the turn, whereas the LSP-style
+ * `$/cancelRequest` this replaces was a no-op (turn/start's response returns
+ * immediately, so there was never a pending call to cancel).
+ */
+export function buildTurnInterrupt(id: number, threadId: string, turnId: string): string {
+  return rpcLine({ id, method: CODEX_CLIENT_METHODS.turnInterrupt, params: { threadId, turnId } });
 }
 
 export function buildApprovalResponse(requestId: string, decision: string): string {

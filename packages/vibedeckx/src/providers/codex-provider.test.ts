@@ -173,4 +173,53 @@ describe("CodexProvider", () => {
       },
     ]);
   });
+
+  it("formatInterrupt sends turn/interrupt for the tracked in-flight turn, null when unknown", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+
+    // Nothing known yet — caller must fall back to killing the process.
+    expect(provider.formatInterrupt("session-1")).toBeNull();
+
+    // initialize (id 1) + thread/start (id 2) sent at spawn
+    provider.getInitializationMessages("session-1");
+    provider.parseStdoutLine(
+      JSON.stringify({ jsonrpc: "2.0", id: 2, result: { thread: { id: "thread-1" } } }),
+      "session-1",
+    );
+
+    // threadId known but no turn in flight yet — still null.
+    expect(provider.formatInterrupt("session-1")).toBeNull();
+
+    // An item notification carries the in-flight turn's UUID (params.turnId).
+    provider.parseStdoutLine(JSON.stringify(commandExecutionCompleted()), "session-1");
+
+    const line = provider.formatInterrupt("session-1");
+    expect(line).not.toBeNull();
+    expect(JSON.parse(line!)).toEqual({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "turn/interrupt",
+      params: { threadId: "thread-1", turnId: "turn-1" },
+    });
+
+    // turn/completed clears the in-flight turn — nothing left to interrupt.
+    provider.parseStdoutLine(JSON.stringify(turnCompleted()), "session-1");
+    expect(provider.formatInterrupt("session-1")).toBeNull();
+
+    // The turn/start JSON-RPC response is the earliest turn-UUID carrier —
+    // formatInterrupt must work from it alone (turn with zero items so far).
+    provider.formatUserInput("hello again", "session-1"); // turn/start, id 4
+    provider.parseStdoutLine(
+      JSON.stringify({ jsonrpc: "2.0", id: 4, result: { turn: { id: "019f-turn-uuid-2", status: "inProgress" } } }),
+      "session-1",
+    );
+    const line2 = provider.formatInterrupt("session-1");
+    expect(JSON.parse(line2!)).toEqual({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "turn/interrupt",
+      params: { threadId: "thread-1", turnId: "019f-turn-uuid-2" },
+    });
+  });
 });

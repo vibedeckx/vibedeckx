@@ -1,5 +1,5 @@
 // packages/vibedeckx/src/protocol/live/codex.live.test.ts
-import { mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { describe, expect, it } from "vitest";
@@ -86,37 +86,17 @@ describe.skipIf(!available)("codex live probes (items & exec)", () => {
       timeoutMs: 60_000,
       recordAs: "cx5-cancel",
       onIncoming: (inc, ctl) => {
-        // Cancel as soon as the turn shows activity (first item/completed event).
-        //
-        // DEVIATION FROM BRIEF (documented, in-scope): the brief's
-        // `ctl.cancelTurn()` sends `$/cancelRequest { id: <json-rpc id of
-        // the turn/start call> }` — LSP "cancel a still-pending RPC call"
-        // semantics. Verified live (recordings/cx5-cancel.jsonl) this is a
-        // no-op against real codex 0.144.1: turn/start's JSON-RPC response
-        // already returns immediately with an in-progress Turn, so by the
-        // time any item/completed notification exists there is nothing
-        // left to "cancel" via that mechanism — the sleep 60 command ran
-        // unaffected to the full 60s timeout on two independent live
-        // attempts (vitest retry: 1), identical failure both times.
-        // `codex app-server generate-json-schema --experimental` shows the
-        // real abort primitive is a *distinct* request, `turn/interrupt`,
-        // params `{ threadId, turnId }` where `turnId` is codex's own turn
-        // UUID (e.g. "019f...", not the small integer JSON-RPC id used for
-        // turn/start) — both ride along on every item/completed
-        // notification's params already. Sent here via `ctl.reply()`, the
-        // runner's existing raw-line escape hatch — no changes to
-        // runner.ts/codec.ts/codex-provider.ts (out of this task's file
-        // scope, and those are exactly the files a follow-up should fix:
-        // buildCancelRequest/formatInterrupt currently send the
-        // real-world-inert $/cancelRequest shape in production too).
+        // Cancel as soon as the turn shows activity (first item/completed
+        // event). cancelTurn() sends the production interrupt mechanism —
+        // `turn/interrupt { threadId, turnId }` via buildTurnInterrupt, the
+        // same builder codex-provider.ts's formatInterrupt uses. (The
+        // original LSP-style `$/cancelRequest { id: <turn/start rpc id> }`
+        // was verified inert against real codex 0.144.1 on two independent
+        // live attempts — sleep 60 ran to the full timeout both times; see
+        // the turn/interrupt discovery notes in protocol/codex/codec.ts.)
         if (!cancelled && inc.kind === "notification" && inc.method === "item/completed") {
           cancelled = true;
-          const p = inc.params as { threadId?: string; turnId?: string };
-          if (p?.threadId && p?.turnId) {
-            ctl.reply(JSON.stringify({ jsonrpc: "2.0", id: 999999, method: "turn/interrupt", params: { threadId: p.threadId, turnId: p.turnId } }) + "\n");
-          } else {
-            ctl.cancelTurn(); // fallback; known inert against real codex, kept so a future protocol change can't silently disable cancellation entirely
-          }
+          ctl.cancelTurn();
         }
       },
     });
