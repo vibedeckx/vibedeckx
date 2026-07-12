@@ -19,6 +19,7 @@ export function detectBinary(name: string): string | null {
     const result = execFileSync(cmd, [name], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "ignore"],
+      timeout: 5000,
     }).trim();
     found = result || null;
   } catch {
