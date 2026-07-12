@@ -1,12 +1,19 @@
-import { execFileSync } from "child_process";
 import type { AgentType, ContentPart } from "../agent-types.js";
 import type { ClaudeOutputMessage, ClaudeContentBlock } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import { buildMcpConfigArg, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
+import { detectBinary } from "../protocol/shared/binary.js";
+import { parseClaudeLine, serializeUserInput } from "../protocol/claude-code/codec.js";
+import { buildClaudeSessionSpawnConfig } from "../protocol/claude-code/cli.js";
+import {
+  CLAUDE_BINARY_NAME,
+  TASK_NOTIFICATION_SUBTYPE,
+  TASK_STARTED_SUBTYPE,
+  TASK_UPDATED_SUBTYPE,
+  TERMINAL_TASK_STATUSES,
+} from "../protocol/claude-code/schema.js";
 
 export class ClaudeCodeProvider implements AgentProvider {
-  private binaryPath: string | null | undefined = undefined;
-
   getAgentType(): AgentType {
     return "claude-code";
   }
@@ -20,22 +27,7 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   detectBinary(): string | null {
-    if (this.binaryPath !== undefined) {
-      return this.binaryPath;
-    }
-    try {
-      const cmd = process.platform === "win32" ? "where" : "which";
-      const result = execFileSync(cmd, ["claude"], {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "ignore"],
-      }).trim();
-      this.binaryPath = result || null;
-      console.log(`[ClaudeCodeProvider] Native claude binary found: ${result}`);
-    } catch {
-      this.binaryPath = null;
-      console.log(`[ClaudeCodeProvider] Native claude binary not found, will use npx`);
-    }
-    return this.binaryPath;
+    return detectBinary(CLAUDE_BINARY_NAME);
   }
 
   isAvailable(): boolean {
@@ -45,43 +37,16 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
-    const nativeBinary = this.detectBinary();
-
-    const permissionFlag = permissionMode === "plan"
-      ? "--permission-mode=plan"
-      : "--dangerously-skip-permissions";
-
-    const claudeArgs = [
-      "--output-format=stream-json",
-      "--input-format=stream-json",
-      permissionFlag,
-      // AskUserQuestion can't work over piped (non-TTY) stdin: claude resolves it
-      // internally as "dismissed" before we can present a picker and wait for the
-      // user. Disable it so the agent falls back to asking in plain text, which the
-      // user answers through the normal conversation input.
-      "--disallowedTools",
-      "AskUserQuestion",
-      "--verbose",
-    ];
-
-    if (crossRemoteMcp) {
-      claudeArgs.push("--mcp-config", buildMcpConfigArg(crossRemoteMcp));
-    }
-
-    if (nativeBinary) {
-      return { command: nativeBinary, args: claudeArgs };
-    }
-    return {
-      command: "npx",
-      args: ["-y", "@anthropic-ai/claude-code", ...claudeArgs],
-    };
+    return buildClaudeSessionSpawnConfig(
+      this.detectBinary(),
+      permissionMode,
+      crossRemoteMcp ? buildMcpConfigArg(crossRemoteMcp) : undefined,
+    );
   }
 
   parseStdoutLine(line: string, _sessionId: string): ParsedAgentEvent[] {
-    let msg: ClaudeOutputMessage;
-    try {
-      msg = JSON.parse(line) as ClaudeOutputMessage;
-    } catch {
+    const msg = parseClaudeLine(line);
+    if (!msg) {
       return [];
     }
 
@@ -133,7 +98,7 @@ export class ClaudeCodeProvider implements AgentProvider {
       // task_notification fires when it finishes — right before the harness
       // auto-resumes the main agent. These feed the session manager's pending-
       // background-task ledger, which defers completion handling on `result`.
-      if (systemMsg.subtype === "task_started" && systemMsg.task_id) {
+      if (systemMsg.subtype === TASK_STARTED_SUBTYPE && systemMsg.task_id) {
         return [{
           type: "task_started",
           taskId: systemMsg.task_id,
@@ -141,16 +106,16 @@ export class ClaudeCodeProvider implements AgentProvider {
           description: systemMsg.description,
         }];
       }
-      if (systemMsg.subtype === "task_notification" && systemMsg.task_id) {
+      if (systemMsg.subtype === TASK_NOTIFICATION_SUBTYPE && systemMsg.task_id) {
         return [{ type: "task_finished", taskId: systemMsg.task_id, status: systemMsg.status }];
       }
       // Redundant clear channel: task_updated with a terminal patch.status
       // fires alongside task_notification for the same task. The ledger is a
       // Set (idempotent delete), so parsing both means a future rename of
       // either event name alone can't wedge the ledger.
-      if (systemMsg.subtype === "task_updated" && systemMsg.task_id) {
+      if (systemMsg.subtype === TASK_UPDATED_SUBTYPE && systemMsg.task_id) {
         const patchStatus = (msg as { patch?: { status?: string } }).patch?.status;
-        if (patchStatus && ["completed", "failed", "cancelled", "canceled", "killed", "error"].includes(patchStatus)) {
+        if (patchStatus && (TERMINAL_TASK_STATUSES as readonly string[]).includes(patchStatus)) {
           return [{ type: "task_finished", taskId: systemMsg.task_id, status: patchStatus }];
         }
         return [];
@@ -181,17 +146,7 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   formatUserInput(content: string | ContentPart[], _sessionId: string): string {
-    if (typeof content === "string") {
-      return JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
-    }
-    // Map ContentPart[] to Claude's content block format
-    const blocks = content.map((part) => {
-      if (part.type === "text") {
-        return { type: "text", text: part.text };
-      }
-      return { type: "image", source: { type: "base64", media_type: part.mediaType, data: part.data } };
-    });
-    return JSON.stringify({ type: "user", message: { role: "user", content: blocks } }) + "\n";
+    return serializeUserInput(content);
   }
 
   // Lifecycle hooks are no-ops for Claude (stateless per-session)
