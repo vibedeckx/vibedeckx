@@ -69,7 +69,9 @@ export const CommandExecutionItemSchema = z.looseObject({
   type: z.literal("commandExecution"),
   id: idish.optional(),
   command: z.string(),
-  aggregatedOutput: z.string().optional(),
+  // Real codex (verified live, 0.144.1) sends an explicit `"aggregatedOutput": null`
+  // when the executed command produced no stdout, rather than omitting the field.
+  aggregatedOutput: z.string().nullable().optional(),
   status: z.string().optional(),
 });
 
