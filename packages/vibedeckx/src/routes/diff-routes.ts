@@ -2,12 +2,14 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { readFileSync } from "fs";
+import { execFileSync } from "child_process";
 import { parseDiffOutput, type DiffFile, type DiffLine } from "../utils/diff-parser.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
+import { validateBranchExists } from "../merge-status.js";
 
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   // Check project_remotes table first (new approach)
@@ -69,6 +71,15 @@ function buildDiffCommand(commit?: string): string {
 function buildDiffFallbackCommand(commit: string): string {
   // Fallback for root commits that have no parent
   return `git show ${commit} --format="" --no-color`;
+}
+
+/** Three-dot diff: everything `HEAD` would bring to `compareTo` since their merge-base. */
+export function runCompareToDiff(cwd: string, compareTo: string): string {
+  return execFileSync("git", ["diff", `${compareTo}...HEAD`, "--no-color"], {
+    cwd,
+    encoding: "utf-8",
+    maxBuffer: 10 * 1024 * 1024,
+  });
 }
 
 async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
@@ -138,7 +149,7 @@ async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get diff for a path (path-based, for remote execution)
   fastify.get<{
-    Querystring: { path: string; branch?: string; commit?: string };
+    Querystring: { path: string; branch?: string; commit?: string; compareTo?: string };
   }>("/api/path/diff", async (req, reply) => {
     const projectPath = req.query.path;
     if (!projectPath) {
@@ -150,6 +161,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     if (commit && !/^[0-9a-f]+$/i.test(commit)) {
       return reply.code(400).send({ error: "Invalid commit hash" });
+    }
+
+    const compareTo = req.query.compareTo;
+    if (commit && compareTo) {
+      return reply.code(400).send({ error: "commit and compareTo are mutually exclusive" });
+    }
+    if (compareTo) {
+      const cwd = resolveWorktreePath(projectPath, branch ?? null);
+      if (!validateBranchExists(cwd, compareTo)) {
+        return reply.code(400).send({ error: `Branch not found: ${compareTo}` });
+      }
+      try {
+        // Committed content only — no untracked-file injection in compare mode.
+        return reply.code(200).send({ files: parseDiffOutput(runCompareToDiff(cwd, compareTo)) });
+      } catch {
+        return reply.code(200).send({ files: [] });
+      }
     }
 
     const cwd = resolveWorktreePath(projectPath, branch ?? null);
@@ -208,7 +236,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Get git diff for a project (uncommitted changes or single commit)
   fastify.get<{
     Params: { id: string };
-    Querystring: { branch?: string; commit?: string; target?: 'local' | 'remote' };
+    Querystring: { branch?: string; commit?: string; compareTo?: string; target?: 'local' | 'remote' };
   }>("/api/projects/:id/diff", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -220,10 +248,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const branch = req.query.branch;
     const commit = req.query.commit;
+    const compareTo = req.query.compareTo;
     const target = req.query.target;
 
     if (commit && !/^[0-9a-f]+$/i.test(commit)) {
       return reply.code(400).send({ error: "Invalid commit hash" });
+    }
+
+    if (commit && compareTo) {
+      return reply.code(400).send({ error: "commit and compareTo are mutually exclusive" });
     }
 
     const useRemote = target === 'remote'
@@ -237,6 +270,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const params = [`path=${encodeURIComponent(remoteConfig.remotePath)}`];
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
       if (commit) params.push(`commit=${encodeURIComponent(commit)}`);
+      if (compareTo) params.push(`compareTo=${encodeURIComponent(compareTo)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
         remoteConfig.url,
@@ -251,6 +285,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     if (!project.path) {
       return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    if (compareTo) {
+      const cwd = resolveWorktreePath(project.path, branch ?? null);
+      if (!validateBranchExists(cwd, compareTo)) {
+        return reply.code(400).send({ error: `Branch not found: ${compareTo}` });
+      }
+      try {
+        // Committed content only — no untracked-file injection in compare mode.
+        return reply.code(200).send({ files: parseDiffOutput(runCompareToDiff(cwd, compareTo)) });
+      } catch {
+        return reply.code(200).send({ files: [] });
+      }
     }
 
     const cwd = resolveWorktreePath(project.path, branch ?? null);
