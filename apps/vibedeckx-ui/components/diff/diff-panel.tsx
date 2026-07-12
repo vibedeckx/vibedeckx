@@ -24,17 +24,26 @@ interface DiffPanelProps {
 export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, mergeTarget, compareRequestNonce }: DiffPanelProps) {
   const [selectedCommit, setSinceCommit] = useState<string | null>(null);
   const [compareMode, setCompareMode] = useState(false);
-  // Badge deep-link: a nonce bump means "show the vs-target comparison now".
-  // Applied synchronously during render (not in a useEffect) so the derived
-  // state lands in the same commit as the nonce change — same pattern as the
-  // branchResetProjectId reset in page.tsx, and it sidesteps the
-  // react-hooks/set-state-in-effect lint rule, which (correctly) flags a
-  // useEffect that calls raw useState setters to react to a prop bump.
   const [seenCompareNonce, setSeenCompareNonce] = useState(compareRequestNonce);
-  if (compareRequestNonce !== undefined && compareRequestNonce !== seenCompareNonce) {
+  const [seenBranch, setSeenBranch] = useState(selectedBranch);
+
+  // Badge deep-link: a nonce bump means "show the vs-target comparison now".
+  // Render-time state adjustment (same pattern as page.tsx branchResetProjectId;
+  // the repo's react-hooks/set-state-in-effect rule forbids the effect form).
+  // The branch-change reset is deliberately folded in here too, so both
+  // triggers are reconciled in ONE pass: a badge deep-link changes branch and
+  // nonce in the same commit, and an effect-based branch reset would run after
+  // paint and clobber the just-set compare mode.
+  const nonceBumped = compareRequestNonce !== undefined && compareRequestNonce !== seenCompareNonce;
+  if (nonceBumped) {
     setSeenCompareNonce(compareRequestNonce);
     setCompareMode(true);
     setSinceCommit(null);
+  }
+  if (selectedBranch !== seenBranch) {
+    setSeenBranch(selectedBranch);
+    setSinceCommit(null);
+    if (!nonceBumped) setCompareMode(false); // plain branch switch resets; deep-link wins
   }
 
   const { remotes } = useProjectRemotesContext();
@@ -66,12 +75,6 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, 
   useEffect(() => {
     refetchCommits();
   }, [refetchCommits]);
-
-  // Reset selection when branch changes
-  useEffect(() => {
-    setSinceCommit(null);
-    setCompareMode(false);
-  }, [selectedBranch]);
 
   // Reset diffTarget when project changes
   useEffect(() => {
