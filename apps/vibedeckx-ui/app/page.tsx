@@ -6,6 +6,7 @@ import { useCommands } from '@/hooks/use-commands';
 import { ProjectInfoView } from '@/components/project/project-info-view';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
+import { useMergeStatus } from '@/hooks/use-merge-status';
 import { useTasks } from '@/hooks/use-tasks';
 import { useSchedules } from '@/hooks/use-schedules';
 import { SchedulesView } from '@/components/schedule';
@@ -133,6 +134,11 @@ export default function Home() {
   }
 
   const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
+  const {
+    statuses: mergeStatuses,
+    defaultTarget: mergeDefaultTarget,
+    setTarget: setMergeTarget,
+  } = useMergeStatus(currentProject?.id ?? null, worktrees);
   const residentSessions = useResidentSessions(currentProject?.id ?? null, worktrees, residentSessionSeed);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
 
@@ -547,6 +553,13 @@ Please proceed step by step and let me know if there are any issues or conflicts
             onDeleteWorktree={(wt) => {
               setWorktreeToDelete(wt);
               setDeleteWorktreeDialogOpen(true);
+            }}
+            mergeStatuses={mergeStatuses}
+            mergeDefaultTarget={mergeDefaultTarget}
+            onMergeTargetChange={setMergeTarget}
+            onMergeBadgeClick={(branch) => {
+              setSelectedBranch(branch);
+              setActiveView("workspace");
             }}
             workspaceStatuses={workspaceStatuses}
             residentSessions={residentSessions}

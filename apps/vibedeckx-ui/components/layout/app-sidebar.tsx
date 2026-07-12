@@ -1,12 +1,15 @@
 "use client";
 
-import { Columns3, ListTodo, FolderOpen, Plus, Trash2, Globe, Settings } from "lucide-react";
+import { Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { WorkspaceMergeBadge } from "./workspace-merge-badge";
+import { WorkspaceRowMenu } from "./workspace-row-menu";
 
 import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
+import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info";
 
@@ -19,6 +22,10 @@ interface AppSidebarProps {
   currentProject?: Project | null;
   onCreateWorktreeOpen?: () => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
+  mergeStatuses?: Map<string, BranchMergeInfo>;
+  mergeDefaultTarget?: string | null;
+  onMergeTargetChange?: (branch: string, target: string) => void;
+  onMergeBadgeClick?: (branch: string) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
   residentSessions?: Map<string, ResidentSidebarSession[]>;
   selectedSessionId?: string | null;
@@ -194,6 +201,10 @@ export function AppSidebar({
   currentProject,
   onCreateWorktreeOpen,
   onDeleteWorktree,
+  mergeStatuses,
+  mergeDefaultTarget,
+  onMergeTargetChange,
+  onMergeBadgeClick,
   workspaceStatuses,
   residentSessions,
   selectedSessionId,
@@ -362,7 +373,7 @@ export function AppSidebar({
                       key={wt.branch ?? "__main__"}
                       className={cn("min-w-0 rounded-[3px]", isActive && "bg-accent")}
                     >
-                      <div className="group relative flex items-center min-w-0">
+                      <div className="group relative flex items-center min-w-0 gap-0.5 pr-1">
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <button
@@ -371,7 +382,7 @@ export function AppSidebar({
                                 onViewChange("workspace");
                               }}
                               className={cn(
-                                "flex-1 min-w-0 flex items-center gap-2 rounded-[3px] pl-2 pr-6 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
+                                "flex-1 min-w-0 flex items-center gap-2 rounded-[3px] pl-2 pr-1 py-1 font-mono text-[11.5px] transition-colors overflow-hidden",
                                 !isActive && "text-foreground/80 hover:bg-muted",
                                 isActive && "text-accent-foreground font-medium"
                               )}
@@ -382,17 +393,22 @@ export function AppSidebar({
                           </TooltipTrigger>
                           <TooltipContent side="right">{wt.branch ?? "main"}</TooltipContent>
                         </Tooltip>
-                        {wt.branch !== null && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onDeleteWorktree?.(wt);
-                            }}
-                            className="absolute right-1 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive transition-all"
-                            title="Delete worktree"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
+                        {wt.branch !== null && mergeStatuses?.get(wt.branch) && (
+                          <WorkspaceMergeBadge
+                            info={mergeStatuses.get(wt.branch)!}
+                            onClick={() => onMergeBadgeClick?.(wt.branch!)}
+                          />
+                        )}
+                        {wt.branch !== null && currentProject && (
+                          <WorkspaceRowMenu
+                            projectId={currentProject.id}
+                            branch={wt.branch}
+                            currentTarget={
+                              mergeStatuses?.get(wt.branch)?.target ?? mergeDefaultTarget ?? null
+                            }
+                            onTargetChange={(t) => onMergeTargetChange?.(wt.branch!, t)}
+                            onDelete={() => onDeleteWorktree?.(wt)}
+                          />
                         )}
                       </div>
                       {liveSessions.length > 0 && (
