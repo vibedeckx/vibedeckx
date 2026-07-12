@@ -20,6 +20,9 @@ export function parseCodexLine(line: string): CodexIncoming {
   } catch {
     return { kind: "ignored", raw: line };
   }
+  if (msg === null || typeof msg !== "object") {
+    return { kind: "ignored", raw: line };
+  }
   const id = msg.id as string | number | null | undefined;
   const method = msg.method as string | undefined;
   if (id != null && !method && msg.error !== undefined) {

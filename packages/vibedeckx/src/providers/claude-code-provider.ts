@@ -1,5 +1,5 @@
 import type { AgentType, ContentPart } from "../agent-types.js";
-import type { ClaudeOutputMessage, ClaudeContentBlock } from "../agent-types.js";
+import type { ClaudeContentBlock } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import { buildMcpConfigArg, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { detectBinary } from "../protocol/shared/binary.js";

@@ -49,6 +49,11 @@ describe("parseCodexLine", () => {
     expect(parseCodexLine("not json").kind).toBe("ignored");
     expect(parseCodexLine(JSON.stringify({ jsonrpc: "2.0" })).kind).toBe("ignored");
   });
+
+  it("returns ignored for scalar JSON lines", () => {
+    expect(parseCodexLine("null").kind).toBe("ignored");
+    expect(parseCodexLine("42").kind).toBe("ignored");
+  });
 });
 
 describe("codex message builders", () => {

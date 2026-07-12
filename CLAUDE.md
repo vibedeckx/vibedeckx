@@ -28,10 +28,10 @@ cd apps/vibedeckx-ui && npx tsc --noEmit                 # Frontend
 
 # Lint (frontend only)
 pnpm --filter vibedeckx-ui lint
-```
 
 # Tests (vitest, colocated *.test.ts files in packages/vibedeckx/src/)
 pnpm --filter vibedeckx test
+```
 
 ## Monorepo Structure
 
