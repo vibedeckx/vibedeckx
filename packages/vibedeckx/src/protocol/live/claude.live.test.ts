@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { buildClaudePrintCommand } from "../claude-code/cli.js";
 import { detectBinary } from "../shared/binary.js";
+import { buildMcpConfigArg } from "../../cross-remote-mcp-config.js";
 import { claudeBinaryAvailable, compatRequired, runClaudeSession, runOneShot } from "./runner.js";
+import { startStubMcpServer } from "./stub-mcp-server.js";
 
 const MODEL_ARGS = ["--model", "claude-haiku-4-5-20251001"];
 const available = claudeBinaryAvailable();
@@ -129,5 +131,30 @@ describe.skipIf(!available)("claude live probes (lifecycle & flags)", () => {
       return am.message.content.filter((b) => b.type === "tool_use").map((b) => b.name);
     });
     expect(toolNames, "AskUserQuestion must be blocked by --disallowedTools").not.toContain("AskUserQuestion");
+  });
+});
+
+describe.skipIf(!available)("claude live probes (mcp-config)", () => {
+  it("CC-7: --mcp-config http server with bearer auth — connects and can call the tool", async () => {
+    const stub = await startStubMcpServer();
+    try {
+      const r = await runClaudeSession({
+        turns: ["Call the MCP tool compat_ping from the cross-remote server exactly once, then reply with what it returned. Do not use any other tools."],
+        mcpConfigArg: buildMcpConfigArg({ url: stub.url, token: "compat-probe-token" }),
+        extraArgs: MODEL_ARGS,
+        recordAs: "cc7-mcp",
+      });
+      expect(r.outcome).toBe("ok");
+      // Transport-level assertion first — its failure message distinguishes
+      // "CLI never connected" (transport drift) from "agent didn't call the tool".
+      expect(stub.requests.length, "claude CLI never contacted the MCP stub — --mcp-config http transport drifted?").toBeGreaterThan(0);
+      expect(
+        stub.authHeaders.filter(Boolean).every((h) => h === "Bearer compat-probe-token"),
+        `unexpected Authorization headers: ${JSON.stringify([...new Set(stub.authHeaders)])}`,
+      ).toBe(true);
+      expect(stub.toolCalls, "MCP transport connected but the tool was never invoked").toBeGreaterThan(0);
+    } finally {
+      await stub.close();
+    }
   });
 });
