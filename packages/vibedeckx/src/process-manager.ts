@@ -7,7 +7,7 @@ import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { Executor, ExecutorProcessStatus, PromptProvider, Storage } from "./storage/types.js";
 import type { EventBus } from "./event-bus.js";
-import { detectBinary } from "./protocol/shared/binary.js";
+import { detectBinary, getBinaryVersion } from "./protocol/shared/binary.js";
 import { buildCodexExecCommand } from "./protocol/codex/cli.js";
 import {
   buildClaudePrintCommand,
@@ -535,6 +535,10 @@ export class ProcessManager {
    */
   private startClaudeStreamProcess(processId: string, executor: Executor, cwd: string, skipDb: boolean): void {
     const { command, args: fullArgs } = buildClaudeStreamExecutorSpawn(detectBinary('claude'));
+
+    if (command !== 'npx') {
+      console.log(`[ProcessManager] claude version: ${getBinaryVersion(command) ?? 'unknown'}`);
+    }
 
     const childProcess = spawn(command, fullArgs, {
       cwd,

@@ -12,6 +12,7 @@ import type {
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
@@ -577,6 +578,16 @@ export class AgentSessionManager {
     }
 
     const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp);
+
+    // Log the agent CLI version once per binary so protocol failures can be
+    // attributed to an agent version. npx runs are logged as such (probing
+    // `npx --version` would report npx itself, not the agent).
+    if (config.command !== "npx") {
+      const agentVersion = getBinaryVersion(config.command);
+      console.log(`[AgentSession] ${provider.getDisplayName()} version: ${agentVersion ?? "unknown (--version probe failed)"}`);
+    } else {
+      console.log(`[AgentSession] ${provider.getDisplayName()} running via npx (version resolved at spawn by npm)`);
+    }
 
     // Per-spawn state for diagnosing startup failures (e.g. agent not installed).
     session.producedOutput = false;
