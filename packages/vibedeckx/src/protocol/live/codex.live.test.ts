@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { describe, expect, it } from "vitest";
 import type { CodexIncoming } from "../codex/codec.js";
+import { buildApprovalResponse } from "../codex/codec.js";
 import { buildCodexExecCommand } from "../codex/cli.js";
 import { detectBinary } from "../shared/binary.js";
 import { codexBinaryAvailable, compatRequired, runCodexAppServer, runOneShot } from "./runner.js";
@@ -132,4 +133,46 @@ describe.skipIf(!available)("codex live probes (items & exec)", () => {
     const lastMessage = readFileSync(outFile, "utf-8").trim();
     expect(lastMessage.length, "--output-last-message file empty or missing").toBeGreaterThan(0);
   }, 200_000); // vitest.live.config.ts's default testTimeout (120s) is shorter than runOneShot's own 180s internal timeout above — without this the test framework kills the test at 120s before the internal timeout can ever fire, misreporting a real ~150s exec run as a vitest-level timeout rather than the runOneShot outcome under test.
+});
+
+describe.skipIf(!available)("codex live probes (approval round-trip)", () => {
+  it("CX-8: on-request approval — server request arrives, accept reply lets the command run", async () => {
+    const approvalsSeen: Array<{ method: string; id: string | number }> = [];
+    const r = await runCodexAppServer({
+      turns: ["Run exactly this shell command: echo approval-probe. Then reply DONE."],
+      threadStartParams: { sandbox: "workspace-write", approvalPolicy: "on-request" },
+      timeoutMs: 120_000,
+      recordAs: "cx8-approval",
+      onIncoming: (inc, ctl) => {
+        if (inc.kind === "server_request" && inc.method.endsWith("requestApproval")) {
+          approvalsSeen.push({ method: inc.method, id: inc.id });
+          ctl.reply(buildApprovalResponse(String(inc.id), "accept"));
+        }
+      },
+    });
+    expect(r.outcome).toBe("ok");
+    expect(r.contractFailures).toEqual([]);
+    expect(approvalsSeen.length, "no requestApproval server request under approvalPolicy=on-request").toBeGreaterThan(0);
+    expect(approvalsSeen[0].method).toBe("item/commandExecution/requestApproval");
+    // accept reply must unblock the command: expect the commandExecution item afterwards
+    const cmds = items(r.incoming, "commandExecution");
+    expect(cmds.length, "approval accepted but command never executed — decision format drifted?").toBeGreaterThan(0);
+  });
+
+  it("CX-8b: decline reply prevents execution", async () => {
+    const r = await runCodexAppServer({
+      turns: ["Run exactly this shell command: echo should-not-run. Then reply DONE."],
+      threadStartParams: { sandbox: "workspace-write", approvalPolicy: "on-request" },
+      timeoutMs: 120_000,
+      recordAs: "cx8b-decline",
+      onIncoming: (inc, ctl) => {
+        if (inc.kind === "server_request" && inc.method.endsWith("requestApproval")) {
+          ctl.reply(buildApprovalResponse(String(inc.id), "decline"));
+        }
+      },
+    });
+    expect(r.outcome).toBe("ok");
+    const cmds = items(r.incoming, "commandExecution").filter((c) => String(c.aggregatedOutput ?? "").includes("should-not-run"));
+    expect(cmds.length, "declined command still produced output").toBe(0);
+  });
 });
