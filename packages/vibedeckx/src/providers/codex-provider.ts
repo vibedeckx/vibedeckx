@@ -1,7 +1,17 @@
-import { execFileSync } from "child_process";
 import type { AgentType, ContentPart } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
+import { detectBinary } from "../protocol/shared/binary.js";
+import {
+  buildApprovalResponse,
+  buildCancelRequest,
+  buildInitialize,
+  buildThreadStart,
+  buildTurnStart,
+  parseCodexLine,
+} from "../protocol/codex/codec.js";
+import { buildCodexAppServerSpawnConfig } from "../protocol/codex/cli.js";
+import { CODEX_BINARY_NAME, CODEX_CLIENT_METHODS, CODEX_NOTIFICATIONS, CODEX_SERVER_REQUESTS } from "../protocol/codex/schema.js";
 
 interface CodexSessionState {
   threadId: string | null;
@@ -18,7 +28,6 @@ interface CodexSessionState {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 export class CodexProvider implements AgentProvider {
-  private binaryPath: string | null | undefined = undefined;
   private sessions = new Map<string, CodexSessionState>();
   private static idCounter = 0;
   private lastPermissionMode: "plan" | "edit" = "edit";
@@ -36,22 +45,7 @@ export class CodexProvider implements AgentProvider {
   }
 
   detectBinary(): string | null {
-    if (this.binaryPath !== undefined) {
-      return this.binaryPath;
-    }
-    try {
-      const cmd = process.platform === "win32" ? "where" : "which";
-      const result = execFileSync(cmd, ["codex"], {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "ignore"],
-      }).trim();
-      this.binaryPath = result || null;
-      console.log(`[CodexProvider] Native codex binary found: ${result}`);
-    } catch {
-      this.binaryPath = null;
-      console.log(`[CodexProvider] Native codex binary not found, will use npx`);
-    }
-    return this.binaryPath;
+    return detectBinary(CODEX_BINARY_NAME);
   }
 
   isAvailable(): boolean {
@@ -61,102 +55,76 @@ export class CodexProvider implements AgentProvider {
   }
 
   buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", _crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
-    // Store permissionMode for use in formatUserInput's turn/start params (task 5.12)
+    // Store permissionMode for use in formatUserInput's turn/start params
     this.lastPermissionMode = permissionMode;
-    const nativeBinary = this.detectBinary();
-    if (nativeBinary) {
-      return { command: nativeBinary, args: ["app-server"], shell: false };
-    }
-    return {
-      command: "npx",
-      args: ["-y", "@openai/codex", "app-server"],
-      shell: false,
-    };
+    return buildCodexAppServerSpawnConfig(this.detectBinary());
   }
 
   // ============ Task 5.5: parseStdoutLine — JSON-RPC message routing ============
 
   parseStdoutLine(line: string, sessionId: string): ParsedAgentEvent[] {
-    let msg: any;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return [];
-    }
-
+    const incoming = parseCodexLine(line);
     const state = this.getSessionState(sessionId);
 
-    // (a') Error response: has id + error, no method. Every request we send
-    // (initialize / thread/start / turn/start) is turn-fatal on failure, so
-    // surface it as an error result — previously these were dropped with zero
-    // trace, which made a rejected turn/start look like a silently hung
-    // session.
-    if (msg.id != null && !msg.method && msg.error !== undefined) {
-      const reqMethod = state.pendingRequests.get(Number(msg.id));
-      state.pendingRequests.delete(Number(msg.id));
-      console.error(
-        `[CodexProvider] JSON-RPC error response for ${reqMethod ?? "unknown request"} (id=${msg.id}, session=${sessionId}): ${JSON.stringify(msg.error)}`,
-      );
-      if (reqMethod === "thread/start") {
-        // The buffered first turn can never be flushed without a threadId
-        state.pendingTurnContent = null;
-      }
-      const errText = typeof msg.error?.message === "string" ? msg.error.message : JSON.stringify(msg.error);
-      return [{
-        type: "result",
-        subtype: "error",
-        error: `Codex ${reqMethod ?? "request"} failed: ${errText}`,
-      }];
-    }
-
-    // (a) Response: has id + result, no method
-    if (msg.id != null && !msg.method && msg.result !== undefined) {
-      const reqMethod = state.pendingRequests.get(Number(msg.id));
-      state.pendingRequests.delete(Number(msg.id));
-      // Extract threadId from thread/start response
-      if (reqMethod === "thread/start" && msg.result?.thread?.id) {
-        state.threadId = msg.result.thread.id;
-        // Send buffered first turn now that we have threadId
-        if (state.pendingTurnContent !== null) {
-          const content = state.pendingTurnContent;
+    switch (incoming.kind) {
+      case "error_response": {
+        // Every request we send (initialize / thread/start / turn/start) is
+        // turn-fatal on failure, so surface it as an error result.
+        const reqMethod = state.pendingRequests.get(Number(incoming.id));
+        state.pendingRequests.delete(Number(incoming.id));
+        console.error(
+          `[CodexProvider] JSON-RPC error response for ${reqMethod ?? "unknown request"} (id=${incoming.id}, session=${sessionId}): ${JSON.stringify(incoming.error)}`,
+        );
+        if (reqMethod === CODEX_CLIENT_METHODS.threadStart) {
+          // The buffered first turn can never be flushed without a threadId
           state.pendingTurnContent = null;
-          const id = state.rpcIdCounter++;
-          state.pendingRequests.set(id, "turn/start");
-          const turnMsg = JSON.stringify({
-            jsonrpc: "2.0",
-            id,
-            method: "turn/start",
-            params: { threadId: state.threadId, input: this.buildCodexInput(content) },
-          }) + "\n";
-          return [{ type: "stdin_write", content: turnMsg }];
         }
+        const errText = typeof incoming.error?.message === "string" ? incoming.error.message : JSON.stringify(incoming.error);
+        return [{
+          type: "result",
+          subtype: "error",
+          error: `Codex ${reqMethod ?? "request"} failed: ${errText}`,
+        }];
       }
-      return [];
-    }
 
-    // (c) Server request: has id + method (check before notifications since both have method)
-    if (msg.id != null && msg.method) {
-      return this.handleServerRequest(msg);
-    }
+      case "response": {
+        const reqMethod = state.pendingRequests.get(Number(incoming.id));
+        state.pendingRequests.delete(Number(incoming.id));
+        const result = incoming.result as { thread?: { id?: string } } | undefined;
+        if (reqMethod === CODEX_CLIENT_METHODS.threadStart && result?.thread?.id) {
+          state.threadId = result.thread.id;
+          // Send buffered first turn now that we have threadId
+          if (state.pendingTurnContent !== null) {
+            const content = state.pendingTurnContent;
+            state.pendingTurnContent = null;
+            const id = state.rpcIdCounter++;
+            state.pendingRequests.set(id, CODEX_CLIENT_METHODS.turnStart);
+            return [{ type: "stdin_write", content: buildTurnStart(id, state.threadId, content) }];
+          }
+        }
+        return [];
+      }
 
-    // (b) Notification: has method, no id
-    if (msg.method) {
-      return this.handleNotification(msg, sessionId);
-    }
+      case "server_request":
+        return this.handleServerRequest(incoming.id, incoming.method, incoming.params);
 
-    return [];
+      case "notification":
+        return this.handleNotification(incoming.method, incoming.params, sessionId);
+
+      case "ignored":
+        return [];
+    }
   }
 
   // ============ Notification routing ============
 
-  private handleNotification(msg: any, sessionId: string): ParsedAgentEvent[] {
-    const params = msg.params;
-    switch (msg.method) {
-      case "item/completed":
+  private handleNotification(method: string, params: any, sessionId: string): ParsedAgentEvent[] {
+    switch (method) {
+      case CODEX_NOTIFICATIONS.itemCompleted:
         return this.handleItemCompleted(params, sessionId);
-      case "turn/completed":
+      case CODEX_NOTIFICATIONS.turnCompleted:
         return this.handleTurnCompleted(params, sessionId);
-      case "thread/tokenUsage/updated":
+      case CODEX_NOTIFICATIONS.tokenUsageUpdated:
         return this.handleTokenUsage(params, sessionId);
       default:
         return [];
@@ -288,32 +256,31 @@ export class CodexProvider implements AgentProvider {
 
   // ============ Task 5.9: Server requests (approvals) ============
 
-  private handleServerRequest(msg: any): ParsedAgentEvent[] {
-    const params = msg.params;
-    switch (msg.method) {
-      case "item/commandExecution/requestApproval":
+  private handleServerRequest(id: string | number, method: string, params: any): ParsedAgentEvent[] {
+    switch (method) {
+      case CODEX_SERVER_REQUESTS.commandApproval:
         return [{
           type: "approval_request",
           requestType: "command",
-          requestId: String(msg.id),
+          requestId: String(id),
           command: params?.command ?? "",
           cwd: params?.cwd,
         }];
 
-      case "item/fileChange/requestApproval":
+      case CODEX_SERVER_REQUESTS.fileChangeApproval:
         return [{
           type: "approval_request",
           requestType: "fileChange",
-          requestId: String(msg.id),
+          requestId: String(id),
           changes: params?.changes ?? [],
         }];
 
-      case "item/tool/requestUserInput":
+      case CODEX_SERVER_REQUESTS.userInput:
         return [{
           type: "tool_use",
           tool: "AskUserQuestion",
           input: { questions: params?.questions },
-          toolUseId: String(msg.id),
+          toolUseId: String(id),
         }];
 
       default:
@@ -329,16 +296,11 @@ export class CodexProvider implements AgentProvider {
 
     const id1 = state.rpcIdCounter++;
     const id2 = state.rpcIdCounter++;
-    state.pendingRequests.set(id1, "initialize");
-    state.pendingRequests.set(id2, "thread/start");
+    state.pendingRequests.set(id1, CODEX_CLIENT_METHODS.initialize);
+    state.pendingRequests.set(id2, CODEX_CLIENT_METHODS.threadStart);
     state.initialized = true;
 
-    const threadStartParams = this.buildThreadStartParams(state.permissionMode);
-
-    return [
-      JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: { clientInfo: { name: "vibedeckx", version: "1.0.0" } } }),
-      JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: threadStartParams }),
-    ].join("\n") + "\n";
+    return buildInitialize(id1) + buildThreadStart(id2, state.permissionMode);
   }
 
   // ============ Task 5.10: formatUserInput — JSON-RPC message construction ============
@@ -351,30 +313,19 @@ export class CodexProvider implements AgentProvider {
     // Fast path: threadId already available (pre-initialization completed)
     if (state.threadId) {
       const id = state.rpcIdCounter++;
-      state.pendingRequests.set(id, "turn/start");
-      return JSON.stringify({
-        jsonrpc: "2.0",
-        id,
-        method: "turn/start",
-        params: { threadId: state.threadId, input: this.buildCodexInput(content) },
-      }) + "\n";
+      state.pendingRequests.set(id, CODEX_CLIENT_METHODS.turnStart);
+      return buildTurnStart(id, state.threadId, content);
     }
 
     // Edge case: getInitializationMessages wasn't called (e.g. dormant session wake)
     if (!state.initialized) {
       const id1 = state.rpcIdCounter++;
       const id2 = state.rpcIdCounter++;
-      state.pendingRequests.set(id1, "initialize");
-      state.pendingRequests.set(id2, "thread/start");
+      state.pendingRequests.set(id1, CODEX_CLIENT_METHODS.initialize);
+      state.pendingRequests.set(id2, CODEX_CLIENT_METHODS.threadStart);
       state.initialized = true;
       state.pendingTurnContent = content;
-
-      const threadStartParams = this.buildThreadStartParams(state.permissionMode);
-
-      return [
-        JSON.stringify({ jsonrpc: "2.0", id: id1, method: "initialize", params: { clientInfo: { name: "vibedeckx", version: "1.0.0" } } }),
-        JSON.stringify({ jsonrpc: "2.0", id: id2, method: "thread/start", params: threadStartParams }),
-      ].join("\n") + "\n";
+      return buildInitialize(id1) + buildThreadStart(id2, state.permissionMode);
     }
 
     // Initialized but threadId not yet available (race: user sent message before thread/start responded)
@@ -392,47 +343,10 @@ export class CodexProvider implements AgentProvider {
     return "";
   }
 
-  // ============ Task 5.12: Permission mode mapping ============
-
-  /**
-   * Build params for thread/start.
-   *
-   * `sandbox` is the `SandboxMode` string enum ("read-only" | "workspace-write"
-   * | "danger-full-access") and `approvalPolicy` is the `AskForApproval` enum
-   * ("untrusted" | "on-failure" | "on-request" | "never" | ...).
-   *
-   * We always set `approvalPolicy: "never"` so Codex runs autonomously without
-   * emitting `item/commandExecution/requestApproval` prompts — the equivalent of
-   * Claude Code's `--dangerously-skip-permissions`. (`"on-request"` is what makes
-   * Codex stop and ask before every command.)
-   *
-   * Edit mode uses `danger-full-access` so commands execute directly: with a
-   * confined sandbox + `never`, any command that needs to escape the sandbox is
-   * auto-denied and silently fails instead of prompting (and on hosts where the
-   * Linux sandbox can't initialize, every command would fail).
-   */
-  private buildThreadStartParams(mode: "plan" | "edit"): Record<string, unknown> {
-    if (mode === "plan") {
-      return {
-        sandbox: "read-only",
-        approvalPolicy: "never",
-      };
-    }
-    // edit mode
-    return {
-      sandbox: "danger-full-access",
-      approvalPolicy: "never",
-    };
-  }
-
   // ============ Task 5.11: formatApprovalResponse ============
 
   formatApprovalResponse(requestId: string, decision: string, _sessionId: string): string {
-    return JSON.stringify({
-      jsonrpc: "2.0",
-      id: Number(requestId),
-      result: { decision },
-    }) + "\n";
+    return buildApprovalResponse(requestId, decision);
   }
 
   // ============ Interrupt (cancel current turn) ============
@@ -440,12 +354,8 @@ export class CodexProvider implements AgentProvider {
   formatInterrupt(sessionId: string): string | null {
     const state = this.getSessionState(sessionId);
     for (const [id, method] of state.pendingRequests) {
-      if (method === "turn/start") {
-        return JSON.stringify({
-          jsonrpc: "2.0",
-          method: "$/cancelRequest",
-          params: { id },
-        }) + "\n";
+      if (method === CODEX_CLIENT_METHODS.turnStart) {
+        return buildCancelRequest(id);
       }
     }
     return null;
@@ -487,19 +397,6 @@ export class CodexProvider implements AgentProvider {
       this.sessions.set(sessionId, state);
     }
     return state;
-  }
-
-  /** Build Codex input array from string or ContentPart[] */
-  private buildCodexInput(content: string | ContentPart[]): unknown[] {
-    if (typeof content === "string") {
-      return [{ type: "text", text: content }];
-    }
-    return content.map((part) => {
-      if (part.type === "text") {
-        return { type: "text", text: part.text };
-      }
-      return { type: "image", url: `data:${part.mediaType};base64,${part.data}` };
-    });
   }
 
   private generateId(): string {
