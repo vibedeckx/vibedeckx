@@ -136,7 +136,9 @@ export const TurnCompletedParamsSchema = z.looseObject({
   turn: z.looseObject({
     id: idish.optional(),
     status: z.string().optional(),
-    error: z.looseObject({ message: z.string().optional() }).optional(),
+    // Real codex (verified live, 0.144.1) sends an explicit `"error": null` on
+    // successful turns rather than omitting the field.
+    error: z.looseObject({ message: z.string().optional() }).nullable().optional(),
   }),
 });
 

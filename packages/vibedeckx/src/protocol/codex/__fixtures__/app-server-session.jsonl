@@ -4,3 +4,4 @@
 {"jsonrpc":"2.0","method":"item/completed","params":{"turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done.","phase":"final_answer"}}}
 {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}
 {"jsonrpc":"2.0","id":7,"method":"item/commandExecution/requestApproval","params":{"command":"rm /tmp/x","cwd":"/tmp"}}
+{"method":"turn/completed","params":{"threadId":"019f56af-cec7-7e63-a459-96afb2aff02c","turn":{"id":"019f56af-d6d2-7ed3-892a-ff5e2a486860","items":[],"itemsView":"notLoaded","status":"completed","error":null,"startedAt":1783865792,"completedAt":1783865797,"durationMs":5300}}}
