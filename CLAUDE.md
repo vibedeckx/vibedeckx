@@ -30,7 +30,8 @@ cd apps/vibedeckx-ui && npx tsc --noEmit                 # Frontend
 pnpm --filter vibedeckx-ui lint
 ```
 
-No test framework is configured.
+# Tests (vitest, colocated *.test.ts files in packages/vibedeckx/src/)
+pnpm --filter vibedeckx test
 
 ## Monorepo Structure
 
@@ -75,6 +76,7 @@ No test framework is configured.
 - WebSocket messages are typed as `AgentWsMessage`: `{ JsonPatch }`, `{ Ready }`, `{ finished }`, `{ error }`, `{ taskCompleted }`
 - `EntryIndexProvider` generates monotonic indices for message ordering
 - Git worktree support: `resolveWorktreePath()` in `utils/worktree-paths.ts` resolves paths relative to project or parent directory
+- Agent CLI protocol knowledge (stream-json / Codex JSON-RPC shapes, CLI flags, binary detection) lives in `packages/vibedeckx/src/protocol/` — providers and process-manager consume it; never re-implement parsing or arg-building inline. Offline contract tests validate recorded fixtures against the zod schemas there.
 
 ### Default Ports
 
