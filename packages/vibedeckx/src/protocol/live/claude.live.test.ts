@@ -78,3 +78,56 @@ describe.skipIf(!available)("claude live probes (core)", () => {
     expect(types).toContain("result");
   });
 });
+
+describe.skipIf(!available)("claude live probes (lifecycle & flags)", () => {
+  it("CC-3: run_in_background emits task_started and task_notification", async () => {
+    const r = await runClaudeSession({
+      turns: ["Use the Bash tool with run_in_background set to true to run: sleep 3. Then wait for it to finish and reply DONE."],
+      extraArgs: MODEL_ARGS,
+      timeoutMs: 150_000,
+      recordAs: "cc3-background",
+    });
+    expect(r.outcome).toBe("ok");
+    expect(r.contractFailures).toEqual([]);
+    const systems = r.messages.filter((m) => (m as { type: string }).type === "system") as Array<{ subtype?: string; task_id?: string }>;
+    const started = systems.filter((s) => s.subtype === "task_started" && s.task_id);
+    // The background-task ledger depends on these two events — this is the core drift tripwire.
+    expect(started.length, "no task_started event — background-task ledger protocol drifted?").toBeGreaterThan(0);
+    const finished = systems.filter(
+      (s) => (s.subtype === "task_notification" && s.task_id) || (s.subtype === "task_updated" && s.task_id),
+    );
+    expect(finished.length, "no task_notification/task_updated terminal event").toBeGreaterThan(0);
+  });
+
+  it("CC-5: plan mode — ExitPlanMode tool_use appears", async () => {
+    const r = await runClaudeSession({
+      turns: ["Make a one-step plan to create a file named hello.txt. Do not write any files or use ToolSearch. As soon as you have the one-step plan in mind, immediately call the ExitPlanMode tool (it is a core built-in tool available directly in this session, not something you need to search for) with the plan text to present it and exit plan mode."],
+      permissionMode: "plan",
+      extraArgs: MODEL_ARGS,
+      recordAs: "cc5-planmode",
+    });
+    expect(r.outcome).toBe("ok");
+    expect(r.contractFailures).toEqual([]);
+    const toolNames = r.messages.flatMap((m) => {
+      const am = m as { type: string; message?: { content?: Array<{ type: string; name?: string }> } };
+      if (am.type !== "assistant" || !Array.isArray(am.message?.content)) return [];
+      return am.message.content.filter((b) => b.type === "tool_use").map((b) => b.name);
+    });
+    expect(toolNames, `expected ExitPlanMode among: ${toolNames.join(", ")}`).toContain("ExitPlanMode");
+  });
+
+  it("CC-6: --disallowedTools AskUserQuestion is honored", async () => {
+    const r = await runClaudeSession({
+      turns: ["Ask me a multiple-choice question about my favorite color using the AskUserQuestion tool. If that tool is unavailable, ask in plain text instead."],
+      extraArgs: MODEL_ARGS,
+      recordAs: "cc6-disallowed",
+    });
+    expect(r.outcome).toBe("ok");
+    const toolNames = r.messages.flatMap((m) => {
+      const am = m as { type: string; message?: { content?: Array<{ type: string; name?: string }> } };
+      if (am.type !== "assistant" || !Array.isArray(am.message?.content)) return [];
+      return am.message.content.filter((b) => b.type === "tool_use").map((b) => b.name);
+    });
+    expect(toolNames, "AskUserQuestion must be blocked by --disallowedTools").not.toContain("AskUserQuestion");
+  });
+});
