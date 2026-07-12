@@ -16,6 +16,7 @@
     "dev": "tsc -w",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:compat": "vitest run --config vitest.live.config.ts",
     "eval": "evalite run",
     "eval:dev": "evalite watch",
     "prepublishOnly": "npm run build",
