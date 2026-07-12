@@ -102,6 +102,7 @@ export default function Home() {
   const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
   const [activateAgentTabNonce, setActivateAgentTabNonce] = useState(0);
+  const [diffCompareNonce, setDiffCompareNonce] = useState(0);
   const agentRef = useRef<AgentConversationHandle>(null);
   // The project id we last reset the branch for. State (not a ref) so the
   // render-time reset below is concurrent-safe.
@@ -560,6 +561,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             onMergeBadgeClick={(branch) => {
               setSelectedBranch(branch);
               setActiveView("workspace");
+              setDiffCompareNonce((n) => n + 1);
             }}
             workspaceStatuses={workspaceStatuses}
             residentSessions={residentSessions}
@@ -647,6 +649,12 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     projectId={currentProject?.id ?? null}
                     selectedBranch={selectedBranch}
                     activateAgentTabNonce={activateAgentTabNonce}
+                    diffCompareNonce={diffCompareNonce}
+                    mergeTarget={
+                      selectedBranch
+                        ? (mergeStatuses.get(selectedBranch)?.target ?? mergeDefaultTarget)
+                        : null
+                    }
                     onMergeRequest={handleMergeRequest}
                     project={currentProject}
                     onExecutorModeChange={handleExecutorModeChange}

@@ -20,6 +20,8 @@ interface RightPanelProps {
   onExecutorModeChange?: (mode: ExecutionMode) => void;
   agentSlot?: ReactNode;
   activateAgentTabNonce?: number;
+  diffCompareNonce?: number;
+  mergeTarget?: string | null;
   // Whether the workspace view is currently shown. The panel stays mounted
   // (hidden via CSS) on other views, so this gates the file-ref index load.
   active?: boolean;
@@ -55,6 +57,8 @@ export function RightPanel({
   onExecutorModeChange,
   agentSlot,
   activateAgentTabNonce,
+  diffCompareNonce,
+  mergeTarget,
   active = true,
 }: RightPanelProps) {
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
@@ -66,6 +70,14 @@ export function RightPanel({
     prevActivateAgentTabNonceRef.current = activateAgentTabNonce;
     setActiveTab('agent');
   }, [activateAgentTabNonce, setActiveTab]);
+
+  const prevDiffCompareNonceRef = useRef(diffCompareNonce);
+  useEffect(() => {
+    if (diffCompareNonce === undefined) return;
+    if (prevDiffCompareNonceRef.current === diffCompareNonce) return;
+    prevDiffCompareNonceRef.current = diffCompareNonce;
+    setActiveTab('diff');
+  }, [diffCompareNonce, setActiveTab]);
 
   const target = project && !project.path ? ("remote" as const) : undefined;
   const index = useFileRefIndex({ projectId, branch: selectedBranch, target, enabled: active });
@@ -145,6 +157,8 @@ export function RightPanel({
             selectedBranch={selectedBranch}
             onMergeRequest={onMergeRequest}
             project={project}
+            mergeTarget={mergeTarget}
+            compareRequestNonce={diffCompareNonce}
           />
         </div>
         <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'terminal' && 'hidden')}>

@@ -17,10 +17,26 @@ interface DiffPanelProps {
   selectedBranch?: string | null;
   onMergeRequest?: () => void;
   project?: Project | null;
+  mergeTarget?: string | null;
+  compareRequestNonce?: number;
 }
 
-export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }: DiffPanelProps) {
+export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, mergeTarget, compareRequestNonce }: DiffPanelProps) {
   const [selectedCommit, setSinceCommit] = useState<string | null>(null);
+  const [compareMode, setCompareMode] = useState(false);
+  // Badge deep-link: a nonce bump means "show the vs-target comparison now".
+  // Applied synchronously during render (not in a useEffect) so the derived
+  // state lands in the same commit as the nonce change — same pattern as the
+  // branchResetProjectId reset in page.tsx, and it sidesteps the
+  // react-hooks/set-state-in-effect lint rule, which (correctly) flags a
+  // useEffect that calls raw useState setters to react to a prop bump.
+  const [seenCompareNonce, setSeenCompareNonce] = useState(compareRequestNonce);
+  if (compareRequestNonce !== undefined && compareRequestNonce !== seenCompareNonce) {
+    setSeenCompareNonce(compareRequestNonce);
+    setCompareMode(true);
+    setSinceCommit(null);
+  }
+
   const { remotes } = useProjectRemotesContext();
 
   // Build execution mode targets from local path + project remotes
@@ -39,7 +55,8 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
   // When the project has no local path, omit target so the backend auto-detects remote.
   const hookTarget: 'local' | 'remote' | undefined =
     diffTarget === 'local' ? (project?.path ? 'local' : undefined) : 'remote';
-  const { diff, loading, error, refresh } = useDiff(projectId, selectedBranch, selectedCommit, hookTarget);
+  const compareTo = compareMode && mergeTarget ? mergeTarget : null;
+  const { diff, loading, error, refresh } = useDiff(projectId, selectedBranch, selectedCommit, hookTarget, compareTo);
   const { commits, loading: commitsLoading, refetch: refetchCommits } = useCommits(projectId, selectedBranch, undefined, hookTarget);
 
   useEffect(() => {
@@ -50,9 +67,10 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
     refetchCommits();
   }, [refetchCommits]);
 
-  // Reset selectedCommit when branch changes
+  // Reset selection when branch changes
   useEffect(() => {
     setSinceCommit(null);
+    setCompareMode(false);
   }, [selectedBranch]);
 
   // Reset diffTarget when project changes
@@ -112,7 +130,16 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
           <CommitSelector
             commits={commits}
             selectedCommit={selectedCommit}
-            onSelectCommit={setSinceCommit}
+            onSelectCommit={(commit) => {
+              setCompareMode(false);
+              setSinceCommit(commit);
+            }}
+            compareTarget={mergeTarget}
+            compareSelected={compareMode}
+            onSelectCompare={() => {
+              setCompareMode(true);
+              setSinceCommit(null);
+            }}
             loading={commitsLoading}
             disabled={loading}
           />
@@ -139,7 +166,13 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project }
             </div>
           ) : fileCount === 0 ? (
             <div className="text-center text-muted-foreground py-8">
-              <p>{selectedCommit ? 'No changes in this commit' : 'No uncommitted changes'}</p>
+              <p>
+                {compareMode && mergeTarget
+                  ? `No changes vs ${mergeTarget}`
+                  : selectedCommit
+                    ? 'No changes in this commit'
+                    : 'No uncommitted changes'}
+              </p>
             </div>
           ) : (
             diff?.files.map((file, index) => (

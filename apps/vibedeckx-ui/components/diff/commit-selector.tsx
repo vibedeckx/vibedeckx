@@ -11,11 +11,15 @@ import {
 import type { CommitEntry } from '@/lib/api';
 
 const HEAD_SENTINEL = '__head__';
+const COMPARE_SENTINEL = '__compare__';
 
 interface CommitSelectorProps {
   commits: CommitEntry[];
   selectedCommit: string | null;
   onSelectCommit: (commit: string | null) => void;
+  compareTarget?: string | null;
+  compareSelected?: boolean;
+  onSelectCompare?: () => void;
   loading?: boolean;
   disabled?: boolean;
 }
@@ -24,14 +28,21 @@ export function CommitSelector({
   commits,
   selectedCommit,
   onSelectCommit,
+  compareTarget,
+  compareSelected,
+  onSelectCompare,
   loading,
   disabled,
 }: CommitSelectorProps) {
   return (
     <Select
-      value={selectedCommit ?? HEAD_SENTINEL}
+      value={compareSelected ? COMPARE_SENTINEL : (selectedCommit ?? HEAD_SENTINEL)}
       onValueChange={(value) => {
-        onSelectCommit(value === HEAD_SENTINEL ? null : value);
+        if (value === COMPARE_SENTINEL) {
+          onSelectCompare?.();
+        } else {
+          onSelectCommit(value === HEAD_SENTINEL ? null : value);
+        }
       }}
       disabled={disabled || loading}
     >
@@ -41,6 +52,11 @@ export function CommitSelector({
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={HEAD_SENTINEL}>HEAD (uncommitted)</SelectItem>
+        {compareTarget && (
+          <SelectItem value={COMPARE_SENTINEL}>
+            vs <span className="font-mono text-xs">{compareTarget}</span>
+          </SelectItem>
+        )}
         {commits.map((commit) => (
           <SelectItem key={commit.hash} value={commit.hash}>
             <span className="font-mono text-xs">{commit.shortHash}</span>{' '}
