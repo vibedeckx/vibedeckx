@@ -106,19 +106,11 @@ export function computeBranchMergeStatus(
   } else if (isAncestor(repoPath, branchTip, targetTip)) {
     status = "merged";
   } else {
-    // git cherry only outputs commits "yet to be applied" ("+"), not already-applied ("-").
-    // Count total commits on branch (all commits minus the root).
-    const logOutput = git(repoPath, ["log", "--oneline", branch]).trim().split("\n").filter(Boolean);
-    const totalCount = logOutput.length - 1; // exclude root/base commit
-
-    // git cherry shows commits "yet to be applied" (start with "+").
-    const cherryLines = git(repoPath, ["cherry", target, branch]).trim().split("\n").filter(Boolean);
-    unmergedCount = cherryLines.filter((l) => l.startsWith("+")).length;
-
-    // Determine status based on total vs unmerged count.
-    if (totalCount === 0) status = "no-unique-commits";
+    const lines = git(repoPath, ["cherry", target, branch]).trim().split("\n").filter(Boolean);
+    unmergedCount = lines.filter((l) => l.startsWith("+")).length;
+    if (lines.length === 0) status = "no-unique-commits";
     else if (unmergedCount === 0) status = "merged";
-    else if (unmergedCount < totalCount) status = "partial";
+    else if (unmergedCount < lines.length) status = "partial";
     else status = "unmerged";
   }
 

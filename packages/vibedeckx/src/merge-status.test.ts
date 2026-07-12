@@ -132,10 +132,28 @@ describe("merge-status", () => {
       const first = run(repo, ["rev-parse", "dev1"]).trim();
       commit(repo, "b.txt", "b", "dev commit 2");
       run(repo, ["checkout", "main"]);
+      // Advance main first so the cherry-pick gets a different parent — an
+      // unchanged parent + same-second timestamps yields a byte-identical
+      // SHA, making the commit shared history that `git cherry` omits.
+      commit(repo, "m.txt", "m", "main advances");
       run(repo, ["cherry-pick", first]);
       expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "partial",
         unmergedCount: 1,
+      });
+    });
+
+    it("stays unmerged with deep pre-fork history (denominator regression)", () => {
+      commit(repo, "h1.txt", "1", "history 1");
+      commit(repo, "h2.txt", "2", "history 2");
+      commit(repo, "h3.txt", "3", "history 3");
+      run(repo, ["checkout", "-b", "dev1"]);
+      commit(repo, "a.txt", "a", "dev commit 1");
+      commit(repo, "b.txt", "b", "dev commit 2");
+      run(repo, ["checkout", "main"]);
+      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+        status: "unmerged",
+        unmergedCount: 2,
       });
     });
 
