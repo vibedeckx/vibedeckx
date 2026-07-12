@@ -73,6 +73,16 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
   const [statuses, setStatuses] = useState<Map<string, BranchMergeInfo>>(new Map());
   const [defaultTarget, setDefaultTarget] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const [seenProjectId, setSeenProjectId] = useState(projectId);
+
+  // Project switch: drop the old project's statuses immediately — the
+  // keep-on-failure behavior below must never carry badges across projects
+  // (same-named branches like dev1/main would show the wrong project's state).
+  if (projectId !== seenProjectId) {
+    setSeenProjectId(projectId);
+    setStatuses(new Map());
+    setDefaultTarget(null);
+  }
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 

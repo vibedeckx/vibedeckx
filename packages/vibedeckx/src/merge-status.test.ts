@@ -234,6 +234,18 @@ describe("merge-status", () => {
       }
     });
 
+    it("memoizes a failed default detection across pairs", () => {
+      const trunk = initRepo("trunk");
+      try {
+        run(trunk, ["branch", "dev1"]);
+        run(trunk, ["branch", "dev2"]);
+        const entries = computeMergeStatusPairs(trunk, [{ branch: "dev1" }, { branch: "dev2" }]);
+        expect(entries.map((e) => e.error)).toEqual(["no-default-branch", "no-default-branch"]);
+      } finally {
+        rmSync(trunk, { recursive: true, force: true });
+      }
+    });
+
     it("branch equal to target reads no-unique-commits", () => {
       const entries = computeMergeStatusPairs(repo, [{ branch: "main", target: "main" }]);
       expect(entries[0].status).toBe("no-unique-commits");
