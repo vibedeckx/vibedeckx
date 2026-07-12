@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thread-1"}}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"/bin/bash -lc \"echo hi\"","aggregatedOutput":"hi\n","status":"completed"}}}
+{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"turnId":"turn-1","tokenUsage":{"last":{"inputTokens":12,"outputTokens":34}}}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Done.","phase":"final_answer"}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}
+{"jsonrpc":"2.0","id":7,"method":"item/commandExecution/requestApproval","params":{"command":"rm /tmp/x","cwd":"/tmp"}}
