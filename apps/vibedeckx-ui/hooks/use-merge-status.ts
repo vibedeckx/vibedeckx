@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, type MergeStatusEntry, type Worktree } from "@/lib/api";
+import { api, type MergeStatusEntry, type MergeStatusResult, type Worktree } from "@/lib/api";
 
 export interface BranchMergeInfo extends MergeStatusEntry {
   target: string;
@@ -29,6 +29,18 @@ export function groupBranchesByTarget(
     groups.set(target, list);
   }
   return groups;
+}
+
+/**
+ * True only when a merge-status fetch for an *explicit* persisted target
+ * fails with a genuine 400 (bad/deleted branch) — the signal that the
+ * persisted target is stale and should be dropped. Any other failure
+ * (network error, 401, 502, etc.) or a fetch for the default target (no
+ * explicit target set, so nothing to clean up) leaves the persisted choice
+ * alone. Pure — exported for tests.
+ */
+export function shouldClearStaleTarget(result: MergeStatusResult, target: string | null): boolean {
+  return !result.ok && result.status === 400 && target !== null;
 }
 
 /**
@@ -63,20 +75,25 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
       const groups = groupBranchesByTarget(branches, (b) => readMergeTarget(projectId, b));
       const next = new Map<string, BranchMergeInfo>();
       let nextDefault: string | null = null;
+      let clearedStaleTarget = false;
 
       await Promise.all(
         Array.from(groups.entries()).map(async ([target, groupBranches]) => {
-          const resp = await api.getMergeStatus(projectId, target ?? undefined);
-          if (!resp) {
-            // Explicit target failed (e.g. branch deleted since it was chosen) —
-            // drop the stale persisted choice; the next refresh uses the default.
-            if (target) {
+          const result = await api.getMergeStatus(projectId, target ?? undefined);
+          if (!result.ok) {
+            // Only a genuine 400 for an explicit persisted target means the
+            // target itself is bad (e.g. branch deleted since it was chosen).
+            // Any other failure (network blip, 401 during token refresh, 502
+            // from an offline remote) must not wipe the user's choice.
+            if (shouldClearStaleTarget(result, target) && !cancelled) {
+              clearedStaleTarget = true;
               for (const b of groupBranches) {
                 localStorage.removeItem(mergeTargetStorageKey(projectId, b));
               }
             }
             return;
           }
+          const resp = result.data;
           if (!target) nextDefault = resp.target;
           for (const entry of resp.entries) {
             // The backend reports every worktree branch for the requested
@@ -91,21 +108,31 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
       if (!cancelled) {
         setStatuses(next);
         setDefaultTarget(nextDefault);
+        // Branches whose stale target we just cleared fall back to the
+        // default group on the next fetch — trigger it now so they don't
+        // stay badge-less until an unrelated refresh. A 400 on the default
+        // group itself (target === null) never sets clearedStaleTarget, so
+        // this can't loop forever.
+        if (clearedStaleTarget) refetch();
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [projectId, worktrees, nonce]);
+  }, [projectId, worktrees, nonce, refetch]);
 
   const setTarget = useCallback(
     (branch: string, target: string | null) => {
       if (!projectId) return;
-      if (target) {
-        localStorage.setItem(mergeTargetStorageKey(projectId, branch), target);
-      } else {
-        localStorage.removeItem(mergeTargetStorageKey(projectId, branch));
+      try {
+        if (target) {
+          localStorage.setItem(mergeTargetStorageKey(projectId, branch), target);
+        } else {
+          localStorage.removeItem(mergeTargetStorageKey(projectId, branch));
+        }
+      } catch {
+        // ignore quota / privacy-mode errors
       }
       refetch();
     },

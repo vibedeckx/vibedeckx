@@ -297,6 +297,10 @@ export interface MergeStatusResponse {
   entries: MergeStatusEntry[];
 }
 
+export type MergeStatusResult =
+  | { ok: true; data: MergeStatusResponse }
+  | { ok: false; status: number }; // status 0 = thrown fetch/network error
+
 export type WorktreeTarget = "local" | "remote";
 
 export interface WorktreeTargetResult {
@@ -1004,16 +1008,17 @@ export const api = {
     return data.worktrees;
   },
 
-  async getMergeStatus(id: string, target?: string): Promise<MergeStatusResponse | null> {
+  async getMergeStatus(id: string, target?: string): Promise<MergeStatusResult> {
     try {
       const params = new URLSearchParams();
       if (target) params.set("target", target);
       const query = params.toString() ? `?${params.toString()}` : "";
       const res = await authFetch(`${getApiBase()}/api/projects/${id}/branches/merge-status${query}`);
-      if (!res.ok) return null;
-      return await res.json();
+      if (!res.ok) return { ok: false, status: res.status };
+      const data = await res.json();
+      return { ok: true, data };
     } catch {
-      return null;
+      return { ok: false, status: 0 };
     }
   },
 

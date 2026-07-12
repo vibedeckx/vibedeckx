@@ -19,6 +19,7 @@ export function WorkspaceMergeBadge({ info, onClick }: WorkspaceMergeBadgeProps)
       : info.status === "no-unique-commits"
         ? `No commits vs ${info.target}`
         : `${info.unmergedCount} commit${info.unmergedCount !== 1 ? "s" : ""} not in ${info.target}`;
+  const ariaLabel = info.dirty ? `${label} · uncommitted changes` : label;
 
   return (
     <Tooltip>
@@ -28,6 +29,7 @@ export function WorkspaceMergeBadge({ info, onClick }: WorkspaceMergeBadgeProps)
             e.stopPropagation();
             onClick();
           }}
+          aria-label={ariaLabel}
           className="relative shrink-0 flex items-center justify-center h-4 min-w-4 px-0.5 rounded hover:bg-muted"
         >
           {info.status === "merged" ? (
