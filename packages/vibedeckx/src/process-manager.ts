@@ -1,4 +1,4 @@
-import { spawn, execFileSync, type ChildProcess } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { existsSync, chmodSync, readdirSync, statSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -7,6 +7,13 @@ import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { Executor, ExecutorProcessStatus, PromptProvider, Storage } from "./storage/types.js";
 import type { EventBus } from "./event-bus.js";
+import { detectBinary } from "./protocol/shared/binary.js";
+import { buildCodexExecCommand } from "./protocol/codex/cli.js";
+import {
+  buildClaudePrintCommand,
+  buildClaudeStreamExecutorSpawn,
+} from "./protocol/claude-code/cli.js";
+import { serializeUserInput } from "./protocol/claude-code/codec.js";
 
 export type LogMessage =
   | { type: "stdout"; data: string }
@@ -77,60 +84,21 @@ export class ProcessManager {
   private storage: Storage;
   private eventBus: EventBus | null = null;
   private terminalCounter = 0;
-  private binaryCache = new Map<string, string | null>();
 
   constructor(storage: Storage) {
     this.storage = storage;
   }
 
   /**
-   * Detect a CLI binary by name, caching the result.
-   */
-  private detectBinary(name: string): string | null {
-    if (this.binaryCache.has(name)) {
-      return this.binaryCache.get(name)!;
-    }
-    try {
-      const cmd = process.platform === "win32" ? "where" : "which";
-      const result = execFileSync(cmd, [name], {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "ignore"],
-      }).trim();
-      const path = result || null;
-      this.binaryCache.set(name, path);
-      console.log(`[ProcessManager] ${name} binary found: ${result}`);
-      return path;
-    } catch {
-      this.binaryCache.set(name, null);
-      console.log(`[ProcessManager] ${name} binary not found, will use npx`);
-      return null;
-    }
-  }
-
-  /**
    * Build the shell command string for a prompt executor.
-   * Supports claude and codex providers.
+   * Supports claude and codex providers. Command shapes live in the
+   * protocol layer (src/protocol/).
    */
   private buildPromptCommand(prompt: string, provider: PromptProvider, finalResultFile?: string): string {
-    const escapedPrompt = prompt.replace(/'/g, "'\\''");
-
     if (provider === 'codex') {
-      // --output-last-message makes codex write the agent's final message to a
-      // file, which we read on exit as the run's structured report.
-      const lastMessageArg = finalResultFile ? ` --output-last-message '${finalResultFile}'` : '';
-      const binary = this.detectBinary('codex');
-      if (binary) {
-        return `${binary} --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'${lastMessageArg}`;
-      }
-      return `npx -y @openai/codex --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'${lastMessageArg}`;
+      return buildCodexExecCommand(detectBinary('codex'), prompt, finalResultFile);
     }
-
-    // Default: claude
-    const binary = this.detectBinary('claude');
-    if (binary) {
-      return `${binary} -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
-    }
-    return `npx -y @anthropic-ai/claude-code -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
+    return buildClaudePrintCommand(detectBinary('claude'), prompt);
   }
 
   /**
@@ -566,16 +534,7 @@ export class ProcessManager {
    * sends the prompt via stdin, and parses JSON output into formatted terminal text.
    */
   private startClaudeStreamProcess(processId: string, executor: Executor, cwd: string, skipDb: boolean): void {
-    const binary = this.detectBinary('claude');
-    const args = [
-      '--output-format=stream-json',
-      '--input-format=stream-json',
-      '--dangerously-skip-permissions',
-      '--verbose',
-    ];
-
-    const command = binary || 'npx';
-    const fullArgs = binary ? args : ['-y', '@anthropic-ai/claude-code', ...args];
+    const { command, args: fullArgs } = buildClaudeStreamExecutorSpawn(detectBinary('claude'));
 
     const childProcess = spawn(command, fullArgs, {
       cwd,
@@ -602,7 +561,7 @@ export class ProcessManager {
     console.log(`[ProcessManager] Stream process ${processId} added to map, PID: ${childProcess.pid}`);
 
     // Send prompt via stdin and close to signal single-turn
-    const userMessage = JSON.stringify({ type: 'user', message: { role: 'user', content: executor.command } }) + '\n';
+    const userMessage = serializeUserInput(executor.command);
     childProcess.stdin?.write(userMessage, () => {
       childProcess.stdin?.end();
     });
