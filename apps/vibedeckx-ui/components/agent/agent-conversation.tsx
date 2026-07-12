@@ -48,7 +48,7 @@ import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
 import { SessionHistoryDropdown } from "./session-history-dropdown";
-import { QuotePopover, formatAsQuote } from "./quote-popover";
+import { QuotePopover, appendQuote } from "./quote-popover";
 
 /** Only renders the attachment header when there are files attached */
 function AttachmentHeader() {
@@ -335,7 +335,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const alternateBranchProviders = availableBranchProviders.filter((p) => p.type !== agentType);
 
   const handleQuote = useCallback((text: string) => {
-    setInput(formatAsQuote(text) + input);
+    setInput(appendQuote(input, text));
     requestAnimationFrame(() => {
       const ta = textareaWrapperRef.current?.querySelector("textarea");
       if (!ta) return;

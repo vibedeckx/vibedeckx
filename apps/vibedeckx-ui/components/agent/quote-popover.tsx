@@ -14,6 +14,15 @@ export function formatAsQuote(text: string): string {
   return text.replace(/\r?\n/g, "\n").split("\n").map((l) => `> ${l}`).join("\n") + "\n\n";
 }
 
+export function appendQuote(input: string, text: string): string {
+  const separator = input.length === 0 || input.endsWith("\n\n")
+    ? ""
+    : input.endsWith("\n")
+      ? "\n"
+      : "\n\n";
+  return input + separator + formatAsQuote(text);
+}
+
 interface QuotePopoverProps {
   containerRef: React.RefObject<HTMLElement | null>;
   onQuote: (text: string) => void;
