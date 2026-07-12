@@ -8,6 +8,5 @@ export default defineConfig({
     testTimeout: 120_000,
     hookTimeout: 60_000,
     retry: 1,
-    passWithNoTests: true,
   },
 });

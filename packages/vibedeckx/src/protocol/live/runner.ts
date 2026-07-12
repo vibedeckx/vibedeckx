@@ -85,6 +85,10 @@ function startPump(proc: ChildProcess): Pump {
   type Waiter = { pred: (line: string) => boolean; resolve: (r: "matched" | "exit") => void };
   const waiters: Set<Waiter> = new Set();
 
+  // A CLI that exits between turns can leave a write in flight; without this,
+  // the resulting EPIPE is an unhandled 'error' event that crashes the vitest
+  // worker instead of surfacing as a normal timeout/exit outcome.
+  proc.stdin?.on("error", () => {});
   proc.stderr?.on("data", (d: Buffer) => { stderrBuf += d.toString(); });
   proc.stdout?.on("data", (d: Buffer) => {
     stdoutBuf += d.toString();
@@ -258,6 +262,9 @@ export async function runClaudeSession(opts: ClaudeRunOptions): Promise<ClaudeRu
 
   const sawProtocol = messages.length > 0;
   record(opts.recordAs, pump.rawLines);
+  if (Object.keys(unknownKeys).length) {
+    console.warn(`[compat] unknown-key WARNINGS (${opts.recordAs ?? "claude"}):`, JSON.stringify(unknownKeys));
+  }
   return {
     outcome: classifyFailure(pump, sawProtocol, timedOut),
     messages,
@@ -344,11 +351,15 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
   };
 
   const incoming: CodexIncoming[] = [];
-  const seen = new Set<string>();
+  // Cursor over pump.rawLines rather than a content-based Set: byte-identical
+  // duplicate protocol lines are legal (e.g. two identical item/completed
+  // notifications) and must each produce their own `incoming` entry, both to
+  // avoid dropping real events and to keep `incoming[i]` aligned 1:1 with
+  // `pump.rawLines[i]` for the failure-label lookup below.
+  let drainedCount = 0;
   const drain = () => {
-    for (const line of pump.rawLines) {
-      if (seen.has(line)) continue;
-      seen.add(line);
+    while (drainedCount < pump.rawLines.length) {
+      const line = pump.rawLines[drainedCount++];
       const inc = parseCodexLine(line);
       // Track the in-flight turn UUID before onIncoming fires, so a handler
       // may cancelTurn() in direct response to the very line being drained.
@@ -386,18 +397,33 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
     if (parsed.success) threadId = parsed.data.thread.id;
   }
 
+  const isTurnCompletedLine = (line: string): boolean => {
+    const inc = parseCodexLine(line);
+    return inc.kind === "notification" && inc.method === CODEX_NOTIFICATIONS.turnCompleted;
+  };
+
   if (threadId && !timedOut) {
     for (const turn of opts.turns) {
       const turnId = rpcId++;
+      // `waitFor` scans already-received lines first, and turn/completed
+      // notifications carry no distinguishing id we can match against
+      // up-front — so a naive "any turn/completed" predicate would instantly
+      // re-match turn 1's completion line on turn 2's wait (it's still
+      // sitting in pump.rawLines) and kill the process before turn 2 ever
+      // runs. Count turn/completed lines seen before sending this turn, and
+      // require the count to strictly exceed that snapshot — mirrors the
+      // claude driver's result-counting turn loop above.
+      const turnCompletedBefore = pump.rawLines.filter(isTurnCompletedLine).length;
       proc.stdin?.write(rpc({ id: turnId, method: CODEX_CLIENT_METHODS.turnStart, params: { threadId, input: buildCodexInput(turn) } }));
-      // Wait for turn/completed OR an error response for this turn id; drain
-      // continuously so onIncoming can cancel/approve mid-turn.
-      const done = (line: string) => {
+      // Wait for a NEW turn/completed OR an error response for this turn id;
+      // drain continuously so onIncoming can cancel/approve mid-turn.
+      const done = () => {
         drain();
-        const inc = parseCodexLine(line);
-        if (inc.kind === "notification" && inc.method === CODEX_NOTIFICATIONS.turnCompleted) return true;
-        if (inc.kind === "error_response" && Number(inc.id) === turnId) return true;
-        return false;
+        if (pump.rawLines.filter(isTurnCompletedLine).length > turnCompletedBefore) return true;
+        return pump.rawLines.some((l) => {
+          const inc = parseCodexLine(l);
+          return inc.kind === "error_response" && Number(inc.id) === turnId;
+        });
       };
       const r = await pump.waitFor(done, timeoutMs);
       drain();
@@ -454,6 +480,9 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
 
   const sawProtocol = incoming.some((i) => i.kind !== "ignored");
   record(opts.recordAs, pump.rawLines);
+  if (Object.keys(unknownKeys).length) {
+    console.warn(`[compat] unknown-key WARNINGS (${opts.recordAs ?? "codex"}):`, JSON.stringify(unknownKeys));
+  }
   return {
     outcome: classifyFailure(pump, sawProtocol, timedOut),
     incoming,

@@ -16,6 +16,7 @@ if (mode === "hang") {
 }
 
 let turns = 0;
+let codexTurnCounter = 0;
 let buffered = "";
 process.stdin.on("data", (d) => {
   buffered += d.toString();
@@ -36,9 +37,25 @@ process.stdin.on("data", (d) => {
       if (msg.method === "initialize") out({ jsonrpc: "2.0", id: msg.id, result: {} });
       if (msg.method === "thread/start") out({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "t-fake" } } });
       if (msg.method === "turn/start") {
-        out({ jsonrpc: "2.0", method: "item/completed", params: { turnId: "turn-1", item: { type: "agentMessage", id: "m1", text: "done", phase: "final_answer" } } });
+        // Per-turn counter: each turn/start gets its own turnId so a
+        // multi-turn run produces distinguishable item/completed +
+        // turn/completed pairs (pins the runner's count-based turn-loop fix).
+        codexTurnCounter++;
+        const turnId = `turn-${codexTurnCounter}`;
+        out({ jsonrpc: "2.0", method: "item/completed", params: { turnId, item: { type: "agentMessage", id: `m${codexTurnCounter}`, text: "done", phase: "final_answer" } } });
         out({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { tokenUsage: { last: { inputTokens: 1, outputTokens: 2 } } } });
-        out({ jsonrpc: "2.0", method: "turn/completed", params: { turn: { id: "turn-1", status: "completed" } } });
+        out({ jsonrpc: "2.0", method: "turn/completed", params: { turn: { id: turnId, status: "completed" } } });
+      }
+    } else if (mode === "codex-duplicate-line") {
+      if (msg.method === "initialize") out({ jsonrpc: "2.0", id: msg.id, result: {} });
+      if (msg.method === "thread/start") out({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "t-fake" } } });
+      if (msg.method === "turn/start") {
+        codexTurnCounter++;
+        const turnId = `turn-${codexTurnCounter}`;
+        const dup = { jsonrpc: "2.0", method: "item/completed", params: { turnId, item: { type: "agentMessage", id: `m${codexTurnCounter}`, text: "done", phase: "final_answer" } } };
+        out(dup);
+        out(dup); // byte-identical duplicate line — must not be dropped from `incoming`
+        out({ jsonrpc: "2.0", method: "turn/completed", params: { turn: { id: turnId, status: "completed" } } });
       }
     }
   }

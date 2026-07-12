@@ -99,7 +99,7 @@ describe.skipIf(!available)("claude live probes (lifecycle & flags)", () => {
       (s) => (s.subtype === "task_notification" && s.task_id) || (s.subtype === "task_updated" && s.task_id),
     );
     expect(finished.length, "no task_notification/task_updated terminal event").toBeGreaterThan(0);
-  });
+  }, 200_000); // runner timeoutMs above (150_000) exceeds vitest.live.config.ts's default testTimeout (120s); without a longer per-test timeout here, vitest kills the test before the runner's own timeout can ever fire.
 
   it("CC-5: plan mode — ExitPlanMode tool_use appears", async () => {
     const r = await runClaudeSession({

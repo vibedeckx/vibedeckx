@@ -49,4 +49,24 @@ describe("runner (offline, fake CLI)", () => {
     expect(methods).toContain("turn/completed");
     expect(r.contractFailures).toEqual([]);
   });
+
+  it("codex multi-turn: second turn's completion is not pre-matched by the first's", async () => {
+    // Pins the turn-loop count fix: with a naive "any turn/completed"
+    // predicate, waitFor's pre-scan over already-received lines would match
+    // turn 1's completion instantly on turn 2's wait and kill the process
+    // before turn 2 ever ran (only ONE turn/completed would show up here).
+    const r = await runCodexAppServer({ turns: ["one", "two"], spawnOverride: fakeSpawn("codex-basic"), timeoutMs: 10_000 });
+    expect(r.outcome).toBe("ok");
+    const completions = r.incoming.filter((i) => i.kind === "notification" && i.method === "turn/completed");
+    expect(completions.length).toBe(2);
+  });
+
+  it("codex drain() does not drop byte-identical duplicate protocol lines", async () => {
+    // Pins the drain() cursor fix: the old content-keyed `seen: Set<string>`
+    // dropped byte-identical duplicate lines from `incoming` entirely.
+    const r = await runCodexAppServer({ turns: ["hello"], spawnOverride: fakeSpawn("codex-duplicate-line"), timeoutMs: 10_000 });
+    expect(r.outcome).toBe("ok");
+    const itemCompletions = r.incoming.filter((i) => i.kind === "notification" && i.method === "item/completed");
+    expect(itemCompletions.length).toBe(2);
+  });
 });

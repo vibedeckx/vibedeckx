@@ -7,8 +7,12 @@ on:
         description: "Run the live matrix even if no new version detected"
         type: boolean
         default: true
-  schedule:
-    - cron: "17 3 * * *" # daily; version-check only — matrix runs when a new version appears
+  # Enable after the matrix has run clean a few times via workflow_dispatch AND a lastSeen-bump step closes the loop — otherwise every upstream release makes the daily cron run the paid matrix forever (agent-versions.json lastSeen is never auto-updated).
+  # schedule:
+  #   - cron: "17 3 * * *" # daily; version-check only — matrix runs when a new version appears
+
+permissions:
+  contents: read
 
 jobs:
   version-check:
@@ -100,9 +104,12 @@ jobs:
       issues: write
     steps:
       - uses: actions/github-script@v7
+        env:
+          CLAUDE_LATEST: ${{ needs.version-check.outputs.claude_latest }}
+          CODEX_LATEST: ${{ needs.version-check.outputs.codex_latest }}
         with:
           script: |
-            const title = `protocol-compat: live matrix failure (claude latest ${{ needs.version-check.outputs.claude_latest }}, codex latest ${{ needs.version-check.outputs.codex_latest }})`;
+            const title = `protocol-compat: live matrix failure (claude latest ${process.env.CLAUDE_LATEST}, codex latest ${process.env.CODEX_LATEST})`;
             const existing = await github.rest.search.issuesAndPullRequests({
               q: `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:title "protocol-compat: live matrix failure"`,
             });
