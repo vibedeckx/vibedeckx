@@ -6,7 +6,7 @@ import { useCommands } from '@/hooks/use-commands';
 import { ProjectInfoView } from '@/components/project/project-info-view';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
-import { useMergeStatus } from '@/hooks/use-merge-status';
+import { useMergeStatus, useMergeStatusAutoRefresh } from '@/hooks/use-merge-status';
 import { useTasks } from '@/hooks/use-tasks';
 import { useSchedules } from '@/hooks/use-schedules';
 import { SchedulesView } from '@/components/schedule';
@@ -139,6 +139,7 @@ export default function Home() {
     statuses: mergeStatuses,
     defaultTarget: mergeDefaultTarget,
     setTarget: setMergeTarget,
+    refetch: refetchMergeStatus,
   } = useMergeStatus(currentProject?.id ?? null, worktrees);
   const residentSessions = useResidentSessions(currentProject?.id ?? null, worktrees, residentSessionSeed);
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
@@ -211,6 +212,10 @@ export default function Home() {
       }),
     [worktrees, branchActivity, isPlaceholder, backendSince, placeholderSince]
   );
+
+  // Keep sidebar merge badges live: refetch when an agent finishes a turn,
+  // on window focus, and every 30s while any branch is active.
+  useMergeStatusAutoRefresh(refetchMergeStatus, workspaceStatuses);
 
   // Completion notification center. Listens to the global SSE stream directly
   // (one connection for all projects), plays the completion sound — sound1 for

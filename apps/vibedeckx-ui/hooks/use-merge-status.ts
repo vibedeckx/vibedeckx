@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type MergeStatusEntry, type MergeStatusResult, type Worktree } from "@/lib/api";
 
 export interface BranchMergeInfo extends MergeStatusEntry {
@@ -140,4 +140,63 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
   );
 
   return { statuses, defaultTarget, setTarget, refetch };
+}
+
+/** Workspace statuses that mean an agent is actively working on the branch. */
+const ACTIVE_WORKSPACE_STATUSES = new Set(["working", "main-running"]);
+
+/** Branch keys currently in an active status. Pure — exported for tests. */
+export function activeBranchSet(
+  statuses: ReadonlyMap<string, string> | undefined,
+): Set<string> {
+  const active = new Set<string>();
+  if (!statuses) return active;
+  for (const [branch, status] of statuses) {
+    if (ACTIVE_WORKSPACE_STATUSES.has(status)) active.add(branch);
+  }
+  return active;
+}
+
+/** True when some branch was active before and no longer is. Pure — exported for tests. */
+export function someActivityEnded(prev: ReadonlySet<string>, next: ReadonlySet<string>): boolean {
+  for (const branch of prev) {
+    if (!next.has(branch)) return true;
+  }
+  return false;
+}
+
+/**
+ * Live refresh triggers for merge status: refetch when an agent finishes a
+ * turn (branch leaves the active set), on window focus, and on a 30s interval
+ * while any branch is active. Quiet when nothing is running — the tip-SHA
+ * cache makes redundant refetches nearly free.
+ */
+export function useMergeStatusAutoRefresh(
+  refetch: () => void,
+  workspaceStatuses: ReadonlyMap<string, string> | undefined,
+): void {
+  const prevActiveRef = useRef<Set<string>>(new Set());
+  const active = activeBranchSet(workspaceStatuses);
+  const anyActive = active.size > 0;
+  // Serialize for stable effect deps (Set identity changes every render).
+  const activeKey = Array.from(active).sort().join("\n");
+
+  useEffect(() => {
+    const next = activeKey ? new Set(activeKey.split("\n")) : new Set<string>();
+    const prev = prevActiveRef.current;
+    prevActiveRef.current = next;
+    if (someActivityEnded(prev, next)) refetch();
+  }, [activeKey, refetch]);
+
+  useEffect(() => {
+    const onFocus = () => refetch();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refetch]);
+
+  useEffect(() => {
+    if (!anyActive) return;
+    const id = setInterval(refetch, 30_000);
+    return () => clearInterval(id);
+  }, [anyActive, refetch]);
 }

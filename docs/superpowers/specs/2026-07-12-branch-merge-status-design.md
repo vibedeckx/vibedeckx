@@ -185,3 +185,13 @@ Vitest, following the temp-git-repo fixture style of `projects.test.ts` /
 - nonexistent target ⇒ 400
 - cache: same tips ⇒ cached; moved tip ⇒ recomputed
 - diff `compareTo` mode returns three-dot diff, rejects invalid branch names
+
+## Addendum (2026-07-12): live refresh
+
+Approved after v1: merge status additionally refetches (a) when any workspace
+branch leaves the active set (`working`/`main-running` → anything else — an
+agent finished a turn), (b) on window focus, and (c) on a 30-second interval
+while at least one branch is active. No polling when nothing is running.
+Implemented in `useMergeStatusAutoRefresh` (use-merge-status.ts), driven by the
+`workspaceStatuses` map page.tsx already derives from the SSE activity stream.
+Mid-turn dirty changes still only surface when the turn ends — accepted.
