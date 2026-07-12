@@ -165,6 +165,17 @@ export function someActivityEnded(prev: ReadonlySet<string>, next: ReadonlySet<s
   return false;
 }
 
+/** Collision-free serialization for effect deps — the main workspace's branch
+ *  key is "" so a plain join("\n") cannot distinguish {} from {""}.
+ *  Pure — exported for tests. */
+export function serializeBranchSet(set: ReadonlySet<string>): string {
+  return JSON.stringify(Array.from(set).sort());
+}
+
+export function deserializeBranchSet(key: string): Set<string> {
+  return new Set(JSON.parse(key) as string[]);
+}
+
 /**
  * Live refresh triggers for merge status: refetch when an agent finishes a
  * turn (branch leaves the active set), on window focus, and on a 30s interval
@@ -179,10 +190,10 @@ export function useMergeStatusAutoRefresh(
   const active = activeBranchSet(workspaceStatuses);
   const anyActive = active.size > 0;
   // Serialize for stable effect deps (Set identity changes every render).
-  const activeKey = Array.from(active).sort().join("\n");
+  const activeKey = serializeBranchSet(active);
 
   useEffect(() => {
-    const next = activeKey ? new Set(activeKey.split("\n")) : new Set<string>();
+    const next = deserializeBranchSet(activeKey);
     const prev = prevActiveRef.current;
     prevActiveRef.current = next;
     if (someActivityEnded(prev, next)) refetch();

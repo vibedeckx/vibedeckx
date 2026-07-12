@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import type { MergeStatusResult } from "@/lib/api";
 import {
   activeBranchSet,
+  deserializeBranchSet,
   groupBranchesByTarget,
   mergeTargetStorageKey,
+  serializeBranchSet,
   shouldClearStaleTarget,
   someActivityEnded,
 } from "./use-merge-status";
@@ -74,6 +76,18 @@ describe("activeBranchSet", () => {
   it("handles undefined and empty maps", () => {
     expect(activeBranchSet(undefined).size).toBe(0);
     expect(activeBranchSet(new Map()).size).toBe(0);
+  });
+});
+
+describe("serializeBranchSet / deserializeBranchSet", () => {
+  it("distinguishes the empty set from the main-workspace-only set", () => {
+    expect(serializeBranchSet(new Set())).not.toBe(serializeBranchSet(new Set([""])));
+  });
+
+  it("round-trips sets including the empty-string key", () => {
+    for (const s of [new Set<string>(), new Set([""]), new Set(["", "dev1"]), new Set(["dev2", "dev1"])]) {
+      expect(deserializeBranchSet(serializeBranchSet(s))).toEqual(s);
+    }
   });
 });
 
