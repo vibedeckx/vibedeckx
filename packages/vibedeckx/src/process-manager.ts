@@ -96,9 +96,17 @@ export class ProcessManager {
    */
   private buildPromptCommand(prompt: string, provider: PromptProvider, finalResultFile?: string): string {
     if (provider === 'codex') {
-      return buildCodexExecCommand(detectBinary('codex'), prompt, finalResultFile);
+      const binary = detectBinary('codex');
+      if (binary) {
+        console.log(`[ProcessManager] codex version: ${getBinaryVersion(binary) ?? 'unknown'}`);
+      }
+      return buildCodexExecCommand(binary, prompt, finalResultFile);
     }
-    return buildClaudePrintCommand(detectBinary('claude'), prompt);
+    const binary = detectBinary('claude');
+    if (binary) {
+      console.log(`[ProcessManager] claude version: ${getBinaryVersion(binary) ?? 'unknown'}`);
+    }
+    return buildClaudePrintCommand(binary, prompt);
   }
 
   /**
