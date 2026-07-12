@@ -27,6 +27,65 @@ pnpm build:ui      # Build UI (static export)
 pnpm copy:ui       # Copy UI to CLI dist
 ```
 
+## Testing & Protocol Compatibility
+
+Vibedeckx spawns the Claude Code (`claude`) and Codex (`codex`) CLIs and depends on
+their external protocols (stream-json / JSON-RPC wire formats, CLI flags). The
+protocol contract lives in `packages/vibedeckx/src/protocol/` and is guarded by
+three layers of tests:
+
+### 1. Offline tests — run automatically on every PR
+
+```bash
+pnpm --filter vibedeckx test
+```
+
+Free, deterministic, no network or agent CLIs required. Includes the protocol
+contract tests: recorded real CLI transcripts (`__fixtures__/*.jsonl`) are
+validated against the zod schemas in `src/protocol/*/schema.ts`. CI runs this on
+every pull request and push to main (`.github/workflows/test.yml`). This layer
+catches regressions **we** introduce in the protocol layer.
+
+### 2. Live compat probes — run manually, locally or via workflow dispatch
+
+```bash
+pnpm --filter vibedeckx test:compat                                        # all 16 probes
+pnpm --filter vibedeckx test:compat src/protocol/live/claude.live.test.ts # one agent only
+```
+
+Spawns the **real** `claude`/`codex` CLIs through the production spawn builders and
+validates every protocol line against the contracts (16 scenarios: tool calls,
+background-task lifecycle events, plan mode, MCP config, interrupts, approval
+round-trips, exec modes). This layer catches protocol drift in **new upstream
+releases**.
+
+- **Locally: no configuration needed.** The probes inherit your machine's existing
+  CLI logins (Claude subscription / ChatGPT login). Costs cents per full sweep
+  (~3–4 min). To pre-check a new release by hand:
+
+  ```bash
+  npm i -g @anthropic-ai/claude-code@latest && pnpm --filter vibedeckx test:compat
+  ```
+
+- **On GitHub Actions:** trigger `protocol-compat` from the Actions tab
+  (`workflow_dispatch`; requires the workflow file on the default branch). CI
+  runners have no login state, so two repo secrets are required:
+  `ANTHROPIC_API_KEY` (claude headless auth, API billing) and `OPENAI_API_KEY`
+  (codex authenticates via `codex login --with-api-key`). The matrix tests each
+  agent at both the `pinned` version (from `.github/agent-versions.json`) and
+  `latest`: a `pinned` failure means our bug; a `latest` failure means upstream
+  drift. Failures auto-open a deduplicated GitHub issue.
+
+### 3. Scheduled drift watch — currently disabled, opt-in later
+
+`protocol-compat.yml` contains a commented-out daily cron. Once enabled, a cheap
+version-check job compares npm's latest `@anthropic-ai/claude-code` /
+`@openai/codex` versions against `.github/agent-versions.json` every day and runs
+the paid live matrix **only when a new upstream version appears**. It stays
+disabled until a `lastSeen` write-back step is added after matrix runs — without
+it, any upstream release would make the daily cron re-run the paid matrix forever.
+Enable by uncommenting the `schedule:` block after a few clean manual runs.
+
 ## Installation
 
 The fastest way to install is via npx (requires Node.js 22+):
