@@ -283,6 +283,20 @@ export interface Worktree {
   branch: string | null;
 }
 
+export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";
+
+export interface MergeStatusEntry {
+  branch: string;
+  status: MergeStatusValue;
+  unmergedCount: number;
+  dirty: boolean;
+}
+
+export interface MergeStatusResponse {
+  target: string;
+  entries: MergeStatusEntry[];
+}
+
 export type WorktreeTarget = "local" | "remote";
 
 export interface WorktreeTargetResult {
@@ -990,6 +1004,19 @@ export const api = {
     return data.worktrees;
   },
 
+  async getMergeStatus(id: string, target?: string): Promise<MergeStatusResponse | null> {
+    try {
+      const params = new URLSearchParams();
+      if (target) params.set("target", target);
+      const query = params.toString() ? `?${params.toString()}` : "";
+      const res = await authFetch(`${getApiBase()}/api/projects/${id}/branches/merge-status${query}`);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  },
+
   async createWorktree(
     projectId: string,
     branchName: string,
@@ -1212,7 +1239,7 @@ export const api = {
     return data.processes;
   },
 
-  async getDiff(projectId: string, branch?: string | null, commit?: string | null, target?: 'local' | 'remote'): Promise<DiffResponse> {
+  async getDiff(projectId: string, branch?: string | null, commit?: string | null, target?: 'local' | 'remote', compareTo?: string | null): Promise<DiffResponse> {
     const params = new URLSearchParams();
     if (branch) {
       params.set('branch', branch);
@@ -1222,6 +1249,9 @@ export const api = {
     }
     if (target) {
       params.set('target', target);
+    }
+    if (compareTo) {
+      params.set('compareTo', compareTo);
     }
     const query = params.toString() ? `?${params.toString()}` : '';
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/diff${query}`);
