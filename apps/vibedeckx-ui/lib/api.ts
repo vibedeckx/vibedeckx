@@ -285,20 +285,26 @@ export interface Worktree {
 
 export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";
 
-export interface MergeStatusEntry {
+export interface MergeComparison {
   branch: string;
-  status: MergeStatusValue;
-  unmergedCount: number;
-  dirty: boolean;
+  /** Omitted = compare against the auto-detected default branch (main/master). */
+  target?: string;
 }
 
-export interface MergeStatusResponse {
-  target: string;
-  entries: MergeStatusEntry[];
+export type MergePairError = "target-not-found" | "branch-not-found" | "no-default-branch";
+
+export interface MergeStatusPairEntry {
+  branch: string;
+  /** Resolved target branch; null when errored before resolution. */
+  target: string | null;
+  status?: MergeStatusValue;
+  unmergedCount?: number;
+  dirty?: boolean;
+  error?: MergePairError;
 }
 
-export type MergeStatusResult =
-  | { ok: true; data: MergeStatusResponse }
+export type MergeStatusBatchResult =
+  | { ok: true; entries: MergeStatusPairEntry[] }
   | { ok: false; status: number }; // status 0 = thrown fetch/network error
 
 export type WorktreeTarget = "local" | "remote";
@@ -1008,15 +1014,16 @@ export const api = {
     return data.worktrees;
   },
 
-  async getMergeStatus(id: string, target?: string): Promise<MergeStatusResult> {
+  async getMergeStatus(id: string, comparisons: MergeComparison[]): Promise<MergeStatusBatchResult> {
     try {
-      const params = new URLSearchParams();
-      if (target) params.set("target", target);
-      const query = params.toString() ? `?${params.toString()}` : "";
-      const res = await authFetch(`${getApiBase()}/api/projects/${id}/branches/merge-status${query}`);
+      const res = await authFetch(`${getApiBase()}/api/projects/${id}/branches/merge-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comparisons }),
+      });
       if (!res.ok) return { ok: false, status: res.status };
       const data = await res.json();
-      return { ok: true, data };
+      return { ok: true, entries: data.entries ?? [] };
     } catch {
       return { ok: false, status: 0 };
     }

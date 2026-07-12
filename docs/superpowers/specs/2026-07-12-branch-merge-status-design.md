@@ -195,3 +195,17 @@ while at least one branch is active. No polling when nothing is running.
 Implemented in `useMergeStatusAutoRefresh` (use-merge-status.ts), driven by the
 `workspaceStatuses` map page.tsx already derives from the SSE activity stream.
 Mid-turn dirty changes still only surface when the turn ends — accepted.
+
+## Addendum (2026-07-12): batch pair API
+
+Before first ship, the merge-status API was reshaped to match the data model
+(one workspace branch → one target). `GET ...?target=` (compute all worktree
+branches vs one target; one request per distinct target; frontend filters) is
+replaced by `POST /api/projects/:id/branches/merge-status` with
+`{ comparisons: [{ branch, target? }] }` (max 50; omitted target = default
+branch), returning per-pair entries with per-pair errors (`target-not-found`,
+`branch-not-found`, `no-default-branch`). One remote round-trip regardless of
+target dispersion; dirty checked once per worktree per request; a deleted
+target errors only its own pair (its persisted key is cleared, then one
+fallback refetch). Transport failures now keep the previous badge state
+instead of clearing it.

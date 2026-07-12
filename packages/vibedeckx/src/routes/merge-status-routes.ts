@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
-import { computeMergeStatus } from "../merge-status.js";
+import { computeMergeStatusPairs, type MergeComparison } from "../merge-status.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
@@ -33,9 +33,28 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   return null;
 }
 
-function sendComputed(reply: FastifyReply, repoPath: string, target?: string) {
+const MAX_COMPARISONS = 50;
+
+/** Returns validated comparisons, or null when the body is malformed. */
+function parseComparisons(body: unknown): MergeComparison[] | null {
+  if (!body || typeof body !== "object") return null;
+  const comparisons = (body as { comparisons?: unknown }).comparisons;
+  if (!Array.isArray(comparisons) || comparisons.length > MAX_COMPARISONS) return null;
+  const result: MergeComparison[] = [];
+  for (const item of comparisons) {
+    if (!item || typeof item !== "object") return null;
+    const branch = (item as { branch?: unknown }).branch;
+    const target = (item as { target?: unknown }).target;
+    if (typeof branch !== "string" || !branch) return null;
+    if (target !== undefined && (typeof target !== "string" || !target)) return null;
+    result.push(target === undefined ? { branch } : { branch, target });
+  }
+  return result;
+}
+
+function sendComputed(reply: FastifyReply, repoPath: string, comparisons: MergeComparison[]) {
   try {
-    return reply.code(200).send(computeMergeStatus(repoPath, target));
+    return reply.code(200).send({ entries: computeMergeStatusPairs(repoPath, comparisons) });
   } catch (error) {
     const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
     const message = error instanceof Error ? error.message : "Failed to compute merge status";
@@ -45,19 +64,23 @@ function sendComputed(reply: FastifyReply, repoPath: string, target?: string) {
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // Path-based: used as the proxy target by remote backends.
-  fastify.get<{ Querystring: { path?: string; target?: string } }>(
+  fastify.post<{ Body: { path?: string; comparisons?: unknown } }>(
     "/api/path/branches/merge-status",
     async (req, reply) => {
-      const projectPath = req.query.path;
+      const projectPath = req.body?.path;
       if (!projectPath) {
         return reply.code(400).send({ error: "path is required" });
       }
-      return sendComputed(reply, projectPath, req.query.target || undefined);
+      const comparisons = parseComparisons(req.body);
+      if (!comparisons) {
+        return reply.code(400).send({ error: "Invalid comparisons" });
+      }
+      return sendComputed(reply, projectPath, comparisons);
     },
   );
 
   // Project-based: local computation or proxy to remote for remote-only projects.
-  fastify.get<{ Params: { id: string }; Querystring: { target?: string } }>(
+  fastify.post<{ Params: { id: string }; Body: { comparisons?: unknown } }>(
     "/api/projects/:id/branches/merge-status",
     async (req, reply) => {
       const userId = requireAuth(req, reply);
@@ -68,26 +91,29 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
+      const comparisons = parseComparisons(req.body);
+      if (!comparisons) {
+        return reply.code(400).send({ error: "Invalid comparisons" });
+      }
+
       if (!project.path) {
         const remoteConfig = await getRemoteConfig(fastify, project);
         if (!remoteConfig) {
           return reply.code(400).send({ error: "Project has no local path" });
         }
-        const params = new URLSearchParams({ path: remoteConfig.remotePath });
-        if (req.query.target) params.set("target", req.query.target);
         const result = await proxyToRemoteAuto(
           remoteConfig.serverId,
           remoteConfig.url,
           remoteConfig.apiKey,
-          "GET",
-          `/api/path/branches/merge-status?${params.toString()}`,
-          undefined,
+          "POST",
+          "/api/path/branches/merge-status",
+          { path: remoteConfig.remotePath, comparisons },
           { reverseConnectManager: fastify.reverseConnectManager },
         );
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      return sendComputed(reply, project.path, req.query.target || undefined);
+      return sendComputed(reply, project.path, comparisons);
     },
   );
 };

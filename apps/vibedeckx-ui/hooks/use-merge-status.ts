@@ -1,9 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type MergeStatusEntry, type MergeStatusResult, type Worktree } from "@/lib/api";
+import {
+  api,
+  type MergeComparison,
+  type MergeStatusPairEntry,
+  type MergeStatusValue,
+  type Worktree,
+} from "@/lib/api";
 
-export interface BranchMergeInfo extends MergeStatusEntry {
+export interface BranchMergeInfo {
+  branch: string;
+  status: MergeStatusValue;
+  unmergedCount: number;
+  dirty: boolean;
   target: string;
 }
 
@@ -16,31 +26,42 @@ function readMergeTarget(projectId: string, branch: string): string | null {
   return localStorage.getItem(mergeTargetStorageKey(projectId, branch));
 }
 
-/** Group workspace branches by persisted target; null key = backend default. Pure — exported for tests. */
-export function groupBranchesByTarget(
+/** One comparison per branch, carrying its persisted target when set. Pure — exported for tests. */
+export function buildComparisons(
   branches: string[],
   readTarget: (branch: string) => string | null,
-): Map<string | null, string[]> {
-  const groups = new Map<string | null, string[]>();
-  for (const branch of branches) {
+): MergeComparison[] {
+  return branches.map((branch) => {
     const target = readTarget(branch);
-    const list = groups.get(target) ?? [];
-    list.push(branch);
-    groups.set(target, list);
-  }
-  return groups;
+    return target ? { branch, target } : { branch };
+  });
 }
 
-/**
- * True only when a merge-status fetch for an *explicit* persisted target
- * fails with a genuine 400 (bad/deleted branch) — the signal that the
- * persisted target is stale and should be dropped. Any other failure
- * (network error, 401, 502, etc.) or a fetch for the default target (no
- * explicit target set, so nothing to clean up) leaves the persisted choice
- * alone. Pure — exported for tests.
- */
-export function shouldClearStaleTarget(result: MergeStatusResult, target: string | null): boolean {
-  return !result.ok && result.status === 400 && target !== null;
+/** Branches whose PERSISTED target no longer exists — their stored keys should
+ *  be cleared. Only explicit targets qualify; default-target failures
+ *  (no-default-branch) and unrelated errors never clear keys. Pure — exported
+ *  for tests. */
+export function staleTargetBranches(
+  comparisons: MergeComparison[],
+  entries: MergeStatusPairEntry[],
+): string[] {
+  const explicit = new Set(comparisons.filter((c) => c.target !== undefined).map((c) => c.branch));
+  return entries
+    .filter((e) => e.error === "target-not-found" && explicit.has(e.branch))
+    .map((e) => e.branch);
+}
+
+/** The backend-resolved default target: the resolved target of any pair sent
+ *  without an explicit choice. Pure — exported for tests. */
+export function deriveDefaultTarget(
+  comparisons: MergeComparison[],
+  entries: MergeStatusPairEntry[],
+): string | null {
+  const explicit = new Set(comparisons.filter((c) => c.target !== undefined).map((c) => c.branch));
+  for (const entry of entries) {
+    if (!explicit.has(entry.branch) && entry.target) return entry.target;
+  }
+  return null;
 }
 
 /**
@@ -72,49 +93,35 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
         return;
       }
 
-      const groups = groupBranchesByTarget(branches, (b) => readMergeTarget(projectId, b));
+      const comparisons = buildComparisons(branches, (b) => readMergeTarget(projectId, b));
+      const result = await api.getMergeStatus(projectId, comparisons);
+      if (cancelled) return;
+      if (!result.ok) return; // transport/server failure — keep previous statuses, touch nothing
+
       const next = new Map<string, BranchMergeInfo>();
-      let nextDefault: string | null = null;
-      let clearedStaleTarget = false;
-
-      await Promise.all(
-        Array.from(groups.entries()).map(async ([target, groupBranches]) => {
-          const result = await api.getMergeStatus(projectId, target ?? undefined);
-          if (!result.ok) {
-            // Only a genuine 400 for an explicit persisted target means the
-            // target itself is bad (e.g. branch deleted since it was chosen).
-            // Any other failure (network blip, 401 during token refresh, 502
-            // from an offline remote) must not wipe the user's choice.
-            if (shouldClearStaleTarget(result, target) && !cancelled) {
-              clearedStaleTarget = true;
-              for (const b of groupBranches) {
-                localStorage.removeItem(mergeTargetStorageKey(projectId, b));
-              }
-            }
-            return;
-          }
-          const resp = result.data;
-          if (!target) nextDefault = resp.target;
-          for (const entry of resp.entries) {
-            // The backend reports every worktree branch for the requested
-            // target; keep only the branches that chose this target.
-            if (groupBranches.includes(entry.branch)) {
-              next.set(entry.branch, { ...entry, target: resp.target });
-            }
-          }
-        }),
-      );
-
-      if (!cancelled) {
-        setStatuses(next);
-        setDefaultTarget(nextDefault);
-        // Branches whose stale target we just cleared fall back to the
-        // default group on the next fetch — trigger it now so they don't
-        // stay badge-less until an unrelated refresh. A 400 on the default
-        // group itself (target === null) never sets clearedStaleTarget, so
-        // this can't loop forever.
-        if (clearedStaleTarget) refetch();
+      for (const entry of result.entries) {
+        if (entry.error || !entry.target || !entry.status) continue;
+        next.set(entry.branch, {
+          branch: entry.branch,
+          status: entry.status,
+          unmergedCount: entry.unmergedCount ?? 0,
+          dirty: entry.dirty ?? false,
+          target: entry.target,
+        });
       }
+
+      const stale = staleTargetBranches(comparisons, result.entries);
+      for (const branch of stale) {
+        try {
+          localStorage.removeItem(mergeTargetStorageKey(projectId, branch));
+        } catch {
+          // localStorage unavailable (e.g. Safari private mode) — skip.
+        }
+      }
+
+      setStatuses(next);
+      setDefaultTarget(deriveDefaultTarget(comparisons, result.entries));
+      if (stale.length > 0) refetch(); // one-shot fallback: cleared branches re-fetch on the default
     })();
 
     return () => {

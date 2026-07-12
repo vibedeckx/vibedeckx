@@ -8,18 +8,6 @@ import { parseGitWorktreeList } from "./utils/worktree-paths.js";
 
 export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";
 
-export interface MergeStatusEntry {
-  branch: string;
-  status: MergeStatusValue;
-  unmergedCount: number;
-  dirty: boolean;
-}
-
-export interface MergeStatusResponse {
-  target: string;
-  entries: MergeStatusEntry[];
-}
-
 const MAX_BUFFER = 10 * 1024 * 1024;
 
 function git(cwd: string, args: string[]): string {
@@ -126,22 +114,73 @@ function isDirty(worktreePath: string): boolean {
   }
 }
 
-/**
- * Merge status for every worktree branch of `repoPath` vs `target`
- * (auto-detected default branch when omitted). Worktree → branch mapping is
- * read live — users switch branches inside worktrees with git commands.
- */
-export function computeMergeStatus(repoPath: string, target?: string): MergeStatusResponse {
-  if (target && !validateBranchExists(repoPath, target)) {
-    throw Object.assign(new Error(`Target branch not found: ${target}`), { statusCode: 400 });
-  }
-  const resolvedTarget = target ?? detectDefaultBranch(repoPath);
+export interface MergeComparison {
+  branch: string;
+  /** Omitted = compare against the auto-detected default branch (main/master). */
+  target?: string;
+}
 
-  const entries: MergeStatusEntry[] = [];
+export type MergePairError = "target-not-found" | "branch-not-found" | "no-default-branch";
+
+export interface MergeStatusPairEntry {
+  branch: string;
+  /** Resolved target branch; null when errored before resolution. */
+  target: string | null;
+  status?: MergeStatusValue;
+  unmergedCount?: number;
+  dirty?: boolean;
+  error?: MergePairError;
+}
+
+/**
+ * Merge status for explicit branch-target pairs. Computes exactly what was
+ * asked: no worktree enumeration beyond the dirty lookup, dirty checked once
+ * per branch per call, default branch resolved at most once per call.
+ * Pair-level problems are reported per entry, never thrown.
+ */
+export function computeMergeStatusPairs(
+  repoPath: string,
+  comparisons: MergeComparison[],
+): MergeStatusPairEntry[] {
+  // Worktree paths for dirty checks — enumerated once per call. A branch not
+  // checked out in any worktree has no working tree, so dirty = false.
+  const worktreePathByBranch = new Map<string, string>();
   for (const wt of parseGitWorktreeList(repoPath)) {
-    if (!wt.branch || wt.branch === resolvedTarget) continue;
-    const { status, unmergedCount } = computeBranchMergeStatus(repoPath, wt.branch, resolvedTarget);
-    entries.push({ branch: wt.branch, status, unmergedCount, dirty: isDirty(wt.path) });
+    if (wt.branch) worktreePathByBranch.set(wt.branch, wt.path);
   }
-  return { target: resolvedTarget, entries };
+
+  let defaultTarget: string | null | undefined; // undefined = not resolved yet
+  const dirtyByBranch = new Map<string, boolean>();
+
+  return comparisons.map((cmp): MergeStatusPairEntry => {
+    let target = cmp.target;
+    if (!target) {
+      if (defaultTarget === undefined) {
+        try {
+          defaultTarget = detectDefaultBranch(repoPath);
+        } catch {
+          defaultTarget = null;
+        }
+      }
+      if (defaultTarget === null) {
+        return { branch: cmp.branch, target: null, error: "no-default-branch" };
+      }
+      target = defaultTarget;
+    } else if (!validateBranchExists(repoPath, target)) {
+      return { branch: cmp.branch, target: null, error: "target-not-found" };
+    }
+
+    if (!validateBranchExists(repoPath, cmp.branch)) {
+      return { branch: cmp.branch, target, error: "branch-not-found" };
+    }
+
+    const { status, unmergedCount } = computeBranchMergeStatus(repoPath, cmp.branch, target);
+    let dirty = dirtyByBranch.get(cmp.branch);
+    if (dirty === undefined) {
+      const wtPath = worktreePathByBranch.get(cmp.branch);
+      dirty = wtPath ? isDirty(wtPath) : false;
+      dirtyByBranch.set(cmp.branch, dirty);
+    }
+    return { branch: cmp.branch, target, status, unmergedCount, dirty };
+  });
 }

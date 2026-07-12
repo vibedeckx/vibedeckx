@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
-import type { MergeStatusResult } from "@/lib/api";
 import {
   activeBranchSet,
+  buildComparisons,
+  deriveDefaultTarget,
   deserializeBranchSet,
-  groupBranchesByTarget,
   mergeTargetStorageKey,
   serializeBranchSet,
-  shouldClearStaleTarget,
   someActivityEnded,
+  staleTargetBranches,
 } from "./use-merge-status";
 
 describe("mergeTargetStorageKey", () => {
@@ -16,49 +16,55 @@ describe("mergeTargetStorageKey", () => {
   });
 });
 
-describe("groupBranchesByTarget", () => {
-  it("groups branches by their persisted target, null for default", () => {
-    const targets: Record<string, string | null> = { dev3: null, dev4: "dev1", dev5: "dev1" };
-    const groups = groupBranchesByTarget(["dev3", "dev4", "dev5"], (b) => targets[b]);
-    expect(groups.get(null)).toEqual(["dev3"]);
-    expect(groups.get("dev1")).toEqual(["dev4", "dev5"]);
-  });
-
-  it("returns an empty map for no branches", () => {
-    expect(groupBranchesByTarget([], () => null).size).toBe(0);
+describe("buildComparisons", () => {
+  it("carries persisted targets and omits target otherwise", () => {
+    const targets: Record<string, string | null> = { dev3: null, dev4: "dev1" };
+    expect(buildComparisons(["dev3", "dev4"], (b) => targets[b])).toEqual([
+      { branch: "dev3" },
+      { branch: "dev4", target: "dev1" },
+    ]);
   });
 });
 
-describe("shouldClearStaleTarget", () => {
-  const okResult: MergeStatusResult = { ok: true, data: { target: "main", entries: [] } };
-
-  it("clears on a genuine 400 for an explicit target", () => {
-    const result: MergeStatusResult = { ok: false, status: 400 };
-    expect(shouldClearStaleTarget(result, "dev1")).toBe(true);
+describe("staleTargetBranches", () => {
+  const cmp = [{ branch: "dev3" }, { branch: "dev4", target: "gone" }];
+  it("clears only explicit targets that errored target-not-found", () => {
+    expect(
+      staleTargetBranches(cmp, [
+        { branch: "dev3", target: null, error: "no-default-branch" },
+        { branch: "dev4", target: null, error: "target-not-found" },
+      ]),
+    ).toEqual(["dev4"]);
   });
-
-  it("does not clear on a 400 for the default group (null target)", () => {
-    const result: MergeStatusResult = { ok: false, status: 400 };
-    expect(shouldClearStaleTarget(result, null)).toBe(false);
+  it("never clears on other errors or success", () => {
+    expect(
+      staleTargetBranches(cmp, [
+        { branch: "dev3", target: "main", status: "merged", unmergedCount: 0, dirty: false },
+        { branch: "dev4", target: "gone", error: "branch-not-found" },
+      ]),
+    ).toEqual([]);
   });
+});
 
-  it("does not clear on a thrown network error (status 0) for an explicit target", () => {
-    const result: MergeStatusResult = { ok: false, status: 0 };
-    expect(shouldClearStaleTarget(result, "dev1")).toBe(false);
+describe("deriveDefaultTarget", () => {
+  it("takes the resolved target of a default-target pair", () => {
+    expect(
+      deriveDefaultTarget(
+        [{ branch: "dev3" }, { branch: "dev4", target: "dev1" }],
+        [
+          { branch: "dev4", target: "dev1", status: "merged", unmergedCount: 0, dirty: false },
+          { branch: "dev3", target: "main", status: "unmerged", unmergedCount: 2, dirty: false },
+        ],
+      ),
+    ).toBe("main");
   });
-
-  it("does not clear on a 502 for an explicit target", () => {
-    const result: MergeStatusResult = { ok: false, status: 502 };
-    expect(shouldClearStaleTarget(result, "dev1")).toBe(false);
-  });
-
-  it("does not clear on a 404 for an explicit target", () => {
-    const result: MergeStatusResult = { ok: false, status: 404 };
-    expect(shouldClearStaleTarget(result, "dev1")).toBe(false);
-  });
-
-  it("does not clear on an ok result", () => {
-    expect(shouldClearStaleTarget(okResult, "dev1")).toBe(false);
+  it("null when every pair was explicit or errored", () => {
+    expect(
+      deriveDefaultTarget(
+        [{ branch: "dev3" }],
+        [{ branch: "dev3", target: null, error: "no-default-branch" }],
+      ),
+    ).toBe(null);
   });
 });
 

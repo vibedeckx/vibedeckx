@@ -5,7 +5,7 @@ import path from "path";
 import { execFileSync } from "child_process";
 import {
   computeBranchMergeStatus,
-  computeMergeStatus,
+  computeMergeStatusPairs,
   detectDefaultBranch,
   validateBranchExists,
   clearMergeStatusCache,
@@ -174,7 +174,7 @@ describe("merge-status", () => {
     });
   });
 
-  describe("computeMergeStatus", () => {
+  describe("computeMergeStatusPairs", () => {
     function addWorktree(branch: string): string {
       const base = getWorktreeBaseForProject(repo);
       mkdirSync(base, { recursive: true });
@@ -184,52 +184,63 @@ describe("merge-status", () => {
       return wtPath;
     }
 
-    it("reports all worktree branches with dirty flags, omitting target", () => {
+    it("computes each pair against its own target", () => {
       const dev1 = addWorktree("dev1");
       commit(dev1, "a.txt", "a", "dev1 commit");
-      const dev2 = addWorktree("dev2");
-      writeFileSync(path.join(dev2, "uncommitted.txt"), "wip");
-
-      const result = computeMergeStatus(repo);
-      expect(result.target).toBe("main");
-      const byBranch = new Map(result.entries.map((e) => [e.branch, e]));
-      expect(byBranch.get("dev1")).toEqual({
-        branch: "dev1",
-        status: "unmerged",
-        unmergedCount: 1,
-        dirty: false,
-      });
-      expect(byBranch.get("dev2")).toEqual({
-        branch: "dev2",
-        status: "no-unique-commits",
-        unmergedCount: 0,
-        dirty: true,
-      });
-      expect(byBranch.has("main")).toBe(false);
-    });
-
-    it("omits detached-HEAD worktrees", () => {
-      const base = getWorktreeBaseForProject(repo);
-      mkdirSync(base, { recursive: true });
-      run(repo, ["worktree", "add", "--detach", path.join(base, "detached")]);
-      invalidateWorktreeListCache(repo);
-      expect(computeMergeStatus(repo).entries).toEqual([]);
-    });
-
-    it("throws 400 for a nonexistent explicit target", () => {
-      expect(() => computeMergeStatus(repo, "ghost")).toThrowError(
-        expect.objectContaining({ statusCode: 400 }),
-      );
-    });
-
-    it("accepts an explicit target", () => {
-      addWorktree("dev1");
       run(repo, ["branch", "release"]);
-      const result = computeMergeStatus(repo, "release");
-      expect(result.target).toBe("release");
-      // With an explicit non-main target, the main worktree's branch is no
-      // longer the target, so it appears in the entries too.
-      expect(result.entries.map((e) => e.branch).sort()).toEqual(["dev1", "main"]);
+      const entries = computeMergeStatusPairs(repo, [
+        { branch: "dev1" },
+        { branch: "dev1", target: "release" },
+      ]);
+      expect(entries).toEqual([
+        { branch: "dev1", target: "main", status: "unmerged", unmergedCount: 1, dirty: false },
+        { branch: "dev1", target: "release", status: "unmerged", unmergedCount: 1, dirty: false },
+      ]);
+    });
+
+    it("reports dirty from the branch's worktree; false when not checked out anywhere", () => {
+      const dev1 = addWorktree("dev1");
+      writeFileSync(path.join(dev1, "wip.txt"), "wip");
+      run(repo, ["branch", "loose"]);
+      const entries = computeMergeStatusPairs(repo, [{ branch: "dev1" }, { branch: "loose" }]);
+      expect(entries[0].dirty).toBe(true);
+      expect(entries[1].dirty).toBe(false);
+    });
+
+    it("reports per-pair errors without failing the batch", () => {
+      run(repo, ["branch", "dev1"]);
+      const entries = computeMergeStatusPairs(repo, [
+        { branch: "dev1", target: "ghost" },
+        { branch: "ghost" },
+        { branch: "dev1" },
+      ]);
+      expect(entries[0]).toEqual({ branch: "dev1", target: null, error: "target-not-found" });
+      expect(entries[1]).toEqual({ branch: "ghost", target: "main", error: "branch-not-found" });
+      expect(entries[2].status).toBe("no-unique-commits");
+    });
+
+    it("errors no-default-branch only for pairs that need the default", () => {
+      const trunk = initRepo("trunk");
+      try {
+        run(trunk, ["branch", "dev1"]);
+        const entries = computeMergeStatusPairs(trunk, [
+          { branch: "dev1" },
+          { branch: "dev1", target: "trunk" },
+        ]);
+        expect(entries[0]).toEqual({ branch: "dev1", target: null, error: "no-default-branch" });
+        expect(entries[1].status).toBe("no-unique-commits");
+      } finally {
+        rmSync(trunk, { recursive: true, force: true });
+      }
+    });
+
+    it("branch equal to target reads no-unique-commits", () => {
+      const entries = computeMergeStatusPairs(repo, [{ branch: "main", target: "main" }]);
+      expect(entries[0].status).toBe("no-unique-commits");
+    });
+
+    it("returns an empty array for an empty batch", () => {
+      expect(computeMergeStatusPairs(repo, [])).toEqual([]);
     });
   });
 });
