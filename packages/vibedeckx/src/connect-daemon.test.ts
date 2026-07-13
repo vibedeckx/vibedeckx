@@ -1126,7 +1126,7 @@ describe("daemon state ownership", () => {
     expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
   });
 
-  it("recovers a lock whose recorded process identity is dead", () => {
+  it("recovers a lock whose recorded process identity is dead and does not leak the quarantine", () => {
     writeLockOwner({
       pid: Number.MAX_SAFE_INTEGER,
       processStartTicks: "1",
@@ -1137,10 +1137,30 @@ describe("daemon state ownership", () => {
 
     expect(state.pid).toBe(process.pid);
     expect(fs.existsSync(lockPath())).toBe(false);
+    // The recovered dead-owner lock is quarantined and then swept while the
+    // lock is held, so it must not accumulate across crash/recovery cycles.
     const quarantines = fs.readdirSync(path.dirname(lockPath())).filter(
       (entry) => entry.startsWith("connect.lock.stale-"),
     );
-    expect(quarantines).toHaveLength(1);
+    expect(quarantines).toHaveLength(0);
+  });
+
+  it("sweeps stale quarantines and dead-PID candidates but keeps live-PID candidates", () => {
+    const runDir = path.dirname(lockPath());
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    const stale = `${lockPath()}.stale-1-2-3`;
+    const deadCandidate = `${lockPath()}.candidate-${Number.MAX_SAFE_INTEGER}-dead`;
+    const liveCandidate = `${lockPath()}.candidate-${process.pid}-live`;
+    fs.mkdirSync(stale, { mode: 0o700 });
+    fs.mkdirSync(deadCandidate, { mode: 0o700 });
+    fs.mkdirSync(liveCandidate, { mode: 0o700 });
+
+    // Acquiring the lock runs the quarantine sweep while the lock is held.
+    claimDaemonState(dataDir, "https://example.com", "test");
+
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(deadCandidate)).toBe(false);
+    expect(fs.existsSync(liveCandidate)).toBe(true);
   });
 
   it.each([

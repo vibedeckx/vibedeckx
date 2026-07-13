@@ -699,6 +699,44 @@ function acquireDaemonStateLock(lockPath: string): DaemonStateLockOwner {
   }
 }
 
+function sweepLockQuarantine(lockPath: string): void {
+  // Called while the lock is held. Quarantined dead-owner locks
+  // (.stale-<dev>-<ino>-<ctime>) are terminal and never referenced again, so
+  // they can always be removed. Candidate dirs (.candidate-<pid>-<nonce>) are
+  // cleaned on the normal error path and only leak on a SIGKILL between mkdir
+  // and rename-publish; remove one only when its embedded PID is not alive, so
+  // a live concurrent acquirer's in-flight candidate is never touched. All
+  // best-effort: quarantine cleanup must never fail a state operation.
+  const runDir = path.dirname(lockPath);
+  const base = path.basename(lockPath);
+  const stalePrefix = `${base}.stale-`;
+  const candidatePrefix = `${base}.candidate-`;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(runDir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    let removable = false;
+    if (entry.startsWith(stalePrefix)) {
+      removable = true;
+    } else if (entry.startsWith(candidatePrefix)) {
+      const pid = Number(entry.slice(candidatePrefix.length).split("-")[0]);
+      removable =
+        !Number.isInteger(pid) ||
+        pid <= 0 ||
+        readLinuxProcessStartTicks(pid) === undefined;
+    }
+    if (!removable) continue;
+    try {
+      fs.rmSync(path.join(runDir, entry), { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 function releaseDaemonStateLock(
   lockPath: string,
   expected: DaemonStateLockOwner,
@@ -729,6 +767,7 @@ function withDaemonStateLock<T>(
   const owner = acquireDaemonStateLock(lockPath);
 
   try {
+    sweepLockQuarantine(lockPath);
     return operation();
   } finally {
     releaseDaemonStateLock(lockPath, owner);
