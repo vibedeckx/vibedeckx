@@ -5,11 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   claimDaemonState,
   daemonStatePath,
+  describeConnectDaemon,
   inspectDaemonState,
   parseLinuxProcessStartTicks,
   readLinuxProcessStartTicks,
   removeDaemonStateIfOwned,
   removeVerifiedStaleState,
+  stopConnectDaemon,
   type ConnectDaemonState,
 } from "./connect-daemon.js";
 
@@ -188,6 +190,277 @@ describe("daemon state inspection", () => {
     readSpy.mockRestore();
     expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
   });
+});
+
+describe("daemon status", () => {
+  it("formats a running daemon with its identity, target, and log path", () => {
+    const state = validState({
+      startedAt: "2026-07-13T10:00:00.000Z",
+      connectTo: "https://connect.example.com",
+    });
+    writeState(state);
+
+    const result = describeConnectDaemon(dataDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toContain(`Running (PID ${state.pid}`);
+    expect(result.message).toContain(state.startedAt);
+    expect(result.message).toContain(`Target: ${state.connectTo}`);
+    expect(result.message).toContain(
+      `Logs: ${path.join(dataDir, "logs", "vibedeckx.log")}`,
+    );
+  });
+
+  it("returns non-zero when the daemon is not running", () => {
+    expect(describeConnectDaemon(dataDir)).toMatchObject({
+      exitCode: 1,
+      message: expect.stringMatching(/not running/i),
+    });
+  });
+
+  it("reports stale state without deleting it", () => {
+    writeState(validState({ processStartTicks: "0" }));
+
+    expect(describeConnectDaemon(dataDir)).toMatchObject({
+      exitCode: 1,
+      message: expect.stringMatching(/stale.*PID/i),
+    });
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
+  });
+
+  it("reports invalid state with its path without deleting it", () => {
+    writeState("{");
+    const statePath = daemonStatePath(dataDir);
+
+    const result = describeConnectDaemon(dataDir);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/invalid|cannot read/i);
+    expect(result.message).toContain(statePath);
+    expect(fs.existsSync(statePath)).toBe(true);
+  });
+});
+
+describe("daemon stop", () => {
+  const fastTimings = {
+    pollIntervalMs: 1,
+    firstTimeoutMs: 2,
+    forceTimeoutMs: 1,
+  };
+
+  it("is idempotently successful when the daemon is not running", async () => {
+    await expect(stopConnectDaemon(dataDir)).resolves.toEqual({
+      exitCode: 0,
+      message: "Vibedeckx connect is not running",
+    });
+  });
+
+  it("does not signal or delete stale state", async () => {
+    writeState(validState({ processStartTicks: "0" }));
+    const sendSignal = vi.fn();
+
+    const result = await stopConnectDaemon(dataDir, {
+      sendSignal,
+      ...fastTimings,
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.message).toMatch(/stale.*PID/i);
+    expect(sendSignal).not.toHaveBeenCalled();
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
+  });
+
+  it("does not signal or delete invalid state", async () => {
+    writeState("{");
+    const statePath = daemonStatePath(dataDir);
+    const sendSignal = vi.fn();
+
+    const result = await stopConnectDaemon(dataDir, {
+      sendSignal,
+      ...fastTimings,
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.message).toContain(statePath);
+    expect(sendSignal).not.toHaveBeenCalled();
+    expect(fs.existsSync(statePath)).toBe(true);
+  });
+
+  it("refuses to signal when the immediate identity recheck does not match", async () => {
+    const state = validState();
+    writeState(state);
+    const sendSignal = vi.fn();
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () => "different",
+      sendSignal,
+      sleep: async () => {},
+      ...fastTimings,
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.message).toMatch(/identity|PID/i);
+    expect(sendSignal).not.toHaveBeenCalled();
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
+  });
+
+  it("sends SIGTERM only to the validated process and cleans its state", async () => {
+    const state = validState();
+    writeState(state);
+    let alive = true;
+    const signals: Array<[number, NodeJS.Signals]> = [];
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () =>
+        alive ? state.processStartTicks : undefined,
+      sendSignal: (pid, signal) => {
+        signals.push([pid, signal]);
+        alive = false;
+      },
+      sleep: async () => {},
+      ...fastTimings,
+    });
+
+    expect(signals).toEqual([[state.pid, "SIGTERM"]]);
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toMatch(/stopped/i);
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(false);
+  });
+
+  it("polls until the gracefully stopping process exits", async () => {
+    const state = validState();
+    writeState(state);
+    const reads = [
+      state.processStartTicks,
+      state.processStartTicks,
+      undefined,
+    ];
+    const sleep = vi.fn(async () => {});
+    const sendSignal = vi.fn();
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () => reads.shift(),
+      sendSignal,
+      sleep,
+      pollIntervalMs: 1,
+      firstTimeoutMs: 3,
+      forceTimeoutMs: 1,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(sendSignal).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("revalidates identity immediately before both SIGTERM signals", async () => {
+    const state = validState();
+    writeState(state);
+    let alive = true;
+    const events: string[] = [];
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () => {
+        events.push("read");
+        return alive ? state.processStartTicks : undefined;
+      },
+      sendSignal: (_pid, signal) => {
+        events.push(`signal:${signal}`);
+        if (events.filter((event) => event.startsWith("signal:")).length === 2) {
+          alive = false;
+        }
+      },
+      sleep: async () => {},
+      ...fastTimings,
+    });
+
+    expect(result.exitCode).toBe(0);
+    const signalIndexes = events.flatMap((event, index) =>
+      event.startsWith("signal:") ? [index] : [],
+    );
+    expect(signalIndexes).toHaveLength(2);
+    for (const index of signalIndexes) {
+      expect(events[index - 1]).toBe("read");
+    }
+  });
+
+  it("does not send the second SIGTERM if the identity changes before it", async () => {
+    const state = validState();
+    writeState(state);
+    const reads = [
+      state.processStartTicks,
+      state.processStartTicks,
+      state.processStartTicks,
+      "replacement-process",
+    ];
+    const sendSignal = vi.fn();
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () => reads.shift(),
+      sendSignal,
+      sleep: async () => {},
+      ...fastTimings,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(sendSignal).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(false);
+  });
+
+  it("returns a timeout without deleting state when both stop phases expire", async () => {
+    const state = validState();
+    writeState(state);
+    const sendSignal = vi.fn();
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () => state.processStartTicks,
+      sendSignal,
+      sleep: async () => {},
+      ...fastTimings,
+    });
+
+    expect(sendSignal).toHaveBeenCalledTimes(2);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.message).toMatch(/timed out|still running/i);
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
+  });
+
+  it("treats an ESRCH signal race as an already exited process", async () => {
+    const state = validState();
+    writeState(state);
+
+    const result = await stopConnectDaemon(dataDir, {
+      readStartTicks: () => state.processStartTicks,
+      sendSignal: () => {
+        throw Object.assign(new Error("process disappeared"), { code: "ESRCH" });
+      },
+      sleep: async () => {},
+      ...fastTimings,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(false);
+  });
+
+  it.each(["EPERM", "EIO"])(
+    "does not report success for a %s signal error",
+    async (code) => {
+      const state = validState();
+      writeState(state);
+
+      const result = await stopConnectDaemon(dataDir, {
+        readStartTicks: () => state.processStartTicks,
+        sendSignal: () => {
+          throw Object.assign(new Error(`signal failed: ${code}`), { code });
+        },
+        sleep: async () => {},
+        ...fastTimings,
+      });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.message).toContain(`signal failed: ${code}`);
+      expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
+    },
+  );
 });
 
 describe("daemon state ownership", () => {

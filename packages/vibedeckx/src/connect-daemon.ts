@@ -16,6 +16,23 @@ export type ConnectDaemonInspection =
   | { kind: "stale"; state: ConnectDaemonState }
   | { kind: "invalid"; path: string; reason: string };
 
+export interface DaemonCommandResult {
+  exitCode: number;
+  message: string;
+}
+
+export interface StopDaemonRuntime {
+  readStartTicks: (pid: number) => string | undefined;
+  sendSignal: (pid: number, signal: NodeJS.Signals) => void;
+  sleep: (ms: number) => Promise<void>;
+}
+
+export type StopDaemonOptions = Partial<StopDaemonRuntime> & {
+  pollIntervalMs?: number;
+  firstTimeoutMs?: number;
+  forceTimeoutMs?: number;
+};
+
 export function parseLinuxProcessStartTicks(stat: string): string {
   const closeParen = stat.lastIndexOf(")");
   if (closeParen < 0) throw new Error("Malformed Linux process stat");
@@ -153,6 +170,207 @@ export function inspectDaemonState(dataDir: string): ConnectDaemonInspection {
   return actualTicks === parsed.processStartTicks
     ? { kind: "running", state: parsed }
     : { kind: "stale", state: parsed };
+}
+
+export function describeConnectDaemon(dataDir: string): DaemonCommandResult {
+  const inspection = inspectDaemonState(dataDir);
+
+  switch (inspection.kind) {
+    case "running":
+      return {
+        exitCode: 0,
+        message: [
+          `Running (PID ${inspection.state.pid}, since ${inspection.state.startedAt})`,
+          `Target: ${inspection.state.connectTo}`,
+          `Logs: ${path.join(dataDir, "logs", "vibedeckx.log")}`,
+        ].join("\n"),
+      };
+    case "missing":
+      return { exitCode: 1, message: "Vibedeckx connect is not running" };
+    case "stale":
+      return {
+        exitCode: 1,
+        message: `Vibedeckx connect has stale daemon state for PID ${inspection.state.pid}`,
+      };
+    case "invalid":
+      return {
+        exitCode: 1,
+        message: `Invalid daemon state at ${inspection.path}: ${inspection.reason}`,
+      };
+  }
+}
+
+const defaultStopDaemonRuntime: StopDaemonRuntime = {
+  readStartTicks: readLinuxProcessStartTicks,
+  sendSignal: (pid, signal) => {
+    process.kill(pid, signal);
+  },
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+type SignalAttempt =
+  | { kind: "sent" }
+  | { kind: "identity-changed" }
+  | { kind: "already-exited" }
+  | { kind: "error"; error: unknown };
+
+function signalDaemon(
+  state: ConnectDaemonState,
+  runtime: StopDaemonRuntime,
+): SignalAttempt {
+  /*
+   * A PID can be reused after inspectDaemonState() returns. Re-read Linux's
+   * process start ticks immediately before every signal so an old snapshot is
+   * never our authorization to signal. There is still an unavoidable, tiny
+   * snapshot window between this /proc read and process.kill(); ESRCH handles
+   * the common exit race, while the start-ticks check minimizes reuse risk.
+   */
+  if (runtime.readStartTicks(state.pid) !== state.processStartTicks) {
+    return { kind: "identity-changed" };
+  }
+
+  try {
+    runtime.sendSignal(state.pid, "SIGTERM");
+    return { kind: "sent" };
+  } catch (error) {
+    return hasErrorCode(error, "ESRCH")
+      ? { kind: "already-exited" }
+      : { kind: "error", error };
+  }
+}
+
+async function waitForDaemonExit(
+  state: ConnectDaemonState,
+  runtime: StopDaemonRuntime,
+  timeoutMs: number,
+  pollIntervalMs: number,
+): Promise<boolean> {
+  let elapsedMs = 0;
+  while (elapsedMs < timeoutMs) {
+    const delayMs = Math.min(pollIntervalMs, timeoutMs - elapsedMs);
+    await runtime.sleep(delayMs);
+    elapsedMs += delayMs;
+    if (runtime.readStartTicks(state.pid) !== state.processStartTicks) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function signalErrorResult(
+  state: ConnectDaemonState,
+  error: unknown,
+): DaemonCommandResult {
+  const reason = error instanceof Error ? error.message : String(error);
+  return {
+    exitCode: 1,
+    message: `Failed to signal Vibedeckx connect PID ${state.pid}: ${reason}`,
+  };
+}
+
+function finishStopped(
+  dataDir: string,
+  state: ConnectDaemonState,
+): DaemonCommandResult {
+  try {
+    removeDaemonStateIfOwned(dataDir, state);
+    return {
+      exitCode: 0,
+      message: `Vibedeckx connect stopped (PID ${state.pid})`,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      exitCode: 1,
+      message: `Vibedeckx connect stopped, but its daemon state could not be cleaned up: ${reason}`,
+    };
+  }
+}
+
+export async function stopConnectDaemon(
+  dataDir: string,
+  options: StopDaemonOptions = {},
+): Promise<DaemonCommandResult> {
+  const inspection = inspectDaemonState(dataDir);
+  switch (inspection.kind) {
+    case "missing":
+      return { exitCode: 0, message: "Vibedeckx connect is not running" };
+    case "stale":
+      return {
+        exitCode: 1,
+        message: `Vibedeckx connect has stale daemon state for PID ${inspection.state.pid}; no signal was sent`,
+      };
+    case "invalid":
+      return {
+        exitCode: 1,
+        message: `Invalid daemon state at ${inspection.path}: ${inspection.reason}; no signal was sent`,
+      };
+    case "running":
+      break;
+  }
+
+  const state = inspection.state;
+  const runtime: StopDaemonRuntime = {
+    readStartTicks:
+      options.readStartTicks ?? defaultStopDaemonRuntime.readStartTicks,
+    sendSignal: options.sendSignal ?? defaultStopDaemonRuntime.sendSignal,
+    sleep: options.sleep ?? defaultStopDaemonRuntime.sleep,
+  };
+  const pollIntervalMs = options.pollIntervalMs ?? 100;
+  const firstTimeoutMs = options.firstTimeoutMs ?? 7_000;
+  const forceTimeoutMs = options.forceTimeoutMs ?? 1_000;
+
+  const firstSignal = signalDaemon(state, runtime);
+  if (firstSignal.kind === "identity-changed") {
+    return {
+      exitCode: 1,
+      message: `Vibedeckx connect PID ${state.pid} no longer has the recorded process identity; no signal was sent`,
+    };
+  }
+  if (firstSignal.kind === "already-exited") {
+    return finishStopped(dataDir, state);
+  }
+  if (firstSignal.kind === "error") {
+    return signalErrorResult(state, firstSignal.error);
+  }
+
+  if (
+    await waitForDaemonExit(
+      state,
+      runtime,
+      firstTimeoutMs,
+      pollIntervalMs,
+    )
+  ) {
+    return finishStopped(dataDir, state);
+  }
+
+  const secondSignal = signalDaemon(state, runtime);
+  if (
+    secondSignal.kind === "identity-changed" ||
+    secondSignal.kind === "already-exited"
+  ) {
+    return finishStopped(dataDir, state);
+  }
+  if (secondSignal.kind === "error") {
+    return signalErrorResult(state, secondSignal.error);
+  }
+
+  if (
+    await waitForDaemonExit(
+      state,
+      runtime,
+      forceTimeoutMs,
+      pollIntervalMs,
+    )
+  ) {
+    return finishStopped(dataDir, state);
+  }
+
+  return {
+    exitCode: 1,
+    message: `Timed out waiting for Vibedeckx connect PID ${state.pid} to stop; it is still running`,
+  };
 }
 
 export function claimDaemonState(
