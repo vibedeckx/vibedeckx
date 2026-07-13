@@ -385,6 +385,7 @@ function expectCliExit(result: CliResult, exitCode: number): void {
 
 function expectTokenAbsent(result: CliResult, token: string): void {
   expect(combinedOutput(result)).not.toContain(token);
+  expect(combinedOutput(result)).not.toContain(encodeURIComponent(token));
 }
 
 async function startSentinelProcess(): Promise<DaemonIdentity> {
@@ -531,6 +532,41 @@ describe.runIf(runIntegration)("built connect daemon CLI", () => {
     expect(logContents).not.toContain(token);
   }, integrationTestTimeoutMs);
 
+  it("reports the winning PID when two daemon starts race", async () => {
+    const dataDir = temporaryDataDir();
+    const token = `daemon-integration-secret-${randomUUID()}`;
+    const args = [
+      "connect",
+      "--connect-to",
+      target,
+      "--token",
+      token,
+      "--daemon",
+      "--data-dir",
+      dataDir,
+    ];
+
+    const results = await Promise.all([runCli(args), runCli(args)]);
+    const winner = results.find((result) => result.exitCode === 0);
+    const loser = results.find((result) => result.exitCode !== 0);
+    expect(winner, results.map(combinedOutput).join("\n---\n")).toBeDefined();
+    expect(loser, results.map(combinedOutput).join("\n---\n")).toBeDefined();
+    expectCliExit(winner!, 0);
+    expectCliExit(loser!, 1);
+
+    const state = JSON.parse(fs.readFileSync(statePath(dataDir), "utf8")) as DaemonState;
+    registerDaemonIdentity(state);
+    expect(combinedOutput(loser!)).toContain(
+      `already running (PID ${state.pid})`,
+    );
+    expectTokenAbsent(winner!, token);
+    expectTokenAbsent(loser!, token);
+
+    const stop = await runCli(["connect", "stop", "--data-dir", dataDir]);
+    expectCliExit(stop, 0);
+    expect(await waitForIdentityToDisappear(state)).toBe(true);
+  }, integrationTestTimeoutMs);
+
   it("returns non-zero for missing, stale, and invalid status", async () => {
     const missingDir = temporaryDataDir();
     const missing = await runCli([
@@ -625,6 +661,57 @@ describe.runIf(runIntegration)("built connect daemon CLI", () => {
         portOwner.close((error) => (error ? reject(error) : resolve()));
       });
     }
+  }, integrationTestTimeoutMs);
+
+  it("does not persist raw or URL-encoded tokens from malformed connection URLs", async () => {
+    const dataDir = temporaryDataDir();
+    const token = `secret/${randomUUID()}?key=value&percent%`;
+    const encodedToken = encodeURIComponent(token);
+    const result = await runCli([
+      "connect",
+      "--connect-to",
+      "http://[invalid",
+      "--token",
+      token,
+      "--daemon",
+      "--data-dir",
+      dataDir,
+    ]);
+
+    expectCliExit(result, 1);
+    expectTokenAbsent(result, token);
+    expect(fs.existsSync(statePath(dataDir))).toBe(false);
+    expect(await waitForNoProcessesWithArgument(dataDir)).toEqual([]);
+
+    const logContents = fs.readFileSync(
+      path.join(dataDir, "logs", "vibedeckx.log"),
+      "utf8",
+    );
+    expect(logContents).not.toContain(token);
+    expect(logContents).not.toContain(encodedToken);
+  }, integrationTestTimeoutMs);
+
+  it("fails daemon startup when its persistent log cannot be established", async () => {
+    const dataDir = temporaryDataDir();
+    const token = `daemon-integration-secret-${randomUUID()}`;
+    fs.writeFileSync(path.join(dataDir, "logs"), "not a directory");
+
+    const result = await runCli([
+      "connect",
+      "--connect-to",
+      target,
+      "--token",
+      token,
+      "--daemon",
+      "--data-dir",
+      dataDir,
+    ]);
+
+    expectCliExit(result, 1);
+    expectTokenAbsent(result, token);
+    expect(combinedOutput(result)).not.toContain("Logs:");
+    expect(fs.existsSync(statePath(dataDir))).toBe(false);
+    expect(await waitForNoProcessesWithArgument(dataDir)).toEqual([]);
   }, integrationTestTimeoutMs);
 
   it("redacts timeout diagnostics and reaps the timed-out CLI", async () => {

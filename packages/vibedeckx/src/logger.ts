@@ -47,6 +47,8 @@ export interface SetupLoggingOptions {
   level?: string;
   /** Install uncaughtException/unhandledRejection fatal-loggers (default true; tests pass false) */
   crashHandlers?: boolean;
+  /** Refuse startup when the persistent log cannot be opened (daemon children). */
+  requireFileLogging?: boolean;
 }
 
 /**
@@ -56,6 +58,11 @@ export interface SetupLoggingOptions {
  */
 export function setupLogging(opts: SetupLoggingOptions): Logger {
   const level = resolveLevel(opts.level);
+  if (opts.requireFileLogging && level === "silent") {
+    throw new Error(
+      "Cannot require persistent file logging while log level is silent",
+    );
+  }
   const streams: StreamEntry[] = [];
 
   if (level !== "silent") {
@@ -73,6 +80,9 @@ export function setupLogging(opts: SetupLoggingOptions): Logger {
     const logsDir = path.join(opts.dataDir, "logs");
     try {
       fs.mkdirSync(logsDir, { recursive: true });
+      const logPath = path.join(logsDir, "vibedeckx.log");
+      const preflightFd = fs.openSync(logPath, "a", 0o600);
+      fs.closeSync(preflightFd);
       fileStream = createStream("vibedeckx.log", {
         path: logsDir,
         size: "10M",
@@ -87,6 +97,12 @@ export function setupLogging(opts: SetupLoggingOptions): Logger {
       });
       streams.push({ level: level as Level, stream: fileStream });
     } catch (err) {
+      if (opts.requireFileLogging) {
+        throw new Error(
+          `Cannot establish required file logging in ${logsDir}: ${format(err)}`,
+          { cause: err },
+        );
+      }
       console.warn(`Warning: cannot create log directory ${logsDir}: ${(err as Error).message}; file logging disabled`);
     }
   }

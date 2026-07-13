@@ -109,6 +109,29 @@ function lockPath(): string {
   return path.join(path.dirname(daemonStatePath(dataDir)), "connect.lock");
 }
 
+function writeLockOwner(
+  overrides: Partial<{
+    schemaVersion: 1;
+    pid: number;
+    processStartTicks: string;
+    nonce: string;
+  }> = {},
+): void {
+  const directory = lockPath();
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(directory, "owner.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      pid: process.pid,
+      processStartTicks: readLinuxProcessStartTicks(process.pid),
+      nonce: "test-owner",
+      ...overrides,
+    })}\n`,
+    { mode: 0o600 },
+  );
+}
+
 function expectLockedError(thrown: unknown): void {
   expect(thrown).toBeInstanceOf(Error);
   const message = thrown instanceof Error ? thrown.message : "";
@@ -340,6 +363,32 @@ describe("detached daemon startup", () => {
     expectAllRecordedFixturesStopped();
   });
 
+  it("redacts both raw and URL-encoded token forms from startup errors", async () => {
+    const reservedToken = "secret/with?reserved=value&percent%";
+    const encodedToken = encodeURIComponent(reservedToken);
+
+    let rejected: unknown;
+    try {
+      await runFixture("error", {
+        token: reservedToken,
+        extraEnv: {
+          VIBEDECKX_TEST_DAEMON_MODE: "error",
+          VIBEDECKX_TEST_DAEMON_ERROR_MESSAGE:
+            `failed URL token=${encodedToken}; raw=${reservedToken}`,
+        },
+      });
+    } catch (error) {
+      rejected = error;
+    }
+
+    expect(rejected).toBeInstanceOf(Error);
+    const message = rejected instanceof Error ? rejected.message : "";
+    expect(message).not.toContain(reservedToken);
+    expect(message).not.toContain(encodedToken);
+    expect(message).toContain("[redacted]");
+    expectAllRecordedFixturesStopped();
+  });
+
   it("removes stale daemon state claimed by a child that fails startup", async () => {
     await expect(
       runFixture("error-with-state", {
@@ -404,7 +453,7 @@ describe("detached daemon startup", () => {
     expectAllRecordedFixturesStopped();
   });
 
-  it("preserves daemon state owned by a different live process", async () => {
+  it("preserves and reports daemon state owned by a different live process", async () => {
     await expect(
       runFixture("error-with-foreign-state", {
         extraEnv: {
@@ -412,7 +461,7 @@ describe("detached daemon startup", () => {
           VIBEDECKX_TEST_DAEMON_STATE_DATA_DIR: dataDir,
         },
       }),
-    ).rejects.toThrow("fixture failed");
+    ).rejects.toThrow(/already running.*PID/i);
 
     const preserved = JSON.parse(
       fs.readFileSync(daemonStatePath(dataDir), "utf8"),
@@ -1043,7 +1092,7 @@ describe("daemon state ownership", () => {
     });
     writeState(state);
     const before = fs.readFileSync(daemonStatePath(dataDir), "utf8");
-    fs.mkdirSync(lockPath(), { mode: 0o700 });
+    writeLockOwner();
 
     expectStateOperationLocked(() => operation(state));
     expect(fs.readFileSync(daemonStatePath(dataDir), "utf8")).toBe(before);
@@ -1075,6 +1124,135 @@ describe("daemon state ownership", () => {
     );
     expect(fs.statSync(path.dirname(statePath)).mode & 0o777).toBe(0o700);
     expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
+  });
+
+  it("recovers a lock whose recorded process identity is dead", () => {
+    writeLockOwner({
+      pid: Number.MAX_SAFE_INTEGER,
+      processStartTicks: "1",
+      nonce: "dead-owner",
+    });
+
+    const state = claimDaemonState(dataDir, "https://example.com", "test");
+
+    expect(state.pid).toBe(process.pid);
+    expect(fs.existsSync(lockPath())).toBe(false);
+    const quarantines = fs.readdirSync(path.dirname(lockPath())).filter(
+      (entry) => entry.startsWith("connect.lock.stale-"),
+    );
+    expect(quarantines).toHaveLength(1);
+  });
+
+  it.each([
+    ["interrupted empty directory", undefined],
+    ["malformed metadata", "{"],
+  ])("recovers a %s lock publication", (_description, contents) => {
+    fs.mkdirSync(lockPath(), { recursive: true, mode: 0o700 });
+    if (contents !== undefined) {
+      fs.writeFileSync(path.join(lockPath(), "owner.json"), contents, {
+        mode: 0o600,
+      });
+    }
+
+    expect(() =>
+      claimDaemonState(dataDir, "https://example.com", "test"),
+    ).not.toThrow();
+    expect(fs.existsSync(lockPath())).toBe(false);
+  });
+
+  it("recovers a malformed lock published as a regular file", () => {
+    fs.mkdirSync(path.dirname(lockPath()), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(lockPath(), "interrupted publication", { mode: 0o600 });
+
+    expect(() =>
+      claimDaemonState(dataDir, "https://example.com", "test"),
+    ).not.toThrow();
+    expect(fs.existsSync(lockPath())).toBe(false);
+  });
+
+  it("keeps concurrent contenders out while a live owner mutates state", () => {
+    const statePath = daemonStatePath(dataDir);
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    let competingError: unknown;
+    vi.spyOn(fs, "writeFileSync").mockImplementation((file, contents, options) => {
+      if (file === statePath && competingError === undefined) {
+        try {
+          claimDaemonState(dataDir, "https://competitor.example.com", "test");
+        } catch (error) {
+          competingError = error;
+        }
+      }
+      return writeFileSync(file, contents, options);
+    });
+
+    claimDaemonState(dataDir, "https://winner.example.com", "test");
+
+    expectLockedError(competingError);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).connectTo).toBe(
+      "https://winner.example.com",
+    );
+  });
+
+  it("publishes private owner metadata while holding the lock", () => {
+    const statePath = daemonStatePath(dataDir);
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    let observedDirectoryMode: number | undefined;
+    let observedOwnerMode: number | undefined;
+    vi.spyOn(fs, "writeFileSync").mockImplementation((file, contents, options) => {
+      if (file === statePath) {
+        observedDirectoryMode = fs.statSync(lockPath()).mode & 0o777;
+        observedOwnerMode =
+          fs.statSync(path.join(lockPath(), "owner.json")).mode & 0o777;
+      }
+      return writeFileSync(file, contents, options);
+    });
+
+    claimDaemonState(dataDir, "https://example.com", "test");
+
+    expect(observedDirectoryMode).toBe(0o700);
+    expect(observedOwnerMode).toBe(0o600);
+  });
+
+  it("does not release a lock replaced by a different owner", () => {
+    const statePath = daemonStatePath(dataDir);
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    let replaced = false;
+    vi.spyOn(fs, "writeFileSync").mockImplementation((file, contents, options) => {
+      const result = writeFileSync(file, contents, options);
+      if (file === statePath && !replaced) {
+        replaced = true;
+        fs.rmSync(lockPath(), { recursive: true });
+        writeLockOwner({ nonce: "replacement-owner" });
+      }
+      return result;
+    });
+
+    expect(() =>
+      claimDaemonState(dataDir, "https://example.com", "test"),
+    ).toThrow(/ownership|owner/i);
+    expect(fs.existsSync(lockPath())).toBe(true);
+    expect(fs.readFileSync(path.join(lockPath(), "owner.json"), "utf8")).toContain(
+      "replacement-owner",
+    );
+  });
+
+  it("preserves an existing lock when owner metadata cannot be read", () => {
+    writeLockOwner();
+    const ownerPath = path.join(lockPath(), "owner.json");
+    const readFileSync = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, "readFileSync").mockImplementation((file, options) => {
+      if (file === ownerPath) {
+        throw Object.assign(new Error("lock owner permission denied"), {
+          code: "EACCES",
+        });
+      }
+      return readFileSync(file, options as never);
+    });
+
+    expect(() =>
+      claimDaemonState(dataDir, "https://example.com", "test"),
+    ).toThrow(/permission denied/i);
+    expect(fs.existsSync(lockPath())).toBe(true);
   });
 
   it("does not overwrite an existing state claim", () => {

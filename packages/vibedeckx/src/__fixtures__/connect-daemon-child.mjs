@@ -60,7 +60,10 @@ function writeDaemonState(pid, processStartTicks) {
 }
 
 function sendFixtureError() {
-  process.send?.({ type: "error", message: "fixture failed" }, () => {
+  process.send?.({
+    type: "error",
+    message: process.env.VIBEDECKX_TEST_DAEMON_ERROR_MESSAGE ?? "fixture failed",
+  }, () => {
     disconnect();
     process.exit(1);
   });
@@ -77,6 +80,16 @@ if (mode === "ready") {
 } else if (mode === "error-with-state-lock") {
   const runDir = writeDaemonState(process.pid, readStartTicks(process.pid));
   fs.mkdirSync(`${runDir}/connect.lock`, { mode: 0o700 });
+  fs.writeFileSync(
+    `${runDir}/connect.lock/owner.json`,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      pid: process.ppid,
+      processStartTicks: readStartTicks(process.ppid),
+      nonce: "fixture-live-owner",
+    })}\n`,
+    { mode: 0o600 },
+  );
   sendFixtureError();
 } else if (mode === "error-with-unreadable-state") {
   const runDir = writeDaemonState(process.pid, readStartTicks(process.pid));

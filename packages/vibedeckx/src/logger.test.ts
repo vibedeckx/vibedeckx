@@ -71,4 +71,31 @@ describe("logger", () => {
     // must not throw
     logger.info("pre-init logging is safe");
   });
+
+  it("fails initialization when required daemon file logging is unavailable", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vdx-log-"));
+    fs.writeFileSync(path.join(tmpDir, "logs"), "not a directory");
+
+    expect(() =>
+      setupLogging({
+        dataDir: tmpDir!,
+        level: "info",
+        crashHandlers: false,
+        requireFileLogging: true,
+      }),
+    ).toThrow(/log/i);
+  });
+
+  it("does not allow silent mode to bypass required daemon file logging", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vdx-log-"));
+
+    expect(() =>
+      setupLogging({
+        dataDir: tmpDir!,
+        level: "silent",
+        crashHandlers: false,
+        requireFileLogging: true,
+      }),
+    ).toThrow(/file logging.*silent|silent.*file logging/i);
+  });
 });

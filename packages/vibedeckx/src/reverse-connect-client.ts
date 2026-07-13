@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { generateKeyPairSync, sign as cryptoSign, createPrivateKey, createPublicKey, type KeyObject } from "crypto";
 import type { ControlFrame, HttpRequestFrame, WsOpenFrame, WsCloseFrame, PingFrame, HttpResponseFrame, PongFrame, StatusFrame, WsDataFrame, MachineChallengeFrame, MachineAuthFrame } from "./reverse-connect-types.js";
 import type { FastifyInstance } from "fastify";
+import { redactErrorSecret, redactSecretForms } from "./secret-redaction.js";
 
 // Settings key under which the remote node persists its stable Ed25519 private
 // key (PKCS8 PEM). This key is the machine's cryptographic identity, recognized
@@ -83,7 +84,8 @@ export class ReverseConnectClient {
     });
 
     this.ws.on("close", (code, reason) => {
-      console.log(`[ReverseClient] Disconnected (code=${code}, reason=${reason?.toString() || ""})`);
+      const safeReason = redactSecretForms(reason?.toString() || "", this.token);
+      console.log(`[ReverseClient] Disconnected (code=${code}, reason=${safeReason})`);
       this.clearNoPingTimer();
       this.closeAllLocalChannels();
       this.ws = null;
@@ -94,7 +96,10 @@ export class ReverseConnectClient {
     });
 
     this.ws.on("error", (err) => {
-      console.error("[ReverseClient] WebSocket error:", err.message);
+      console.error(
+        "[ReverseClient] WebSocket error:",
+        redactErrorSecret(err, this.token),
+      );
     });
   }
 

@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { redactSecretForms } from "./secret-redaction.js";
 
 export const CONNECT_DAEMON_CHILD_ENV = "VIBEDECKX_INTERNAL_CONNECT_DAEMON";
 export const CONNECT_DAEMON_TOKEN_ENV = "VIBEDECKX_INTERNAL_CONNECT_TOKEN";
@@ -344,8 +346,31 @@ function removeFailedChildStateIfOwned(
   });
 }
 
-function redactSecret(message: string, token: string): string {
-  return token.length > 0 ? message.replaceAll(token, "[redacted]") : message;
+async function findForeignRunningDaemon(
+  dataDir: string,
+  childPid: number | undefined,
+  childStartTicks: string | undefined,
+  timeoutMs = 250,
+): Promise<ConnectDaemonState | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      const inspection = inspectDaemonState(dataDir);
+      if (
+        inspection.kind === "running" &&
+        (inspection.state.pid !== childPid ||
+          inspection.state.processStartTicks !== childStartTicks)
+      ) {
+        return inspection.state;
+      }
+    } catch {
+      // Startup's original error remains authoritative unless a complete,
+      // currently-live foreign state can be verified during this bounded wait.
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (true);
+  return undefined;
 }
 
 export async function startConnectDaemon(
@@ -423,6 +448,16 @@ export async function startConnectDaemon(
     } catch (stateError) {
       stateCleanupError = stateError;
     }
+    const foreignDaemon = await findForeignRunningDaemon(
+      options.dataDir,
+      childPid,
+      childStartTicks,
+    );
+    if (foreignDaemon) {
+      throw new Error(
+        `Vibedeckx connect daemon is already running (PID ${foreignDaemon.pid})`,
+      );
+    }
     const startupMessage =
       error instanceof Error ? error.message : String(error);
     const cleanupMessages: string[] = [];
@@ -437,7 +472,7 @@ export async function startConnectDaemon(
       );
     }
     const message = [startupMessage, ...cleanupMessages].join("; ");
-    throw new Error(redactSecret(message, options.token));
+    throw new Error(redactSecretForms(message, options.token));
   }
 }
 
@@ -514,6 +549,175 @@ function hasErrorCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
+interface DaemonStateLockOwner {
+  schemaVersion: 1;
+  pid: number;
+  processStartTicks: string;
+  nonce: string;
+}
+
+function isDaemonStateLockOwner(value: unknown): value is DaemonStateLockOwner {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const owner = value as Record<string, unknown>;
+  return (
+    Object.keys(owner).length === 4 &&
+    owner.schemaVersion === 1 &&
+    Number.isSafeInteger(owner.pid) &&
+    (owner.pid as number) > 0 &&
+    typeof owner.processStartTicks === "string" &&
+    /^\d+$/.test(owner.processStartTicks) &&
+    typeof owner.nonce === "string" &&
+    owner.nonce.length > 0
+  );
+}
+
+function daemonStateLockOwnerPath(lockPath: string): string {
+  return path.join(lockPath, "owner.json");
+}
+
+function readDaemonStateLockOwner(
+  lockPath: string,
+): DaemonStateLockOwner | undefined {
+  let contents: string;
+  try {
+    contents = fs.readFileSync(daemonStateLockOwnerPath(lockPath), "utf8");
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(contents);
+    return isDaemonStateLockOwner(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function createDaemonStateLockCandidate(lockPath: string): {
+  path: string;
+  owner: DaemonStateLockOwner;
+} {
+  const processStartTicks = readLinuxProcessStartTicks(process.pid);
+  if (!processStartTicks) {
+    throw new Error(
+      `Cannot read Linux process start ticks for lock owner PID ${process.pid}`,
+    );
+  }
+
+  const owner: DaemonStateLockOwner = {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartTicks,
+    nonce: randomUUID(),
+  };
+  const candidatePath = `${lockPath}.candidate-${process.pid}-${owner.nonce}`;
+  fs.mkdirSync(candidatePath, { mode: 0o700 });
+  try {
+    fs.chmodSync(candidatePath, 0o700);
+    const ownerPath = daemonStateLockOwnerPath(candidatePath);
+    fs.writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.chmodSync(ownerPath, 0o600);
+    return { path: candidatePath, owner };
+  } catch (error) {
+    fs.rmSync(candidatePath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function quarantineRecoverableDaemonStateLock(lockPath: string): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(lockPath);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return;
+    throw error;
+  }
+
+  const owner = readDaemonStateLockOwner(lockPath);
+  if (
+    owner &&
+    readLinuxProcessStartTicks(owner.pid) === owner.processStartTicks
+  ) {
+    throw new Error(
+      `daemon state operation already in progress at ${lockPath} (PID ${owner.pid})`,
+    );
+  }
+
+  // A deterministic destination tied to the observed inode is deliberately
+  // retained. Concurrent stale observers therefore cannot later move a newly
+  // published live lock after the first observer has recovered the old one.
+  const quarantinePath = `${lockPath}.stale-${stat.dev}-${stat.ino}-${String(stat.ctimeMs).replace(".", "-")}`;
+  try {
+    fs.renameSync(lockPath, quarantinePath);
+  } catch (error) {
+    if (
+      hasErrorCode(error, "ENOENT") ||
+      hasErrorCode(error, "EEXIST") ||
+      hasErrorCode(error, "ENOTEMPTY")
+    ) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function acquireDaemonStateLock(lockPath: string): DaemonStateLockOwner {
+  const candidate = createDaemonStateLockCandidate(lockPath);
+  let acquired = false;
+  try {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        // The candidate already contains complete private metadata. Publishing
+        // by rename means contenders never observe a half-created new lock.
+        fs.renameSync(candidate.path, lockPath);
+        acquired = true;
+        return candidate.owner;
+      } catch (error) {
+        if (
+          !hasErrorCode(error, "EEXIST") &&
+          !hasErrorCode(error, "ENOTEMPTY") &&
+          !hasErrorCode(error, "ENOTDIR") &&
+          !hasErrorCode(error, "EISDIR")
+        ) {
+          throw error;
+        }
+      }
+      quarantineRecoverableDaemonStateLock(lockPath);
+    }
+    throw new Error(
+      `daemon state operation already in progress at ${lockPath}`,
+    );
+  } finally {
+    if (!acquired) {
+      fs.rmSync(candidate.path, { recursive: true, force: true });
+    }
+  }
+}
+
+function releaseDaemonStateLock(
+  lockPath: string,
+  expected: DaemonStateLockOwner,
+): void {
+  const current = readDaemonStateLockOwner(lockPath);
+  if (
+    !current ||
+    current.pid !== expected.pid ||
+    current.processStartTicks !== expected.processStartTicks ||
+    current.nonce !== expected.nonce
+  ) {
+    throw new Error(
+      `Cannot release daemon state lock at ${lockPath}: lock ownership changed`,
+    );
+  }
+  fs.rmSync(lockPath, { recursive: true });
+}
+
 function withDaemonStateLock<T>(
   dataDir: string,
   operation: () => T,
@@ -523,22 +727,12 @@ function withDaemonStateLock<T>(
   fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(runDir, 0o700);
 
-  try {
-    fs.mkdirSync(lockPath, { mode: 0o700 });
-  } catch (error) {
-    if (hasErrorCode(error, "EEXIST")) {
-      throw new Error(
-        `daemon state operation already in progress at ${lockPath}`,
-      );
-    }
-    throw error;
-  }
+  const owner = acquireDaemonStateLock(lockPath);
 
   try {
-    fs.chmodSync(lockPath, 0o700);
     return operation();
   } finally {
-    fs.rmdirSync(lockPath);
+    releaseDaemonStateLock(lockPath, owner);
   }
 }
 

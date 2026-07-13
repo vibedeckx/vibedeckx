@@ -22,6 +22,7 @@ import {
   type DaemonCommandResult,
 } from "./connect-daemon.js";
 import open from "open";
+import { redactErrorSecret } from "./secret-redaction.js";
 
 function loadTLSOptions(flags: {
   cert: string | undefined;
@@ -57,11 +58,6 @@ function readPackageVersion(): string {
   } catch {
     return "unknown";
   }
-}
-
-function redactTokenFromError(error: unknown, token: string): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return token.length > 0 ? message.replaceAll(token, "[redacted]") : message;
 }
 
 const startCommand = buildCommand({
@@ -390,7 +386,11 @@ const connectCommand = buildCommand({
       }
 
       loggingStarted = true;
-      setupLogging({ dataDir, level: flags["log-level"] });
+      setupLogging({
+        dataDir,
+        level: flags["log-level"],
+        requireFileLogging: childContext.isDaemonChild,
+      });
       console.log("Starting vibedeckx in reverse-connect mode...");
 
       const dbPath = path.join(dataDir, "data.sqlite");
@@ -429,7 +429,7 @@ const connectCommand = buildCommand({
 
       console.log(`Connecting to ${flags["connect-to"]}...`);
     } catch (error) {
-      const safeMessage = redactTokenFromError(error, token);
+      const safeMessage = redactErrorSecret(error, token);
       if (loggingStarted) {
         console.error(`Error starting vibedeckx connect: ${safeMessage}`);
       }
@@ -437,7 +437,7 @@ const connectCommand = buildCommand({
       if (childContext.isDaemonChild) notifyDaemonParentError(error);
       const cleanupMessages = cleanupErrors.map(
         (cleanupError) =>
-          `cleanup failed: ${redactTokenFromError(cleanupError, token)}`,
+          `cleanup failed: ${redactErrorSecret(cleanupError, token)}`,
       );
       throw new Error([safeMessage, ...cleanupMessages].join("; "));
     }
@@ -461,7 +461,7 @@ const connectCommand = buildCommand({
       const cleanupErrors = await closeResources();
       for (const error of cleanupErrors) {
         process.stderr.write(
-          `Error during shutdown: ${redactTokenFromError(error, token)}\n`,
+          `Error during shutdown: ${redactErrorSecret(error, token)}\n`,
         );
       }
       process.exit(cleanupErrors.length === 0 ? 0 : 1);
