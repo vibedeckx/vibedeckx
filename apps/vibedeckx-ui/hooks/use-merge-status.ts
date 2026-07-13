@@ -8,6 +8,7 @@ import {
   type MergeStatusValue,
   type Worktree,
 } from "@/lib/api";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 export interface BranchMergeInfo {
   branch: string;
@@ -195,13 +196,15 @@ export function deserializeBranchSet(key: string): Set<string> {
 
 /**
  * Live refresh triggers for merge status: refetch when an agent finishes a
- * turn (branch leaves the active set), on window focus, and on a 30s interval
- * while any branch is active. Quiet when nothing is running — the tip-SHA
- * cache makes redundant refetches nearly free.
+ * turn (branch leaves the active set), on window focus, when an executor for
+ * this project stops, and on a visible-tab backstop poll (30s active / 60s
+ * idle, fully stopped while the tab is hidden). The tip-SHA cache makes
+ * redundant refetches nearly free.
  */
 export function useMergeStatusAutoRefresh(
   refetch: () => void,
   workspaceStatuses: ReadonlyMap<string, string> | undefined,
+  projectId: string | null,
 ): void {
   const prevActiveRef = useRef<Set<string>>(new Set());
   const active = activeBranchSet(workspaceStatuses);
@@ -222,9 +225,42 @@ export function useMergeStatusAutoRefresh(
     return () => window.removeEventListener("focus", onFocus);
   }, [refetch]);
 
+  // Executor runs (rebase/merge scripts) are not in the workspace active set,
+  // so their finish must be its own trigger. Local and remote executors both
+  // emit executor:stopped with projectId on the /api/events stream.
+  useGlobalEventStream((evt) => {
+    if (evt.type === "executor:stopped" && evt.projectId === projectId) {
+      refetch();
+    }
+  });
+
+  // Backstop poll: catches git operations no event covers (e.g. the user
+  // rebasing in the app's built-in terminal — window already focused, so the
+  // focus trigger never fires). 30s while an agent is active, 60s otherwise;
+  // completely quiet while the tab is hidden. The window-focus listener
+  // (above) handles the immediate refresh when the user returns, so becoming
+  // visible only restarts the interval without an extra refetch.
   useEffect(() => {
-    if (!anyActive) return;
-    const id = setInterval(refetch, 30_000);
-    return () => clearInterval(id);
-  }, [anyActive, refetch]);
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (interval !== null) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+    const start = () => {
+      stop();
+      interval = setInterval(refetch, anyActive ? 30_000 : 60_000);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refetch, anyActive]);
 }

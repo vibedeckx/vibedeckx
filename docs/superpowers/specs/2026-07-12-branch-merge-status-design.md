@@ -194,10 +194,19 @@ Vitest, following the temp-git-repo fixture style of `projects.test.ts` /
 Approved after v1: merge status additionally refetches (a) when any workspace
 branch leaves the active set (`working`/`main-running` → anything else — an
 agent finished a turn), (b) on window focus, and (c) on a 30-second interval
-while at least one branch is active. No polling when nothing is running.
-Implemented in `useMergeStatusAutoRefresh` (use-merge-status.ts), driven by the
-`workspaceStatuses` map page.tsx already derives from the SSE activity stream.
-Mid-turn dirty changes still only surface when the turn ends — accepted.
+while at least one branch is active. Implemented in `useMergeStatusAutoRefresh`
+(use-merge-status.ts), driven by the `workspaceStatuses` map page.tsx already
+derives from the SSE activity stream. Mid-turn dirty changes still only
+surface when the turn ends — accepted.
+
+Revised 2026-07-13 (trigger gaps): additionally refetches (d) when an
+executor:stopped event for the project arrives (executor runs are not part of
+the active set), and the poll is now a visible-tab backstop — 30s while a
+branch is active, 60s otherwise, fully stopped while the tab is hidden
+(previously: no polling at all when idle, which left in-app-terminal git
+operations invisible until the next focus/turn event). Push-based ref
+watching is designed in docs/merge-status-ref-watcher-design.md (phase 2,
+not built).
 
 ## Addendum (2026-07-12): batch pair API
 

@@ -214,8 +214,9 @@ export default function Home() {
   );
 
   // Keep sidebar merge badges live: refetch when an agent finishes a turn,
-  // on window focus, and every 30s while any branch is active.
-  useMergeStatusAutoRefresh(refetchMergeStatus, workspaceStatuses);
+  // on window focus, when an executor for this project stops, and on a
+  // visible-tab backstop poll (30s active / 60s idle).
+  useMergeStatusAutoRefresh(refetchMergeStatus, workspaceStatuses, currentProject?.id ?? null);
 
   // Completion notification center. Listens to the global SSE stream directly
   // (one connection for all projects), plays the completion sound — sound1 for
