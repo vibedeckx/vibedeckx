@@ -15,6 +15,7 @@
     "build": "node esbuild.config.mjs && chmod +x ./dist/bin.js",
     "dev": "tsc -w",
     "test": "vitest run",
+    "test:daemon": "npm run build && VIBEDECKX_DAEMON_INTEGRATION=1 vitest run src/connect-daemon.integration.test.ts",
     "test:watch": "vitest",
     "test:compat": "vitest run --config vitest.live.config.ts",
     "eval": "evalite run",

@@ -22,3 +22,5 @@ jobs:
         run: npx tsc --noEmit -p packages/vibedeckx/tsconfig.json
       - name: Unit + offline contract tests
         run: pnpm --filter vibedeckx test
+      - name: Connect daemon integration test
+        run: pnpm --filter vibedeckx test:daemon
