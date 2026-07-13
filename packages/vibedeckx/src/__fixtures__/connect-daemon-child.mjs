@@ -5,14 +5,12 @@ const recordPath = process.env.VIBEDECKX_TEST_DAEMON_RECORD;
 const pidRecordPath = process.env.VIBEDECKX_TEST_DAEMON_PID_RECORD;
 
 if (pidRecordPath) {
-  const stat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
-  const processStartTicks = stat
-    .slice(stat.lastIndexOf(")") + 1)
-    .trim()
-    .split(/\s+/)[19];
   fs.writeFileSync(
     pidRecordPath,
-    JSON.stringify({ pid: process.pid, processStartTicks }),
+    JSON.stringify({
+      pid: process.pid,
+      processStartTicks: readStartTicks(process.pid),
+    }),
   );
 }
 

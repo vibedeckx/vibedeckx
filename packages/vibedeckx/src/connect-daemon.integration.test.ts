@@ -6,6 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+// Liveness helper only — reuse the production /proc field-22 parser so the
+// PID-identity check this suite verifies stays in lockstep with the daemon's.
+import { readLinuxProcessStartTicks as readProcessStartTicks } from "./connect-daemon.js";
 
 const runIntegration =
   process.platform === "linux" &&
@@ -59,26 +62,6 @@ function writeState(dataDir: string, contents: string): void {
   const file = statePath(dataDir);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, contents);
-}
-
-function readProcessStartTicks(pid: number): string | undefined {
-  let stat: string;
-  try {
-    stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error.code === "ENOENT" || error.code === "ESRCH")
-    ) {
-      return undefined;
-    }
-    throw error;
-  }
-
-  const closeParen = stat.lastIndexOf(")");
-  if (closeParen < 0) throw new Error(`Malformed /proc/${pid}/stat`);
-  return stat.slice(closeParen + 1).trim().split(/\s+/)[19];
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {
