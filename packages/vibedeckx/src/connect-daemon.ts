@@ -49,6 +49,42 @@ export function daemonStatePath(dataDir: string): string {
   return path.join(dataDir, "run", "connect.json");
 }
 
+function daemonStateLockPath(dataDir: string): string {
+  return path.join(path.dirname(daemonStatePath(dataDir)), "connect.lock");
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function withDaemonStateLock<T>(
+  dataDir: string,
+  operation: () => T,
+): T {
+  const lockPath = daemonStateLockPath(dataDir);
+  const runDir = path.dirname(lockPath);
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(runDir, 0o700);
+
+  try {
+    fs.mkdirSync(lockPath, { mode: 0o700 });
+  } catch (error) {
+    if (hasErrorCode(error, "EEXIST")) {
+      throw new Error(
+        `daemon state operation already in progress at ${lockPath}`,
+      );
+    }
+    throw error;
+  }
+
+  try {
+    fs.chmodSync(lockPath, 0o700);
+    return operation();
+  } finally {
+    fs.rmdirSync(lockPath);
+  }
+}
+
 function isConnectDaemonState(value: unknown): value is ConnectDaemonState {
   if (!value || typeof value !== "object") return false;
   const state = value as Record<string, unknown>;
@@ -124,6 +160,16 @@ export function claimDaemonState(
   connectTo: string,
   version: string,
 ): ConnectDaemonState {
+  return withDaemonStateLock(dataDir, () =>
+    claimDaemonStateUnlocked(dataDir, connectTo, version),
+  );
+}
+
+function claimDaemonStateUnlocked(
+  dataDir: string,
+  connectTo: string,
+  version: string,
+): ConnectDaemonState {
   const processStartTicks = readLinuxProcessStartTicks(process.pid);
   if (!processStartTicks) {
     throw new Error(
@@ -154,11 +200,28 @@ export function removeDaemonStateIfOwned(
   dataDir: string,
   expected: ConnectDaemonState,
 ): boolean {
+  return withDaemonStateLock(dataDir, () =>
+    removeDaemonStateIfOwnedUnlocked(dataDir, expected),
+  );
+}
+
+function removeDaemonStateIfOwnedUnlocked(
+  dataDir: string,
+  expected: ConnectDaemonState,
+): boolean {
   const statePath = daemonStatePath(dataDir);
+
+  let contents: string;
+  try {
+    contents = fs.readFileSync(statePath, "utf8");
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw error;
+  }
 
   let current: unknown;
   try {
-    current = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    current = JSON.parse(contents);
   } catch {
     return false;
   }
@@ -174,24 +237,24 @@ export function removeDaemonStateIfOwned(
     fs.unlinkSync(statePath);
     return true;
   } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return false;
-    }
+    if (hasErrorCode(error, "ENOENT")) return false;
     throw error;
   }
 }
 
 export function removeVerifiedStaleState(dataDir: string): boolean {
+  return withDaemonStateLock(dataDir, () =>
+    removeVerifiedStaleStateUnlocked(dataDir),
+  );
+}
+
+function removeVerifiedStaleStateUnlocked(dataDir: string): boolean {
   const inspection = inspectDaemonState(dataDir);
   switch (inspection.kind) {
     case "missing":
       return false;
     case "stale":
-      return removeDaemonStateIfOwned(dataDir, inspection.state);
+      return removeDaemonStateIfOwnedUnlocked(dataDir, inspection.state);
     case "running":
       throw new Error(
         `Vibedeckx connect daemon is already running (PID ${inspection.state.pid})`,

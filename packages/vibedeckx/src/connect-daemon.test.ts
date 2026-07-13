@@ -33,6 +33,27 @@ function writeState(state: ConnectDaemonState | string): void {
   );
 }
 
+function lockPath(): string {
+  return path.join(path.dirname(daemonStatePath(dataDir)), "connect.lock");
+}
+
+function expectLockedError(thrown: unknown): void {
+  expect(thrown).toBeInstanceOf(Error);
+  const message = thrown instanceof Error ? thrown.message : "";
+  expect(message).toContain("daemon state operation already in progress");
+  expect(message).toContain(lockPath());
+}
+
+function expectStateOperationLocked(operation: () => unknown): void {
+  let thrown: unknown;
+  try {
+    operation();
+  } catch (error) {
+    thrown = error;
+  }
+  expectLockedError(thrown);
+}
+
 function validState(
   overrides: Partial<ConnectDaemonState> = {},
 ): ConnectDaemonState {
@@ -170,6 +191,35 @@ describe("daemon state inspection", () => {
 });
 
 describe("daemon state ownership", () => {
+  it.each([
+    [
+      "claim",
+      (state: ConnectDaemonState) =>
+        claimDaemonState(dataDir, "https://new.example.com", state.version),
+    ],
+    [
+      "owned removal",
+      (state: ConnectDaemonState) =>
+        removeDaemonStateIfOwned(dataDir, state),
+    ],
+    [
+      "verified stale cleanup",
+      () => removeVerifiedStaleState(dataDir),
+    ],
+  ])("rejects %s while the shared state lock is held", (_, operation) => {
+    const state = validState({
+      pid: Number.MAX_SAFE_INTEGER,
+      processStartTicks: "1",
+    });
+    writeState(state);
+    const before = fs.readFileSync(daemonStatePath(dataDir), "utf8");
+    fs.mkdirSync(lockPath(), { mode: 0o700 });
+
+    expectStateOperationLocked(() => operation(state));
+    expect(fs.readFileSync(daemonStatePath(dataDir), "utf8")).toBe(before);
+    expect(fs.existsSync(lockPath())).toBe(true);
+  });
+
   it("claims state exclusively for the current process with private permissions", () => {
     const before = Date.now();
     const state = claimDaemonState(
@@ -209,6 +259,23 @@ describe("daemon state ownership", () => {
       claimDaemonState(dataDir, "https://other.example.com", "2.0.0"),
     ).toThrow(/EEXIST|already exists/i);
     expect(JSON.parse(fs.readFileSync(statePath, "utf8"))).toEqual(state);
+  });
+
+  it("releases the shared lock after a successful mutation", () => {
+    const state = claimDaemonState(dataDir, "https://example.com", "test");
+    expect(fs.existsSync(lockPath())).toBe(false);
+
+    expect(removeDaemonStateIfOwned(dataDir, state)).toBe(true);
+    expect(fs.existsSync(lockPath())).toBe(false);
+  });
+
+  it("releases the shared lock when claiming state fails", () => {
+    claimDaemonState(dataDir, "https://example.com", "test");
+
+    expect(() =>
+      claimDaemonState(dataDir, "https://other.example.com", "test"),
+    ).toThrow(/EEXIST|already exists/i);
+    expect(fs.existsSync(lockPath())).toBe(false);
   });
 
   it("enforces private permissions even with a restrictive process umask", () => {
@@ -254,6 +321,24 @@ describe("daemon state ownership", () => {
   it("returns false when removing missing state", () => {
     expect(removeDaemonStateIfOwned(dataDir, validState())).toBe(false);
   });
+
+  it.each(["EACCES", "EIO"])(
+    "propagates %s state read errors and releases the lock",
+    (code) => {
+      const state = validState();
+      writeState(state);
+      const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(() => {
+        throw Object.assign(new Error(`state read failed: ${code}`), { code });
+      });
+
+      expect(() => removeDaemonStateIfOwned(dataDir, state)).toThrow(
+        `state read failed: ${code}`,
+      );
+      expect(fs.existsSync(lockPath())).toBe(false);
+
+      readSpy.mockRestore();
+    },
+  );
 });
 
 describe("verified stale state cleanup", () => {
@@ -277,6 +362,50 @@ describe("verified stale state cleanup", () => {
       new RegExp(`${statePath}.*cannot safely remove`, "i"),
     );
     expect(fs.existsSync(statePath)).toBe(true);
+  });
+
+  it("releases the shared lock when verified cleanup fails", () => {
+    writeState("{");
+
+    expect(() => removeVerifiedStaleState(dataDir)).toThrow(
+      /cannot safely remove/i,
+    );
+    expect(fs.existsSync(lockPath())).toBe(false);
+  });
+
+  it("holds the shared lock through stale state deletion", () => {
+    const staleState = validState({
+      pid: Number.MAX_SAFE_INTEGER,
+      processStartTicks: "1",
+    });
+    writeState(staleState);
+    const statePath = daemonStatePath(dataDir);
+    const unlinkSync = fs.unlinkSync.bind(fs);
+    let firstStateUnlink = true;
+    let competingRemoveError: unknown;
+    let competingClaimError: unknown;
+    vi.spyOn(fs, "unlinkSync").mockImplementation((target) => {
+      if (target === statePath && firstStateUnlink) {
+        firstStateUnlink = false;
+        try {
+          removeDaemonStateIfOwned(dataDir, staleState);
+        } catch (error) {
+          competingRemoveError = error;
+        }
+        try {
+          claimDaemonState(dataDir, "https://new.example.com", "next");
+        } catch (error) {
+          competingClaimError = error;
+        }
+      }
+      unlinkSync(target);
+    });
+
+    expect(removeVerifiedStaleState(dataDir)).toBe(true);
+    expectLockedError(competingRemoveError);
+    expectLockedError(competingClaimError);
+    expect(fs.existsSync(statePath)).toBe(false);
+    expect(fs.existsSync(lockPath())).toBe(false);
   });
 
   it("refuses to remove running state and reports its PID", () => {
