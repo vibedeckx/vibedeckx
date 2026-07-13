@@ -1,5 +1,342 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+
+export const CONNECT_DAEMON_CHILD_ENV = "VIBEDECKX_INTERNAL_CONNECT_DAEMON";
+export const CONNECT_DAEMON_TOKEN_ENV = "VIBEDECKX_INTERNAL_CONNECT_TOKEN";
+
+export function buildDaemonChildArgs(argv: string[]): string[] {
+  const args: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--daemon" || argument.startsWith("--daemon=")) {
+      continue;
+    }
+    if (argument === "--token") {
+      if (index + 1 >= argv.length) {
+        throw new Error("--token requires a value");
+      }
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--token=")) continue;
+    args.push(argument);
+  }
+  return args;
+}
+
+export function consumeDaemonChildEnvironment(env: NodeJS.ProcessEnv): {
+  isDaemonChild: boolean;
+  token: string | undefined;
+} {
+  const childMarker = env[CONNECT_DAEMON_CHILD_ENV];
+  const token = env[CONNECT_DAEMON_TOKEN_ENV];
+  delete env[CONNECT_DAEMON_CHILD_ENV];
+  delete env[CONNECT_DAEMON_TOKEN_ENV];
+  return { isDaemonChild: childMarker === "1", token };
+}
+
+export interface StartConnectDaemonOptions {
+  dataDir: string;
+  connectTo: string;
+  token: string;
+  argv: string[];
+  entrypoint?: string;
+  timeoutMs?: number;
+  extraEnv?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+}
+
+export interface StartedConnectDaemon {
+  pid: number;
+  target: string;
+  logPath: string;
+}
+
+type DaemonParentMessage =
+  | { type: "ready"; pid: number }
+  | { type: "error"; message: string };
+
+export interface DaemonParentProcess {
+  pid: number;
+  connected?: boolean;
+  send?: (
+    message: DaemonParentMessage,
+    callback: (error: Error | null) => void,
+  ) => boolean;
+  disconnect?: () => void;
+}
+
+function notifyDaemonParent(
+  message: DaemonParentMessage,
+  parent: DaemonParentProcess,
+): void {
+  if (!parent.send || !parent.connected) return;
+  parent.send(message, () => {
+    if (parent.connected) parent.disconnect?.();
+  });
+}
+
+export function notifyDaemonParentReady(
+  parent: DaemonParentProcess = process as unknown as DaemonParentProcess,
+): void {
+  notifyDaemonParent({ type: "ready", pid: parent.pid }, parent);
+}
+
+export function notifyDaemonParentError(
+  error: unknown,
+  parent: DaemonParentProcess = process as unknown as DaemonParentProcess,
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  notifyDaemonParent({ type: "error", message }, parent);
+}
+
+function isExactObject(
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+function parseDaemonParentMessage(
+  message: unknown,
+  expectedPid: number,
+): DaemonParentMessage | undefined {
+  if (
+    isExactObject(message, ["type", "pid"]) &&
+    message.type === "ready" &&
+    message.pid === expectedPid
+  ) {
+    return { type: "ready", pid: expectedPid };
+  }
+  if (
+    isExactObject(message, ["type", "message"]) &&
+    message.type === "error" &&
+    typeof message.message === "string"
+  ) {
+    return { type: "error", message: message.message };
+  }
+  return undefined;
+}
+
+function waitForDaemonReady(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let disconnectTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (disconnectTimer) clearTimeout(disconnectTimer);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      child.off("disconnect", onDisconnect);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onMessage = (message: unknown): void => {
+      if (child.pid === undefined) {
+        finish(new Error("Daemon child has no PID"));
+        return;
+      }
+      const parsed = parseDaemonParentMessage(message, child.pid);
+      if (!parsed) {
+        finish(new Error("Invalid daemon IPC message"));
+      } else if (parsed.type === "error") {
+        finish(new Error(parsed.message));
+      } else {
+        finish();
+      }
+    };
+    const onError = (error: Error): void => finish(error);
+    const onExit = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
+      const outcome =
+        code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`;
+      finish(new Error(`Daemon child exited before readiness (${outcome})`));
+    };
+    const onDisconnect = (): void => {
+      // A child that exits can close IPC just before Node reports its exit
+      // status. Give the exit event one turn so the more useful code wins.
+      disconnectTimer = setTimeout(() => {
+        if (child.exitCode !== null) {
+          finish(
+            new Error(
+              `Daemon child exited before readiness (code ${child.exitCode})`,
+            ),
+          );
+        } else if (child.signalCode !== null) {
+          finish(
+            new Error(
+              `Daemon child exited before readiness (signal ${child.signalCode})`,
+            ),
+          );
+        } else {
+          finish(new Error("Daemon child disconnected before readiness"));
+        }
+      }, 25);
+    };
+    const timer = setTimeout(() => {
+      finish(
+        new Error(`Timed out waiting for daemon readiness after ${timeoutMs}ms`),
+      );
+    }, timeoutMs);
+
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.once("disconnect", onDisconnect);
+  });
+}
+
+async function waitForChildExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const onExit = (): void => finish(true);
+    const finish = (exited: boolean): void => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    child.once("exit", onExit);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function terminateFailedChild(child: ChildProcess): Promise<void> {
+  if (child.connected) child.disconnect();
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+    return;
+  }
+
+  try {
+    child.kill("SIGTERM");
+  } catch (error) {
+    if (!hasErrorCode(error, "ESRCH")) child.unref();
+    return;
+  }
+  if (await waitForChildExit(child, 1_000)) return;
+
+  try {
+    child.kill("SIGKILL");
+  } catch (error) {
+    if (!hasErrorCode(error, "ESRCH")) child.unref();
+    return;
+  }
+  await waitForChildExit(child, 1_000);
+}
+
+function removeFailedChildStateIfOwned(
+  dataDir: string,
+  pid: number | undefined,
+  processStartTicks: string | undefined,
+): void {
+  if (!pid || !processStartTicks) return;
+  try {
+    withDaemonStateLock(dataDir, () => {
+      const inspection = inspectDaemonState(dataDir);
+      if (
+        inspection.kind === "stale" &&
+        inspection.state.pid === pid &&
+        inspection.state.processStartTicks === processStartTicks
+      ) {
+        removeDaemonStateIfOwnedUnlocked(dataDir, inspection.state);
+      }
+    });
+  } catch {
+    // Startup failure remains the primary error; uncertain state is preserved.
+  }
+}
+
+function redactSecret(message: string, token: string): string {
+  return token.length > 0 ? message.replaceAll(token, "[redacted]") : message;
+}
+
+export async function startConnectDaemon(
+  options: StartConnectDaemonOptions,
+): Promise<StartedConnectDaemon> {
+  if ((options.platform ?? process.platform) !== "linux") {
+    throw new Error("Vibedeckx connect daemon mode is only supported on Linux");
+  }
+
+  const inspection = inspectDaemonState(options.dataDir);
+  if (inspection.kind === "running") {
+    throw new Error(
+      `Vibedeckx connect daemon is already running (PID ${inspection.state.pid})`,
+    );
+  }
+  if (inspection.kind === "invalid") {
+    throw new Error(
+      `Invalid daemon state at ${inspection.path}: ${inspection.reason}`,
+    );
+  }
+  if (inspection.kind === "stale") {
+    removeVerifiedStaleState(options.dataDir);
+  }
+
+  const configuredEntrypoint = options.entrypoint ?? process.argv[1];
+  if (!configuredEntrypoint) {
+    throw new Error("Cannot start connect daemon: CLI entrypoint is unavailable");
+  }
+  const entrypoint = path.resolve(configuredEntrypoint);
+  const child = spawn(
+    process.execPath,
+    [entrypoint, ...buildDaemonChildArgs(options.argv)],
+    {
+      detached: true,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      env: {
+        ...process.env,
+        ...options.extraEnv,
+        [CONNECT_DAEMON_CHILD_ENV]: "1",
+        [CONNECT_DAEMON_TOKEN_ENV]: options.token,
+      },
+    },
+  );
+  const childPid = child.pid;
+  let childStartTicks: string | undefined;
+
+  try {
+    childStartTicks = childPid
+      ? readLinuxProcessStartTicks(childPid)
+      : undefined;
+    await waitForDaemonReady(child, options.timeoutMs ?? 15_000);
+    if (!child.pid) {
+      throw new Error("Daemon child reported readiness without a PID");
+    }
+    if (child.connected) child.disconnect();
+    child.unref();
+    return {
+      pid: child.pid,
+      target: options.connectTo,
+      logPath: path.join(options.dataDir, "logs", "vibedeckx.log"),
+    };
+  } catch (error) {
+    await terminateFailedChild(child);
+    removeFailedChildStateIfOwned(
+      options.dataDir,
+      childPid,
+      childStartTicks,
+    );
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(redactSecret(message, options.token));
+  }
+}
 
 export interface ConnectDaemonState {
   schemaVersion: 1;

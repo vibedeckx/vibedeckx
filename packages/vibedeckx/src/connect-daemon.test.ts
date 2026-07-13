@@ -1,27 +1,60 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildDaemonChildArgs,
   claimDaemonState,
+  CONNECT_DAEMON_CHILD_ENV,
+  CONNECT_DAEMON_TOKEN_ENV,
+  consumeDaemonChildEnvironment,
   daemonStatePath,
   describeConnectDaemon,
   inspectDaemonState,
+  notifyDaemonParentError,
+  notifyDaemonParentReady,
   parseLinuxProcessStartTicks,
   readLinuxProcessStartTicks,
   removeDaemonStateIfOwned,
   removeVerifiedStaleState,
+  startConnectDaemon,
   stopConnectDaemon,
   type ConnectDaemonState,
 } from "./connect-daemon.js";
 
 let dataDir: string;
+const fixtureEntrypoint = fileURLToPath(
+  new URL("./__fixtures__/connect-daemon-child.mjs", import.meta.url),
+);
+const liveFixtureProcesses = new Map<number, string>();
 
 beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "vdx-daemon-"));
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const [pid, startTicks] of liveFixtureProcesses) {
+    if (readLinuxProcessStartTicks(pid) !== startTicks) continue;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch (error) {
+      if (
+        !(
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ESRCH"
+        )
+      ) {
+        throw error;
+      }
+    }
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (readLinuxProcessStartTicks(pid) !== startTicks) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  liveFixtureProcesses.clear();
   vi.restoreAllMocks();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
@@ -69,6 +102,303 @@ function validState(
     ...overrides,
   };
 }
+
+describe("daemon child arguments and environment", () => {
+  it.each([
+    [
+      [
+        "connect",
+        "--connect-to",
+        "https://example.com",
+        "--token",
+        "secret",
+        "--daemon",
+      ],
+      ["connect", "--connect-to", "https://example.com"],
+    ],
+    [
+      ["connect", "--token=secret", "--daemon=true", "--data-dir=/tmp/data"],
+      ["connect", "--data-dir=/tmp/data"],
+    ],
+  ])("removes daemon and token arguments", (input, expected) => {
+    expect(buildDaemonChildArgs(input)).toEqual(expected);
+  });
+
+  it("preserves all unrelated arguments byte-for-byte", () => {
+    const argv = [
+      "connect",
+      "--connect-to",
+      "https://example.com/a?x=%20",
+      "--data-dir",
+      "/tmp/path with spaces",
+      "--other-token",
+      "keep-me",
+    ];
+
+    expect(buildDaemonChildArgs(argv)).toEqual(argv);
+  });
+
+  it("rejects a standalone token flag without a value", () => {
+    expect(() => buildDaemonChildArgs(["connect", "--token"])).toThrow(
+      /--token.*value/i,
+    );
+  });
+
+  it("consumes and deletes the internal child environment", () => {
+    const env: NodeJS.ProcessEnv = {
+      [CONNECT_DAEMON_CHILD_ENV]: "1",
+      [CONNECT_DAEMON_TOKEN_ENV]: "secret",
+      UNRELATED: "preserved",
+    };
+
+    expect(consumeDaemonChildEnvironment(env)).toEqual({
+      isDaemonChild: true,
+      token: "secret",
+    });
+    expect(env[CONNECT_DAEMON_CHILD_ENV]).toBeUndefined();
+    expect(env[CONNECT_DAEMON_TOKEN_ENV]).toBeUndefined();
+    expect(env.UNRELATED).toBe("preserved");
+  });
+
+  it("only recognizes the exact daemon child marker", () => {
+    const env: NodeJS.ProcessEnv = {
+      [CONNECT_DAEMON_CHILD_ENV]: "true",
+      [CONNECT_DAEMON_TOKEN_ENV]: "secret",
+    };
+
+    expect(consumeDaemonChildEnvironment(env)).toEqual({
+      isDaemonChild: false,
+      token: "secret",
+    });
+    expect(env[CONNECT_DAEMON_CHILD_ENV]).toBeUndefined();
+    expect(env[CONNECT_DAEMON_TOKEN_ENV]).toBeUndefined();
+  });
+});
+
+describe("detached daemon startup", () => {
+  const target = "https://connect.example.com";
+  const secret = "super-secret-token";
+
+  function fixtureOptions(
+    mode: string,
+    overrides: Partial<Parameters<typeof startConnectDaemon>[0]> = {},
+  ): Parameters<typeof startConnectDaemon>[0] {
+    return {
+      dataDir,
+      connectTo: target,
+      token: secret,
+      argv: ["connect", "--connect-to", target, "--token", secret, "--daemon"],
+      entrypoint: fixtureEntrypoint,
+      timeoutMs: 1_000,
+      extraEnv: { VIBEDECKX_TEST_DAEMON_MODE: mode },
+      ...overrides,
+    };
+  }
+
+  function trackFixture(pid: number): void {
+    const startTicks = readLinuxProcessStartTicks(pid);
+    expect(startTicks).toMatch(/^\d+$/);
+    liveFixtureProcesses.set(pid, startTicks!);
+  }
+
+  it("returns after readiness while the detached child remains alive", async () => {
+    const result = await startConnectDaemon(fixtureOptions("ready"));
+    trackFixture(result.pid);
+
+    expect(readLinuxProcessStartTicks(result.pid)).toBe(
+      liveFixtureProcesses.get(result.pid),
+    );
+    expect(result).toEqual({
+      pid: result.pid,
+      target,
+      logPath: path.join(dataDir, "logs", "vibedeckx.log"),
+    });
+  });
+
+  it("reports a structured child startup error", async () => {
+    await expect(startConnectDaemon(fixtureOptions("error"))).rejects.toThrow(
+      "fixture failed",
+    );
+  });
+
+  it("reports an early child exit code", async () => {
+    await expect(startConnectDaemon(fixtureOptions("exit"))).rejects.toThrow(
+      /exit.*2|code 2/i,
+    );
+  });
+
+  it("times out and terminates a child that never reports readiness", async () => {
+    const startedAt = Date.now();
+
+    await expect(
+      startConnectDaemon(fixtureOptions("hang", { timeoutMs: 30 })),
+    ).rejects.toThrow(/timed out|timeout/i);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("rejects an invalid IPC readiness message", async () => {
+    await expect(
+      startConnectDaemon(fixtureOptions("invalid")),
+    ).rejects.toThrow(/invalid.*IPC|IPC.*message/i);
+  });
+
+  it("rejects a running daemon before spawning another child", async () => {
+    const state = validState();
+    const recordPath = path.join(dataDir, "child-record.json");
+    writeState(state);
+
+    await expect(
+      startConnectDaemon(
+        fixtureOptions("ready", {
+          extraEnv: {
+            VIBEDECKX_TEST_DAEMON_MODE: "ready",
+            VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
+          },
+        }),
+      ),
+    ).rejects.toThrow(
+      new RegExp(`running.*${state.pid}|${state.pid}.*running`, "i"),
+    );
+    expect(fs.existsSync(recordPath)).toBe(false);
+  });
+
+  it("rejects invalid daemon state before spawning another child", async () => {
+    const recordPath = path.join(dataDir, "child-record.json");
+    writeState("{");
+
+    await expect(
+      startConnectDaemon(
+        fixtureOptions("ready", {
+          extraEnv: {
+            VIBEDECKX_TEST_DAEMON_MODE: "ready",
+            VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
+          },
+        }),
+      ),
+    ).rejects.toThrow(new RegExp(daemonStatePath(dataDir)));
+    expect(fs.existsSync(recordPath)).toBe(false);
+  });
+
+  it("removes verified stale state before starting the child", async () => {
+    writeState(
+      validState({ pid: Number.MAX_SAFE_INTEGER, processStartTicks: "1" }),
+    );
+
+    const result = await startConnectDaemon(fixtureOptions("ready"));
+    trackFixture(result.pid);
+
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(false);
+  });
+
+  it("passes a sanitized argv and the token only through the internal environment", async () => {
+    const recordPath = path.join(dataDir, "child-record.json");
+    const result = await startConnectDaemon(
+      fixtureOptions("ready", {
+        argv: [
+          "connect",
+          "--token=super-secret-token",
+          "--daemon",
+          "--connect-to",
+          target,
+          "--data-dir=/tmp/kept-byte-for-byte",
+        ],
+        extraEnv: {
+          VIBEDECKX_TEST_DAEMON_MODE: "ready",
+          VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
+        },
+      }),
+    );
+    trackFixture(result.pid);
+
+    expect(JSON.parse(fs.readFileSync(recordPath, "utf8"))).toEqual({
+      argv: [
+        "connect",
+        "--connect-to",
+        target,
+        "--data-dir=/tmp/kept-byte-for-byte",
+      ],
+      internalToken: secret,
+      childMarker: "1",
+    });
+    expect(fs.readFileSync(recordPath, "utf8")).not.toContain(
+      "VIBEDECKX_TEST_DAEMON",
+    );
+  });
+
+  it("rejects daemon startup outside Linux without spawning", async () => {
+    const recordPath = path.join(dataDir, "child-record.json");
+
+    await expect(
+      startConnectDaemon(
+        fixtureOptions("ready", {
+          platform: "darwin",
+          extraEnv: {
+            VIBEDECKX_TEST_DAEMON_MODE: "ready",
+            VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
+          },
+        }),
+      ),
+    ).rejects.toThrow(/Linux/i);
+    expect(fs.existsSync(recordPath)).toBe(false);
+  });
+});
+
+describe("daemon parent notifications", () => {
+  it("flushes readiness before disconnecting IPC", () => {
+    let sentCallback: (() => void) | undefined;
+    const parent = {
+      pid: 4242,
+      connected: true,
+      send: vi.fn((_message: unknown, callback: () => void) => {
+        sentCallback = callback;
+        return true;
+      }),
+      disconnect: vi.fn(),
+    };
+
+    notifyDaemonParentReady(parent);
+
+    expect(parent.send).toHaveBeenCalledWith(
+      { type: "ready", pid: 4242 },
+      expect.any(Function),
+    );
+    expect(parent.disconnect).not.toHaveBeenCalled();
+    sentCallback?.();
+    expect(parent.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("flushes a credential-free error message before disconnecting IPC", () => {
+    let sentCallback: (() => void) | undefined;
+    const parent = {
+      pid: 4242,
+      connected: true,
+      send: vi.fn((_message: unknown, callback: () => void) => {
+        sentCallback = callback;
+        return true;
+      }),
+      disconnect: vi.fn(),
+    };
+
+    notifyDaemonParentError(new Error("fixture failed"), parent);
+
+    expect(parent.send).toHaveBeenCalledWith(
+      { type: "error", message: "fixture failed" },
+      expect.any(Function),
+    );
+    expect(parent.disconnect).not.toHaveBeenCalled();
+    sentCallback?.();
+    expect(parent.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("is a safe no-op without an IPC channel", () => {
+    const foregroundProcess = { pid: 4242, connected: false };
+
+    expect(() => notifyDaemonParentReady(foregroundProcess)).not.toThrow();
+    expect(() =>
+      notifyDaemonParentError(new Error("ignored"), foregroundProcess),
+    ).not.toThrow();
+  });
+});
 
 describe("Linux process identity", () => {
   it("reads field 22 from proc stat", () => {
