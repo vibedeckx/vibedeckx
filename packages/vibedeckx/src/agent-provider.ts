@@ -36,6 +36,14 @@ export type ParsedAgentEvent =
   // auto-resume when the task completes), not a session completion.
   | { type: "task_started"; taskId: string; taskType?: string; description?: string }
   | { type: "task_finished"; taskId: string; status?: string }
+  // Authoritative snapshot of the running background-task set (Claude Code
+  // `system/background_tasks_changed`). Resyncs the ledger so add/delete
+  // drift in the started/finished pairs can't accumulate.
+  | { type: "task_list_changed"; taskIds: string[] }
+  // A new turn began (Claude Code `system/init`, emitted for auto-resume
+  // turns too). Cancels a grace-held completion — it beats the resume's
+  // first assistant event by an LLM roundtrip.
+  | { type: "turn_started" }
   | { type: "approval_request"; requestType: "command"; requestId: string; command: string; cwd?: string }
   | { type: "approval_request"; requestType: "fileChange"; requestId: string; changes: Array<{path: string; diff?: string; kind: string}> }
   | { type: "stdin_write"; content: string };

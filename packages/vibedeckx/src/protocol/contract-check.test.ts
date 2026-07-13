@@ -8,6 +8,7 @@ import {
   ClaudeAssistantMessageSchema,
   ClaudeResultMessageSchema,
   ClaudeSystemMessageSchema,
+  ClaudeUserMessageSchema,
 } from "./claude-code/schema.js";
 import {
   CODEX_NOTIFICATIONS,
@@ -25,27 +26,50 @@ function fixtureLines(url: URL): string[] {
 }
 
 describe("claude-code fixture corpus honors the contract", () => {
-  const lines = fixtureLines(new URL("./claude-code/__fixtures__/stream-session.jsonl", import.meta.url));
+  // stream-session: 2.1.198 single background subagent + auto-resume.
+  // The other three: 2.1.205 captures of the turn-completion orderings the
+  // session manager's grace-commit ledger is built on (see turn-completion.ts):
+  //  - race:    both subagents finish before the first result → 3 results
+  //  - nested:  a subagent's own background task + task_id restart cycle
+  //  - in-turn: notifications consumed mid-turn → a single result
+  const fixtureFiles = [
+    "stream-session.jsonl",
+    "race-two-fast-subagents.jsonl",
+    "nested-restart.jsonl",
+    "in-turn-consumption.jsonl",
+  ];
 
-  it("every fixture line parses", () => {
-    for (const line of lines) {
-      expect(parseClaudeLine(line), `unparseable: ${line}`).not.toBeNull();
-    }
-  });
+  const byType = {
+    assistant: ClaudeAssistantMessageSchema,
+    user: ClaudeUserMessageSchema,
+    system: ClaudeSystemMessageSchema,
+    result: ClaudeResultMessageSchema,
+  } as const;
+  // Top-level types vibedeckx deliberately doesn't consume. A new type
+  // showing up in a recording fails the corpus until it's triaged into
+  // either a schema or this list.
+  const UNCONTRACTED_TYPES = ["rate_limit_event"];
 
-  it("every fixture line validates against its message schema", () => {
-    const byType = {
-      assistant: ClaudeAssistantMessageSchema,
-      system: ClaudeSystemMessageSchema,
-      result: ClaudeResultMessageSchema,
-    } as const;
-    for (const line of lines) {
-      const msg = parseClaudeLine(line)! as { type: keyof typeof byType };
-      const schema = byType[msg.type];
-      expect(schema, `no schema for type=${msg.type}`).toBeDefined();
-      const report = checkContract({ id: `CC-OUT-${msg.type}`, schema, consumers: [] }, msg);
-      expect(report.ok, `${report.issues.join("; ")} in: ${line}`).toBe(true);
-    }
+  describe.each(fixtureFiles)("%s", (file) => {
+    const lines = fixtureLines(new URL(`./claude-code/__fixtures__/${file}`, import.meta.url));
+
+    it("every fixture line parses", () => {
+      expect(lines.length).toBeGreaterThan(0);
+      for (const line of lines) {
+        expect(parseClaudeLine(line), `unparseable: ${line}`).not.toBeNull();
+      }
+    });
+
+    it("every fixture line validates against its message schema", () => {
+      for (const line of lines) {
+        const msg = parseClaudeLine(line)! as { type: string };
+        if (UNCONTRACTED_TYPES.includes(msg.type)) continue;
+        const schema = byType[msg.type as keyof typeof byType];
+        expect(schema, `no schema for type=${msg.type}`).toBeDefined();
+        const report = checkContract({ id: `CC-OUT-${msg.type}`, schema, consumers: [] }, msg);
+        expect(report.ok, `${report.issues.join("; ")} in: ${line}`).toBe(true);
+      }
+    });
   });
 
   it("contract registry is wired", () => {

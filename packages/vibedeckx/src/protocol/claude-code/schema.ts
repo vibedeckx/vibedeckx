@@ -22,6 +22,21 @@ export const TASK_STARTED_SUBTYPE = "task_started";
 export const TASK_NOTIFICATION_SUBTYPE = "task_notification";
 export const TASK_UPDATED_SUBTYPE = "task_updated";
 export const TERMINAL_TASK_STATUSES = ["completed", "failed", "cancelled", "canceled", "killed", "error"] as const;
+/**
+ * Authoritative snapshot of the running background-task set, fired on every
+ * change (including tasks launched by subagents). Used to resync the session
+ * manager's task ledger; not documented as a stable stream contract upstream,
+ * hence the schema + drift coverage here.
+ */
+export const BACKGROUND_TASKS_CHANGED_SUBTYPE = "background_tasks_changed";
+/**
+ * Emitted at the start of EVERY turn — including auto-resume turns injected
+ * by background-task completions, where it arrives ~20ms after the previous
+ * turn's result (measured on 2.1.205) while the first assistant event lags a
+ * full LLM roundtrip. The turn-completion ledger relies on it to cancel a
+ * grace-held completion before the grace window can fire.
+ */
+export const INIT_SUBTYPE = "init";
 
 /**
  * Tool names the frontend renders with dedicated UIs
@@ -88,6 +103,7 @@ export const ClaudeSystemMessageSchema = z.looseObject({
   description: z.string().optional(),
   status: z.string().optional(),
   patch: z.looseObject({ status: z.string().optional() }).optional(),
+  tasks: z.array(z.looseObject({ task_id: z.string() })).optional(),
   session_id: z.string().optional(),
 });
 
@@ -99,6 +115,11 @@ export const ClaudeResultMessageSchema = z.looseObject({
   duration_ms: z.number().optional(),
   duration_api_ms: z.number().optional(),
   cost_usd: z.number().optional(),
+  // How the turn started: absent/null on user turns, { kind: "task-notification" }
+  // on auto-resume turns injected by a background-task completion. Not consumed
+  // at runtime (turn completion uses the grace-commit ledger instead) — kept in
+  // the contract so drift tests flag its removal.
+  origin: z.looseObject({ kind: z.string().optional() }).nullish(),
   session_id: z.string().optional(),
 });
 

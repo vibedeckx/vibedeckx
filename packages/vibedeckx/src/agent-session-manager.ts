@@ -31,6 +31,12 @@ import {
   type ResidentProcessScope,
   type RunningResidentProcess,
 } from "./resident-agent-processes.js";
+import {
+  COMPLETION_GRACE_MS,
+  TurnCompletionLedger,
+  type CompletionAction,
+  type CompletionPayload,
+} from "./turn-completion.js";
 
 // ============ Session Store Types ============
 
@@ -84,15 +90,22 @@ interface RunningSession {
   agentType: AgentType; // Which agent provider to use
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
   /**
-   * Pending background tasks (background subagents / run_in_background
-   * commands) launched by the agent, keyed by the harness task_id. Fed by
-   * task_started / task_finished events. A `result` that arrives while this
-   * set is non-empty is an intermediate turn — the process auto-resumes when
-   * the task completes — so completion side effects (taskCompleted broadcast,
-   * markCompleted, status→stopped) are deferred until a result with an empty
-   * ledger. Reset per spawn and cleared on stopSession.
+   * Turn-completion state machine (see turn-completion.ts): tracks live
+   * background tasks and decides whether a `result` commits completion side
+   * effects immediately, defers them (tasks still running), or holds them
+   * for a grace window (tasks ran this turn, an auto-resume may be queued).
+   * Reset per spawn and on stopSession/hibernate/agent switch.
    */
-  backgroundTasks: Set<string>;
+  completion: TurnCompletionLedger;
+  /** Live grace timer for a held completion candidate, if any. */
+  graceTimer: NodeJS.Timeout | null;
+  /**
+   * Per-session serial work queue. Stdout chunks, the grace-timer commit,
+   * and process-exit handling all run through it, so a completion commit
+   * can never interleave with the event that should cancel it (handleStdout
+   * awaits storage calls, and the stdout data callback can't await).
+   */
+  eventChain: Promise<void>;
   /**
    * Protocol-drift detection, both counted since the last `result`. A
    * `run_in_background: true` tool_use input is a model request parameter
@@ -129,9 +142,12 @@ export class AgentSessionManager {
    */
   suppressTitleGeneration: boolean = false;
   private capacityQueue: Promise<void> = Promise.resolve();
+  /** Grace window before committing a held completion (injectable for tests). */
+  private readonly completionGraceMs: number;
 
-  constructor(storage: Storage) {
+  constructor(storage: Storage, opts?: { completionGraceMs?: number }) {
     this.storage = storage;
+    this.completionGraceMs = opts?.completionGraceMs ?? COMPLETION_GRACE_MS;
   }
 
   setEventBus(eventBus: EventBus): void {
@@ -307,7 +323,7 @@ export class AgentSessionManager {
           processAlive: this.isProcessAlive(session),
           status: session.status,
           dormant: session.dormant,
-          backgroundTaskCount: session.backgroundTasks.size,
+          backgroundTaskCount: session.completion.pendingTaskCount,
           lastActiveAt: session.lastActiveAt,
           projectId: session.projectId,
           branch: session.branch,
@@ -443,7 +459,9 @@ export class AgentSessionManager {
       permissionMode,
       crossRemoteMcp: opts.crossRemoteMcp,
       agentType,
-      backgroundTasks: new Set(),
+      completion: new TurnCompletionLedger(),
+      graceTimer: null,
+      eventChain: Promise.resolve(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
@@ -591,9 +609,10 @@ export class AgentSessionManager {
 
     // Per-spawn state for diagnosing startup failures (e.g. agent not installed).
     session.producedOutput = false;
-    // A fresh process has no background tasks — a stale ledger from a previous
-    // process would wedge completion detection in "intermediate turn" forever.
-    session.backgroundTasks.clear();
+    // A fresh process has no background tasks and no held completion — stale
+    // ledger state from a previous process would wedge completion detection
+    // in "intermediate turn" forever (or commit a dead process's candidate).
+    this.resetCompletion(session);
     let stderrTail = "";
     let spawnFailed = false;
 
@@ -620,11 +639,12 @@ export class AgentSessionManager {
       }
     }
 
-    // Handle stdout (JSON messages from Claude)
+    // Handle stdout (JSON messages from Claude). Serialized through the
+    // session's event chain: handleStdout awaits storage calls, so without
+    // the queue a second data chunk (or the completion-grace timer) could
+    // interleave mid-await and race the turn-completion state.
     childProcess.stdout?.on("data", (data: Buffer) => {
-      this.handleStdout(session, data.toString()).catch((err) => {
-        console.error(`[AgentSession] Error handling stdout for ${session.id}:`, err);
-      });
+      this.enqueueSessionWork(session, () => this.handleStdout(session, data.toString()), "stdout");
     });
 
     // Handle stderr (errors and debug info)
@@ -636,8 +656,10 @@ export class AgentSessionManager {
       stderrTail = (stderrTail + text).slice(-4000);
     });
 
-    // Handle process exit
+    // Handle process exit — queued behind any still-processing stdout chunks
+    // so exit handling can't overtake the events the process flushed at death.
     childProcess.on("close", (code) => {
+      this.enqueueSessionWork(session, async () => {
       console.log(`[AgentSession] Process ${session.id} exited with code ${code}`);
 
       // Don't update status or send finished signal if this is an old process
@@ -649,8 +671,18 @@ export class AgentSessionManager {
 
       session.process = null;
       this.emitProcessAlive(session, false);
+
+      // A clean exit with a held completion commits it immediately: the
+      // process can never auto-resume again, so waiting for the grace window
+      // (or discarding the candidate) would drop markCompleted and the
+      // completion notification entirely. Crash exits discard held state.
+      this.clearGraceTimer(session);
+      const action = session.completion.processExited(code);
+      if (action.kind === "commit") {
+        await this.commitCompletion(session, action.payload);
+      }
+
       session.status = code === 0 ? "stopped" : "error";
-      session.backgroundTasks.clear();
       if (!session.skipDb) {
         this.storage.agentSessions.updateStatus(session.id, session.status).catch((err) => {
           console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
@@ -680,6 +712,7 @@ export class AgentSessionManager {
       this.broadcastPatch(session.id, ConversationPatch.updateStatus(session.status));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: session.status });
       this.broadcastRaw(session.id, { finished: true });
+      }, "process-close");
     });
 
     // Handle spawn errors
@@ -708,6 +741,122 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Failed to push spawn-error entry for ${session.id}:`, err);
       });
     });
+  }
+
+  /**
+   * Append work to the session's serial event chain. Everything that mutates
+   * turn-completion state (stdout parsing, grace-timer expiry, process exit)
+   * runs through here so steps never interleave across await points.
+   */
+  private enqueueSessionWork(session: RunningSession, work: () => Promise<void>, label: string): void {
+    session.eventChain = session.eventChain.then(work).catch((err) => {
+      console.error(`[AgentSession] Error in ${label} handler for ${session.id}:`, err);
+    });
+  }
+
+  private clearGraceTimer(session: RunningSession): void {
+    if (session.graceTimer) {
+      clearTimeout(session.graceTimer);
+      session.graceTimer = null;
+    }
+  }
+
+  /**
+   * (Re)arm the completion-grace timer for the held candidate. Expiry only
+   * enqueues a generation-checked probe — the ledger decides inside the
+   * serial chain whether the candidate is still current, so a timer armed
+   * for a superseded result can never commit it.
+   */
+  private armGraceTimer(session: RunningSession, generation: number): void {
+    this.clearGraceTimer(session);
+    const timer = setTimeout(() => {
+      session.graceTimer = null;
+      this.enqueueSessionWork(session, async () => {
+        const action = session.completion.graceElapsed(generation);
+        if (action.kind === "commit") {
+          await this.commitCompletion(session, action.payload);
+        }
+      }, "completion-grace");
+    }, this.completionGraceMs);
+    // Don't keep the server process alive just for a pending chime.
+    timer.unref?.();
+    session.graceTimer = timer;
+  }
+
+  /** Apply a cancel/schedule ledger action to the grace timer (commit actions
+   * are handled at their call sites, which can await the side effects). */
+  private applyCompletionTimerAction(session: RunningSession, action: CompletionAction): void {
+    if (action.kind === "cancel") {
+      this.clearGraceTimer(session);
+    } else if (action.kind === "schedule") {
+      this.armGraceTimer(session, action.generation);
+    }
+  }
+
+  /** Discard all turn-completion state (fresh spawn / stop / hibernate / agent switch). */
+  private resetCompletion(session: RunningSession): void {
+    this.clearGraceTimer(session);
+    session.completion.reset();
+  }
+
+  /**
+   * The single place completion side effects run. Fired by processAgentEvent
+   * for turns with no background activity (zero delay), by the grace timer
+   * for held candidates, and by the close handler on a clean process exit.
+   */
+  private async commitCompletion(session: RunningSession, payload: CompletionPayload): Promise<void> {
+    const sessionId = session.id;
+    console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
+    const completedAt = Date.now();
+    if (!session.skipDb) {
+      await this.storage.agentSessions.markCompleted(sessionId, completedAt);
+    }
+    const summaryText = extractLastAssistantText(session.store.entries);
+    this.broadcastRaw(sessionId, {
+      taskCompleted: {
+        duration_ms: payload.duration_ms,
+        cost_usd: payload.cost_usd,
+        input_tokens: payload.input_tokens,
+        output_tokens: payload.output_tokens,
+        summaryText,
+      },
+    });
+    this.eventBus?.emit({
+      type: "session:taskCompleted",
+      projectId: session.projectId,
+      branch: session.branch,
+      sessionId,
+      duration_ms: payload.duration_ms,
+      cost_usd: payload.cost_usd,
+      input_tokens: payload.input_tokens,
+      output_tokens: payload.output_tokens,
+      summaryText,
+    });
+    await this.emitDerivedBranchActivity(session.projectId, session.branch);
+
+    // Turn finished — process stays alive (stream-json) waiting for next
+    // input, but status now reflects "between turns" so UI affordances
+    // like "New Conversation" don't prompt for a running confirmation.
+    if (session.status !== "stopped") {
+      session.status = "stopped";
+      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
+      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
+    }
+
+    // Auto-update task status to "done" for the branch's assigned task.
+    // Pushed into a single atomic storage call (find-first-match +
+    // update) so a concurrent edit to the task between the read and
+    // the write can't be silently clobbered back to "done".
+    const branchKey = session.branch ?? "";
+    const completedTask = await this.storage.tasks.completeIfAssigned(session.projectId, branchKey);
+    if (completedTask) {
+      this.eventBus?.emit({
+        type: "task:updated",
+        projectId: session.projectId,
+        task: { ...completedTask } as Record<string, unknown>,
+      });
+    }
   }
 
   /**
@@ -753,6 +902,27 @@ export class AgentSessionManager {
 
     const timestamp = Date.now();
     session.lastActiveAt = timestamp;
+
+    // Turn activity while a completion candidate is held for grace means the
+    // previous `result` was intermediate — an auto-resume turn is running and
+    // its own result will become the new candidate. Discard the held one
+    // before it can commit. `turn_started` (system/init) is the signal that
+    // makes this work in practice: it lands ~20ms behind the intermediate
+    // result, while the resume's first assistant event lags a full LLM
+    // roundtrip — far past any sane grace window. (Deliberately NOT wired to
+    // generic "system" messages: hooks can emit those outside any turn, and
+    // cancelling on an event that has no result behind it would drop the
+    // completion entirely.)
+    if (
+      event.type === "turn_started" ||
+      event.type === "text" ||
+      event.type === "thinking" ||
+      event.type === "tool_use" ||
+      event.type === "tool_result" ||
+      event.type === "approval_request"
+    ) {
+      this.applyCompletionTimerAction(session, session.completion.noteTurnActivity());
+    }
 
     // A turn can start without any user message going through this server:
     // Claude Code auto-resumes the same process when a background task
@@ -878,16 +1048,31 @@ export class AgentSessionManager {
 
       // Background-task ledger. Inner tasks launched by subagents also emit
       // these events; their started/notification pairs balance out, so we
-      // count everything rather than trying to establish parentage.
+      // count everything rather than trying to establish parentage. While a
+      // completion candidate is held, task events re-arm the grace window
+      // (delay, don't cancel): an orphaned inner-task notification may have
+      // no auto-resume behind it, and cancelling on it would drop the
+      // completion entirely.
       case "task_started":
-        session.backgroundTasks.add(event.taskId);
+        this.applyCompletionTimerAction(session, session.completion.taskStarted(event.taskId));
         session.taskStartedThisTurn++;
-        console.log(`[AgentSession] Background task started: ${event.taskId} (${event.taskType ?? "?"}) — ${session.backgroundTasks.size} pending in ${sessionId}`);
+        console.log(`[AgentSession] Background task started: ${event.taskId} (${event.taskType ?? "?"}) — ${session.completion.pendingTaskCount} pending in ${sessionId}`);
         break;
 
       case "task_finished":
-        session.backgroundTasks.delete(event.taskId);
-        console.log(`[AgentSession] Background task finished: ${event.taskId} (${event.status ?? "?"}) — ${session.backgroundTasks.size} pending in ${sessionId}`);
+        this.applyCompletionTimerAction(session, session.completion.taskFinished(event.taskId));
+        console.log(`[AgentSession] Background task finished: ${event.taskId} (${event.status ?? "?"}) — ${session.completion.pendingTaskCount} pending in ${sessionId}`);
+        break;
+
+      // Authoritative running-task snapshot from the CLI — resyncs the ledger
+      // so add/delete drift in the started/finished pairs can't accumulate.
+      case "task_list_changed":
+        this.applyCompletionTimerAction(session, session.completion.taskListChanged(event.taskIds));
+        console.log(`[AgentSession] Background task snapshot: [${event.taskIds.join(", ")}] in ${sessionId}`);
+        break;
+
+      // Handled above (cancels a grace-held completion); no store entry.
+      case "turn_started":
         break;
 
       case "error":
@@ -927,6 +1112,8 @@ export class AgentSessionManager {
         }
 
         if (event.subtype === "error") {
+          // A failed turn never dings — discard any held completion candidate.
+          this.applyCompletionTimerAction(session, session.completion.errorResult());
           // The turn is over even though it failed — without this the UI
           // keeps a perpetual "running" dot after an error result.
           if (session.status !== "stopped") {
@@ -938,69 +1125,38 @@ export class AgentSessionManager {
         }
 
         if (event.subtype === "success") {
-          // Intermediate turn: the agent handed work to background tasks and
-          // ended its turn to wait — Claude Code will inject the completion
-          // notification and auto-resume this same process. Treat completion
-          // (taskCompleted, markCompleted, status→stopped, auto task-done) as
-          // deferred until a result arrives with an empty ledger. Status stays
-          // "running": semantically true (background work is executing inside
-          // the process) and it keeps the Stop button usable. If a
-          // notification never arrives, the session honestly shows "running"
-          // and Stop/process-exit clears the state.
-          if (session.backgroundTasks.size > 0) {
-            console.log(`[AgentSession] result with ${session.backgroundTasks.size} background task(s) pending — intermediate turn, deferring completion for ${sessionId}`);
-            break;
-          }
-          console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
-          const completedAt = Date.now();
-          if (!session.skipDb) {
-            await this.storage.agentSessions.markCompleted(sessionId, completedAt);
-          }
-          const summaryText = extractLastAssistantText(session.store.entries);
-          this.broadcastRaw(sessionId, {
-            taskCompleted: {
-              duration_ms: event.duration_ms,
-              cost_usd: event.cost_usd,
-              input_tokens: event.input_tokens,
-              output_tokens: event.output_tokens,
-              summaryText,
-            },
-          });
-          this.eventBus?.emit({
-            type: "session:taskCompleted",
-            projectId: session.projectId,
-            branch: session.branch,
-            sessionId,
+          // The ledger decides what this result means (see turn-completion.ts):
+          //  - cancel:   intermediate turn — background tasks still running,
+          //              Claude Code will auto-resume this process. Status
+          //              stays "running": semantically true and it keeps the
+          //              Stop button usable. If a notification never arrives,
+          //              the session honestly shows "running" and Stop/
+          //              process-exit clears the state.
+          //  - commit:   no background activity this turn → no auto-resume
+          //              can be queued; complete immediately (common case).
+          //  - schedule: background tasks ran this turn, so an auto-resume
+          //              may be queued behind this result even though the
+          //              ledger is empty (notifications can arrive before the
+          //              result they interrupt). Hold as candidate; commit
+          //              after the grace window unless new turn activity
+          //              supersedes it. Each newer result replaces the held
+          //              candidate, so only the last result of a resume chain
+          //              commits — with its own duration/cost/token payload.
+          const action = session.completion.successResult({
             duration_ms: event.duration_ms,
             cost_usd: event.cost_usd,
             input_tokens: event.input_tokens,
             output_tokens: event.output_tokens,
-            summaryText,
           });
-          await this.emitDerivedBranchActivity(session.projectId, session.branch);
-
-          // Turn finished — process stays alive (stream-json) waiting for next
-          // input, but status now reflects "between turns" so UI affordances
-          // like "New Conversation" don't prompt for a running confirmation.
-          if (session.status !== "stopped") {
-            session.status = "stopped";
-            if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
-            this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
-            this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
-          }
-
-          // Auto-update task status to "done" for the branch's assigned task.
-          // Pushed into a single atomic storage call (find-first-match +
-          // update) so a concurrent edit to the task between the read and
-          // the write can't be silently clobbered back to "done".
-          const branchKey = session.branch ?? "";
-          const completedTask = await this.storage.tasks.completeIfAssigned(session.projectId, branchKey);
-          if (completedTask) {
-            this.eventBus?.emit({
-              type: "task:updated",
-              projectId: session.projectId,
-              task: { ...completedTask } as Record<string, unknown>,
-            });
+          if (action.kind === "commit") {
+            await this.commitCompletion(session, action.payload);
+          } else {
+            if (action.kind === "cancel") {
+              console.log(`[AgentSession] result with ${session.completion.pendingTaskCount} background task(s) pending — intermediate turn, deferring completion for ${sessionId}`);
+            } else {
+              console.log(`[AgentSession] result after background-task activity — holding completion for ${this.completionGraceMs}ms grace (session=${sessionId})`);
+            }
+            this.applyCompletionTimerAction(session, action);
           }
         }
         break;
@@ -1198,6 +1354,14 @@ export class AgentSessionManager {
       return false;
     }
 
+    // The user moved on: a message sent while a completion candidate is held
+    // for grace discards it — the new turn's own result will complete, and a
+    // late chime for the abandoned turn would just be noise (the workspace
+    // dot flips to "working" via markUserMessage regardless). Also resets the
+    // background flag so this turn's result commits with zero grace delay
+    // unless it launches background tasks of its own.
+    this.applyCompletionTimerAction(session, session.completion.userTurnStarted());
+
     // Start-of-turn: if the previous turn ended (status="stopped" but process
     // still alive in stream-json mode), flip back to "running" and broadcast
     // so subscribers see the transition.
@@ -1386,8 +1550,9 @@ export class AgentSessionManager {
       // Mark as dormant so the next message triggers wakeDormantSession
       // (which spawns a new process and replays the full conversation context).
       session.dormant = true;
-      // Killing the process kills its background tasks with it.
-      session.backgroundTasks.clear();
+      // Killing the process kills its background tasks with it — and a user
+      // Stop must never ding, so any held completion candidate goes too.
+      this.resetCompletion(session);
       session.status = "stopped";
       if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
@@ -1435,7 +1600,7 @@ export class AgentSessionManager {
       await this.finalizeStreamingEntry(session);
       session.store.currentAssistantIndex = null;
       session.buffer = "";
-      session.backgroundTasks.clear();
+      this.resetCompletion(session);
       session.dormant = true;
       session.status = "stopped";
       this.touchSession(session);
@@ -1601,7 +1766,7 @@ export class AgentSessionManager {
     await this.finalizeStreamingEntry(session);
     session.store.currentAssistantIndex = null;
     session.buffer = "";
-    session.backgroundTasks.clear();
+    this.resetCompletion(session);
 
     getProvider(session.agentType).onSessionDestroyed?.(sessionId);
     session.agentType = agentType;
@@ -1642,7 +1807,10 @@ export class AgentSessionManager {
 
     console.log(`[AgentSession] Switching session ${sessionId} from ${session.permissionMode} to ${newMode}`);
 
-    // 1. Kill existing process
+    // 1. Kill existing process. Discard turn-completion state with it —
+    // spawnAgent resets too, but a held candidate's grace timer must not
+    // fire in the gap between kill and respawn.
+    this.resetCompletion(session);
     const proc = session.process;
     session.process = null;
     this.killProcess(proc);
@@ -1917,7 +2085,9 @@ export class AgentSessionManager {
         skipDb: false,
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
-        backgroundTasks: new Set(),
+        completion: new TurnCompletionLedger(),
+      graceTimer: null,
+      eventChain: Promise.resolve(),
         bgSpawnHintsThisTurn: 0,
         taskStartedThisTurn: 0,
         lastActiveAt: Date.now(),
@@ -2022,7 +2192,9 @@ export class AgentSessionManager {
       skipDb: false,
       permissionMode,
       agentType,
-      backgroundTasks: new Set(),
+      completion: new TurnCompletionLedger(),
+      graceTimer: null,
+      eventChain: Promise.resolve(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
@@ -2045,6 +2217,7 @@ export class AgentSessionManager {
       try {
         getProvider(session.agentType).onSessionDestroyed?.(id);
       } catch { /* ignore - provider cleanup is best-effort */ }
+      this.clearGraceTimer(session);
       this.killProcess(session.process);
     }
     this.sessions.clear();

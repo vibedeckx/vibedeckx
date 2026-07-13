@@ -134,6 +134,58 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([]);
   });
 
+  // Real capture from Claude Code 2.1.205 — fires on every change to the set
+  // of running background tasks, including tasks launched by subagents.
+  it("parses system/background_tasks_changed into task_list_changed", () => {
+    const line = JSON.stringify({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        { task_id: "a2c8b3b8fef0c5b25", task_type: "local_agent", description: "Return OK immediately" },
+        { task_id: "a0b37e04e9bcdb02a", task_type: "local_agent", description: "Return OK immediately" },
+      ],
+      uuid: "3b01f301-faa4-44a9-86eb-5f2d156492e8",
+      session_id: "cdc13acc-4319-48b4-8003-f0fc1ac347b7",
+    });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([
+      { type: "task_list_changed", taskIds: ["a2c8b3b8fef0c5b25", "a0b37e04e9bcdb02a"] },
+    ]);
+  });
+
+  it("parses an empty background_tasks_changed snapshot", () => {
+    const line = JSON.stringify({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+      uuid: "8e498186-8b2f-4f04-905d-149031a578d3",
+      session_id: "cdc13acc-4319-48b4-8003-f0fc1ac347b7",
+    });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([
+      { type: "task_list_changed", taskIds: [] },
+    ]);
+  });
+
+  it("ignores background_tasks_changed without a tasks array (drift guard)", () => {
+    const line = JSON.stringify({ type: "system", subtype: "background_tasks_changed" });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([]);
+  });
+
+  // Real capture (2.1.205): every turn — including auto-resume turns injected
+  // by background-task completions — starts with a system/init. It arrives
+  // ~20ms after the previous turn's result (measured live), long before the
+  // resume's first assistant event (a full LLM roundtrip later), so it is the
+  // signal that cancels a grace-held completion in time.
+  it("parses system/init into turn_started", () => {
+    const line = JSON.stringify({
+      type: "system",
+      subtype: "init",
+      session_id: "cdc13acc-4319-48b4-8003-f0fc1ac347b7",
+      model: "claude-fable-5",
+      cwd: "/tmp/scratch",
+    });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([{ type: "turn_started" }]);
+  });
+
   it("omits --mcp-config when no cross-remote config is given", () => {
     const provider = new ClaudeCodeProvider();
     const config = provider.buildSpawnConfig("/tmp", "edit");

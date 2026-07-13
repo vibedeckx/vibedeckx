@@ -6,7 +6,9 @@ import { detectBinary } from "../protocol/shared/binary.js";
 import { parseClaudeLine, serializeUserInput } from "../protocol/claude-code/codec.js";
 import { buildClaudeSessionSpawnConfig } from "../protocol/claude-code/cli.js";
 import {
+  BACKGROUND_TASKS_CHANGED_SUBTYPE,
   CLAUDE_BINARY_NAME,
+  INIT_SUBTYPE,
   TASK_NOTIFICATION_SUBTYPE,
   TASK_STARTED_SUBTYPE,
   TASK_UPDATED_SUBTYPE,
@@ -119,6 +121,22 @@ export class ClaudeCodeProvider implements AgentProvider {
           return [{ type: "task_finished", taskId: systemMsg.task_id, status: patchStatus }];
         }
         return [];
+      }
+      // Authoritative running-task snapshot — fires on every change to the
+      // background-task set (including tasks launched by subagents). Resyncs
+      // the ledger; a missing tasks array (upstream drift) is ignored rather
+      // than treated as "no tasks".
+      if (systemMsg.subtype === BACKGROUND_TASKS_CHANGED_SUBTYPE) {
+        const tasks = (msg as { tasks?: Array<{ task_id?: string }> }).tasks;
+        if (!Array.isArray(tasks)) return [];
+        const taskIds = tasks.map((t) => t.task_id).filter((id): id is string => typeof id === "string");
+        return [{ type: "task_list_changed", taskIds }];
+      }
+      // Turn start (fires for auto-resume turns too) — the timely cancel
+      // signal for a grace-held completion; the resume's first assistant
+      // event arrives a full LLM roundtrip later.
+      if (systemMsg.subtype === INIT_SUBTYPE) {
+        return [{ type: "turn_started" }];
       }
       if (systemMsg.message) {
         return [{ type: "system", content: systemMsg.message }];
