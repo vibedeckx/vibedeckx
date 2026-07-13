@@ -33,38 +33,65 @@ beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "vdx-daemon-"));
 });
 
-afterEach(async () => {
-  for (const [pid, startTicks] of liveFixtureProcesses) {
-    if (readLinuxProcessStartTicks(pid) !== startTicks) continue;
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch (error) {
-      if (
-        !(
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "ESRCH"
-        )
-      ) {
-        throw error;
-      }
-    }
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (readLinuxProcessStartTicks(pid) !== startTicks) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    if (readLinuxProcessStartTicks(pid) === startTicks) {
-      process.kill(pid, "SIGKILL");
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        if (readLinuxProcessStartTicks(pid) !== startTicks) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-    expect(readLinuxProcessStartTicks(pid)).not.toBe(startTicks);
+function isErrorCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function waitForFixtureExit(
+  pid: number,
+  startTicks: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (readLinuxProcessStartTicks(pid) !== startTicks) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  liveFixtureProcesses.clear();
-  vi.restoreAllMocks();
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  return readLinuxProcessStartTicks(pid) !== startTicks;
+}
+
+function signalFixture(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (!isErrorCode(error, "ESRCH")) throw error;
+  }
+}
+
+afterEach(async () => {
+  const cleanupErrors: unknown[] = [];
+  try {
+    for (const [pid, startTicks] of liveFixtureProcesses) {
+      try {
+        if (readLinuxProcessStartTicks(pid) !== startTicks) continue;
+        signalFixture(pid, "SIGTERM");
+        if (!(await waitForFixtureExit(pid, startTicks))) {
+          signalFixture(pid, "SIGKILL");
+          await waitForFixtureExit(pid, startTicks);
+        }
+        if (readLinuxProcessStartTicks(pid) === startTicks) {
+          throw new Error(
+            `Fixture PID ${pid} remained alive after test cleanup`,
+          );
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+  } finally {
+    liveFixtureProcesses.clear();
+    try {
+      vi.restoreAllMocks();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, "Failed to clean up daemon fixtures");
+  }
 });
 
 function writeState(state: ConnectDaemonState | string): void {
@@ -259,6 +286,90 @@ describe("detached daemon startup", () => {
   it("reports a structured child startup error", async () => {
     await expect(runFixture("error")).rejects.toThrow(
       "fixture failed",
+    );
+    expectAllRecordedFixturesStopped();
+  });
+
+  it("removes stale daemon state claimed by a child that fails startup", async () => {
+    await expect(
+      runFixture("error-with-state", {
+        extraEnv: {
+          VIBEDECKX_TEST_DAEMON_MODE: "error-with-state",
+          VIBEDECKX_TEST_DAEMON_STATE_DATA_DIR: dataDir,
+        },
+      }),
+    ).rejects.toThrow("fixture failed");
+
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(false);
+    expectAllRecordedFixturesStopped();
+  });
+
+  it("reports state cleanup failure without replacing the startup error or leaking the token", async () => {
+    const secretDataDir = path.join(dataDir, secret);
+    let rejected: unknown;
+
+    try {
+      await runFixture("error-with-state-lock", {
+        dataDir: secretDataDir,
+        extraEnv: {
+          VIBEDECKX_TEST_DAEMON_MODE: "error-with-state-lock",
+          VIBEDECKX_TEST_DAEMON_STATE_DATA_DIR: secretDataDir,
+        },
+      });
+    } catch (error) {
+      rejected = error;
+    }
+
+    expect(rejected).toBeInstanceOf(Error);
+    const message = rejected instanceof Error ? rejected.message : "";
+    expect(message).toContain("fixture failed");
+    expect(message).toMatch(/daemon state cleanup/i);
+    expect(message).toMatch(/operation already in progress/i);
+    expect(message).not.toContain(secret);
+    expect(message).toContain("[redacted]");
+    expect(fs.existsSync(daemonStatePath(secretDataDir))).toBe(true);
+    expectAllRecordedFixturesStopped();
+  });
+
+  it("reports unreadable daemon state instead of silently preserving uncertainty", async () => {
+    let rejected: unknown;
+
+    try {
+      await runFixture("error-with-unreadable-state", {
+        extraEnv: {
+          VIBEDECKX_TEST_DAEMON_MODE: "error-with-unreadable-state",
+          VIBEDECKX_TEST_DAEMON_STATE_DATA_DIR: dataDir,
+        },
+      });
+    } catch (error) {
+      rejected = error;
+    }
+
+    expect(rejected).toBeInstanceOf(Error);
+    const message = rejected instanceof Error ? rejected.message : "";
+    expect(message).toContain("fixture failed");
+    expect(message).toMatch(/daemon state cleanup/i);
+    expect(message).toMatch(/EACCES|permission denied/i);
+    expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
+    expectAllRecordedFixturesStopped();
+  });
+
+  it("preserves daemon state owned by a different live process", async () => {
+    await expect(
+      runFixture("error-with-foreign-state", {
+        extraEnv: {
+          VIBEDECKX_TEST_DAEMON_MODE: "error-with-foreign-state",
+          VIBEDECKX_TEST_DAEMON_STATE_DATA_DIR: dataDir,
+        },
+      }),
+    ).rejects.toThrow("fixture failed");
+
+    const preserved = JSON.parse(
+      fs.readFileSync(daemonStatePath(dataDir), "utf8"),
+    ) as ConnectDaemonState;
+    expect(preserved.pid).toBe(process.pid);
+    expect(preserved.processStartTicks).toBe(
+      readLinuxProcessStartTicks(process.pid),
     );
     expectAllRecordedFixturesStopped();
   });

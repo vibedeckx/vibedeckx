@@ -308,20 +308,21 @@ function removeFailedChildStateIfOwned(
   processStartTicks: string | undefined,
 ): void {
   if (!pid || !processStartTicks) return;
-  try {
-    withDaemonStateLock(dataDir, () => {
-      const inspection = inspectDaemonState(dataDir);
-      if (
-        inspection.kind === "stale" &&
-        inspection.state.pid === pid &&
-        inspection.state.processStartTicks === processStartTicks
-      ) {
-        removeDaemonStateIfOwnedUnlocked(dataDir, inspection.state);
-      }
-    });
-  } catch {
-    // Startup failure remains the primary error; uncertain state is preserved.
-  }
+  withDaemonStateLock(dataDir, () => {
+    const inspection = inspectDaemonState(dataDir);
+    if (inspection.kind === "invalid") {
+      throw new Error(
+        `Cannot safely inspect daemon state at ${inspection.path}: ${inspection.reason}`,
+      );
+    }
+    if (
+      inspection.kind === "stale" &&
+      inspection.state.pid === pid &&
+      inspection.state.processStartTicks === processStartTicks
+    ) {
+      removeDaemonStateIfOwnedUnlocked(dataDir, inspection.state);
+    }
+  });
 }
 
 function redactSecret(message: string, token: string): string {
@@ -388,23 +389,37 @@ export async function startConnectDaemon(
       logPath: path.join(options.dataDir, "logs", "vibedeckx.log"),
     };
   } catch (error) {
-    let cleanupError: unknown;
+    let terminationCleanupError: unknown;
     try {
       await terminateFailedChild(child, childPid, childStartTicks);
     } catch (terminationError) {
-      cleanupError = terminationError;
+      terminationCleanupError = terminationError;
       child.unref();
     }
-    removeFailedChildStateIfOwned(
-      options.dataDir,
-      childPid,
-      childStartTicks,
-    );
+    let stateCleanupError: unknown;
+    try {
+      removeFailedChildStateIfOwned(
+        options.dataDir,
+        childPid,
+        childStartTicks,
+      );
+    } catch (stateError) {
+      stateCleanupError = stateError;
+    }
     const startupMessage =
       error instanceof Error ? error.message : String(error);
-    const message = cleanupError
-      ? `${startupMessage}; failed to clean up daemon child: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
-      : startupMessage;
+    const cleanupMessages: string[] = [];
+    if (terminationCleanupError) {
+      cleanupMessages.push(
+        `child termination cleanup failed: ${terminationCleanupError instanceof Error ? terminationCleanupError.message : String(terminationCleanupError)}`,
+      );
+    }
+    if (stateCleanupError) {
+      cleanupMessages.push(
+        `daemon state cleanup failed: ${stateCleanupError instanceof Error ? stateCleanupError.message : String(stateCleanupError)}`,
+      );
+    }
+    const message = [startupMessage, ...cleanupMessages].join("; ");
     throw new Error(redactSecret(message, options.token));
   }
 }

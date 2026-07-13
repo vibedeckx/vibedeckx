@@ -31,14 +31,60 @@ function disconnect() {
   if (process.connected) process.disconnect();
 }
 
-if (mode === "ready") {
-  setInterval(() => {}, 1_000);
-  process.send?.({ type: "ready", pid: process.pid }, disconnect);
-} else if (mode === "error") {
+function readStartTicks(pid) {
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+  return stat
+    .slice(stat.lastIndexOf(")") + 1)
+    .trim()
+    .split(/\s+/)[19];
+}
+
+function writeDaemonState(pid, processStartTicks) {
+  const dataDir = process.env.VIBEDECKX_TEST_DAEMON_STATE_DATA_DIR;
+  if (!dataDir) throw new Error("Missing fixture daemon state data directory");
+  const runDir = `${dataDir}/run`;
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    `${runDir}/connect.json`,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      pid,
+      processStartTicks,
+      startedAt: new Date().toISOString(),
+      connectTo: "https://fixture.example.com",
+      version: "fixture",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  return runDir;
+}
+
+function sendFixtureError() {
   process.send?.({ type: "error", message: "fixture failed" }, () => {
     disconnect();
     process.exit(1);
   });
+}
+
+if (mode === "ready") {
+  setInterval(() => {}, 1_000);
+  process.send?.({ type: "ready", pid: process.pid }, disconnect);
+} else if (mode === "error") {
+  sendFixtureError();
+} else if (mode === "error-with-state") {
+  writeDaemonState(process.pid, readStartTicks(process.pid));
+  sendFixtureError();
+} else if (mode === "error-with-state-lock") {
+  const runDir = writeDaemonState(process.pid, readStartTicks(process.pid));
+  fs.mkdirSync(`${runDir}/connect.lock`, { mode: 0o700 });
+  sendFixtureError();
+} else if (mode === "error-with-unreadable-state") {
+  const runDir = writeDaemonState(process.pid, readStartTicks(process.pid));
+  fs.chmodSync(`${runDir}/connect.json`, 0o000);
+  sendFixtureError();
+} else if (mode === "error-with-foreign-state") {
+  writeDaemonState(process.ppid, readStartTicks(process.ppid));
+  sendFixtureError();
 } else if (mode === "exit") {
   process.exit(2);
 } else if (mode === "hang") {
