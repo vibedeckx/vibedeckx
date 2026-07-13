@@ -2,6 +2,8 @@ import { readFileSync } from "fs";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import { EventBus, type GlobalEvent } from "./event-bus.js";
+import { getProvider } from "./providers/index.js";
+import type { CodexProvider } from "./providers/codex-provider.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 
 /**
@@ -23,14 +25,14 @@ function fixture(name: string): string {
   return readFileSync(new URL(`./protocol/claude-code/__fixtures__/${name}`, import.meta.url), "utf-8");
 }
 
-function makeHarness() {
+function makeHarness(agentType: string = "claude-code") {
   const row: AgentSession = {
     id: SESSION_ID,
     project_id: "p1",
     branch: "main",
     status: "running",
     permission_mode: "edit",
-    agent_type: "claude-code",
+    agent_type: agentType,
     title: "already titled",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
@@ -161,6 +163,52 @@ describe("agent-session-manager turn completion wiring", () => {
 
     expect(markCompleted).toHaveBeenCalledTimes(1);
     expect(events.filter((e) => e.type === "session:taskCompleted")).toHaveLength(1);
+  });
+
+  it("codex fire-and-forget subagent: no completion while it runs, exactly one after it finishes", async () => {
+    // Real codex 0.144.3 recording: the main thread's turn/completed arrives
+    // while the collab subagent (a sibling thread in the same stdout) is
+    // still running, and codex never auto-resumes the main thread. Split the
+    // replay at the main turn/completed: phase 1 must complete NOTHING (the
+    // result stays parked on the live subagent), phase 2 (subagent finishes)
+    // must commit exactly once.
+    const lines = fixture("../../codex/__fixtures__/subagent-session.jsonl").split("\n").filter((l) => l.trim());
+    const mainThreadId = "019f5c02-2087-7023-b186-9c3b8595cf26";
+    const mainTurnDone = lines.findIndex((l) => {
+      const m = JSON.parse(l);
+      return m.method === "turn/completed" && m.params?.threadId === mainThreadId;
+    });
+    expect(mainTurnDone).toBeGreaterThan(0);
+    const phase1 = lines.slice(0, mainTurnDone + 1);
+    const phase2 = lines.slice(mainTurnDone + 1);
+
+    const { storage, markCompleted, completeIfAssigned, row } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const bus = new EventBus();
+    const events: GlobalEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    manager.setEventBus(bus);
+
+    // The fixture's thread/start response can't seed the provider (fresh
+    // state has no pending rpc id) — set the main threadId directly.
+    (getProvider("codex") as CodexProvider).getSessionState(SESSION_ID).threadId = mainThreadId;
+    try {
+      const { feed } = await liveSession(manager);
+
+      await feed(phase1.join("\n") + "\n");
+      await settle(GRACE_MS * 5);
+      expect(markCompleted).toHaveBeenCalledTimes(0); // parked: subagent still running
+      expect(row.status).toBe("running");
+
+      await feed(phase2.join("\n") + "\n");
+      await settle(GRACE_MS * 5);
+      expect(markCompleted).toHaveBeenCalledTimes(1);
+      expect(completeIfAssigned).toHaveBeenCalledTimes(1);
+      expect(events.filter((e) => e.type === "session:taskCompleted")).toHaveLength(1);
+      expect(row.status).toBe("stopped");
+    } finally {
+      getProvider("codex").onSessionDestroyed?.(SESSION_ID);
+    }
   });
 
   it("a plain turn with no background tasks completes with zero grace delay", async () => {

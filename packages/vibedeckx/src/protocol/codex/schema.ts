@@ -28,8 +28,23 @@ export const CODEX_CLIENT_METHODS = {
 export const CODEX_NOTIFICATIONS = {
   itemCompleted: "item/completed",
   turnCompleted: "turn/completed",
+  // Fires at the start of every turn. Two uses: on the MAIN thread it is the
+  // turn_started signal that cancels a grace-held completion; on a foreign
+  // threadId it means a collab subagent's turn began (subagents run as
+  // sibling threads multiplexed into the same app-server stdout).
+  turnStarted: "turn/started",
   tokenUsageUpdated: "thread/tokenUsage/updated",
 } as const;
+
+/**
+ * Terminal `kind` values of a subAgentActivity item. Only these clear the
+ * subagent from the pending-task ledger — unknown kinds (upstream may add
+ * progress-style updates) must not, or completion would fire while the
+ * subagent still runs. "started" is the only kind observed live (0.144.3);
+ * the terminal list mirrors Claude's task statuses defensively. The foreign
+ * thread's own turn/completed is the primary finish signal either way.
+ */
+export const CODEX_SUBAGENT_TERMINAL_KINDS = ["completed", "failed", "cancelled", "canceled", "closed", "killed", "error"] as const;
 
 export const CODEX_SERVER_REQUESTS = {
   commandApproval: "item/commandExecution/requestApproval",
@@ -121,6 +136,19 @@ export const CollabAgentToolCallItemSchema = z.looseObject({
   prompt: z.string().optional(),
 });
 
+/**
+ * Collab-subagent lifecycle marker on the MAIN thread. `agentThreadId` is the
+ * sibling thread the subagent runs as — the key the pending-task ledger uses
+ * to pair this with the foreign thread's turn/started and turn/completed.
+ */
+export const SubAgentActivityItemSchema = z.looseObject({
+  type: z.literal("subAgentActivity"),
+  id: idish.optional(),
+  kind: z.string().optional(),
+  agentThreadId: z.string().optional(),
+  agentPath: z.string().optional(),
+});
+
 export const KnownThreadItemSchema = z.discriminatedUnion("type", [
   AgentMessageItemSchema,
   ReasoningItemSchema,
@@ -131,6 +159,7 @@ export const KnownThreadItemSchema = z.discriminatedUnion("type", [
   WebSearchItemSchema,
   McpToolCallItemSchema,
   CollabAgentToolCallItemSchema,
+  SubAgentActivityItemSchema,
 ]);
 
 // ---- Notification params ----
@@ -141,12 +170,24 @@ export const ItemCompletedParamsSchema = z.looseObject({
 });
 
 export const TurnCompletedParamsSchema = z.looseObject({
+  // Which thread this turn belongs to — REQUIRED for correctness: a missing
+  // threadId would make a subagent's completion indistinguishable from the
+  // main turn's (premature result + spurious chime).
+  threadId: z.string().optional(),
   turn: z.looseObject({
     id: idish.optional(),
     status: z.string().optional(),
     // Real codex (verified live, 0.144.1) sends an explicit `"error": null` on
     // successful turns rather than omitting the field.
     error: z.looseObject({ message: z.string().optional() }).nullable().optional(),
+  }),
+});
+
+export const TurnStartedParamsSchema = z.looseObject({
+  threadId: z.string().optional(),
+  turn: z.looseObject({
+    id: idish.optional(),
+    status: z.string().optional(),
   }),
 });
 
@@ -183,6 +224,7 @@ export const CODEX_CONTRACTS: ContractItem[] = [
   { id: "CX-NOTIF-item_completed", schema: ItemCompletedParamsSchema, consumers: ["src/providers/codex-provider.ts handleItemCompleted"] },
   { id: "CX-ITEM-known_types", schema: KnownThreadItemSchema, consumers: ["src/providers/codex-provider.ts handleItemCompleted"] },
   { id: "CX-NOTIF-turn_completed", schema: TurnCompletedParamsSchema, consumers: ["src/providers/codex-provider.ts handleTurnCompleted"] },
+  { id: "CX-NOTIF-turn_started", schema: TurnStartedParamsSchema, consumers: ["src/providers/codex-provider.ts handleNotification (turn_started / subagent ledger)"] },
   { id: "CX-NOTIF-token_usage", schema: TokenUsageParamsSchema, consumers: ["src/providers/codex-provider.ts handleTokenUsage"] },
   { id: "CX-REQ-command_approval", schema: CommandApprovalParamsSchema, consumers: ["src/providers/codex-provider.ts handleServerRequest", "apps/vibedeckx-ui/components/agent/approval-request.tsx"] },
   { id: "CX-REQ-file_change_approval", schema: FileChangeApprovalParamsSchema, consumers: ["src/providers/codex-provider.ts handleServerRequest"] },

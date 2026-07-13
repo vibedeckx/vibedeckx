@@ -11,7 +11,13 @@ import {
   parseCodexLine,
 } from "../protocol/codex/codec.js";
 import { buildCodexAppServerSpawnConfig } from "../protocol/codex/cli.js";
-import { CODEX_BINARY_NAME, CODEX_CLIENT_METHODS, CODEX_NOTIFICATIONS, CODEX_SERVER_REQUESTS } from "../protocol/codex/schema.js";
+import {
+  CODEX_BINARY_NAME,
+  CODEX_CLIENT_METHODS,
+  CODEX_NOTIFICATIONS,
+  CODEX_SERVER_REQUESTS,
+  CODEX_SUBAGENT_TERMINAL_KINDS,
+} from "../protocol/codex/schema.js";
 
 interface CodexSessionState {
   threadId: string | null;
@@ -136,11 +142,39 @@ export class CodexProvider implements AgentProvider {
   // ============ Notification routing ============
 
   private handleNotification(method: string, params: any, sessionId: string): ParsedAgentEvent[] {
+    // Collab subagents run as sibling THREADS inside the same app-server
+    // process — their turn/item/tokenUsage notifications are multiplexed into
+    // this stdout, distinguished only by params.threadId (verified live,
+    // 0.144.3). A notification for a foreign thread must never be treated as
+    // main-session activity: the subagent's turn/completed would emit a
+    // spurious `result` (premature completion + extra chime), its messages
+    // would render into the main conversation, and its turnIds would clobber
+    // the interrupt target. Instead, foreign turn lifecycle feeds the
+    // pending-task ledger. When state.threadId is still unknown (thread/start
+    // in flight) everything is treated as main-thread, matching pre-collab
+    // behavior.
+    const state = this.getSessionState(sessionId);
+    const notifThreadId = params?.threadId != null ? String(params.threadId) : null;
+    if (state.threadId && notifThreadId && notifThreadId !== state.threadId) {
+      switch (method) {
+        case CODEX_NOTIFICATIONS.turnStarted:
+          return [{ type: "task_started", taskId: notifThreadId, taskType: "codex_subagent" }];
+        case CODEX_NOTIFICATIONS.turnCompleted:
+          return [{ type: "task_finished", taskId: notifThreadId, status: params?.turn?.status }];
+        default:
+          return [];
+      }
+    }
+
     switch (method) {
       case CODEX_NOTIFICATIONS.itemCompleted:
         return this.handleItemCompleted(params, sessionId);
       case CODEX_NOTIFICATIONS.turnCompleted:
         return this.handleTurnCompleted(params, sessionId);
+      case CODEX_NOTIFICATIONS.turnStarted:
+        // Main-thread turn start — cancels a grace-held completion (analog
+        // of Claude Code's system/init).
+        return [{ type: "turn_started" }];
       case CODEX_NOTIFICATIONS.tokenUsageUpdated:
         return this.handleTokenUsage(params, sessionId);
       default:
@@ -225,6 +259,22 @@ export class CodexProvider implements AgentProvider {
         return [
           { type: "tool_use", tool: "Agent", input: { tool: item.tool, prompt: item.prompt }, toolUseId: id },
         ];
+      }
+
+      // Subagent lifecycle marker on the main thread. kind="started" pairs
+      // with the foreign thread's turn/completed (or a terminal kind here)
+      // in the pending-task ledger, so the session doesn't complete while a
+      // fire-and-forget collab agent is still working.
+      case "subAgentActivity": {
+        const agentThreadId = item.agentThreadId != null ? String(item.agentThreadId) : null;
+        if (!agentThreadId) return [];
+        if (item.kind === "started") {
+          return [{ type: "task_started", taskId: agentThreadId, taskType: "codex_subagent", description: item.agentPath }];
+        }
+        if ((CODEX_SUBAGENT_TERMINAL_KINDS as readonly string[]).includes(item.kind)) {
+          return [{ type: "task_finished", taskId: agentThreadId, status: item.kind }];
+        }
+        return [];
       }
 
       default:

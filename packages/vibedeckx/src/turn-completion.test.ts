@@ -27,12 +27,55 @@ describe("TurnCompletionLedger", () => {
     expect(ledger.successResult(P1)).toEqual({ kind: "commit", payload: P1 });
   });
 
-  it("defers (no commit) while background tasks are still running", () => {
+  it("defers (no commit) while background tasks are still running, keeping the result parked", () => {
     const ledger = new TurnCompletionLedger();
     ledger.taskStarted("a");
     expect(ledger.successResult(P1)).toEqual({ kind: "cancel" });
     expect(ledger.pendingTaskCount).toBe(1);
-    expect(ledger.hasPendingCompletion).toBe(false);
+    // The result stays parked: Codex never auto-resumes the main thread
+    // after a fire-and-forget subagent, so the last task finishing must be
+    // able to commit this result — discarding it would wedge the session.
+    expect(ledger.hasPendingCompletion).toBe(true);
+  });
+
+  it("codex fire-and-forget: last task finishing schedules the parked result (no resume ever comes)", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskStarted("sub-thread-1");
+    const parked = ledger.successResult(P1); // main turn ends while subagent runs
+    expect(parked).toEqual({ kind: "cancel" });
+    const action = ledger.taskFinished("sub-thread-1");
+    const gen = generationOf(action);
+    expect(ledger.graceElapsed(gen)).toEqual({ kind: "commit", payload: P1 });
+  });
+
+  it("a parked result is superseded by resume activity (claude path unaffected)", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskStarted("a");
+    ledger.successResult(P1); // parked, task a still running
+    const g1 = generationOf(ledger.taskFinished("a")); // schedules parked P1
+    expect(ledger.noteTurnActivity()).toEqual({ kind: "cancel" }); // resume init beats the grace
+    expect(ledger.graceElapsed(g1)).toEqual({ kind: "none" });
+    const g2 = generationOf(ledger.successResult(P2));
+    expect(ledger.graceElapsed(g2)).toEqual({ kind: "commit", payload: P2 });
+  });
+
+  it("a new task starting while a result is scheduled parks it again until the set empties", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskStarted("a");
+    ledger.successResult(P1);
+    const g1 = generationOf(ledger.taskFinished("a")); // scheduled
+    expect(ledger.taskStarted("b")).toEqual({ kind: "cancel" }); // parked again, kept
+    expect(ledger.graceElapsed(g1)).toEqual({ kind: "none" });
+    const g2 = generationOf(ledger.taskFinished("b"));
+    expect(ledger.graceElapsed(g2)).toEqual({ kind: "commit", payload: P1 });
+  });
+
+  it("an emptying task snapshot schedules the parked result", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskListChanged(["sub-1"]);
+    ledger.successResult(P1);
+    const gen = generationOf(ledger.taskListChanged([]));
+    expect(ledger.graceElapsed(gen)).toEqual({ kind: "commit", payload: P1 });
   });
 
   it("holds the result for grace when background tasks ran this turn (race sequence)", () => {

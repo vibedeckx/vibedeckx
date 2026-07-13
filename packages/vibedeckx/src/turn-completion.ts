@@ -112,14 +112,18 @@ export class TurnCompletionLedger {
   }
 
   successResult(payload: CompletionPayload): CompletionAction {
-    this.pending = null;
     this.generation++;
     if (this.tasks.size > 0) {
-      // Intermediate turn: background work still running, the process will
-      // auto-resume. Defer everything (caller keeps status "running").
+      // Turn ended while background work is still running. PARK the result
+      // (no timer) instead of discarding it: Claude Code auto-resumes when
+      // the task completes and the resume supersedes this candidate, but
+      // Codex fire-and-forget subagents never resume the main thread — the
+      // last task finishing is the only chance to commit this turn.
+      this.pending = payload;
       return { kind: "cancel" };
     }
     if (!this.sawBackgroundActivity) {
+      this.pending = null;
       return { kind: "commit", payload };
     }
     this.pending = payload;
@@ -162,12 +166,15 @@ export class TurnCompletionLedger {
     this.sawBackgroundActivity = false;
   }
 
-  /** Re-arm the grace window for the held candidate, if any. Task lifecycle
-   * events are ambiguous (an orphaned nested-task notification may have no
-   * resume behind it), so they delay the commit rather than cancel it. */
+  /** Re-arm or park the held candidate after a task-set change. Task
+   * lifecycle events are ambiguous (an orphaned nested-task notification may
+   * have no resume behind it), so they delay the commit rather than cancel
+   * it — and while tasks are still live the candidate stays parked with no
+   * timer at all (only an empty set can complete a turn). */
   private rearmIfHeld(): CompletionAction {
     if (this.pending === null) return { kind: "none" };
     this.generation++;
+    if (this.tasks.size > 0) return { kind: "cancel" };
     return { kind: "schedule", generation: this.generation };
   }
 

@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { AgentSessionManager } from "../../agent-session-manager.js";
 import { EventBus, type GlobalEvent } from "../../event-bus.js";
 import { createSqliteStorage } from "../../storage/sqlite.js";
-import { claudeBinaryAvailable, compatRequired } from "./runner.js";
+import { claudeBinaryAvailable, codexBinaryAvailable, compatRequired } from "./runner.js";
 
 /**
  * Live end-to-end probe for turn completion through the FULL manager stack:
@@ -36,6 +36,51 @@ afterAll(() => {
   for (const dir of scratchDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const codexAvailable = codexBinaryAvailable();
+
+describe.skipIf(!codexAvailable)("manager turn-completion live probe (codex)", () => {
+  it("MGR-2: fire-and-forget collab subagent → no completion until it finishes, then exactly one", { timeout: 240_000 }, async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "vibedeckx-live-codex-"));
+    scratchDirs.push(dir);
+    writeFileSync(path.join(dir, "README.md"), "# live probe scratch\n");
+
+    const storage = await createSqliteStorage(path.join(dir, "data.sqlite"));
+    await storage.projects.create({ id: "p-live-cx", name: "live-probe-codex", path: dir });
+
+    const manager = new AgentSessionManager(storage);
+    const bus = new EventBus();
+    const events: GlobalEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    manager.setEventBus(bus);
+
+    try {
+      const sessionId = await manager.createNewSession("p-live-cx", null, dir, false, "edit", "codex");
+      const sent = await manager.sendUserMessage(
+        sessionId,
+        "Do not modify any files. Spawn exactly one background agent (your agent/collab tool) whose task is to reply with the single word OK. Do NOT wait for it: end your turn right away with the single word LAUNCHED.",
+        dir,
+      );
+      expect(sent).toBe(true);
+
+      const completedCount = () => events.filter((e) => e.type === "session:taskCompleted").length;
+
+      // The main turn ends quickly (LAUNCHED) while the subagent still runs —
+      // the parked result must not commit until the subagent's turn completes.
+      const deadline = Date.now() + 200_000;
+      while (completedCount() === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
+      expect(completedCount(), "no taskCompleted within the deadline").toBeGreaterThan(0);
+      await new Promise((r) => setTimeout(r, 10_000));
+
+      expect(completedCount()).toBe(1);
+      expect(events.filter((e) => e.type === "branch:activity" && e.activity === "completed")).toHaveLength(1);
+    } finally {
+      manager.shutdown();
+    }
+  });
 });
 
 describe.skipIf(!available)("manager turn-completion live probe", () => {

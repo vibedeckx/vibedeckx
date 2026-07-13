@@ -17,6 +17,7 @@ import {
   KnownThreadItemSchema,
   TokenUsageParamsSchema,
   TurnCompletedParamsSchema,
+  TurnStartedParamsSchema,
   ThreadStartResultSchema,
   CommandApprovalParamsSchema,
 } from "./codex/schema.js";
@@ -105,6 +106,63 @@ describe("codex fixture corpus honors the contract", () => {
         expect(checkContract({ id: "CX-REQ-command_approval", schema: CommandApprovalParamsSchema, consumers: [] }, incoming.params).ok).toBe(true);
       }
     }
+  });
+});
+
+describe("codex subagent fixture corpus honors the contract", () => {
+  // Real codex 0.144.3 capture: main thread spawns a fire-and-forget collab
+  // subagent (sibling thread in the same app-server stdout); the main turn
+  // completes while the subagent is still running. The recording behind the
+  // turn-completion ledger's codex wiring (see turn-completion.ts).
+  const lines = fixtureLines(new URL("./codex/__fixtures__/subagent-session.jsonl", import.meta.url));
+
+  const CONTRACTED: Record<string, (typeof ItemCompletedParamsSchema)> = {
+    [CODEX_NOTIFICATIONS.itemCompleted]: ItemCompletedParamsSchema,
+    [CODEX_NOTIFICATIONS.turnCompleted]: TurnCompletedParamsSchema,
+    [CODEX_NOTIFICATIONS.turnStarted]: TurnStartedParamsSchema,
+    [CODEX_NOTIFICATIONS.tokenUsageUpdated]: TokenUsageParamsSchema,
+  };
+  // Methods vibedeckx deliberately doesn't consume. A new method showing up
+  // in a recording fails the corpus until it's triaged into a schema or here.
+  const UNCONTRACTED_METHODS = [
+    "configWarning",
+    "remoteControl/status/changed",
+    "thread/started",
+    "thread/status/changed",
+    "mcpServer/startupStatus/updated",
+    "item/started",
+    "item/agentMessage/delta",
+    "account/rateLimits/updated",
+  ];
+
+  it("every contracted notification validates; unknown methods are triaged", () => {
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      const incoming = parseCodexLine(line);
+      expect(incoming.kind, `ignored: ${line}`).not.toBe("ignored");
+      if (incoming.kind !== "notification") continue; // responses covered by the main corpus
+      const schema = CONTRACTED[incoming.method];
+      if (!schema) {
+        expect(UNCONTRACTED_METHODS, `untriaged notification method: ${incoming.method}`).toContain(incoming.method);
+        continue;
+      }
+      const report = checkContract({ id: incoming.method, schema, consumers: [] }, incoming.params);
+      expect(report.ok, `${report.issues.join("; ")} in: ${line}`).toBe(true);
+      if (incoming.method === CODEX_NOTIFICATIONS.itemCompleted) {
+        const item = (incoming.params as { item: unknown }).item;
+        expect(checkContract({ id: "CX-ITEM-known_types", schema: KnownThreadItemSchema, consumers: [] }, item).ok, `unknown item in: ${line}`).toBe(true);
+      }
+    }
+  });
+
+  it("captures the premature-completion ordering: main turn completes before the subagent's", () => {
+    const turnEvents = lines
+      .map((l) => parseCodexLine(l))
+      .filter((m): m is Extract<ReturnType<typeof parseCodexLine>, { kind: "notification" }> => m.kind === "notification")
+      .filter((m) => m.method === CODEX_NOTIFICATIONS.turnCompleted)
+      .map((m) => (m.params as { threadId?: string }).threadId);
+    expect(turnEvents).toHaveLength(2);
+    expect(turnEvents[0]).not.toBe(turnEvents[1]);
   });
 });
 

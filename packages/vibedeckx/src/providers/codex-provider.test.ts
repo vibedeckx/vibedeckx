@@ -235,4 +235,142 @@ describe("CodexProvider", () => {
       params: { threadId: "thread-1", turnId: "019f-turn-uuid-2" },
     });
   });
+
+  // ============ Collab subagents (fixture lines are real codex 0.144.3 output) ============
+  //
+  // Codex runs collab subagents as sibling THREADS inside the same app-server
+  // process: their turn/started, item/*, and turn/completed notifications are
+  // multiplexed into the main session's stdout, distinguished only by
+  // params.threadId. Verified live: the main thread's turn/completed fires
+  // while the subagent is still running, and codex never auto-resumes the
+  // main thread when the subagent finishes.
+
+  const MAIN_THREAD = "019f5bfb-a05d-71c2-96d8-f2b45e56ea49";
+  const SUB_THREAD = "019f5bfb-d05a-7541-8a6a-b8507b398782";
+
+  function subagentProvider(): CodexProvider {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+    provider.getSessionState("session-1").threadId = MAIN_THREAD;
+    return provider;
+  }
+
+  it("parses subAgentActivity kind=started into task_started keyed by agentThreadId", () => {
+    const provider = subagentProvider();
+    const line = JSON.stringify({
+      method: "item/completed",
+      params: {
+        item: { type: "subAgentActivity", id: "call_CwKEj5c9uRF2MQ1LgIWyrKqY", kind: "started", agentThreadId: SUB_THREAD, agentPath: "/root/ok_reply" },
+        threadId: MAIN_THREAD,
+        turnId: "019f5bfb-a7e8-7012-9476-c40c616eb6ff",
+        completedAtMs: 1783954659013,
+      },
+    });
+    expect(provider.parseStdoutLine(line, "session-1")).toEqual([
+      { type: "task_started", taskId: SUB_THREAD, taskType: "codex_subagent", description: "/root/ok_reply" },
+    ]);
+  });
+
+  it("parses a subagent thread's turn/started into task_started (belt for subAgentActivity)", () => {
+    const provider = subagentProvider();
+    const line = JSON.stringify({
+      method: "turn/started",
+      params: { threadId: SUB_THREAD, turn: { id: "019f5bfb-d6c5-7653-8455-266cc5ac3e15", status: "inProgress" } },
+    });
+    expect(provider.parseStdoutLine(line, "session-1")).toEqual([
+      { type: "task_started", taskId: SUB_THREAD, taskType: "codex_subagent" },
+    ]);
+  });
+
+  it("parses a subagent thread's turn/completed into task_finished, NOT a result", () => {
+    const provider = subagentProvider();
+    const line = JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: SUB_THREAD, turn: { id: "019f5bfb-d6c5-7653-8455-266cc5ac3e15", status: "completed", error: null } },
+    });
+    expect(provider.parseStdoutLine(line, "session-1")).toEqual([
+      { type: "task_finished", taskId: SUB_THREAD, status: "completed" },
+    ]);
+  });
+
+  it("does not render a subagent thread's agentMessage into the main conversation", () => {
+    const provider = subagentProvider();
+    const line = JSON.stringify({
+      method: "item/completed",
+      params: {
+        item: { type: "agentMessage", id: "msg_sub", text: "OK", phase: "final_answer" },
+        threadId: SUB_THREAD,
+        turnId: "019f5bfb-d6c5-7653-8455-266cc5ac3e15",
+      },
+    });
+    expect(provider.parseStdoutLine(line, "session-1")).toEqual([]);
+  });
+
+  it("a subagent's final message must not mark the MAIN turn as having a final answer", () => {
+    const provider = subagentProvider();
+    // Subagent's final answer arrives first (foreign thread)...
+    provider.parseStdoutLine(JSON.stringify({
+      method: "item/completed",
+      params: { item: { type: "agentMessage", id: "m1", text: "OK", phase: "final_answer" }, threadId: SUB_THREAD, turnId: "sub-turn" },
+    }), "session-1");
+    // ...then the subagent's turn completes: without thread filtering this
+    // produced a spurious `result` for the main session (second chime).
+    const events = provider.parseStdoutLine(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: SUB_THREAD, turn: { id: "sub-turn", status: "completed" } },
+    }), "session-1");
+    expect(events).toEqual([{ type: "task_finished", taskId: SUB_THREAD, status: "completed" }]);
+  });
+
+  it("does not let subagent token usage pollute the main session's usage", () => {
+    const provider = subagentProvider();
+    provider.parseStdoutLine(JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: { threadId: SUB_THREAD, tokenUsage: { last: { inputTokens: 999, outputTokens: 999 } } },
+    }), "session-1");
+    provider.parseStdoutLine(JSON.stringify({
+      method: "item/completed",
+      params: { item: { type: "agentMessage", id: "m2", text: "done", phase: "final_answer" }, threadId: MAIN_THREAD, turnId: "main-turn" },
+    }), "session-1");
+    const events = provider.parseStdoutLine(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: MAIN_THREAD, turn: { id: "main-turn", status: "completed" } },
+    }), "session-1");
+    expect(events).toEqual([{ type: "result", subtype: "success" }]);
+  });
+
+  it("does not clobber the main turn's interrupt target with subagent turn ids", () => {
+    const provider = subagentProvider();
+    const state = provider.getSessionState("session-1");
+    state.currentTurnId = "main-turn-uuid";
+    provider.parseStdoutLine(JSON.stringify({
+      method: "item/completed",
+      params: { item: { type: "commandExecution", id: "e1", command: "ls", aggregatedOutput: "" }, threadId: SUB_THREAD, turnId: "sub-turn-uuid" },
+    }), "session-1");
+    expect(state.currentTurnId).toBe("main-turn-uuid");
+  });
+
+  it("parses the MAIN thread's turn/started into turn_started (cancels a grace-held completion)", () => {
+    const provider = subagentProvider();
+    const line = JSON.stringify({
+      method: "turn/started",
+      params: { threadId: MAIN_THREAD, turn: { id: "019f5bfb-a7e8-7012-9476-c40c616eb6ff", status: "inProgress" } },
+    });
+    expect(provider.parseStdoutLine(line, "session-1")).toEqual([{ type: "turn_started" }]);
+  });
+
+  it("treats notifications without a known main threadId as main-thread (pre-thread/start safety)", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+    // threadId still null — legacy shape without params.threadId keeps working
+    provider.parseStdoutLine(JSON.stringify({
+      method: "item/completed",
+      params: { item: { type: "agentMessage", id: "m", text: "hi", phase: "final_answer" }, turnId: "t1" },
+    }), "session-1");
+    const events = provider.parseStdoutLine(JSON.stringify({
+      method: "turn/completed",
+      params: { turn: { id: "t1", status: "completed" } },
+    }), "session-1");
+    expect(events).toEqual([{ type: "result", subtype: "success" }]);
+  });
 });
