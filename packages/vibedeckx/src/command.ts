@@ -19,6 +19,7 @@ import {
   startConnectDaemon,
   stopConnectDaemon,
   type ConnectDaemonState,
+  type DaemonCommandResult,
 } from "./connect-daemon.js";
 import open from "open";
 
@@ -483,13 +484,19 @@ const connectManagementFlags = {
   },
 };
 
+function reportDaemonCommandResult(
+  result: DaemonCommandResult,
+): void | Error {
+  if (result.exitCode !== 0) return new Error(result.message);
+  console.log(result.message);
+}
+
 const connectStatusCommand = buildCommand({
   parameters: { flags: connectManagementFlags },
   func: async (flags: { "data-dir": string | undefined }) => {
     assertConnectDaemonPlatform();
     const result = describeConnectDaemon(flags["data-dir"] ?? VIBEDECKX_HOME);
-    console.log(result.message);
-    process.exitCode = result.exitCode;
+    return reportDaemonCommandResult(result);
   },
   docs: { brief: "Show the connect daemon status" },
 });
@@ -501,8 +508,7 @@ const connectStopCommand = buildCommand({
     const result = await stopConnectDaemon(
       flags["data-dir"] ?? VIBEDECKX_HOME,
     );
-    console.log(result.message);
-    process.exitCode = result.exitCode;
+    return reportDaemonCommandResult(result);
   },
   docs: { brief: "Stop the connect daemon" },
 });
