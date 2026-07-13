@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Equal } from "lucide-react";
+import { Check, CheckCheck } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
@@ -33,8 +33,9 @@ export function WorkspaceMergeBadge({ info, onClick }: WorkspaceMergeBadgeProps)
             <Check className="h-3 w-3 text-muted-foreground/70" />
           ) : info.status === "no-unique-commits" ? (
             // Tip equals target (just fast-forward-merged, or a fresh branch):
-            // "identical to target", one shade fainter than the merged check.
-            <Equal className="h-3 w-3 text-muted-foreground/40" />
+            // the goal state. Green double-check — distinct from the merged
+            // single check in both shape and color (color-blind safe).
+            <CheckCheck className="h-3 w-3 text-emerald-500" />
           ) : (
             <span className="text-[10px] font-mono leading-none text-amber-500">
               {info.unmergedCount}
