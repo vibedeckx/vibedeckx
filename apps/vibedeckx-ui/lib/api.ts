@@ -2144,6 +2144,17 @@ export const api = {
     return data.remote;
   },
 
+  async setProjectRemotePrimary(projectId: string, remoteId: string): Promise<void> {
+    const res = await authFetch(
+      `${getApiBase()}/api/projects/${projectId}/remotes/${remoteId}/primary`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      const body = await res.json();
+      throw new Error(body.error ?? "Failed to set primary remote");
+    }
+  },
+
   async removeProjectRemote(projectId: string, remoteId: string): Promise<void> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/remotes/${remoteId}`, {
       method: "DELETE",

@@ -105,6 +105,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // POST /api/projects/:id/remotes/:rid/primary — promote a project remote
+  fastify.post<{ Params: { id: string; rid: string } }>(
+    "/api/projects/:id/remotes/:rid/primary",
+    async (request, reply) => {
+      const userId = requireAuth(request, reply);
+      if (userId === null) return;
+
+      const project = await fastify.storage.projects.getById(request.params.id, userId);
+      if (!project)
+        return reply.code(404).send({ error: "Project not found" });
+
+      const promoted = await fastify.storage.projectRemotes.setPrimary(
+        project.id,
+        request.params.rid,
+      );
+      if (!promoted)
+        return reply.code(404).send({ error: "Project remote not found" });
+      return reply.send({ success: true });
+    },
+  );
+
   // DELETE /api/projects/:id/remotes/:rid — remove a remote from a project
   fastify.delete<{ Params: { id: string; rid: string } }>(
     "/api/projects/:id/remotes/:rid",
