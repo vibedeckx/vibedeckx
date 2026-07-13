@@ -57,24 +57,52 @@ function isConnectDaemonState(value: unknown): value is ConnectDaemonState {
     Number.isSafeInteger(state.pid) &&
     (state.pid as number) > 0 &&
     typeof state.processStartTicks === "string" &&
+    /^\d+$/.test(state.processStartTicks) &&
     typeof state.startedAt === "string" &&
+    state.startedAt.length > 0 &&
+    !Number.isNaN(Date.parse(state.startedAt)) &&
     typeof state.connectTo === "string" &&
-    typeof state.version === "string"
+    state.connectTo.length > 0 &&
+    typeof state.version === "string" &&
+    state.version.length > 0
   );
 }
 
+/**
+ * Reads an identity snapshot of the recorded daemon process.
+ *
+ * This result must not be used alone to authorize sending a signal. Callers
+ * must re-read the process start ticks immediately before signaling the PID.
+ */
 export function inspectDaemonState(dataDir: string): ConnectDaemonInspection {
   const statePath = daemonStatePath(dataDir);
-  if (!fs.existsSync(statePath)) return { kind: "missing" };
+
+  let contents: string;
+  try {
+    contents = fs.readFileSync(statePath, "utf8");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return { kind: "missing" };
+    }
+    return {
+      kind: "invalid",
+      path: statePath,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    parsed = JSON.parse(contents);
   } catch (error) {
     return {
       kind: "invalid",
       path: statePath,
-      reason: (error as Error).message,
+      reason: error instanceof Error ? error.message : String(error),
     };
   }
   if (!isConnectDaemonState(parsed)) {
