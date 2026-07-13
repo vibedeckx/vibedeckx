@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -20,6 +21,7 @@ import {
   Trash2,
   Server,
   Globe,
+  Crown,
 } from "lucide-react";
 import {
   api,
@@ -199,6 +201,7 @@ export function ProjectSettingsForm({
   const [path, setPath] = useState(project.path ?? "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [settingPrimaryRemoteId, setSettingPrimaryRemoteId] = useState<string | null>(null);
   const [syncUpConfig, setSyncUpConfig] = useState<SyncConfigState>(
     fromSyncButtonConfig(project.sync_up_config)
   );
@@ -330,6 +333,19 @@ export function ProjectSettingsForm({
     }
   };
 
+  const handleSetPrimaryRemote = async (remoteId: string) => {
+    setError("");
+    setSettingPrimaryRemoteId(remoteId);
+    try {
+      await api.setProjectRemotePrimary(project.id, remoteId);
+      await refreshRemotes();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to set primary remote");
+    } finally {
+      setSettingPrimaryRemoteId(null);
+    }
+  };
+
   const hasLocalPath = path.trim().length > 0;
 
   const handleSubmit = async () => {
@@ -429,23 +445,47 @@ export function ProjectSettingsForm({
 
             <div className="space-y-3">
               <label className="text-sm font-medium">Remote Servers</label>
+              <p className="text-xs text-muted-foreground">
+                The primary remote is used for remote-only projects and default remote
+                operations. When a local checkout exists, merge status is computed locally.
+              </p>
 
               {remotes.length > 0 && (
                 <div className="space-y-2">
-                  {remotes.map((remote) => (
+                  {remotes.map((remote, index) => (
                     <div
                       key={remote.id}
                       className="flex items-center gap-2 rounded-md border p-2 text-sm"
                     >
                       <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
                       <div className="flex-1 min-w-0">
-                        <p className="font-medium truncate">
-                          {remote.server_name}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-medium truncate">{remote.server_name}</p>
+                          {index === 0 && (
+                            <Badge variant="secondary" className="shrink-0 gap-1">
+                              <Crown className="h-3 w-3" />
+                              Primary
+                            </Badge>
+                          )}
+                        </div>
                         <p className="text-xs text-muted-foreground font-mono truncate">
                           {remote.remote_path}
                         </p>
                       </div>
+                      {index !== 0 && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0"
+                          disabled={settingPrimaryRemoteId !== null}
+                          onClick={() => handleSetPrimaryRemote(remote.id)}
+                        >
+                          {settingPrimaryRemoteId === remote.id && (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          )}
+                          Set as Primary
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon-sm"

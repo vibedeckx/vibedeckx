@@ -6,17 +6,32 @@ import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
 interface WorkspaceMergeBadgeProps {
   info: BranchMergeInfo;
+  repositoryLabel?: string | null;
   onClick: () => void;
 }
 
-export function WorkspaceMergeBadge({ info, onClick }: WorkspaceMergeBadgeProps) {
-  const label =
+export function mergeBadgeAriaLabel(
+  info: BranchMergeInfo,
+  repositoryLabel?: string | null,
+): string {
+  const relationshipLabel =
     info.status === "merged"
       ? `Merged into ${info.target}`
       : info.status === "no-unique-commits"
         ? `In sync with ${info.target}`
         : `${info.unmergedCount} commit${info.unmergedCount !== 1 ? "s" : ""} not in ${info.target}`;
-  const ariaLabel = info.dirty ? `${label} · uncommitted changes` : label;
+  const parts = [relationshipLabel];
+  if (info.dirty) parts.push("uncommitted changes");
+  if (repositoryLabel) parts.push(repositoryLabel);
+  return parts.join(" · ");
+}
+
+export function WorkspaceMergeBadge({
+  info,
+  repositoryLabel,
+  onClick,
+}: WorkspaceMergeBadgeProps) {
+  const ariaLabel = mergeBadgeAriaLabel(info, repositoryLabel);
 
   return (
     <Tooltip>
@@ -46,10 +61,7 @@ export function WorkspaceMergeBadge({ info, onClick }: WorkspaceMergeBadgeProps)
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="right">
-        {label}
-        {info.dirty ? " · uncommitted changes" : ""}
-      </TooltipContent>
+      <TooltipContent side="right">{ariaLabel}</TooltipContent>
     </Tooltip>
   );
 }

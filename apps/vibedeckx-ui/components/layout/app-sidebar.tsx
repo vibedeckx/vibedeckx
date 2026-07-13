@@ -24,6 +24,7 @@ interface AppSidebarProps {
   onDeleteWorktree?: (worktree: Worktree) => void;
   mergeStatuses?: Map<string, BranchMergeInfo>;
   mergeDefaultTarget?: string | null;
+  mergeRepositoryLabel?: string | null;
   onMergeTargetChange?: (branch: string, target: string) => void;
   onMergeBadgeClick?: (branch: string) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
@@ -203,6 +204,7 @@ export function AppSidebar({
   onDeleteWorktree,
   mergeStatuses,
   mergeDefaultTarget,
+  mergeRepositoryLabel,
   onMergeTargetChange,
   onMergeBadgeClick,
   workspaceStatuses,
@@ -396,6 +398,7 @@ export function AppSidebar({
                         {wt.branch !== null && mergeStatuses?.get(wt.branch) && (
                           <WorkspaceMergeBadge
                             info={mergeStatuses.get(wt.branch)!}
+                            repositoryLabel={mergeRepositoryLabel}
                             onClick={() => onMergeBadgeClick?.(wt.branch!)}
                           />
                         )}
