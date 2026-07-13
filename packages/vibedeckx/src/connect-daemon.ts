@@ -346,30 +346,29 @@ function removeFailedChildStateIfOwned(
   });
 }
 
-async function findForeignRunningDaemon(
+function findForeignRunningDaemon(
   dataDir: string,
   childPid: number | undefined,
   childStartTicks: string | undefined,
-  timeoutMs = 250,
-): Promise<ConnectDaemonState | undefined> {
-  const deadline = Date.now() + timeoutMs;
-  do {
-    try {
-      const inspection = inspectDaemonState(dataDir);
-      if (
-        inspection.kind === "running" &&
-        (inspection.state.pid !== childPid ||
-          inspection.state.processStartTicks !== childStartTicks)
-      ) {
-        return inspection.state;
-      }
-    } catch {
-      // Startup's original error remains authoritative unless a complete,
-      // currently-live foreign state can be verified during this bounded wait.
+): ConnectDaemonState | undefined {
+  // A concurrent duplicate start is the only way a foreign daemon exists here.
+  // The losing child fails claimDaemonState() precisely because the winner has
+  // already written its state, so by the time this runs the foreign state is
+  // already on disk and its own state was already cleaned up above — a single
+  // inspection is sufficient, no poll needed.
+  try {
+    const inspection = inspectDaemonState(dataDir);
+    if (
+      inspection.kind === "running" &&
+      (inspection.state.pid !== childPid ||
+        inspection.state.processStartTicks !== childStartTicks)
+    ) {
+      return inspection.state;
     }
-    if (Date.now() >= deadline) break;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  } while (true);
+  } catch {
+    // Startup's original error remains authoritative unless a complete,
+    // currently-live foreign state can be verified.
+  }
   return undefined;
 }
 
@@ -448,7 +447,7 @@ export async function startConnectDaemon(
     } catch (stateError) {
       stateCleanupError = stateError;
     }
-    const foreignDaemon = await findForeignRunningDaemon(
+    const foreignDaemon = findForeignRunningDaemon(
       options.dataDir,
       childPid,
       childStartTicks,
