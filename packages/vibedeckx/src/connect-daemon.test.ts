@@ -53,6 +53,14 @@ afterEach(async () => {
       if (readLinuxProcessStartTicks(pid) !== startTicks) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    if (readLinuxProcessStartTicks(pid) === startTicks) {
+      process.kill(pid, "SIGKILL");
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (readLinuxProcessStartTicks(pid) !== startTicks) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    expect(readLinuxProcessStartTicks(pid)).not.toBe(startTicks);
   }
   liveFixtureProcesses.clear();
   vi.restoreAllMocks();
@@ -201,8 +209,41 @@ describe("detached daemon startup", () => {
     liveFixtureProcesses.set(pid, startTicks!);
   }
 
+  function expectAllRecordedFixturesStopped(): void {
+    for (const [pid, startTicks] of liveFixtureProcesses) {
+      expect(readLinuxProcessStartTicks(pid)).not.toBe(startTicks);
+    }
+  }
+
+  async function runFixture(
+    mode: string,
+    overrides: Partial<Parameters<typeof startConnectDaemon>[0]> = {},
+  ): Promise<Awaited<ReturnType<typeof startConnectDaemon>>> {
+    const options = fixtureOptions(mode, overrides);
+    const pidRecordPath = path.join(
+      dataDir,
+      `fixture-pid-${liveFixtureProcesses.size}.json`,
+    );
+    options.extraEnv = {
+      ...options.extraEnv,
+      VIBEDECKX_TEST_DAEMON_PID_RECORD: pidRecordPath,
+    };
+
+    try {
+      return await startConnectDaemon(options);
+    } finally {
+      if (fs.existsSync(pidRecordPath)) {
+        const record = JSON.parse(fs.readFileSync(pidRecordPath, "utf8")) as {
+          pid: number;
+          processStartTicks: string;
+        };
+        liveFixtureProcesses.set(record.pid, record.processStartTicks);
+      }
+    }
+  }
+
   it("returns after readiness while the detached child remains alive", async () => {
-    const result = await startConnectDaemon(fixtureOptions("ready"));
+    const result = await runFixture("ready");
     trackFixture(result.pid);
 
     expect(readLinuxProcessStartTicks(result.pid)).toBe(
@@ -216,30 +257,41 @@ describe("detached daemon startup", () => {
   });
 
   it("reports a structured child startup error", async () => {
-    await expect(startConnectDaemon(fixtureOptions("error"))).rejects.toThrow(
+    await expect(runFixture("error")).rejects.toThrow(
       "fixture failed",
     );
+    expectAllRecordedFixturesStopped();
   });
 
   it("reports an early child exit code", async () => {
-    await expect(startConnectDaemon(fixtureOptions("exit"))).rejects.toThrow(
+    await expect(runFixture("exit")).rejects.toThrow(
       /exit.*2|code 2/i,
     );
+    expectAllRecordedFixturesStopped();
   });
 
   it("times out and terminates a child that never reports readiness", async () => {
     const startedAt = Date.now();
 
     await expect(
-      startConnectDaemon(fixtureOptions("hang", { timeoutMs: 30 })),
+      runFixture("hang", { timeoutMs: 30 }),
     ).rejects.toThrow(/timed out|timeout/i);
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expectAllRecordedFixturesStopped();
   });
 
   it("rejects an invalid IPC readiness message", async () => {
     await expect(
-      startConnectDaemon(fixtureOptions("invalid")),
+      runFixture("invalid"),
     ).rejects.toThrow(/invalid.*IPC|IPC.*message/i);
+    expectAllRecordedFixturesStopped();
+  });
+
+  it("rejects and terminates a child that disconnects without a message", async () => {
+    await expect(runFixture("disconnect")).rejects.toThrow(
+      /disconnected.*readiness/i,
+    );
+    expectAllRecordedFixturesStopped();
   });
 
   it("rejects a running daemon before spawning another child", async () => {
@@ -248,13 +300,14 @@ describe("detached daemon startup", () => {
     writeState(state);
 
     await expect(
-      startConnectDaemon(
-        fixtureOptions("ready", {
+      runFixture(
+        "ready",
+        {
           extraEnv: {
             VIBEDECKX_TEST_DAEMON_MODE: "ready",
             VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
           },
-        }),
+        },
       ),
     ).rejects.toThrow(
       new RegExp(`running.*${state.pid}|${state.pid}.*running`, "i"),
@@ -267,13 +320,14 @@ describe("detached daemon startup", () => {
     writeState("{");
 
     await expect(
-      startConnectDaemon(
-        fixtureOptions("ready", {
+      runFixture(
+        "ready",
+        {
           extraEnv: {
             VIBEDECKX_TEST_DAEMON_MODE: "ready",
             VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
           },
-        }),
+        },
       ),
     ).rejects.toThrow(new RegExp(daemonStatePath(dataDir)));
     expect(fs.existsSync(recordPath)).toBe(false);
@@ -284,7 +338,7 @@ describe("detached daemon startup", () => {
       validState({ pid: Number.MAX_SAFE_INTEGER, processStartTicks: "1" }),
     );
 
-    const result = await startConnectDaemon(fixtureOptions("ready"));
+    const result = await runFixture("ready");
     trackFixture(result.pid);
 
     expect(fs.existsSync(daemonStatePath(dataDir))).toBe(false);
@@ -292,8 +346,9 @@ describe("detached daemon startup", () => {
 
   it("passes a sanitized argv and the token only through the internal environment", async () => {
     const recordPath = path.join(dataDir, "child-record.json");
-    const result = await startConnectDaemon(
-      fixtureOptions("ready", {
+    const result = await runFixture(
+      "ready",
+      {
         argv: [
           "connect",
           "--token=super-secret-token",
@@ -306,7 +361,7 @@ describe("detached daemon startup", () => {
           VIBEDECKX_TEST_DAEMON_MODE: "ready",
           VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
         },
-      }),
+      },
     );
     trackFixture(result.pid);
 
@@ -329,14 +384,15 @@ describe("detached daemon startup", () => {
     const recordPath = path.join(dataDir, "child-record.json");
 
     await expect(
-      startConnectDaemon(
-        fixtureOptions("ready", {
+      runFixture(
+        "ready",
+        {
           platform: "darwin",
           extraEnv: {
             VIBEDECKX_TEST_DAEMON_MODE: "ready",
             VIBEDECKX_TEST_DAEMON_RECORD: recordPath,
           },
-        }),
+        },
       ),
     ).rejects.toThrow(/Linux/i);
     expect(fs.existsSync(recordPath)).toBe(false);
@@ -379,10 +435,16 @@ describe("daemon parent notifications", () => {
       disconnect: vi.fn(),
     };
 
-    notifyDaemonParentError(new Error("fixture failed"), parent);
+    notifyDaemonParentError(
+      new Error("startup failed with super-secret-token"),
+      parent,
+    );
 
     expect(parent.send).toHaveBeenCalledWith(
-      { type: "error", message: "fixture failed" },
+      {
+        type: "error",
+        message: expect.not.stringContaining("super-secret-token"),
+      },
       expect.any(Function),
     );
     expect(parent.disconnect).not.toHaveBeenCalled();

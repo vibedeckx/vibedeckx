@@ -84,11 +84,16 @@ export function notifyDaemonParentReady(
 }
 
 export function notifyDaemonParentError(
-  error: unknown,
+  _error: unknown,
   parent: DaemonParentProcess = process as unknown as DaemonParentProcess,
 ): void {
-  const message = error instanceof Error ? error.message : String(error);
-  notifyDaemonParent({ type: "error", message }, parent);
+  notifyDaemonParent(
+    {
+      type: "error",
+      message: "Vibedeckx connect daemon failed during startup",
+    },
+    parent,
+  );
 }
 
 function isExactObject(
@@ -201,44 +206,100 @@ function waitForDaemonReady(
   });
 }
 
-async function waitForChildExit(
+function waitForChildIdentityExit(
   child: ChildProcess,
+  pid: number,
+  processStartTicks: string,
   timeoutMs: number,
 ): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return true;
-  return new Promise((resolve) => {
-    const onExit = (): void => finish(true);
-    const finish = (exited: boolean): void => {
-      clearTimeout(timer);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pollTimer: NodeJS.Timeout | undefined;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    const finish = (exited: boolean, error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      if (pollTimer) clearInterval(pollTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       child.off("exit", onExit);
-      resolve(exited);
+      if (error) reject(error);
+      else resolve(exited);
     };
+    const checkIdentity = (): void => {
+      try {
+        if (
+          child.exitCode !== null ||
+          child.signalCode !== null ||
+          readLinuxProcessStartTicks(pid) !== processStartTicks
+        ) {
+          finish(true);
+        }
+      } catch (error) {
+        finish(false, error);
+      }
+    };
+    const onExit = (): void => finish(true);
     child.once("exit", onExit);
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    pollTimer = setInterval(checkIdentity, 10);
+    timeoutTimer = setTimeout(() => finish(false), timeoutMs);
+    checkIdentity();
   });
 }
 
-async function terminateFailedChild(child: ChildProcess): Promise<void> {
-  if (child.connected) child.disconnect();
-  if (child.exitCode !== null || child.signalCode !== null || !child.pid) {
+function signalFailedChild(
+  child: ChildProcess,
+  pid: number,
+  processStartTicks: string,
+  signal: NodeJS.Signals,
+): boolean {
+  if (readLinuxProcessStartTicks(pid) !== processStartTicks) return false;
+  try {
+    const sent = child.kill(signal);
+    if (!sent && readLinuxProcessStartTicks(pid) === processStartTicks) {
+      throw new Error(`Failed to send ${signal} to daemon child PID ${pid}`);
+    }
+    return sent;
+  } catch (error) {
+    if (hasErrorCode(error, "ESRCH")) return false;
+    throw error;
+  }
+}
+
+async function terminateFailedChild(
+  child: ChildProcess,
+  capturedPid: number | undefined,
+  processStartTicks: string | undefined,
+): Promise<void> {
+  if (child.connected) {
+    try {
+      child.disconnect();
+    } catch (error) {
+      if (!hasErrorCode(error, "ERR_IPC_DISCONNECTED")) throw error;
+    }
+  }
+  const pid = capturedPid;
+  if (child.exitCode !== null || child.signalCode !== null || !pid) {
+    return;
+  }
+  if (!processStartTicks) {
+    throw new Error(
+      `Cannot safely terminate daemon child PID ${pid}: process identity is unavailable`,
+    );
+  }
+
+  if (!signalFailedChild(child, pid, processStartTicks, "SIGTERM")) return;
+  if (await waitForChildIdentityExit(child, pid, processStartTicks, 1_000)) {
     return;
   }
 
-  try {
-    child.kill("SIGTERM");
-  } catch (error) {
-    if (!hasErrorCode(error, "ESRCH")) child.unref();
-    return;
+  if (!signalFailedChild(child, pid, processStartTicks, "SIGKILL")) return;
+  if (
+    !(await waitForChildIdentityExit(child, pid, processStartTicks, 1_000))
+  ) {
+    throw new Error(
+      `Daemon child PID ${pid} remained alive after SIGKILL`,
+    );
   }
-  if (await waitForChildExit(child, 1_000)) return;
-
-  try {
-    child.kill("SIGKILL");
-  } catch (error) {
-    if (!hasErrorCode(error, "ESRCH")) child.unref();
-    return;
-  }
-  await waitForChildExit(child, 1_000);
 }
 
 function removeFailedChildStateIfOwned(
@@ -327,13 +388,23 @@ export async function startConnectDaemon(
       logPath: path.join(options.dataDir, "logs", "vibedeckx.log"),
     };
   } catch (error) {
-    await terminateFailedChild(child);
+    let cleanupError: unknown;
+    try {
+      await terminateFailedChild(child, childPid, childStartTicks);
+    } catch (terminationError) {
+      cleanupError = terminationError;
+      child.unref();
+    }
     removeFailedChildStateIfOwned(
       options.dataDir,
       childPid,
       childStartTicks,
     );
-    const message = error instanceof Error ? error.message : String(error);
+    const startupMessage =
+      error instanceof Error ? error.message : String(error);
+    const message = cleanupError
+      ? `${startupMessage}; failed to clean up daemon child: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+      : startupMessage;
     throw new Error(redactSecret(message, options.token));
   }
 }

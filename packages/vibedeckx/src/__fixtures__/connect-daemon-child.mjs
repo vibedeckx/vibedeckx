@@ -2,6 +2,19 @@ import fs from "node:fs";
 
 const mode = process.env.VIBEDECKX_TEST_DAEMON_MODE ?? "ready";
 const recordPath = process.env.VIBEDECKX_TEST_DAEMON_RECORD;
+const pidRecordPath = process.env.VIBEDECKX_TEST_DAEMON_PID_RECORD;
+
+if (pidRecordPath) {
+  const stat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  const processStartTicks = stat
+    .slice(stat.lastIndexOf(")") + 1)
+    .trim()
+    .split(/\s+/)[19];
+  fs.writeFileSync(
+    pidRecordPath,
+    JSON.stringify({ pid: process.pid, processStartTicks }),
+  );
+}
 
 if (recordPath) {
   fs.writeFileSync(
@@ -30,6 +43,9 @@ if (mode === "ready") {
   process.exit(2);
 } else if (mode === "hang") {
   setInterval(() => {}, 1_000);
+} else if (mode === "disconnect") {
+  setInterval(() => {}, 1_000);
+  disconnect();
 } else if (mode === "invalid") {
   process.send?.({ type: "ready", pid: "not-a-pid" }, disconnect);
 }
