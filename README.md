@@ -220,12 +220,32 @@ Runs in reverse-connect mode: starts a local server bound to `127.0.0.1` and tun
 |------|-------------|
 | `--connect-to <url>` | URL of the remote vibedeckx server (required) |
 | `--token <value>` | Authentication token for the reverse connection (required) |
+| `--daemon` | Run in the background after initialization (Linux only) |
 | `--port <number>` | Local port (default: random) |
 | `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
 
 ```bash
 vibedeckx connect --connect-to https://example.com --token abc123
 ```
+
+To keep a remote node running after disconnecting SSH on Linux:
+
+```bash
+npx -y vibedeckx@latest connect --connect-to https://example.com --token abc123 --daemon
+```
+
+Manage the background process with the same CLI:
+
+```bash
+npx -y vibedeckx@latest connect status
+npx -y vibedeckx@latest connect stop
+```
+
+Daemon status is scoped by `--data-dir`; when using a custom directory, pass
+the same `--data-dir` to the start, status, and stop commands. The first version
+survives SSH disconnection but does not restart after a crash or machine reboot.
+Logs remain available at `~/.vibedeckx/logs/vibedeckx.log` by default (or
+`<data-dir>/logs/vibedeckx.log` for a custom data directory).
 
 ### Running from source
 
