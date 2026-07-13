@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { sql, type Kysely, type Selectable } from "kysely";
+import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
 import type { DB, RemoteServersTable, ProjectRemotesTable } from "../schema.js";
 import type { DialectHelpers } from "../dialect.js";
 import type {
@@ -50,6 +50,33 @@ const mapProjectRemoteWithServer = (row: ProjectRemoteJoinedRow): ProjectRemoteW
   server_url: row.server_url,
   server_api_key: row.server_api_key ?? undefined,
 });
+
+async function orderedProjectRemoteIds(
+  db: Kysely<DB> | Transaction<DB>,
+  projectId: string,
+): Promise<string[]> {
+  const rows = await db.selectFrom("project_remotes")
+    .select("id")
+    .where("project_id", "=", projectId)
+    .orderBy("sort_order", "asc")
+    .orderBy("id", "asc")
+    .execute();
+  return rows.map((row) => row.id);
+}
+
+async function renumberProjectRemotes(
+  trx: Transaction<DB>,
+  projectId: string,
+  orderedIds: string[],
+): Promise<void> {
+  for (const [sortOrder, id] of orderedIds.entries()) {
+    await trx.updateTable("project_remotes")
+      .set({ sort_order: sortOrder })
+      .where("id", "=", id)
+      .where("project_id", "=", projectId)
+      .execute();
+  }
+}
 
 export const createRemoteServerRepos = (
   kdb: Kysely<DB>,
@@ -185,6 +212,7 @@ export const createRemoteServerRepos = (
         ])
         .where("project_remotes.project_id", "=", projectId)
         .orderBy("project_remotes.sort_order", "asc")
+        .orderBy("project_remotes.id", "asc")
         .execute();
       return rows.map(mapProjectRemoteWithServer);
     },
@@ -212,43 +240,80 @@ export const createRemoteServerRepos = (
 
     add: async (opts) => {
       const id = crypto.randomUUID();
-      await kdb.insertInto("project_remotes").values({
-        id,
-        project_id: opts.project_id,
-        remote_server_id: opts.remote_server_id,
-        remote_path: opts.remote_path,
-        sort_order: opts.sort_order ?? 0,
-        sync_up_config: opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null,
-        sync_down_config: opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null,
-      }).execute();
+      return kdb.transaction().execute(async (trx) => {
+        const orderedIds = await orderedProjectRemoteIds(trx, opts.project_id);
+        const requestedOrder = opts.sort_order ?? orderedIds.length;
+        const insertionIndex = Math.max(0, Math.min(requestedOrder, orderedIds.length));
 
-      const row = await kdb.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      return mapProjectRemote(row);
+        await trx.insertInto("project_remotes").values({
+          id,
+          project_id: opts.project_id,
+          remote_server_id: opts.remote_server_id,
+          remote_path: opts.remote_path,
+          sort_order: orderedIds.length,
+          sync_up_config: opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null,
+          sync_down_config: opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null,
+        }).execute();
+
+        orderedIds.splice(insertionIndex, 0, id);
+        await renumberProjectRemotes(trx, opts.project_id, orderedIds);
+        const row = await trx.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+        return mapProjectRemote(row);
+      });
     },
 
     update: async (id, opts) => {
-      const sets: Record<string, unknown> = {};
-      if (opts.remote_path !== undefined) sets.remote_path = opts.remote_path;
-      if (opts.sort_order !== undefined) sets.sort_order = opts.sort_order;
-      if (opts.sync_up_config !== undefined) {
-        sets.sync_up_config = opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null;
-      }
-      if (opts.sync_down_config !== undefined) {
-        sets.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
-      }
+      return kdb.transaction().execute(async (trx) => {
+        const existing = await trx.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirst();
+        if (!existing) return undefined;
 
-      if (Object.keys(sets).length > 0) {
-        await kdb.updateTable("project_remotes").set(sets).where("id", "=", id).execute();
-      }
+        const sets: Record<string, unknown> = {};
+        if (opts.remote_path !== undefined) sets.remote_path = opts.remote_path;
+        if (opts.sync_up_config !== undefined) {
+          sets.sync_up_config = opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null;
+        }
+        if (opts.sync_down_config !== undefined) {
+          sets.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
+        }
+        if (Object.keys(sets).length > 0) {
+          await trx.updateTable("project_remotes").set(sets).where("id", "=", id).execute();
+        }
 
-      const row = await kdb.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirst();
-      return row ? mapProjectRemote(row) : undefined;
+        if (opts.sort_order !== undefined) {
+          const orderedIds = (await orderedProjectRemoteIds(trx, existing.project_id)).filter((remoteId) => remoteId !== id);
+          const insertionIndex = Math.max(0, Math.min(opts.sort_order, orderedIds.length));
+          orderedIds.splice(insertionIndex, 0, id);
+          await renumberProjectRemotes(trx, existing.project_id, orderedIds);
+        }
+
+        const row = await trx.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+        return mapProjectRemote(row);
+      });
     },
 
-    remove: async (id) => {
-      const result = await kdb.deleteFrom("project_remotes").where("id", "=", id).executeTakeFirst();
-      return (result?.numDeletedRows ?? 0n) > 0n;
-    },
+    setPrimary: async (projectId, remoteId) => kdb.transaction().execute(async (trx) => {
+      const orderedIds = await orderedProjectRemoteIds(trx, projectId);
+      if (!orderedIds.includes(remoteId)) return false;
+      await renumberProjectRemotes(
+        trx,
+        projectId,
+        [remoteId, ...orderedIds.filter((id) => id !== remoteId)],
+      );
+      return true;
+    }),
+
+    remove: async (id) => kdb.transaction().execute(async (trx) => {
+      const existing = await trx.selectFrom("project_remotes")
+        .select(["id", "project_id"])
+        .where("id", "=", id)
+        .executeTakeFirst();
+      if (!existing) return false;
+
+      await trx.deleteFrom("project_remotes").where("id", "=", id).execute();
+      const orderedIds = await orderedProjectRemoteIds(trx, existing.project_id);
+      await renumberProjectRemotes(trx, existing.project_id, orderedIds);
+      return true;
+    }),
   },
 
   machineIdentity: {

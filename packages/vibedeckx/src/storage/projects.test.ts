@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
 
@@ -310,6 +311,89 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b", sort_order: 0 });
     const list = await storage.projectRemotes.getByProject("p1");
     expect(list.map((r) => r.server_name)).toEqual(["s2", "s1"]);
+  });
+
+  it("projectRemotes appends remotes by default without replacing the primary", async () => {
+    await storage.projects.create({ id: "p1", name: "proj", path: null });
+    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b" });
+
+    const rows = await storage.projectRemotes.getByProject("p1");
+    expect(rows.map((r) => [r.server_name, r.sort_order])).toEqual([
+      ["s1", 0],
+      ["s2", 1],
+    ]);
+  });
+
+  it("projectRemotes promotes a remote and preserves the relative order of the others", async () => {
+    await storage.projects.create({ id: "p1", name: "proj", path: null });
+    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+    const s3 = await storage.remoteServers.create({ name: "s3", url: "http://s3" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b" });
+    const r3 = await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s3.id, remote_path: "/c" });
+
+    expect(await storage.projectRemotes.setPrimary("p1", r3.id)).toBe(true);
+    const rows = await storage.projectRemotes.getByProject("p1");
+    expect(rows.map((r) => [r.server_name, r.sort_order])).toEqual([
+      ["s3", 0],
+      ["s1", 1],
+      ["s2", 2],
+    ]);
+  });
+
+  it("projectRemotes refuses to promote an association from another project", async () => {
+    await storage.projects.create({ id: "p1", name: "one", path: null });
+    await storage.projects.create({ id: "p2", name: "two", path: null });
+    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
+    const other = await storage.projectRemotes.add({ project_id: "p2", remote_server_id: s2.id, remote_path: "/b" });
+
+    expect(await storage.projectRemotes.setPrimary("p1", other.id)).toBe(false);
+    expect((await storage.projectRemotes.getByProject("p1"))[0].server_name).toBe("s1");
+  });
+
+  it("projectRemotes removing the primary promotes and renumbers the remaining remotes", async () => {
+    await storage.projects.create({ id: "p1", name: "proj", path: null });
+    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+    const s3 = await storage.remoteServers.create({ name: "s3", url: "http://s3" });
+    const primary = await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s3.id, remote_path: "/c" });
+
+    expect(await storage.projectRemotes.remove(primary.id)).toBe(true);
+    const rows = await storage.projectRemotes.getByProject("p1");
+    expect(rows.map((r) => [r.server_name, r.sort_order])).toEqual([
+      ["s2", 0],
+      ["s3", 1],
+    ]);
+  });
+
+  it("normalizes tied legacy project-remote ordering when storage opens", async () => {
+    const dbPath = path.join(dir, "legacy-order.sqlite");
+    let legacyStorage = await createSqliteStorage(dbPath);
+    await legacyStorage.projects.create({ id: "legacy", name: "legacy", path: null });
+    const s1 = await legacyStorage.remoteServers.create({ name: "s1", url: "http://legacy-s1" });
+    const s2 = await legacyStorage.remoteServers.create({ name: "s2", url: "http://legacy-s2" });
+    await legacyStorage.projectRemotes.add({ project_id: "legacy", remote_server_id: s1.id, remote_path: "/a" });
+    await legacyStorage.projectRemotes.add({ project_id: "legacy", remote_server_id: s2.id, remote_path: "/b" });
+    await legacyStorage.close();
+
+    const db = new Database(dbPath);
+    db.prepare("UPDATE project_remotes SET sort_order = 0 WHERE project_id = ?").run("legacy");
+    db.close();
+
+    legacyStorage = await createSqliteStorage(dbPath);
+    const rows = await legacyStorage.projectRemotes.getByProject("legacy");
+    expect(rows.map((r) => r.sort_order)).toEqual([0, 1]);
+    expect(rows.map((r) => r.server_name)).toEqual(["s1", "s2"]);
+    await legacyStorage.close();
   });
 
   it("projectRemotes update: partial update and null clears sync configs", async () => {

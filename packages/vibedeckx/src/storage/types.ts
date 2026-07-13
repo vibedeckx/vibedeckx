@@ -317,6 +317,7 @@ export interface Storage {
       sync_up_config?: SyncButtonConfig | null;
       sync_down_config?: SyncButtonConfig | null;
     }): Promise<ProjectRemote | undefined>;
+    setPrimary(projectId: string, remoteId: string): Promise<boolean>;
     remove(id: string): Promise<boolean>;
   };
   executorGroups: {

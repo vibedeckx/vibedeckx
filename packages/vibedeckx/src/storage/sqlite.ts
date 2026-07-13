@@ -525,6 +525,24 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     }
   }
 
+  // Primary remote is represented by sort_order = 0. Older databases could
+  // contain tied orders because new links previously defaulted to zero.
+  // Normalize deterministically on every startup; the pass is idempotent.
+  db.transaction(() => {
+    const rows = db.prepare(`
+      SELECT id, project_id
+      FROM project_remotes
+      ORDER BY project_id ASC, sort_order ASC, rowid ASC
+    `).all() as { id: string; project_id: string }[];
+    const nextOrder = new Map<string, number>();
+    const update = db.prepare("UPDATE project_remotes SET sort_order = ? WHERE id = ?");
+    for (const row of rows) {
+      const sortOrder = nextOrder.get(row.project_id) ?? 0;
+      update.run(sortOrder, row.id);
+      nextOrder.set(row.project_id, sortOrder + 1);
+    }
+  })();
+
   // Migration: executor.disabled (global bool) → executor.disabled_targets
   // (JSON array of target ids: "local" or a remote_server_id). A disabled
   // executor becomes disabled on every current target of its project, then the
