@@ -11,6 +11,18 @@ import type { Project } from "../storage/types.js";
  * See docs/superpowers/specs/2026-07-12-branch-merge-status-design.md.
  */
 
+export type MergeStatusRepository =
+  | { kind: "local"; label: "Local" }
+  | { kind: "remote"; remoteServerId: string; label: string };
+
+function legacyRemoteLabel(remoteUrl: string): string {
+  try {
+    return new URL(remoteUrl).hostname;
+  } catch {
+    return "Remote";
+  }
+}
+
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
   if (remotes.length > 0) {
@@ -20,6 +32,7 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
       url: primary.server_url ?? "",
       apiKey: primary.server_api_key ?? "",
       remotePath: primary.remote_path,
+      serverName: primary.server_name,
     };
   }
   if (project.remote_url && project.remote_api_key && project.remote_path) {
@@ -28,6 +41,7 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
       url: project.remote_url,
       apiKey: project.remote_api_key,
       remotePath: project.remote_path,
+      serverName: legacyRemoteLabel(project.remote_url),
     };
   }
   return null;
@@ -52,9 +66,17 @@ function parseComparisons(body: unknown): MergeComparison[] | null {
   return result;
 }
 
-function sendComputed(reply: FastifyReply, repoPath: string, comparisons: MergeComparison[]) {
+function sendComputed(
+  reply: FastifyReply,
+  repoPath: string,
+  comparisons: MergeComparison[],
+  repository?: MergeStatusRepository,
+) {
   try {
-    return reply.code(200).send({ entries: computeMergeStatusPairs(repoPath, comparisons) });
+    return reply.code(200).send({
+      ...(repository ? { repository } : {}),
+      entries: computeMergeStatusPairs(repoPath, comparisons),
+    });
   } catch (error) {
     const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
     const message = error instanceof Error ? error.message : "Failed to compute merge status";
@@ -110,10 +132,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
           { path: remoteConfig.remotePath, comparisons },
           { reverseConnectManager: fastify.reverseConnectManager },
         );
-        return reply.code(proxyStatus(result)).send(result.data);
+        if (!result.ok) {
+          return reply.code(proxyStatus(result)).send(result.data);
+        }
+        const data = result.data as { entries?: unknown };
+        return reply.code(200).send({
+          repository: {
+            kind: "remote",
+            remoteServerId: remoteConfig.serverId,
+            label: remoteConfig.serverName,
+          } satisfies MergeStatusRepository,
+          entries: data.entries ?? [],
+        });
       }
 
-      return sendComputed(reply, project.path, comparisons);
+      return sendComputed(
+        reply,
+        project.path,
+        comparisons,
+        { kind: "local", label: "Local" },
+      );
     },
   );
 };

@@ -20,16 +20,17 @@ const getMergeStatus = vi.mocked(api.getMergeStatus);
 let latest: {
   statuses: Map<string, BranchMergeInfo>;
   defaultTarget: string | null;
+  repositoryLabel: string | null;
 } | null = null;
 
 function Probe({ projectId, worktrees }: { projectId: string | null; worktrees: Worktree[] }) {
-  const { statuses, defaultTarget } = useMergeStatus(projectId, worktrees);
+  const { statuses, defaultTarget, repositoryLabel } = useMergeStatus(projectId, worktrees);
   // Capture in an effect (not during render) — react-hooks/globals forbids
   // reassigning module variables mid-render. Effects run inside act(), so
   // `latest` reflects the settled state by the time assertions run.
   useEffect(() => {
-    latest = { statuses, defaultTarget };
-  });
+    latest = { statuses, defaultTarget, repositoryLabel };
+  }, [statuses, defaultTarget, repositoryLabel]);
   return null;
 }
 
@@ -72,6 +73,7 @@ describe("useMergeStatus (project switch reset)", () => {
     const worktrees: Worktree[] = [{ branch: "dev1" }];
     getMergeStatus.mockResolvedValueOnce({
       ok: true,
+      repository: { kind: "remote", remoteServerId: "remote-a", label: "Remote A" },
       entries: [
         { branch: "dev1", target: "main", status: "unmerged", unmergedCount: 1, dirty: false },
       ],
@@ -98,6 +100,7 @@ describe("useMergeStatus (project switch reset)", () => {
     const worktrees: Worktree[] = [{ branch: "dev1" }];
     getMergeStatus.mockResolvedValueOnce({
       ok: true,
+      repository: { kind: "local", label: "Local" },
       entries: [
         { branch: "dev1", target: "main", status: "merged", unmergedCount: 0, dirty: false },
       ],
@@ -109,5 +112,34 @@ describe("useMergeStatus (project switch reset)", () => {
     // New worktrees array identity retriggers the effect for the same project.
     await render("p1", [{ branch: "dev1" }]);
     expect(latest!.statuses.get("dev1")?.status).toBe("merged");
+  });
+
+  it("stores the repository label from a successful batch", async () => {
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "remote", remoteServerId: "remote-a", label: "Remote A" },
+      entries: [],
+    });
+
+    await render("p1", [{ branch: "dev1" }]);
+    expect(latest!.repositoryLabel).toBe("Remote A");
+  });
+
+  it("keeps the label on same-project failure and clears it on project switch", async () => {
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "remote", remoteServerId: "remote-a", label: "Remote A" },
+      entries: [],
+    });
+    await render("p1", [{ branch: "dev1" }]);
+    expect(latest!.repositoryLabel).toBe("Remote A");
+
+    getMergeStatus.mockResolvedValueOnce({ ok: false, status: 0 });
+    await render("p1", [{ branch: "dev1" }]);
+    expect(latest!.repositoryLabel).toBe("Remote A");
+
+    getMergeStatus.mockResolvedValueOnce({ ok: false, status: 0 });
+    await render("p2", [{ branch: "dev1" }]);
+    expect(latest!.repositoryLabel).toBe(null);
   });
 });

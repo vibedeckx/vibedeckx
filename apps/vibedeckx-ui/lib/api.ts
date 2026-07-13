@@ -303,8 +303,12 @@ export interface MergeStatusPairEntry {
   error?: MergePairError;
 }
 
+export type MergeStatusRepository =
+  | { kind: "local"; label: "Local" }
+  | { kind: "remote"; remoteServerId: string; label: string };
+
 export type MergeStatusBatchResult =
-  | { ok: true; entries: MergeStatusPairEntry[] }
+  | { ok: true; repository: MergeStatusRepository; entries: MergeStatusPairEntry[] }
   | { ok: false; status: number }; // status 0 = thrown fetch/network error
 
 export type WorktreeTarget = "local" | "remote";
@@ -1023,7 +1027,7 @@ export const api = {
       });
       if (!res.ok) return { ok: false, status: res.status };
       const data = await res.json();
-      return { ok: true, entries: data.entries ?? [] };
+      return { ok: true, repository: data.repository, entries: data.entries ?? [] };
     } catch {
       return { ok: false, status: 0 };
     }

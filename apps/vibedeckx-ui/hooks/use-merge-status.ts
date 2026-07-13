@@ -73,6 +73,7 @@ export function deriveDefaultTarget(
 export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) {
   const [statuses, setStatuses] = useState<Map<string, BranchMergeInfo>>(new Map());
   const [defaultTarget, setDefaultTarget] = useState<string | null>(null);
+  const [repositoryLabel, setRepositoryLabel] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const [seenProjectId, setSeenProjectId] = useState(projectId);
 
@@ -83,6 +84,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
     setSeenProjectId(projectId);
     setStatuses(new Map());
     setDefaultTarget(null);
+    setRepositoryLabel(null);
   }
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
@@ -100,6 +102,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
         if (!cancelled) {
           setStatuses(new Map());
           setDefaultTarget(null);
+          setRepositoryLabel(null);
         }
         return;
       }
@@ -132,6 +135,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
 
       setStatuses(next);
       setDefaultTarget(deriveDefaultTarget(comparisons, result.entries));
+      setRepositoryLabel(result.repository.label);
       if (stale.length > 0) refetch(); // one-shot fallback: cleared branches re-fetch on the default
     })();
 
@@ -157,7 +161,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
     [projectId, refetch],
   );
 
-  return { statuses, defaultTarget, setTarget, refetch };
+  return { statuses, defaultTarget, repositoryLabel, setTarget, refetch };
 }
 
 /** Workspace statuses that mean an agent is actively working on the branch. */
