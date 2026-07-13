@@ -61,10 +61,10 @@ export class CodexProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", _crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
+  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
     // Store permissionMode for use in formatUserInput's turn/start params
     this.lastPermissionMode = permissionMode;
-    return buildCodexAppServerSpawnConfig(this.detectBinary());
+    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp);
   }
 
   // ============ Task 5.5: parseStdoutLine — JSON-RPC message routing ============

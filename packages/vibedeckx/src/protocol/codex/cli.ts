@@ -4,13 +4,31 @@
  * executor) modes.
  */
 import type { SpawnConfig } from "../../agent-provider.js";
+import type { CrossRemoteMcpConfig } from "../../cross-remote-mcp-config.js";
 import { CODEX_NPM_PACKAGE } from "./schema.js";
 
-export function buildCodexAppServerSpawnConfig(nativeBinary: string | null): SpawnConfig {
-  if (nativeBinary) {
-    return { command: nativeBinary, args: ["app-server"], shell: false };
+const CROSS_REMOTE_MCP_TOKEN_ENV = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN";
+
+export function buildCodexAppServerSpawnConfig(
+  nativeBinary: string | null,
+  crossRemoteMcp?: CrossRemoteMcpConfig,
+): SpawnConfig {
+  const args = ["app-server"];
+  if (crossRemoteMcp) {
+    args.push(
+      "-c",
+      `mcp_servers.cross-remote={ url = ${JSON.stringify(crossRemoteMcp.url)}, bearer_token_env_var = ${JSON.stringify(CROSS_REMOTE_MCP_TOKEN_ENV)} }`,
+    );
   }
-  return { command: "npx", args: ["-y", CODEX_NPM_PACKAGE, "app-server"], shell: false };
+
+  const env = crossRemoteMcp
+    ? { [CROSS_REMOTE_MCP_TOKEN_ENV]: crossRemoteMcp.token }
+    : undefined;
+
+  if (nativeBinary) {
+    return { command: nativeBinary, args, ...(env ? { env } : {}), shell: false };
+  }
+  return { command: "npx", args: ["-y", CODEX_NPM_PACKAGE, ...args], ...(env ? { env } : {}), shell: false };
 }
 
 /**

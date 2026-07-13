@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 import { CodexProvider } from "./codex-provider.js";
 
 describe("CodexProvider", () => {
+  it("forwards cross-remote MCP configuration to the app-server process", () => {
+    const provider = new CodexProvider();
+    const config = provider.buildSpawnConfig("/tmp", "edit", {
+      url: "https://app.example.com/api/cross-remote-mcp",
+      token: "secret-token",
+    });
+
+    expect(config.args).toContain("-c");
+    expect(config.args.join(" ")).toContain("mcp_servers.cross-remote");
+    expect(config.args.join(" ")).not.toContain("secret-token");
+    expect(config.env).toEqual({ VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" });
+  });
+
   function commandExecutionCompleted(id = "cmd-1") {
     return {
       jsonrpc: "2.0",
