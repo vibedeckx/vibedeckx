@@ -108,19 +108,50 @@ jobs:
           mv "../../vibedeckx-${VERSION}.tgz" "../../${ARCHIVE_NAME}.tar.gz"
 
           # --- npm package: use platform template (scoped name, no bin) ---
+          # dist/ui is stripped: the npm install path (remote workers) gets the
+          # lean package; the server downloads @vibedeckx/ui-dist at runtime.
+          # The platform archive above keeps dist/ui baked in (Docker / npx).
           cd ../..
           mkdir -p npm-package
           cp -r "staging/${ARCHIVE_NAME}/dist" npm-package/
           rm -f npm-package/dist/bin.js.map
+          rm -rf npm-package/dist/ui
           cp -r "staging/${ARCHIVE_NAME}/node_modules" npm-package/
           cp "packages/vibedeckx-${{ matrix.platform }}/package.json" npm-package/
           VERSION="$VERSION" node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('npm-package/package.json', 'utf8'));
             pkg.version = process.env.VERSION;
+            pkg.files = (pkg.files || []).filter((f) => f !== 'dist/ui');
             fs.writeFileSync('npm-package/package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
         shell: bash
+
+      - name: Prepare UI npm package (@vibedeckx/ui-dist)
+        if: matrix.platform == 'linux-x64'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version tag: $VERSION" >&2
+            exit 1
+          fi
+          mkdir -p npm-ui-dist
+          cp packages/vibedeckx-ui-dist/package.json npm-ui-dist/
+          cp -r apps/vibedeckx-ui/out npm-ui-dist/ui
+          VERSION="$VERSION" node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('npm-ui-dist/package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('npm-ui-dist/package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+        shell: bash
+
+      - name: Upload npm UI package
+        if: matrix.platform == 'linux-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-ui-dist
+          path: npm-ui-dist/
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
@@ -230,6 +261,14 @@ jobs:
         with:
           pattern: npm-*
           path: npm-packages
+
+      # Publish the UI package first: the platform packages' runtime download
+      # expects @vibedeckx/ui-dist@<version> to exist once they are installable.
+      - name: Publish @vibedeckx/ui-dist
+        run: npm publish --access public
+        working-directory: npm-packages/npm-ui-dist
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Publish each platform package
       - name: Publish @vibedeckx/linux-x64

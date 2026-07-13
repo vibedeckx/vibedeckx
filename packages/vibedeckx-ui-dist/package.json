@@ -1,0 +1,7 @@
+{
+  "name": "@vibedeckx/ui-dist",
+  "version": "0.1.0",
+  "description": "Vibedeckx web UI static assets (served by the vibedeckx server; not needed on remote workers)",
+  "type": "module",
+  "files": ["ui"]
+}

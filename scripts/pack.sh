@@ -150,14 +150,18 @@ if [ "$MODE" = "npm-platform" ]; then
   echo "==> Creating npm platform package ($PLATFORM)..."
   stage_platform
 
-  # Remove sourcemap (excluded from npm publish)
+  # Remove sourcemap and UI (excluded from npm publish — the UI ships as
+  # @vibedeckx/ui-dist and is downloaded at runtime by the server; remote
+  # workers never need it). The platform archive keeps dist/ui baked in.
   rm -f dist/bin.js.map
+  rm -rf dist/ui
 
   # Set version (keep scoped name and no bin — matches what CI publishes)
   node -e "
     const fs = require('fs');
     const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
     pkg.version = '${VERSION}';
+    pkg.files = (pkg.files || []).filter((f) => f !== 'dist/ui');
     fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
   "
 
@@ -196,14 +200,33 @@ if [ "$MODE" = "npm-platform" ]; then
 
   cd "$WRAPPER_DIR"
   npm pack --pack-destination "$OUT_DIR" 2>&1 | tail -1
-  rm -rf "$OUT_DIR/staging"
 
   echo "    Output: $OUT_DIR/vibedeckx-${VERSION}.tgz"
+
+  # Also build the UI package (identical to what CI publishes as '@vibedeckx/ui-dist')
+  echo ""
+  echo "==> Creating UI package (@vibedeckx/ui-dist)..."
+  UI_DIST_DIR="$OUT_DIR/staging/ui-dist"
+  mkdir -p "$UI_DIST_DIR"
+  cp "$ROOT_DIR/packages/vibedeckx-ui-dist/package.json" "$UI_DIST_DIR/"
+  cp -r "$ROOT_DIR/apps/vibedeckx-ui/out" "$UI_DIST_DIR/ui"
+  node -e "
+    const fs = require('fs');
+    const pkg = JSON.parse(fs.readFileSync('$UI_DIST_DIR/package.json', 'utf8'));
+    pkg.version = '${VERSION}';
+    fs.writeFileSync('$UI_DIST_DIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
+  "
+  cd "$UI_DIST_DIR"
+  npm pack --pack-destination "$OUT_DIR" 2>&1 | tail -1
+  cd "$ROOT_DIR"
+  rm -rf "$OUT_DIR/staging"
+
+  echo "    Output: $OUT_DIR/vibedeckx-ui-dist-${VERSION}.tgz"
 
   echo ""
   echo "==> To test the full npm install flow locally:"
   echo "    npm install $OUT_DIR/vibedeckx-${VERSION}.tgz $OUT_DIR/vibedeckx-${PLATFORM}-${VERSION}.tgz"
-  echo "    npx vibedeckx"
+  echo "    npx vibedeckx    # server: add $OUT_DIR/vibedeckx-ui-dist-${VERSION}.tgz or let it download the UI"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import type { FastifyRequest, FastifyReply, FastifyBaseLogger } from "fastify";
 import { fastifyStatic } from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyMultipart from "@fastify/multipart";
+import fs from "node:fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { Storage } from "./storage/types.js";
@@ -107,7 +108,17 @@ export interface TLSOptions {
   clientCA?: string | Buffer;
 }
 
-export const createServer = async (opts: { storage: Storage; authEnabled?: boolean; acceptRemote?: boolean; noLocalProjects?: boolean; tls?: TLSOptions }) => {
+export const createServer = async (opts: {
+  storage: Storage;
+  authEnabled?: boolean;
+  acceptRemote?: boolean;
+  noLocalProjects?: boolean;
+  tls?: TLSOptions;
+  // Directory of UI static assets. undefined = use the baked-in dist/ui if it
+  // exists (legacy default); null = API-only, no UI served (reverse-connect
+  // workers, --no-ui). Resolved by resolveUiRoot() in command.ts.
+  uiRoot?: string | null;
+}) => {
   const authEnabled = opts.authEnabled ?? false;
   const acceptRemote = opts.acceptRemote ?? false;
   const noLocalProjects = opts.noLocalProjects ?? false;
@@ -123,10 +134,18 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     }
   }
 
-  const UI_ROOT = path.join(
+  const bakedUiRoot = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "./ui"
   );
+  // undefined keeps the legacy behavior (serve the baked dist/ui when present);
+  // @fastify/static throws on a missing root, so absence must resolve to null.
+  const UI_ROOT =
+    opts.uiRoot !== undefined
+      ? opts.uiRoot
+      : fs.existsSync(bakedUiRoot)
+        ? bakedUiRoot
+        : null;
 
   // maxParamLength: remote session IDs are ~117 chars (remote-{serverId}-{projectId}-{sessionId}),
   // which exceeds find-my-way's default limit of 100, causing silent 404s on route matching.
@@ -324,11 +343,13 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
   server.register(crossRemoteTargetRoutes);
   server.register(crossRemoteMcpRoutes);
 
-  // 提供静态 UI 文件
-  server.register(fastifyStatic, {
-    root: UI_ROOT,
-    wildcard: false,
-  });
+  // 提供静态 UI 文件（reverse-connect worker / --no-ui 模式下不提供）
+  if (UI_ROOT) {
+    server.register(fastifyStatic, {
+      root: UI_ROOT,
+      wildcard: false,
+    });
+  }
 
   // Catch errors in hooks/handlers (Fastify default logger is disabled, so errors are silent)
   server.addHook("onError", (req, _reply, error, done) => {
@@ -344,6 +365,16 @@ export const createServer = async (opts: { storage: Storage; authEnabled?: boole
     }
     if (req.url.startsWith("/api/")) {
       return reply.code(404).send({ error: "Not found" });
+    }
+    if (!UI_ROOT) {
+      return reply
+        .code(404)
+        .type("text/plain")
+        .send(
+          "Vibedeckx is running in API-only mode (no UI assets installed).\n" +
+            "Install the UI with: npm install -g @vibedeckx/ui-dist\n" +
+            "or point --ui-dir / VIBEDECKX_UI_DIR at a UI build directory."
+        );
     }
     return reply.status(200).sendFile("index.html");
   });

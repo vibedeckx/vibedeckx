@@ -36,6 +36,7 @@ pnpm --filter vibedeckx test
 ## Monorepo Structure
 
 - `packages/vibedeckx/` — Backend: Fastify server + CLI (`@stricli/core`), published as npm package
+- `packages/vibedeckx-ui-dist/` — Template for the `@vibedeckx/ui-dist` npm package (UI static assets, populated at release time from `apps/vibedeckx-ui/out`)
 - `apps/vibedeckx-ui/` — Frontend: Next.js 16 with React 19, static export (`output: "export"`)
 - Package manager: **pnpm** with workspaces (`pnpm-workspace.yaml`)
 
@@ -43,7 +44,7 @@ pnpm --filter vibedeckx test
 
 ### Backend (`packages/vibedeckx/src/`)
 
-**Server** (`server.ts`): Fastify with CORS, optional API key auth (`VIBEDECKX_API_KEY` env var), WebSocket support, and static file serving of the bundled UI. The cross-remote MCP gateway (letting an agent on one remote diagnose another) requires `VIBEDECKX_PUBLIC_URL` — the SaaS server's publicly reachable base URL (e.g. `https://app.example.com`). Without it no session-scoped token is minted and no `--mcp-config` is injected, so the feature stays off.
+**Server** (`server.ts`): Fastify with CORS, optional API key auth (`VIBEDECKX_API_KEY` env var), WebSocket support, and static file serving of the bundled UI. UI assets resolve via `ui-root.ts` in priority order: `--ui-dir`/`VIBEDECKX_UI_DIR` → baked `dist/ui` (Docker/platform archives, monorepo dev) → installed `@vibedeckx/ui-dist` → `~/.vibedeckx/ui/<version>` cache → one-time npm download of `@vibedeckx/ui-dist@<version>` (lockstep version). The npm platform packages (`@vibedeckx/<platform>`) ship without `dist/ui` and sourcemaps so remote-worker installs stay small; a missing UI degrades to API-only mode (`--no-ui` forces it; reverse-connect workers always run API-only). The cross-remote MCP gateway (letting an agent on one remote diagnose another) requires `VIBEDECKX_PUBLIC_URL` — the SaaS server's publicly reachable base URL (e.g. `https://app.example.com`). Without it no session-scoped token is minted and no `--mcp-config` is injected, so the feature stays off.
 
 **Storage** (`storage/`): SQLite via `better-sqlite3` with WAL mode. Database at `~/.vibedeckx/data.sqlite`. Schema auto-created on startup. `Storage` interface in `types.ts`, implementation in `sqlite.ts`. Entities: projects, executor_groups, executors, executor_processes, agent_sessions, tasks.
 

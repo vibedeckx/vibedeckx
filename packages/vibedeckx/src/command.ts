@@ -3,6 +3,7 @@ import path from "node:path";
 import { buildApplication, buildCommand, buildRouteMap } from "@stricli/core";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import { createServer, type TLSOptions } from "./server.js";
+import { resolveUiRoot } from "./ui-root.js";
 import { ReverseConnectClient } from "./reverse-connect-client.js";
 import { DEFAULT_PORT, VIBEDECKX_HOME } from "./constants.js";
 import { setupLogging, shutdownLogging } from "./logger.js";
@@ -97,6 +98,17 @@ const startCommand = buildCommand({
         brief: "Log level: trace, debug, info, warn, error, fatal, silent (default: info). Env: VIBEDECKX_LOG_LEVEL. Logs are written to <data-dir>/logs/ with daily/10MB rotation.",
         optional: true,
       },
+      "ui-dir": {
+        kind: "parsed",
+        parse: String,
+        brief: "Directory of UI static assets to serve (default: bundled dist/ui, installed @vibedeckx/ui-dist, or a one-time download cached in ~/.vibedeckx/ui). Env: VIBEDECKX_UI_DIR",
+        optional: true,
+      },
+      "no-ui": {
+        kind: "boolean",
+        brief: "Serve the API only; skip UI assets entirely (no lookup, no download)",
+        optional: true,
+      },
     },
   },
   func: async (flags: {
@@ -113,6 +125,8 @@ const startCommand = buildCommand({
     key: string | undefined;
     "client-ca": string | undefined;
     "log-level": string | undefined;
+    "ui-dir": string | undefined;
+    "no-ui": boolean | undefined;
   }) => {
     const dataDir = flags["data-dir"] ?? VIBEDECKX_HOME;
     setupLogging({ dataDir, level: flags["log-level"] });
@@ -161,16 +175,19 @@ const startCommand = buildCommand({
 
     console.log(`Starting vibedeckx${acceptRemote ? " (accepting remote clients)" : ""}${tls ? " (HTTPS)" : ""}...`);
 
+    const uiRoot = await resolveUiRoot({ uiDir: flags["ui-dir"], noUi: flags["no-ui"] });
+
     const dbPath = path.join(dataDir, "data.sqlite");
     const storage = await createSqliteStorage(dbPath);
-    const server = await createServer({ storage, authEnabled, acceptRemote, noLocalProjects, tls });
+    const server = await createServer({ storage, authEnabled, acceptRemote, noLocalProjects, tls, uiRoot });
 
     const url = await server.start(port, host);
     console.log(`Server running at ${url}`);
 
     // Skip auto-open when TLS is on: the cert is for the public domain,
-    // so https://localhost would just show a cert warning.
-    if (!tls) {
+    // so https://localhost would just show a cert warning. API-only mode has
+    // nothing to show in a browser either.
+    if (!tls && uiRoot) {
       await open(url);
     }
 
@@ -262,8 +279,10 @@ const connectCommand = buildCommand({
     const storage = await createSqliteStorage(dbPath);
     // Reverse-connect mode is inherently a remote-provider role: the inbound
     // server proxies requests through the tunnel into this instance, so the
-    // path-based endpoints must be exposed.
-    const server = await createServer({ storage, acceptRemote: true });
+    // path-based endpoints must be exposed. The UI is served by the upstream
+    // server, never through the tunnel — run API-only so the lean npm install
+    // (no dist/ui) works without downloading anything.
+    const server = await createServer({ storage, acceptRemote: true, uiRoot: null });
 
     // Start local server on localhost only (not publicly exposed)
     // Port 0 lets the OS pick a random available port
