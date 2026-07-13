@@ -336,7 +336,6 @@ const connectCommand = buildCommand({
     let server: Awaited<ReturnType<typeof createServer>> | undefined;
     let client: ReverseConnectClient | undefined;
     let ownedState: ConnectDaemonState | undefined;
-    let loggingStarted = false;
 
     const removeOwnedState = (): void => {
       if (!ownedState) return;
@@ -366,12 +365,11 @@ const connectCommand = buildCommand({
       } catch (error) {
         errors.push(error);
       }
-      if (loggingStarted) {
-        try {
-          await shutdownLogging();
-        } catch (error) {
-          errors.push(error);
-        }
+      // shutdownLogging is a no-op when file logging never started.
+      try {
+        await shutdownLogging();
+      } catch (error) {
+        errors.push(error);
       }
       return errors;
     };
@@ -385,7 +383,6 @@ const connectCommand = buildCommand({
         );
       }
 
-      loggingStarted = true;
       setupLogging({
         dataDir,
         level: flags["log-level"],
@@ -430,9 +427,7 @@ const connectCommand = buildCommand({
       console.log(`Connecting to ${flags["connect-to"]}...`);
     } catch (error) {
       const safeMessage = redactErrorSecret(error, token);
-      if (loggingStarted) {
-        console.error(`Error starting vibedeckx connect: ${safeMessage}`);
-      }
+      console.error(`Error starting vibedeckx connect: ${safeMessage}`);
       const cleanupErrors = await closeResources();
       if (childContext.isDaemonChild) notifyDaemonParentError(error);
       const cleanupMessages = cleanupErrors.map(
@@ -537,6 +532,6 @@ const routes = buildRouteMap({
 export const program = buildApplication(routes, {
   name: "vibedeckx",
   versionInfo: {
-    currentVersion: "0.1.0",
+    currentVersion: readPackageVersion(),
   },
 });
