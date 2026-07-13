@@ -135,7 +135,9 @@ At the end of each workspace row (before the row menu):
 
 - `merged` → muted gray check icon
 - `partial` / `unmerged` → amber count (`unmergedCount`)
-- `no-unique-commits` → no badge
+- `no-unique-commits` → faint gray equal icon ("in sync with target"; revised 2026-07-13 —
+  originally no badge, but that made a just-fast-forward-merged branch indistinguishable
+  from a not-yet-loaded row)
 - `dirty` → small dot overlaid on whatever badge is shown (including the check), meaning
   "uncommitted changes present"
 
