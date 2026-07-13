@@ -36,6 +36,25 @@ export function consumeDaemonChildEnvironment(env: NodeJS.ProcessEnv): {
   return { isDaemonChild: childMarker === "1", token };
 }
 
+export function resolveConnectToken(
+  flagToken: string | undefined,
+  child: { isDaemonChild: boolean; token: string | undefined },
+): string {
+  const token = flagToken ?? (child.isDaemonChild ? child.token : undefined);
+  if (!token) {
+    throw new Error("Missing required --token for vibedeckx connect");
+  }
+  return token;
+}
+
+export function assertConnectDaemonPlatform(
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== "linux") {
+    throw new Error("Vibedeckx connect daemon mode is only supported on Linux");
+  }
+}
+
 export interface StartConnectDaemonOptions {
   dataDir: string;
   connectTo: string;
@@ -332,9 +351,7 @@ function redactSecret(message: string, token: string): string {
 export async function startConnectDaemon(
   options: StartConnectDaemonOptions,
 ): Promise<StartedConnectDaemon> {
-  if ((options.platform ?? process.platform) !== "linux") {
-    throw new Error("Vibedeckx connect daemon mode is only supported on Linux");
-  }
+  assertConnectDaemonPlatform(options.platform);
 
   const inspection = inspectDaemonState(options.dataDir);
   if (inspection.kind === "running") {

@@ -18,6 +18,8 @@ import {
   readLinuxProcessStartTicks,
   removeDaemonStateIfOwned,
   removeVerifiedStaleState,
+  resolveConnectToken,
+  assertConnectDaemonPlatform,
   startConnectDaemon,
   stopConnectDaemon,
   type ConnectDaemonState,
@@ -207,6 +209,54 @@ describe("daemon child arguments and environment", () => {
     });
     expect(env[CONNECT_DAEMON_CHILD_ENV]).toBeUndefined();
     expect(env[CONNECT_DAEMON_TOKEN_ENV]).toBeUndefined();
+  });
+});
+
+describe("connect daemon runtime policy", () => {
+  it("prefers the explicit token flag over the daemon child token", () => {
+    expect(
+      resolveConnectToken("flag-secret", {
+        isDaemonChild: true,
+        token: "child-secret",
+      }),
+    ).toBe("flag-secret");
+  });
+
+  it("uses the internal token only for a daemon child", () => {
+    expect(
+      resolveConnectToken(undefined, {
+        isDaemonChild: true,
+        token: "child-secret",
+      }),
+    ).toBe("child-secret");
+  });
+
+  it("rejects a missing connect token", () => {
+    expect(() =>
+      resolveConnectToken(undefined, {
+        isDaemonChild: false,
+        token: undefined,
+      }),
+    ).toThrow("Missing required --token for vibedeckx connect");
+  });
+
+  it("does not expose an internal token to a non-child process", () => {
+    expect(() =>
+      resolveConnectToken(undefined, {
+        isDaemonChild: false,
+        token: "accidental-secret",
+      }),
+    ).toThrow("Missing required --token for vibedeckx connect");
+  });
+
+  it("accepts Linux for daemon management", () => {
+    expect(() => assertConnectDaemonPlatform("linux")).not.toThrow();
+  });
+
+  it("rejects daemon management on other platforms", () => {
+    expect(() => assertConnectDaemonPlatform("darwin")).toThrow(
+      "Vibedeckx connect daemon mode is only supported on Linux",
+    );
   });
 });
 

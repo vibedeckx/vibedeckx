@@ -7,6 +7,19 @@ import { resolveUiRoot } from "./ui-root.js";
 import { ReverseConnectClient } from "./reverse-connect-client.js";
 import { DEFAULT_PORT, VIBEDECKX_HOME } from "./constants.js";
 import { setupLogging, shutdownLogging } from "./logger.js";
+import {
+  assertConnectDaemonPlatform,
+  claimDaemonState,
+  consumeDaemonChildEnvironment,
+  describeConnectDaemon,
+  notifyDaemonParentError,
+  notifyDaemonParentReady,
+  removeDaemonStateIfOwned,
+  resolveConnectToken,
+  startConnectDaemon,
+  stopConnectDaemon,
+  type ConnectDaemonState,
+} from "./connect-daemon.js";
 import open from "open";
 
 function loadTLSOptions(flags: {
@@ -30,6 +43,24 @@ function loadTLSOptions(flags: {
     key: fs.readFileSync(keyPath),
     ...(clientCAPath && { clientCA: fs.readFileSync(clientCAPath) }),
   };
+}
+
+function readPackageVersion(): string {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version?: unknown };
+    return typeof parsed.version === "string" && parsed.version.length > 0
+      ? parsed.version
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function redactTokenFromError(error: unknown, token: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return token.length > 0 ? message.replaceAll(token, "[redacted]") : message;
 }
 
 const startCommand = buildCommand({
@@ -240,6 +271,12 @@ const connectCommand = buildCommand({
         kind: "parsed",
         parse: String,
         brief: "Authentication token for the reverse connection",
+        optional: true,
+      },
+      daemon: {
+        kind: "boolean",
+        brief: "Run in the background after initialization (Linux only)",
+        optional: true,
       },
       port: {
         kind: "parsed",
@@ -267,39 +304,142 @@ const connectCommand = buildCommand({
       },
     },
   },
-  func: async (flags: { "connect-to": string; token: string; port: number | undefined; "data-dir": string | undefined; "env-file": string | undefined; "log-level": string | undefined }) => {
+  func: async (flags: {
+    "connect-to": string;
+    token: string | undefined;
+    daemon: boolean | undefined;
+    port: number | undefined;
+    "data-dir": string | undefined;
+    "env-file": string | undefined;
+    "log-level": string | undefined;
+  }) => {
     const dataDir = flags["data-dir"] ?? VIBEDECKX_HOME;
-    setupLogging({ dataDir, level: flags["log-level"] });
+    const childContext = consumeDaemonChildEnvironment(process.env);
+    const token = resolveConnectToken(flags.token, childContext);
+
+    if (flags.daemon) {
+      const started = await startConnectDaemon({
+        dataDir,
+        connectTo: flags["connect-to"],
+        token,
+        argv: process.argv.slice(2),
+      });
+      console.log(
+        `Vibedeckx connect started in background (PID ${started.pid}).`,
+      );
+      console.log(`Target: ${started.target}`);
+      console.log(`Logs: ${started.logPath}`);
+      return;
+    }
 
     const requestedPort = flags.port ?? 0;
+    let storage:
+      | Awaited<ReturnType<typeof createSqliteStorage>>
+      | undefined;
+    let server: Awaited<ReturnType<typeof createServer>> | undefined;
+    let client: ReverseConnectClient | undefined;
+    let ownedState: ConnectDaemonState | undefined;
+    let loggingStarted = false;
 
-    console.log("Starting vibedeckx in reverse-connect mode...");
+    const removeOwnedState = (): void => {
+      if (!ownedState) return;
+      removeDaemonStateIfOwned(dataDir, ownedState);
+      ownedState = undefined;
+    };
 
-    const dbPath = path.join(dataDir, "data.sqlite");
-    const storage = await createSqliteStorage(dbPath);
-    // Reverse-connect mode is inherently a remote-provider role: the inbound
-    // server proxies requests through the tunnel into this instance, so the
-    // path-based endpoints must be exposed. The UI is served by the upstream
-    // server, never through the tunnel — run API-only so the lean npm install
-    // (no dist/ui) works without downloading anything.
-    const server = await createServer({ storage, acceptRemote: true, uiRoot: null });
+    const closeResources = async (): Promise<unknown[]> => {
+      const errors: unknown[] = [];
+      try {
+        client?.shutdown();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await server?.close();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        await storage?.close();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        removeOwnedState();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (loggingStarted) {
+        try {
+          await shutdownLogging();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      return errors;
+    };
 
-    // Start local server on localhost only (not publicly exposed)
-    // Port 0 lets the OS pick a random available port
-    const { instance, port: localPort } = await server.startLocal(requestedPort);
-    console.log(`Local server running on 127.0.0.1:${localPort}`);
+    try {
+      if (childContext.isDaemonChild) {
+        ownedState = claimDaemonState(
+          dataDir,
+          flags["connect-to"],
+          readPackageVersion(),
+        );
+      }
 
-    // Reverse-connect mode: the upstream vibedeckx server runs
-    // generateAndPushRemoteSessionTitle and PATCHes the resulting title back
-    // here, so locally generating one would waste tokens and emit a
-    // duplicate Langfuse trace with userId="local".
-    instance.agentSessionManager.suppressTitleGeneration = true;
+      loggingStarted = true;
+      setupLogging({ dataDir, level: flags["log-level"] });
+      console.log("Starting vibedeckx in reverse-connect mode...");
 
-    // Create and start the reverse-connect client
-    const client = new ReverseConnectClient(instance, flags["connect-to"], flags.token, localPort);
-    client.connect();
+      const dbPath = path.join(dataDir, "data.sqlite");
+      storage = await createSqliteStorage(dbPath);
+      // Reverse-connect mode is inherently a remote-provider role: the inbound
+      // server proxies requests through the tunnel into this instance, so the
+      // path-based endpoints must be exposed. The UI is served by the upstream
+      // server, never through the tunnel — run API-only so the lean npm install
+      // (no dist/ui) works without downloading anything.
+      server = await createServer({
+        storage,
+        acceptRemote: true,
+        uiRoot: null,
+      });
 
-    console.log(`Connecting to ${flags["connect-to"]}...`);
+      // Start local server on localhost only (not publicly exposed)
+      // Port 0 lets the OS pick a random available port
+      const { instance, port: localPort } =
+        await server.startLocal(requestedPort);
+      console.log(`Local server running on 127.0.0.1:${localPort}`);
+
+      // Reverse-connect mode: the upstream vibedeckx server runs
+      // generateAndPushRemoteSessionTitle and PATCHes the resulting title back
+      // here, so locally generating one would waste tokens and emit a
+      // duplicate Langfuse trace with userId="local".
+      instance.agentSessionManager.suppressTitleGeneration = true;
+
+      client = new ReverseConnectClient(
+        instance,
+        flags["connect-to"],
+        token,
+        localPort,
+      );
+      client.connect();
+      if (childContext.isDaemonChild) notifyDaemonParentReady();
+
+      console.log(`Connecting to ${flags["connect-to"]}...`);
+    } catch (error) {
+      const safeMessage = redactTokenFromError(error, token);
+      if (loggingStarted) {
+        console.error(`Error starting vibedeckx connect: ${safeMessage}`);
+      }
+      const cleanupErrors = await closeResources();
+      if (childContext.isDaemonChild) notifyDaemonParentError(error);
+      const cleanupMessages = cleanupErrors.map(
+        (cleanupError) =>
+          `cleanup failed: ${redactTokenFromError(cleanupError, token)}`,
+      );
+      throw new Error([safeMessage, ...cleanupMessages].join("; "));
+    }
 
     // Graceful shutdown
     let shuttingDown = false;
@@ -317,16 +457,13 @@ const connectCommand = buildCommand({
       }, 5000);
       forceExit.unref();
 
-      try {
-        client.shutdown();
-        await server.close();
-        await storage.close();
-      } catch (err) {
-        console.error("Error during shutdown:", err);
+      const cleanupErrors = await closeResources();
+      for (const error of cleanupErrors) {
+        process.stderr.write(
+          `Error during shutdown: ${redactTokenFromError(error, token)}\n`,
+        );
       }
-      // Last: flush buffered log lines to disk before the hard exit.
-      await shutdownLogging().catch(() => {});
-      process.exit(0);
+      process.exit(cleanupErrors.length === 0 ? 0 : 1);
     };
 
     process.on("SIGINT", cleanup);
@@ -337,10 +474,53 @@ const connectCommand = buildCommand({
   },
 });
 
+const connectManagementFlags = {
+  "data-dir": {
+    kind: "parsed" as const,
+    parse: String,
+    brief: "Daemon data directory (default: ~/.vibedeckx)",
+    optional: true as const,
+  },
+};
+
+const connectStatusCommand = buildCommand({
+  parameters: { flags: connectManagementFlags },
+  func: async (flags: { "data-dir": string | undefined }) => {
+    assertConnectDaemonPlatform();
+    const result = describeConnectDaemon(flags["data-dir"] ?? VIBEDECKX_HOME);
+    console.log(result.message);
+    process.exitCode = result.exitCode;
+  },
+  docs: { brief: "Show the connect daemon status" },
+});
+
+const connectStopCommand = buildCommand({
+  parameters: { flags: connectManagementFlags },
+  func: async (flags: { "data-dir": string | undefined }) => {
+    assertConnectDaemonPlatform();
+    const result = await stopConnectDaemon(
+      flags["data-dir"] ?? VIBEDECKX_HOME,
+    );
+    console.log(result.message);
+    process.exitCode = result.exitCode;
+  },
+  docs: { brief: "Stop the connect daemon" },
+});
+
+const connectRoutes = buildRouteMap({
+  routes: {
+    run: connectCommand,
+    status: connectStatusCommand,
+    stop: connectStopCommand,
+  },
+  defaultCommand: "run",
+  docs: { brief: "Connect to a Vibedeckx server as an inbound node" },
+});
+
 const routes = buildRouteMap({
   routes: {
     start: startCommand,
-    connect: connectCommand,
+    connect: connectRoutes,
   },
   defaultCommand: "start",
   docs: {
