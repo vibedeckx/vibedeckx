@@ -118,3 +118,87 @@ export function inspectDaemonState(dataDir: string): ConnectDaemonInspection {
     ? { kind: "running", state: parsed }
     : { kind: "stale", state: parsed };
 }
+
+export function claimDaemonState(
+  dataDir: string,
+  connectTo: string,
+  version: string,
+): ConnectDaemonState {
+  const processStartTicks = readLinuxProcessStartTicks(process.pid);
+  if (!processStartTicks) {
+    throw new Error(
+      `Cannot read Linux process start ticks for current PID ${process.pid}`,
+    );
+  }
+
+  const state: ConnectDaemonState = {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartTicks,
+    startedAt: new Date().toISOString(),
+    connectTo,
+    version,
+  };
+  const statePath = daemonStatePath(dataDir);
+  fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.dirname(statePath), 0o700);
+  fs.writeFileSync(statePath, `${JSON.stringify(state)}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  fs.chmodSync(statePath, 0o600);
+  return state;
+}
+
+export function removeDaemonStateIfOwned(
+  dataDir: string,
+  expected: ConnectDaemonState,
+): boolean {
+  const statePath = daemonStatePath(dataDir);
+
+  let current: unknown;
+  try {
+    current = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (
+    !isConnectDaemonState(current) ||
+    current.pid !== expected.pid ||
+    current.processStartTicks !== expected.processStartTicks
+  ) {
+    return false;
+  }
+
+  try {
+    fs.unlinkSync(statePath);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export function removeVerifiedStaleState(dataDir: string): boolean {
+  const inspection = inspectDaemonState(dataDir);
+  switch (inspection.kind) {
+    case "missing":
+      return false;
+    case "stale":
+      return removeDaemonStateIfOwned(dataDir, inspection.state);
+    case "running":
+      throw new Error(
+        `Vibedeckx connect daemon is already running (PID ${inspection.state.pid})`,
+      );
+    case "invalid":
+      throw new Error(
+        `Daemon state at ${inspection.path}: cannot safely remove it automatically (${inspection.reason})`,
+      );
+  }
+}
