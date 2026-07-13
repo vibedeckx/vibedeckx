@@ -221,3 +221,20 @@ target dispersion; dirty checked once per worktree per request; a deleted
 target errors only its own pair (its persisted key is cleared, then one
 fallback refetch). Transport failures now keep the previous badge state
 instead of clearing it.
+
+## Addendum (2026-07-13): Primary remote visibility
+
+For a remote-only project, merge status is computed against the project's
+explicit Primary remote. Primary is the first project-remote association in a
+normalized, unique `sort_order = 0..n-1`; Settings marks it with a `Primary`
+badge and exposes `Set as Primary` on every other remote. New remotes append,
+removing Primary promotes the next remote, and changing Primary preserves the
+relative order of the remaining remotes.
+
+The project merge-status route now returns a repository descriptor alongside
+the pair entries. A project with a local checkout returns `Local`; a
+remote-only project returns the selected Primary remote's server ID and name.
+The frontend uses this backend routing result directly, so badge tooltips state
+where the comparison actually ran, for example `In sync with main · Local` or
+`3 commits not in main · Remote A`. Same-project transport failures retain the
+last descriptor together with the badges; switching projects clears both.
