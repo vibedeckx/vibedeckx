@@ -401,14 +401,16 @@ describe("detached daemon startup", () => {
 
 describe("daemon parent notifications", () => {
   it("flushes readiness before disconnecting IPC", () => {
-    let sentCallback: (() => void) | undefined;
+    let sentCallback: ((error: Error | null) => void) | undefined;
     const parent = {
       pid: 4242,
       connected: true,
-      send: vi.fn((_message: unknown, callback: () => void) => {
-        sentCallback = callback;
-        return true;
-      }),
+      send: vi.fn(
+        (_message: unknown, callback: (error: Error | null) => void) => {
+          sentCallback = callback;
+          return true;
+        },
+      ),
       disconnect: vi.fn(),
     };
 
@@ -419,19 +421,21 @@ describe("daemon parent notifications", () => {
       expect.any(Function),
     );
     expect(parent.disconnect).not.toHaveBeenCalled();
-    sentCallback?.();
+    sentCallback?.(null);
     expect(parent.disconnect).toHaveBeenCalledOnce();
   });
 
   it("flushes a credential-free error message before disconnecting IPC", () => {
-    let sentCallback: (() => void) | undefined;
+    let sentCallback: ((error: Error | null) => void) | undefined;
     const parent = {
       pid: 4242,
       connected: true,
-      send: vi.fn((_message: unknown, callback: () => void) => {
-        sentCallback = callback;
-        return true;
-      }),
+      send: vi.fn(
+        (_message: unknown, callback: (error: Error | null) => void) => {
+          sentCallback = callback;
+          return true;
+        },
+      ),
       disconnect: vi.fn(),
     };
 
@@ -448,7 +452,7 @@ describe("daemon parent notifications", () => {
       expect.any(Function),
     );
     expect(parent.disconnect).not.toHaveBeenCalled();
-    sentCallback?.();
+    sentCallback?.(null);
     expect(parent.disconnect).toHaveBeenCalledOnce();
   });
 
