@@ -64,9 +64,38 @@ function isAncestor(repoPath: string, ancestor: string, descendant: string): boo
 }
 
 /**
+ * Tree-level containment: does `branch` add any content to `target`? Merge
+ * branch into target in memory; if the merged tree equals target's own tree,
+ * branch contributes nothing new and is fully merged.
+ *
+ * This backstops `git cherry`, which compares per-commit patch-ids (diffs) and
+ * so misses work that already lives in target once the diff changed — e.g. a
+ * rebase whose new base touched lines within the ~3-line diff context window
+ * (patch-id hashes context lines), or a squash merge (one commit, no matching
+ * patch-ids). A merge conflict means genuinely divergent content, so
+ * `merge-tree --write-tree` exits non-zero and we return false. Requires git
+ * >= 2.38; on any failure we return false and keep the conservative cherry
+ * result — this check only ever downgrades "unmerged/partial" to "merged", it
+ * never hides real unmerged work.
+ */
+function branchContentContainedInTarget(repoPath: string, branch: string, target: string): boolean {
+  try {
+    const mergedTree = git(repoPath, ["merge-tree", "--write-tree", target, branch])
+      .split("\n", 1)[0]
+      .trim();
+    const targetTree = revParse(repoPath, `${target}^{tree}`);
+    return targetTree !== null && mergedTree === targetTree;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Tiered detection: tip equality → merge-base ancestor (normal/ff merges) →
- * `git cherry` patch-ids (rebase / cherry-pick merges). Squash merges are a
- * known phase-1 limitation: they show as unmerged (conservative).
+ * `git cherry` patch-ids (rebase / cherry-pick merges) → `git merge-tree`
+ * content containment (catches rebases whose diff shifted and squash merges,
+ * which patch-ids miss). Each tier is cheaper than the next and only runs when
+ * the prior one is inconclusive.
  */
 export function computeBranchMergeStatus(
   repoPath: string,
@@ -100,6 +129,14 @@ export function computeBranchMergeStatus(
     else if (unmergedCount === 0) status = "merged";
     else if (unmergedCount < lines.length) status = "partial";
     else status = "unmerged";
+
+    // Tier 4: cherry (patch-id) misses rebases whose diff shifted and squash
+    // merges even when the content already lives in target. Confirm at the
+    // tree level before trusting an unmerged/partial verdict.
+    if (unmergedCount > 0 && branchContentContainedInTarget(repoPath, branch, target)) {
+      status = "merged";
+      unmergedCount = 0;
+    }
   }
 
   statusCache.set(cacheKey, { branchTip, targetTip, status, unmergedCount });

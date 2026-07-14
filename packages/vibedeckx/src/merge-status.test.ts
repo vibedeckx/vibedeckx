@@ -126,6 +126,42 @@ describe("merge-status", () => {
       });
     });
 
+    it("rebased onto a base that shifted only diff context => merged (tier 4)", () => {
+      // A change and a nearby-but-non-overlapping base edit. The rebased twin
+      // has a byte-identical change (`-line3 +FEATURE`) but a different context
+      // line, so its patch-id differs and `git cherry` flags it — yet the
+      // content is fully in target. merge-tree containment must catch this.
+      commit(repo, "f.txt", "line1\nline2\nline3\n", "seed file");
+      run(repo, ["checkout", "-b", "dev1"]);
+      commit(repo, "f.txt", "line1\nline2\nFEATURE\n", "dev edits line3");
+      const devTip = run(repo, ["rev-parse", "dev1"]).trim();
+      // target advances with an edit to line1 (nearby, no overlap), then takes
+      // the dev change as a rebased copy (new SHA, shifted context).
+      run(repo, ["checkout", "main"]);
+      commit(repo, "f.txt", "TARGET2\nline2\nline3\n", "main edits line1");
+      run(repo, ["cherry-pick", devTip]);
+      expect(run(repo, ["cherry", "main", "dev1"]).trim()).toMatch(/^\+/); // cherry alone misses it
+      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+        status: "merged",
+        unmergedCount: 0,
+      });
+    });
+
+    it("squash-merged branch => merged (tier 4)", () => {
+      run(repo, ["checkout", "-b", "dev1"]);
+      commit(repo, "a.txt", "a", "dev commit 1");
+      commit(repo, "b.txt", "b", "dev commit 2");
+      run(repo, ["checkout", "main"]);
+      run(repo, ["merge", "--squash", "dev1"]);
+      run(repo, ["commit", "-m", "squash dev1"]);
+      // Squash flattens both commits into one with no matching patch-ids, so
+      // cherry reports them unmerged; the resulting tree is identical.
+      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+        status: "merged",
+        unmergedCount: 0,
+      });
+    });
+
     it("some commits cherry-picked => partial with count", () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit 1");
