@@ -583,4 +583,13 @@ export async function generateAndPushRemoteSessionTitle(
     localSessionId,
     JSON.stringify({ titleUpdated: { title: finalTitle } }),
   );
+  // Announce globally too, so the sidebar picks up the title even when the
+  // user has navigated away from this session's workspace (the broadcast above
+  // only reaches the focused AgentConversation over its per-session WS).
+  deps.agentSessionManager.emitSessionTitle(
+    projectIdFromRemoteSessionId(localSessionId, remoteInfo),
+    remoteInfo.branch ?? null,
+    localSessionId,
+    finalTitle,
+  );
 }

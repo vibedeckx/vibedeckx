@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  mergeRefreshedSessions,
   updateResidentSessionTitle,
   upsertResidentSession,
   type ResidentSidebarSession,
@@ -64,5 +65,45 @@ describe("upsertResidentSession", () => {
       { ...previous, title: "Generated title" },
     ]);
     expect(updateResidentSessionTitle([previous], "missing", "Generated title")).toEqual([previous]);
+  });
+});
+
+describe("mergeRefreshedSessions", () => {
+  const base: ResidentSidebarSession = {
+    id: "s1",
+    projectId: "p1",
+    branch: "feature-a",
+    title: "New Session",
+    status: "running",
+    processAlive: true,
+    updated_at: "2026-07-14T00:00:00.000Z",
+  };
+
+  it("keeps a resolved title when a stale refresh returns the placeholder", () => {
+    // The race: a session:title event resolved the title, then a refresh that
+    // started before the backend persisted the title lands with the old
+    // placeholder. The merge must not revert the sidebar to "New Session".
+    const current = [{ ...base, title: "Add dark mode toggle" }];
+    const staleFetch = [{ ...base, title: "New Session" }];
+
+    expect(mergeRefreshedSessions(current, staleFetch)).toEqual([
+      { ...base, title: "Add dark mode toggle" },
+    ]);
+  });
+
+  it("adopts the fetched title when the refresh is the newer source", () => {
+    const current = [{ ...base, title: "New Session" }];
+    const freshFetch = [{ ...base, title: "Add dark mode toggle" }];
+
+    expect(mergeRefreshedSessions(current, freshFetch)).toEqual([
+      { ...base, title: "Add dark mode toggle" },
+    ]);
+  });
+
+  it("uses the fetched list for membership — drops gone, adds new", () => {
+    const current = [{ ...base, id: "gone", title: "Old title" }];
+    const fetched = [{ ...base, id: "s-new", title: "New Session" }];
+
+    expect(mergeRefreshedSessions(current, fetched)).toEqual(fetched);
   });
 });

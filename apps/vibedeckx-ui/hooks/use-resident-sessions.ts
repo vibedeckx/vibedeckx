@@ -30,6 +30,31 @@ export function upsertResidentSession(
   return copy;
 }
 
+/**
+ * Reconcile an authoritative `refresh()` result against the current state
+ * without downgrading a title that a `session:title` event has already
+ * resolved. A refresh started *before* the backend persisted the generated
+ * title returns the placeholder ("New Session"); if that stale response lands
+ * after the title event, a plain replace would revert the sidebar. The fetched
+ * list stays authoritative for membership (dropped/added sessions), we only
+ * keep the better title — mirrors `upsertResidentSession`'s guard. Titles are
+ * write-once server-side, so preferring a real title over the placeholder is
+ * always safe.
+ */
+export function mergeRefreshedSessions(
+  previous: ResidentSidebarSession[],
+  fetched: ResidentSidebarSession[],
+): ResidentSidebarSession[] {
+  const previousById = new Map(previous.map((session) => [session.id, session]));
+  return fetched.map((next) => {
+    const existing = previousById.get(next.id);
+    if (existing && next.title === "New Session" && existing.title !== "New Session") {
+      return { ...next, title: existing.title };
+    }
+    return next;
+  });
+}
+
 export function updateResidentSessionTitle(
   previous: ResidentSidebarSession[],
   sessionId: string,
@@ -76,7 +101,10 @@ export function useResidentSessions(
           }));
       }),
     );
-    setSessions(results.flat());
+    // Functional update so we reconcile against the freshest state: a
+    // `session:title` event that landed while this fetch was in flight must not
+    // be clobbered by the pre-title snapshot this request returned.
+    setSessions((prev) => mergeRefreshedSessions(prev, results.flat()));
   }, [branches, projectId]);
 
   useEffect(() => {
@@ -124,6 +152,16 @@ export function useResidentSessions(
           session.id === sessionId ? { ...session, status } : session,
         ),
       );
+    }
+    if (event.type === "session:title") {
+      // Global title channel: reaches the sidebar even when the user has
+      // navigated away from the session's workspace, so it no longer depends on
+      // that session's AgentConversation still being mounted (the per-session WS
+      // `titleUpdated` broadcast is lost the moment focus moves elsewhere).
+      const sessionId = typeof event.sessionId === "string" ? event.sessionId : null;
+      const title = typeof event.title === "string" ? event.title.trim() : "";
+      if (!sessionId || !title) return;
+      setSessions((prev) => updateResidentSessionTitle(prev, sessionId, title));
     }
   });
 

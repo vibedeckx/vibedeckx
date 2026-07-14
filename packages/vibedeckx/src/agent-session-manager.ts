@@ -155,6 +155,18 @@ export class AgentSessionManager {
   }
 
   /**
+   * Broadcast a freshly-generated title on the global event bus so the sidebar
+   * (`useResidentSessions`) updates regardless of which workspace is currently
+   * focused. The per-session WS `titleUpdated` broadcast only reaches the one
+   * mounted AgentConversation, which is lost when the user navigates to another
+   * workspace before the ~1-2s title generation completes. Used by both the
+   * local title path and the remote proxy path.
+   */
+  emitSessionTitle(projectId: string, branch: string | null, sessionId: string, title: string): void {
+    this.eventBus?.emit({ type: "session:title", projectId, branch, sessionId, title });
+  }
+
+  /**
    * Single emit path for `branch:activity` events. Derives the current
    * activity from local DB state (the source of truth — see
    * `computeBranchActivity`) and emits iff the value changed since the
@@ -2253,6 +2265,10 @@ export class AgentSessionManager {
       if (!dbRow || (dbRow.title !== null && dbRow.title !== undefined)) return;
       await this.storage.agentSessions.updateTitle(session.id, finalTitle);
       this.broadcastRaw(session.id, { titleUpdated: { title: finalTitle } });
+      // Also announce globally so the sidebar updates even when the user has
+      // navigated away from this session's workspace (the WS broadcast above
+      // only reaches the currently-focused AgentConversation).
+      this.emitSessionTitle(session.projectId, session.branch, session.id, finalTitle);
     } catch (error) {
       console.error(`[AgentSession] Failed to persist generated title for ${session.id}:`, error);
     }

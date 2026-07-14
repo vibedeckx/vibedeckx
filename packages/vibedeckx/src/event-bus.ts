@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 export type GlobalEvent =
   | { type: "session:status"; projectId: string; branch: string | null; sessionId: string; status: "running" | "stopped" | "error"; agentType?: string }
   | { type: "session:process"; projectId: string; branch: string | null; sessionId: string; alive: boolean }
+  | { type: "session:title"; projectId: string; branch: string | null; sessionId: string; title: string }
   | { type: "session:finished"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number; agentType?: string }
   | { type: "session:taskCompleted"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number; summaryText?: string }
   | { type: "branch:activity"; projectId: string; branch: string | null; activity: "idle" | "working" | "completed" | "stopped" | "main-running" | "main-completed"; since: number; sessionId?: string }
