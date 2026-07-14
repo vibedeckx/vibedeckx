@@ -1,8 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listBranchSessions, type BranchSessionSummary, type Worktree } from "@/lib/api";
-import { useGlobalEventStream } from "@/hooks/global-event-stream";
+import {
+  useConnectionStatus,
+  useGlobalEventStream,
+  type ConnectionState,
+} from "@/hooks/global-event-stream";
 
 export interface ResidentSidebarSession {
   id: string;
@@ -69,6 +73,22 @@ function sessionTitle(session: BranchSessionSummary): string {
   return session.title?.trim() || "New Session";
 }
 
+/**
+ * True only when the SSE stream just came back after having dropped — i.e. it
+ * was live at some point, went away, and is now live again. The EventBus→SSE
+ * path has no replay, so any `session:title` (or other) event emitted while the
+ * stream was down is lost; re-fetching on reconnect recovers it. Returns false
+ * on the very first connect (the mount refresh already covers that) and while
+ * merely re-rendering in the live state.
+ */
+export function isReconnectTransition(
+  previous: ConnectionState | null,
+  next: ConnectionState,
+  everLive: boolean,
+): boolean {
+  return next === "live" && everLive && previous !== "live";
+}
+
 export function useResidentSessions(
   projectId: string | null,
   worktrees: Worktree[] | undefined,
@@ -116,6 +136,24 @@ export function useResidentSessions(
       cancelled = true;
     };
   }, [refresh]);
+
+  // Recover from a dropped SSE stream: events (e.g. session:title) emitted
+  // while disconnected are gone for good (no replay), so re-fetch once the
+  // stream is live again. mergeRefreshedSessions keeps this non-destructive.
+  const { state: connectionState } = useConnectionStatus();
+  const prevConnRef = useRef<ConnectionState | null>(null);
+  const everLiveRef = useRef(false);
+  useEffect(() => {
+    const previous = prevConnRef.current;
+    prevConnRef.current = connectionState;
+    const reconnected = isReconnectTransition(previous, connectionState, everLiveRef.current);
+    if (connectionState === "live") everLiveRef.current = true;
+    if (reconnected) {
+      refresh().catch((error) =>
+        console.warn("[ResidentSessions] reconnect refresh failed:", error),
+      );
+    }
+  }, [connectionState, refresh]);
 
   useEffect(() => {
     if (!seedSession || !seedSession.processAlive) return;

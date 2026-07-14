@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isReconnectTransition,
   mergeRefreshedSessions,
   updateResidentSessionTitle,
   upsertResidentSession,
@@ -105,5 +106,27 @@ describe("mergeRefreshedSessions", () => {
     const fetched = [{ ...base, id: "s-new", title: "New Session" }];
 
     expect(mergeRefreshedSessions(current, fetched)).toEqual(fetched);
+  });
+});
+
+describe("isReconnectTransition", () => {
+  it("fires when the stream comes back after a drop", () => {
+    expect(isReconnectTransition("connecting", "live", true)).toBe(true);
+    expect(isReconnectTransition("stale", "live", true)).toBe(true);
+  });
+
+  it("does not fire on the very first connect (mount refresh covers it)", () => {
+    // Provider starts "connecting", then reaches "live" for the first time.
+    expect(isReconnectTransition("connecting", "live", false)).toBe(false);
+    expect(isReconnectTransition(null, "live", false)).toBe(false);
+  });
+
+  it("does not fire while merely re-rendering in the live state", () => {
+    expect(isReconnectTransition("live", "live", true)).toBe(false);
+  });
+
+  it("does not fire when going offline", () => {
+    expect(isReconnectTransition("live", "connecting", true)).toBe(false);
+    expect(isReconnectTransition("live", "stale", true)).toBe(false);
   });
 });
