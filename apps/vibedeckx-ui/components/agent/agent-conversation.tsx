@@ -721,11 +721,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             variant="ghost"
             size="icon"
             onClick={async () => {
-              console.log("[NewConv] click", { liveStatus: status, sessionStatus: session?.status, sessionId: session?.id });
-              if (status === "running") {
-                const ok = window.confirm("Current conversation is running. Stop it and start a new conversation?");
-                if (!ok) return;
-              }
+              // Multiple sessions can run concurrently per workspace, so opening a
+              // new conversation no longer stops the current one — `startNewConversation`
+              // just detaches this view and shows an empty placeholder. The running
+              // session keeps going in the background (reachable via session history).
               await startNewConversation();
               onNewConversation?.();
               // Drop ?session=<id> from the URL — the new conversation has no
