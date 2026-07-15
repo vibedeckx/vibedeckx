@@ -307,14 +307,19 @@ export function SessionHistoryDropdown({
                 if (editing) e.preventDefault();
                 else if (!isCurrent) onSwitch(s.id);
               }}
-              // While renaming, keep focus in the <Input>. Radix menu items
-              // focus themselves on pointer-move (see react-menu Item
-              // onPointerMove), which would blur the input the moment the
-              // cursor — already hovering this row after the pencil click —
-              // twitches. The item's own handler is gated on
-              // `!event.defaultPrevented`, so preventing default here suppresses
-              // the focus-steal across the whole row (padding included).
-              onPointerMove={editing ? (e) => e.preventDefault() : undefined}
+              // While a rename is in progress, keep focus in the <Input>. Radix
+              // menu items focus themselves on pointer-move (see react-menu Item
+              // onPointerMove), which would blur the input the moment the cursor
+              // twitches — over this row or over any other session row. The
+              // item's own handler is gated on `!event.defaultPrevented`, so
+              // preventing default on every row while `editingId` is set
+              // suppresses the focus-steal menu-wide (padding included).
+              onPointerMove={
+                editingId !== null ? (e) => e.preventDefault() : undefined
+              }
+              className={`flex items-center gap-2 group ${
+                isCurrent ? "bg-accent text-accent-foreground" : ""
+              }`}
             >
               <div className="flex-1 min-w-0">
                 {editing ? (
