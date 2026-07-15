@@ -85,6 +85,55 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return remoteInfo;
   }
 
+  // Branch a local session: verify the caller owns the source's project, copy
+  // its history into a new dormant session, and return the response payload.
+  // Shared by the UI route (`/api/agent-sessions/:id/branch`, which mints its
+  // own crossRemoteMcp) and the remote-provider route
+  // (`/api/path/agent-sessions/:id/branch`, which receives a center-minted one).
+  // `userId` is the raw requireAuth result — undefined in solo/api-key mode,
+  // which makes projects.getById unscoped (single-tenant) by design.
+  async function performLocalBranch(
+    sourceSessionId: string,
+    userId: string | undefined,
+    opts: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig },
+  ): Promise<
+    | { ok: true; payload: { session: Record<string, unknown>; messages: unknown[] } }
+    | { ok: false; code: number; error: string }
+  > {
+    const sourceRow = await fastify.storage.agentSessions.getById(sourceSessionId);
+    if (!sourceRow || !(await fastify.storage.projects.getById(sourceRow.project_id, userId))) {
+      return { ok: false, code: 404, error: "Session not found" };
+    }
+
+    const newSessionId = await fastify.agentSessionManager.branchSession(
+      sourceSessionId,
+      opts.agentType as AgentType | undefined,
+      { sessionId: opts.sessionId, crossRemoteMcp: opts.crossRemoteMcp },
+    );
+    if (!newSessionId) {
+      return { ok: false, code: 404, error: "Session not found or has no history to branch" };
+    }
+
+    const session = fastify.agentSessionManager.getSession(newSessionId);
+    const messages = fastify.agentSessionManager.getMessages(newSessionId);
+    const dbRow = await fastify.storage.agentSessions.getById(newSessionId);
+    return {
+      ok: true,
+      payload: {
+        session: {
+          id: newSessionId,
+          projectId: session?.projectId,
+          branch: session?.branch ?? null,
+          status: session?.status || "stopped",
+          permissionMode: session?.permissionMode || "edit",
+          agentType: session?.agentType || "claude-code",
+          title: dbRow?.title ?? null,
+        },
+        messages,
+      },
+    };
+  }
+
   // Broadcast a manual rename over the same `session:title` SSE channel the
   // AI-title path uses, so every open window (the sidebar's resident-session
   // list included) updates live instead of waiting for its next refetch. Both
@@ -993,53 +1042,81 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const { agentType } = (req.body || {}) as { agentType?: string };
 
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
       if (req.params.sessionId.startsWith("remote-")) {
-        const userId = requireAuth(req, reply);
-        if (userId === null) return;
         const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
+        const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
+        // Pre-generate the branch's id so we can mint a token bound to it before
+        // the remote creates the (dormant) branch — mirrors createRemoteAgentSession.
+        // The branch runs on the remote, which can't mint (no userId / no public
+        // URL), so the config must be minted here and passed down.
+        const newRemoteSessionId = randomUUID();
+        const localSessionId = `remote-${remoteInfo.remoteServerId}-${projectId}-${newRemoteSessionId}`;
+        const crossRemoteMcp = await mintCrossRemoteMcpConfig(
+          { storage: fastify.storage },
+          { userId, sessionId: localSessionId, sourceRemoteServerId: remoteInfo.remoteServerId },
+        );
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
           remoteInfo.remoteUrl,
           remoteInfo.remoteApiKey,
           "POST",
-          `/api/agent-sessions/${remoteInfo.remoteSessionId}/branch`,
-          { agentType }
+          `/api/path/agent-sessions/${remoteInfo.remoteSessionId}/branch`,
+          { agentType, sessionId: newRemoteSessionId, crossRemoteMcp }
         );
         if (!result.ok) {
           return reply.code(proxyStatus(result)).send(result.data);
         }
 
         const remoteData = result.data as { session: { id: string }; messages: unknown[] };
-        const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
-        const localSessionId = `remote-${remoteInfo.remoteServerId}-${projectId}-${remoteData.session.id}`;
+        if (remoteData.session.id !== newRemoteSessionId) {
+          // Older remote that ignored the supplied id (or lacks the path-branch
+          // route). The token we minted names a session that won't exist, so
+          // cross-remote calls would be rejected — fail closed and don't register.
+          return reply.code(409).send({ error: "Remote returned an unexpected session id; upgrade the remote" });
+        }
+        // Register the local handle. The in-memory set is first (so a later
+        // failure has something to roll back), but a throw in the DB write or
+        // any subsequent step must not leave a half-registered handle: the map
+        // entry would keep a session id "usable" to the gateway (isSessionUsable
+        // checks map presence) while the client, having gotten a 500, retries
+        // and creates a *second* branch on the remote. Clean up on any error,
+        // mirroring createRemoteAgentSession's rollback.
         fastify.remoteSessionMap.set(localSessionId, {
           remoteServerId: remoteInfo.remoteServerId,
           remoteUrl: remoteInfo.remoteUrl,
           remoteApiKey: remoteInfo.remoteApiKey,
-          remoteSessionId: remoteData.session.id,
+          remoteSessionId: newRemoteSessionId,
           branch: remoteInfo.branch ?? null,
         });
-        await fastify.storage.remoteSessionMappings.upsert(
-          localSessionId, projectId, remoteInfo.remoteServerId, remoteData.session.id, remoteInfo.branch ?? null,
-        );
-        // The remote already wrote the final "Branch - ..." title — claim both
-        // title-generation guards so the first message here doesn't clobber it.
-        await fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
-        fastify.agentSessionManager.markTitleResolved(localSessionId);
+        try {
+          await fastify.storage.remoteSessionMappings.upsert(
+            localSessionId, projectId, remoteInfo.remoteServerId, newRemoteSessionId, remoteInfo.branch ?? null,
+          );
+          // The remote already wrote the final "Branch - ..." title — claim both
+          // title-generation guards so the first message here doesn't clobber it.
+          await fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
+          fastify.agentSessionManager.markTitleResolved(localSessionId);
 
-        // Seed remotePatchCache with the copied messages so WS replay has data
-        // immediately (mirrors the create/findExisting proxy paths).
-        if (remoteData.messages && remoteData.messages.length > 0) {
-          const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
-          if (cacheEntry.messages.length === 0) {
-            for (let i = 0; i < remoteData.messages.length; i++) {
-              const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
-              fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
+          // Seed remotePatchCache with the copied messages so WS replay has data
+          // immediately (mirrors the create/findExisting proxy paths).
+          if (remoteData.messages && remoteData.messages.length > 0) {
+            const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
+            if (cacheEntry.messages.length === 0) {
+              for (let i = 0; i < remoteData.messages.length; i++) {
+                const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
+                fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
+              }
             }
           }
+        } catch (err) {
+          fastify.remoteSessionMap.delete(localSessionId);
+          throw err;
         }
 
         return reply.code(200).send({
@@ -1048,31 +1125,51 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      const newSessionId = await fastify.agentSessionManager.branchSession(
-        req.params.sessionId,
-        agentType as AgentType | undefined,
+      // Mint a cross-remote MCP config bound to the branch's own (pre-generated)
+      // session id, mirroring the New Conversation path — otherwise the dormant
+      // branch wakes and spawns with no --mcp-config and the gateway never appears.
+      const preSessionId = randomUUID();
+      const crossRemoteMcp = await mintCrossRemoteMcpConfig(
+        { storage: fastify.storage },
+        { userId, sessionId: preSessionId, sourceRemoteServerId: null },
       );
-      if (!newSessionId) {
-        return reply.code(404).send({ error: "Session not found or has no history to branch" });
-      }
 
-      const session = fastify.agentSessionManager.getSession(newSessionId);
-      const messages = fastify.agentSessionManager.getMessages(newSessionId);
-      const dbRow = await fastify.storage.agentSessions.getById(newSessionId);
-      return reply.code(200).send({
-        session: {
-          id: newSessionId,
-          projectId: session?.projectId,
-          branch: session?.branch ?? null,
-          status: session?.status || "stopped",
-          permissionMode: session?.permissionMode || "edit",
-          agentType: session?.agentType || "claude-code",
-          title: dbRow?.title ?? null,
-        },
-        messages,
+      const branched = await performLocalBranch(req.params.sessionId, userId, {
+        agentType,
+        sessionId: preSessionId,
+        crossRemoteMcp,
       });
+      if (!branched.ok) {
+        return reply.code(branched.code).send({ error: branched.error });
+      }
+      return reply.code(200).send(branched.payload);
     }
   );
+
+  // Path-based branch: the remote-provider target the center proxies to when a
+  // user branches a remote session. Gated to --accept-remote servers by the
+  // /api/path/ prefix hook, so only an api-key-authenticated center reaches it.
+  // The center pre-generates the branch id and mints a token bound to it, then
+  // passes both here — the remote must honour the supplied id (the center 409s
+  // on mismatch, mirroring /api/path/agent-sessions/new).
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig };
+  }>("/api/path/agent-sessions/:sessionId/branch", async (req, reply) => {
+    const { agentType, sessionId, crossRemoteMcp } = req.body || {};
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const branched = await performLocalBranch(req.params.sessionId, userId, {
+      agentType,
+      sessionId,
+      crossRemoteMcp,
+    });
+    if (!branched.ok) {
+      return reply.code(branched.code).send({ error: branched.error });
+    }
+    return reply.code(200).send(branched.payload);
+  });
 
   // Switch Agent Session permission mode
   fastify.post<{

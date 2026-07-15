@@ -2133,7 +2133,11 @@ export class AgentSessionManager {
    * Returns the new session id, or null when the source is unknown or has
    * no persisted history to copy.
    */
-  async branchSession(sourceSessionId: string, agentTypeOverride?: AgentType): Promise<string | null> {
+  async branchSession(
+    sourceSessionId: string,
+    agentTypeOverride?: AgentType,
+    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig } = {},
+  ): Promise<string | null> {
     const source = this.sessions.get(sourceSessionId);
     const sourceRow = await this.storage.agentSessions.getById(sourceSessionId);
     if (!source && !sourceRow) return null;
@@ -2154,7 +2158,7 @@ export class AgentSessionManager {
       ?? source?.agentType
       ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
 
-    const newId = randomUUID();
+    const newId = opts.sessionId ?? randomUUID();
     await this.storage.agentSessions.create({
       id: newId,
       project_id: projectId,
@@ -2210,6 +2214,7 @@ export class AgentSessionManager {
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
+      crossRemoteMcp: opts.crossRemoteMcp,
     };
     this.sessions.set(newId, branched);
 
