@@ -59,6 +59,17 @@ export function mergeRefreshedSessions(
   });
 }
 
+/**
+ * Resolve the display title carried by a `session:title` event. A real title is
+ * trimmed and used as-is; a null/empty title (the user cleared the name) falls
+ * back to the default placeholder so the clear reflects in the sidebar live
+ * rather than lingering on the stale title until the next refetch.
+ */
+export function residentTitleFromEvent(rawTitle: unknown): string {
+  const trimmed = typeof rawTitle === "string" ? rawTitle.trim() : "";
+  return trimmed || "New Session";
+}
+
 export function updateResidentSessionTitle(
   previous: ResidentSidebarSession[],
   sessionId: string,
@@ -197,9 +208,10 @@ export function useResidentSessions(
       // that session's AgentConversation still being mounted (the per-session WS
       // `titleUpdated` broadcast is lost the moment focus moves elsewhere).
       const sessionId = typeof event.sessionId === "string" ? event.sessionId : null;
-      const title = typeof event.title === "string" ? event.title.trim() : "";
-      if (!sessionId || !title) return;
-      setSessions((prev) => updateResidentSessionTitle(prev, sessionId, title));
+      if (!sessionId) return;
+      setSessions((prev) =>
+        updateResidentSessionTitle(prev, sessionId, residentTitleFromEvent(event.title)),
+      );
     }
   });
 

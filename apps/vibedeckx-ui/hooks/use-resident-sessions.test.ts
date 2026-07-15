@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isReconnectTransition,
   mergeRefreshedSessions,
+  residentTitleFromEvent,
   updateResidentSessionTitle,
   upsertResidentSession,
   type ResidentSidebarSession,
@@ -66,6 +67,23 @@ describe("upsertResidentSession", () => {
       { ...previous, title: "Generated title" },
     ]);
     expect(updateResidentSessionTitle([previous], "missing", "Generated title")).toEqual([previous]);
+  });
+});
+
+describe("residentTitleFromEvent", () => {
+  it("uses a real title as-is (trimmed)", () => {
+    expect(residentTitleFromEvent("  Add dark mode  ")).toBe("Add dark mode");
+  });
+
+  it("falls back to the default when the title is cleared to null", () => {
+    // A manual rename to blank persists as null and broadcasts title=null; the
+    // sidebar must show the default placeholder live, not keep the old title.
+    expect(residentTitleFromEvent(null)).toBe("New Session");
+  });
+
+  it("falls back to the default for an empty/whitespace title", () => {
+    expect(residentTitleFromEvent("")).toBe("New Session");
+    expect(residentTitleFromEvent("   ")).toBe("New Session");
   });
 });
 

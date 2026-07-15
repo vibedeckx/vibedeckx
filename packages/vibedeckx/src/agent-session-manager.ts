@@ -162,7 +162,7 @@ export class AgentSessionManager {
    * workspace before the ~1-2s title generation completes. Used by both the
    * local title path and the remote proxy path.
    */
-  emitSessionTitle(projectId: string, branch: string | null, sessionId: string, title: string): void {
+  emitSessionTitle(projectId: string, branch: string | null, sessionId: string, title: string | null): void {
     this.eventBus?.emit({ type: "session:title", projectId, branch, sessionId, title });
   }
 

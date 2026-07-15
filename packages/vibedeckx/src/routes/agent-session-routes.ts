@@ -85,6 +85,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return remoteInfo;
   }
 
+  // Broadcast a manual rename over the same `session:title` SSE channel the
+  // AI-title path uses, so every open window (the sidebar's resident-session
+  // list included) updates live instead of waiting for its next refetch. Both
+  // the local and remote-proxy branches funnel through here to keep the emit
+  // shape identical. `sessionId` MUST be the local id — the wrapped `remote-…`
+  // id for remote sessions — since the sidebar keys off wrapped ids. A null
+  // title tells the client to fall back to the default name.
+  function broadcastRenamedTitle(
+    sessionId: string,
+    projectId: string,
+    branch: string | null,
+    title: string | null,
+  ): void {
+    fastify.agentSessionManager.emitSessionTitle(projectId, branch, sessionId, title);
+  }
+
   // List available agent providers
   fastify.get("/api/agent-providers", async (_req, reply) => {
     const providers = getAllProviders().map((provider) => ({
@@ -1248,6 +1264,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (title !== null && (typeof title !== "string" || title.length > 200)) {
       return reply.code(400).send({ error: "title must be null or a string up to 200 chars" });
     }
+    // Normalize once so persistence, the proxied remote write, and the live
+    // `session:title` broadcast all agree on the same value: empty/whitespace
+    // collapses to null, which the client renders as the default "New Session".
+    const normalizedTitle = title && title.trim().length > 0 ? title.trim() : null;
 
     if (req.params.sessionId.startsWith("remote-")) {
       const userId = requireAuth(req, reply);
@@ -1260,15 +1280,33 @@ const routes: FastifyPluginAsync = async (fastify) => {
         remoteInfo.remoteApiKey,
         "PATCH",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/title`,
-        { title }
+        { title: normalizedTitle }
       );
+      // The remote write persists on its node and emits `session:title` on the
+      // remote's bus — which this browser never sees, and whose raw id wouldn't
+      // match the sidebar's wrapped id anyway. Re-emit locally (once the proxy
+      // succeeds) with the LOCAL wrapped id so the sidebar updates live.
+      if (result.ok) {
+        broadcastRenamedTitle(
+          req.params.sessionId,
+          projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
+          remoteInfo.branch ?? null,
+          normalizedTitle
+        );
+      }
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
     const session = await fastify.storage.agentSessions.getById(req.params.sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
-    await fastify.storage.agentSessions.updateTitle(req.params.sessionId, title);
-    return reply.code(200).send({ success: true, title });
+    await fastify.storage.agentSessions.updateTitle(req.params.sessionId, normalizedTitle);
+    broadcastRenamedTitle(
+      req.params.sessionId,
+      session.project_id,
+      session.branch,
+      normalizedTitle
+    );
+    return reply.code(200).send({ success: true, title: normalizedTitle });
   });
 
   fastify.patch<{
