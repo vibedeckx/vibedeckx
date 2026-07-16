@@ -1,6 +1,6 @@
 # Global Search & Quick Switcher — Design
 
-Date: 2026-07-16 (revised same day after external design review)
+Date: 2026-07-16 (revised twice same day after external design review rounds)
 Status: approved direction, pending implementation plan
 
 ## Problem
@@ -60,12 +60,22 @@ Search capability grows in independent layers, each shippable on its own:
   In-flight requests are aborted on new input (AbortController) so a stale
   response can never overwrite a newer query's results.
 - A failed search request shows an error row with retry — not an empty
-  "No results" state.
-- Jumping reuses the existing navigation machinery — no routing changes:
+  "No results" state. A cold or refreshing cache (`cacheState` from the API,
+  below) shows a "syncing history…" hint instead of "No results".
+- Jumping reuses the existing navigation machinery — no URL-schema changes:
   - Project → `onSelectProject` + `buildUrl("/p/:id/...")`
   - Workspace → same + `?branch=` (lib/url-state.ts)
   - Session → same + the orthogonal `?session=<id>` param
     (`app/page.tsx` history.replaceState mechanism).
+- **Cross-target navigation**: search results carry `targetId`
+  (`"local"` or a remote server id). If a result's target differs from the
+  project's current `agent_mode`, the click handler first PATCHes the project
+  (`agent_mode` update — existing PUT route supports it), awaits success, then
+  switches branch/session. This keeps `agent_mode` the single source of truth
+  for which worker a project talks to, matching how the list proxy resolves it
+  today. Putting the target into the URL state (stable deep links to a
+  specific worker) is a future enhancement — it would need reconciliation
+  rules between URL and persisted `agent_mode` and is out of v1 scope.
 - Component: `components/search/quick-switcher.tsx`, mounted in `app/page.tsx`
   (it needs the selection callbacks that live there). Global `keydown` listener
   follows the pattern of the sidebar's Cmd+B toggle (`components/ui/sidebar.tsx`).
@@ -81,14 +91,23 @@ call per (project path):
 ```
 {
   snapshotAt: number,
-  workspaces: [{ branch, updatedAt }],          // from git worktree enumeration
+  workspaces: [{ branch }],                     // from git worktree enumeration
   sessions:   [{ id, branch, title, lastActiveAt, favoritedAt, entryCount }]
 }
 ```
 
-- `workspaces` comes from the same worktree enumeration the sidebar uses, so
-  worktrees **without** sessions are searchable too (the session-derived-only
-  approach missed them).
+- `workspaces` comes from the same worktree enumeration the sidebar uses
+  (`getWorktreeBranches`), so worktrees **without** sessions are searchable
+  too (the session-derived-only approach missed them). No `updatedAt` — git
+  worktree enumeration doesn't provide one; workspace ranking falls back to
+  branch-name ordering within a match tier (a recency signal can later be
+  derived from session activity on the branch).
+- **Branch sentinel convention**: the API uses `branch: null` for the main
+  workspace (matching `getWorktreeBranches`); the DB uses the empty-string
+  `""` sentinel (matching the existing `agent_sessions` convention). The
+  repository layer converts at the boundary in both directions — no other
+  layer may do its own conversion. Main-workspace rows must round-trip
+  (upsert, search, navigate) under test.
 - `sessions` applies the same `shouldShowBranchSessionInList` filtering as the
   dropdown (hide empty sessions).
 - Full snapshot per call — no cursor/`updatedAfter` in v1 (payload is a few KB
@@ -105,50 +124,84 @@ URL → proxy resolution); reconciling a search cache must never delete mapping
 rows that old session URLs depend on. New tables:
 
 ```
-remote_session_cache
+session_search_cache
   local_session_id TEXT PRIMARY KEY
   project_id TEXT NOT NULL
-  remote_server_id TEXT NOT NULL
-  branch TEXT
+  target_id TEXT NOT NULL           -- "local" or remote server id
+  branch TEXT NOT NULL              -- "" sentinel for main
   title TEXT
   last_active_at INTEGER
   favorited_at INTEGER
   entry_count INTEGER
-  last_seen_at INTEGER NOT NULL     -- last snapshot that contained this row
-  deleted_at INTEGER                -- set when absent from a newer snapshot
+  generation INTEGER NOT NULL      -- snapshot generation that last contained this row
+  deleted_at INTEGER               -- set when absent from a newer snapshot
 
-remote_workspace_cache
+workspace_search_cache
   project_id TEXT NOT NULL
-  remote_server_id TEXT NOT NULL
-  branch TEXT NOT NULL
-  updated_at INTEGER
-  last_seen_at INTEGER NOT NULL
+  target_id TEXT NOT NULL           -- "local" or remote server id
+  branch TEXT NOT NULL              -- "" sentinel for main
+  generation INTEGER NOT NULL
   deleted_at INTEGER
-  PRIMARY KEY (project_id, remote_server_id, branch)
+  PRIMARY KEY (project_id, target_id, branch)
+
+search_catalog_sync_state
+  project_id TEXT NOT NULL
+  target_id TEXT NOT NULL
+  last_success_at INTEGER
+  last_attempt_at INTEGER
+  snapshot_generation INTEGER NOT NULL DEFAULT 0
+  last_error TEXT
+  PRIMARY KEY (project_id, target_id)
 ```
 
-`remote_server_id` is part of workspace identity because a project can have
+`workspace_search_cache.target_id` covers **both local and remote**: local
+worktree enumeration spawns git subprocesses, so it runs during refresh and is
+cached like remote data — `GET /api/search` reads only the database.
+`session_search_cache` holds **remote targets only** in v1: local sessions
+already live in this same database (`agent_sessions`) and are UNIONed into the
+search query directly — copying them into the cache would be pointless
+double-writing. (The `target_id` column keeps the generic name so local rows
+can be added later if that ever changes.) `target_id` is part of workspace identity because a project can have
 multiple remotes configured (`project_remotes` is UNIQUE(project_id,
 remote_server_id)); cached rows from a previously-active remote must not
 collide with the current one. Favorited state for remote sessions lives on the
 worker (the favorite route proxies), so it must be cached here for the
 empty-query favorites view.
 
+**Sync state is per (project, target), not per row.** Row-level timestamps
+cannot represent "successfully synced an empty catalog" (no rows to stamp) or
+distinguish it from "never synced" — the TTL check reads
+`search_catalog_sync_state.last_success_at`. Reconciliation is
+generation-based, in one transaction after a **fully successful** catalog
+fetch: bump `snapshot_generation`, upsert snapshot rows with the new
+generation (clearing `deleted_at` on rows that reappear), mark rows of the
+same (project, target) with an older generation as deleted, update
+`last_success_at`. A timeout, partial failure, or parse failure records
+`last_attempt_at`/`last_error` and **never runs deletion reconciliation**.
+
 Opportunistic freshness: wherever titles/favorites already transit the server
 (list proxy, title PATCH proxy, `session:title` events), update the cache rows
-in passing.
+in passing (without touching generation).
 
 ### Refresh: explicit, singleflight, never on the search path
 
-- `GET /api/search?q=` is **cache-only** — it never triggers proxy traffic.
+- `GET /api/search?q=` is **cache-only** — it never triggers proxy traffic or
+  subprocesses.
 - `POST /api/search/refresh` is called once when the palette opens. Per
-  (project, remote) it applies a TTL (~30 s, skip if fresh) and singleflight
-  (concurrent refreshes coalesce). Fan-out to the user's remotes runs in
-  parallel with a per-worker timeout (2 s); the endpoint returns when done
-  (bounded by the timeout), and the frontend re-queries once on completion —
-  no SSE/versioning machinery needed for v1.
-- Proxy failures during refresh are logged and skipped; cache stays stale.
-  Stale titles are cosmetically harmless for navigation.
+  (project, target) it applies a TTL (~30 s against
+  `sync_state.last_success_at`, skip if fresh) and singleflight (concurrent
+  refreshes coalesce). Fan-out is **grouped by worker** — many projects can
+  point at the same worker, so concurrency is capped per worker (e.g. 3
+  catalog calls in flight) with a per-call timeout (2 s) and an **overall
+  refresh deadline** (~5 s) after which the endpoint returns with whatever
+  completed. The frontend re-queries once on completion — no SSE/versioning
+  machinery needed for v1.
+- The refresh (and search) response includes `cacheState: cold | stale |
+  fresh` derived from sync state, so the palette can distinguish "still
+  syncing" from "genuinely no results".
+- Proxy failures during refresh are logged into `sync_state.last_error` and
+  skipped; cache stays stale. Stale titles are cosmetically harmless for
+  navigation.
 - Offline workers: their sessions remain searchable by cached title; jumping
   into one shows the existing "remote unavailable" behavior.
 
@@ -162,10 +215,12 @@ Sources (all filtered by the authenticated user's projects — `requireAuth` +
 endpoint, exactly the shape where authz bugs have happened before):
 
 - **Projects**: `projects.name` / `projects.path`.
-- **Workspaces**: `remote_workspace_cache` (remote) + distinct branches from
-  local `agent_sessions` + local worktree enumeration for local projects.
-- **Sessions**: local `agent_sessions.title` + `remote_session_cache.title`,
+- **Workspaces**: `workspace_search_cache` (local + remote targets alike).
+- **Sessions**: local `agent_sessions` UNION `session_search_cache` (remote),
   excluding `deleted_at` rows.
+- Remote-target rows are **joined against `project_remotes`** so caches for a
+  remote that has since been unlinked from the project drop out of results
+  automatically (self-healing; no unlink-time cleanup hook required).
 
 Query handling:
 
@@ -182,10 +237,16 @@ Query handling:
 ### Testing
 
 - Repository: vitest unit tests for the search query (tier ranking, tenant
-  scoping, LIKE-wildcard escaping, empty-query recents, deleted_at exclusion)
-  and snapshot reconciliation (upsert, mark-deleted, mapping table untouched).
+  scoping, LIKE-wildcard escaping, empty-query recents, deleted_at exclusion,
+  unlinked-remote rows excluded via project_remotes join, main-workspace ""
+  sentinel round-trip) and snapshot reconciliation (upsert, generation-based
+  mark-deleted, reappearing rows clear deleted_at, **failed/partial snapshot
+  never deletes**, empty snapshot updates sync state, mapping table untouched).
 - Routes: authz test — user A must not see user B's projects/sessions in
-  results; refresh singleflight/TTL behavior.
+  results; refresh singleflight/TTL behavior; cacheState cold vs fresh.
+- Frontend: stale-request cancellation (old response must not overwrite newer
+  query), cross-target navigation (agent_mode PATCH before branch/session
+  switch), main-workspace navigation from a search result.
 - Manual e2e: palette open latency with a remote project configured; second
   query reflects refreshed titles; worker offline → cached results still shown.
 
@@ -223,8 +284,11 @@ so message hits don't add noise and latency to navigation.
   3 chars cannot use the trigram index; whether to allow them via `LIKE` over
   the documents table (a scan) or enforce a 3-char minimum is decided by
   benchmark on realistic data, not assumed.
-- **Worker endpoint**: `GET /api/search/content?q=` returning matches with
-  local rank and `snippet()` highlights.
+- **Worker endpoint**: `POST /api/search/content` (query in the body, not the
+  URL — search terms are user content and must not land in access logs, proxy
+  logs, or monitoring; responses carry `Cache-Control: no-store` and the query
+  body is excluded from request logging). Returns matches with local rank and
+  `snippet()` highlights.
 - **Federation & merging**: front server fans out through the existing
   reverse-connect tunnels (persistent — one RTT), 1–2 s per-worker timeout.
   Raw BM25 scores are **not comparable across workers** (corpus-dependent
@@ -262,9 +326,12 @@ Gets its own spec; requirements that spec must cover:
 ## Implementation order (v1)
 
 1. Worker catalog endpoint (`/api/path/search-catalog`) + local in-process
-   equivalent.
-2. Server cache tables + snapshot reconciliation + refresh endpoint
-   (singleflight/TTL) + tests.
-3. Cache-only `GET /api/search` (ranking tiers, escaping, authz) + tests.
-4. Quick Switcher palette + Cmd+K wiring + navigation glue + e2e pass.
+   equivalent (branch sentinel conversion at the repository boundary).
+2. Server cache tables + sync-state table + generation-based reconciliation +
+   refresh endpoint (singleflight/TTL, per-worker concurrency cap, overall
+   deadline) + tests.
+3. Cache-only `GET /api/search` (ranking tiers, escaping, authz,
+   project_remotes join, cacheState) + tests.
+4. Quick Switcher palette + Cmd+K wiring + navigation glue (incl. cross-target
+   agent_mode switch) + e2e pass.
 5. v1.5, v2, v3 as separate specs/plans when scheduled.
