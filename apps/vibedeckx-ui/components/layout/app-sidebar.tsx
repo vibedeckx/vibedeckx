@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -220,6 +221,13 @@ export function AppSidebar({
   onScheduleSelect,
   onCreateScheduleOpen,
 }: AppSidebarProps) {
+  const selectedProjectRef = useRef<HTMLButtonElement | null>(null);
+
+  // Keep the current project visible in the scrollable projects list
+  useEffect(() => {
+    selectedProjectRef.current?.scrollIntoView({ block: "nearest" });
+  }, [currentProject?.id, projects]);
+
   return (
     <nav className="w-[220px] border-r border-border bg-sidebar flex flex-col overflow-hidden">
       {/* Projects Section */}
@@ -247,6 +255,7 @@ export function AppSidebar({
                   <Tooltip key={project.id}>
                     <TooltipTrigger asChild>
                       <button
+                        ref={isSelected ? selectedProjectRef : undefined}
                         onClick={() => {
                           onSelectProject?.(project);
                           onViewChange("project-info");
