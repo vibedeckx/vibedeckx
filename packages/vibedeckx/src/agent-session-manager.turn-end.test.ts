@@ -29,8 +29,13 @@ function fixture(name: string): string {
 }
 
 function makeHarness() {
+  // status: "stopped" — liveSession() below uses restoreSessionsFromDb() purely
+  // as a session-construction helper (then flips dormant/status/turnOpenSince
+  // in memory to simulate a live process). A "running" DB row would instead
+  // trip the restore-time crash-repair gate (agent-session-manager.restore-repair.test.ts),
+  // which is unrelated to what these turn_end-on-live-paths tests exercise.
   const row: AgentSession = {
-    id: SESSION_ID, project_id: "p1", branch: "main", status: "running",
+    id: SESSION_ID, project_id: "p1", branch: "main", status: "stopped",
     permission_mode: "edit", agent_type: "claude-code", title: "t",
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
     last_user_message_at: 1, last_completed_at: null,

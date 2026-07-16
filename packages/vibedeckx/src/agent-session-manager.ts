@@ -2114,6 +2114,39 @@ export class AgentSessionManager {
   }
 
   /**
+   * Crash repair (restore path): if the previous process died mid-turn, the
+   * history has no closing turn_end — append one with outcome
+   * "server_restart" and no duration (the crash time is unknown; the UI
+   * shows "interrupted" instead of a fabricated number). Runs BEFORE
+   * rebuildStoreFromRows so the store is built from the repaired rows.
+   * The other constructor of turn_end entries is endActiveTurn (live paths).
+   */
+  private async repairInterruptedTurn(
+    sessionId: string,
+    rows: Array<{ entry_index: number; data: string }>,
+  ): Promise<Array<{ entry_index: number; data: string }>> {
+    // Scan past trailing system entries (e.g. the hibernate note lands after
+    // the turn's turn_end).
+    let landing: AgentMessage | null = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      try {
+        const msg = JSON.parse(rows[i].data) as AgentMessage;
+        if (msg.type === "system") continue;
+        landing = msg;
+      } catch { /* unparsable row — treat as content, repair below */ }
+      break;
+    }
+    if (landing === null || landing.type === "turn_end") return rows;
+
+    const maxIndex = rows.reduce((m, r) => Math.max(m, r.entry_index), -1);
+    const repair: AgentMessage = { type: "turn_end", timestamp: Date.now(), outcome: "server_restart" };
+    const data = JSON.stringify(repair);
+    await this.storage.agentSessions.upsertEntry(sessionId, maxIndex + 1, data);
+    console.log(`[AgentSession] Repaired interrupted turn for ${sessionId} (server_restart turn_end at ${maxIndex + 1})`);
+    return [...rows, { entry_index: maxIndex + 1, data }];
+  }
+
+  /**
    * Restore sessions from database on startup.
    * Creates dormant RunningSession objects with process=null for sessions that have entries.
    */
@@ -2125,9 +2158,17 @@ export class AgentSessionManager {
       // Skip sessions already in memory
       if (this.sessions.has(dbSession.id)) continue;
 
-      const entries = await this.storage.agentSessions.getEntries(dbSession.id);
+      let entries = await this.storage.agentSessions.getEntries(dbSession.id);
       // Skip sessions with no entries (stale metadata)
       if (entries.length === 0) continue;
+
+      // Only sessions the crash left as "running" can hold an interrupted
+      // turn. The gate also keeps pre-feature (marker-less, cleanly stopped)
+      // histories untouched and makes repair idempotent — this run resets
+      // the row to "stopped" below.
+      if (dbSession.status === "running") {
+        entries = await this.repairInterruptedTurn(dbSession.id, entries);
+      }
 
       const store = this.rebuildStoreFromRows(entries, dbSession.id);
 
