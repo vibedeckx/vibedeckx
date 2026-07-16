@@ -704,29 +704,34 @@ export class AgentSessionManager {
         await this.commitCompletion(session, action.payload);
       }
 
-      session.status = code === 0 ? "stopped" : "error";
-      if (!session.skipDb) {
-        this.storage.agentSessions.updateStatus(session.id, session.status).catch((err) => {
-          console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
-        });
-      }
-
       // A non-zero exit with no agent output means the process never really
       // started — most often the agent isn't installed (and the npx fallback
       // couldn't run/download it). The "error" handler already reports ENOENT;
       // for other startup failures, surface a friendly hint here.
       if (code !== 0 && !spawnFailed && !session.producedOutput) {
-        // Sync event-callback boundary (EventEmitter ignores returned promises):
-        // fire-and-forget with .catch so a persist failure can't become an
-        // unhandled rejection. persistEntry also swallows storage errors
-        // internally, so ordering vs the broadcasts below is best-effort only —
-        // matching the pre-refactor intent (surface the hint, then finish).
-        this.pushEntry(session.id, {
-          type: "error",
-          message: this.buildStartupFailureMessage(session.agentType, stderrTail),
-          timestamp: Date.now(),
-        }, true).catch((err) => {
+        // Awaited so the error entry lands before the final status broadcast
+        // (turn_end/status ordering guarantee). Persistence errors are still
+        // swallowed inside persistEntry; this only fixes ordering.
+        try {
+          await this.pushEntry(session.id, {
+            type: "error",
+            message: this.buildStartupFailureMessage(session.agentType, stderrTail),
+            timestamp: Date.now(),
+          }, true);
+        } catch (err) {
           console.error(`[AgentSession] Failed to push startup-failure entry for ${session.id}:`, err);
+        }
+      }
+
+      // Stop point for a turn the process took down with it. If a held
+      // completion just committed above, endActiveTurn already ran inside
+      // commitCompletion and this is a no-op.
+      await this.endActiveTurn(session, "process_exit");
+
+      session.status = code === 0 ? "stopped" : "error";
+      if (!session.skipDb) {
+        this.storage.agentSessions.updateStatus(session.id, session.status).catch((err) => {
+          console.error(`[AgentSession] Failed to update status for ${session.id}:`, err);
         });
       }
 
@@ -1140,6 +1145,7 @@ export class AgentSessionManager {
         if (event.subtype === "error") {
           // A failed turn never dings — discard any held completion candidate.
           this.applyCompletionTimerAction(session, session.completion.errorResult());
+          await this.endActiveTurn(session, "failed");
           // The turn is over even though it failed — without this the UI
           // keeps a perpetual "running" dot after an error result.
           if (session.status !== "stopped") {
@@ -1593,6 +1599,10 @@ export class AgentSessionManager {
         content: "Session stopped by user.",
         timestamp: Date.now(),
       });
+
+      // Stop point: user interrupted the turn. Written after the visible
+      // system note so the divider closes the turn's rendering.
+      await this.endActiveTurn(session, "stopped");
 
       // Mark as dormant so the next message triggers wakeDormantSession
       // (which spawns a new process and replays the full conversation context).

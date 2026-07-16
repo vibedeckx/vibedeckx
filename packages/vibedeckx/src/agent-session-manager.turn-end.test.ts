@@ -123,4 +123,25 @@ describe("turn_end on turn completion", () => {
     expect(ctx).toContain("done");
     expect(ctx).not.toContain("turn_end");
   });
+
+  it("stopSession writes turn_end (outcome=stopped) after the system entry and before status:stopped", async () => {
+    const { storage, ops, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await liveSession(manager, Date.now() - 1000);
+
+    await manager.stopSession(SESSION_ID);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].outcome).toBe("stopped");
+    expect(ops.indexOf("entry:system")).toBeLessThan(ops.indexOf("entry:turn_end"));
+    expect(ops.indexOf("entry:turn_end")).toBeLessThan(ops.indexOf("status:stopped"));
+  });
+
+  it("hibernateSession / switch paths write no turn_end (turnOpenSince already null)", async () => {
+    const { storage, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await liveSession(manager, null); // between turns
+    await manager.stopSession(SESSION_ID); // any stop transition with no open turn
+    expect(turnEnds).toHaveLength(0);
+  });
 });
