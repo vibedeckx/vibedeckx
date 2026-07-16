@@ -2127,16 +2127,18 @@ export class AgentSessionManager {
   ): Promise<Array<{ entry_index: number; data: string }>> {
     // Scan past trailing system entries (e.g. the hibernate note lands after
     // the turn's turn_end).
-    let landing: AgentMessage | null = null;
+    let landingType: string | null = null; // null = no non-system row found
     for (let i = rows.length - 1; i >= 0; i--) {
       try {
         const msg = JSON.parse(rows[i].data) as AgentMessage;
         if (msg.type === "system") continue;
-        landing = msg;
-      } catch { /* unparsable row — treat as content, repair below */ }
+        landingType = msg.type;
+      } catch {
+        landingType = "unparsable"; // corrupted tail write — treat as content, repair
+      }
       break;
     }
-    if (landing === null || landing.type === "turn_end") return rows;
+    if (landingType === null || landingType === "turn_end") return rows;
 
     const maxIndex = rows.reduce((m, r) => Math.max(m, r.entry_index), -1);
     const repair: AgentMessage = { type: "turn_end", timestamp: Date.now(), outcome: "server_restart" };

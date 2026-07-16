@@ -86,4 +86,17 @@ describe("restore-time turn repair", () => {
     await new AgentSessionManager(h.storage).restoreSessionsFromDb();
     expect(h.upserts).toHaveLength(0);
   });
+
+  it("repairs when the landing row is unparsable (truncated tail write from a hard kill)", async () => {
+    const h = makeHarness("running", [
+      entry(0, { type: "user", content: "go", timestamp: 1 }),
+      { session_id: "s1", entry_index: 1, data: "{truncated" }, // corrupted tail — crash signature
+    ]);
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+
+    const turnEnds = h.upserts.filter((u) => u.msg.type === "turn_end");
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].index).toBe(2); // maxIndex + 1
+    expect((turnEnds[0].msg as { outcome?: string }).outcome).toBe("server_restart");
+  });
 });

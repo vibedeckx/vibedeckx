@@ -26,11 +26,16 @@ function fixture(name: string): string {
 }
 
 function makeHarness(agentType: string = "claude-code") {
+  // status: "stopped" — liveSession() below uses restoreSessionsFromDb() purely
+  // as a session-construction helper (then flips dormant/status/turnOpenSince
+  // in memory to simulate a live process). A "running" DB row would instead
+  // trip the restore-time crash-repair gate (agent-session-manager.restore-repair.test.ts),
+  // which is unrelated to what these completion-wiring tests exercise.
   const row: AgentSession = {
     id: SESSION_ID,
     project_id: "p1",
     branch: "main",
-    status: "running",
+    status: "stopped",
     permission_mode: "edit",
     agent_type: agentType,
     title: "already titled",
@@ -194,6 +199,10 @@ describe("agent-session-manager turn completion wiring", () => {
     (getProvider("codex") as CodexProvider).getSessionState(SESSION_ID).threadId = mainThreadId;
     try {
       const { feed } = await liveSession(manager);
+      // Simulate the live-turn DB state (the harness seeds "stopped" to stay
+      // clear of the restore-time crash-repair gate); the assertions below
+      // check phase 1 does NOT write "stopped" and phase 2 does.
+      row.status = "running";
 
       await feed(phase1.join("\n") + "\n");
       await settle(GRACE_MS * 5);
