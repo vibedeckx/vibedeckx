@@ -16,7 +16,7 @@ import { useSchedules } from '@/hooks/use-schedules';
 import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
-import { Plus } from 'lucide-react';
+import { Plus, Search } from 'lucide-react';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
 import { SettingsView } from '@/components/settings/settings-view';
 import { RemoteServersSettings } from '@/components/settings/remote-servers-settings';
@@ -640,6 +640,15 @@ Please proceed step by step and let me know if there are any issues or conflicts
             </h1>
           </div>
           <div className="flex items-center gap-2.5">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Search projects, workspaces, and sessions"
+              title="Search (⌘K / Ctrl+K)"
+              onClick={() => setSwitcherOpen(true)}
+            >
+              <Search className="h-4 w-4" />
+            </Button>
             <ConnectionStatusIndicator />
             <CompletionNotificationsMenu
               notifications={notifications}
