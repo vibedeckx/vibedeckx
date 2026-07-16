@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
 import { useAgentSession } from "@/hooks/use-agent-session";
 import { useSurfaceCommanderSession } from "@/hooks/use-surface-commander-session";
 import type { AgentMessage, ContentPart, UploadedPaste, AgentSession } from "@/hooks/use-agent-session";
@@ -42,7 +42,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
-import { BranchMenu } from "./branch-menu";
+import { TurnEndDivider } from "./turn-end-divider";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
@@ -321,11 +321,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   };
 
   const [isBranching, setIsBranching] = useState(false);
-  const handleBranch = async (branchAgentType?: AgentType) => {
+  const handleBranch = async (branchAgentType?: AgentType, upToEntryIndex?: number) => {
     if (!session || isBranching) return;
     setIsBranching(true);
     try {
-      const result = await branchAgentSession(session.id, branchAgentType);
+      const result = await branchAgentSession(session.id, branchAgentType, upToEntryIndex);
       // Refresh the session dropdown so the "Branch - ..." entry shows up,
       // then switch this window to the new session.
       setTitleRefreshKey((k) => k + 1);
@@ -342,6 +342,15 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     ?? (agentType === "codex" ? "Codex" : "Claude Code");
   const availableBranchProviders = providers.filter((p) => p.available);
   const alternateBranchProviders = availableBranchProviders.filter((p) => p.type !== agentType);
+
+  // Last persisted turn_end — rendered with "normal" emphasis as the
+  // discoverable tail affordance; earlier stop points render "subtle".
+  const lastTurnEndIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.type === "turn_end") return i;
+    }
+    return -1;
+  }, [messages]);
 
   const handleQuote = useCallback((text: string) => {
     setInput(appendQuote(input, text));
@@ -794,16 +803,30 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   tabIndex={-1}
                   onKeyDown={onMarkerKeyDown}
                 >
-                  {messages.map((msg, index) => (
-                    <div
-                      key={index}
-                      data-message-idx={index}
-                      {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
-                      className="scroll-mt-2"
-                    >
-                      <AgentMessageItem message={msg} messageIndex={index} />
-                    </div>
-                  ))}
+                  {messages.map((msg, index) =>
+                    msg?.type === "turn_end" ? (
+                      <TurnEndDivider
+                        key={index}
+                        durationMs={msg.durationMs}
+                        outcome={msg.outcome}
+                        emphasis={index === lastTurnEndIndex ? "normal" : "subtle"}
+                        agentType={agentType}
+                        currentAgentName={currentAgentName}
+                        alternateProviders={alternateBranchProviders}
+                        onBranch={(t) => handleBranch(t, index)}
+                        disabled={isBranching}
+                      />
+                    ) : (
+                      <div
+                        key={index}
+                        data-message-idx={index}
+                        {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
+                        className="scroll-mt-2"
+                      >
+                        <AgentMessageItem message={msg} messageIndex={index} />
+                      </div>
+                    )
+                  )}
                   {isLoading && (
                     <div className="flex items-center gap-2 py-4 text-muted-foreground">
                       <Loader className="h-4 w-4" />
@@ -811,21 +834,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     </div>
                   )}
                 </div>
-                {/* Post-run actions — shown once the agent has finished (status
-                    back to stopped with history present). Branch copies the
-                    conversation into a new session, optionally under a
-                    different coding agent. */}
-                {session && status !== "running" && !isLoading && messages.length > 0 && (
-                  <div className="mt-3 border-t border-border/50 pt-1.5 pb-1">
-                    <BranchMenu
-                      agentType={session?.agentType ?? agentType}
-                      currentAgentName={currentAgentName}
-                      alternateProviders={alternateBranchProviders}
-                      onBranch={(t) => handleBranch(t)}
-                      disabled={isBranching}
-                    />
-                  </div>
-                )}
               </AgentConversationContext.Provider>
             )}
 

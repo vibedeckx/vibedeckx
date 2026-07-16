@@ -112,6 +112,9 @@ function renderBody(message: AgentMessage, messageIndex: number) {
         </div>
       );
 
+    case "turn_end":
+      return null; // rendered by agent-conversation as TurnEndDivider
+
     default:
       return null;
   }
