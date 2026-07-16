@@ -1,6 +1,10 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
-import { computeMergeStatusPairs, type MergeComparison } from "../merge-status.js";
+import {
+  computeMergeStatusPairs,
+  type MergeComparison,
+  type MergeStatusPairEntry,
+} from "../merge-status.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
@@ -14,6 +18,46 @@ import type { Project } from "../storage/types.js";
 export type MergeStatusRepository =
   | { kind: "local"; label: "Local" }
   | { kind: "remote"; remoteServerId: string; label: string };
+
+export type TargetSource = "request" | "stored" | "default";
+
+export interface ProjectMergeStatusPairEntry extends MergeStatusPairEntry {
+  targetSource: TargetSource;
+  requestedTarget: string | null;
+}
+
+function resolveTargets(
+  comparisons: MergeComparison[],
+  storedTargets: Map<string, string>,
+): { comparisons: MergeComparison[]; sources: TargetSource[] } {
+  const sources: TargetSource[] = [];
+  const effective = comparisons.map((comparison) => {
+    if (comparison.target !== undefined) {
+      sources.push("request");
+      return comparison;
+    }
+    const storedTarget = storedTargets.get(comparison.branch);
+    if (storedTarget !== undefined) {
+      sources.push("stored");
+      return { branch: comparison.branch, target: storedTarget };
+    }
+    sources.push("default");
+    return comparison;
+  });
+  return { comparisons: effective, sources };
+}
+
+function annotateEntries(
+  entries: MergeStatusPairEntry[],
+  comparisons: MergeComparison[],
+  sources: TargetSource[],
+): ProjectMergeStatusPairEntry[] {
+  return entries.map((entry, index) => ({
+    ...entry,
+    targetSource: sources[index],
+    requestedTarget: comparisons[index]?.target ?? entry.target,
+  }));
+}
 
 function legacyRemoteLabel(remoteUrl: string): string {
   try {
@@ -123,6 +167,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: "Invalid comparisons" });
       }
 
+      const storedTargets = await fastify.storage.mergeTargets.getForBranches(
+        project.id,
+        comparisons.map(({ branch }) => branch),
+      );
+      const resolved = resolveTargets(comparisons, storedTargets);
+
       if (!project.path) {
         const remoteConfig = await getRemoteConfig(fastify, project);
         if (!remoteConfig) {
@@ -134,29 +184,41 @@ const routes: FastifyPluginAsync = async (fastify) => {
           remoteConfig.apiKey,
           "POST",
           "/api/path/branches/merge-status",
-          { path: remoteConfig.remotePath, comparisons },
+          { path: remoteConfig.remotePath, comparisons: resolved.comparisons },
           { reverseConnectManager: fastify.reverseConnectManager },
         );
         if (!result.ok) {
           return reply.code(proxyStatus(result)).send(result.data);
         }
         const data = result.data as { entries?: unknown };
+        if (!Array.isArray(data.entries) || data.entries.length !== resolved.comparisons.length) {
+          return reply.code(502).send({ error: "Remote merge-status entry count mismatch" });
+        }
         return reply.code(200).send({
           repository: {
             kind: "remote",
             remoteServerId: remoteConfig.serverId,
             label: remoteConfig.serverName,
           } satisfies MergeStatusRepository,
-          entries: data.entries ?? [],
+          entries: annotateEntries(
+            data.entries as MergeStatusPairEntry[],
+            resolved.comparisons,
+            resolved.sources,
+          ),
         });
       }
 
-      return sendComputed(
-        reply,
-        project.path,
-        comparisons,
-        { kind: "local", label: "Local" },
-      );
+      try {
+        const entries = computeMergeStatusPairs(project.path, resolved.comparisons);
+        return reply.code(200).send({
+          repository: { kind: "local", label: "Local" } satisfies MergeStatusRepository,
+          entries: annotateEntries(entries, resolved.comparisons, resolved.sources),
+        });
+      } catch (error) {
+        const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
+        const message = error instanceof Error ? error.message : "Failed to compute merge status";
+        return reply.code(statusCode).send({ error: message });
+      }
     },
   );
 

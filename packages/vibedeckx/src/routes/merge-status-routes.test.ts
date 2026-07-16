@@ -40,6 +40,8 @@ describe("merge-status repository descriptor", () => {
     writeFileSync(path.join(repo, "base.txt"), "base");
     run(repo, ["add", "."]);
     run(repo, ["commit", "-m", "base"]);
+    run(repo, ["branch", "feature"]);
+    run(repo, ["branch", "release"]);
 
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "local", name: "Local project", path: repo });
@@ -115,6 +117,148 @@ describe("merge-status repository descriptor", () => {
     const response = await postBatch("remote");
     expect(response.statusCode).toBe(503);
     expect(response.json()).toEqual({ error: "remote unavailable" });
+  });
+
+  describe("stored merge-target resolution", () => {
+    const postComparisons = (projectId: string, comparisons: Array<{
+      branch: string;
+      target?: string;
+    }>) => app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/branches/merge-status`,
+      payload: { comparisons },
+    });
+
+    it("annotates a bare comparison with its resolved default target", async () => {
+      const response = await postComparisons("local", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().entries[0]).toMatchObject({
+        branch: "feature",
+        target: "main",
+        targetSource: "default",
+        requestedTarget: "main",
+      });
+    });
+
+    it("resolves and annotates a stored target", async () => {
+      await storage.mergeTargets.upsert("local", "feature", "release");
+
+      const response = await postComparisons("local", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().entries[0]).toMatchObject({
+        branch: "feature",
+        target: "release",
+        targetSource: "stored",
+        requestedTarget: "release",
+      });
+    });
+
+    it("gives an explicit request target precedence over a stored target", async () => {
+      await storage.mergeTargets.upsert("local", "feature", "ghost");
+
+      const response = await postComparisons("local", [
+        { branch: "feature", target: "main" },
+      ]);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().entries[0]).toMatchObject({
+        branch: "feature",
+        target: "main",
+        targetSource: "request",
+        requestedTarget: "main",
+      });
+    });
+
+    it("preserves a missing stored target in metadata without deleting it", async () => {
+      await storage.mergeTargets.upsert("local", "feature", "ghost");
+
+      const response = await postComparisons("local", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().entries[0]).toEqual({
+        branch: "feature",
+        target: null,
+        error: "target-not-found",
+        targetSource: "stored",
+        requestedTarget: "ghost",
+      });
+      expect(await storage.mergeTargets.getForBranches("local", ["feature"]))
+        .toEqual(new Map([["feature", "ghost"]]));
+    });
+
+    it("annotates duplicate branches positionally", async () => {
+      await storage.mergeTargets.upsert("local", "feature", "release");
+
+      const response = await postComparisons("local", [
+        { branch: "feature" },
+        { branch: "feature", target: "main" },
+      ]);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().entries).toEqual([
+        expect.objectContaining({
+          branch: "feature",
+          target: "release",
+          targetSource: "stored",
+          requestedTarget: "release",
+        }),
+        expect.objectContaining({
+          branch: "feature",
+          target: "main",
+          targetSource: "request",
+          requestedTarget: "main",
+        }),
+      ]);
+    });
+
+    it("sends effective stored targets to a remote and annotates its response", async () => {
+      await storage.mergeTargets.upsert("remote", "feature", "release");
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: {
+          entries: [{
+            branch: "feature",
+            target: "release",
+            status: "merged",
+            unmergedCount: 0,
+            dirty: false,
+          }],
+        },
+      });
+
+      const response = await postComparisons("remote", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(200);
+      expect(proxyToRemoteAuto.mock.calls[0]?.[5]).toEqual({
+        path: "/repo-a",
+        comparisons: [{ branch: "feature", target: "release" }],
+      });
+      expect(response.json()).toMatchObject({
+        repository: {
+          kind: "remote",
+          remoteServerId: remoteA.remote_server_id,
+          label: "Remote A",
+        },
+        entries: [{
+          branch: "feature",
+          target: "release",
+          targetSource: "stored",
+          requestedTarget: "release",
+        }],
+      });
+    });
+
+    it("rejects a remote response whose entry count does not match the request", async () => {
+      proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { entries: [] } });
+
+      const response = await postComparisons("remote", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Remote merge-status entry count mismatch" });
+    });
   });
 
   const putTarget = (projectId: string, payload: unknown) => app.inject({
