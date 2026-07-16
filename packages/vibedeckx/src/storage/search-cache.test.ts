@@ -203,5 +203,54 @@ describe("searchCache", () => {
       expect(res.sessions.map(s => s.sessionId)).toEqual(["loc1"]);
       expect(res.sessions[0].targetId).toBe("local");
     });
+
+    it("recents mode: title-less session WITH entries isn't crowded out of the recency window by 200+ empty sessions", async () => {
+      // Qualifying (has entries) but oldest; the entries/title filter must run
+      // in SQL BEFORE the 200-row window, or 200+ newer non-qualifying rows
+      // fill the window and this session is silently dropped.
+      await storage.agentSessions.create({ id: "old-entries", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.upsertEntry("old-entries", 0, JSON.stringify({ type: "user" }));
+      await new Promise((r) => setTimeout(r, 10)); // strictly older updated_at than the padding
+      for (let i = 0; i < 205; i++) {
+        await storage.agentSessions.create({ id: `empty-${i}`, project_id: "p1", branch: "dev" }); // no title, no entries
+      }
+      const res = await storage.searchCache.search({ query: "", limitPerGroup: 300 });
+      expect(res.sessions.map(s => s.sessionId)).toContain("old-entries");
+    });
+
+    it("recents mode includes ALL favorited sessions, even outside the 200-row recency window", async () => {
+      await storage.agentSessions.create({ id: "fav-old", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.updateTitle("fav-old", "ancient favorite");
+      await storage.agentSessions.setFavorited("fav-old", true);
+      await new Promise((r) => setTimeout(r, 10)); // strictly older updated_at than the padding
+      for (let i = 0; i < 205; i++) {
+        const id = `titled-${i}`;
+        await storage.agentSessions.create({ id, project_id: "p1", branch: "dev" });
+        await storage.agentSessions.updateTitle(id, `padding session ${i}`);
+      }
+      const res = await storage.searchCache.search({ query: "", limitPerGroup: 300 });
+      expect(res.sessions.map(s => s.sessionId)).toContain("fav-old");
+      // No duplicates from the favorites union
+      const ids = res.sessions.map(s => s.sessionId);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it("limitPerGroup truncates each group to the top-ranked rows", async () => {
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [
+        { id: "e1", branch: "dev", title: "deploy",         lastActiveAt: 1, favoritedAt: null, entryCount: 1 }, // exact
+        { id: "p2", branch: "dev", title: "deploy watcher", lastActiveAt: 5, favoritedAt: null, entryCount: 1 }, // prefix
+        { id: "p3", branch: "dev", title: "deploy scripts", lastActiveAt: 3, favoritedAt: null, entryCount: 1 }, // prefix, older
+        { id: "s4", branch: "dev", title: "fix deploy bug", lastActiveAt: 9, favoritedAt: null, entryCount: 1 }, // substring
+        { id: "s5", branch: "dev", title: "old deploy fix", lastActiveAt: 8, favoritedAt: null, entryCount: 1 }, // substring
+      ]});
+      const res = await storage.searchCache.search({ query: "deploy", limitPerGroup: 2 });
+      expect(res.sessions.map(s => s.sessionId)).toEqual(["e1", "p2"]);
+    });
+
+    it("matches projects by path when the name doesn't match", async () => {
+      // p1: name "proj" (no match for "tmp"), path "/tmp/p1" (substring match)
+      const res = await storage.searchCache.search({ query: "tmp", limitPerGroup: 10 });
+      expect(res.projects.map(p => p.id)).toEqual(["p1"]);
+    });
   });
 });

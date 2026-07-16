@@ -170,28 +170,34 @@ export const createSearchCacheRepos = (
       const pattern = `%${escapeLike(q)}%`;
 
       // ---- local sessions (agent_sessions) ------------------------------
-      // "has entries" is checked in JS against a full session_id set rather
-      // than an inline subquery/join — simpler to keep portable and avoids
-      // relying on GROUP BY/aggregate quirks across dialects.
-      const entryRows = await kdb.selectFrom("agent_session_entries")
-        .select("session_id")
-        .distinct()
-        .execute();
-      const sessionsWithEntries = new Set(entryRows.map((r) => r.session_id));
-
-      let localQuery = kdb.selectFrom("agent_sessions as s")
+      // The qualifying filter (title present OR has entries) runs in SQL,
+      // BEFORE the ORDER BY/LIMIT recency window — otherwise 200+ newer
+      // non-qualifying rows would fill the window and silently crowd out
+      // qualifying sessions. Portable correlated EXISTS, no dialect-specific
+      // aggregates.
+      let localBase = kdb.selectFrom("agent_sessions as s")
         .select(["s.id", "s.project_id", "s.branch", "s.title", "s.last_user_message_at", "s.updated_at", "s.favorited_at"])
-        .where("s.project_id", "in", projectIds);
-      if (q) localQuery = localQuery.where(sql<boolean>`lower(coalesce(s.title, '')) like ${pattern} escape '\\'`);
-      const localRowsRaw = await localQuery.orderBy("s.updated_at", "desc").limit(200).execute();
-      const localRows = localRowsRaw.filter((r) => r.title !== null || sessionsWithEntries.has(r.id));
+        .where("s.project_id", "in", projectIds)
+        .where((eb) => eb.or([
+          eb("s.title", "is not", null),
+          eb.exists(
+            eb.selectFrom("agent_session_entries")
+              .select("agent_session_entries.session_id")
+              .whereRef("agent_session_entries.session_id", "=", "s.id"),
+          ),
+        ]));
+      if (q) localBase = localBase.where(sql<boolean>`lower(coalesce(s.title, '')) like ${pattern} escape '\\'`);
+      const localRows = await localBase.orderBy("s.updated_at", "desc").limit(200).execute();
+      // Favorites are exempt from the recency window: the contract includes
+      // ALL favorited sessions, and favorites are inherently few — no cap.
+      const localFavRows = await localBase.where("s.favorited_at", "is not", null).execute();
 
       // ---- remote sessions (session_search_cache) ------------------------
       // Self-heal: a cache row for a non-local target ONLY surfaces while a
       // matching project_remotes link still exists. Unlinking a remote from
       // the project drops its cached rows out of search without an explicit
       // purge; re-linking makes them reappear on the next snapshot.
-      let cacheQuery = kdb.selectFrom("session_search_cache as c")
+      let cacheBase = kdb.selectFrom("session_search_cache as c")
         .leftJoin("project_remotes as pr", (join) => join
           .onRef("pr.project_id", "=", "c.project_id")
           .onRef("pr.remote_server_id", "=", "c.target_id"))
@@ -202,11 +208,16 @@ export const createSearchCacheRepos = (
           eb("c.target_id", "=", "local"),
           eb("pr.id", "is not", null),
         ]));
-      if (q) cacheQuery = cacheQuery.where(sql<boolean>`lower(coalesce(c.title, '')) like ${pattern} escape '\\'`);
-      const cacheRows = await cacheQuery.orderBy("c.last_active_at", "desc").limit(200).execute();
+      if (q) cacheBase = cacheBase.where(sql<boolean>`lower(coalesce(c.title, '')) like ${pattern} escape '\\'`);
+      const cacheRows = await cacheBase.orderBy("c.last_active_at", "desc").limit(200).execute();
+      const cacheFavRows = await cacheBase.where("c.favorited_at", "is not", null).execute();
 
-      const sessionCandidates: SessionCandidate[] = [
-        ...localRows.map((r) => ({
+      // Union of the recency windows and the uncapped favorites, deduped by
+      // sessionId (a favorited session inside the window appears in both).
+      const candidateById = new Map<string, SessionCandidate>();
+      for (const r of [...localRows, ...localFavRows]) {
+        if (candidateById.has(r.id)) continue;
+        candidateById.set(r.id, {
           sessionId: r.id,
           projectId: r.project_id,
           projectName: nameById.get(r.project_id) ?? "",
@@ -215,8 +226,11 @@ export const createSearchCacheRepos = (
           title: r.title ?? null,
           lastActiveAt: r.last_user_message_at ?? parseDbTimestamp(r.updated_at),
           favoritedAt: r.favorited_at ?? null,
-        })),
-        ...cacheRows.map((r) => ({
+        });
+      }
+      for (const r of [...cacheRows, ...cacheFavRows]) {
+        if (candidateById.has(r.local_session_id)) continue;
+        candidateById.set(r.local_session_id, {
           sessionId: r.local_session_id,
           projectId: r.project_id,
           projectName: nameById.get(r.project_id) ?? "",
@@ -225,15 +239,16 @@ export const createSearchCacheRepos = (
           title: r.title ?? null,
           lastActiveAt: r.last_active_at ?? null,
           favoritedAt: r.favorited_at ?? null,
-        })),
-      ];
+        });
+      }
+      const sessionCandidates: SessionCandidate[] = [...candidateById.values()];
 
       if (!q) {
         // Recents mode: projects/workspaces are irrelevant without a query
         // term; sessions are the full (already project-scoped, self-healed)
-        // candidate set — which includes every favorited session and the
-        // most-recently-active ones (bounded by the 200-row prefetch above)
-        // — ordered by recency desc and capped.
+        // candidate set — ALL favorited sessions (uncapped side queries)
+        // plus the most-recently-active ones (200-row windows) — ordered by
+        // recency desc and capped.
         const sessions = [...sessionCandidates]
           .sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))
           .slice(0, limitPerGroup);
