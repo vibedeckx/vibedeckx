@@ -81,9 +81,10 @@ describe("mergeTargets repository", () => {
     expect(await storage.mergeTargets.getForBranches("p1", [])).toEqual(new Map());
   });
 
-  it("upsert overwrites an existing row", async () => {
-    await storage.mergeTargets.upsert("p1", "dev1", "main");
-    await storage.mergeTargets.upsert("p1", "dev1", "release");
+  it("upsert reports inserts and changed targets but not identical targets", async () => {
+    expect(await storage.mergeTargets.upsert("p1", "dev1", "main")).toBe(true);
+    expect(await storage.mergeTargets.upsert("p1", "dev1", "main")).toBe(false);
+    expect(await storage.mergeTargets.upsert("p1", "dev1", "release")).toBe(true);
     const result = await storage.mergeTargets.getForBranches("p1", ["dev1"]);
     expect(result.get("dev1")).toBe("release");
   });
@@ -101,6 +102,22 @@ describe("mergeTargets repository", () => {
       // The upsert's explicit ISO-8601 value differs from the DEFAULT format,
       // so any successful ON CONFLICT SET shows up as a change.
       expect(readUpdatedAt()).not.toBe(initial);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("upsert leaves updated_at unchanged when the target is identical", async () => {
+    await storage.mergeTargets.upsert("p1", "dev1", "main");
+    const db = new Database(path.join(dir, "test.sqlite"), { readonly: true });
+    const readUpdatedAt = () =>
+      (db.prepare(
+        "SELECT updated_at FROM branch_merge_targets WHERE project_id = 'p1' AND branch = 'dev1'",
+      ).get() as { updated_at: string }).updated_at;
+    try {
+      const initial = readUpdatedAt();
+      await storage.mergeTargets.upsert("p1", "dev1", "main");
+      expect(readUpdatedAt()).toBe(initial);
     } finally {
       db.close();
     }
@@ -264,7 +281,7 @@ and add to the returned object in `createSqliteStorage` (after `...createCrossRe
 - [ ] **Step 8: Run test to verify it passes**
 
 Run: `pnpm --filter vibedeckx exec vitest run src/storage/merge-targets.test.ts`
-Expected: 6 tests PASS.
+Expected: 7 tests PASS.
 
 - [ ] **Step 9: Type-check and commit**
 
@@ -326,8 +343,11 @@ describe("PUT /api/projects/:id/branches/merge-target", () => {
 
   it("stores a target, returns it, and emits the update event", async () => {
     const response = await put("local", { branch: "dev1", target: "main" });
+    const repeated = await put("local", { branch: "dev1", target: "main" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ branch: "dev1", target: "main" });
+    expect(repeated.statusCode).toBe(200);
+    expect(repeated.json()).toEqual({ branch: "dev1", target: "main" });
     expect(await storage.mergeTargets.getForBranches("local", ["dev1"]))
       .toEqual(new Map([["dev1", "main"]]));
     expect(emitted).toEqual([
