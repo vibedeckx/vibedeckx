@@ -517,7 +517,9 @@ git commit -m "feat: merge-target PUT route + merge-target:updated event"
   The remote proxy response is untrusted input: before positional annotation it must pass
   runtime validation for a non-null response object, entry count/order, branch identity,
   target/error/status/count/dirty field types, and mutually exclusive computed success/error
-  shapes. Every violation returns 502 `Remote merge-status response invalid`; central metadata
+  shapes. Each entry must semantically correspond to its effective comparison's target/error
+  contract, which detects reversed targets even when adjacent comparisons share a branch.
+  Every violation returns 502 `Remote merge-status response invalid`; central metadata
   is spread last so the worker cannot override it.
 
 - [ ] **Step 1: Write the failing tests**
@@ -634,6 +636,21 @@ describe("stored-target resolution and annotation", () => {
     expect(response.statusCode).toBe(502);
     expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
   });
+
+  it("502s when duplicate-branch targets are returned in reverse order", async () => {
+    await storage.mergeTargets.upsert("remote", "feature", "release");
+    const success = (target: string) => ({
+      branch: "feature", target, status: "merged", unmergedCount: 0, dirty: false,
+    });
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true, status: 200, data: { entries: [success("main"), success("release")] },
+    });
+    const response = await postComparisons("remote", [
+      { branch: "feature" },
+      { branch: "feature", target: "main" },
+    ]);
+    expect(response.statusCode).toBe(502);
+  });
 });
 ```
 
@@ -711,7 +728,10 @@ Add a module-private runtime parser for the remote computation boundary. It acce
 entries whose branch equals the effective comparison at the same index; target is
 `string | null`; optional discriminants are known enum values; counts are finite
 nonnegative integers; dirty is boolean; success entries contain the computed success fields;
-error entries contain a known pair error and no success fields. Then replace the **remote
+error entries contain a known pair error and no success fields. Explicit effective targets
+must equal successful or `branch-not-found` entry targets; `target-not-found` requires an
+explicit effective target, while `no-default-branch` requires an implicit one. This target
+correspondence is positional and therefore covers duplicate branches. Then replace the **remote
 proxy branch**'s response handling with:
 
 ```ts

@@ -359,6 +359,76 @@ describe("merge-status repository descriptor", () => {
       }]);
     });
 
+    it("rejects reversed remote targets for duplicate branch comparisons", async () => {
+      await storage.mergeTargets.upsert("remote", "feature", "release");
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: {
+          entries: [
+            {
+              branch: "feature",
+              target: "main",
+              status: "merged",
+              unmergedCount: 0,
+              dirty: false,
+            },
+            {
+              branch: "feature",
+              target: "release",
+              status: "merged",
+              unmergedCount: 0,
+              dirty: false,
+            },
+          ],
+        },
+      });
+
+      const response = await postComparisons("remote", [
+        { branch: "feature" },
+        { branch: "feature", target: "main" },
+      ]);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
+    });
+
+    it.each([
+      ["a success target that differs from the explicit comparison", {
+        comparison: { branch: "feature", target: "main" },
+        entry: {
+          branch: "feature",
+          target: "release",
+          status: "merged",
+          unmergedCount: 0,
+          dirty: false,
+        },
+      }],
+      ["a branch-not-found target that differs from the explicit comparison", {
+        comparison: { branch: "feature", target: "main" },
+        entry: { branch: "feature", target: "release", error: "branch-not-found" },
+      }],
+      ["target-not-found for an implicit default comparison", {
+        comparison: { branch: "feature" },
+        entry: { branch: "feature", target: null, error: "target-not-found" },
+      }],
+      ["no-default-branch for an explicit comparison", {
+        comparison: { branch: "feature", target: "main" },
+        entry: { branch: "feature", target: null, error: "no-default-branch" },
+      }],
+    ])("rejects remote response with %s", async (_case, fixture) => {
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: { entries: [fixture.entry] },
+      });
+
+      const response = await postComparisons("remote", [fixture.comparison]);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
+    });
+
     it("rejects a remote response whose entry count does not match the request", async () => {
       proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { entries: [] } });
 

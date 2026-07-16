@@ -93,11 +93,18 @@ function isRemoteMergeStatusEntry(
     ) {
       return false;
     }
-    if (value.error === "branch-not-found") return typeof value.target === "string";
-    return value.target === null;
+    if (value.error === "target-not-found") {
+      return comparison.target !== undefined && value.target === null;
+    }
+    if (value.error === "no-default-branch") {
+      return comparison.target === undefined && value.target === null;
+    }
+    return typeof value.target === "string"
+      && (comparison.target === undefined || value.target === comparison.target);
   }
 
   return typeof value.target === "string"
+    && (comparison.target === undefined || value.target === comparison.target)
     && MERGE_STATUS_VALUES.has(value.status as MergeStatusValue)
     && Number.isInteger(value.unmergedCount)
     && (value.unmergedCount as number) >= 0

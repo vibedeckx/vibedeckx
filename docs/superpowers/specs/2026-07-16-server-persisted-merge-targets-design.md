@@ -143,11 +143,14 @@ export interface ProjectMergeStatusPairEntry extends MergeStatusPairEntry {
   duplicate branch comparisons, which the API does not forbid. Before annotation, a
   proxied response crosses a runtime validation boundary: the response must be a
   non-null object with one structurally valid computed entry per effective comparison,
-  in the same branch order. Entry target/error/status/count/dirty fields and the
-  success-vs-error shape are validated against the computation contract. Any violation
-  returns `502 { error: "Remote merge-status response invalid" }` rather than crashing or
-  misattaching metadata. Metadata is then attached after spreading the validated entry,
-  so an untrusted worker cannot override `targetSource` or `requestedTarget`.
+  in the same branch order. Entry targets/errors must also semantically correspond to
+  that exact effective comparison (not merely its branch), so duplicate-branch entries
+  with different targets cannot be reversed. Entry target/error/status/count/dirty
+  fields and the success-vs-error shape are validated against the computation contract.
+  Any violation returns `502 { error: "Remote merge-status response invalid" }` rather
+  than crashing or misattaching metadata. Metadata is then attached after spreading the
+  validated entry, so an untrusted worker cannot override `targetSource` or
+  `requestedTarget`.
 - Entries that errored still carry `targetSource` (a `target-not-found` on a stored
   target reports `targetSource: "stored"` so the UI can label the warning correctly; a
   `no-default-branch` error reports `"default"`).
@@ -266,7 +269,8 @@ localStorage keys have drained.
   insertIfAbsent semantics, cascade on project delete); merge-status route resolves
   stored targets and annotates `targetSource`/`requestedTarget` positionally — including
   duplicate-branch comparisons; proxied null/malformed entries, invalid field and result
-  shapes, count mismatches, and branch-order mismatches all return 502 (proxy mocked);
+  shapes, count mismatches, branch-order mismatches, and duplicate-branch target-order
+  mismatches all return 502 (proxy mocked);
   PUT route auth, validation (including `ifAbsent` + `target: null` → 400), delete-on-null,
   event emitted on state change and suppressed when `insertIfAbsent` loses.
 
