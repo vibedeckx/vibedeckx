@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
 } from "@/components/ui/command";
@@ -37,19 +37,24 @@ export function QuickSwitcher({
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queryRef = useRef("");
-  useEffect(() => {
+  // Layout effect (not passive effect): it flushes synchronously in the same
+  // commit as the query render, so an async consumer (e.g. a fast
+  // refreshSearchCache() completion) can never read a one-render-stale query.
+  useLayoutEffect(() => {
     queryRef.current = query;
   }, [query]);
 
-  // Reset the query/error on each open→close→open transition. Adjusted
+  // Reset query/results/error on each open→close→open transition. Adjusted
   // during render (React's documented pattern for "resetting state when a
   // prop changes") rather than in an effect, so it can't trigger a
-  // synchronous setState-in-effect cascade.
+  // synchronous setState-in-effect cascade. Clearing results avoids flashing
+  // the previous session's rows on reopen.
   const [prevOpen, setPrevOpen] = useState(open);
   if (open !== prevOpen) {
     setPrevOpen(open);
     if (open) {
       setQuery("");
+      setResults(null);
       setError(false);
     }
   }
@@ -71,23 +76,29 @@ export function QuickSwitcher({
     }
   }, []);
 
-  // Debounced server-side search (cmdk filtering is off).
+  // Debounced server-side search (cmdk filtering is off). This single effect
+  // also handles the on-open initial fetch: on the open transition it fires
+  // immediately (0ms) for the reset "" query; subsequent query changes while
+  // open debounce at 150ms. Because the render-phase open-reset commits query
+  // as "" in the same render that flips `open`, this effect runs exactly once
+  // per open — so exactly one initial empty-query search fires per open.
+  const wasOpenRef = useRef(false);
   useEffect(() => {
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
     if (!open) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => void runSearch(query), 150);
+    debounceRef.current = setTimeout(() => void runSearch(query), justOpened ? 0 : 150);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [query, open, runSearch]);
 
-  // On open: instant cached results, then one background cache refresh and a
-  // re-query with whatever the user has typed by then.
+  // On open: one background cache refresh, then a re-query with whatever the
+  // user has typed by then (queryRef — kept commit-fresh via useLayoutEffect).
+  // The initial cached-results fetch is owned by the debounce effect above.
   useEffect(() => {
     if (!open) return;
-    // Deferred a microtask so the (async, non-blocking) search kickoff
-    // isn't a direct synchronous call from the effect body.
-    void Promise.resolve().then(() => runSearch(""));
     let cancelled = false;
     void refreshSearchCache()
       .then(() => { if (!cancelled) void runSearch(queryRef.current); })
