@@ -67,14 +67,16 @@ CREATE TABLE IF NOT EXISTS branch_merge_targets (
 ```
 
 `updated_at` must be set explicitly in the upsert's `ON CONFLICT DO UPDATE` clause —
-SQLite defaults apply on INSERT only.
+SQLite defaults apply on INSERT only. The update branch has a `WHERE` condition that
+skips an identical target, so a no-op neither refreshes `updated_at` nor emits an event.
 
 New `Storage` sub-repository `mergeTargets`:
 
 ```ts
 mergeTargets: {
   getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
-  upsert: (projectId: string, branch: string, target: string) => Promise<void>;
+  /** Atomic upsert; true when inserted or changed, false for an identical target. */
+  upsert: (projectId: string, branch: string, target: string) => Promise<boolean>;
   /** INSERT ... ON CONFLICT DO NOTHING; returns true if the row was inserted. */
   insertIfAbsent: (projectId: string, branch: string, target: string) => Promise<boolean>;
   /** Returns true when a row existed and was removed — feeds the
@@ -167,9 +169,9 @@ Body: { branch: string, target: string | null, ifAbsent?: boolean }
    `target` set → `upsert`, or `insertIfAbsent` when `ifAbsent: true` (migration path,
    see below).
 4. Emit `{ type: "merge-target:updated", projectId, branch }` on the event bus **only
-   when the write changed state** — in particular, `insertIfAbsent` that lost to an
-   existing row emits nothing (otherwise every old device migrating an already-imported
-   config would trigger a pointless fleet-wide refetch). Return
+   when the write changed state** — in particular, an identical ordinary upsert and an
+   `insertIfAbsent` that lost to an existing row emit nothing (otherwise unchanged writes
+   would trigger a pointless fleet-wide refetch). Return
    `{ branch, target: <stored value or null> }` (for `ifAbsent`, the value that actually
    won).
 

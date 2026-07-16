@@ -19,7 +19,7 @@
 - Entry ordering is a contract: `computeMergeStatusPairs` returns exactly one entry per comparison **in input order**; all annotation is by array index (duplicate branch comparisons are legal).
 - `target-not-found` must NEVER delete a stored row or fall back silently (spec decision 3).
 - Reset-to-default menu copy is exactly **"Default branch (auto)"** — deliberately name-free.
-- SSE event emits **only when a write changed state** (losing `insertIfAbsent`, no-op delete → no event).
+- SSE event emits **only when a write changed state** (identical upsert, losing `insertIfAbsent`, no-op delete → no event).
 
 ---
 
@@ -37,7 +37,7 @@
 - Produces (later tasks rely on these exact signatures):
   ```ts
   storage.mergeTargets.getForBranches(projectId: string, branches: string[]): Promise<Map<string, string>>
-  storage.mergeTargets.upsert(projectId: string, branch: string, target: string): Promise<void>
+  storage.mergeTargets.upsert(projectId: string, branch: string, target: string): Promise<boolean> // true = inserted or changed
   storage.mergeTargets.insertIfAbsent(projectId: string, branch: string, target: string): Promise<boolean> // true = row inserted
   storage.mergeTargets.delete(projectId: string, branch: string): Promise<boolean>                          // true = row existed
   ```
@@ -177,7 +177,8 @@ In `packages/vibedeckx/src/storage/types.ts`, inside `interface Storage`, direct
   mergeTargets: {
     /** Stored explicit merge targets for the given branches, keyed by branch. */
     getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
-    upsert: (projectId: string, branch: string, target: string) => Promise<void>;
+    /** Atomic upsert. Returns true when inserted or changed; false when identical. */
+    upsert: (projectId: string, branch: string, target: string) => Promise<boolean>;
     /** INSERT ... ON CONFLICT DO NOTHING. Returns true when the row was inserted
      *  (false = an existing value won). */
     insertIfAbsent: (projectId: string, branch: string, target: string) => Promise<boolean>;
@@ -211,7 +212,7 @@ export const createMergeTargetsRepo = (
     },
 
     upsert: async (projectId, branch, target) => {
-      await kdb
+      const result = await kdb
         .insertInto("branch_merge_targets")
         .values({ project_id: projectId, branch, target })
         .onConflict((oc) =>
@@ -219,9 +220,10 @@ export const createMergeTargetsRepo = (
             target,
             // SQLite DEFAULT applies on INSERT only — set explicitly on update.
             updated_at: new Date().toISOString(),
-          }),
+          }).where("target", "!=", target),
         )
-        .execute();
+        .executeTakeFirst();
+      return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
     },
 
     insertIfAbsent: async (projectId, branch, target) => {
@@ -446,8 +448,7 @@ and register inside `routes` (after the existing POST project route). Names are 
           ? target
           : (await fastify.storage.mergeTargets.getForBranches(project.id, [branch])).get(branch) ?? null;
       } else {
-        await fastify.storage.mergeTargets.upsert(project.id, branch, target);
-        changed = true;
+        changed = await fastify.storage.mergeTargets.upsert(project.id, branch, target);
         stored = target;
       }
 

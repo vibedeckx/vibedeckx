@@ -20,16 +20,17 @@ export const createMergeTargetsRepo = (
     },
 
     upsert: async (projectId, branch, target) => {
-      await kdb
+      const result = await kdb
         .insertInto("branch_merge_targets")
         .values({ project_id: projectId, branch, target })
         .onConflict((conflict) =>
           conflict.columns(["project_id", "branch"]).doUpdateSet({
             target,
             updated_at: new Date().toISOString(),
-          }),
+          }).where("target", "!=", target),
         )
-        .execute();
+        .executeTakeFirst();
+      return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
     },
 
     insertIfAbsent: async (projectId, branch, target) => {

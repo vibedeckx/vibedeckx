@@ -284,7 +284,7 @@ export interface Storage {
   };
   mergeTargets: {
     getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
-    upsert: (projectId: string, branch: string, target: string) => Promise<void>;
+    upsert: (projectId: string, branch: string, target: string) => Promise<boolean>;
     insertIfAbsent: (projectId: string, branch: string, target: string) => Promise<boolean>;
     delete: (projectId: string, branch: string) => Promise<boolean>;
   };

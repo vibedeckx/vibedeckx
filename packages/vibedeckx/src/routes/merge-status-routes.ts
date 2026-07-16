@@ -200,8 +200,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             .get(branch) ?? null;
         }
       } else {
-        await fastify.storage.mergeTargets.upsert(project.id, branch, target);
-        changed = true;
+        changed = await fastify.storage.mergeTargets.upsert(project.id, branch, target);
         storedTarget = target;
       }
 

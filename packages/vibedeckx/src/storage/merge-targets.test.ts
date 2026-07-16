@@ -35,9 +35,10 @@ describe("branch merge targets storage", () => {
     expect(await storage.mergeTargets.getForBranches("p1", [])).toEqual(new Map());
   });
 
-  it("upsert overwrites an existing target", async () => {
-    await storage.mergeTargets.upsert("p1", "dev1", "main");
-    await storage.mergeTargets.upsert("p1", "dev1", "release");
+  it("upsert reports inserts and changed targets but not identical targets", async () => {
+    expect(await storage.mergeTargets.upsert("p1", "dev1", "main")).toBe(true);
+    expect(await storage.mergeTargets.upsert("p1", "dev1", "main")).toBe(false);
+    expect(await storage.mergeTargets.upsert("p1", "dev1", "release")).toBe(true);
 
     expect(await storage.mergeTargets.getForBranches("p1", ["dev1"])).toEqual(
       new Map([["dev1", "release"]]),
@@ -59,6 +60,24 @@ describe("branch merge targets storage", () => {
       expect(initial).not.toContain("T");
       expect(readUpdatedAt()).not.toBe(initial);
       expect(readUpdatedAt()).toContain("T");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("upsert leaves updated_at unchanged when the target is identical", async () => {
+    await storage.mergeTargets.upsert("p1", "dev1", "main");
+    const db = new Database(dbPath, { readonly: true });
+    const readUpdatedAt = () =>
+      (db.prepare(
+        "SELECT updated_at FROM branch_merge_targets WHERE project_id = 'p1' AND branch = 'dev1'",
+      ).get() as { updated_at: string }).updated_at;
+
+    try {
+      const initial = readUpdatedAt();
+      await storage.mergeTargets.upsert("p1", "dev1", "main");
+
+      expect(readUpdatedAt()).toBe(initial);
     } finally {
       db.close();
     }

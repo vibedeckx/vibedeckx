@@ -125,9 +125,12 @@ describe("merge-status repository descriptor", () => {
 
   it("stores an explicit target verbatim and emits an update event", async () => {
     const response = await putTarget("local", { branch: " dev ", target: " release " });
+    const repeated = await putTarget("local", { branch: " dev ", target: " release " });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ branch: " dev ", target: " release " });
+    expect(repeated.statusCode).toBe(200);
+    expect(repeated.json()).toEqual({ branch: " dev ", target: " release " });
     expect(await storage.mergeTargets.getForBranches("local", [" dev "])).toEqual(
       new Map([[" dev ", " release "]]),
     );
