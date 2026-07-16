@@ -104,21 +104,35 @@ function ensureLegacyImport(projectId: string): Promise<void> {
   if (inFlight) return inFlight;
 
   const promise = (async () => {
-    const entries = legacyTargetKeys(projectId);
-    for (const { key, branch, target } of entries) {
-      let imported = false;
-      try {
-        imported = await api.setMergeTarget(projectId, branch, target, { ifAbsent: true });
-      } catch {
-        // The API normally folds transport failures into false, but keep the
-        // legacy key even if an alternate implementation rejects.
-      }
-      if (!imported) continue;
-      try {
-        localStorage.removeItem(key);
-      } catch {
-        // The server is authoritative after a successful import. A stale
-        // local key is harmless and can be retried on the next mount.
+    const attempted = new Map<string, string>();
+    while (true) {
+      const entries = legacyTargetKeys(projectId).filter(
+        ({ key, target }) => attempted.get(key) !== target,
+      );
+      if (entries.length === 0) break;
+
+      for (const { key, branch, target } of entries) {
+        // Mark before awaiting so a failed, unchanged value is attempted only
+        // once in this drain. The next effect can retry it after this promise
+        // leaves legacyImports.
+        attempted.set(key, target);
+        let imported = false;
+        try {
+          imported = await api.setMergeTarget(projectId, branch, target, { ifAbsent: true });
+        } catch {
+          // The API normally folds transport failures into false, but keep the
+          // legacy key even if an alternate implementation rejects.
+        }
+        if (!imported) continue;
+        try {
+          // Another tab may have replaced this value while the request was in
+          // flight. Remove only the exact snapshot we imported; a replacement
+          // is picked up by the next drain pass.
+          if (localStorage.getItem(key) === target) localStorage.removeItem(key);
+        } catch {
+          // The server is authoritative after a successful import. A stale
+          // local key is harmless and can be retried on the next mount.
+        }
       }
     }
   })();

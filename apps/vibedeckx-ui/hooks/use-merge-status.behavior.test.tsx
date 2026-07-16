@@ -281,7 +281,117 @@ describe("useMergeStatus (legacy target import)", () => {
     expect(setMergeTarget).toHaveBeenCalledWith("p1", "dev1", "release", {
       ifAbsent: true,
     });
+    expect(setMergeTarget).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem("vibedeckx:mergeTarget:p1:dev1")).toBe("release");
+  });
+
+  it("drains a changed value before the first fetch without deleting the replacement", async () => {
+    let finishOldImport!: (ok: boolean) => void;
+    let finishNewImport!: (ok: boolean) => void;
+    setMergeTarget
+      .mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          finishOldImport = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          finishNewImport = resolve;
+        }),
+      );
+    const key = "vibedeckx:mergeTarget:p-changed:dev1";
+    localStorage.setItem(key, "old-target");
+
+    await render("p-changed", [{ branch: "dev1" }]);
+    await vi.waitFor(() =>
+      expect(setMergeTarget).toHaveBeenNthCalledWith(
+        1,
+        "p-changed",
+        "dev1",
+        "old-target",
+        { ifAbsent: true },
+      ),
+    );
+
+    localStorage.setItem(key, "new-target");
+    await act(async () => {
+      finishOldImport(true);
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(setMergeTarget).toHaveBeenNthCalledWith(
+        2,
+        "p-changed",
+        "dev1",
+        "new-target",
+        { ifAbsent: true },
+      ),
+    );
+    expect(localStorage.getItem(key)).toBe("new-target");
+    expect(getMergeStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishNewImport(true);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
+
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(setMergeTarget.mock.invocationCallOrder[1]).toBeLessThan(
+      getMergeStatus.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("drains a newly added branch before the first fetch", async () => {
+    let finishFirstImport!: (ok: boolean) => void;
+    let finishAddedImport!: (ok: boolean) => void;
+    setMergeTarget
+      .mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          finishFirstImport = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          finishAddedImport = resolve;
+        }),
+      );
+    const firstKey = "vibedeckx:mergeTarget:p-added:dev1";
+    const addedKey = "vibedeckx:mergeTarget:p-added:dev2";
+    localStorage.setItem(firstKey, "main");
+
+    await render("p-added", [{ branch: "dev1" }, { branch: "dev2" }]);
+    await vi.waitFor(() => expect(setMergeTarget).toHaveBeenCalledTimes(1));
+
+    localStorage.setItem(addedKey, "release");
+    await act(async () => {
+      finishFirstImport(true);
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(setMergeTarget).toHaveBeenNthCalledWith(
+        2,
+        "p-added",
+        "dev2",
+        "release",
+        { ifAbsent: true },
+      ),
+    );
+    expect(getMergeStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishAddedImport(true);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
+
+    expect(localStorage.getItem(firstKey)).toBeNull();
+    expect(localStorage.getItem(addedKey)).toBeNull();
+    expect(setMergeTarget.mock.invocationCallOrder[1]).toBeLessThan(
+      getMergeStatus.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("shares an in-flight import across repeated effects for the same project", async () => {
@@ -291,19 +401,21 @@ describe("useMergeStatus (legacy target import)", () => {
         finishImport = resolve;
       }),
     );
-    localStorage.setItem("vibedeckx:mergeTarget:p1:dev1", "release");
+    localStorage.setItem("vibedeckx:mergeTarget:p-dedup:dev1", "release");
 
-    await render("p1", [{ branch: "dev1" }]);
-    await vi.waitFor(() => expect(setMergeTarget).toHaveBeenCalledTimes(1));
+    try {
+      await render("p-dedup", [{ branch: "dev1" }]);
+      await vi.waitFor(() => expect(setMergeTarget).toHaveBeenCalledTimes(1));
 
-    await render("p1", [{ branch: "dev1" }]);
-    expect(setMergeTarget).toHaveBeenCalledTimes(1);
-    expect(getMergeStatus).not.toHaveBeenCalled();
-
-    await act(async () => {
-      finishImport(true);
-      await Promise.resolve();
-    });
+      await render("p-dedup", [{ branch: "dev1" }]);
+      expect(setMergeTarget).toHaveBeenCalledTimes(1);
+      expect(getMergeStatus).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => {
+        finishImport(true);
+        await Promise.resolve();
+      });
+    }
     await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
   });
 });
