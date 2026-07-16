@@ -74,6 +74,7 @@ describe("WorkspaceRowMenu", () => {
       (element) => element.textContent === "Default branch (auto)",
     ) as HTMLElement | undefined;
     expect(resetItem).toBeTruthy();
+    expect(resetItem!.querySelector("span")?.classList.contains("text-xs")).toBe(true);
 
     act(() => resetItem!.click());
     expect(onTargetReset).toHaveBeenCalledTimes(1);

@@ -76,7 +76,7 @@ export function WorkspaceRowMenu({
             )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={onTargetReset}>
-              <span>Default branch (auto)</span>
+              <span className="text-xs">Default branch (auto)</span>
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
