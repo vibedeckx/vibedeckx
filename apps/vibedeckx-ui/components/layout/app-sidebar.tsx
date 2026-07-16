@@ -9,7 +9,7 @@ import { WorkspaceRowMenu } from "./workspace-row-menu";
 import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
-import type { BranchMergeInfo } from "@/hooks/use-merge-status";
+import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info";
 
@@ -25,7 +25,7 @@ interface AppSidebarProps {
   mergeStatuses?: Map<string, BranchMergeInfo>;
   mergeDefaultTarget?: string | null;
   mergeRepositoryLabel?: string | null;
-  onMergeTargetChange?: (branch: string, target: string) => void;
+  onMergeTargetChange?: (branch: string, target: string | null) => void;
   onMergeBadgeClick?: (branch: string) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
   residentSessions?: Map<string, ResidentSidebarSession[]>;
@@ -407,9 +407,12 @@ export function AppSidebar({
                             projectId={currentProject.id}
                             branch={wt.branch}
                             currentTarget={
-                              mergeStatuses?.get(wt.branch)?.target ?? mergeDefaultTarget ?? null
+                              effectiveTarget(mergeStatuses?.get(wt.branch)) ??
+                              mergeDefaultTarget ??
+                              null
                             }
                             onTargetChange={(t) => onMergeTargetChange?.(wt.branch!, t)}
+                            onTargetReset={() => onMergeTargetChange?.(wt.branch!, null)}
                             onDelete={() => onDeleteWorktree?.(wt)}
                           />
                         )}

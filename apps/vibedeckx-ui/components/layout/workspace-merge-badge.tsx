@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, CheckCheck } from "lucide-react";
+import { Check, CheckCheck, TriangleAlert } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
@@ -14,6 +14,11 @@ export function mergeBadgeAriaLabel(
   info: BranchMergeInfo,
   repositoryLabel?: string | null,
 ): string {
+  if (info.error === "target-not-found") {
+    const warning = `Target branch '${info.requestedTarget}' not found — pick a new target or reset to default`;
+    return repositoryLabel ? `${warning} · ${repositoryLabel}` : warning;
+  }
+
   const relationshipLabel =
     info.status === "merged"
       ? `Merged into ${info.target}`
@@ -44,7 +49,9 @@ export function WorkspaceMergeBadge({
           aria-label={ariaLabel}
           className="relative shrink-0 flex items-center justify-center h-4 min-w-4 px-0.5 rounded hover:bg-muted"
         >
-          {info.status === "merged" ? (
+          {info.error === "target-not-found" ? (
+            <TriangleAlert className="h-3 w-3 text-amber-500" />
+          ) : info.status === "merged" ? (
             <Check className="h-3 w-3 text-muted-foreground/70" />
           ) : info.status === "no-unique-commits" ? (
             // Tip equals target (just fast-forward-merged, or a fresh branch):
@@ -56,7 +63,7 @@ export function WorkspaceMergeBadge({
               {info.unmergedCount}
             </span>
           )}
-          {info.dirty && (
+          {!info.error && info.dirty && (
             <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-orange-400" />
           )}
         </button>

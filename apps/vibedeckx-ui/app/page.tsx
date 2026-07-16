@@ -6,7 +6,11 @@ import { useCommands } from '@/hooks/use-commands';
 import { ProjectInfoView } from '@/components/project/project-info-view';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
-import { useMergeStatus, useMergeStatusAutoRefresh } from '@/hooks/use-merge-status';
+import {
+  effectiveTarget,
+  useMergeStatus,
+  useMergeStatusAutoRefresh,
+} from '@/hooks/use-merge-status';
 import { useTasks } from '@/hooks/use-tasks';
 import { useSchedules } from '@/hooks/use-schedules';
 import { SchedulesView } from '@/components/schedule';
@@ -660,7 +664,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     diffCompareNonce={diffCompareNonce}
                     mergeTarget={
                       selectedBranch
-                        ? (mergeStatuses.get(selectedBranch)?.target ?? mergeDefaultTarget)
+                        ? (effectiveTarget(mergeStatuses.get(selectedBranch)) ??
+                          mergeDefaultTarget)
                         : null
                     }
                     onMergeRequest={handleMergeRequest}

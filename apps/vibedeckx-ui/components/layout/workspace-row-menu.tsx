@@ -8,6 +8,7 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -20,6 +21,7 @@ interface WorkspaceRowMenuProps {
   /** Effective compare target shown as checked (persisted choice or default). */
   currentTarget: string | null;
   onTargetChange: (target: string) => void;
+  onTargetReset: () => void;
   onDelete: () => void;
 }
 
@@ -28,6 +30,7 @@ export function WorkspaceRowMenu({
   branch,
   currentTarget,
   onTargetChange,
+  onTargetReset,
   onDelete,
 }: WorkspaceRowMenuProps) {
   const [branches, setBranches] = useState<string[] | null>(null);
@@ -71,6 +74,10 @@ export function WorkspaceRowMenu({
                 </DropdownMenuCheckboxItem>
               ))
             )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={onTargetReset}>
+              <span>Default branch (auto)</span>
+            </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         <DropdownMenuItem
