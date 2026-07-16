@@ -142,7 +142,7 @@ describe("turn_end on turn completion", () => {
     expect(ops.indexOf("entry:turn_end")).toBeLessThan(ops.indexOf("status:stopped"));
   });
 
-  it("hibernateSession / switch paths write no turn_end (turnOpenSince already null)", async () => {
+  it("stop with no open turn writes no turn_end (turnOpenSince already null)", async () => {
     const { storage, turnEnds } = makeHarness();
     const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
     await liveSession(manager, null); // between turns

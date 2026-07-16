@@ -734,6 +734,12 @@ export class AgentSessionManager {
         }
       }
 
+      // Persist any partial streaming assistant text before the turn_end
+      // marker: a mid-stream crash must not leave a DB index hole under the
+      // divider — the branch-cutoff protocol assumes dense entry indices.
+      await this.finalizeStreamingEntry(session);
+      session.store.currentAssistantIndex = null;
+
       // Stop point for a turn the process took down with it. If a held
       // completion just committed above, endActiveTurn already ran inside
       // commitCompletion and this is a no-op.
@@ -1770,6 +1776,8 @@ export class AgentSessionManager {
     session.store.currentAssistantIndex = null;
     session.buffer = "";
     session.dormant = false;
+    // The restarted conversation starts with no open turn — never inherit the wiped history's clock.
+    session.turnOpenSince = null;
     this.touchSession(session);
 
     // 4. Broadcast clear signal to all subscribers
