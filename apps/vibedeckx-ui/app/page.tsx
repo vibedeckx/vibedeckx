@@ -32,7 +32,8 @@ import { MainConversation, type MainConversationHandle } from '@/components/conv
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
-import type { ExecutionMode, Task, Worktree } from '@/lib/api';
+import { api, type ExecutionMode, type Task, type Worktree, type SearchResultWorkspace, type SearchResultSession } from '@/lib/api';
+import { QuickSwitcher } from '@/components/search/quick-switcher';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
 import { useResidentSessions, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
@@ -263,9 +264,9 @@ export default function Home() {
   // keeps the URL-sync effect from stripping ?session= on the branch change
   // it causes. Shared by the sidebar resident-session click and the
   // completion-notification click-through.
-  const selectBranchSession = useCallback((branch: string | null, sessionId: string) => {
+  const selectBranchSession = useCallback((branch: string | null, sessionId: string, projectId?: string) => {
     pendingSessionSelectionRef.current = {
-      projectId: currentProject?.id,
+      projectId: projectId ?? currentProject?.id,
       branch,
       sessionId,
     };
@@ -400,6 +401,59 @@ export default function Home() {
     },
     [currentProject?.id, projects, selectProject, selectBranchSession],
   );
+
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+
+  // Cmd/Ctrl+K opens the quick switcher (same pattern as the sidebar's Cmd+B).
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        setSwitcherOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Cross-target navigation: agent_mode is the single source of truth for
+  // which worker a project talks to — switch it (and wait) before navigating.
+  const resolveProjectForTarget = useCallback(async (projectId: string, targetId: string) => {
+    let project = projects.find((p) => p.id === projectId);
+    if (!project) return null;
+    const desiredMode = targetId === "local" ? "local" : targetId;
+    if ((project.agent_mode ?? "local") !== desiredMode) {
+      project = await api.updateProjectMode(project.id, "agentMode", desiredMode);
+    }
+    return project;
+  }, [projects]);
+
+  const handleSwitcherProject = useCallback((projectId: string) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project) return;
+    selectProject(project);
+    setActiveView("project-info");
+    setSwitcherOpen(false);
+  }, [projects, selectProject]);
+
+  const handleSwitcherWorkspace = useCallback(async (w: SearchResultWorkspace) => {
+    const project = await resolveProjectForTarget(w.projectId, w.targetId);
+    if (!project) return;
+    selectProject(project);
+    setSelectedBranch(w.branch);
+    setSessionUrlParam(null);
+    setActiveView("workspace");
+    setSwitcherOpen(false);
+  }, [resolveProjectForTarget, selectProject, setSessionUrlParam]);
+
+  const handleSwitcherSession = useCallback(async (s: SearchResultSession) => {
+    const project = await resolveProjectForTarget(s.projectId, s.targetId);
+    if (!project) return;
+    selectProject(project);
+    selectBranchSession(s.branch, s.sessionId, s.projectId);
+    setActiveView("workspace");
+    setSwitcherOpen(false);
+  }, [resolveProjectForTarget, selectProject, selectBranchSession]);
 
   // Track previous (projectId, branch) so we can detect switches.
   // sessionId is scoped to one (projectId, branch); on switch we must drop it,
@@ -797,6 +851,13 @@ Please proceed step by step and let me know if there are any issues or conflicts
             onWorktreeDeleted={refetchWorktrees}
           />
         )}
+        <QuickSwitcher
+          open={switcherOpen}
+          onOpenChange={setSwitcherOpen}
+          onNavigateProject={handleSwitcherProject}
+          onNavigateWorkspace={handleSwitcherWorkspace}
+          onNavigateSession={handleSwitcherSession}
+        />
       </div>
   );
 }
