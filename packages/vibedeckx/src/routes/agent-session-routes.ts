@@ -1414,6 +1414,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
           remoteInfo.branch ?? null,
           normalizedTitle
         );
+        // Opportunistic write-through: keep the search cache's copy of this
+        // session's title fresh since a title change transits the server
+        // anyway. UPDATE-only (no insert for a null/cleared title — the
+        // cache column stays whatever the last snapshot/refresh set it to).
+        if (normalizedTitle) {
+          await fastify.storage.searchCache.updateCachedSessionTitle(req.params.sessionId, normalizedTitle);
+        }
       }
       return reply.code(proxyStatus(result)).send(result.data);
     }
