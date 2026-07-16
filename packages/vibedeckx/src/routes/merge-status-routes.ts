@@ -48,6 +48,11 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
 }
 
 const MAX_COMPARISONS = 50;
+const MAX_NAME_LENGTH = 256;
+
+function isValidName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_NAME_LENGTH;
+}
 
 /** Returns validated comparisons, or null when the body is malformed. */
 function parseComparisons(body: unknown): MergeComparison[] | null {
@@ -152,6 +157,63 @@ const routes: FastifyPluginAsync = async (fastify) => {
         comparisons,
         { kind: "local", label: "Local" },
       );
+    },
+  );
+
+  fastify.put<{ Params: { id: string }; Body: unknown }>(
+    "/api/projects/:id/branches/merge-target",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const project = await fastify.storage.projects.getById(req.params.id, userId);
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+
+      if (!req.body || typeof req.body !== "object") {
+        return reply.code(400).send({ error: "Invalid merge target" });
+      }
+
+      const body = req.body as Record<string, unknown>;
+      const { branch, target, ifAbsent } = body;
+      if (
+        !isValidName(branch)
+        || (target !== null && !isValidName(target))
+        || (ifAbsent !== undefined && typeof ifAbsent !== "boolean")
+        || (ifAbsent === true && target === null)
+      ) {
+        return reply.code(400).send({ error: "Invalid merge target" });
+      }
+
+      let changed: boolean;
+      let storedTarget: string | null;
+      if (target === null) {
+        changed = await fastify.storage.mergeTargets.delete(project.id, branch);
+        storedTarget = null;
+      } else if (ifAbsent === true) {
+        changed = await fastify.storage.mergeTargets.insertIfAbsent(project.id, branch, target);
+        if (changed) {
+          storedTarget = target;
+        } else {
+          storedTarget = (await fastify.storage.mergeTargets.getForBranches(project.id, [branch]))
+            .get(branch) ?? null;
+        }
+      } else {
+        await fastify.storage.mergeTargets.upsert(project.id, branch, target);
+        changed = true;
+        storedTarget = target;
+      }
+
+      if (changed) {
+        fastify.eventBus.emit({
+          type: "merge-target:updated",
+          projectId: project.id,
+          branch,
+        });
+      }
+
+      return reply.code(200).send({ branch, target: storedTarget });
     },
   );
 };

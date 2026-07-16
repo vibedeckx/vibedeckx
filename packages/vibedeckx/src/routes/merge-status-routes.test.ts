@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import path from "path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GlobalEvent } from "../event-bus.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { ProjectRemote, Storage } from "../storage/types.js";
 
@@ -26,9 +27,11 @@ describe("merge-status repository descriptor", () => {
   let repo: string;
   let remoteA: ProjectRemote;
   let remoteB: ProjectRemote;
+  let emitted: GlobalEvent[];
 
   beforeEach(async () => {
     proxyToRemoteAuto.mockReset();
+    emitted = [];
     dir = mkdtempSync(path.join(tmpdir(), "vdx-merge-status-routes-"));
     repo = path.join(dir, "repo");
     run(dir, ["init", "-b", "main", repo]);
@@ -57,6 +60,7 @@ describe("merge-status repository descriptor", () => {
     app = Fastify();
     app.decorate("storage", storage);
     app.decorate("reverseConnectManager", { isConnected: () => false } as never);
+    app.decorate("eventBus", { emit: (event: GlobalEvent) => emitted.push(event) } as never);
     await app.register(mergeStatusRoutes);
     await app.ready();
   });
@@ -111,5 +115,91 @@ describe("merge-status repository descriptor", () => {
     const response = await postBatch("remote");
     expect(response.statusCode).toBe(503);
     expect(response.json()).toEqual({ error: "remote unavailable" });
+  });
+
+  const putTarget = (projectId: string, payload: unknown) => app.inject({
+    method: "PUT",
+    url: `/api/projects/${projectId}/branches/merge-target`,
+    payload,
+  });
+
+  it("stores an explicit target verbatim and emits an update event", async () => {
+    const response = await putTarget("local", { branch: " dev ", target: " release " });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ branch: " dev ", target: " release " });
+    expect(await storage.mergeTargets.getForBranches("local", [" dev "])).toEqual(
+      new Map([[" dev ", " release "]]),
+    );
+    expect(emitted).toEqual([
+      { type: "merge-target:updated", projectId: "local", branch: " dev " },
+    ]);
+  });
+
+  it("deletes a target and emits only when state changed", async () => {
+    await storage.mergeTargets.upsert("local", "dev", "release");
+
+    const deleted = await putTarget("local", { branch: "dev", target: null });
+    const noOp = await putTarget("local", { branch: "dev", target: null });
+
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ branch: "dev", target: null });
+    expect(noOp.statusCode).toBe(200);
+    expect(noOp.json()).toEqual({ branch: "dev", target: null });
+    expect(await storage.mergeTargets.getForBranches("local", ["dev"])).toEqual(new Map());
+    expect(emitted).toEqual([
+      { type: "merge-target:updated", projectId: "local", branch: "dev" },
+    ]);
+  });
+
+  it("returns the existing winner and emits nothing when insert-if-absent conflicts", async () => {
+    await storage.mergeTargets.upsert("local", "dev", "release");
+
+    const response = await putTarget("local", {
+      branch: "dev",
+      target: "main",
+      ifAbsent: true,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ branch: "dev", target: "release" });
+    expect(emitted).toEqual([]);
+  });
+
+  it("inserts an absent target and emits an update event", async () => {
+    const response = await putTarget("local", {
+      branch: "dev",
+      target: "main",
+      ifAbsent: true,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ branch: "dev", target: "main" });
+    expect(emitted).toEqual([
+      { type: "merge-target:updated", projectId: "local", branch: "dev" },
+    ]);
+  });
+
+  it.each([
+    [{ target: "main" }],
+    [{ branch: "", target: "main" }],
+    [{ branch: "x".repeat(257), target: "main" }],
+    [{ branch: "dev" }],
+    [{ branch: "dev", target: "" }],
+    [{ branch: "dev", target: "x".repeat(257) }],
+    [{ branch: "dev", target: "main", ifAbsent: "yes" }],
+    [{ branch: "dev", target: null, ifAbsent: true }],
+  ])("rejects malformed target payload %#", async (payload) => {
+    const response = await putTarget("local", payload);
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("returns 404 for an unknown project", async () => {
+    const response = await putTarget("missing", { branch: "dev", target: "main" });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Project not found" });
+    expect(emitted).toEqual([]);
   });
 });

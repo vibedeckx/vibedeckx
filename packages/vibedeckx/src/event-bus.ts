@@ -13,6 +13,7 @@ export type GlobalEvent =
   | { type: "task:deleted"; projectId: string; taskId: string }
   | { type: "executor:started"; projectId: string; executorId: string; processId: string; target?: string }
   | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string; finalResult?: string }
+  | { type: "merge-target:updated"; projectId: string; branch: string }
   | { type: "schedule:run-started"; projectId: string; scheduleId: string; runId: string }
   | { type: "schedule:run-finished"; projectId: string; scheduleId: string; runId: string; status: string; exitCode: number | null };
 
