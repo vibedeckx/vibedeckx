@@ -109,7 +109,8 @@ export function QuickSwitcher({
     };
   }, [open, runSearch]);
 
-  const empty = !results || (results.projects.length === 0 && results.workspaces.length === 0 && results.sessions.length === 0);
+  const loading = results === null;
+  const empty = !!results && results.projects.length === 0 && results.workspaces.length === 0 && results.sessions.length === 0;
   const syncing = results?.cacheState === "cold";
 
   return (
@@ -134,13 +135,19 @@ export function QuickSwitcher({
             </Button>
           </div>
         )}
-        {!error && empty && syncing && (
+        {!error && loading && (
+          <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Searching…
+          </div>
+        )}
+        {!error && !loading && empty && syncing && (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Syncing history…
           </div>
         )}
-        {!error && empty && !syncing && <CommandEmpty>No results found.</CommandEmpty>}
+        {!error && !loading && empty && !syncing && <CommandEmpty>No results found.</CommandEmpty>}
         {results && results.projects.length > 0 && (
           <CommandGroup heading="Projects">
             {results.projects.map((p) => (

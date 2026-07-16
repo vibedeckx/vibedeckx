@@ -101,10 +101,40 @@ describe("search refresh", () => {
 
   it("computeCacheState: cold until every target has succeeded, fresh within TTL, stale after", () => {
     const now = 100_000;
-    expect(computeCacheState([], 0, now)).toBe("fresh");
-    expect(computeCacheState([], 1, now)).toBe("cold");
-    expect(computeCacheState([{ project_id: "p1", target_id: "t", last_success_at: now - 1_000, last_attempt_at: now, last_error: null }], 1, now)).toBe("fresh");
-    expect(computeCacheState([{ project_id: "p1", target_id: "t", last_success_at: now - 90_000, last_attempt_at: now, last_error: null }], 1, now)).toBe("stale");
-    expect(computeCacheState([{ project_id: "p1", target_id: "t", last_success_at: now - 1_000, last_attempt_at: now, last_error: null }], 2, now)).toBe("cold");
+    expect(computeCacheState([], [], now)).toBe("fresh");
+    expect(computeCacheState([], [{ projectId: "p1", targetId: "t" }], now)).toBe("cold");
+    expect(computeCacheState(
+      [{ project_id: "p1", target_id: "t", last_success_at: now - 1_000, last_attempt_at: now, last_error: null }],
+      [{ projectId: "p1", targetId: "t" }], now,
+    )).toBe("fresh");
+    expect(computeCacheState(
+      [{ project_id: "p1", target_id: "t", last_success_at: now - 90_000, last_attempt_at: now, last_error: null }],
+      [{ projectId: "p1", targetId: "t" }], now,
+    )).toBe("stale");
+    expect(computeCacheState(
+      [{ project_id: "p1", target_id: "t", last_success_at: now - 1_000, last_attempt_at: now, last_error: null }],
+      [{ projectId: "p1", targetId: "t" }, { projectId: "p1", targetId: "t2" }], now,
+    )).toBe("cold");
+  });
+
+  it("computeCacheState: a leftover row for a since-unlinked target is ignored — does not force permanent staleness", () => {
+    const now = 100_000;
+    const states = [
+      // expected target: fresh
+      { project_id: "p1", target_id: "t", last_success_at: now - 1_000, last_attempt_at: now, last_error: null },
+      // leftover row for a target no longer in `targets` (e.g. an unlinked remote), long stale
+      { project_id: "p1", target_id: "gone", last_success_at: now - 999_999, last_attempt_at: now, last_error: null },
+    ];
+    expect(computeCacheState(states, [{ projectId: "p1", targetId: "t" }], now)).toBe("fresh");
+  });
+
+  it("computeCacheState: a leftover row's success cannot mask a never-synced expected target as cold", () => {
+    const now = 100_000;
+    const states = [
+      // leftover row for a target no longer in `targets`, but it DID succeed —
+      // must not be counted toward the expected target's success.
+      { project_id: "p1", target_id: "gone", last_success_at: now - 1_000, last_attempt_at: now, last_error: null },
+    ];
+    expect(computeCacheState(states, [{ projectId: "p1", targetId: "t" }], now)).toBe("cold");
   });
 });

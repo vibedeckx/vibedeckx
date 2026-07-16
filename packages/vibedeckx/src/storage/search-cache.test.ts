@@ -235,6 +235,25 @@ describe("searchCache", () => {
       expect(new Set(ids).size).toBe(ids.length);
     });
 
+    it("empty query at the DEFAULT limit still surfaces an old favorited session, ranked first", async () => {
+      // Regression: recents mode used to sort purely by recency before
+      // capping, so an old favorite lost out to the N most-recently-active
+      // unfavorited sessions and never made the (default) top-10 cut.
+      await storage.agentSessions.create({ id: "old-fav", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.updateTitle("old-fav", "ancient favorite");
+      await storage.agentSessions.setFavorited("old-fav", true);
+      await new Promise((r) => setTimeout(r, 10)); // strictly older updated_at than the padding below
+      for (let i = 0; i < 12; i++) {
+        const id = `recent-${i}`;
+        await storage.agentSessions.create({ id, project_id: "p1", branch: "dev" });
+        await storage.agentSessions.updateTitle(id, `recent session ${i}`);
+      }
+      const res = await storage.searchCache.search({ query: "", limitPerGroup: 10 });
+      expect(res.sessions).toHaveLength(10);
+      expect(res.sessions.map(s => s.sessionId)).toContain("old-fav");
+      expect(res.sessions[0].sessionId).toBe("old-fav");
+    });
+
     it("limitPerGroup truncates each group to the top-ranked rows", async () => {
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [
         { id: "e1", branch: "dev", title: "deploy",         lastActiveAt: 1, favoritedAt: null, entryCount: 1 }, // exact

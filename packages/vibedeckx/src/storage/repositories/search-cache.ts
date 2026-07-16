@@ -247,10 +247,14 @@ export const createSearchCacheRepos = (
         // Recents mode: projects/workspaces are irrelevant without a query
         // term; sessions are the full (already project-scoped, self-healed)
         // candidate set — ALL favorited sessions (uncapped side queries)
-        // plus the most-recently-active ones (200-row windows) — ordered by
-        // recency desc and capped.
+        // plus the most-recently-active ones (200-row windows). Sorted
+        // favorited-first (then recency desc) BEFORE the limitPerGroup cap —
+        // otherwise an old favorite loses out to the N most-recently-active
+        // unfavorited sessions and never makes the cut, defeating the
+        // "recents AND favorited" contract at the default limit.
         const sessions = [...sessionCandidates]
-          .sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))
+          .sort((a, b) => Number(!!b.favoritedAt) - Number(!!a.favoritedAt)
+            || (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))
           .slice(0, limitPerGroup);
         return { projects: [], workspaces: [], sessions };
       }

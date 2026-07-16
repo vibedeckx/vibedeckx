@@ -36,14 +36,19 @@ export async function listSearchTargets(storage: Storage, userId?: string): Prom
 
 export function computeCacheState(
   states: SearchSyncState[],
-  expectedTargets: number,
+  targets: Array<{ projectId: string; targetId: string }>,
   now: number,
   ttlMs: number = DEFAULT_TTL_MS,
 ): "cold" | "stale" | "fresh" {
-  if (expectedTargets === 0) return "fresh";
-  const succeeded = states.filter((s) => s.last_success_at != null);
-  if (succeeded.length < expectedTargets) return "cold";
-  return succeeded.every((s) => now - (s.last_success_at ?? 0) <= ttlMs) ? "fresh" : "stale";
+  if (targets.length === 0) return "fresh";
+  // Match by key rather than comparing counts: `search_catalog_sync_state`
+  // rows are never deleted, so a leftover row for a since-unlinked target
+  // must neither count toward staleness (permanent "stale") nor toward
+  // success (masking a genuinely never-synced expected target as "cold").
+  const stateByKey = new Map(states.map((s) => [`${s.project_id}:${s.target_id}`, s]));
+  const matched = targets.map((t) => stateByKey.get(`${t.projectId}:${t.targetId}`));
+  if (matched.some((s) => s?.last_success_at == null)) return "cold";
+  return matched.every((s) => now - (s!.last_success_at ?? 0) <= ttlMs) ? "fresh" : "stale";
 }
 
 export interface RefreshDeps {

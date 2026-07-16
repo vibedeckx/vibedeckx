@@ -65,17 +65,24 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
       // even if the user never opened its branch dropdown.
       const sessions = await Promise.all(data.sessions.map(async (s) => {
         const localSessionId = `remote-${target.targetId}-${target.projectId}-${s.id}`;
+        // The session-list proxy (agent-session-routes.ts) registers the same
+        // map entry / mapping row with the worker's raw "" branch sentinel for
+        // main, while the catalog here uses the API's `null` convention.
+        // Whichever registrar runs first must not leave a divergent value for
+        // the other — normalize to "" for the map/mapping registration only;
+        // the snapshot passed onward to applyCatalogSnapshot keeps `null`.
+        const mapBranch = s.branch ?? "";
         if (!fastify.remoteSessionMap.has(localSessionId)) {
           fastify.remoteSessionMap.set(localSessionId, {
             remoteServerId: target.targetId,
             remoteUrl: r.url,
             remoteApiKey: r.apiKey,
             remoteSessionId: s.id,
-            branch: s.branch,
+            branch: mapBranch,
           });
         }
         await fastify.storage.remoteSessionMappings.upsert(
-          localSessionId, target.projectId, target.targetId, s.id, s.branch,
+          localSessionId, target.projectId, target.targetId, s.id, mapBranch,
         );
         return { ...s, id: localSessionId };
       }));
@@ -88,7 +95,7 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
     const states = await fastify.storage.searchCache.getSyncStates(
       [...new Set(targets.map((t) => t.projectId))],
     );
-    return computeCacheState(states, targets.length, Date.now());
+    return computeCacheState(states, targets, Date.now());
   }
 
   // Cache-only search: never proxies, never spawns subprocesses.

@@ -1419,7 +1419,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // anyway. UPDATE-only (no insert for a null/cleared title — the
         // cache column stays whatever the last snapshot/refresh set it to).
         if (normalizedTitle) {
-          await fastify.storage.searchCache.updateCachedSessionTitle(req.params.sessionId, normalizedTitle);
+          try {
+            await fastify.storage.searchCache.updateCachedSessionTitle(req.params.sessionId, normalizedTitle);
+          } catch (err) {
+            // Best-effort cache freshness only — the remote PATCH already
+            // succeeded, so a write-through failure here must not 500 an
+            // otherwise-successful title change.
+            console.error("[API] searchCache.updateCachedSessionTitle failed:", err);
+          }
         }
       }
       return reply.code(proxyStatus(result)).send(result.data);
