@@ -95,7 +95,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   async function performLocalBranch(
     sourceSessionId: string,
     userId: string | undefined,
-    opts: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig },
+    opts: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; upToEntryIndex?: number },
   ): Promise<
     | { ok: true; payload: { session: Record<string, unknown>; messages: unknown[] } }
     | { ok: false; code: number; error: string }
@@ -105,14 +105,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return { ok: false, code: 404, error: "Session not found" };
     }
 
-    const newSessionId = await fastify.agentSessionManager.branchSession(
+    const result = await fastify.agentSessionManager.branchSession(
       sourceSessionId,
       opts.agentType as AgentType | undefined,
-      { sessionId: opts.sessionId, crossRemoteMcp: opts.crossRemoteMcp },
+      { sessionId: opts.sessionId, crossRemoteMcp: opts.crossRemoteMcp, upToEntryIndex: opts.upToEntryIndex },
     );
-    if (!newSessionId) {
+    if (!result.ok) {
+      if (result.reason === "invalid-cutoff") {
+        return { ok: false, code: 400, error: "upToEntryIndex must reference a turn_end stop point" };
+      }
+      if (result.reason === "running-needs-cutoff") {
+        return { ok: false, code: 409, error: "Session is running; branching requires a stop-point cutoff" };
+      }
       return { ok: false, code: 404, error: "Session not found or has no history to branch" };
     }
+    const newSessionId = result.sessionId;
 
     const session = fastify.agentSessionManager.getSession(newSessionId);
     const messages = fastify.agentSessionManager.getMessages(newSessionId);
@@ -1036,11 +1043,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // (optionally with a different agent type) while the original stays intact.
   fastify.post<{
     Params: { sessionId: string };
-    Body: { agentType?: string };
+    Body: { agentType?: string; upToEntryIndex?: number };
   }>(
     "/api/agent-sessions/:sessionId/branch",
     async (req, reply) => {
-      const { agentType } = (req.body || {}) as { agentType?: string };
+      const { agentType, upToEntryIndex } = (req.body || {}) as { agentType?: string; upToEntryIndex?: number };
+      if (upToEntryIndex !== undefined && (!Number.isInteger(upToEntryIndex) || upToEntryIndex < 0)) {
+        return reply.code(400).send({ error: "upToEntryIndex must be a non-negative integer" });
+      }
 
       const userId = requireAuth(req, reply);
       if (userId === null) return;
@@ -1138,6 +1148,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         agentType,
         sessionId: preSessionId,
         crossRemoteMcp,
+        upToEntryIndex,
       });
       if (!branched.ok) {
         return reply.code(branched.code).send({ error: branched.error });
@@ -1154,9 +1165,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // on mismatch, mirroring /api/path/agent-sessions/new).
   fastify.post<{
     Params: { sessionId: string };
-    Body: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig };
+    Body: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; upToEntryIndex?: number };
   }>("/api/path/agent-sessions/:sessionId/branch", async (req, reply) => {
-    const { agentType, sessionId, crossRemoteMcp } = req.body || {};
+    const { agentType, sessionId, crossRemoteMcp, upToEntryIndex } = req.body || {};
+    if (upToEntryIndex !== undefined && (!Number.isInteger(upToEntryIndex) || upToEntryIndex < 0)) {
+      return reply.code(400).send({ error: "upToEntryIndex must be a non-negative integer" });
+    }
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
@@ -1164,6 +1178,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       agentType,
       sessionId,
       crossRemoteMcp,
+      upToEntryIndex,
     });
     if (!branched.ok) {
       return reply.code(branched.code).send({ error: branched.error });

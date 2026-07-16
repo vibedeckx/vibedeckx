@@ -25,7 +25,7 @@ function makeApp(overrides?: {
   const sourceRow = overrides?.sourceRow ?? { project_id: "p1" };
   const project = overrides && "project" in overrides ? overrides.project : { id: "p1" };
 
-  const branchSession = vi.fn(async () => BRANCH_ID);
+  const branchSession = vi.fn(async () => ({ ok: true, sessionId: BRANCH_ID }));
 
   const app = Fastify();
   app.decorate("authEnabled", false);
@@ -101,5 +101,26 @@ describe("branch routes", () => {
     const opts = h.branchSession.mock.calls[0][2];
     expect(opts.sessionId).toBe("pre-branch-id");
     expect(opts.crossRemoteMcp).toEqual(crossRemoteMcp);
+  });
+
+  it("threads upToEntryIndex to branchSession and maps invalid-cutoff to 400", async () => {
+    const h = makeApp();
+    app = h.app;
+    await app.register(agentSessionRoutes);
+    await app.ready();
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/src-1/branch", payload: { upToEntryIndex: 7 } });
+    expect(h.branchSession.mock.calls[0][2].upToEntryIndex).toBe(7);
+
+    h.branchSession.mockResolvedValueOnce({ ok: false, reason: "invalid-cutoff" });
+    const bad = await app.inject({ method: "POST", url: "/api/agent-sessions/src-1/branch", payload: { upToEntryIndex: 3 } });
+    expect(bad.statusCode).toBe(400);
+
+    h.branchSession.mockResolvedValueOnce({ ok: false, reason: "running-needs-cutoff" });
+    const busy = await app.inject({ method: "POST", url: "/api/agent-sessions/src-1/branch", payload: {} });
+    expect(busy.statusCode).toBe(409);
+
+    const nonInt = await app.inject({ method: "POST", url: "/api/agent-sessions/src-1/branch", payload: { upToEntryIndex: -1 } });
+    expect(nonInt.statusCode).toBe(400);
   });
 });

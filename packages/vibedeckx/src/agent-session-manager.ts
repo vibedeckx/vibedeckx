@@ -130,6 +130,17 @@ interface RunningSession {
   crossRemoteMcp?: CrossRemoteMcpConfig;
 }
 
+/**
+ * Result of `branchSession`. `not-found`: source session unknown.
+ * `empty-history`: source has no persisted entries to copy (or none survive
+ * the cutoff). `invalid-cutoff`: `upToEntryIndex` doesn't land on a
+ * `turn_end` row. `running-needs-cutoff`: no-cutoff branch requested while
+ * the source is running — refused so a half-finished turn is never copied.
+ */
+export type BranchResult =
+  | { ok: true; sessionId: string }
+  | { ok: false; reason: "not-found" | "empty-history" | "invalid-cutoff" | "running-needs-cutoff" };
+
 export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
   private storage: Storage;
@@ -2223,25 +2234,47 @@ export class AgentSessionManager {
    * message goes through wakeDormantSession, which replays the full copied
    * context to a fresh process, so a branch also works with a different
    * agent type than the source.
-   * Returns the new session id, or null when the source is unknown or has
-   * no persisted history to copy.
+   *
+   * `opts.upToEntryIndex`, when given, is an inclusive cutoff that must land
+   * on a `turn_end` row — every branch then ends with its own tail divider.
+   * With a cutoff the source's live process is never touched (no
+   * finalizeStreamingEntry), so a historical branch is safe even while the
+   * source is running. Without a cutoff (legacy full-copy callers) a running
+   * source is refused outright — copying mid-turn would leave the branch
+   * with a half-finished turn and no closing turn_end.
    */
   async branchSession(
     sourceSessionId: string,
     agentTypeOverride?: AgentType,
-    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig } = {},
-  ): Promise<string | null> {
+    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; upToEntryIndex?: number } = {},
+  ): Promise<BranchResult> {
     const source = this.sessions.get(sourceSessionId);
     const sourceRow = await this.storage.agentSessions.getById(sourceSessionId);
-    if (!source && !sourceRow) return null;
+    if (!source && !sourceRow) return { ok: false, reason: "not-found" };
     // skipDb sessions have no persisted entries to copy
-    if (source?.skipDb) return null;
+    if (source?.skipDb) return { ok: false, reason: "empty-history" };
 
-    // Flush any in-flight streaming assistant entry so the copy is complete
-    if (source) await this.finalizeStreamingEntry(source);
+    if (opts.upToEntryIndex === undefined) {
+      // Legacy full-copy path (no-cutoff callers). Refused mid-turn so a
+      // half-finished turn can never be copied; historical branches pass a
+      // cutoff and are always allowed.
+      if (source?.status === "running") return { ok: false, reason: "running-needs-cutoff" };
+      // Flush any in-flight streaming assistant entry so the copy is complete
+      if (source) await this.finalizeStreamingEntry(source);
+    }
 
-    const entryRows = await this.storage.agentSessions.getEntries(sourceSessionId);
-    if (entryRows.length === 0) return null;
+    let entryRows = await this.storage.agentSessions.getEntries(sourceSessionId);
+    if (opts.upToEntryIndex !== undefined) {
+      // The cutoff must be a stop point: every branched copy ends with a
+      // turn_end so the new session has its own tail divider. With a cutoff
+      // we read persisted rows only — never finalize the source's stream.
+      const cut = entryRows.find((r) => r.entry_index === opts.upToEntryIndex);
+      let cutType: string | null = null;
+      if (cut) { try { cutType = (JSON.parse(cut.data) as AgentMessage).type; } catch { /* unparsable → invalid */ } }
+      if (cutType !== "turn_end") return { ok: false, reason: "invalid-cutoff" };
+      entryRows = entryRows.filter((r) => r.entry_index <= opts.upToEntryIndex!);
+    }
+    if (entryRows.length === 0) return { ok: false, reason: "empty-history" };
 
     const projectId = source?.projectId ?? sourceRow!.project_id;
     const branch = source?.branch ?? (sourceRow!.branch || null);
@@ -2317,7 +2350,7 @@ export class AgentSessionManager {
     await this.emitDerivedBranchActivity(projectId, branch);
 
     console.log(`[AgentSession] branchSession: ${sourceSessionId} → ${newId} (entries=${entryRows.length}, agentType=${agentType})`);
-    return newId;
+    return { ok: true, sessionId: newId };
   }
 
   /**

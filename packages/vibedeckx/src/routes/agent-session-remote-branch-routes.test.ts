@@ -25,7 +25,7 @@ type ProxyResult = { ok: boolean; status: number; data: unknown };
 function makeApp() {
   const upsert = vi.fn(async () => undefined);
   const projectsGetById = vi.fn(async () => ({ id: "p1" }));
-  const branchSession = vi.fn(async () => "new-local-id");
+  const branchSession = vi.fn(async () => ({ ok: true, sessionId: "new-local-id" }));
   const remoteSessionMap = new Map<string, unknown>();
   remoteSessionMap.set(SRC_SESSION_ID, {
     remoteServerId: "srv1",
