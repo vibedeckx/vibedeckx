@@ -9,8 +9,19 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   listBranchSessions,
@@ -60,6 +71,10 @@ export function SessionHistoryDropdown({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [open, setOpen] = useState(false);
+  // Session awaiting delete confirmation. Held as the full summary (not just
+  // the id) so the dialog can keep showing its title while the row animates
+  // out of the reloaded list underneath.
+  const [pendingDelete, setPendingDelete] = useState<BranchSessionSummary | null>(null);
   // Sessions whose row has landed in the list but is still awaiting its AI
   // title — surfaced via the self-heal refetch below the moment we observe a
   // freshly-appeared, untitled row. Drives the "Generating title…" loader so
@@ -202,7 +217,6 @@ export function SessionHistoryDropdown({
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm("Delete this conversation? This cannot be undone.")) return;
     try {
       await deleteSession(id);
       const remaining = sessions.filter((s) => s.id !== id);
@@ -265,6 +279,7 @@ export function SessionHistoryDropdown({
   const triggerTitle = triggerPending ? "Generating title…" : triggerLabel;
 
   return (
+    <>
     <DropdownMenu
       open={open}
       onOpenChange={(next) => {
@@ -401,7 +416,11 @@ export function SessionHistoryDropdown({
                       aria-label="Delete conversation"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void handleDelete(s.id);
+                        // Close the menu before opening the confirm dialog —
+                        // two stacked Radix modal layers fight over focus and
+                        // body pointer-events.
+                        setOpen(false);
+                        setPendingDelete(s);
                       }}
                       className="p-1 hover:bg-muted rounded text-destructive"
                     >
@@ -437,5 +456,41 @@ export function SessionHistoryDropdown({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+    <AlertDialog
+      open={pendingDelete !== null}
+      onOpenChange={(dialogOpen) => {
+        if (!dialogOpen) setPendingDelete(null);
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {pendingDelete ? (
+              <>
+                <span className="font-medium text-foreground">
+                  {label(pendingDelete)}
+                </span>{" "}
+                and its message history will be permanently deleted. This cannot
+                be undone.
+              </>
+            ) : null}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className={cn(buttonVariants({ variant: "destructive" }), "border-transparent")}
+            onClick={() => {
+              if (pendingDelete) void handleDelete(pendingDelete.id);
+              setPendingDelete(null);
+            }}
+          >
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }

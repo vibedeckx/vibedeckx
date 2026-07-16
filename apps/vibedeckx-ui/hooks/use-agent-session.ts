@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError, type RunningResidentSession } from "@/lib/api";
 import type { AgentType } from "@/lib/api";
 import {
   workspaceKey,
@@ -1013,59 +1013,137 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     return null;
   }, [projectId, branch, agentMode, session?.id, explicitSessionId]);
 
+  // Pending resident-limit eviction question, lifted out of ensureSession so
+  // the component layer can render a styled confirm dialog instead of
+  // window.confirm. `resolve` is the suspended ensureSession continuation:
+  // resolve(true) evicts the least recently active session and retries,
+  // resolve(false) aborts the send. Mirrored into a ref so the workspace-reset
+  // effect and unmount cleanup can cancel it without listing it as a dep.
+  interface ResidentLimitPromptState {
+    maxResidentAgentProcesses: number;
+    runningSessions: RunningResidentSession[];
+    resolve: (evict: boolean) => void;
+  }
+  const [residentLimitPrompt, setResidentLimitPrompt] =
+    useState<ResidentLimitPromptState | null>(null);
+  const residentLimitPromptRef = useRef<ResidentLimitPromptState | null>(null);
+
+  // Resume a suspended ensureSession with "No" — called on workspace switch
+  // and unmount so an unanswered dialog can never strand its caller.
+  const cancelResidentLimitPrompt = useCallback(() => {
+    residentLimitPromptRef.current?.resolve(false);
+    residentLimitPromptRef.current = null;
+    setResidentLimitPrompt(null);
+  }, []);
+
+  // Single-flight guard for ensureSession: first-sends can race (imperative
+  // submitMessage from page.tsx vs the form submit), and two concurrent
+  // creates hitting the resident limit would each open an eviction prompt —
+  // the second overwriting the first's resolver and stranding that caller.
+  // Concurrent callers of the same workspace generation share one promise.
+  const ensureSessionInFlightRef = useRef<{
+    generation: number;
+    promise: Promise<AgentSession | null>;
+  } | null>(null);
+
   // Create a real session on demand (called by submitMessage on first send).
   // POSTs to /api/projects/:projectId/agent-sessions/new and wires up WS.
   // If a session already exists, returns it unchanged.
-  const ensureSession = useCallback(async (
+  const ensureSession = useCallback((
     permissionMode?: "plan" | "edit"
   ): Promise<AgentSession | null> => {
-    if (!projectId) return null;
-    if (session) return session;
+    if (!projectId) return Promise.resolve(null);
+    if (session) return Promise.resolve(session);
 
-    setIsLoading(true);
-    setError(null);
-    try {
-      let data: Awaited<ReturnType<typeof createNewAgentSession>>;
+    // Capture generation at call time to detect a workspace switch happening
+    // under any of the awaits below (same pattern as startSession).
+    const generation = sessionGenerationRef.current;
+    const inFlight = ensureSessionInFlightRef.current;
+    if (inFlight && inFlight.generation === generation) return inFlight.promise;
+
+    const run = async (): Promise<AgentSession | null> => {
+      setIsLoading(true);
+      setError(null);
       try {
-        data = await createNewAgentSession(projectId, branch, permissionMode, agentType);
-      } catch (error) {
-        if (error instanceof ResidentLimitError) {
-          const confirmed = window.confirm(
-            `All ${error.maxResidentAgentProcesses} resident agent processes for this workspace branch are running. Stop the least recently active running session in this branch and start a new conversation?`,
-          );
+        let data: Awaited<ReturnType<typeof createNewAgentSession>>;
+        try {
+          data = await createNewAgentSession(projectId, branch, permissionMode, agentType);
+        } catch (error) {
+          if (!(error instanceof ResidentLimitError)) throw error;
+          // Suspend until the user answers the eviction dialog rendered by
+          // the consuming component (see residentLimitPrompt above).
+          let resolvePrompt!: (evict: boolean) => void;
+          const answer = new Promise<boolean>((resolve) => {
+            resolvePrompt = resolve;
+          });
+          const prompt: ResidentLimitPromptState = {
+            maxResidentAgentProcesses: error.maxResidentAgentProcesses,
+            runningSessions: error.runningSessions,
+            resolve: resolvePrompt,
+          };
+          residentLimitPromptRef.current = prompt;
+          setResidentLimitPrompt(prompt);
+          const confirmed = await answer;
+          // Clear only if still ours — a cancel + newer prompt may have
+          // replaced it while this continuation waited its turn.
+          if (residentLimitPromptRef.current === prompt) {
+            residentLimitPromptRef.current = null;
+          }
+          setResidentLimitPrompt((cur) => (cur === prompt ? null : cur));
+          // Workspace switched while the dialog was up (the reset effect
+          // cancels it) — abort silently, don't force-create for the old one.
+          if (sessionGenerationRef.current !== generation) return null;
           if (!confirmed) throw error;
           data = await createNewAgentSession(projectId, branch, permissionMode, agentType, true);
-        } else {
-          throw error;
+        }
+        // If workspace changed while a create call was in flight, discard the
+        // result rather than writing the old workspace's session into the new
+        // one's UI state.
+        if (sessionGenerationRef.current !== generation) {
+          console.log("[AgentSession] Discarding stale ensureSession result (generation mismatch)");
+          return null;
+        }
+        const newSession: AgentSession = {
+          id: data.session.id,
+          projectId: data.session.projectId,
+          branch: data.session.branch,
+          status: data.session.status as AgentSessionStatus,
+          permissionMode: (data.session.permissionMode ?? "edit") as "plan" | "edit",
+          agentType: (data.session.agentType ?? "claude-code") as AgentType,
+          processAlive: data.session.processAlive ?? true,
+        };
+        sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), newSession);
+        sessionCache.set(getCacheKey(projectId, branch, newSession.id), newSession);
+        setSession(newSession);
+        setStatus(newSession.status);
+        setIsInitialized(true);
+        // No longer in placeholder mode — a real session exists now.
+        removePlaceholder(workspaceKey(projectId, branch, agentMode));
+        connectWebSocket(newSession.id);
+        onSessionStartedRef.current?.(newSession);
+        return newSession;
+      } catch (e) {
+        console.error("[AgentSession] ensureSession:", e);
+        // Don't surface the error into a workspace that has moved on.
+        if (sessionGenerationRef.current !== generation) return null;
+        setError(e instanceof Error ? e.message : "Failed to create session");
+        return null;
+      } finally {
+        // Clear only our own entry — a newer-generation call may have already
+        // replaced it after a workspace switch.
+        if (ensureSessionInFlightRef.current?.generation === generation) {
+          ensureSessionInFlightRef.current = null;
+        }
+        // Only clear loading if this is still the current generation
+        if (sessionGenerationRef.current === generation) {
+          setIsLoading(false);
         }
       }
-      const newSession: AgentSession = {
-        id: data.session.id,
-        projectId: data.session.projectId,
-        branch: data.session.branch,
-        status: data.session.status as AgentSessionStatus,
-        permissionMode: (data.session.permissionMode ?? "edit") as "plan" | "edit",
-        agentType: (data.session.agentType ?? "claude-code") as AgentType,
-        processAlive: data.session.processAlive ?? true,
-      };
-      sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), newSession);
-      sessionCache.set(getCacheKey(projectId, branch, newSession.id), newSession);
-      setSession(newSession);
-      setStatus(newSession.status);
-      setIsInitialized(true);
-      // No longer in placeholder mode — a real session exists now.
-      removePlaceholder(workspaceKey(projectId, branch, agentMode));
-      connectWebSocket(newSession.id);
-      onSessionStartedRef.current?.(newSession);
-      return newSession;
-    } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : "Failed to create session";
-      setError(errorMsg);
-      console.error("[AgentSession] ensureSession:", e);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
+    };
+
+    const promise = run();
+    ensureSessionInFlightRef.current = { generation, promise };
+    return promise;
   }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket]);
 
   // Cleanup on unmount
@@ -1082,8 +1160,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       if (stabilityTimeoutRef.current) {
         clearTimeout(stabilityTimeoutRef.current);
       }
+      // Invalidate in-flight creates and answer any open eviction dialog with
+      // "No" so a suspended ensureSession caller doesn't hang forever.
+      sessionGenerationRef.current += 1;
+      cancelResidentLimitPrompt();
     };
-  }, []);
+  }, [cancelResidentLimitPrompt]);
 
   // Reset session when projectId or branch changes
   useEffect(() => {
@@ -1103,8 +1185,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       stabilityTimeoutRef.current = null;
     }
 
-    // Increment generation to invalidate any in-flight startSession API calls
+    // Increment generation to invalidate any in-flight startSession /
+    // ensureSession API calls
     sessionGenerationRef.current += 1;
+
+    // A resident-limit eviction dialog opened for the previous workspace must
+    // not survive the switch: answer it "No" so its suspended ensureSession
+    // resumes (and discards itself via the generation bump above).
+    cancelResidentLimitPrompt();
 
     // Per-workspace placeholder intent. Skip auto-start and mark initialized
     // so the empty-state UI shows instead of a spinner. If the user picks an
@@ -1145,7 +1233,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Agent type changes are handled by restartSession() which keeps the WebSocket
     // connected so it can receive the clearAll patch and new messages from the backend.
     // Including agentType here would close the WebSocket and race with restartSession.
-  }, [projectId, branch, agentMode, explicitSessionId]);
+  }, [projectId, branch, agentMode, explicitSessionId, cancelResidentLimitPrompt]);
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
@@ -1208,5 +1296,6 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     ensureSession,
     switchMode,
     acceptPlan,
+    residentLimitPrompt,
   };
 }

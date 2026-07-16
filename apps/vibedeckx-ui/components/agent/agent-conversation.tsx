@@ -8,6 +8,16 @@ import { AgentMessageItem } from "./agent-message";
 import { Conversation, ConversationContent, ConversationScrollButton } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   PromptInput,
   PromptInputTextarea,
   PromptInputSubmit,
@@ -174,6 +184,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     ensureSession,
     switchMode,
     acceptPlan,
+    residentLimitPrompt,
   } = useAgentSession(projectId, branch, project?.agent_mode, agentType, {
     sessionId,
     onTaskCompleted,
@@ -950,6 +961,34 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           </div>
         </PromptInput>
       </div>
+
+      {/* Resident-limit eviction confirm — answers the suspended ensureSession
+          in use-agent-session. Any dismissal (Cancel, Escape, overlay click)
+          must resolve(false), otherwise the send stays stuck loading. */}
+      <AlertDialog
+        open={residentLimitPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) residentLimitPrompt?.resolve(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Agent process limit reached</AlertDialogTitle>
+            <AlertDialogDescription>
+              All {residentLimitPrompt?.maxResidentAgentProcesses} resident
+              agent processes for this workspace branch are running. Starting a
+              new conversation will stop the least recently active running
+              session in this branch.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => residentLimitPrompt?.resolve(true)}>
+              Stop &amp; start new
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 });

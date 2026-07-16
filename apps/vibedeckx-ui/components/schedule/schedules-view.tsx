@@ -6,7 +6,17 @@ import { Streamdown } from "streamdown";
 import { cn } from "@/lib/utils";
 import { api, type Schedule, type ScheduleInput, type ScheduleRun, type Worktree } from "@/lib/api";
 import { PageHeader } from "@/components/layout";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScheduleFormDialog } from "./schedule-form-dialog";
@@ -72,6 +82,10 @@ export function SchedulesView({
   const [editOpen, setEditOpen] = useState(false);
   const [viewRun, setViewRun] = useState<ScheduleRun | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Schedule awaiting delete confirmation. Held as the full object (not a
+  // boolean on `selected`) so the dialog text stays stable even if the
+  // selection changes underneath while it's open.
+  const [pendingDelete, setPendingDelete] = useState<Schedule | null>(null);
 
   const refetchRuns = useCallback(async (scheduleId: string) => {
     try {
@@ -107,10 +121,9 @@ export function SchedulesView({
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
     if (!selected) return;
-    if (!window.confirm(`Delete scheduled task "${selected.name}" and its run history?`)) return;
-    await onDelete(selected.id);
+    setPendingDelete(selected);
   };
 
   const openRun = async (run: ScheduleRun) => {
@@ -247,6 +260,45 @@ export function SchedulesView({
         worktrees={worktrees}
         projectId={projectId}
       />
+
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete scheduled task?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete ? (
+                <>
+                  <span className="font-medium text-foreground">{pendingDelete.name}</span>{" "}
+                  and its run history will be permanently deleted. This cannot be
+                  undone.
+                </>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={cn(buttonVariants({ variant: "destructive" }), "border-transparent")}
+              onClick={() => {
+                const target = pendingDelete;
+                setPendingDelete(null);
+                if (!target) return;
+                setActionError(null);
+                onDelete(target.id).catch((err) => {
+                  setActionError(err instanceof Error ? err.message : "Failed to delete");
+                });
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog open={viewRun !== null} onOpenChange={(o) => !o && setViewRun(null)}>
         <DialogContent className="max-w-3xl">
