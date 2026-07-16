@@ -212,6 +212,13 @@ export function useMergeStatusAutoRefresh(
     if (evt.type === "executor:stopped" && evt.projectId === projectId) {
       refetch();
     }
+    if (
+      evt.type === "merge-target:updated" &&
+      projectId !== null &&
+      evt.projectId === projectId
+    ) {
+      refetch();
+    }
   });
 
   // Backstop poll: catches git operations no event covers (e.g. the user

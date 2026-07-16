@@ -116,6 +116,33 @@ describe("useMergeStatusAutoRefresh (executor:stopped trigger)", () => {
   });
 });
 
+describe("useMergeStatusAutoRefresh (merge-target:updated trigger)", () => {
+  it("refetches only when the merge target changed for the same project", () => {
+    const refetch = vi.fn();
+    render(refetch, new Map(), "p1");
+
+    act(() => {
+      capturedListener?.({ type: "merge-target:updated", projectId: "p2", branch: "dev1" });
+    });
+    expect(refetch).not.toHaveBeenCalled();
+
+    act(() => {
+      capturedListener?.({ type: "merge-target:updated", projectId: "p1", branch: "dev1" });
+    });
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refetch without a selected project", () => {
+    const refetch = vi.fn();
+    render(refetch, new Map(), null);
+
+    act(() => {
+      capturedListener?.({ type: "merge-target:updated", projectId: null, branch: "dev1" });
+    });
+    expect(refetch).not.toHaveBeenCalled();
+  });
+});
+
 describe("useMergeStatusAutoRefresh (visible-tab backstop poll)", () => {
   const originalVisibilityState = Object.getOwnPropertyDescriptor(document, "visibilityState");
 
