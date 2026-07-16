@@ -36,6 +36,7 @@ import browserProxyRoutes from "./routes/browser-proxy-routes.js";
 import crossRemoteTargetRoutes from "./routes/cross-remote-target-routes.js";
 import crossRemoteMcpRoutes from "./routes/cross-remote-mcp-routes.js";
 import scheduleRoutes from "./routes/schedule-routes.js";
+import searchRoutes from "./routes/search-routes.js";
 import { getAuth, clerkClient } from "@clerk/fastify";
 import { getLogger } from "./logger.js";
 import "./server-types.js";
@@ -320,6 +321,7 @@ export const createServer = async (opts: {
   server.register(remoteRoutes);
   server.register(remoteServerRoutes);
   server.register(projectRemoteRoutes);
+  server.register(searchRoutes);
   server.register(executorGroupRoutes);
   server.register(executorRoutes);
   server.register(scheduleRoutes);
