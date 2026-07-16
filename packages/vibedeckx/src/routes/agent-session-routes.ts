@@ -1077,7 +1077,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           remoteInfo.remoteApiKey,
           "POST",
           `/api/path/agent-sessions/${remoteInfo.remoteSessionId}/branch`,
-          { agentType, sessionId: newRemoteSessionId, crossRemoteMcp }
+          { agentType, sessionId: newRemoteSessionId, crossRemoteMcp, upToEntryIndex }
         );
         if (!result.ok) {
           return reply.code(proxyStatus(result)).send(result.data);
@@ -1089,6 +1089,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // route). The token we minted names a session that won't exist, so
           // cross-remote calls would be rejected — fail closed and don't register.
           return reply.code(409).send({ error: "Remote returned an unexpected session id; upgrade the remote" });
+        }
+        // Old-remote guard (post-hoc by design — lockstep upgrades assumed,
+        // same pattern as the id check above): a remote that ignored the
+        // cutoff copied the full history. Fail closed and don't register.
+        if (upToEntryIndex !== undefined && remoteData.messages.length > upToEntryIndex + 1) {
+          console.error(
+            `[Branch] Remote ${remoteInfo.remoteServerId} ignored branch cutoff (${remoteData.messages.length} messages > cutoff ${upToEntryIndex}) — version drift, upgrade the remote`,
+          );
+          return reply.code(409).send({ error: "Remote ignored branch cutoff; upgrade the remote" });
         }
         // Register the local handle. The in-memory set is first (so a later
         // failure has something to roll back), but a throw in the DB write or

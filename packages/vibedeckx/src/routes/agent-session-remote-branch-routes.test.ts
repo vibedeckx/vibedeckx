@@ -138,4 +138,25 @@ describe("center-side remote branch protocol", () => {
     expect(ctx.projectsGetById).toHaveBeenCalledWith("p1", "user-1");
     expect(ctx.branchSession).toHaveBeenCalledOnce();
   });
+
+  it("threads upToEntryIndex to the remote and accepts a compliant reply", async () => {
+    proxyMock.mockImplementation(async (...args: unknown[]) => {
+      const body = args[5] as { sessionId: string; upToEntryIndex?: number };
+      expect(body.upToEntryIndex).toBe(2);
+      return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [{}, {}, {}] } }; // 3 ≤ 2+1
+    });
+    const res = await app.inject({ method: "POST", url: `/api/agent-sessions/${SRC_SESSION_ID}/branch`, payload: { upToEntryIndex: 2 } });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("fails closed with 409 and no registration when the remote ignored the cutoff", async () => {
+    proxyMock.mockImplementation(async (...args: unknown[]) => {
+      const body = args[5] as { sessionId: string };
+      return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [{}, {}, {}, {}, {}] } }; // 5 > 2+1
+    });
+    const res = await app.inject({ method: "POST", url: `/api/agent-sessions/${SRC_SESSION_ID}/branch`, payload: { upToEntryIndex: 2 } });
+    expect(res.statusCode).toBe(409);
+    expect([...ctx.remoteSessionMap.keys()]).toEqual([SRC_SESSION_ID]);
+    expect(ctx.upsert).not.toHaveBeenCalled();
+  });
 });
