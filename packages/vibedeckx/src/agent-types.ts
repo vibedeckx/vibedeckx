@@ -14,6 +14,9 @@ export type ContentPart = TextPart | ImagePart;
 
 // ============ Agent Message Types ============
 
+/** Why a turn's turn_end marker was written. See endActiveTurn in agent-session-manager.ts. */
+export type TurnOutcome = "completed" | "failed" | "stopped" | "process_exit" | "server_restart";
+
 export type AgentMessage =
   | { type: 'user'; content: string | ContentPart[]; timestamp: number }
   | { type: 'assistant'; content: string; partial?: boolean; agentType?: AgentType; timestamp: number }
@@ -22,7 +25,7 @@ export type AgentMessage =
   | { type: 'thinking'; content: string; timestamp: number }
   | { type: 'error'; message: string; timestamp: number }
   | { type: 'system'; content: string; timestamp: number }
-  | { type: 'turn_end'; timestamp: number }
+  | { type: 'turn_end'; timestamp: number; durationMs?: number; outcome?: TurnOutcome }
   | { type: 'approval_request'; requestType: 'command' | 'fileChange'; requestId: string; command?: string; cwd?: string; changes?: Array<{path: string; diff?: string; kind: string}>; timestamp: number }
   | { type: 'tool_approval_request'; tool: string; input: unknown; approvalId: string; resolved?: 'approved' | 'denied'; timestamp: number };
 

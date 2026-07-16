@@ -8,6 +8,7 @@ import type {
   AgentSessionStatus,
   AgentType,
   ContentPart,
+  TurnOutcome,
 } from "./agent-types.js";
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
@@ -117,6 +118,14 @@ interface RunningSession {
   bgSpawnHintsThisTurn: number;
   taskStartedThisTurn: number;
   lastActiveAt: number;
+  /**
+   * Wall-clock start of the currently open user turn, or null when no turn
+   * is in flight. Set when a user message actually starts a turn (steering
+   * messages don't reset it); cleared by endActiveTurn after the turn_end
+   * entry is written. In-memory only — a crash mid-turn is repaired by
+   * restoreSessionsFromDb (see repairInterruptedTurn).
+   */
+  turnOpenSince: number | null;
   /** Injected at spawn, never persisted: a token is useless once the process holding it exits. */
   crossRemoteMcp?: CrossRemoteMcpConfig;
 }
@@ -477,6 +486,7 @@ export class AgentSessionManager {
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
+      turnOpenSince: null,
     };
 
     this.sessions.set(sessionId, session);
@@ -845,6 +855,10 @@ export class AgentSessionManager {
       summaryText,
     });
     await this.emitDerivedBranchActivity(session.projectId, session.branch);
+
+    // Stop point: persist the turn_end marker before the status flips, so
+    // subscribers never see "stopped" without a tail Branch divider.
+    await this.endActiveTurn(session, "completed");
 
     // Turn finished — process stays alive (stream-json) waiting for next
     // input, but status now reflects "between turns" so UI affordances
@@ -1341,6 +1355,24 @@ export class AgentSessionManager {
   }
 
   /**
+   * Close the open turn with a persisted turn_end stop-point entry.
+   * turn_end entries are constructed ONLY here and in repairInterruptedTurn
+   * (restore path). Wall clock only — see design doc for why the CLI's
+   * payload.duration_ms is not used. Rides the normal best-effort entry
+   * persistence on purpose (no strict path — design decision).
+   */
+  private async endActiveTurn(
+    session: RunningSession,
+    outcome: Exclude<TurnOutcome, "server_restart">,
+  ): Promise<void> {
+    if (session.turnOpenSince === null) return; // no turn in flight
+    const endedAt = Date.now(); // single clock read: timestamp === end bound of durationMs
+    const durationMs = endedAt - session.turnOpenSince;
+    await this.pushEntry(session.id, { type: "turn_end", timestamp: endedAt, durationMs, outcome }, true);
+    session.turnOpenSince = null; // cleared only after the write resolves
+  }
+
+  /**
    * Send a user message to the agent
    */
   async sendUserMessage(
@@ -1410,6 +1442,9 @@ export class AgentSessionManager {
         `[AgentSession] sendUserMessage: wrote ${formatted.length}B to ${session.agentType} stdin (session=${sessionId})`,
       );
       session.process.stdin.write(formatted);
+      // A turn is now genuinely in flight. Steering messages (sent while a
+      // turn is already open) must not reset the clock.
+      if (session.turnOpenSince === null) session.turnOpenSince = Date.now();
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to send message:`, error);
@@ -1937,6 +1972,9 @@ export class AgentSessionManager {
         case "system":
           // Skip system messages (session lifecycle noise)
           break;
+        case "turn_end":
+          // UI stop-point marker, not conversation content.
+          break;
         // Skip thinking blocks (internal)
       }
     }
@@ -1999,6 +2037,7 @@ export class AgentSessionManager {
       content: userMessage,
       timestamp: Date.now(),
     }, true, userId);
+    session.turnOpenSince = Date.now();
 
     // After process ready: send full context + new message to stdin
     setTimeout(() => {
@@ -2103,6 +2142,7 @@ export class AgentSessionManager {
         bgSpawnHintsThisTurn: 0,
         taskStartedThisTurn: 0,
         lastActiveAt: Date.now(),
+        turnOpenSince: null,
       };
 
       this.sessions.set(dbSession.id, runningSession);
@@ -2214,6 +2254,7 @@ export class AgentSessionManager {
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
+      turnOpenSince: null,
       crossRemoteMcp: opts.crossRemoteMcp,
     };
     this.sessions.set(newId, branched);
