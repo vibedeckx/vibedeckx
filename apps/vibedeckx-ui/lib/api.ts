@@ -735,6 +735,34 @@ export async function translateText(text: string): Promise<{ translatedText: str
   }
 }
 
+// ============ Search Helpers ============
+
+export type SearchCacheState = "cold" | "stale" | "fresh";
+export interface SearchResultProject { id: string; name: string; path: string | null }
+export interface SearchResultWorkspace { projectId: string; projectName: string; targetId: string; branch: string | null }
+export interface SearchResultSession {
+  sessionId: string; projectId: string; projectName: string; targetId: string;
+  branch: string | null; title: string | null; lastActiveAt: number | null; favoritedAt: number | null;
+}
+export interface SearchResponse {
+  projects: SearchResultProject[];
+  workspaces: SearchResultWorkspace[];
+  sessions: SearchResultSession[];
+  cacheState: SearchCacheState;
+}
+
+export async function searchAll(q: string, opts?: { signal?: AbortSignal }): Promise<SearchResponse> {
+  const res = await authFetch(`${getApiBase()}/api/search?q=${encodeURIComponent(q)}`, { signal: opts?.signal });
+  if (!res.ok) throw new Error(`searchAll failed: ${res.status}`);
+  return res.json();
+}
+
+export async function refreshSearchCache(): Promise<{ ok: boolean; cacheState: SearchCacheState }> {
+  const res = await authFetch(`${getApiBase()}/api/search/refresh`, { method: "POST" });
+  if (!res.ok) throw new Error(`refreshSearchCache failed: ${res.status}`);
+  return res.json();
+}
+
 // ============ Agent Session Multi-Session Helpers ============
 
 export interface BranchSessionSummary {
