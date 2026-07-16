@@ -30,6 +30,13 @@ export interface ProjectsTable {
   created_at: Generated<string>;
 }
 
+export interface BranchMergeTargetsTable {
+  project_id: string;
+  branch: string;
+  target: string;
+  updated_at: Generated<string>;
+}
+
 export interface ExecutorGroupsTable {
   id: string;
   project_id: string;
@@ -241,6 +248,7 @@ export interface CrossRemoteAuditTable {
 
 export interface DB {
   projects: ProjectsTable;
+  branch_merge_targets: BranchMergeTargetsTable;
   executor_groups: ExecutorGroupsTable;
   executors: ExecutorsTable;
   executor_processes: ExecutorProcessesTable;

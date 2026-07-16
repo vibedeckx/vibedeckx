@@ -282,6 +282,12 @@ export interface Storage {
     }, userId?: string) => Promise<Project | undefined>;
     delete: (id: string, userId?: string) => Promise<void>;
   };
+  mergeTargets: {
+    getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
+    upsert: (projectId: string, branch: string, target: string) => Promise<void>;
+    insertIfAbsent: (projectId: string, branch: string, target: string) => Promise<boolean>;
+    delete: (projectId: string, branch: string) => Promise<boolean>;
+  };
   remoteServers: {
     create(server: { name: string; url: string | null; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer>;
     getAll(userId?: string): Promise<RemoteServer[]>;

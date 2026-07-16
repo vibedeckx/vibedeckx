@@ -14,6 +14,7 @@ import { createExecutorRepos } from "./repositories/executors.js";
 import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
+import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -765,6 +766,17 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE scheduled_task_runs ADD COLUMN report TEXT DEFAULT NULL");
   }
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS branch_merge_targets (
+      project_id TEXT NOT NULL,
+      branch TEXT NOT NULL,
+      target TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (project_id, branch),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+  `);
+
   // Re-enable FK enforcement for runtime operations
   db.pragma("foreign_keys = ON");
 
@@ -790,6 +802,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createAgentSessionRepos(kdb, h),
     ...createWorkspaceRepos(kdb, h),
     ...createCrossRemoteAuditRepo(kdb),
+    ...createMergeTargetsRepo(kdb),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
