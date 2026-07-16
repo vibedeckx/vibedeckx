@@ -15,6 +15,7 @@ import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
+import { createSearchCacheRepos } from "./repositories/search-cache.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -775,6 +776,44 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       PRIMARY KEY (project_id, branch),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
+
+    -- Search caches: server-side searchable copies of worker catalogs.
+    -- remote_session_mappings stays routing-only; these tables are reconciled
+    -- from full catalog snapshots (generation-based) and rows are soft-deleted,
+    -- so wiping them never breaks existing remote session URLs.
+    CREATE TABLE IF NOT EXISTS session_search_cache (
+      local_session_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      branch TEXT NOT NULL DEFAULT '',
+      title TEXT,
+      last_active_at INTEGER,
+      favorited_at INTEGER,
+      entry_count INTEGER NOT NULL DEFAULT 0,
+      generation INTEGER NOT NULL,
+      deleted_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_search_cache_project
+      ON session_search_cache(project_id, target_id);
+
+    CREATE TABLE IF NOT EXISTS workspace_search_cache (
+      project_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      branch TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      deleted_at INTEGER,
+      PRIMARY KEY (project_id, target_id, branch)
+    );
+
+    CREATE TABLE IF NOT EXISTS search_catalog_sync_state (
+      project_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      last_success_at INTEGER,
+      last_attempt_at INTEGER,
+      snapshot_generation INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      PRIMARY KEY (project_id, target_id)
+    );
   `);
 
   // Re-enable FK enforcement for runtime operations
@@ -803,6 +842,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createWorkspaceRepos(kdb, h),
     ...createCrossRemoteAuditRepo(kdb),
     ...createMergeTargetsRepo(kdb),
+    ...createSearchCacheRepos(kdb, h),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect

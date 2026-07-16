@@ -252,6 +252,28 @@ export interface AgentSession {
   favorited_at?: number | null;
 }
 
+export interface SearchCatalogSessionEntry {
+  id: string;                 // server-side session id (already remote-prefixed for remote targets)
+  branch: string | null;      // null = main workspace (API convention)
+  title: string | null;
+  lastActiveAt: number | null;
+  favoritedAt: number | null;
+  entryCount: number;
+}
+
+export interface SearchCatalogSnapshot {
+  workspaces: Array<{ branch: string | null }>;
+  sessions: SearchCatalogSessionEntry[];
+}
+
+export interface SearchSyncState {
+  project_id: string;
+  target_id: string;          // "local" or remote server id
+  last_success_at: number | null;
+  last_attempt_at: number | null;
+  last_error: string | null;
+}
+
 export interface Storage {
   projects: {
     create: (opts: {
@@ -491,6 +513,12 @@ export interface Storage {
     delete: (localSessionId: string) => Promise<void>;
     isTitleResolved: (localSessionId: string) => Promise<boolean>;
     markTitleResolved: (localSessionId: string) => Promise<void>;
+  };
+  searchCache: {
+    applyCatalogSnapshot(projectId: string, targetId: string, snapshot: SearchCatalogSnapshot): Promise<void>;
+    recordSyncFailure(projectId: string, targetId: string, error: string): Promise<void>;
+    getSyncStates(projectIds: string[]): Promise<SearchSyncState[]>;
+    updateCachedSessionTitle(localSessionId: string, title: string): Promise<void>;
   };
   settings: {
     get: (key: string) => Promise<string | undefined>;

@@ -200,6 +200,36 @@ export interface RemoteSessionMappingsTable {
   title_resolved: GeneratedDbBool;
 }
 
+export interface SessionSearchCacheTable {
+  local_session_id: string;
+  project_id: string;
+  target_id: string;
+  branch: string;             // "" sentinel for main
+  title: string | null;
+  last_active_at: number | null;
+  favorited_at: number | null;
+  entry_count: number;
+  generation: number;
+  deleted_at: number | null;
+}
+
+export interface WorkspaceSearchCacheTable {
+  project_id: string;
+  target_id: string;
+  branch: string;             // "" sentinel for main
+  generation: number;
+  deleted_at: number | null;
+}
+
+export interface SearchCatalogSyncStateTable {
+  project_id: string;
+  target_id: string;
+  last_success_at: number | null;
+  last_attempt_at: number | null;
+  snapshot_generation: number;
+  last_error: string | null;
+}
+
 export interface ScheduledTasksTable {
   id: string;
   project_id: string;
@@ -263,6 +293,9 @@ export interface DB {
   remote_servers: RemoteServersTable;
   project_remotes: ProjectRemotesTable;
   remote_session_mappings: RemoteSessionMappingsTable;
+  session_search_cache: SessionSearchCacheTable;
+  workspace_search_cache: WorkspaceSearchCacheTable;
+  search_catalog_sync_state: SearchCatalogSyncStateTable;
   scheduled_tasks: ScheduledTasksTable;
   scheduled_task_runs: ScheduledTaskRunsTable;
   cross_remote_audit: CrossRemoteAuditTable;
