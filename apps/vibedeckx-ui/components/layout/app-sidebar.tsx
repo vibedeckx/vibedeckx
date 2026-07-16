@@ -262,10 +262,8 @@ export function AppSidebar({
                         }}
                         className={cn(
                           "relative w-full flex items-center gap-[9px] rounded-md px-2 py-[5px] text-[12.5px] transition-colors min-w-0",
-                          !isActiveInfo && "text-foreground/75 hover:bg-muted hover:text-foreground",
-                          isActiveInfo &&
-                            "bg-card text-foreground font-medium shadow-sm",
-                          isSelected && !isActiveInfo && "text-foreground font-medium"
+                          "hover:bg-muted hover:text-foreground",
+                          isSelected ? "text-foreground font-medium" : "text-foreground/75"
                         )}
                       >
                         {isActiveInfo && (
