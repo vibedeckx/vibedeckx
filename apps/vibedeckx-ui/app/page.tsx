@@ -32,8 +32,9 @@ import { MainConversation, type MainConversationHandle } from '@/components/conv
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
-import { api, type ExecutionMode, type Task, type Worktree, type SearchResultWorkspace, type SearchResultSession } from '@/lib/api';
+import type { ExecutionMode, Task, Worktree, SearchResultWorkspace, SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
+import { toast } from 'sonner';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
 import { useResidentSessions, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
@@ -416,44 +417,92 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // Ignore further switcher selections while one navigation (which may await
+  // a mode PATCH) is still in flight — a double-click or Enter+click race
+  // would otherwise kick off two navigations.
+  const switcherNavigationInFlightRef = useRef(false);
+
   // Cross-target navigation: agent_mode is the single source of truth for
   // which worker a project talks to — switch it (and wait) before navigating.
+  // Uses useProjects' updateProject (the same mechanism as the header's mode
+  // dropdown) so the hook's `projects` array and `currentProject` stay in
+  // sync with the DB — a raw api call would leave them stale and make the
+  // next cross-target check compare against an outdated agent_mode.
   const resolveProjectForTarget = useCallback(async (projectId: string, targetId: string) => {
-    let project = projects.find((p) => p.id === projectId);
+    const project = projects.find((p) => p.id === projectId);
     if (!project) return null;
     const desiredMode = targetId === "local" ? "local" : targetId;
     if ((project.agent_mode ?? "local") !== desiredMode) {
-      project = await api.updateProjectMode(project.id, "agentMode", desiredMode);
+      return updateProject(project.id, { agentMode: desiredMode });
     }
     return project;
-  }, [projects]);
+  }, [projects, updateProject]);
 
   const handleSwitcherProject = useCallback((projectId: string) => {
+    if (switcherNavigationInFlightRef.current) return;
     const project = projects.find((p) => p.id === projectId);
     if (!project) return;
+    setSwitcherOpen(false);
     selectProject(project);
     setActiveView("project-info");
-    setSwitcherOpen(false);
   }, [projects, selectProject]);
 
   const handleSwitcherWorkspace = useCallback(async (w: SearchResultWorkspace) => {
-    const project = await resolveProjectForTarget(w.projectId, w.targetId);
-    if (!project) return;
-    selectProject(project);
-    setSelectedBranch(w.branch);
-    setSessionUrlParam(null);
-    setActiveView("workspace");
+    if (switcherNavigationInFlightRef.current) return;
+    switcherNavigationInFlightRef.current = true;
     setSwitcherOpen(false);
-  }, [resolveProjectForTarget, selectProject, setSessionUrlParam]);
+    try {
+      const project = await resolveProjectForTarget(w.projectId, w.targetId);
+      if (!project) return;
+      setActiveView("workspace");
+      if (project.id === currentProject?.id) {
+        // Same project: the render-phase branch reset only fires on a project
+        // *id* change, so setting the branch synchronously is safe.
+        setSelectedBranch(w.branch);
+        setSessionUrlParam(null);
+      } else {
+        // Cross-project: selectProject triggers the render-phase branch reset
+        // and a worktree refetch — setting the branch synchronously here would
+        // be nulled and then overridden by the auto-select-first-worktree
+        // effect. Stage the target in pendingWorkspaceRef instead (same
+        // mechanism as the notification deep-link) and let the worktrees-
+        // loaded effect apply it.
+        pendingWorkspaceRef.current = { branch: w.branch, sessionId: null };
+        selectProject(project);
+      }
+    } catch (error) {
+      console.error("Quick switcher navigation failed:", error);
+      toast.error("Failed to open workspace");
+    } finally {
+      switcherNavigationInFlightRef.current = false;
+    }
+  }, [currentProject?.id, resolveProjectForTarget, selectProject, setSessionUrlParam]);
 
   const handleSwitcherSession = useCallback(async (s: SearchResultSession) => {
-    const project = await resolveProjectForTarget(s.projectId, s.targetId);
-    if (!project) return;
-    selectProject(project);
-    selectBranchSession(s.branch, s.sessionId, s.projectId);
-    setActiveView("workspace");
+    if (switcherNavigationInFlightRef.current) return;
+    switcherNavigationInFlightRef.current = true;
     setSwitcherOpen(false);
-  }, [resolveProjectForTarget, selectProject, selectBranchSession]);
+    try {
+      const project = await resolveProjectForTarget(s.projectId, s.targetId);
+      if (!project) return;
+      setActiveView("workspace");
+      if (project.id === currentProject?.id) {
+        selectBranchSession(s.branch, s.sessionId, s.projectId);
+      } else {
+        // Cross-project session jump: stage branch + session and let the
+        // worktrees-loaded effect call selectBranchSession once the target
+        // project is current — it then stamps pendingSessionSelectionRef with
+        // the *new* project id, so the URL-sync effect keeps ?session=.
+        pendingWorkspaceRef.current = { branch: s.branch, sessionId: s.sessionId };
+        selectProject(project);
+      }
+    } catch (error) {
+      console.error("Quick switcher navigation failed:", error);
+      toast.error("Failed to open session");
+    } finally {
+      switcherNavigationInFlightRef.current = false;
+    }
+  }, [currentProject?.id, resolveProjectForTarget, selectProject, selectBranchSession]);
 
   // Track previous (projectId, branch) so we can detect switches.
   // sessionId is scoped to one (projectId, branch); on switch we must drop it,
