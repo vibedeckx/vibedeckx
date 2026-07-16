@@ -77,7 +77,9 @@ mergeTargets: {
   upsert: (projectId: string, branch: string, target: string) => Promise<void>;
   /** INSERT ... ON CONFLICT DO NOTHING; returns true if the row was inserted. */
   insertIfAbsent: (projectId: string, branch: string, target: string) => Promise<boolean>;
-  delete: (projectId: string, branch: string) => Promise<void>;
+  /** Returns true when a row existed and was removed — feeds the
+   *  emit-only-on-state-change SSE rule (a no-op delete emits nothing). */
+  delete: (projectId: string, branch: string) => Promise<boolean>;
 };
 ```
 
