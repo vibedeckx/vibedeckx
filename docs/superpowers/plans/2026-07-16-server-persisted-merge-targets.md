@@ -514,6 +514,11 @@ git commit -m "feat: merge-target PUT route + merge-target:updated event"
   }
   ```
   `/api/path/branches/merge-status` (worker endpoint) and `merge-status.ts` are NOT modified.
+  The remote proxy response is untrusted input: before positional annotation it must pass
+  runtime validation for a non-null response object, entry count/order, branch identity,
+  target/error/status/count/dirty field types, and mutually exclusive computed success/error
+  shapes. Every violation returns 502 `Remote merge-status response invalid`; central metadata
+  is spread last so the worker cannot override it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -618,6 +623,17 @@ describe("stored-target resolution and annotation", () => {
     const response = await postComparisons("remote", [{ branch: "dev1" }]);
     expect(response.statusCode).toBe(502);
   });
+
+  it.each([
+    ["null data", null],
+    ["malformed item", { entries: [null] }],
+    ["wrong branch order", { entries: [{ branch: "other", target: "main", status: "merged", unmergedCount: 0, dirty: false }] }],
+  ])("502s on invalid proxied response: %s", async (_case, data) => {
+    proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data });
+    const response = await postComparisons("remote", [{ branch: "feature" }]);
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
+  });
 });
 ```
 
@@ -691,14 +707,17 @@ In the **project POST route**, after `parseComparisons` succeeds, resolve stored
       );
 ```
 
-Replace the **remote proxy branch**'s response handling (`const data = ...` onward) with:
+Add a module-private runtime parser for the remote computation boundary. It accepts only
+entries whose branch equals the effective comparison at the same index; target is
+`string | null`; optional discriminants are known enum values; counts are finite
+nonnegative integers; dirty is boolean; success entries contain the computed success fields;
+error entries contain a known pair error and no success fields. Then replace the **remote
+proxy branch**'s response handling with:
 
 ```ts
-        const data = result.data as { entries?: MergeStatusPairEntry[] };
-        const entries = Array.isArray(data.entries) ? data.entries : [];
-        if (entries.length !== effective.length) {
-          // Ordering contract violated — refuse rather than misattach metadata.
-          return reply.code(502).send({ error: "Remote merge-status entry count mismatch" });
+        const entries = parseRemoteEntries(result.data, effective);
+        if (!entries) {
+          return reply.code(502).send({ error: "Remote merge-status response invalid" });
         }
         return reply.code(200).send({
           repository: {

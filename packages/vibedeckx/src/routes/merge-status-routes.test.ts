@@ -251,13 +251,121 @@ describe("merge-status repository descriptor", () => {
       });
     });
 
+    it.each([
+      ["null data", null],
+      ["a null entry", { entries: [null] }],
+      ["a primitive entry", { entries: [42] }],
+      ["an entry without a branch", {
+        entries: [{ target: "main", status: "merged", unmergedCount: 0, dirty: false }],
+      }],
+      ["an entry with a mismatched branch", {
+        entries: [{
+          branch: "other",
+          target: "main",
+          status: "merged",
+          unmergedCount: 0,
+          dirty: false,
+        }],
+      }],
+      ["an entry with an invalid target", {
+        entries: [{
+          branch: "feature",
+          target: 42,
+          status: "merged",
+          unmergedCount: 0,
+          dirty: false,
+        }],
+      }],
+      ["an entry with an invalid error", {
+        entries: [{ branch: "feature", target: null, error: "remote-broke" }],
+      }],
+      ["an entry with an invalid status", {
+        entries: [{
+          branch: "feature",
+          target: "main",
+          status: "unknown",
+          unmergedCount: 0,
+          dirty: false,
+        }],
+      }],
+      ["an entry with a negative unmerged count", {
+        entries: [{
+          branch: "feature",
+          target: "main",
+          status: "merged",
+          unmergedCount: -1,
+          dirty: false,
+        }],
+      }],
+      ["an entry with a fractional unmerged count", {
+        entries: [{
+          branch: "feature",
+          target: "main",
+          status: "merged",
+          unmergedCount: 1.5,
+          dirty: false,
+        }],
+      }],
+      ["an entry with invalid dirty state", {
+        entries: [{
+          branch: "feature",
+          target: "main",
+          status: "merged",
+          unmergedCount: 0,
+          dirty: "no",
+        }],
+      }],
+      ["an incomplete success entry", {
+        entries: [{ branch: "feature", target: "main" }],
+      }],
+      ["an error entry mixed with success fields", {
+        entries: [{
+          branch: "feature",
+          target: null,
+          error: "target-not-found",
+          status: "merged",
+          unmergedCount: 0,
+          dirty: false,
+        }],
+      }],
+    ])("rejects remote response with %s", async (_case, data) => {
+      proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data });
+
+      const response = await postComparisons("remote", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
+    });
+
+    it("accepts and annotates a valid remote pair error", async () => {
+      await storage.mergeTargets.upsert("remote", "feature", "ghost");
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: {
+          entries: [{ branch: "feature", target: null, error: "target-not-found" }],
+        },
+      });
+
+      const response = await postComparisons("remote", [{ branch: "feature" }]);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().entries).toEqual([{
+        branch: "feature",
+        target: null,
+        error: "target-not-found",
+        targetSource: "stored",
+        requestedTarget: "ghost",
+      }]);
+    });
+
     it("rejects a remote response whose entry count does not match the request", async () => {
       proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { entries: [] } });
 
       const response = await postComparisons("remote", [{ branch: "feature" }]);
 
       expect(response.statusCode).toBe(502);
-      expect(response.json()).toEqual({ error: "Remote merge-status entry count mismatch" });
+      expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
     });
   });
 

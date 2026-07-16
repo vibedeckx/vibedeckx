@@ -3,7 +3,9 @@ import fp from "fastify-plugin";
 import {
   computeMergeStatusPairs,
   type MergeComparison,
+  type MergePairError,
   type MergeStatusPairEntry,
+  type MergeStatusValue,
 } from "../merge-status.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
@@ -57,6 +59,61 @@ function annotateEntries(
     targetSource: sources[index],
     requestedTarget: comparisons[index]?.target ?? entry.target,
   }));
+}
+
+const MERGE_PAIR_ERRORS = new Set<MergePairError>([
+  "target-not-found",
+  "branch-not-found",
+  "no-default-branch",
+]);
+const MERGE_STATUS_VALUES = new Set<MergeStatusValue>([
+  "merged",
+  "partial",
+  "unmerged",
+  "no-unique-commits",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRemoteMergeStatusEntry(
+  value: unknown,
+  comparison: MergeComparison,
+): value is MergeStatusPairEntry {
+  if (!isRecord(value) || value.branch !== comparison.branch) return false;
+  if (value.target !== null && typeof value.target !== "string") return false;
+
+  if (value.error !== undefined) {
+    if (!MERGE_PAIR_ERRORS.has(value.error as MergePairError)) return false;
+    if (
+      value.status !== undefined
+      || value.unmergedCount !== undefined
+      || value.dirty !== undefined
+    ) {
+      return false;
+    }
+    if (value.error === "branch-not-found") return typeof value.target === "string";
+    return value.target === null;
+  }
+
+  return typeof value.target === "string"
+    && MERGE_STATUS_VALUES.has(value.status as MergeStatusValue)
+    && Number.isInteger(value.unmergedCount)
+    && (value.unmergedCount as number) >= 0
+    && typeof value.dirty === "boolean";
+}
+
+function parseRemoteEntries(
+  data: unknown,
+  comparisons: MergeComparison[],
+): MergeStatusPairEntry[] | null {
+  if (!isRecord(data) || !Array.isArray(data.entries)) return null;
+  if (data.entries.length !== comparisons.length) return null;
+  return data.entries.every((entry, index) =>
+    isRemoteMergeStatusEntry(entry, comparisons[index]))
+    ? data.entries
+    : null;
 }
 
 function legacyRemoteLabel(remoteUrl: string): string {
@@ -190,9 +247,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!result.ok) {
           return reply.code(proxyStatus(result)).send(result.data);
         }
-        const data = result.data as { entries?: unknown };
-        if (!Array.isArray(data.entries) || data.entries.length !== resolved.comparisons.length) {
-          return reply.code(502).send({ error: "Remote merge-status entry count mismatch" });
+        const entries = parseRemoteEntries(result.data, resolved.comparisons);
+        if (!entries) {
+          return reply.code(502).send({ error: "Remote merge-status response invalid" });
         }
         return reply.code(200).send({
           repository: {
@@ -201,7 +258,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             label: remoteConfig.serverName,
           } satisfies MergeStatusRepository,
           entries: annotateEntries(
-            data.entries as MergeStatusPairEntry[],
+            entries,
             resolved.comparisons,
             resolved.sources,
           ),

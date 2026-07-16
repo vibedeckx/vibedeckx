@@ -140,9 +140,14 @@ export interface ProjectMergeStatusPairEntry extends MergeStatusPairEntry {
   comparison in input order (it is a `comparisons.map`); this ordering is now a stated
   contract of both endpoints, and the central server attaches
   `targetSource`/`requestedTarget` by array index — a branch-keyed map would break on
-  duplicate branch comparisons, which the API does not forbid. If a proxied worker
-  response violates the length contract, the route returns 502 rather than misattaching
-  metadata.
+  duplicate branch comparisons, which the API does not forbid. Before annotation, a
+  proxied response crosses a runtime validation boundary: the response must be a
+  non-null object with one structurally valid computed entry per effective comparison,
+  in the same branch order. Entry target/error/status/count/dirty fields and the
+  success-vs-error shape are validated against the computation contract. Any violation
+  returns `502 { error: "Remote merge-status response invalid" }` rather than crashing or
+  misattaching metadata. Metadata is then attached after spreading the validated entry,
+  so an untrusted worker cannot override `targetSource` or `requestedTarget`.
 - Entries that errored still carry `targetSource` (a `target-not-found` on a stored
   target reports `targetSource: "stored"` so the UI can label the warning correctly; a
   `no-default-branch` error reports `"default"`).
@@ -260,7 +265,8 @@ localStorage keys have drained.
 - **Backend** (vitest, colocated): `mergeTargets` repo (upsert updates `updated_at`,
   insertIfAbsent semantics, cascade on project delete); merge-status route resolves
   stored targets and annotates `targetSource`/`requestedTarget` positionally — including
-  duplicate-branch comparisons and the 502 on proxied length mismatch (proxy mocked);
+  duplicate-branch comparisons; proxied null/malformed entries, invalid field and result
+  shapes, count mismatches, and branch-order mismatches all return 502 (proxy mocked);
   PUT route auth, validation (including `ifAbsent` + `target: null` → 400), delete-on-null,
   event emitted on state change and suppressed when `insertIfAbsent` loses.
 
