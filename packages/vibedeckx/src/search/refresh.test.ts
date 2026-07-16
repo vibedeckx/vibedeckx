@@ -101,6 +101,7 @@ describe("search refresh", () => {
 
   it("computeCacheState: cold until every target has succeeded, fresh within TTL, stale after", () => {
     const now = 100_000;
+    expect(computeCacheState([], 0, now)).toBe("fresh");
     expect(computeCacheState([], 1, now)).toBe("cold");
     expect(computeCacheState([{ project_id: "p1", target_id: "t", last_success_at: now - 1_000, last_attempt_at: now, last_error: null }], 1, now)).toBe("fresh");
     expect(computeCacheState([{ project_id: "p1", target_id: "t", last_success_at: now - 90_000, last_attempt_at: now, last_error: null }], 1, now)).toBe("stale");
