@@ -1,10 +1,65 @@
-import { type Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import type { DB } from "../schema.js";
-import type { Storage } from "../types.js";
+import type { Storage, SearchResultProjectRow, SearchResultSessionRow, SearchResultWorkspaceRow } from "../types.js";
 import type { DialectHelpers } from "../dialect.js";
 
 export const toDbBranch = (branch: string | null): string => branch ?? "";
 export const fromDbBranch = (branch: string): string | null => (branch === "" ? null : branch);
+
+// Escapes LIKE metacharacters so user-typed '%'/'_' are matched literally
+// rather than acting as wildcards; paired with `escape '\'` at call sites.
+const escapeLike = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+// 0 exact, 1 prefix, 2 substring, 3 no match. `q` is expected pre-lowercased.
+const matchTier = (text: string | null | undefined, q: string): number => {
+  if (!q) return 2;
+  if (!text) return 3;
+  const t = text.toLowerCase();
+  if (t === q) return 0;
+  if (t.startsWith(q)) return 1;
+  if (t.includes(q)) return 2;
+  return 3;
+};
+
+// agent_sessions.updated_at is stored as 'YYYY-MM-DD HH:MM:SS.SSS' (UTC, see
+// dialect.ts nowMs()) — used as a recency fallback when a local session has
+// no last_user_message_at yet.
+const parseDbTimestamp = (ts: string | null | undefined): number | null => {
+  if (!ts) return null;
+  const ms = Date.parse(ts.replace(" ", "T") + "Z");
+  return Number.isNaN(ms) ? null : ms;
+};
+
+interface RankInput<T> {
+  item: T;
+  tier: number;
+  favorited: boolean;
+  recency: number;
+}
+
+// Shared tiered ranking: tier asc, then favorited desc, then recency desc.
+// Candidate sets here are already bounded (per-user project/branch counts,
+// or a 200-row SQL prefilter for sessions), so ranking in JS is cheap and
+// keeps the SQL portable across backends.
+const rankAndCap = <T>(items: Array<RankInput<T>>, limit: number): T[] =>
+  items
+    .filter((x) => x.tier < 3)
+    .sort((a, b) => a.tier - b.tier
+      || Number(b.favorited) - Number(a.favorited)
+      || b.recency - a.recency)
+    .slice(0, limit)
+    .map((x) => x.item);
+
+interface SessionCandidate {
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  targetId: string;
+  branch: string | null;
+  title: string | null;
+  lastActiveAt: number | null;
+  favoritedAt: number | null;
+}
 
 export const createSearchCacheRepos = (
   kdb: Kysely<DB>,
@@ -98,6 +153,138 @@ export const createSearchCacheRepos = (
         .set({ title })
         .where("local_session_id", "=", localSessionId)
         .execute();
+    },
+
+    search: async ({ userId, query, limitPerGroup }) => {
+      const q = query.trim().slice(0, 256).toLowerCase();
+
+      let projQuery = kdb.selectFrom("projects")
+        .select(["id", "name", "path"])
+        .where("id", "not like", "path:%");
+      if (userId) projQuery = projQuery.where("user_id", "=", userId);
+      const allProjects = await projQuery.execute();
+      const projectIds = allProjects.map((p) => p.id);
+      const nameById = new Map(allProjects.map((p) => [p.id, p.name]));
+      if (projectIds.length === 0) return { projects: [], workspaces: [], sessions: [] };
+
+      const pattern = `%${escapeLike(q)}%`;
+
+      // ---- local sessions (agent_sessions) ------------------------------
+      // "has entries" is checked in JS against a full session_id set rather
+      // than an inline subquery/join — simpler to keep portable and avoids
+      // relying on GROUP BY/aggregate quirks across dialects.
+      const entryRows = await kdb.selectFrom("agent_session_entries")
+        .select("session_id")
+        .distinct()
+        .execute();
+      const sessionsWithEntries = new Set(entryRows.map((r) => r.session_id));
+
+      let localQuery = kdb.selectFrom("agent_sessions as s")
+        .select(["s.id", "s.project_id", "s.branch", "s.title", "s.last_user_message_at", "s.updated_at", "s.favorited_at"])
+        .where("s.project_id", "in", projectIds);
+      if (q) localQuery = localQuery.where(sql<boolean>`lower(coalesce(s.title, '')) like ${pattern} escape '\\'`);
+      const localRowsRaw = await localQuery.orderBy("s.updated_at", "desc").limit(200).execute();
+      const localRows = localRowsRaw.filter((r) => r.title !== null || sessionsWithEntries.has(r.id));
+
+      // ---- remote sessions (session_search_cache) ------------------------
+      // Self-heal: a cache row for a remote target only surfaces if either
+      // (a) that target is still linked to the project via project_remotes,
+      // or (b) we have no remote_servers record for that target at all
+      // (nothing to validate against — e.g. legacy/unknown target ids). Once
+      // a remote_servers row exists but the project_remotes link is removed,
+      // the row is excluded until re-linked.
+      let cacheQuery = kdb.selectFrom("session_search_cache as c")
+        .leftJoin("project_remotes as pr", (join) => join
+          .onRef("pr.project_id", "=", "c.project_id")
+          .onRef("pr.remote_server_id", "=", "c.target_id"))
+        .leftJoin("remote_servers as rs", "rs.id", "c.target_id")
+        .select(["c.local_session_id", "c.project_id", "c.target_id", "c.branch", "c.title", "c.last_active_at", "c.favorited_at"])
+        .where("c.project_id", "in", projectIds)
+        .where("c.deleted_at", "is", null)
+        .where((eb) => eb.or([
+          eb("c.target_id", "=", "local"),
+          eb("pr.id", "is not", null),
+          eb("rs.id", "is", null),
+        ]));
+      if (q) cacheQuery = cacheQuery.where(sql<boolean>`lower(coalesce(c.title, '')) like ${pattern} escape '\\'`);
+      const cacheRows = await cacheQuery.orderBy("c.last_active_at", "desc").limit(200).execute();
+
+      const sessionCandidates: SessionCandidate[] = [
+        ...localRows.map((r) => ({
+          sessionId: r.id,
+          projectId: r.project_id,
+          projectName: nameById.get(r.project_id) ?? "",
+          targetId: "local",
+          branch: fromDbBranch(r.branch),
+          title: r.title ?? null,
+          lastActiveAt: r.last_user_message_at ?? parseDbTimestamp(r.updated_at),
+          favoritedAt: r.favorited_at ?? null,
+        })),
+        ...cacheRows.map((r) => ({
+          sessionId: r.local_session_id,
+          projectId: r.project_id,
+          projectName: nameById.get(r.project_id) ?? "",
+          targetId: r.target_id,
+          branch: fromDbBranch(r.branch),
+          title: r.title ?? null,
+          lastActiveAt: r.last_active_at ?? null,
+          favoritedAt: r.favorited_at ?? null,
+        })),
+      ];
+
+      if (!q) {
+        // Recents mode: projects/workspaces are irrelevant without a query
+        // term; sessions are the full (already project-scoped, self-healed)
+        // candidate set — which includes every favorited session and the
+        // most-recently-active ones (bounded by the 200-row prefetch above)
+        // — ordered by recency desc and capped.
+        const sessions = [...sessionCandidates]
+          .sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))
+          .slice(0, limitPerGroup);
+        return { projects: [], workspaces: [], sessions };
+      }
+
+      const projects: SearchResultProjectRow[] = rankAndCap(allProjects.map((p) => ({
+        item: { id: p.id, name: p.name, path: p.path ?? null },
+        tier: Math.min(matchTier(p.name, q), matchTier(p.path, q)),
+        favorited: false,
+        recency: 0,
+      })), limitPerGroup);
+
+      const wsRows = await kdb.selectFrom("workspace_search_cache as w")
+        .leftJoin("project_remotes as pr", (join) => join
+          .onRef("pr.project_id", "=", "w.project_id")
+          .onRef("pr.remote_server_id", "=", "w.target_id"))
+        .leftJoin("remote_servers as rs", "rs.id", "w.target_id")
+        .select(["w.project_id", "w.target_id", "w.branch"])
+        .where("w.project_id", "in", projectIds)
+        .where("w.deleted_at", "is", null)
+        .where((eb) => eb.or([
+          eb("w.target_id", "=", "local"),
+          eb("pr.id", "is not", null),
+          eb("rs.id", "is", null),
+        ]))
+        .execute();
+      const workspaces: SearchResultWorkspaceRow[] = rankAndCap(wsRows.map((w) => ({
+        item: {
+          projectId: w.project_id,
+          projectName: nameById.get(w.project_id) ?? "",
+          targetId: w.target_id,
+          branch: fromDbBranch(w.branch),
+        },
+        tier: matchTier(fromDbBranch(w.branch) ?? "main", q),
+        favorited: false,
+        recency: 0,
+      })), limitPerGroup);
+
+      const sessions: SearchResultSessionRow[] = rankAndCap(sessionCandidates.map((s) => ({
+        item: s,
+        tier: matchTier(s.title, q),
+        favorited: !!s.favoritedAt,
+        recency: s.lastActiveAt ?? 0,
+      })), limitPerGroup);
+
+      return { projects, workspaces, sessions };
     },
   },
 });

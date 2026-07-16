@@ -274,6 +274,36 @@ export interface SearchSyncState {
   last_error: string | null;
 }
 
+export interface SearchResultProjectRow {
+  id: string;
+  name: string;
+  path: string | null;
+}
+
+export interface SearchResultWorkspaceRow {
+  projectId: string;
+  projectName: string;
+  targetId: string;           // "local" or remote server id
+  branch: string | null;      // null = main workspace (API convention)
+}
+
+export interface SearchResultSessionRow {
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  targetId: string;           // "local" or remote server id
+  branch: string | null;      // null = main workspace (API convention)
+  title: string | null;
+  lastActiveAt: number | null;
+  favoritedAt: number | null;
+}
+
+export interface SearchResults {
+  projects: SearchResultProjectRow[];
+  workspaces: SearchResultWorkspaceRow[];
+  sessions: SearchResultSessionRow[];
+}
+
 export interface Storage {
   projects: {
     create: (opts: {
@@ -519,6 +549,15 @@ export interface Storage {
     recordSyncFailure(projectId: string, targetId: string, error: string): Promise<void>;
     getSyncStates(projectIds: string[]): Promise<SearchSyncState[]>;
     updateCachedSessionTitle(localSessionId: string, title: string): Promise<void>;
+    /**
+     * Cache-only tiered search across projects/workspaces/sessions, scoped to
+     * `userId` (skipped in solo mode). Empty/whitespace `query` switches to
+     * "recents" mode: sessions only (most-recently-active + all favorited),
+     * recency-desc. Non-empty query ranks each group by match tier
+     * (exact > prefix > substring), then favorited, then recency — each group
+     * capped at `limitPerGroup`.
+     */
+    search(opts: { userId?: string; query: string; limitPerGroup: number }): Promise<SearchResults>;
   };
   settings: {
     get: (key: string) => Promise<string | undefined>;

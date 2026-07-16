@@ -74,17 +74,15 @@ describe("searchCache", () => {
 
   it("marks rows absent from a newer snapshot as deleted, and reappearing rows undeleted", async () => {
     await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
-    // second snapshot drops session s1 and branch dev
     await storage.searchCache.applyCatalogSnapshot("p1", "w1", {
       workspaces: [{ branch: null }],
       sessions: [snap().sessions[1]],
     });
-    // third snapshot brings s1 back
+    let res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
+    expect(res.sessions).toHaveLength(0); // s1 deleted
     await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
-    // verify via Task 2's search OR directly: use a raw query through a second
-    // snapshot check — here we assert through getSyncStates generation growth
-    const states = await storage.searchCache.getSyncStates(["p1"]);
-    expect(states[0].last_success_at).toBeGreaterThan(0);
+    res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
+    expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]); // reappeared
   });
 
   it("recordSyncFailure records the error and never deletes cache rows", async () => {
@@ -125,7 +123,78 @@ describe("searchCache", () => {
 
   it("updateCachedSessionTitle updates title in place", async () => {
     await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
-    await storage.searchCache.updateCachedSessionTitle("remote-w1-p1-s1", "New title");
-    // asserted through Task 2's search(); for now just ensure it doesn't throw
+    await storage.searchCache.updateCachedSessionTitle("remote-w1-p1-s1", "Renamed thing");
+    const res = await storage.searchCache.search({ query: "Renamed", limitPerGroup: 10 });
+    expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]);
+  });
+
+  describe("search", () => {
+    let serverId: string;
+    beforeEach(async () => {
+      const server = await storage.remoteServers.create({ name: "Worker 1", url: "http://w1" });
+      serverId = server.id;
+      await storage.projectRemotes.add({ project_id: "p1", remote_server_id: serverId, remote_path: "/repo" });
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+    });
+
+    it("matches projects by name and path", async () => {
+      const res = await storage.searchCache.search({ query: "proj", limitPerGroup: 10 });
+      expect(res.projects.map(p => p.id)).toEqual(["p1"]);
+    });
+
+    it("ranks exact > prefix > substring and boosts favorites within a tier", async () => {
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [
+        { id: "a", branch: "dev", title: "auth",         lastActiveAt: 1, favoritedAt: null, entryCount: 1 }, // exact
+        { id: "b", branch: "dev", title: "auth refactor", lastActiveAt: 9, favoritedAt: null, entryCount: 1 }, // prefix
+        { id: "c", branch: "dev", title: "fix auth bug",  lastActiveAt: 5, favoritedAt: null, entryCount: 1 }, // substring
+        { id: "d", branch: "dev", title: "fix auth crash", lastActiveAt: 1, favoritedAt: 99, entryCount: 1 },  // substring + favorited
+      ]});
+      const res = await storage.searchCache.search({ query: "auth", limitPerGroup: 10 });
+      expect(res.sessions.map(s => s.sessionId)).toEqual(["a", "b", "d", "c"]);
+    });
+
+    it("escapes LIKE wildcards — '%' finds nothing rather than everything", async () => {
+      const res = await storage.searchCache.search({ query: "%", limitPerGroup: 10 });
+      expect(res.sessions).toHaveLength(0);
+      expect(res.projects).toHaveLength(0);
+    });
+
+    it("empty query returns recents+favorites sessions only", async () => {
+      const res = await storage.searchCache.search({ query: "  ", limitPerGroup: 10 });
+      expect(res.projects).toHaveLength(0);
+      expect(res.workspaces).toHaveLength(0);
+      // s2 (lastActiveAt 2000, favorited) before s1 (1000)
+      expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s2", "remote-w1-p1-s1"]);
+    });
+
+    it("main workspace round-trips: stored as '' but returned as null and matches 'main'", async () => {
+      const res = await storage.searchCache.search({ query: "main", limitPerGroup: 10 });
+      expect(res.workspaces.some(w => w.branch === null && w.targetId === serverId)).toBe(true);
+    });
+
+    it("excludes rows from a remote no longer linked to the project", async () => {
+      // remove the association, cache rows remain but must not surface
+      const remotes = await storage.projectRemotes.getByProject("p1");
+      await storage.projectRemotes.remove(remotes[0].id);
+      const res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
+      expect(res.sessions).toHaveLength(0);
+    });
+
+    it("scopes by userId — user B cannot see user A's data", async () => {
+      await storage.projects.create({ id: "pB", name: "b-proj", path: "/tmp/pB" }, "userB");
+      const resB = await storage.searchCache.search({ userId: "userB", query: "proj", limitPerGroup: 10 });
+      expect(resB.projects.map(p => p.id)).toEqual(["pB"]); // not p1 (user_id "")
+      const resB2 = await storage.searchCache.search({ userId: "userB", query: "Fix login", limitPerGroup: 10 });
+      expect(resB2.sessions).toHaveLength(0);
+    });
+
+    it("includes local sessions from agent_sessions (union), skipping empty ones", async () => {
+      await storage.agentSessions.create({ id: "loc1", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.updateTitle("loc1", "local session about caching");
+      await storage.agentSessions.create({ id: "loc2", project_id: "p1", branch: "dev" }); // no title, no entries
+      const res = await storage.searchCache.search({ query: "caching", limitPerGroup: 10 });
+      expect(res.sessions.map(s => s.sessionId)).toEqual(["loc1"]);
+      expect(res.sessions[0].targetId).toBe("local");
+    });
   });
 });
