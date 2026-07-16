@@ -70,6 +70,66 @@ export function deriveDefaultTarget(entries: ProjectMergeStatusPairEntry[]): str
   return null;
 }
 
+const LEGACY_MERGE_TARGET_PREFIX = "vibedeckx:mergeTarget:";
+
+export interface LegacyTargetKey {
+  key: string;
+  branch: string;
+  target: string;
+}
+
+/** Snapshot valid legacy targets for one project without touching other projects. */
+export function legacyTargetKeys(projectId: string): LegacyTargetKey[] {
+  const matches: LegacyTargetKey[] = [];
+  const prefix = `${LEGACY_MERGE_TARGET_PREFIX}${projectId}:`;
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      const target = localStorage.getItem(key);
+      if (!target) continue;
+      matches.push({ key, branch: key.slice(prefix.length), target });
+    }
+  } catch {
+    // Storage can be disabled or become inaccessible mid-scan. Keep any
+    // entries already captured; a later fetch can retry the remaining keys.
+  }
+  return matches;
+}
+
+const legacyImports = new Map<string, Promise<void>>();
+
+function ensureLegacyImport(projectId: string): Promise<void> {
+  const inFlight = legacyImports.get(projectId);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
+    const entries = legacyTargetKeys(projectId);
+    for (const { key, branch, target } of entries) {
+      let imported = false;
+      try {
+        imported = await api.setMergeTarget(projectId, branch, target, { ifAbsent: true });
+      } catch {
+        // The API normally folds transport failures into false, but keep the
+        // legacy key even if an alternate implementation rejects.
+      }
+      if (!imported) continue;
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // The server is authoritative after a successful import. A stale
+        // local key is harmless and can be retried on the next mount.
+      }
+    }
+  })();
+
+  legacyImports.set(projectId, promise);
+  void promise.finally(() => {
+    if (legacyImports.get(projectId) === promise) legacyImports.delete(projectId);
+  });
+  return promise;
+}
+
 /**
  * Merge status per workspace branch, fetched once per distinct target.
  * Refreshes whenever the worktree list identity changes (same cadence as
@@ -110,6 +170,11 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
           setRepositoryLabel(null);
         }
         return;
+      }
+
+      if (legacyTargetKeys(projectId).length > 0) {
+        await ensureLegacyImport(projectId);
+        if (cancelled) return;
       }
 
       const comparisons = branches.map((branch) => ({ branch }));

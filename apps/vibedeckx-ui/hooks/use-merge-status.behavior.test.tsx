@@ -56,6 +56,11 @@ async function render(projectId: string | null, worktrees: Worktree[]) {
 beforeEach(() => {
   getMergeStatus.mockReset();
   setMergeTarget.mockReset();
+  getMergeStatus.mockResolvedValue({
+    ok: true,
+    repository: { kind: "local", label: "Local" },
+    entries: [],
+  });
   setMergeTarget.mockResolvedValue(true);
   latest = null;
 });
@@ -217,5 +222,88 @@ describe("useMergeStatus (server-persisted targets)", () => {
 
     expect(setMergeTarget).toHaveBeenCalledWith("p1", "dev1", "release");
     expect(getMergeStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useMergeStatus (legacy target import)", () => {
+  it("imports this project's legacy target before the first fetch and leaves other projects alone", async () => {
+    let finishImport!: (ok: boolean) => void;
+    setMergeTarget.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        finishImport = resolve;
+      }),
+    );
+    localStorage.setItem("vibedeckx:mergeTarget:p1:feature: odd", "release candidate");
+    localStorage.setItem("vibedeckx:mergeTarget:p2:dev1", "other-main");
+
+    await render("p1", [{ branch: "feature: odd" }]);
+
+    await vi.waitFor(() =>
+      expect(setMergeTarget).toHaveBeenCalledWith(
+        "p1",
+        "feature: odd",
+        "release candidate",
+        { ifAbsent: true },
+      ),
+    );
+    expect(getMergeStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishImport(true);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
+
+    expect(localStorage.getItem("vibedeckx:mergeTarget:p1:feature: odd")).toBeNull();
+    expect(localStorage.getItem("vibedeckx:mergeTarget:p2:dev1")).toBe("other-main");
+    expect(getMergeStatus).toHaveBeenCalledWith("p1", [{ branch: "feature: odd" }]);
+  });
+
+  it("deletes the legacy key when a successful response means the server value won", async () => {
+    localStorage.setItem("vibedeckx:mergeTarget:p1:dev1", "stale-local-target");
+
+    await render("p1", [{ branch: "dev1" }]);
+
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
+    expect(setMergeTarget).toHaveBeenCalledWith("p1", "dev1", "stale-local-target", {
+      ifAbsent: true,
+    });
+    expect(localStorage.getItem("vibedeckx:mergeTarget:p1:dev1")).toBeNull();
+  });
+
+  it("keeps a failed legacy import and still fetches merge status", async () => {
+    setMergeTarget.mockResolvedValueOnce(false);
+    localStorage.setItem("vibedeckx:mergeTarget:p1:dev1", "release");
+
+    await render("p1", [{ branch: "dev1" }]);
+
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
+    expect(setMergeTarget).toHaveBeenCalledWith("p1", "dev1", "release", {
+      ifAbsent: true,
+    });
+    expect(localStorage.getItem("vibedeckx:mergeTarget:p1:dev1")).toBe("release");
+  });
+
+  it("shares an in-flight import across repeated effects for the same project", async () => {
+    let finishImport!: (ok: boolean) => void;
+    setMergeTarget.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        finishImport = resolve;
+      }),
+    );
+    localStorage.setItem("vibedeckx:mergeTarget:p1:dev1", "release");
+
+    await render("p1", [{ branch: "dev1" }]);
+    await vi.waitFor(() => expect(setMergeTarget).toHaveBeenCalledTimes(1));
+
+    await render("p1", [{ branch: "dev1" }]);
+    expect(setMergeTarget).toHaveBeenCalledTimes(1);
+    expect(getMergeStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishImport(true);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(1));
   });
 });
