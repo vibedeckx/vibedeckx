@@ -365,6 +365,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                   : "Type a message..."
             }
             className="pr-12"
+            style={{ fontSize: "var(--conv-font-size, 14px)" }}
             value={inputValue}
             onChange={(e) => setInputValue(e.currentTarget.value)}
           />

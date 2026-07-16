@@ -903,6 +903,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       : "Type your first message to start..."
                   }
                   className="pr-12"
+                  style={{ fontSize: "var(--conv-font-size, 14px)" }}
                 />
               </div>
               <PromptInputSubmit
