@@ -1,70 +1,71 @@
 import { describe, it, expect } from "vitest";
 import {
   activeBranchSet,
-  buildComparisons,
+  buildStatusMap,
   deriveDefaultTarget,
   deserializeBranchSet,
-  mergeTargetStorageKey,
+  effectiveTarget,
   serializeBranchSet,
   someActivityEnded,
-  staleTargetBranches,
 } from "./use-merge-status";
 
-describe("mergeTargetStorageKey", () => {
-  it("is scoped by project and branch", () => {
-    expect(mergeTargetStorageKey("p1", "dev3")).toBe("vibedeckx:mergeTarget:p1:dev3");
-  });
-});
-
-describe("buildComparisons", () => {
-  it("carries persisted targets and omits target otherwise", () => {
-    const targets: Record<string, string | null> = { dev3: null, dev4: "dev1" };
-    expect(buildComparisons(["dev3", "dev4"], (b) => targets[b])).toEqual([
-      { branch: "dev3" },
-      { branch: "dev4", target: "dev1" },
-    ]);
-  });
-});
-
-describe("staleTargetBranches", () => {
-  const cmp = [{ branch: "dev3" }, { branch: "dev4", target: "gone" }];
-  it("clears only explicit targets that errored target-not-found", () => {
-    expect(
-      staleTargetBranches(cmp, [
-        { branch: "dev3", target: null, targetSource: "default", requestedTarget: null, error: "no-default-branch" },
-        { branch: "dev4", target: null, targetSource: "request", requestedTarget: "gone", error: "target-not-found" },
-      ]),
-    ).toEqual(["dev4"]);
-  });
-  it("never clears on other errors or success", () => {
-    expect(
-      staleTargetBranches(cmp, [
-        { branch: "dev3", target: "main", targetSource: "default", requestedTarget: "main", status: "merged", unmergedCount: 0, dirty: false },
-        { branch: "dev4", target: "gone", targetSource: "request", requestedTarget: "gone", error: "branch-not-found" },
-      ]),
-    ).toEqual([]);
-  });
-});
-
 describe("deriveDefaultTarget", () => {
-  it("takes the resolved target of a default-target pair", () => {
+  it("skips stored targets and takes the first resolved default target", () => {
     expect(
-      deriveDefaultTarget(
-        [{ branch: "dev3" }, { branch: "dev4", target: "dev1" }],
-        [
-          { branch: "dev4", target: "dev1", targetSource: "request", requestedTarget: "dev1", status: "merged", unmergedCount: 0, dirty: false },
-          { branch: "dev3", target: "main", targetSource: "default", requestedTarget: "main", status: "unmerged", unmergedCount: 2, dirty: false },
-        ],
-      ),
+      deriveDefaultTarget([
+        { branch: "dev4", target: "release", targetSource: "stored", requestedTarget: "release", status: "merged" },
+        { branch: "dev3", target: "main", targetSource: "default", requestedTarget: "main", status: "unmerged" },
+        { branch: "dev2", target: "master", targetSource: "default", requestedTarget: "master", status: "merged" },
+      ]),
     ).toBe("main");
   });
-  it("null when every pair was explicit or errored", () => {
+
+  it("returns null when every target is stored", () => {
     expect(
-      deriveDefaultTarget(
-        [{ branch: "dev3" }],
-        [{ branch: "dev3", target: null, targetSource: "default", requestedTarget: null, error: "no-default-branch" }],
-      ),
+      deriveDefaultTarget([
+        { branch: "dev3", target: "release", targetSource: "stored", requestedTarget: "release", status: "merged" },
+      ]),
     ).toBe(null);
+  });
+
+  it("returns null when the default target errored", () => {
+    expect(
+      deriveDefaultTarget([
+        { branch: "dev3", target: null, targetSource: "default", requestedTarget: null, error: "no-default-branch" },
+      ]),
+    ).toBe(null);
+  });
+});
+
+describe("buildStatusMap", () => {
+  it("maps successful and missing-target entries while skipping other errors", () => {
+    expect(
+      buildStatusMap([
+        { branch: "dev1", target: "main", targetSource: "default", requestedTarget: "main", status: "partial" },
+        { branch: "dev2", target: null, targetSource: "stored", requestedTarget: "ghost", error: "target-not-found" },
+        { branch: "dev3", target: null, targetSource: "default", requestedTarget: null, error: "no-default-branch" },
+        { branch: "dev4", target: null, targetSource: "request", requestedTarget: "missing", error: "branch-not-found" },
+      ]),
+    ).toEqual(
+      new Map([
+        ["dev1", { branch: "dev1", status: "partial", unmergedCount: 0, dirty: false, target: "main" }],
+        ["dev2", { branch: "dev2", error: "target-not-found", requestedTarget: "ghost", targetSource: "stored" }],
+      ]),
+    );
+  });
+});
+
+describe("effectiveTarget", () => {
+  it("returns null without info", () => {
+    expect(effectiveTarget(undefined)).toBe(null);
+  });
+
+  it("returns the requested target for a warning", () => {
+    expect(effectiveTarget({ branch: "dev1", error: "target-not-found", requestedTarget: "ghost", targetSource: "stored" })).toBe("ghost");
+  });
+
+  it("returns the resolved target for a successful status", () => {
+    expect(effectiveTarget({ branch: "dev1", status: "merged", unmergedCount: 0, dirty: false, target: "main" })).toBe("main");
   });
 });
 

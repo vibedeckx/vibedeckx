@@ -3,64 +3,69 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
-  type MergeComparison,
   type ProjectMergeStatusPairEntry,
   type MergeStatusValue,
+  type TargetSource,
   type Worktree,
 } from "@/lib/api";
 import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
-export interface BranchMergeInfo {
-  branch: string;
-  status: MergeStatusValue;
-  unmergedCount: number;
-  dirty: boolean;
-  target: string;
+export type BranchMergeInfo =
+  | {
+      branch: string;
+      status: MergeStatusValue;
+      unmergedCount: number;
+      dirty: boolean;
+      target: string;
+      error?: undefined;
+    }
+  | {
+      branch: string;
+      error: "target-not-found";
+      requestedTarget: string;
+      targetSource: TargetSource;
+      /** Temporary type compatibility for consumers until they wire the error discriminant. */
+      target?: undefined;
+      status?: undefined;
+      unmergedCount?: undefined;
+      dirty?: undefined;
+    };
+
+export function effectiveTarget(info: BranchMergeInfo | undefined): string | null {
+  if (!info) return null;
+  return info.error === "target-not-found" ? info.requestedTarget : info.target;
 }
 
-export function mergeTargetStorageKey(projectId: string, branch: string): string {
-  return `vibedeckx:mergeTarget:${projectId}:${branch}`;
-}
-
-function readMergeTarget(projectId: string, branch: string): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(mergeTargetStorageKey(projectId, branch));
-}
-
-/** One comparison per branch, carrying its persisted target when set. Pure — exported for tests. */
-export function buildComparisons(
-  branches: string[],
-  readTarget: (branch: string) => string | null,
-): MergeComparison[] {
-  return branches.map((branch) => {
-    const target = readTarget(branch);
-    return target ? { branch, target } : { branch };
-  });
-}
-
-/** Branches whose PERSISTED target no longer exists — their stored keys should
- *  be cleared. Only explicit targets qualify; default-target failures
- *  (no-default-branch) and unrelated errors never clear keys. Pure — exported
- *  for tests. */
-export function staleTargetBranches(
-  comparisons: MergeComparison[],
+export function buildStatusMap(
   entries: ProjectMergeStatusPairEntry[],
-): string[] {
-  const explicit = new Set(comparisons.filter((c) => c.target !== undefined).map((c) => c.branch));
-  return entries
-    .filter((e) => e.error === "target-not-found" && explicit.has(e.branch))
-    .map((e) => e.branch);
-}
-
-/** The backend-resolved default target: the resolved target of any pair sent
- *  without an explicit choice. Pure — exported for tests. */
-export function deriveDefaultTarget(
-  comparisons: MergeComparison[],
-  entries: ProjectMergeStatusPairEntry[],
-): string | null {
-  const explicit = new Set(comparisons.filter((c) => c.target !== undefined).map((c) => c.branch));
+): Map<string, BranchMergeInfo> {
+  const statuses = new Map<string, BranchMergeInfo>();
   for (const entry of entries) {
-    if (!explicit.has(entry.branch) && entry.target) return entry.target;
+    if (entry.error === "target-not-found" && entry.requestedTarget) {
+      statuses.set(entry.branch, {
+        branch: entry.branch,
+        error: entry.error,
+        requestedTarget: entry.requestedTarget,
+        targetSource: entry.targetSource,
+      });
+      continue;
+    }
+    if (entry.error || !entry.target || !entry.status) continue;
+    statuses.set(entry.branch, {
+      branch: entry.branch,
+      status: entry.status,
+      unmergedCount: entry.unmergedCount ?? 0,
+      dirty: entry.dirty ?? false,
+      target: entry.target,
+    });
+  }
+  return statuses;
+}
+
+/** The first target that the backend resolved from the repository default. */
+export function deriveDefaultTarget(entries: ProjectMergeStatusPairEntry[]): string | null {
+  for (const entry of entries) {
+    if (entry.targetSource === "default" && entry.target) return entry.target;
   }
   return null;
 }
@@ -107,36 +112,14 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
         return;
       }
 
-      const comparisons = buildComparisons(branches, (b) => readMergeTarget(projectId, b));
+      const comparisons = branches.map((branch) => ({ branch }));
       const result = await api.getMergeStatus(projectId, comparisons);
       if (cancelled) return;
       if (!result.ok) return; // transport/server failure — keep previous statuses, touch nothing
 
-      const next = new Map<string, BranchMergeInfo>();
-      for (const entry of result.entries) {
-        if (entry.error || !entry.target || !entry.status) continue;
-        next.set(entry.branch, {
-          branch: entry.branch,
-          status: entry.status,
-          unmergedCount: entry.unmergedCount ?? 0,
-          dirty: entry.dirty ?? false,
-          target: entry.target,
-        });
-      }
-
-      const stale = staleTargetBranches(comparisons, result.entries);
-      for (const branch of stale) {
-        try {
-          localStorage.removeItem(mergeTargetStorageKey(projectId, branch));
-        } catch {
-          // localStorage unavailable (e.g. Safari private mode) — skip.
-        }
-      }
-
-      setStatuses(next);
-      setDefaultTarget(deriveDefaultTarget(comparisons, result.entries));
+      setStatuses(buildStatusMap(result.entries));
+      setDefaultTarget(deriveDefaultTarget(result.entries));
       setRepositoryLabel(result.repository.label);
-      if (stale.length > 0) refetch(); // one-shot fallback: cleared branches re-fetch on the default
     })();
 
     return () => {
@@ -147,16 +130,9 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
   const setTarget = useCallback(
     (branch: string, target: string | null) => {
       if (!projectId) return;
-      try {
-        if (target) {
-          localStorage.setItem(mergeTargetStorageKey(projectId, branch), target);
-        } else {
-          localStorage.removeItem(mergeTargetStorageKey(projectId, branch));
-        }
-      } catch {
-        // ignore quota / privacy-mode errors
-      }
-      refetch();
+      void api.setMergeTarget(projectId, branch, target).then((ok) => {
+        if (ok) refetch();
+      });
     },
     [projectId, refetch],
   );

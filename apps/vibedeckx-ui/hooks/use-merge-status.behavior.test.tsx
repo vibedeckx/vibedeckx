@@ -8,12 +8,14 @@ import { useMergeStatus, type BranchMergeInfo } from "./use-merge-status";
 vi.mock("@/lib/api", () => ({
   api: {
     getMergeStatus: vi.fn(),
+    setMergeTarget: vi.fn(),
   },
 }));
 
 import { api } from "@/lib/api";
 
 const getMergeStatus = vi.mocked(api.getMergeStatus);
+const setMergeTarget = vi.mocked(api.setMergeTarget);
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,16 +23,17 @@ let latest: {
   statuses: Map<string, BranchMergeInfo>;
   defaultTarget: string | null;
   repositoryLabel: string | null;
+  setTarget: (branch: string, target: string | null) => void;
 } | null = null;
 
 function Probe({ projectId, worktrees }: { projectId: string | null; worktrees: Worktree[] }) {
-  const { statuses, defaultTarget, repositoryLabel } = useMergeStatus(projectId, worktrees);
+  const { statuses, defaultTarget, repositoryLabel, setTarget } = useMergeStatus(projectId, worktrees);
   // Capture in an effect (not during render) — react-hooks/globals forbids
   // reassigning module variables mid-render. Effects run inside act(), so
   // `latest` reflects the settled state by the time assertions run.
   useEffect(() => {
-    latest = { statuses, defaultTarget, repositoryLabel };
-  }, [statuses, defaultTarget, repositoryLabel]);
+    latest = { statuses, defaultTarget, repositoryLabel, setTarget };
+  }, [statuses, defaultTarget, repositoryLabel, setTarget]);
   return null;
 }
 
@@ -52,6 +55,8 @@ async function render(projectId: string | null, worktrees: Worktree[]) {
 
 beforeEach(() => {
   getMergeStatus.mockReset();
+  setMergeTarget.mockReset();
+  setMergeTarget.mockResolvedValue(true);
   latest = null;
 });
 
@@ -106,12 +111,12 @@ describe("useMergeStatus (project switch reset)", () => {
       ],
     });
     await render("p1", worktrees);
-    expect(latest!.statuses.get("dev1")?.status).toBe("merged");
+    expect(latest!.statuses.get("dev1")).toMatchObject({ status: "merged" });
 
     getMergeStatus.mockResolvedValue({ ok: false, status: 0 });
     // New worktrees array identity retriggers the effect for the same project.
     await render("p1", [{ branch: "dev1" }]);
-    expect(latest!.statuses.get("dev1")?.status).toBe("merged");
+    expect(latest!.statuses.get("dev1")).toMatchObject({ status: "merged" });
   });
 
   it("stores the repository label from a successful batch", async () => {
@@ -141,5 +146,76 @@ describe("useMergeStatus (project switch reset)", () => {
     getMergeStatus.mockResolvedValueOnce({ ok: false, status: 0 });
     await render("p2", [{ branch: "dev1" }]);
     expect(latest!.repositoryLabel).toBe(null);
+  });
+});
+
+describe("useMergeStatus (server-persisted targets)", () => {
+  it("keeps a missing stored target as a warning without automatically clearing it", async () => {
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [
+        { branch: "dev1", target: null, targetSource: "stored", requestedTarget: "ghost", error: "target-not-found" },
+      ],
+    });
+
+    await render("p1", [{ branch: "dev1" }]);
+
+    expect(latest!.statuses.get("dev1")).toEqual({
+      branch: "dev1",
+      error: "target-not-found",
+      requestedTarget: "ghost",
+      targetSource: "stored",
+    });
+    expect(setMergeTarget).not.toHaveBeenCalled();
+    expect(getMergeStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends bare branch comparisons even when legacy localStorage has a target", async () => {
+    localStorage.setItem("vibedeckx:mergeTarget:p1:dev1", "release");
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [],
+    });
+
+    await render("p1", [{ branch: "dev1" }]);
+
+    expect(getMergeStatus).toHaveBeenCalledWith("p1", [{ branch: "dev1" }]);
+  });
+
+  it("persists a target through the API and refetches after success", async () => {
+    getMergeStatus.mockResolvedValue({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [],
+    });
+    await render("p1", [{ branch: "dev1" }]);
+
+    await act(async () => {
+      latest!.setTarget("dev1", "release");
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(getMergeStatus).toHaveBeenCalledTimes(2));
+
+    expect(setMergeTarget).toHaveBeenCalledWith("p1", "dev1", "release");
+  });
+
+  it("does not refetch when persisting the target fails", async () => {
+    setMergeTarget.mockResolvedValueOnce(false);
+    getMergeStatus.mockResolvedValue({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [],
+    });
+    await render("p1", [{ branch: "dev1" }]);
+
+    await act(async () => {
+      latest!.setTarget("dev1", "release");
+      await Promise.resolve();
+    });
+
+    expect(setMergeTarget).toHaveBeenCalledWith("p1", "dev1", "release");
+    expect(getMergeStatus).toHaveBeenCalledTimes(1);
   });
 });
