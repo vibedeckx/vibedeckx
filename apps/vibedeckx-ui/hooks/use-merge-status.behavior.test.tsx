@@ -75,7 +75,7 @@ describe("useMergeStatus (project switch reset)", () => {
       ok: true,
       repository: { kind: "remote", remoteServerId: "remote-a", label: "Remote A" },
       entries: [
-        { branch: "dev1", target: "main", status: "unmerged", unmergedCount: 1, dirty: false },
+        { branch: "dev1", target: "main", targetSource: "default", requestedTarget: "main", status: "unmerged", unmergedCount: 1, dirty: false },
       ],
     });
     await render("p1", worktrees);
@@ -102,7 +102,7 @@ describe("useMergeStatus (project switch reset)", () => {
       ok: true,
       repository: { kind: "local", label: "Local" },
       entries: [
-        { branch: "dev1", target: "main", status: "merged", unmergedCount: 0, dirty: false },
+        { branch: "dev1", target: "main", targetSource: "default", requestedTarget: "main", status: "merged", unmergedCount: 0, dirty: false },
       ],
     });
     await render("p1", worktrees);

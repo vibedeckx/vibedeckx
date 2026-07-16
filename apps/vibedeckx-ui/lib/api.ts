@@ -293,10 +293,19 @@ export interface MergeComparison {
 
 export type MergePairError = "target-not-found" | "branch-not-found" | "no-default-branch";
 
-export interface MergeStatusPairEntry {
+export type TargetSource = "request" | "stored" | "default";
+
+/**
+ * Merge-status entry returned by the project endpoint.
+ * For target-not-found warnings, read requestedTarget: target is null because
+ * the computation layer could not resolve it.
+ */
+export interface ProjectMergeStatusPairEntry {
   branch: string;
   /** Resolved target branch; null when errored before resolution. */
   target: string | null;
+  targetSource: TargetSource;
+  requestedTarget: string | null;
   status?: MergeStatusValue;
   unmergedCount?: number;
   dirty?: boolean;
@@ -308,7 +317,7 @@ export type MergeStatusRepository =
   | { kind: "remote"; remoteServerId: string; label: string };
 
 export type MergeStatusBatchResult =
-  | { ok: true; repository: MergeStatusRepository; entries: MergeStatusPairEntry[] }
+  | { ok: true; repository: MergeStatusRepository; entries: ProjectMergeStatusPairEntry[] }
   | { ok: false; status: number }; // status 0 = thrown fetch/network error
 
 export type WorktreeTarget = "local" | "remote";
@@ -1030,6 +1039,28 @@ export const api = {
       return { ok: true, repository: data.repository, entries: data.entries ?? [] };
     } catch {
       return { ok: false, status: 0 };
+    }
+  },
+
+  async setMergeTarget(
+    projectId: string,
+    branch: string,
+    target: string | null,
+    opts?: { ifAbsent?: boolean },
+  ): Promise<boolean> {
+    try {
+      const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/branches/merge-target`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          branch,
+          target,
+          ...(opts?.ifAbsent ? { ifAbsent: true } : {}),
+        }),
+      });
+      return res.ok;
+    } catch {
+      return false;
     }
   },
 

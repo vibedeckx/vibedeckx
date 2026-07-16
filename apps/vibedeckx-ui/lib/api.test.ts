@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createNewAgentSession, getFreshToken, ResidentLimitError, setAuthToken, setTokenGetter } from "@/lib/api";
+import { api, createNewAgentSession, getFreshToken, ResidentLimitError, setAuthToken, setTokenGetter } from "@/lib/api";
 
 // Build a JWT whose `exp` is `secondsFromNow` away (negative = already expired).
 function makeJwt(secondsFromNow: number): string {
@@ -94,6 +94,71 @@ describe("createNewAgentSession", () => {
       maxResidentAgentProcesses: 3,
       runningSessions: [{ id: "s1", title: "Still running", projectId: "p1", branch: null }],
     });
+
+    global.fetch = originalFetch;
+  });
+});
+
+describe("setMergeTarget", () => {
+  it("PUTs an explicit target and returns true when the response is ok", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    global.fetch = fetchMock;
+
+    await expect(api.setMergeTarget("p1", "dev1", "release")).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/branches/merge-target",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ branch: "dev1", target: "release" }),
+      }),
+    );
+    const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(new Headers(requestInit.headers).get("Content-Type")).toBe("application/json");
+
+    global.fetch = originalFetch;
+  });
+
+  it("keeps target null in reset requests", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    global.fetch = fetchMock;
+
+    await api.setMergeTarget("p1", "dev1", null);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/branches/merge-target",
+      expect.objectContaining({ body: JSON.stringify({ branch: "dev1", target: null }) }),
+    );
+
+    global.fetch = originalFetch;
+  });
+
+  it("sends ifAbsent only when it is true", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    global.fetch = fetchMock;
+
+    await api.setMergeTarget("p1", "dev1", "release", { ifAbsent: true });
+    await api.setMergeTarget("p1", "dev2", "main", { ifAbsent: false });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      branch: "dev1",
+      target: "release",
+      ifAbsent: true,
+    });
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ branch: "dev2", target: "main" });
+
+    global.fetch = originalFetch;
+  });
+
+  it("returns false for non-ok responses and rejected requests", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false } as Response)
+      .mockRejectedValueOnce(new Error("network"));
+
+    await expect(api.setMergeTarget("p1", "dev1", "release")).resolves.toBe(false);
+    await expect(api.setMergeTarget("p1", "dev1", "release")).resolves.toBe(false);
 
     global.fetch = originalFetch;
   });

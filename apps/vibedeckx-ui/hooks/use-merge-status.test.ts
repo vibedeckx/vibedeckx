@@ -31,16 +31,16 @@ describe("staleTargetBranches", () => {
   it("clears only explicit targets that errored target-not-found", () => {
     expect(
       staleTargetBranches(cmp, [
-        { branch: "dev3", target: null, error: "no-default-branch" },
-        { branch: "dev4", target: null, error: "target-not-found" },
+        { branch: "dev3", target: null, targetSource: "default", requestedTarget: null, error: "no-default-branch" },
+        { branch: "dev4", target: null, targetSource: "request", requestedTarget: "gone", error: "target-not-found" },
       ]),
     ).toEqual(["dev4"]);
   });
   it("never clears on other errors or success", () => {
     expect(
       staleTargetBranches(cmp, [
-        { branch: "dev3", target: "main", status: "merged", unmergedCount: 0, dirty: false },
-        { branch: "dev4", target: "gone", error: "branch-not-found" },
+        { branch: "dev3", target: "main", targetSource: "default", requestedTarget: "main", status: "merged", unmergedCount: 0, dirty: false },
+        { branch: "dev4", target: "gone", targetSource: "request", requestedTarget: "gone", error: "branch-not-found" },
       ]),
     ).toEqual([]);
   });
@@ -52,8 +52,8 @@ describe("deriveDefaultTarget", () => {
       deriveDefaultTarget(
         [{ branch: "dev3" }, { branch: "dev4", target: "dev1" }],
         [
-          { branch: "dev4", target: "dev1", status: "merged", unmergedCount: 0, dirty: false },
-          { branch: "dev3", target: "main", status: "unmerged", unmergedCount: 2, dirty: false },
+          { branch: "dev4", target: "dev1", targetSource: "request", requestedTarget: "dev1", status: "merged", unmergedCount: 0, dirty: false },
+          { branch: "dev3", target: "main", targetSource: "default", requestedTarget: "main", status: "unmerged", unmergedCount: 2, dirty: false },
         ],
       ),
     ).toBe("main");
@@ -62,7 +62,7 @@ describe("deriveDefaultTarget", () => {
     expect(
       deriveDefaultTarget(
         [{ branch: "dev3" }],
-        [{ branch: "dev3", target: null, error: "no-default-branch" }],
+        [{ branch: "dev3", target: null, targetSource: "default", requestedTarget: null, error: "no-default-branch" }],
       ),
     ).toBe(null);
   });

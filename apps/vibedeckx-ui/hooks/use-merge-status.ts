@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type MergeComparison,
-  type MergeStatusPairEntry,
+  type ProjectMergeStatusPairEntry,
   type MergeStatusValue,
   type Worktree,
 } from "@/lib/api";
@@ -44,7 +44,7 @@ export function buildComparisons(
  *  for tests. */
 export function staleTargetBranches(
   comparisons: MergeComparison[],
-  entries: MergeStatusPairEntry[],
+  entries: ProjectMergeStatusPairEntry[],
 ): string[] {
   const explicit = new Set(comparisons.filter((c) => c.target !== undefined).map((c) => c.branch));
   return entries
@@ -56,7 +56,7 @@ export function staleTargetBranches(
  *  without an explicit choice. Pure — exported for tests. */
 export function deriveDefaultTarget(
   comparisons: MergeComparison[],
-  entries: MergeStatusPairEntry[],
+  entries: ProjectMergeStatusPairEntry[],
 ): string | null {
   const explicit = new Set(comparisons.filter((c) => c.target !== undefined).map((c) => c.branch));
   for (const entry of entries) {
