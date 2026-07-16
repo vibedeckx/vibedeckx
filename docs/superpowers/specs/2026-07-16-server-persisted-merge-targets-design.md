@@ -147,6 +147,9 @@ export interface ProjectMergeStatusPairEntry extends MergeStatusPairEntry {
   that exact effective comparison (not merely its branch), so duplicate-branch entries
   with different targets cannot be reversed. Entry target/error/status/count/dirty
   fields and the success-vs-error shape are validated against the computation contract.
+  The computation resolves the default target once per call, so all implicit comparisons
+  in a proxied batch must either share one non-null target or all report
+  `no-default-branch`; explicit comparisons are excluded from this batch constraint.
   Any violation returns `502 { error: "Remote merge-status response invalid" }` rather
   than crashing or misattaching metadata. Metadata is then attached after spreading the
   validated entry, so an untrusted worker cannot override `targetSource` or
@@ -270,7 +273,8 @@ localStorage keys have drained.
   stored targets and annotates `targetSource`/`requestedTarget` positionally — including
   duplicate-branch comparisons; proxied null/malformed entries, invalid field and result
   shapes, count mismatches, branch-order mismatches, and duplicate-branch target-order
-  mismatches all return 502 (proxy mocked);
+  mismatches all return 502; inconsistent or mixed implicit default-target results also
+  return 502 (proxy mocked);
   PUT route auth, validation (including `ifAbsent` + `target: null` → 400), delete-on-null,
   event emitted on state change and suppressed when `insertIfAbsent` loses.
 

@@ -429,6 +429,66 @@ describe("merge-status repository descriptor", () => {
       expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
     });
 
+    it("rejects inconsistent resolved targets across implicit comparisons", async () => {
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: {
+          entries: [
+            {
+              branch: "feature",
+              target: "main",
+              status: "merged",
+              unmergedCount: 0,
+              dirty: false,
+            },
+            {
+              branch: "release",
+              target: "release",
+              status: "merged",
+              unmergedCount: 0,
+              dirty: false,
+            },
+          ],
+        },
+      });
+
+      const response = await postComparisons("remote", [
+        { branch: "feature" },
+        { branch: "release" },
+      ]);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
+    });
+
+    it("rejects mixed no-default and resolved-target implicit results", async () => {
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: {
+          entries: [
+            { branch: "feature", target: null, error: "no-default-branch" },
+            {
+              branch: "release",
+              target: "main",
+              status: "merged",
+              unmergedCount: 0,
+              dirty: false,
+            },
+          ],
+        },
+      });
+
+      const response = await postComparisons("remote", [
+        { branch: "feature" },
+        { branch: "release" },
+      ]);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "Remote merge-status response invalid" });
+    });
+
     it("rejects a remote response whose entry count does not match the request", async () => {
       proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { entries: [] } });
 

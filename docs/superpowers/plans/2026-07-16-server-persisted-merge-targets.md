@@ -519,6 +519,9 @@ git commit -m "feat: merge-target PUT route + merge-target:updated event"
   target/error/status/count/dirty field types, and mutually exclusive computed success/error
   shapes. Each entry must semantically correspond to its effective comparison's target/error
   contract, which detects reversed targets even when adjacent comparisons share a branch.
+  Because the computation resolves its default once per call, implicit comparisons must all
+  share one resolved target or all report `no-default-branch`; explicit comparisons do not
+  participate in this batch-level constraint.
   Every violation returns 502 `Remote merge-status response invalid`; central metadata
   is spread last so the worker cannot override it.
 
@@ -651,6 +654,36 @@ describe("stored-target resolution and annotation", () => {
     ]);
     expect(response.statusCode).toBe(502);
   });
+
+  it("502s when implicit comparisons resolve different default targets", async () => {
+    const success = (branch: string, target: string) => ({
+      branch, target, status: "merged", unmergedCount: 0, dirty: false,
+    });
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { entries: [success("feature", "main"), success("release", "release")] },
+    });
+    const response = await postComparisons("remote", [
+      { branch: "feature" }, { branch: "release" },
+    ]);
+    expect(response.statusCode).toBe(502);
+  });
+
+  it("502s when implicit results mix no-default with a resolved target", async () => {
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { entries: [
+        { branch: "feature", target: null, error: "no-default-branch" },
+        { branch: "release", target: "main", status: "merged", unmergedCount: 0, dirty: false },
+      ] },
+    });
+    const response = await postComparisons("remote", [
+      { branch: "feature" }, { branch: "release" },
+    ]);
+    expect(response.statusCode).toBe(502);
+  });
 });
 ```
 
@@ -731,7 +764,9 @@ nonnegative integers; dirty is boolean; success entries contain the computed suc
 error entries contain a known pair error and no success fields. Explicit effective targets
 must equal successful or `branch-not-found` entry targets; `target-not-found` requires an
 explicit effective target, while `no-default-branch` requires an implicit one. This target
-correspondence is positional and therefore covers duplicate branches. Then replace the **remote
+correspondence is positional and therefore covers duplicate branches. After every entry passes,
+validate the implicit subset as a batch: either every entry is `no-default-branch`, or every
+entry has the same non-null resolved target. Then replace the **remote
 proxy branch**'s response handling with:
 
 ```ts

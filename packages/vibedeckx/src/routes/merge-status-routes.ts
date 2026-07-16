@@ -117,9 +117,24 @@ function parseRemoteEntries(
 ): MergeStatusPairEntry[] | null {
   if (!isRecord(data) || !Array.isArray(data.entries)) return null;
   if (data.entries.length !== comparisons.length) return null;
-  return data.entries.every((entry, index) =>
-    isRemoteMergeStatusEntry(entry, comparisons[index]))
-    ? data.entries
+  if (!data.entries.every((entry, index) =>
+    isRemoteMergeStatusEntry(entry, comparisons[index]))) {
+    return null;
+  }
+
+  const entries = data.entries as MergeStatusPairEntry[];
+  const implicitEntries = entries.filter((_entry, index) =>
+    comparisons[index].target === undefined);
+  const hasNoDefault = implicitEntries.some((entry) => entry.error === "no-default-branch");
+  if (hasNoDefault) {
+    return implicitEntries.every((entry) => entry.error === "no-default-branch")
+      ? entries
+      : null;
+  }
+
+  const resolvedDefault = implicitEntries[0]?.target;
+  return implicitEntries.every((entry) => entry.target === resolvedDefault)
+    ? entries
     : null;
 }
 
