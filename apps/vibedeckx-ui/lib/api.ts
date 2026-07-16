@@ -849,7 +849,8 @@ export async function updateAgentProcessSettings(settings: AgentProcessSettings)
 // the coding agent for the new session.
 export async function branchAgentSession(
   sessionId: string,
-  agentType?: string
+  agentType?: string,
+  upToEntryIndex?: number
 ): Promise<{
   session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string; title?: string | null };
   messages: unknown[];
@@ -857,7 +858,7 @@ export async function branchAgentSession(
   const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/branch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentType }),
+    body: JSON.stringify({ agentType, upToEntryIndex }),
   });
   if (!res.ok) throw new Error(`branchAgentSession failed: ${res.status}`);
   return res.json();

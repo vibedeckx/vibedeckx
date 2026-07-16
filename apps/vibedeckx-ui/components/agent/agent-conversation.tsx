@@ -33,18 +33,16 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, Split } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { BranchMenu } from "./branch-menu";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
@@ -819,66 +817,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     different coding agent. */}
                 {session && status !== "running" && !isLoading && messages.length > 0 && (
                   <div className="mt-3 border-t border-border/50 pt-1.5 pb-1">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className={cn(
-                            "h-7 w-7 rounded-md text-muted-foreground transition-colors",
-                            "hover:bg-muted hover:text-foreground"
-                          )}
-                          disabled={isBranching}
-                          aria-label="Branch conversation"
-                        >
-                          {isBranching
-                            ? <Loader2 className="h-4 w-4 animate-spin" />
-                            : <Split className="h-4 w-4" />}
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-44 p-1.5">
-                        <DropdownMenuLabel className="px-2 py-1.5">
-                          <div className="text-xs font-medium">Branch conversation</div>
-                        </DropdownMenuLabel>
-                        <DropdownMenuItem
-                          className="h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs"
-                          onSelect={() => handleBranch()}
-                        >
-                          <div className={cn(
-                            "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-                            agentType === "codex"
-                              ? "bg-emerald-500/10 text-emerald-600"
-                              : "bg-violet-500/10 text-violet-600"
-                          )}>
-                            <Bot className="h-3 w-3" />
-                          </div>
-                          <span className="min-w-0 flex-1 truncate">{currentAgentName}</span>
-                          <span className="shrink-0 text-[11px] text-muted-foreground">current</span>
-                        </DropdownMenuItem>
-                        {alternateBranchProviders.length > 0 && (
-                          <>
-                            <DropdownMenuSeparator className="my-1" />
-                            {alternateBranchProviders.map((p) => (
-                              <DropdownMenuItem
-                                key={p.type}
-                                className="h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs"
-                                onSelect={() => handleBranch(p.type)}
-                              >
-                                <div className={cn(
-                                  "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-                                  p.type === "codex"
-                                    ? "bg-emerald-500/10 text-emerald-600"
-                                    : "bg-violet-500/10 text-violet-600"
-                                )}>
-                                  <Bot className="h-3 w-3" />
-                                </div>
-                                <span className="min-w-0 flex-1 truncate">{p.displayName}</span>
-                              </DropdownMenuItem>
-                            ))}
-                          </>
-                        )}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <BranchMenu
+                      agentType={session?.agentType ?? agentType}
+                      currentAgentName={currentAgentName}
+                      alternateProviders={alternateBranchProviders}
+                      onBranch={(t) => handleBranch(t)}
+                      disabled={isBranching}
+                    />
                   </div>
                 )}
               </AgentConversationContext.Provider>
