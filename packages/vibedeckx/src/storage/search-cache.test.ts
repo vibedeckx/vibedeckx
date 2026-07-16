@@ -73,14 +73,18 @@ describe("searchCache", () => {
   });
 
   it("marks rows absent from a newer snapshot as deleted, and reappearing rows undeleted", async () => {
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", {
+    // search() only surfaces non-local rows with a live project_remotes link,
+    // so the snapshot target must be a real linked server id.
+    const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
+    await storage.searchCache.applyCatalogSnapshot("p1", server.id, snap());
+    await storage.searchCache.applyCatalogSnapshot("p1", server.id, {
       workspaces: [{ branch: null }],
       sessions: [snap().sessions[1]],
     });
     let res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
     expect(res.sessions).toHaveLength(0); // s1 deleted
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
+    await storage.searchCache.applyCatalogSnapshot("p1", server.id, snap());
     res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
     expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]); // reappeared
   });
@@ -122,7 +126,10 @@ describe("searchCache", () => {
   });
 
   it("updateCachedSessionTitle updates title in place", async () => {
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
+    // Seed a linked server so the updated row is visible to search().
+    const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
+    await storage.searchCache.applyCatalogSnapshot("p1", server.id, snap());
     await storage.searchCache.updateCachedSessionTitle("remote-w1-p1-s1", "Renamed thing");
     const res = await storage.searchCache.search({ query: "Renamed", limitPerGroup: 10 });
     expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]);

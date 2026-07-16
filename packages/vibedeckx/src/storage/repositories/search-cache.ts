@@ -187,24 +187,20 @@ export const createSearchCacheRepos = (
       const localRows = localRowsRaw.filter((r) => r.title !== null || sessionsWithEntries.has(r.id));
 
       // ---- remote sessions (session_search_cache) ------------------------
-      // Self-heal: a cache row for a remote target only surfaces if either
-      // (a) that target is still linked to the project via project_remotes,
-      // or (b) we have no remote_servers record for that target at all
-      // (nothing to validate against — e.g. legacy/unknown target ids). Once
-      // a remote_servers row exists but the project_remotes link is removed,
-      // the row is excluded until re-linked.
+      // Self-heal: a cache row for a non-local target ONLY surfaces while a
+      // matching project_remotes link still exists. Unlinking a remote from
+      // the project drops its cached rows out of search without an explicit
+      // purge; re-linking makes them reappear on the next snapshot.
       let cacheQuery = kdb.selectFrom("session_search_cache as c")
         .leftJoin("project_remotes as pr", (join) => join
           .onRef("pr.project_id", "=", "c.project_id")
           .onRef("pr.remote_server_id", "=", "c.target_id"))
-        .leftJoin("remote_servers as rs", "rs.id", "c.target_id")
         .select(["c.local_session_id", "c.project_id", "c.target_id", "c.branch", "c.title", "c.last_active_at", "c.favorited_at"])
         .where("c.project_id", "in", projectIds)
         .where("c.deleted_at", "is", null)
         .where((eb) => eb.or([
           eb("c.target_id", "=", "local"),
           eb("pr.id", "is not", null),
-          eb("rs.id", "is", null),
         ]));
       if (q) cacheQuery = cacheQuery.where(sql<boolean>`lower(coalesce(c.title, '')) like ${pattern} escape '\\'`);
       const cacheRows = await cacheQuery.orderBy("c.last_active_at", "desc").limit(200).execute();
@@ -255,14 +251,12 @@ export const createSearchCacheRepos = (
         .leftJoin("project_remotes as pr", (join) => join
           .onRef("pr.project_id", "=", "w.project_id")
           .onRef("pr.remote_server_id", "=", "w.target_id"))
-        .leftJoin("remote_servers as rs", "rs.id", "w.target_id")
         .select(["w.project_id", "w.target_id", "w.branch"])
         .where("w.project_id", "in", projectIds)
         .where("w.deleted_at", "is", null)
         .where((eb) => eb.or([
           eb("w.target_id", "=", "local"),
           eb("pr.id", "is not", null),
-          eb("rs.id", "is", null),
         ]))
         .execute();
       const workspaces: SearchResultWorkspaceRow[] = rankAndCap(wsRows.map((w) => ({
