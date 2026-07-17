@@ -906,11 +906,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   style={{ fontSize: "var(--conv-font-size, 14px)" }}
                 />
               </div>
-              <PromptInputSubmit
-                className="absolute bottom-1 right-1"
-                disabled={(!input.trim() && !isLoading) || isTranslating || isSubmitting}
-                status={isSubmitting || isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
-              />
+              {/* Wrapper height = one textarea line (1lh must match the
+                  textarea's font classes; 1.5rem = its py-3): centered on a
+                  single line, hugs the last line when multiline */}
+              <div
+                className="pointer-events-none absolute bottom-0 right-1 flex items-center text-base md:text-sm"
+                style={{
+                  fontSize: "var(--conv-font-size, 14px)",
+                  height: "calc(1lh + 1.5rem)",
+                }}
+              >
+                <PromptInputSubmit
+                  className="pointer-events-auto"
+                  disabled={(!input.trim() && !isLoading) || isTranslating || isSubmitting}
+                  status={isSubmitting || isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
+                />
+              </div>
             </div>
           </div>
         </PromptInput>
