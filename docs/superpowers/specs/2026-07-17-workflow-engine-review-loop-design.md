@@ -1,6 +1,6 @@
 # Workflow 引擎与 Design–Review Loop 设计
 
-> 状态：**设计定稿待评审**（2026-07-17）。
+> 状态：**Phase 1 已实现**（实现计划 docs/superpowers/plans/2026-07-17-adhoc-review-phase1.md）。
 > 背景：用户当前手动运行 "implementer 出设计 → branch 出 reviewer session 审 →
 > 手动把意见粘贴回 implementer → 循环" 的工作流，希望自动化。本文定义 vibedeckx
 > 的**确定性 workflow 引擎**（第一个模板：Design–Review Loop），以及 Main Chat /
