@@ -3,6 +3,7 @@
  */
 
 import type { AgentMessage } from "./agent-types.js";
+import type { WorkflowRun } from "./storage/types.js";
 
 // ============ Patch Operation Types ============
 
@@ -44,7 +45,8 @@ export type AgentWsMessage =
   | { branchActivity: { activity: "idle" | "working" | "completed" | "stopped"; since: number } }
   | { browserCommand: BrowserCommand }
   | { openPreviewFrame: { projectId: string; url: string } }
-  | { titleUpdated: { title: string } };
+  | { titleUpdated: { title: string } }
+  | { workflowRunUpdated: WorkflowRun };
 
 /**
  * Browser command sent from backend to frontend via WebSocket.

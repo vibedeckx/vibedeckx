@@ -19,6 +19,8 @@ export interface AgentOps {
   sendUserMessage(sessionId: string, content: string, projectPath?: string): Promise<boolean>;
   /** Raw sparse entries (holes preserved) — index space matches entry indices. */
   getRawMessages(sessionId: string): AgentMessage[];
+  /** Optional: push a raw WS frame to a session's stream subscribers. */
+  broadcastRawToSession?(sessionId: string, payload: Record<string, unknown>): void;
 }
 
 export class WorkflowError extends Error {
@@ -384,5 +386,13 @@ export class WorkflowEngine {
 
   private emitRunUpdated(run: WorkflowRun): void {
     this.eventBus?.emit({ type: "workflow:run-updated", projectId: run.project_id, branch: run.branch, run });
+    // Mirror the update onto the participant sessions' WS streams: the only
+    // worker→front push channel is the per-session stream, so a front server
+    // subscribed to either participant sees run transitions live without a
+    // dedicated cross-machine event channel. Duplicate delivery (both streams
+    // subscribed) is harmless — the front-side panel refresh is idempotent.
+    for (const sid of [run.source_session_id, run.reviewer_session_id]) {
+      if (sid) this.agentOps.broadcastRawToSession?.(sid, { workflowRunUpdated: run });
+    }
   }
 }

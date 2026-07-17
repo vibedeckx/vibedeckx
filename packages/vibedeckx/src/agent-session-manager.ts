@@ -1562,6 +1562,15 @@ export class AgentSessionManager {
   }
 
   /**
+   * Public wrapper over broadcastRaw for the WorkflowEngine: mirror a raw WS
+   * frame to a session's stream subscribers (a front server subscribed to
+   * this stream relies on it for run-transition delivery — spec §Phase 1.5).
+   */
+  broadcastRawToSession(sessionId: string, payload: Record<string, unknown>): void {
+    this.broadcastRaw(sessionId, payload as AgentWsMessage);
+  }
+
+  /**
    * Get session info
    */
   getSession(sessionId: string): RunningSession | null {

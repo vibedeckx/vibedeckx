@@ -47,6 +47,7 @@ describe("WorkflowEngine", () => {
     createNewSession: vi.fn(async () => "s-rev"),
     sendUserMessage: vi.fn(async () => true),
     getRawMessages: vi.fn((sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : entries)),
+    broadcastRawToSession: vi.fn(),
   };
   const project = { id: "p1", path: "/tmp/does-not-exist-vdx" }; // non-git → null review target, still fine
 
@@ -90,6 +91,15 @@ describe("WorkflowEngine", () => {
     expect(prompt).toContain("please fix the bug");   // task context
     expect(prompt).toContain("focus on tests");        // review focus
     expect(prompt).toContain("read-only review mode"); // reviewer must not edit
+  });
+
+  it("mirrors run updates onto participant session streams", async () => {
+    await start();
+    const frames = agentOps.broadcastRawToSession.mock.calls.map(
+      ([sid, frame]: [string, Record<string, unknown>]) => [sid, Object.keys(frame)[0]],
+    );
+    expect(frames).toContainEqual(["s-src", "workflowRunUpdated"]);
+    expect(frames).toContainEqual(["s-rev", "workflowRunUpdated"]);
   });
 
   it("rejects when a participant session is already in an active run", async () => {
