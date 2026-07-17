@@ -6,7 +6,7 @@ export type GlobalEvent =
   | { type: "session:process"; projectId: string; branch: string | null; sessionId: string; alive: boolean }
   | { type: "session:title"; projectId: string; branch: string | null; sessionId: string; title: string | null }
   | { type: "session:finished"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number; agentType?: string }
-  | { type: "session:taskCompleted"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number; summaryText?: string; turnEndEntryIndex?: number }
+  | { type: "session:taskCompleted"; projectId: string; branch: string | null; sessionId: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number; summaryText?: string; turnEndEntryIndex?: number; workflowSuppressed?: boolean }
   | { type: "branch:activity"; projectId: string; branch: string | null; activity: "idle" | "working" | "completed" | "stopped" | "main-running" | "main-completed"; since: number; sessionId?: string }
   | { type: "task:created"; projectId: string; task: Record<string, unknown> }
   | { type: "task:updated"; projectId: string; task: Record<string, unknown> }

@@ -63,3 +63,32 @@ export function statusEventFromRemotePatch(
     status: content as AgentSessionStatus,
   };
 }
+
+/**
+ * Build the front-server `session:taskCompleted` event from a worker's
+ * `{ taskCompleted: {...} }` stream frame. Forwards the turn boundary (needed
+ * by the front's event-card Review button) and the workflow-suppression mark
+ * (the worker's WorkflowEngine claimed this completion — the front commander
+ * must not double-handle it).
+ */
+export function taskCompletedEventFromRemoteFrame(
+  parsed: Record<string, unknown>,
+  sessionId: string,
+  remoteInfo: RemoteSessionInfo,
+): Extract<GlobalEvent, { type: "session:taskCompleted" }> | null {
+  if (!("taskCompleted" in parsed)) return null;
+  const tc = parsed.taskCompleted as Record<string, unknown> | undefined;
+  return {
+    type: "session:taskCompleted",
+    projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),
+    branch: remoteInfo.branch ?? null,
+    sessionId,
+    duration_ms: tc?.duration_ms as number | undefined,
+    cost_usd: tc?.cost_usd as number | undefined,
+    input_tokens: tc?.input_tokens as number | undefined,
+    output_tokens: tc?.output_tokens as number | undefined,
+    summaryText: tc?.summaryText as string | undefined,
+    turnEndEntryIndex: tc?.turnEndEntryIndex as number | undefined,
+    workflowSuppressed: tc?.workflowSuppressed === true ? true : undefined,
+  };
+}

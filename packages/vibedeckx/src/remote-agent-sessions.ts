@@ -10,7 +10,7 @@ import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import { WebSocket } from "ws";
 import { randomUUID } from "crypto";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
-import { statusEventFromRemotePatch, projectIdFromRemoteSessionId } from "./routes/remote-status-bridge.js";
+import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame } from "./routes/remote-status-bridge.js";
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 
@@ -251,28 +251,16 @@ export function connectPersistentRemoteWs(
     } else if ("taskCompleted" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
-      // Emit on local EventBus so ChatSessionManager can detect task completion
-      // (mirrors the executor:stopped pattern for remote executors)
       if (eventBus) {
-        const tc = parsed.taskCompleted as Record<string, unknown> | undefined;
-        const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
-        const branch = remoteInfo.branch ?? null;
-        eventBus.emit({
-          type: "session:taskCompleted",
-          projectId,
-          branch,
-          sessionId,
-          duration_ms: tc?.duration_ms as number | undefined,
-          cost_usd: tc?.cost_usd as number | undefined,
-          input_tokens: tc?.input_tokens as number | undefined,
-          output_tokens: tc?.output_tokens as number | undefined,
-          summaryText: tc?.summaryText as string | undefined,
-        });
-        agentSessionManager?.emitBranchActivityIfChanged(
-          projectId,
-          branch,
-          { activity: "completed", since: Date.now(), sessionId },
-        );
+        const evt = taskCompletedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
+        if (evt) {
+          eventBus.emit(evt);
+          agentSessionManager?.emitBranchActivityIfChanged(evt.projectId, evt.branch, {
+            activity: "completed",
+            since: Date.now(),
+            sessionId,
+          });
+        }
       }
     } else if ("processAlive" in parsed) {
       cache.broadcast(sessionId, raw);

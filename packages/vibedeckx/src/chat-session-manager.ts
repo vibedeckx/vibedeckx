@@ -364,7 +364,7 @@ export class ChatSessionManager {
       // Reviewer sessions belong to the workflow engine: it snapshots the feedback
       // and drives the gate. Waking the commander model too would double-handle
       // the same event (and let the model respond/dispatch on its own).
-      if (this.workflowEngine?.shouldSuppressAgentEvent(event.sessionId)) return;
+      if (event.workflowSuppressed || this.workflowEngine?.shouldSuppressAgentEvent(event.sessionId)) return;
 
       // Find a chat session for this project+branch that has event listening enabled
       const key = `${event.projectId}:${event.branch ?? ""}`;
