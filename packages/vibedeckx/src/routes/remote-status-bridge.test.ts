@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { taskCompletedEventFromRemoteFrame } from "./remote-status-bridge.js";
+import { taskCompletedEventFromRemoteFrame, mapRemoteRun } from "./remote-status-bridge.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 
 const remoteInfo: RemoteSessionInfo = {
@@ -34,5 +34,30 @@ describe("taskCompletedEventFromRemoteFrame", () => {
     expect(evt?.turnEndEntryIndex).toBeUndefined();
     expect(evt?.workflowSuppressed).toBeUndefined();
     expect(taskCompletedEventFromRemoteFrame({ finished: true }, localId, remoteInfo)).toBeNull();
+  });
+});
+
+describe("mapRemoteRun", () => {
+  it("prefixes run + participant ids and rewrites project_id", () => {
+    const mapped = mapRemoteRun(
+      { id: "run1", project_id: "wp1", source_session_id: "src1", reviewer_session_id: "rev1" },
+      "srv1",
+      "p1",
+    );
+    expect(mapped).toEqual({
+      id: "remote-srv1-p1-run1",
+      project_id: "p1",
+      source_session_id: "remote-srv1-p1-src1",
+      reviewer_session_id: "remote-srv1-p1-rev1",
+    });
+  });
+
+  it("keeps a null reviewer null", () => {
+    const mapped = mapRemoteRun(
+      { id: "run1", project_id: "wp1", source_session_id: "src1", reviewer_session_id: null },
+      "srv1",
+      "p1",
+    );
+    expect(mapped.reviewer_session_id).toBeNull();
   });
 });

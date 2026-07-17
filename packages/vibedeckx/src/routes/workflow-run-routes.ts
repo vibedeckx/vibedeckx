@@ -1,7 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth } from "../server.js";
 import { WorkflowError } from "../workflow-engine.js";
+import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { projectIdFromRemoteSessionId, mapRemoteRun } from "./remote-status-bridge.js";
+import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
+import type { WorkflowRun } from "../storage/types.js";
 
 function errStatus(err: unknown): number | null {
   if (!(err instanceof WorkflowError)) return null;
@@ -17,6 +21,51 @@ function errStatus(err: unknown): number | null {
 }
 
 async function routes(fastify: FastifyInstance) {
+  /**
+   * Front-side handles for runs living on a worker. Mirrors remoteSessionMap's
+   * hydrate-by-use model: populated on POST/GET responses, so after a front
+   * restart the panel's first proxied list fetch re-learns every active run
+   * before any gate could be clicked. Not persisted on purpose.
+   */
+  interface RemoteRunInfo {
+    remoteServerId: string;
+    remoteUrl: string;
+    remoteApiKey: string;
+    bareRunId: string;
+    projectId: string;
+  }
+  const remoteRunMap = new Map<string, RemoteRunInfo>();
+
+  const proxyAuto = (
+    info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string },
+    method: string,
+    apiPath: string,
+    body?: unknown,
+  ) =>
+    proxyToRemoteAuto(info.remoteServerId, info.remoteUrl, info.remoteApiKey, method, apiPath, body, {
+      reverseConnectManager: fastify.reverseConnectManager,
+    });
+
+  /** status 0 = never reached the worker; otherwise forward its semantic body. */
+  const sendProxyFailure = (reply: FastifyReply, result: { status: number; data: unknown; errorCode?: string }) =>
+    reply.code(proxyStatus(result)).send(
+      result.status === 0 ? { error: `Remote proxy failed: ${result.errorCode || "unknown"}` } : result.data,
+    );
+
+  /**
+   * Authorization pattern for remote run ids on the front: never trust a bare
+   * remoteRunMap.get — always re-check project ownership with the raw
+   * requireAuth result (undefined in solo mode is fine), same rule as
+   * getAuthorizedRemoteSessionInfo for remote sessions.
+   */
+  const resolveRemoteRun = async (runId: string, userId: string | undefined) => {
+    const info = remoteRunMap.get(runId);
+    if (!info) return null;
+    const project = await fastify.storage.projects.getById(info.projectId, userId);
+    if (!project) return null;
+    return info;
+  };
+
   fastify.post<{
     Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number };
   }>("/api/workflow-runs", async (req, reply) => {
@@ -24,7 +73,63 @@ async function routes(fastify: FastifyInstance) {
     if (userId === null) return;
     const { projectId, branch, sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!projectId || !sourceSessionId) return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
-    if (sourceSessionId.startsWith("remote-")) return reply.code(400).send({ error: "Remote sessions are not supported in ad-hoc review yet" });
+    if (sourceSessionId.startsWith("remote-")) {
+      // Remote workspace: the run lives on the worker (spec §Phase 1.5 —
+      // engine runs where the session/worktree live). Authz follows the
+      // getAuthorizedRemoteSessionInfo pattern: derive the project from the
+      // id and re-check ownership; never trust the map entry alone.
+      const remoteInfo = fastify.remoteSessionMap.get(sourceSessionId);
+      if (!remoteInfo) return reply.code(404).send({ error: "Session not found" });
+      const derivedProjectId = projectIdFromRemoteSessionId(sourceSessionId, remoteInfo);
+      if (derivedProjectId !== projectId) return reply.code(404).send({ error: "Session not found" });
+      const remoteProject = await fastify.storage.projects.getById(projectId, userId);
+      if (!remoteProject) return reply.code(404).send({ error: "Project not found" });
+
+      // The worker derives branch from its own session row — the body branch
+      // is not forwarded (server-derived branch, same rule as the local path).
+      const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
+        sourceSessionId: remoteInfo.remoteSessionId,
+        reviewFocus,
+        sourceTurnEndIndex,
+      });
+      if (!result.ok) return sendProxyFailure(reply, result);
+
+      const bareRun = (result.data as { run: WorkflowRun }).run;
+      const localRun = mapRemoteRun(bareRun, remoteInfo.remoteServerId, projectId);
+      remoteRunMap.set(localRun.id, {
+        remoteServerId: remoteInfo.remoteServerId,
+        remoteUrl: remoteInfo.remoteUrl,
+        remoteApiKey: remoteInfo.remoteApiKey,
+        bareRunId: bareRun.id,
+        projectId,
+      });
+
+      // Surface the worker-created reviewer on the front: register the handle
+      // and open the resident stream — that stream is what carries the
+      // reviewer's suppressed taskCompleted and the workflowRunUpdated frames.
+      if (bareRun.reviewer_session_id && localRun.reviewer_session_id) {
+        fastify.remoteSessionMap.set(localRun.reviewer_session_id, {
+          remoteServerId: remoteInfo.remoteServerId,
+          remoteUrl: remoteInfo.remoteUrl,
+          remoteApiKey: remoteInfo.remoteApiKey,
+          remoteSessionId: bareRun.reviewer_session_id,
+          branch: bareRun.branch,
+        });
+        await fastify.storage.remoteSessionMappings.upsert(
+          localRun.reviewer_session_id, projectId, remoteInfo.remoteServerId,
+          bareRun.reviewer_session_id, bareRun.branch,
+        );
+        ensureRemoteAgentStream(localRun.reviewer_session_id, {
+          remoteSessionMap: fastify.remoteSessionMap,
+          remotePatchCache: fastify.remotePatchCache,
+          reverseConnectManager: fastify.reverseConnectManager,
+          eventBus: fastify.eventBus,
+          agentSessionManager: fastify.agentSessionManager,
+        });
+      }
+      fastify.eventBus.emit({ type: "workflow:run-updated", projectId, branch: bareRun.branch, run: localRun });
+      return reply.code(201).send({ run: localRun });
+    }
     const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return reply.code(404).send({ error: "Project not found" });
     if (!project.path) return reply.code(400).send({ error: "Project has no local path (remote-only projects are not supported yet)" });
@@ -67,6 +172,27 @@ async function routes(fastify: FastifyInstance) {
       if (!projectId) return reply.code(400).send({ error: "projectId is required" });
       const project = await fastify.storage.projects.getById(projectId, userId);
       if (!project) return reply.code(404).send({ error: "Project not found" });
+      if (project.agent_mode && project.agent_mode !== "local") {
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(projectId, project.agent_mode);
+        if (remoteConfig) {
+          const q = new URLSearchParams({ path: remoteConfig.remote_path ?? "" });
+          if (branch) q.set("branch", branch);
+          const info = {
+            remoteServerId: project.agent_mode,
+            remoteUrl: remoteConfig.server_url ?? "",
+            remoteApiKey: remoteConfig.server_api_key || "",
+          };
+          const result = await proxyAuto(info, "GET", `/api/path/workflow-runs?${q}`);
+          if (!result.ok) return sendProxyFailure(reply, result);
+          const bareRuns = (result.data as { runs: WorkflowRun[] }).runs ?? [];
+          const runs = bareRuns.map((r) => {
+            const mapped = mapRemoteRun(r, info.remoteServerId, projectId);
+            remoteRunMap.set(mapped.id, { ...info, bareRunId: r.id, projectId });
+            return mapped;
+          });
+          return reply.send({ runs });
+        }
+      }
       const runs = await fastify.storage.workflowRuns.getActive(projectId, branch ?? null);
       return reply.send({ runs });
     });
@@ -74,6 +200,14 @@ async function routes(fastify: FastifyInstance) {
   fastify.get<{ Params: { id: string } }>("/api/workflow-runs/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
+    if (req.params.id.startsWith("remote-")) {
+      const info = await resolveRemoteRun(req.params.id, userId);
+      if (!info) return reply.code(404).send({ error: "Run not found" });
+      const result = await proxyAuto(info, "GET", `/api/workflow-runs/${info.bareRunId}`);
+      if (!result.ok) return sendProxyFailure(reply, result);
+      const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+      return reply.send({ run: localRun });
+    }
     const run = await fastify.storage.workflowRuns.getById(req.params.id);
     if (!run) return reply.code(404).send({ error: "Run not found" });
     const project = await fastify.storage.projects.getById(run.project_id, userId);
@@ -85,6 +219,15 @@ async function routes(fastify: FastifyInstance) {
     "/api/workflow-runs/:id/gate", async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
+      if (req.params.id.startsWith("remote-")) {
+        const info = await resolveRemoteRun(req.params.id, userId);
+        if (!info) return reply.code(404).send({ error: "Run not found" });
+        const result = await proxyAuto(info, "POST", `/api/workflow-runs/${info.bareRunId}/gate`, req.body ?? {});
+        if (!result.ok) return sendProxyFailure(reply, result);
+        const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+        fastify.eventBus.emit({ type: "workflow:run-updated", projectId: info.projectId, branch: localRun.branch, run: localRun });
+        return reply.send({ run: localRun });
+      }
       const existing = await fastify.storage.workflowRuns.getById(req.params.id);
       if (!existing) return reply.code(404).send({ error: "Run not found" });
       const project = await fastify.storage.projects.getById(existing.project_id, userId);
@@ -110,6 +253,15 @@ async function routes(fastify: FastifyInstance) {
   fastify.post<{ Params: { id: string } }>("/api/workflow-runs/:id/cancel", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
+    if (req.params.id.startsWith("remote-")) {
+      const info = await resolveRemoteRun(req.params.id, userId);
+      if (!info) return reply.code(404).send({ error: "Run not found" });
+      const result = await proxyAuto(info, "POST", `/api/workflow-runs/${info.bareRunId}/cancel`);
+      if (!result.ok) return sendProxyFailure(reply, result);
+      const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+      fastify.eventBus.emit({ type: "workflow:run-updated", projectId: info.projectId, branch: localRun.branch, run: localRun });
+      return reply.send({ run: localRun });
+    }
     const existing = await fastify.storage.workflowRuns.getById(req.params.id);
     if (!existing) return reply.code(404).send({ error: "Run not found" });
     const project = await fastify.storage.projects.getById(existing.project_id, userId);

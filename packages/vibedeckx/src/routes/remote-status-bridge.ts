@@ -92,3 +92,24 @@ export function taskCompletedEventFromRemoteFrame(
     workflowSuppressed: tc?.workflowSuppressed === true ? true : undefined,
   };
 }
+
+/**
+ * Rewrite a worker-local workflow run into the front server's id space: the
+ * run id and both participant session ids gain the standard
+ * `remote-{serverId}-{projectId}-` prefix (same shape as remote session ids,
+ * so the frontend's session-matching predicates keep working), and
+ * project_id becomes the front's project id. Branch names are shared
+ * vocabulary across machines and pass through untouched.
+ */
+export function mapRemoteRun<
+  T extends { id: string; project_id: string; source_session_id: string; reviewer_session_id: string | null },
+>(run: T, remoteServerId: string, projectId: string): T {
+  const prefix = `remote-${remoteServerId}-${projectId}-`;
+  return {
+    ...run,
+    id: `${prefix}${run.id}`,
+    project_id: projectId,
+    source_session_id: `${prefix}${run.source_session_id}`,
+    reviewer_session_id: run.reviewer_session_id ? `${prefix}${run.reviewer_session_id}` : null,
+  };
+}

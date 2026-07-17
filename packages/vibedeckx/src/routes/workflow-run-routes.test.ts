@@ -33,6 +33,12 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
     cancelRun: vi.fn(async () => ({ ...run, status: "cancelled" })),
     ...(overrides.engine ?? {}),
   } as never);
+  // Remote-id branches (workflow-run-remote-routes.test.ts covers proxying
+  // itself) — an empty map means every "remote-" id here is an unmapped
+  // session/run, exercised by the "unknown project" test below.
+  app.decorate("remoteSessionMap", new Map() as never);
+  app.decorate("reverseConnectManager", null as never);
+  app.decorate("eventBus", { emit: vi.fn() } as never);
   return app;
 }
 
@@ -50,11 +56,13 @@ describe("workflow-run-routes", () => {
     expect(res.json().run.id).toBe("r1");
   });
 
-  it("POST rejects remote sessions and unknown projects", async () => {
+  it("POST 404s an unmapped remote session id and an unknown project", async () => {
     const app = makeApp();
     await app.register(workflowRunRoutes);
+    // Remote proxying itself is covered by workflow-run-remote-routes.test.ts;
+    // here remoteSessionMap is empty, so this "remote-" id is simply unmapped.
     const remote = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "p1", sourceSessionId: "remote-x" } });
-    expect(remote.statusCode).toBe(400);
+    expect(remote.statusCode).toBe(404);
     const missing = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "nope", sourceSessionId: "s" } });
     expect(missing.statusCode).toBe(404);
   });
