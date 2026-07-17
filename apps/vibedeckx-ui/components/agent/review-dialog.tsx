@@ -22,7 +22,7 @@ export function ReviewDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!sessionId || sessionId.startsWith("remote-")) return null;
+  if (!sessionId) return null;
 
   const start = async () => {
     setBusy(true);
