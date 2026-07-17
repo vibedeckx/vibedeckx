@@ -1,6 +1,7 @@
 import type { AgentSessionStatus } from "../conversation-patch.js";
 import type { GlobalEvent } from "../event-bus.js";
 import type { RemoteSessionInfo } from "../server-types.js";
+import type { WorkflowRun } from "../storage/types.js";
 
 /**
  * Extract the projectId from a synthetic remote session id.
@@ -112,4 +113,21 @@ export function mapRemoteRun<
     source_session_id: `${prefix}${run.source_session_id}`,
     reviewer_session_id: run.reviewer_session_id ? `${prefix}${run.reviewer_session_id}` : null,
   };
+}
+
+/**
+ * Build the front-server `workflow:run-updated` event from a worker's
+ * `{ workflowRunUpdated: run }` stream frame (mirrored by the worker's
+ * WorkflowEngine onto participant streams — spec §Phase 1.5 事件回传).
+ */
+export function runUpdatedEventFromRemoteFrame(
+  parsed: Record<string, unknown>,
+  sessionId: string,
+  remoteInfo: RemoteSessionInfo,
+): Extract<GlobalEvent, { type: "workflow:run-updated" }> | null {
+  if (!("workflowRunUpdated" in parsed)) return null;
+  const bare = parsed.workflowRunUpdated as WorkflowRun;
+  const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
+  const run = mapRemoteRun(bare, remoteInfo.remoteServerId, projectId);
+  return { type: "workflow:run-updated", projectId, branch: run.branch, run };
 }

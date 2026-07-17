@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { taskCompletedEventFromRemoteFrame, mapRemoteRun } from "./remote-status-bridge.js";
+import { taskCompletedEventFromRemoteFrame, mapRemoteRun, runUpdatedEventFromRemoteFrame } from "./remote-status-bridge.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 
 const remoteInfo: RemoteSessionInfo = {
@@ -59,5 +59,31 @@ describe("mapRemoteRun", () => {
       "p1",
     );
     expect(mapped.reviewer_session_id).toBeNull();
+  });
+});
+
+describe("runUpdatedEventFromRemoteFrame", () => {
+  const bare = {
+    id: "run1", project_id: "wp1", branch: "dev",
+    source_session_id: "src1", source_turn_end_index: 4,
+    reviewer_session_id: "rev1", review_focus: null, review_target: null,
+    feedback_snapshot: null, status: "waiting_feedback", error: null,
+    created_at: "", updated_at: "",
+  };
+
+  it("maps run + participant ids into the front id space", () => {
+    const evt = runUpdatedEventFromRemoteFrame({ workflowRunUpdated: bare }, localId, remoteInfo);
+    expect(evt).toMatchObject({ type: "workflow:run-updated", projectId: "p1", branch: "dev" });
+    expect(evt?.run).toMatchObject({
+      id: "remote-srv1-p1-run1",
+      project_id: "p1",
+      source_session_id: "remote-srv1-p1-src1",
+      reviewer_session_id: "remote-srv1-p1-rev1",
+      status: "waiting_feedback",
+    });
+  });
+
+  it("returns null for other frames", () => {
+    expect(runUpdatedEventFromRemoteFrame({ taskCompleted: {} }, localId, remoteInfo)).toBeNull();
   });
 });
