@@ -25,6 +25,7 @@ import chatSessionRoutes from "./routes/chat-session-routes.js";
 import taskRoutes from "./routes/task-routes.js";
 import ruleRoutes from "./routes/rule-routes.js";
 import commandRoutes from "./routes/command-routes.js";
+import workflowRunRoutes from "./routes/workflow-run-routes.js";
 import settingsRoutes from "./routes/settings-routes.js";
 import translateRoutes from "./routes/translate-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
@@ -336,6 +337,7 @@ export const createServer = async (opts: {
   server.register(taskRoutes);
   server.register(ruleRoutes);
   server.register(commandRoutes);
+  server.register(workflowRunRoutes);
   server.register(settingsRoutes);
   server.register(translateRoutes);
   server.register(eventRoutes);
