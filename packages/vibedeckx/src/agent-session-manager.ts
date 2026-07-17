@@ -1457,8 +1457,13 @@ export class AgentSessionManager {
       const formatted = provider.formatUserInput(content, session.id);
       if (formatted.length === 0) {
         console.warn(
-          `[AgentSession] sendUserMessage: provider returned empty stdin payload for ${session.agentType} session ${sessionId} — nothing written to agent`,
+          `[AgentSession] sendUserMessage: provider buffered the input for ${session.agentType} session ${sessionId} — no stdin payload yet`,
         );
+        // Empty payload = the provider accepted and buffered the input (Codex
+        // before the thread/start response). The send is initiated — the
+        // provider flushes the buffered turn/start itself — so the turn opens
+        // here too, or its completion would skip the turn_end stop point.
+        if (session.turnOpenSince === null) session.turnOpenSince = Date.now();
         return true;
       }
       console.log(

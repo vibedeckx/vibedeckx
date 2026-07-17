@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "./agent-session-manager.js";
+import { getProvider } from "./providers/index.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
 
@@ -28,7 +29,7 @@ function fixture(name: string): string {
   return readFileSync(new URL(`./protocol/claude-code/__fixtures__/${name}`, import.meta.url), "utf-8");
 }
 
-function makeHarness() {
+function makeHarness(agentType: "claude-code" | "codex" = "claude-code") {
   // status: "stopped" — liveSession() below uses restoreSessionsFromDb() purely
   // as a session-construction helper (then flips dormant/status/turnOpenSince
   // in memory to simulate a live process). A "running" DB row would instead
@@ -36,7 +37,7 @@ function makeHarness() {
   // which is unrelated to what these turn_end-on-live-paths tests exercise.
   const row: AgentSession = {
     id: SESSION_ID, project_id: "p1", branch: "main", status: "stopped",
-    permission_mode: "edit", agent_type: "claude-code", title: "t",
+    permission_mode: "edit", agent_type: agentType, title: "t",
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
     last_user_message_at: 1, last_completed_at: null,
   };
@@ -147,6 +148,91 @@ describe("turn_end on turn completion", () => {
     const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
     await liveSession(manager, null); // between turns
     await manager.stopSession(SESSION_ID); // any stop transition with no open turn
+    expect(turnEnds).toHaveLength(0);
+  });
+});
+
+/**
+ * Codex first-turn race: the first sendUserMessage lands before the
+ * thread/start response, so formatUserInput buffers the content and returns
+ * an empty stdin payload. The send IS initiated (the provider flushes the
+ * buffered turn/start itself once threadId arrives), so the turn must open
+ * on the buffered send — otherwise turn/completed → result(success) →
+ * endActiveTurn hits the turnOpenSince===null guard and the conversation
+ * never gets its turn_end stop point (missing divider + Branch affordance).
+ */
+describe("codex buffered first turn", () => {
+  type FakeProcess = { stdin: { write: (s: string) => boolean }; exitCode: null; pid: number };
+
+  async function codexLiveSession(manager: AgentSessionManager) {
+    const { internals, session } = await liveSession(manager, null);
+    const writes: string[] = [];
+    (session as unknown as { process: FakeProcess }).process = {
+      stdin: { write: (s: string) => { writes.push(s); return true; } },
+      exitCode: null, pid: 1234,
+    };
+    // Simulate spawn-time handshake: initialize + thread/start written to the
+    // codex app-server, response not yet arrived (state: initialized, no threadId).
+    const provider = getProvider("codex");
+    provider.onSessionDestroyed?.(SESSION_ID);
+    provider.onSessionCreated?.(SESSION_ID, "edit");
+    const init = provider.getInitializationMessages!(SESSION_ID)!;
+    const threadStartId = init.trim().split("\n").map((l) => JSON.parse(l) as { id: number; method: string })
+      .find((m) => m.method === "thread/start")!.id;
+    const feed = (obj: unknown) => internals.handleStdout(session, JSON.stringify(obj) + "\n");
+    return { session, writes, threadStartId, feed };
+  }
+
+  it("opens the turn on a buffered send and writes turn_end when the flushed turn completes", async () => {
+    const { storage, turnEnds } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session, writes, threadStartId, feed } = await codexLiveSession(manager);
+
+    const ok = await manager.sendUserMessage(SESSION_ID, "hello codex");
+    expect(ok).toBe(true);
+    expect(writes).toHaveLength(0); // buffered — nothing on stdin yet
+    expect(session.turnOpenSince).not.toBeNull(); // buffered send still opens the turn
+
+    // thread/start responds → provider flushes the buffered turn/start
+    await feed({ jsonrpc: "2.0", id: threadStartId, result: { thread: { id: "th-1" } } });
+    expect(writes.some((w) => w.includes("turn/start"))).toBe(true);
+
+    await feed({ jsonrpc: "2.0", method: "item/completed", params: { threadId: "th-1", turnId: "turn-1", item: { type: "agentMessage", text: "done" } } });
+    await feed({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "th-1", turn: { id: "turn-1", status: "completed" } } });
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].outcome).toBe("completed");
+    expect(session.turnOpenSince).toBeNull();
+  });
+
+  it("a second message inside the buffering window does not reset the turn start", async () => {
+    const { storage } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session } = await codexLiveSession(manager);
+
+    await manager.sendUserMessage(SESSION_ID, "first");
+    const openedAt = session.turnOpenSince;
+    expect(openedAt).not.toBeNull();
+    await settle(5);
+    await manager.sendUserMessage(SESSION_ID, "second (steering)");
+    expect(session.turnOpenSince).toBe(openedAt);
+  });
+
+  it("a synchronous stdin failure does not open a turn (no phantom turn_end)", async () => {
+    const { storage, turnEnds } = makeHarness(); // claude-code: non-empty payload path
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session } = await liveSession(manager, null);
+    (session as unknown as { process: FakeProcess }).process = {
+      stdin: { write: () => { throw new Error("EPIPE"); } },
+      exitCode: null, pid: 1234,
+    };
+
+    const ok = await manager.sendUserMessage(SESSION_ID, "hello");
+    expect(ok).toBe(false);
+    expect(session.turnOpenSince).toBeNull();
+
+    await manager.stopSession(SESSION_ID);
     expect(turnEnds).toHaveLength(0);
   });
 });
