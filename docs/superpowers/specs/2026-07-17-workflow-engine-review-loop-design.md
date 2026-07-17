@@ -76,7 +76,8 @@ DAG 画布。逃生舱 = 编辑对话框里的 "Edit as JSON" 切换。
 ### 2.3 `workflow_runs` 表（新）
 
 ```
-id, command_id, project_id, branch,
+id, command_id (nullable — NULL = ad-hoc 隐式 run，见 3.6),
+project_id, branch,
 template, params_snapshot (JSON),     -- 运行时冻结的定义快照
 task_text,                            -- 用户在输入框里给的任务描述
 status: waiting_agent | waiting_gate | paused | completed | cancelled | failed
@@ -166,12 +167,39 @@ v1 指挥官**不新增** `runWorkflow` tool，不做意图路由建议——wor
 在 Main Chat 时间线，但转发决策全在引擎代码。（指挥官建议 chip、自动 dispatch
 留到后续阶段。）
 
+### 3.6 Ad-hoc review（隐式单程 run）— Phase 1 的 tracer bullet
+
+面向最高频场景："agent 完成一次修复/设计后，让另一个 agent 复查一遍"——不需要
+预先创建任何 workflow command，直接从事件卡片上发起。同时它是信任阶梯的第一级：
+**用户自己当状态机的手摇版**，每一步亲手触发，但没有复制粘贴摩擦；手摇顺了再
+升级到 Phase 2 的自动循环（后续的 AI 辅助创建从这里接："把刚才这套存成
+workflow"）。
+
+**交互**：
+- Main Chat 里非 run 关联 session 的 `[Agent Event: Task Completed]` 卡片上
+  显示一个 **Review 按钮**（克制为单个动作，不做按钮排）。点击 → 创建
+  reviewer session（同 3.2 的 fresh/branch 逻辑）并投递指针 payload。
+- reviewer 的 taskCompleted 到达后，出**中继确认卡片**（与 5.3 同一组件，即
+  "Feedback"）：review 意见在可编辑文本域中，原样发送 / 修改后发送 / 结束。
+  发送 → 回到原 session。单程结束，run 置 `completed`。
+- 原 session 之后再次完成时，事件卡片上再次出现 Review 按钮——用户可手摇下一轮。
+
+**机制**：点击 Review 即在 `workflow_runs` 落一行隐式 run
+（`command_id=NULL`、`template='adhoc-review'`、maxRounds=1、`task_text` 取自
+触发事件的任务上下文；无 command 可查，params 一律用模板内置默认值——默认
+reviewerPrompt、`reviewerContext=auto`）。由此白捡全套已设计机制：sessionId 事件路由、sidebar
+角标、session 内横幅、刷新恢复、每 workspace 单活跃 run 约束（活跃 run 存在时
+事件卡片**不**显示 Review 按钮，即 409 的 UI 面）。Feedback 的回送目标就是
+run 行里的 `implementer_session_id`，无需新机制。
+
 ---
 
 ## 4. API
 
 ```
-POST   /api/workflow-runs                { commandId, taskText, projectId, branch }（同 workspace 已有活跃 run → 409）
+POST   /api/workflow-runs                { commandId?, taskText, projectId, branch, sourceSessionId? }
+                                         （同 workspace 已有活跃 run → 409；
+                                           commandId 省略 = ad-hoc 单程 run，须给 sourceSessionId 作 implementer）
 GET    /api/workflow-runs?projectId&branch&status=active   列出 run（前端刷新后恢复 run 卡片、sidebar 关联标注）
 GET    /api/workflow-runs/:id            run 状态（run 卡片轮询兜底；主推送走下述事件）
 POST   /api/workflow-runs/:id/gate       { action: 'approve'|'cancel', editedPayload? }
@@ -205,6 +233,12 @@ POST   /api/workflow-runs/:id/resume     （paused → 继续）
 等你确认 / 已暂停）、implementer 与 reviewer session 跳转链接、取消按钮。
 随 `workflow:run-updated` 事件更新。
 
+### 5.2b 事件卡片上的 Review 按钮（ad-hoc 入口，Phase 1）
+
+非 run 关联 session 的 `[Agent Event: Task Completed]` 卡片右下角一个 Review
+按钮（workspace 已有活跃 run 时隐藏）。点击即 `POST /api/workflow-runs`
+（ad-hoc 形态），随后的 Feedback 交互复用 5.3 的中继确认卡片。详见 3.6。
+
 ### 5.3 中继确认卡片（v1 核心交互）
 
 - 出现在 Main Chat 时间线（`waiting_gate` 时），内容：来源方 final report /
@@ -229,14 +263,24 @@ POST   /api/workflow-runs/:id/resume     （paused → 继续）
 
 ## 6. v1 范围与后续
 
-**v1（本文范围）**：`commands.kind` + 定义 JSON；`workflow_runs` 表 + 引擎 +
-Design–Review Loop 模板；4 条 API；输入框 chip 选择器 + 模板参数表单 + run
-卡片 + 中继确认卡片。每跳必确认，无自动模式。
+**Phase 1 — ad-hoc review（tracer bullet）**：`workflow_runs` 表 + 引擎骨架
+（事件双订阅、sessionId 路由、指针 payload）+ ad-hoc 单程 run（3.6）+ 事件
+卡片 Review 按钮 + 中继确认卡片 + sidebar 角标/session 横幅 + run API
+（POST/GET/gate/cancel/resume——人接管暂停对 ad-hoc run 同样适用）。不含循环
+状态机、模板、chip 选择器。验证三块核心
+肌肉：spawn reviewer、指针 payload、可编辑中继。
+
+**Phase 2 — 完整 workflow**：`commands.kind` + 定义 JSON + Design–Review Loop
+模板（循环状态机、VERDICT 解析、maxRounds/升级卡片、resume）+ 输入框 chip/
+斜杠选择器 + 模板参数表单（含 Edit as JSON）+ run 常驻卡片完整形态。
+
+两个 Phase 都保持：每跳必确认，无自动模式。
 
 **显式不做（后续按信任解锁顺序）**：
 1. "第 N 轮起自动继续"放权旋钮（流程跑顺后）；
 2. 指挥官 `runWorkflow` tool / 意图建议 chip；
-3. AI 辅助创建（"把我刚才手动做的存成 workflow" → 预填参数表单）；
+3. AI 辅助创建（"把刚才手摇的这套存成 workflow" → 预填参数表单；从 ad-hoc
+   使用记录里接最顺）；
 4. 更多模板（test-fix loop、implement→review 单程）；
 5. 自由步骤 schema / 编辑器（除非 ≥5 个模板仍盖不住真实用例）；
 6. remote workspace 上的 run（v1 仅本地 session；remote 的 taskCompleted 事件
