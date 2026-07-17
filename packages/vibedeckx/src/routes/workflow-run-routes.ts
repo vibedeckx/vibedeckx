@@ -123,6 +123,58 @@ async function routes(fastify: FastifyInstance) {
       throw err;
     }
   });
+
+  // ---- Remote-provider (path-based) mirrors --------------------------------
+  // Served under /api/path/* so the --accept-remote gate in server.ts applies.
+  // A front server proxies here for remote workspaces: it knows the worker's
+  // bare session id and the workspace's remote_path, but not the worker-local
+  // project id — so these mirrors derive the project themselves. Gate/cancel/
+  // get-by-id need no mirrors (bare run ids work on the normal routes).
+
+  fastify.post<{
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number };
+  }>("/api/path/workflow-runs", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const { sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
+    if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
+    const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
+    if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
+    const project = await fastify.storage.projects.getById(sourceSession.project_id);
+    if (!project) return reply.code(404).send({ error: "Session not found" });
+    if (!project.path) return reply.code(400).send({ error: "Project has no local path" });
+    try {
+      const run = await fastify.workflowEngine.startAdhocReview({
+        project: { id: project.id, path: project.path },
+        branch: sourceSession.branch || null,
+        sourceSessionId,
+        reviewFocus,
+        sourceTurnEndIndex,
+      });
+      return reply.code(201).send({ run });
+    } catch (err) {
+      const status = errStatus(err);
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      throw err;
+    }
+  });
+
+  fastify.get<{
+    Querystring: { path?: string; branch?: string };
+  }>("/api/path/workflow-runs", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const { path: projectPath, branch } = req.query;
+    if (!projectPath) return reply.code(400).send({ error: "path is required" });
+    // Same resolution as /api/path/agent-sessions: real project by path,
+    // else the pseudo project id used for path-created sessions.
+    const project =
+      (await fastify.storage.projects.getByPath(projectPath)) ??
+      (await fastify.storage.projects.getById(`path:${projectPath}`));
+    if (!project) return reply.send({ runs: [] });
+    const runs = await fastify.storage.workflowRuns.getActive(project.id, branch || null);
+    return reply.send({ runs });
+  });
 }
 
 export default fp(routes, { name: "workflow-run-routes" });

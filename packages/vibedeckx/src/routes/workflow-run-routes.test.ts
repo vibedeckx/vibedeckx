@@ -12,7 +12,10 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
   app = Fastify();
   app.decorate("authEnabled", false);
   app.decorate("storage", {
-    projects: { getById: async (id: string) => (id === "p1" ? project : undefined) },
+    projects: {
+      getById: async (id: string) => (id === "p1" ? project : undefined),
+      getByPath: async (p: string) => (p === "/tmp/p" ? project : undefined),
+    },
     agentSessions: {
       getById: async (id: string) =>
         id === "s-src" || id === "s" ? { id, project_id: "p1", branch: "dev" } : undefined,
@@ -165,5 +168,46 @@ describe("workflow-run-routes", () => {
     const res = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/cancel" });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("反馈正在发送，无法取消");
+  });
+
+  it("path POST derives project and branch from the source session", async () => {
+    const startMock = vi.fn(async () => run);
+    const app = makeApp({ engine: { startAdhocReview: startMock } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/path/workflow-runs",
+      payload: { sourceSessionId: "s-src", reviewFocus: "tests", sourceTurnEndIndex: 4 },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(startMock.mock.calls[0][0]).toMatchObject({
+      project: { id: "p1", path: "/tmp/p" },
+      branch: "dev",
+      sourceSessionId: "s-src",
+      reviewFocus: "tests",
+      sourceTurnEndIndex: 4,
+    });
+  });
+
+  it("path POST 404s an unknown source session and maps engine errors", async () => {
+    const app = makeApp({
+      engine: { startAdhocReview: vi.fn(async () => { throw new WorkflowError("session-busy", "busy"); }) },
+    });
+    await app.register(workflowRunRoutes);
+    const missing = await app.inject({ method: "POST", url: "/api/path/workflow-runs", payload: { sourceSessionId: "nope" } });
+    expect(missing.statusCode).toBe(404);
+    const busy = await app.inject({ method: "POST", url: "/api/path/workflow-runs", payload: { sourceSessionId: "s-src" } });
+    expect(busy.statusCode).toBe(409);
+  });
+
+  it("path GET lists active runs for a path-resolved project", async () => {
+    const app = makeApp();
+    await app.register(workflowRunRoutes);
+    const ok = await app.inject({ method: "GET", url: "/api/path/workflow-runs?path=%2Ftmp%2Fp&branch=dev" });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().runs).toHaveLength(1);
+    const unknown = await app.inject({ method: "GET", url: "/api/path/workflow-runs?path=%2Fnope" });
+    expect(unknown.json().runs).toEqual([]);
+    const noPath = await app.inject({ method: "GET", url: "/api/path/workflow-runs" });
+    expect(noPath.statusCode).toBe(400);
   });
 });
