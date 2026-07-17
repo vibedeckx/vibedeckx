@@ -57,6 +57,7 @@ import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
 import { SessionHistoryDropdown } from "./session-history-dropdown";
 import { QuotePopover, appendQuote } from "./quote-popover";
+import { ReviewDialog } from "./review-dialog";
 
 /** Only renders the attachment header when there are files attached */
 function AttachmentHeader() {
@@ -715,6 +716,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           })()}
         </div>
         <div className="flex items-center gap-1">
+          {projectId && (
+            <ReviewDialog projectId={projectId} branch={branch} sessionId={session?.id ?? null} />
+          )}
           {projectId && (
             <SessionHistoryDropdown
               projectId={projectId}
