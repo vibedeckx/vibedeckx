@@ -855,6 +855,9 @@ export class AgentSessionManager {
     if (!session.skipDb) {
       await this.storage.agentSessions.markCompleted(sessionId, completedAt);
     }
+    // Stop point: persist the turn_end marker BEFORE the completion event goes
+    // out, so event consumers can use its index as a turn boundary / branch cutoff.
+    const turnEndEntryIndex = await this.endActiveTurn(session, "completed");
     const summaryText = extractLastAssistantText(session.store.entries);
     this.broadcastRaw(sessionId, {
       taskCompleted: {
@@ -875,12 +878,9 @@ export class AgentSessionManager {
       input_tokens: payload.input_tokens,
       output_tokens: payload.output_tokens,
       summaryText,
+      turnEndEntryIndex: turnEndEntryIndex ?? undefined,
     });
     await this.emitDerivedBranchActivity(session.projectId, session.branch);
-
-    // Stop point: persist the turn_end marker before the status flips, so
-    // subscribers never see "stopped" without a tail Branch divider.
-    await this.endActiveTurn(session, "completed");
 
     // Turn finished — process stays alive (stream-json) waiting for next
     // input, but status now reflects "between turns" so UI affordances
@@ -1387,12 +1387,13 @@ export class AgentSessionManager {
   private async endActiveTurn(
     session: RunningSession,
     outcome: Exclude<TurnOutcome, "server_restart">,
-  ): Promise<void> {
-    if (session.turnOpenSince === null) return; // no turn in flight
+  ): Promise<number | null> {
+    if (session.turnOpenSince === null) return null; // no turn in flight
     const endedAt = Date.now(); // single clock read: timestamp === end bound of durationMs
     const durationMs = endedAt - session.turnOpenSince;
-    await this.pushEntry(session.id, { type: "turn_end", timestamp: endedAt, durationMs, outcome }, true);
+    const index = await this.pushEntry(session.id, { type: "turn_end", timestamp: endedAt, durationMs, outcome }, true);
     session.turnOpenSince = null; // cleared only after the write resolves
+    return index >= 0 ? index : null;
   }
 
   /**
