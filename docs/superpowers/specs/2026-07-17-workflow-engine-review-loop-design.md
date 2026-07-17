@@ -90,6 +90,14 @@ created_at, updated_at
 持久化到 SQLite（教训来自 approval 设计："内存态重启即丢"）。引擎另需内存索引
 `sessionId → runId`（启动时从表重建），用于事件路由。
 
+**Session 绑定与并发约束**：
+- run 锚定的是**精确 session id**，不是 project+branch——事件路由、人接管检测
+  都按 sessionId 查。同 branch 上其他无关 session（resident 多 session 池下
+  可并发运行）的事件被引擎直接忽略，互不干扰。
+- **v1 每 workspace（project+branch）同时至多一个活跃 run**（`status` 非终态）。
+  `POST /api/workflow-runs` 时已有活跃 run → 409。放宽到多 run 并行（各自锚定
+  不相交的 session 集合）留到后续。
+
 ---
 
 ## 3. Workflow 引擎
@@ -147,7 +155,8 @@ on gate approved → sendToAgentSession(implementer, 意见) → round+1 → wai
 | final report 空 / 无 VERDICT | 降级 `getAgentConversation` 取末条 assistant 消息；再失败 → 一次便宜 LLM 分类（`resolveFastChatModel`）；仍失败 → 卡片请用户裁决 |
 | 用户手动向任一 session 发消息（人接管） | 引擎检测到非引擎发起的 turn → run 置 `paused`，run 卡片上选择继续或结束 |
 | 服务重启 | run 状态在表里；`waiting_agent` 中丢失的 taskCompleted 由启动时对账（查 session 当前状态）补偿；`waiting_gate` 天然可恢复 |
-| 每 branch 一个 active turn 约束 | ping-pong 天然串行（reviewer 跑时 implementer 在等），resident 多 session 池承载同 workspace 双 session |
+| 同 branch 多 session 并发（resident 池） | 事件按精确 sessionId 路由到 run，无关 session 的 taskCompleted 一律忽略；run 内部 ping-pong 本身串行（reviewer 跑时 implementer 在等） |
+| 同 workspace 已有活跃 run | 创建时 409（见 2.3 并发约束） |
 | run 卡片上取消 | 引擎停止调度，不打断正在跑的 turn（该 turn 完成事件被忽略） |
 
 ### 3.5 与指挥官的关系
@@ -162,7 +171,8 @@ v1 指挥官**不新增** `runWorkflow` tool，不做意图路由建议——wor
 ## 4. API
 
 ```
-POST   /api/workflow-runs                { commandId, taskText, projectId, branch }
+POST   /api/workflow-runs                { commandId, taskText, projectId, branch }（同 workspace 已有活跃 run → 409）
+GET    /api/workflow-runs?projectId&branch&status=active   列出 run（前端刷新后恢复 run 卡片、sidebar 关联标注）
 GET    /api/workflow-runs/:id            run 状态（run 卡片轮询兜底；主推送走下述事件）
 POST   /api/workflow-runs/:id/gate       { action: 'approve'|'cancel', editedPayload? }
 POST   /api/workflow-runs/:id/cancel
@@ -204,9 +214,16 @@ POST   /api/workflow-runs/:id/resume     （paused → 继续）
   不支持编辑），但复用 approval 卡片的视觉与 first-wins 语义。
 - 终局形态：APPROVE 收敛卡片（"采纳设计？"）与 maxRounds 升级卡片同一组件。
 
-### 5.4 状态点
+### 5.4 状态点与 session 关联可见性
 
-复用现有 sidebar dot：workflow 运行中 = 指挥官 violet 常亮语义，不发明新状态。
+- 复用现有 sidebar dot：workflow 运行中 = 指挥官 violet 常亮语义，不发明新状态。
+- **Sidebar 关联标注**：属于活跃 run 的 session 在 resident 嵌套列表里加角标
+  （如小循环图标 + 角色 implementer/reviewer），数据来自
+  `GET /api/workflow-runs?status=active`。同 branch 上与 run 无关的并发 session
+  无标注，一眼可辨。
+- **Session 内横幅**：用户打开属于活跃 run 的 session 时，会话顶部显示
+  "此 session 属于 Design–Review Loop（Round 2/3）——直接发消息将暂停该 run"，
+  附 run 卡片跳转。与 3.4 的人接管检测配套：暂停不是惩罚，但要在打字前告知。
 
 ---
 
