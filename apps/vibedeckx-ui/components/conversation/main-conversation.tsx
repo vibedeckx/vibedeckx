@@ -19,10 +19,11 @@ import {
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
 import { ToolApprovalCard } from "./tool-approval-card";
+import { ReviewRunPanel } from "./review-run-panel";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
+import { api, type WorkflowRun } from "@/lib/api";
 import { toast } from "sonner";
 
 /**
@@ -94,9 +95,11 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     sendMessage,
     stopGeneration,
     restartSession,
+    workflowRunUpdate,
   } = useChatSession(projectId, branch);
 
   const { settings: convSettings } = useConversationSettings();
+  const [activeRuns, setActiveRuns] = useState<WorkflowRun[]>([]);
 
   useImperativeHandle(ref, () => ({
     sendMessage: async (text: string) => {
@@ -188,6 +191,13 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
         )}
       </div>
 
+      <ReviewRunPanel
+        projectId={projectId}
+        branch={branch}
+        runUpdate={workflowRunUpdate}
+        onRunsChange={setActiveRuns}
+      />
+
       {/* Messages area */}
       <Conversation className="flex-1 min-h-0" initial="instant">
         <ExecutorEventReStick messages={messages} />
@@ -252,12 +262,42 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             }
 
             if (msg.type === "user") {
+              const evt = msg.event;
               return (
-                <Message key={index} from="user">
-                  <MessageContent style={{ fontSize: "var(--conv-font-size, 14px)" }}>
-                    {msg.content}
-                  </MessageContent>
-                </Message>
+                <div key={index}>
+                  <Message from="user">
+                    <MessageContent style={{ fontSize: "var(--conv-font-size, 14px)" }}>
+                      {msg.content}
+                    </MessageContent>
+                  </Message>
+                  {evt?.kind === "agent_task_completed" && (
+                    <div className="mt-1 flex justify-end">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={activeRuns.some(
+                          (r) => r.source_session_id === evt.sessionId || r.reviewer_session_id === evt.sessionId,
+                        )}
+                        title={activeRuns.length > 0 ? "该 session 已在一个进行中的 review 里" : undefined}
+                        onClick={async () => {
+                          if (!projectId) return;
+                          try {
+                            await api.createWorkflowRun({
+                              projectId,
+                              branch,
+                              sourceSessionId: evt.sessionId,
+                              sourceTurnEndIndex: evt.turnEndEntryIndex,
+                            });
+                          } catch (e) {
+                            alert(e instanceof Error ? e.message : String(e));
+                          }
+                        }}
+                      >
+                        Review
+                      </Button>
+                    </div>
+                  )}
+                </div>
               );
             }
 
