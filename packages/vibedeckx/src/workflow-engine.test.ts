@@ -221,6 +221,25 @@ describe("WorkflowEngine", () => {
     expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(false);
   });
 
+  it("handleExternalUserMessage never throws when the run is mid-send (sending_feedback bad-state race)", async () => {
+    const run = await start();
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+    // Simulate approveFeedback having claimed the run (mid-send, still
+    // awaiting agentOps.sendUserMessage) via its own CAS — same setup as the
+    // cancelRun CAS test above, but here we drive the takeover path, which
+    // must swallow cancelRun's bad-state throw rather than propagate it (it
+    // runs inline before the user's own message is delivered).
+    const claimed = await storage.workflowRuns.transition(run.id, "waiting_feedback", "sending_feedback");
+    expect(claimed).toBe(true);
+
+    await expect(engine.handleExternalUserMessage("s-rev")).resolves.toBeUndefined();
+    const after = await storage.workflowRuns.getById(run.id);
+    expect(after?.status).toBe("sending_feedback"); // unchanged — takeover cancel was skipped
+  });
+
   it("boot recovery: sending_feedback → waiting_feedback with unknown-send warning", async () => {
     const run = await start();
     await storage.workflowRuns.update(run.id, { status: "sending_feedback", feedback_snapshot: "fb" });

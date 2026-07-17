@@ -156,4 +156,14 @@ describe("workflow-run-routes", () => {
     const res = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/gate", payload: { action: "approve" } });
     expect(res.statusCode).toBe(409);
   });
+
+  it("cancel maps bad-state (run mid-send) to 409 with the error message", async () => {
+    const app = makeApp({
+      engine: { cancelRun: vi.fn(async () => { throw new WorkflowError("bad-state", "反馈正在发送，无法取消"); }) },
+    });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/cancel" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("反馈正在发送，无法取消");
+  });
 });

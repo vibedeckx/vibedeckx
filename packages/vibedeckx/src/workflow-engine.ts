@@ -349,11 +349,37 @@ export class WorkflowEngine {
     return updated;
   }
 
-  /** Human takeover (spec §3.4): user sent a message directly to a run session. */
+  /**
+   * Human takeover (spec §3.4): user sent a message directly to a run session.
+   *
+   * Never-throws contract: this is called inline from the agent-session
+   * `/message` route BEFORE the user's message is delivered
+   * (agentOps.sendUserMessage). A throw here would abort delivery of that
+   * message, so this method must never throw — any error from cancelRun is
+   * caught and swallowed, never rethrown. `bad-state` is the expected case:
+   * it means the run is mid-send (approveFeedback's own CAS holds it in
+   * `sending_feedback`), a transient race, so we just log and let the
+   * takeover no-op; the run resolves on its own via approveFeedback's
+   * completion/rollback. Any other error is unexpected but still swallowed
+   * to honor the contract, with a louder log so it isn't silently lost.
+   */
   async handleExternalUserMessage(sessionId: string): Promise<void> {
     const p = this.participants.get(sessionId);
     if (!p) return;
-    await this.cancelRun(p.runId, "用户接管：直接向 run 内的 session 发送了消息，review 已结束。");
+    try {
+      await this.cancelRun(p.runId, "用户接管：直接向 run 内的 session 发送了消息，review 已结束。");
+    } catch (err) {
+      if (err instanceof WorkflowError && err.code === "bad-state") {
+        console.warn(
+          `[WorkflowEngine] handleExternalUserMessage: run ${p.runId} is mid-send (sending_feedback); skipping takeover cancel`,
+        );
+      } else {
+        console.error(
+          `[WorkflowEngine] handleExternalUserMessage: unexpected error cancelling run ${p.runId}; swallowed to honor never-throws contract`,
+          err,
+        );
+      }
+    }
   }
 
   private emitRunUpdated(run: WorkflowRun): void {

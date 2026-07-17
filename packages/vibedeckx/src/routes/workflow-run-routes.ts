@@ -114,8 +114,14 @@ async function routes(fastify: FastifyInstance) {
     if (!existing) return reply.code(404).send({ error: "Run not found" });
     const project = await fastify.storage.projects.getById(existing.project_id, userId);
     if (!project) return reply.code(404).send({ error: "Run not found" });
-    const run = await fastify.workflowEngine.cancelRun(req.params.id);
-    return reply.send({ run });
+    try {
+      const run = await fastify.workflowEngine.cancelRun(req.params.id);
+      return reply.send({ run });
+    } catch (err) {
+      const status = errStatus(err);
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      throw err;
+    }
   });
 }
 
