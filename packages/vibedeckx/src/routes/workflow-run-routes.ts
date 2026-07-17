@@ -36,6 +36,17 @@ async function routes(fastify: FastifyInstance) {
   }
   const remoteRunMap = new Map<string, RemoteRunInfo>();
 
+  // Terminal runs are never gated again, so retaining their handle would only
+  // grow the map forever on a long-lived hosted front. Evict on terminal
+  // status instead of set; the map is in-memory and hydrate-by-use anyway
+  // (see remoteRunMap comment above), so a later fetch re-learns any run
+  // that's still active.
+  const TERMINAL_RUN_STATUSES = new Set<WorkflowRun["status"]>(["completed", "cancelled", "failed"]);
+  const trackRemoteRun = (localRun: WorkflowRun, info: RemoteRunInfo) => {
+    if (TERMINAL_RUN_STATUSES.has(localRun.status)) remoteRunMap.delete(localRun.id);
+    else remoteRunMap.set(localRun.id, info);
+  };
+
   const proxyAuto = (
     info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string },
     method: string,
@@ -96,7 +107,7 @@ async function routes(fastify: FastifyInstance) {
 
       const bareRun = (result.data as { run: WorkflowRun }).run;
       const localRun = mapRemoteRun(bareRun, remoteInfo.remoteServerId, projectId);
-      remoteRunMap.set(localRun.id, {
+      trackRemoteRun(localRun, {
         remoteServerId: remoteInfo.remoteServerId,
         remoteUrl: remoteInfo.remoteUrl,
         remoteApiKey: remoteInfo.remoteApiKey,
@@ -187,7 +198,7 @@ async function routes(fastify: FastifyInstance) {
           const bareRuns = (result.data as { runs: WorkflowRun[] }).runs ?? [];
           const runs = bareRuns.map((r) => {
             const mapped = mapRemoteRun(r, info.remoteServerId, projectId);
-            remoteRunMap.set(mapped.id, { ...info, bareRunId: r.id, projectId });
+            trackRemoteRun(mapped, { ...info, bareRunId: r.id, projectId });
             return mapped;
           });
           return reply.send({ runs });
@@ -206,6 +217,7 @@ async function routes(fastify: FastifyInstance) {
       const result = await proxyAuto(info, "GET", `/api/workflow-runs/${info.bareRunId}`);
       if (!result.ok) return sendProxyFailure(reply, result);
       const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+      trackRemoteRun(localRun, info);
       return reply.send({ run: localRun });
     }
     const run = await fastify.storage.workflowRuns.getById(req.params.id);
@@ -225,6 +237,7 @@ async function routes(fastify: FastifyInstance) {
         const result = await proxyAuto(info, "POST", `/api/workflow-runs/${info.bareRunId}/gate`, req.body ?? {});
         if (!result.ok) return sendProxyFailure(reply, result);
         const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+        trackRemoteRun(localRun, info);
         fastify.eventBus.emit({ type: "workflow:run-updated", projectId: info.projectId, branch: localRun.branch, run: localRun });
         return reply.send({ run: localRun });
       }
@@ -259,6 +272,7 @@ async function routes(fastify: FastifyInstance) {
       const result = await proxyAuto(info, "POST", `/api/workflow-runs/${info.bareRunId}/cancel`);
       if (!result.ok) return sendProxyFailure(reply, result);
       const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+      trackRemoteRun(localRun, info);
       fastify.eventBus.emit({ type: "workflow:run-updated", projectId: info.projectId, branch: localRun.branch, run: localRun });
       return reply.send({ run: localRun });
     }

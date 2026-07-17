@@ -218,6 +218,7 @@ export function connectPersistentRemoteWs(
     const kind = "JsonPatch" in parsed ? "JsonPatch"
       : "finished" in parsed ? "finished"
       : "taskCompleted" in parsed ? "taskCompleted"
+      : "workflowRunUpdated" in parsed ? "workflowRunUpdated"
       : "processAlive" in parsed ? "processAlive"
       : "branchActivity" in parsed ? "branchActivity"
       : "Ready" in parsed ? "Ready"
