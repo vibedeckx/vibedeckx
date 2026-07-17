@@ -4,6 +4,7 @@ import type { Storage } from "../storage/types.js";
 import { ProcessManager } from "../process-manager.js";
 import { AgentSessionManager } from "../agent-session-manager.js";
 import { ChatSessionManager } from "../chat-session-manager.js";
+import { WorkflowEngine } from "../workflow-engine.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
@@ -208,6 +209,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("browserManager", browserManager);
   fastify.decorate("scheduler", scheduler);
   agentSessionManager.setEventBus(eventBus);
+
+  const workflowEngine = new WorkflowEngine(opts.storage, agentSessionManager);
+  workflowEngine.setEventBus(eventBus);   // subscribe BEFORE chatSessionManager so ordering is explicit
+  await workflowEngine.init();
+  fastify.decorate("workflowEngine", workflowEngine);
+  chatSessionManager.setWorkflowEngine(workflowEngine);
+
   chatSessionManager.setEventBus(eventBus);
   chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);
   processManager.setEventBus(eventBus);

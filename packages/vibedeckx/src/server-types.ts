@@ -47,5 +47,6 @@ declare module "fastify" {
     noLocalProjects: boolean;
     browserManager: BrowserManager;
     scheduler: SchedulerService;
+    workflowEngine: import("./workflow-engine.js").WorkflowEngine;
   }
 }

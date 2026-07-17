@@ -221,7 +221,7 @@ export class ChatSessionManager {
    * `sendMessage`. When omitted, classification falls back to content
    * sniffing via `isSystemEventMessage`.
    */
-  private messageQueue = new Map<string, Array<{ content: string; eventDriven?: boolean }>>();
+  private messageQueue = new Map<string, Array<{ content: string; eventDriven?: boolean; eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number } }>>();
 
   /**
    * Coding-agent sessionIds that were started BY this chat orchestrator
@@ -255,6 +255,7 @@ export class ChatSessionManager {
   private remotePatchCache: RemotePatchCache;
   private reverseConnectManager: ReverseConnectManager | null = null;
   private browserManager: BrowserManager | null = null;
+  private workflowEngine: { shouldSuppressAgentEvent(sessionId: string): boolean } | null = null;
 
   /** Pending browser commands waiting for iframe response: commandId → resolve */
   private pendingBrowserCommands = new Map<string, {
@@ -289,6 +290,10 @@ export class ChatSessionManager {
 
   setRemoteExecutorMonitor(monitor: RemoteExecutorMonitor): void {
     this.remoteExecutorMonitor = monitor;
+  }
+
+  setWorkflowEngine(engine: { shouldSuppressAgentEvent(sessionId: string): boolean }): void {
+    this.workflowEngine = engine;
   }
 
   setEventListening(sessionId: string, enabled: boolean): boolean {
@@ -336,12 +341,31 @@ export class ChatSessionManager {
       } else if (event.type === "session:taskCompleted") {
         console.log(`[ChatSession] EventBus received session:taskCompleted for project=${event.projectId} branch=${event.branch}`);
         this.handleSessionTaskCompleted(event);
+      } else if (event.type === "workflow:run-updated") {
+        this.handleWorkflowRunUpdated(event);
       }
     });
   }
 
+  private handleWorkflowRunUpdated(event: Extract<GlobalEvent, { type: "workflow:run-updated" }>): void {
+    const key = `${event.projectId}:${event.branch ?? ""}`;
+    const sessionId = this.sessionIndex.get(key);
+    if (!sessionId) return;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const frame = JSON.stringify({ WorkflowRunUpdated: event.run });
+    for (const ws of session.subscribers) {
+      if (ws.readyState === 1) ws.send(frame);
+    }
+  }
+
   private handleSessionTaskCompleted(event: Extract<GlobalEvent, { type: "session:taskCompleted" }>): void {
     try {
+      // Reviewer sessions belong to the workflow engine: it snapshots the feedback
+      // and drives the gate. Waking the commander model too would double-handle
+      // the same event (and let the model respond/dispatch on its own).
+      if (this.workflowEngine?.shouldSuppressAgentEvent(event.sessionId)) return;
+
       // Find a chat session for this project+branch that has event listening enabled
       const key = `${event.projectId}:${event.branch ?? ""}`;
       console.log(`[ChatSession] handleSessionTaskCompleted: key=${key}, sessionIndex keys=[${[...this.sessionIndex.keys()].join(", ")}]`);
@@ -406,7 +430,10 @@ export class ChatSessionManager {
       const isChatInitiated = this.chatInitiatedAgentTasks.delete(event.sessionId);
 
       // Send as a user message into the main chat — triggers AI response
-      this.enqueueOrSend(sessionId, message, !isChatInitiated);
+      const eventMeta = event.turnEndEntryIndex !== undefined
+        ? { kind: "agent_task_completed" as const, sessionId: event.sessionId, turnEndEntryIndex: event.turnEndEntryIndex }
+        : undefined;
+      this.enqueueOrSend(sessionId, message, !isChatInitiated, eventMeta);
     } catch (error) {
       console.error(`[ChatSession] handleSessionTaskCompleted error:`, error);
     }
@@ -2428,7 +2455,12 @@ export class ChatSessionManager {
 
   // ---- Message queue (prevents concurrent streams on the same session) ----
 
-  private enqueueOrSend(sessionId: string, content: string, eventDriven?: boolean): void {
+  private enqueueOrSend(
+    sessionId: string,
+    content: string,
+    eventDriven?: boolean,
+    eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number },
+  ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.log(`[ChatSession] enqueueOrSend: session ${sessionId} not found, dropping message`);
@@ -2455,14 +2487,14 @@ export class ChatSessionManager {
         }
       }
 
-      queue.push({ content, eventDriven });
+      queue.push({ content, eventDriven, eventMeta });
       console.log(`[ChatSession] Queued message for session ${sessionId} (queue length: ${queue.length})`);
       return;
     }
 
     // No active stream — send immediately
     console.log(`[ChatSession] enqueueOrSend: sending immediately for session ${sessionId} (abortController=null)`);
-    this.sendMessage(sessionId, content, eventDriven).catch((err) => {
+    this.sendMessage(sessionId, content, eventDriven, eventMeta).catch((err) => {
       console.error(`[ChatSession] enqueueOrSend sendMessage error:`, err);
     });
   }
@@ -2478,7 +2510,7 @@ export class ChatSessionManager {
     if (queue.length === 0) this.messageQueue.delete(sessionId);
 
     console.log(`[ChatSession] Draining queued message for session ${sessionId}`);
-    this.sendMessage(sessionId, next.content, next.eventDriven).catch((err) => {
+    this.sendMessage(sessionId, next.content, next.eventDriven, next.eventMeta).catch((err) => {
       console.error(`[ChatSession] drainQueue sendMessage error:`, err);
     });
   }
@@ -2491,8 +2523,17 @@ export class ChatSessionManager {
    *   prefix. Callers that know the provenance (e.g. a chat-initiated agent
    *   completion, which is a workflow continuation despite being an
    *   `[Agent Event]`) pass it explicitly. Drives orchestrator dot gating.
+   * @param eventMeta When this message originates from an `session:taskCompleted`
+   *   event with a known turn-end boundary, carries that provenance onto the
+   *   pushed user entry (`event` field) so downstream consumers (e.g. the
+   *   workflow UI) can correlate the chat turn with the agent turn it reacts to.
    */
-  async sendMessage(sessionId: string, content: string, eventDriven?: boolean): Promise<boolean> {
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    eventDriven?: boolean,
+    eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number },
+  ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.log(`[ChatSession] sendMessage: session ${sessionId} not found`);
@@ -2502,7 +2543,7 @@ export class ChatSessionManager {
     console.log(`[ChatSession] sendMessage called: session=${sessionId}, contentLen=${content.length}, isExecutorEvent=${isExecutorEvent}, isTerminalEvent=${content.includes("[Terminal Event]")}, subscribers=${session.subscribers.size}`);
 
     // 1. Push user message
-    const userMsg: AgentMessage = { type: "user", content, timestamp: Date.now() };
+    const userMsg: AgentMessage = { type: "user", content, timestamp: Date.now(), ...(eventMeta ? { event: eventMeta } : {}) };
     this.pushEntry(session, userMsg);
     if (isExecutorEvent) {
       console.log(`[ChatSession] Executor event user message pushed at index ${session.store.nextIndex - 1}, broadcasting to ${session.subscribers.size} subscribers`);

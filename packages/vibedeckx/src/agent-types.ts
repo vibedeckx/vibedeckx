@@ -18,7 +18,7 @@ export type ContentPart = TextPart | ImagePart;
 export type TurnOutcome = "completed" | "failed" | "stopped" | "process_exit" | "server_restart";
 
 export type AgentMessage =
-  | { type: 'user'; content: string | ContentPart[]; timestamp: number }
+  | { type: 'user'; content: string | ContentPart[]; timestamp: number; event?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number } }
   | { type: 'assistant'; content: string; partial?: boolean; agentType?: AgentType; timestamp: number }
   | { type: 'tool_use'; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: 'tool_result'; tool: string; output: string; toolUseId?: string; timestamp: number }
