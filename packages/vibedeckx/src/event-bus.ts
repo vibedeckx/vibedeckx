@@ -15,7 +15,8 @@ export type GlobalEvent =
   | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string; finalResult?: string }
   | { type: "merge-target:updated"; projectId: string; branch: string }
   | { type: "schedule:run-started"; projectId: string; scheduleId: string; runId: string }
-  | { type: "schedule:run-finished"; projectId: string; scheduleId: string; runId: string; status: string; exitCode: number | null };
+  | { type: "schedule:run-finished"; projectId: string; scheduleId: string; runId: string; status: string; exitCode: number | null }
+  | { type: "workflow:run-updated"; projectId: string; branch: string | null; run: import("./storage/types.js").WorkflowRun };
 
 export class EventBus {
   private emitter = new EventEmitter();
