@@ -165,6 +165,12 @@ export interface GlobalSettingsTable {
   value: string;
 }
 
+export interface UserSettingsTable {
+  user_id: string;
+  key: string;
+  value: string;
+}
+
 export interface RemoteServersTable {
   id: string;
   name: string;
@@ -290,6 +296,7 @@ export interface DB {
   rules: RulesTable;
   commands: CommandsTable;
   global_settings: GlobalSettingsTable;
+  user_settings: UserSettingsTable;
   remote_servers: RemoteServersTable;
   project_remotes: ProjectRemotesTable;
   remote_session_mappings: RemoteSessionMappingsTable;

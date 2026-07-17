@@ -28,8 +28,8 @@ function buildPrompt(userMessage: string): string {
  * (or supplied one via env var). When false, AI title generation is skipped
  * and the caller should fall back to a snippet.
  */
-export async function isChatModelConfigured(storage: Storage): Promise<boolean> {
-  const config = await getChatProviderConfig(storage);
+export async function isChatModelConfigured(storage: Storage, userId: string): Promise<boolean> {
+  const config = await getChatProviderConfig(storage, userId);
   // Session titles run on the fast model, so check that lane's provider key.
   return isModelConfigured(config, config.fast);
 }
@@ -126,6 +126,6 @@ export async function generateSessionTitle(
   userMessage: string,
   userId: string,
 ): Promise<string | null> {
-  if (!(await isChatModelConfigured(storage))) return null;
-  return generateSessionTitleWithModel(await resolveFastChatModel(storage), userMessage, { userId });
+  if (!(await isChatModelConfigured(storage, userId))) return null;
+  return generateSessionTitleWithModel(await resolveFastChatModel(storage, userId), userMessage, { userId });
 }

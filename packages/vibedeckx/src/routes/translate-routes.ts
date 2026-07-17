@@ -20,7 +20,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       try {
         const { text: translatedText } = await generateText({
-          model: await resolveFastChatModel(fastify.storage),
+          model: await resolveFastChatModel(fastify.storage, resolveUserId(userId)),
           prompt: `You are a precise translation assistant for software development.
 Translate the following text into English. This text is an instruction for an AI coding agent.
 

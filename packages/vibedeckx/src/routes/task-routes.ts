@@ -46,7 +46,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!title) {
       try {
         const { text } = await generateText({
-          model: await resolveFastChatModel(fastify.storage),
+          model: await resolveFastChatModel(fastify.storage, resolveUserId(userId)),
           prompt: `Generate a concise task title (under 10 words) that captures the essence of this task description. Write the title in the same language as the description. Return only the title text, nothing else.\n\nDescription: ${description}`,
           experimental_telemetry: {
             isEnabled: true,

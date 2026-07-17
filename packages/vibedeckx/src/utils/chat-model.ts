@@ -151,8 +151,13 @@ export function parseChatProviderConfig(raw: string | undefined): ChatProviderCo
   }
 }
 
-export async function getChatProviderConfig(storage: Storage): Promise<ChatProviderConfig> {
-  const raw = await storage.settings.get("chat_provider");
+/**
+ * Load one user's chat provider config. `userId` is the Clerk user id, or
+ * the "local" sentinel in no-auth solo mode (see `resolveUserId`) — the
+ * config (including API keys) is per-user in SaaS deployments.
+ */
+export async function getChatProviderConfig(storage: Storage, userId: string): Promise<ChatProviderConfig> {
+  const raw = await storage.userSettings.get(userId, "chat_provider");
   return parseChatProviderConfig(raw);
 }
 
@@ -168,17 +173,17 @@ export function isModelConfigured(config: ChatProviderConfig, choice: ModelChoic
   return Boolean(config.apiKeys[choice.provider] || process.env[def.envKey]);
 }
 
-/** Resolve the primary chat model — used by the main chat session. */
-export async function resolveChatModel(storage: Storage): Promise<AnyLanguageModel> {
-  const config = await getChatProviderConfig(storage);
+/** Resolve the primary chat model for one user — used by the main chat session. */
+export async function resolveChatModel(storage: Storage, userId: string): Promise<AnyLanguageModel> {
+  const config = await getChatProviderConfig(storage, userId);
   return resolveModel(config.main, config.apiKeys);
 }
 
 /**
- * Resolve the "fast" chat model — used by lightweight background features
- * (translate, agent session titles).
+ * Resolve one user's "fast" chat model — used by lightweight background
+ * features (translate, agent session titles).
  */
-export async function resolveFastChatModel(storage: Storage): Promise<AnyLanguageModel> {
-  const config = await getChatProviderConfig(storage);
+export async function resolveFastChatModel(storage: Storage, userId: string): Promise<AnyLanguageModel> {
+  const config = await getChatProviderConfig(storage, userId);
   return resolveModel(config.fast, config.apiKeys);
 }

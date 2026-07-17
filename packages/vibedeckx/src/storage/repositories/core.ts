@@ -21,7 +21,7 @@ const mapProject = (row: Selectable<ProjectsTable>): Project => ({
 export const createCoreRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
-): Pick<Storage, "projects" | "settings"> => ({
+): Pick<Storage, "projects" | "settings" | "userSettings"> => ({
   projects: {
     create: async (opts, userId) => {
       await kdb.insertInto("projects").values({
@@ -163,6 +163,37 @@ export const createCoreRepos = (
         const next = mergeFn(existing?.value);
         await trx.insertInto("global_settings").values({ key, value: next })
           .onConflict((oc) => oc.column("key").doUpdateSet({ value: next }))
+          .execute();
+        return next;
+      });
+    },
+  },
+
+  userSettings: {
+    get: async (userId, key) => {
+      const row = await kdb.selectFrom("user_settings").select("value")
+        .where("user_id", "=", userId).where("key", "=", key)
+        .executeTakeFirst();
+      return row?.value;
+    },
+
+    set: async (userId, key, value) => {
+      await kdb.insertInto("user_settings").values({ user_id: userId, key, value })
+        .onConflict((oc) => oc.columns(["user_id", "key"]).doUpdateSet({ value }))
+        .execute();
+    },
+
+    update: async (userId, key, mergeFn) => {
+      // Same transactional read-modify-write as settings.update above (see
+      // that method's comment for why the transaction is load-bearing and
+      // the pg-era FOR UPDATE caveat).
+      return kdb.transaction().execute(async (trx) => {
+        const existing = await trx.selectFrom("user_settings").select("value")
+          .where("user_id", "=", userId).where("key", "=", key)
+          .executeTakeFirst();
+        const next = mergeFn(existing?.value);
+        await trx.insertInto("user_settings").values({ user_id: userId, key, value: next })
+          .onConflict((oc) => oc.columns(["user_id", "key"]).doUpdateSet({ value: next }))
           .execute();
         return next;
       });

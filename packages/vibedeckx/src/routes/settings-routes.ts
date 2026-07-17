@@ -13,7 +13,9 @@ import {
   type ProviderId,
 } from "../utils/chat-model.js";
 import { requireAuth } from "../server.js";
+import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
+import type { FastifyRequest, FastifyReply } from "fastify";
 import {
   AGENT_PROCESS_SETTINGS_LIMITS,
   normalizeAgentProcessSettings,
@@ -115,6 +117,17 @@ function readStoredConversationSettings(saved: string | undefined): Conversation
   } catch {
     return DEFAULT_CONVERSATION_SETTINGS;
   }
+}
+
+/**
+ * Auth-gate + resolve the settings scope for user-level settings routes.
+ * Returns the userId to key `storage.userSettings` by ("local" in no-auth /
+ * api-key-proxy mode), or null if a 401 reply was already sent.
+ */
+function requireSettingsUser(req: FastifyRequest, reply: FastifyReply): string | null {
+  const auth = requireAuth(req, reply);
+  if (auth === null) return null;
+  return resolveUserId(auth);
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -287,15 +300,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }
 
   fastify.get("/api/settings/chat-provider", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-    const config = await getChatProviderConfig(fastify.storage);
+    const userId = requireSettingsUser(req, reply);
+    if (userId === null) return;
+    const config = await getChatProviderConfig(fastify.storage, userId);
     return reply.code(200).send(serializeConfig(config));
   });
 
   fastify.put<{
     Body: Partial<ChatProviderConfig>;
   }>("/api/settings/chat-provider", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
+    const userId = requireSettingsUser(req, reply);
+    if (userId === null) return;
     const { apiKeys, main, fast } = req.body;
 
     // Atomic read-modify-write: the merge is computed and persisted inside
@@ -306,7 +321,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // concurrent edit here is a real functional regression, not just cosmetic.
     let updated!: ChatProviderConfig;
     try {
-      await fastify.storage.settings.update("chat_provider", (current) => {
+      await fastify.storage.userSettings.update(userId, "chat_provider", (current) => {
         const existing = parseChatProviderConfig(current);
 
         // Merge API keys per provider; only providers present in the body are updated.
@@ -351,8 +366,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // ---- Terminal Settings ----
 
   fastify.get("/api/settings/terminal", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-    const saved = await fastify.storage.settings.get("terminal");
+    const userId = requireSettingsUser(req, reply);
+    if (userId === null) return;
+    const saved = await fastify.storage.userSettings.get(userId, "terminal");
     if (!saved) {
       return reply.code(200).send(DEFAULT_TERMINAL_SETTINGS);
     }
@@ -373,7 +389,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{
     Body: Partial<TerminalSettings>;
   }>("/api/settings/terminal", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
+    const userId = requireSettingsUser(req, reply);
+    if (userId === null) return;
     const { scrollback, fontSize, fontFamily } = req.body;
 
     if (scrollback !== undefined) {
@@ -392,7 +409,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const saved = await fastify.storage.settings.get("terminal");
+    const saved = await fastify.storage.userSettings.get(userId, "terminal");
     const existing: TerminalSettings = (() => {
       if (!saved) return DEFAULT_TERMINAL_SETTINGS;
       try {
@@ -415,7 +432,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       fontFamily: (fontFamily ?? existing.fontFamily).trim(),
     };
 
-    await fastify.storage.settings.set("terminal", JSON.stringify(updated));
+    await fastify.storage.userSettings.set(userId, "terminal", JSON.stringify(updated));
     console.log(`[Settings] Terminal updated: scrollback=${updated.scrollback}, fontSize=${updated.fontSize}, fontFamily="${updated.fontFamily}"`);
 
     return reply.code(200).send(updated);
@@ -424,15 +441,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // ---- Conversation Settings ----
 
   fastify.get("/api/settings/conversation", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-    const saved = await fastify.storage.settings.get("conversation");
+    const userId = requireSettingsUser(req, reply);
+    if (userId === null) return;
+    const saved = await fastify.storage.userSettings.get(userId, "conversation");
     return reply.code(200).send(readStoredConversationSettings(saved));
   });
 
   fastify.put<{
     Body: Partial<ConversationSettings>;
   }>("/api/settings/conversation", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
+    const userId = requireSettingsUser(req, reply);
+    if (userId === null) return;
     const { agentFontSize, chatFontSize, filesTreeFontSize, filesContentFontSize } = req.body;
 
     if (agentFontSize !== undefined) {
@@ -452,7 +471,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (err) return reply.code(400).send({ error: err });
     }
 
-    const existing = readStoredConversationSettings(await fastify.storage.settings.get("conversation"));
+    const existing = readStoredConversationSettings(await fastify.storage.userSettings.get(userId, "conversation"));
     const updated: ConversationSettings = {
       agentFontSize: agentFontSize ?? existing.agentFontSize,
       chatFontSize: chatFontSize ?? existing.chatFontSize,
@@ -460,7 +479,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       filesContentFontSize: filesContentFontSize ?? existing.filesContentFontSize,
     };
 
-    await fastify.storage.settings.set("conversation", JSON.stringify(updated));
+    await fastify.storage.userSettings.set(userId, "conversation", JSON.stringify(updated));
     console.log(
       `[Settings] Conversation updated: agentFontSize=${updated.agentFontSize}, chatFontSize=${updated.chatFontSize}, filesTreeFontSize=${updated.filesTreeFontSize}, filesContentFontSize=${updated.filesContentFontSize}`,
     );

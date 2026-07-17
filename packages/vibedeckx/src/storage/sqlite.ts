@@ -816,6 +816,35 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     );
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (user_id, key)
+    );
+  `);
+
+  // Migrate legacy user-level settings out of global_settings. These three
+  // keys used to be server-global; in SaaS multi-user mode that meant every
+  // tenant shared one row (including chat_provider API keys). Copy them to
+  // the "local" pseudo-user (the row no-auth mode reads), then delete the
+  // global rows so no shared secret lingers. Under Clerk auth the "local"
+  // rows are inert — real users start from defaults, which is intentional:
+  // the old shared chat_provider key must not fall back to every tenant.
+  // INSERT OR IGNORE keeps this idempotent and never clobbers a newer
+  // user_settings row.
+  const migrateUserSettings = db.transaction(() => {
+    const USER_LEVEL_KEYS = ["terminal", "conversation", "chat_provider"];
+    const placeholders = USER_LEVEL_KEYS.map(() => "?").join(", ");
+    db.prepare(
+      `INSERT OR IGNORE INTO user_settings (user_id, key, value)
+       SELECT 'local', key, value FROM global_settings WHERE key IN (${placeholders})`,
+    ).run(...USER_LEVEL_KEYS);
+    db.prepare(`DELETE FROM global_settings WHERE key IN (${placeholders})`).run(...USER_LEVEL_KEYS);
+  });
+  migrateUserSettings();
+
   // Re-enable FK enforcement for runtime operations
   db.pragma("foreign_keys = ON");
 

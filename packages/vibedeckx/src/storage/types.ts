@@ -585,6 +585,25 @@ export interface Storage {
      */
     update: (key: string, mergeFn: (current: string | undefined) => string) => Promise<string>;
   };
+  /**
+   * Per-user settings, keyed by (userId, key). Use for user-level preferences
+   * (terminal/conversation UI prefs, chat provider config incl. API keys) —
+   * `settings` above stays reserved for server-level values (proxy, machine
+   * identity keys, resource caps). `userId` is the Clerk user id, or the
+   * "local" sentinel in no-auth solo mode — always a non-empty exact match,
+   * never an optional filter (a falsy short-circuit here would silently
+   * collapse tenants back onto one shared row).
+   */
+  userSettings: {
+    get: (userId: string, key: string) => Promise<string | undefined>;
+    set: (userId: string, key: string, value: string) => Promise<void>;
+    /**
+     * Atomic read-modify-write scoped to one user's row — same contract and
+     * lost-update rationale as `settings.update` above; `mergeFn` may throw
+     * to abort without writing.
+     */
+    update: (userId: string, key: string, mergeFn: (current: string | undefined) => string) => Promise<string>;
+  };
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;
     getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
