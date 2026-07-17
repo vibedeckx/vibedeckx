@@ -17,7 +17,8 @@ export interface AgentOps {
     announceRunning?: boolean,
   ): Promise<string>;
   sendUserMessage(sessionId: string, content: string, projectPath?: string): Promise<boolean>;
-  getMessages(sessionId: string): AgentMessage[];
+  /** Raw sparse entries (holes preserved) — index space matches entry indices. */
+  getRawMessages(sessionId: string): AgentMessage[];
 }
 
 export class WorkflowError extends Error {
@@ -167,7 +168,7 @@ export class WorkflowEngine {
     const busy = await this.storage.workflowRuns.getActiveBySession(opts.sourceSessionId);
     if (busy) throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
 
-    const entries = this.agentOps.getMessages(opts.sourceSessionId);
+    const entries = this.agentOps.getRawMessages(opts.sourceSessionId);
     const turnEndIndex = opts.sourceTurnEndIndex ?? extractLatestTurnEndIndex(entries);
     if (turnEndIndex === null) {
       throw new WorkflowError("no-completed-turn", "source session 还没有已完成的 turn 可供 review");
@@ -217,7 +218,7 @@ export class WorkflowEngine {
     const run = await this.storage.workflowRuns.getById(p.runId);
     if (!run || run.status !== "waiting_reviewer") return;
 
-    const entries = this.agentOps.getMessages(event.sessionId);
+    const entries = this.agentOps.getRawMessages(event.sessionId);
     const boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries) ?? entries.length;
     const feedback = extractLastAssistantBefore(entries, boundary) ?? "(reviewer 没有输出可用的反馈文本)";
 

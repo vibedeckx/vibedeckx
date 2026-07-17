@@ -27,6 +27,10 @@ async function routes(fastify: FastifyInstance) {
     const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return reply.code(404).send({ error: "Project not found" });
     if (!project.path) return reply.code(400).send({ error: "Project has no local path (remote-only projects are not supported yet)" });
+    const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
+    if (!sourceSession || sourceSession.project_id !== projectId) {
+      return reply.code(404).send({ error: "Session not found" });
+    }
     try {
       const run = await fastify.workflowEngine.startAdhocReview({
         project: { id: project.id, path: project.path },

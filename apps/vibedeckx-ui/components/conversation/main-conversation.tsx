@@ -263,6 +263,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
 
             if (msg.type === "user") {
               const evt = msg.event;
+              const sessionBusy = evt?.kind === "agent_task_completed" && activeRuns.some(
+                (r) => r.source_session_id === evt.sessionId || r.reviewer_session_id === evt.sessionId,
+              );
               return (
                 <div key={index}>
                   <Message from="user">
@@ -275,10 +278,8 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={activeRuns.some(
-                          (r) => r.source_session_id === evt.sessionId || r.reviewer_session_id === evt.sessionId,
-                        )}
-                        title={activeRuns.length > 0 ? "该 session 已在一个进行中的 review 里" : undefined}
+                        disabled={sessionBusy}
+                        title={sessionBusy ? "该 session 已在一个进行中的 review 里" : undefined}
                         onClick={async () => {
                           if (!projectId) return;
                           try {

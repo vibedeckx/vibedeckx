@@ -8,11 +8,16 @@ const run = { id: "r1", project_id: "p1", branch: "dev", status: "waiting_feedba
 
 let app: FastifyInstance;
 
-function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<string, unknown> } = {}) {
+function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<string, unknown>; sessions?: Record<string, unknown> } = {}) {
   app = Fastify();
   app.decorate("authEnabled", false);
   app.decorate("storage", {
     projects: { getById: async (id: string) => (id === "p1" ? project : undefined) },
+    agentSessions: {
+      getById: async (id: string) =>
+        id === "s-src" || id === "s" ? { id, project_id: "p1" } : undefined,
+      ...(overrides.sessions ?? {}),
+    },
     workflowRuns: {
       getActive: async () => [run],
       getById: async (id: string) => (id === "r1" ? run : undefined),
@@ -49,6 +54,23 @@ describe("workflow-run-routes", () => {
     expect(remote.statusCode).toBe(400);
     const missing = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "nope", sourceSessionId: "s" } });
     expect(missing.statusCode).toBe(404);
+  });
+
+  it("POST rejects a sourceSessionId belonging to another project", async () => {
+    const app = makeApp({
+      sessions: { getById: async (id: string) => (id === "s-other" ? { id, project_id: "p2" } : undefined) },
+    });
+    await app.register(workflowRunRoutes);
+    const wrongProject = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-other" },
+    });
+    expect(wrongProject.statusCode).toBe(404);
+    const missingSession = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-does-not-exist" },
+    });
+    expect(missingSession.statusCode).toBe(404);
   });
 
   it("POST maps WorkflowError codes to HTTP", async () => {

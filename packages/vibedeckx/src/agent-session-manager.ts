@@ -1543,6 +1543,11 @@ export class AgentSessionManager {
     return session?.store.entries.filter(Boolean) ?? [];
   }
 
+  /** Raw sparse entries (holes preserved) — index space matches entry indices. */
+  getRawMessages(sessionId: string): AgentMessage[] {
+    return this.sessions.get(sessionId)?.store.entries ?? [];
+  }
+
   /**
    * Get session info
    */

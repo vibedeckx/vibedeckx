@@ -46,7 +46,7 @@ describe("WorkflowEngine", () => {
   const agentOps = {
     createNewSession: vi.fn(async () => "s-rev"),
     sendUserMessage: vi.fn(async () => true),
-    getMessages: vi.fn((sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : entries)),
+    getRawMessages: vi.fn((sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : entries)),
   };
   const project = { id: "p1", path: "/tmp/does-not-exist-vdx" }; // non-git → null review target, still fine
 
@@ -92,7 +92,7 @@ describe("WorkflowEngine", () => {
   });
 
   it("rejects a source session with no completed turn", async () => {
-    agentOps.getMessages.mockReturnValueOnce([]);
+    agentOps.getRawMessages.mockReturnValueOnce([]);
     await expect(start()).rejects.toMatchObject({ code: "no-completed-turn" });
   });
 
