@@ -19,7 +19,7 @@ interface TurnEndDividerProps {
 
 /**
  * Stop-point divider rendered for each persisted turn_end entry:
- *   ─────────────────────────  2m 14s  [⑂]
+ *   ────────────  2m 14s  [⑂]  ────────────
  * The button is always rendered and interactive (no hover-only visibility —
  * touch devices and keyboard focus); "subtle" emphasis is raised via the
  * row's group-hover / group-focus-within.
@@ -52,6 +52,7 @@ export function TurnEndDivider({
         disabled={disabled}
         emphasis={emphasis}
       />
+      <div className="h-px flex-1 bg-border/60" />
     </div>
   );
 }
