@@ -54,6 +54,11 @@ describe("WorkflowEngine", () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-eng-"));
     storage = await createSqliteStorage(path.join(dir, "t.sqlite"));
     await storage.projects.create({ id: "p1", name: "p", path: project.path });
+    // Represents the source session having already finished its turn — most
+    // tests exercise the "ready to review" state, so default to "stopped"
+    // and let the running-source-guard test flip it back to "running".
+    await storage.agentSessions.create({ id: "s-src", project_id: "p1", branch: "dev" });
+    await storage.agentSessions.updateStatus("s-src", "stopped");
     bus = new EventBus();
     engine = new WorkflowEngine(storage, agentOps);
     engine.setEventBus(bus);
@@ -80,10 +85,11 @@ describe("WorkflowEngine", () => {
     expect(run.status).toBe("waiting_reviewer");
     expect(run.reviewer_session_id).toBe("s-rev");
     expect(run.source_turn_end_index).toBe(4); // derived from entries
-    expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "edit", "claude-code", true);
+    expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "plan", "claude-code", true);
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
     expect(prompt).toContain("please fix the bug");   // task context
     expect(prompt).toContain("focus on tests");        // review focus
+    expect(prompt).toContain("read-only review mode"); // reviewer must not edit
   });
 
   it("rejects when a participant session is already in an active run", async () => {
@@ -94,6 +100,51 @@ describe("WorkflowEngine", () => {
   it("rejects a source session with no completed turn", async () => {
     agentOps.getRawMessages.mockReturnValueOnce([]);
     await expect(start()).rejects.toMatchObject({ code: "no-completed-turn" });
+  });
+
+  it("rejects a source session that is currently running", async () => {
+    await storage.agentSessions.updateStatus("s-src", "running");
+    await expect(start()).rejects.toMatchObject({ code: "source-running" });
+    // The reservation from the failed attempt must not linger.
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+  });
+
+  it("two concurrent startAdhocReview calls for the same session: exactly one succeeds", async () => {
+    // Force interleaving: the first call's createNewSession hangs on a
+    // deferred promise (simulating a slow reviewer spawn), so the second
+    // call is issued while the first is still deep inside its awaits —
+    // not just back-to-back before either has started.
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    agentOps.createNewSession.mockImplementationOnce(async () => {
+      await gate;
+      return "s-rev";
+    });
+
+    const first = start();
+    const second = start(); // issued while `first` is in-flight
+
+    await expect(second).rejects.toMatchObject({ code: "session-busy" });
+    // The lock is still held by the in-flight first call, not released by
+    // the second call's rejection.
+    expect(engine.isSessionInActiveRun("s-src")).toBe(true);
+
+    releaseFirst();
+    const run = await first;
+    expect(run.status).toBe("waiting_reviewer");
+  });
+
+  it("run fails and releases the source lock when the reviewer prompt send fails", async () => {
+    const updateSpy = vi.spyOn(storage.workflowRuns, "update");
+    agentOps.sendUserMessage.mockResolvedValueOnce(false);
+    await expect(start()).rejects.toMatchObject({ code: "spawn-failed" });
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+
+    const runs = await storage.workflowRuns.getActive("p1", "dev");
+    expect(runs).toHaveLength(0); // not "active" — status flipped to failed
+
+    const failedCall = updateSpy.mock.calls.find(([, patch]) => patch.status === "failed");
+    expect(failedCall?.[1]).toMatchObject({ status: "failed", error: "向 reviewer 投递任务失败" });
   });
 
   it("claims reviewer completion: suppresses, snapshots full feedback, waits for gate", async () => {
@@ -133,6 +184,34 @@ describe("WorkflowEngine", () => {
     const after = await storage.workflowRuns.getById(run.id);
     expect(after?.status).toBe("waiting_feedback");
     expect(after?.error).toContain("未运行");
+  });
+
+  it("cancelRun cancels a run in waiting_feedback", async () => {
+    const run = await start();
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+    const cancelled = await engine.cancelRun(run.id, "user cancelled");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.error).toBe("user cancelled");
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+  });
+
+  it("cancelRun is a CAS: rejects with bad-state while a send is in flight (sending_feedback)", async () => {
+    const run = await start();
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+    // Simulate approveFeedback having claimed the run (mid-send, still
+    // awaiting agentOps.sendUserMessage) via its own CAS.
+    const claimed = await storage.workflowRuns.transition(run.id, "waiting_feedback", "sending_feedback");
+    expect(claimed).toBe(true);
+
+    await expect(engine.cancelRun(run.id)).rejects.toMatchObject({ code: "bad-state" });
+    const after = await storage.workflowRuns.getById(run.id);
+    expect(after?.status).toBe("sending_feedback"); // untouched by the failed cancel
   });
 
   it("handleExternalUserMessage ends the run (human takeover)", async () => {

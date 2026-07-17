@@ -22,7 +22,7 @@ export interface AgentOps {
 }
 
 export class WorkflowError extends Error {
-  constructor(public code: "session-busy" | "no-completed-turn" | "spawn-failed" | "bad-state" | "send-failed", message: string) {
+  constructor(public code: "session-busy" | "no-completed-turn" | "spawn-failed" | "bad-state" | "send-failed" | "source-running", message: string) {
     super(message);
   }
 }
@@ -64,6 +64,7 @@ export function buildReviewerPrompt(opts: {
     opts.taskContext ? `\n## Original task\n${opts.taskContext}` : null,
     opts.reviewFocus ? `\n## Review focus (from the user)\n${opts.reviewFocus}` : null,
     "\n## How to review",
+    "- Do NOT modify any files — you are in read-only review mode.",
     "- Inspect the actual workspace state yourself: read the relevant files, run `git diff`, `git status` and `git log`.",
     opts.target.baseHead
       ? `- The work was captured at commit ${opts.target.baseHead}${opts.target.diffStat ? ` with uncommitted changes (${opts.target.diffStat})` : " with no uncommitted changes"}.`
@@ -165,50 +166,89 @@ export class WorkflowEngine {
     if (this.participants.has(opts.sourceSessionId)) {
       throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
     }
-    const busy = await this.storage.workflowRuns.getActiveBySession(opts.sourceSessionId);
-    if (busy) throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
-
-    const entries = this.agentOps.getRawMessages(opts.sourceSessionId);
-    const turnEndIndex = opts.sourceTurnEndIndex ?? extractLatestTurnEndIndex(entries);
-    if (turnEndIndex === null) {
-      throw new WorkflowError("no-completed-turn", "source session 还没有已完成的 turn 可供 review");
-    }
-
-    const worktreePath = resolveWorktreePath(opts.project.path, opts.branch);
-    const target = captureReviewTarget(worktreePath);
-
-    const run = await this.storage.workflowRuns.create({
-      id: randomUUID(),
-      project_id: opts.project.id,
-      branch: opts.branch,
-      source_session_id: opts.sourceSessionId,
-      source_turn_end_index: turnEndIndex,
-      review_focus: opts.reviewFocus ?? null,
-      review_target: JSON.stringify(target),
-    });
-    this.trackParticipants(run);
+    // Reserve the source session synchronously — before any `await` below —
+    // so two concurrent calls for the same session can't both pass the
+    // check above. JS only yields to another call at an `await`; by the
+    // time it does, this call has already claimed the map entry, so the
+    // other call's synchronous `has()` check (above) sees it and throws.
+    // There is deliberately no DB unique constraint backing this: this is a
+    // single-writer server process and every run creation flows through
+    // this one WorkflowEngine instance, so the in-memory map alone is
+    // authoritative. The run row doesn't exist yet, so reserve with a
+    // "pending" placeholder; the outer catch below releases it on any
+    // failure that happens before `trackParticipants(run)` replaces it with
+    // the real run id (the inner reviewer-spawn try/catch handles cleanup
+    // for failures after that point via the real run id instead).
+    this.participants.set(opts.sourceSessionId, { runId: "pending", role: "source" });
 
     try {
-      const reviewerId = await this.agentOps.createNewSession(
-        opts.project.id, opts.branch, opts.project.path, false, "edit", "claude-code", true,
-      );
-      const prompt = buildReviewerPrompt({
-        taskContext: extractTaskContextBefore(entries, turnEndIndex),
-        reviewFocus: opts.reviewFocus ?? null,
-        target,
+      const busy = await this.storage.workflowRuns.getActiveBySession(opts.sourceSessionId);
+      if (busy) throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
+
+      const sourceSession = await this.storage.agentSessions.getById(opts.sourceSessionId);
+      if (sourceSession?.status === "running") {
+        throw new WorkflowError("source-running", "source session 正在运行，请等待当前 turn 完成后再发起 review");
+      }
+
+      const entries = this.agentOps.getRawMessages(opts.sourceSessionId);
+      const turnEndIndex = opts.sourceTurnEndIndex ?? extractLatestTurnEndIndex(entries);
+      if (turnEndIndex === null) {
+        throw new WorkflowError("no-completed-turn", "source session 还没有已完成的 turn 可供 review");
+      }
+
+      const worktreePath = resolveWorktreePath(opts.project.path, opts.branch);
+      const target = captureReviewTarget(worktreePath);
+
+      const run = await this.storage.workflowRuns.create({
+        id: randomUUID(),
+        project_id: opts.project.id,
+        branch: opts.branch,
+        source_session_id: opts.sourceSessionId,
+        source_turn_end_index: turnEndIndex,
+        review_focus: opts.reviewFocus ?? null,
+        review_target: JSON.stringify(target),
       });
-      await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path);
-      const updated = await this.storage.workflowRuns.update(run.id, { reviewer_session_id: reviewerId });
-      this.trackParticipants(updated!);
-      this.emitRunUpdated(updated!);
-      return updated!;
+      this.trackParticipants(run);
+
+      try {
+        // Reviewer runs in plan (read-only) mode: it shares the worktree with
+        // the implementer session it's reviewing, and an unrestricted
+        // reviewer could mutate the very code it's supposed to be judging.
+        const reviewerId = await this.agentOps.createNewSession(
+          opts.project.id, opts.branch, opts.project.path, false, "plan", "claude-code", true,
+        );
+        const prompt = buildReviewerPrompt({
+          taskContext: extractTaskContextBefore(entries, turnEndIndex),
+          reviewFocus: opts.reviewFocus ?? null,
+          target,
+        });
+        const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path);
+        if (!sent) {
+          const failed = await this.storage.workflowRuns.update(run.id, {
+            status: "failed",
+            error: "向 reviewer 投递任务失败",
+          });
+          if (failed) this.untrackRun(failed);
+          throw new WorkflowError("spawn-failed", "向 reviewer 投递任务失败");
+        }
+        const updated = await this.storage.workflowRuns.update(run.id, { reviewer_session_id: reviewerId });
+        this.trackParticipants(updated!);
+        this.emitRunUpdated(updated!);
+        return updated!;
+      } catch (err) {
+        if (err instanceof WorkflowError && err.code === "spawn-failed") throw err;
+        const failed = await this.storage.workflowRuns.update(run.id, {
+          status: "failed",
+          error: `创建 reviewer 失败：${err instanceof Error ? err.message : String(err)}`,
+        });
+        if (failed) this.untrackRun(failed);
+        throw new WorkflowError("spawn-failed", "创建 reviewer session 失败");
+      }
     } catch (err) {
-      const failed = await this.storage.workflowRuns.update(run.id, {
-        status: "failed",
-        error: `创建 reviewer 失败：${err instanceof Error ? err.message : String(err)}`,
-      });
-      if (failed) this.untrackRun(failed);
-      throw new WorkflowError("spawn-failed", "创建 reviewer session 失败");
+      if (this.participants.get(opts.sourceSessionId)?.runId === "pending") {
+        this.participants.delete(opts.sourceSessionId);
+      }
+      throw err;
     }
   }
 
@@ -263,7 +303,14 @@ export class WorkflowEngine {
       });
       throw new WorkflowError("send-failed", "发送反馈失败");
     }
-    await this.storage.workflowRuns.transition(runId, "sending_feedback", "completed");
+    const completedOk = await this.storage.workflowRuns.transition(runId, "sending_feedback", "completed");
+    if (!completedOk) {
+      // Defensive only: with cancelRun's CAS, nothing else should be able to
+      // touch a run while it's in sending_feedback, so this should never fire.
+      console.warn(
+        `[WorkflowEngine] run ${runId}: expected transition sending_feedback → completed did not apply (status changed unexpectedly)`,
+      );
+    }
     const done = (await this.storage.workflowRuns.getById(runId))!;
     this.untrackRun(done);
     this.emitRunUpdated(done);
@@ -274,10 +321,27 @@ export class WorkflowEngine {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run) return undefined;
     if (["completed", "cancelled", "failed"].includes(run.status)) return run;
-    const updated = await this.storage.workflowRuns.update(runId, {
-      status: "cancelled",
-      ...(reason ? { error: reason } : {}),
-    });
+
+    // CAS instead of an unconditional status write: `sending_feedback` is the
+    // narrow window where approveFeedback is mid-`await` on
+    // agentOps.sendUserMessage. A concurrent cancel must not stomp that —
+    // only the two states below are safe for cancel to interrupt.
+    const patch = reason ? { error: reason } : undefined;
+    const cancelled =
+      (await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "cancelled", patch)) ||
+      (await this.storage.workflowRuns.transition(runId, "waiting_feedback", "cancelled", patch));
+
+    if (!cancelled) {
+      const current = await this.storage.workflowRuns.getById(runId);
+      if (current?.status === "sending_feedback") {
+        throw new WorkflowError("bad-state", "反馈正在发送，无法取消");
+      }
+      // Status moved to a terminal state between the read above and the CAS
+      // attempts (e.g. it just completed/failed) — nothing to cancel.
+      return current;
+    }
+
+    const updated = await this.storage.workflowRuns.getById(runId);
     if (updated) {
       this.untrackRun(updated);
       this.emitRunUpdated(updated);

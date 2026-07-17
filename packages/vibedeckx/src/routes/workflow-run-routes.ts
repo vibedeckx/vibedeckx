@@ -7,6 +7,7 @@ function errStatus(err: unknown): number | null {
   if (!(err instanceof WorkflowError)) return null;
   switch (err.code) {
     case "session-busy": return 409;
+    case "source-running": return 409;
     case "bad-state": return 409;
     case "no-completed-turn": return 400;
     case "send-failed": return 502;
@@ -31,10 +32,21 @@ async function routes(fastify: FastifyInstance) {
     if (!sourceSession || sourceSession.project_id !== projectId) {
       return reply.code(404).send({ error: "Session not found" });
     }
+    // The run's branch is derived from the source session itself, never taken
+    // verbatim from the request body: the client isn't trusted to report the
+    // session's real branch, and a mismatched one would spawn the reviewer
+    // against the wrong worktree. "" is the DB's null-branch sentinel for the
+    // main workspace (see agent-session-manager.ts createNewSession's
+    // `branch ?? ""`), so normalize it to null to match WorkflowRun.branch /
+    // the rest of the API's null-branch convention.
+    const runBranch = sourceSession.branch || null;
+    if (branch !== undefined && (branch || null) !== runBranch) {
+      return reply.code(400).send({ error: "branch does not match source session" });
+    }
     try {
       const run = await fastify.workflowEngine.startAdhocReview({
         project: { id: project.id, path: project.path },
-        branch: branch ?? null,
+        branch: runBranch,
         sourceSessionId,
         reviewFocus,
         sourceTurnEndIndex,

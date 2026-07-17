@@ -15,7 +15,7 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
     projects: { getById: async (id: string) => (id === "p1" ? project : undefined) },
     agentSessions: {
       getById: async (id: string) =>
-        id === "s-src" || id === "s" ? { id, project_id: "p1" } : undefined,
+        id === "s-src" || id === "s" ? { id, project_id: "p1", branch: "dev" } : undefined,
       ...(overrides.sessions ?? {}),
     },
     workflowRuns: {
@@ -80,6 +80,53 @@ describe("workflow-run-routes", () => {
     await app.register(workflowRunRoutes);
     const res = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "p1", sourceSessionId: "s" } });
     expect(res.statusCode).toBe(409);
+  });
+
+  it("POST maps source-running to 409", async () => {
+    const app = makeApp({
+      engine: { startAdhocReview: vi.fn(async () => { throw new WorkflowError("source-running", "still running"); }) },
+    });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "p1", sourceSessionId: "s" } });
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("POST rejects when the body branch does not match the source session's branch", async () => {
+    const app = makeApp();
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", branch: "not-dev", sourceSessionId: "s-src" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/branch/i);
+  });
+
+  it("POST derives the run branch from the source session, ignoring an absent body branch", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { startAdhocReview } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src" }, // branch omitted entirely
+    });
+    expect(res.statusCode).toBe(201);
+    expect(startAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: "dev" }));
+  });
+
+  it("POST normalizes the session's empty-string (main workspace) branch to null and accepts a matching null body branch", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({
+      engine: { startAdhocReview },
+      sessions: { getById: async (id: string) => (id === "s-main" ? { id, project_id: "p1", branch: "" } : undefined) },
+    });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", branch: null, sourceSessionId: "s-main" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(startAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: null }));
   });
 
   it("GET lists active runs for a workspace", async () => {
