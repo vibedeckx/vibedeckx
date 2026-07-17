@@ -16,6 +16,7 @@ import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
+import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -814,6 +815,23 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       last_error TEXT,
       PRIMARY KEY (project_id, target_id)
     );
+
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      branch TEXT,
+      source_session_id TEXT NOT NULL,
+      source_turn_end_index INTEGER NOT NULL,
+      reviewer_session_id TEXT,
+      review_focus TEXT,
+      review_target TEXT,
+      feedback_snapshot TEXT,
+      status TEXT NOT NULL DEFAULT 'waiting_reviewer',
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
   `);
 
   db.exec(`
@@ -872,6 +890,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createCrossRemoteAuditRepo(kdb),
     ...createMergeTargetsRepo(kdb),
     ...createSearchCacheRepos(kdb, h),
+    ...createWorkflowRunRepos(kdb),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect

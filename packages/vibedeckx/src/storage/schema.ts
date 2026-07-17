@@ -267,6 +267,22 @@ export interface ScheduledTaskRunsTable {
   finished_at: string | null;
 }
 
+export interface WorkflowRunsTable {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  source_session_id: string;
+  source_turn_end_index: number;
+  reviewer_session_id: string | null;
+  review_focus: string | null;
+  review_target: string | null;
+  feedback_snapshot: string | null;
+  status: string;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface CrossRemoteAuditTable {
   seq: Generated<number>;
   id: string;
@@ -306,4 +322,5 @@ export interface DB {
   scheduled_tasks: ScheduledTasksTable;
   scheduled_task_runs: ScheduledTaskRunsTable;
   cross_remote_audit: CrossRemoteAuditTable;
+  workflow_runs: WorkflowRunsTable;
 }

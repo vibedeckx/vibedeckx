@@ -232,6 +232,30 @@ export interface Command {
   updated_at: string;
 }
 
+export type WorkflowRunStatus =
+  | "waiting_reviewer"
+  | "waiting_feedback"
+  | "sending_feedback"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export interface WorkflowRun {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  source_session_id: string;
+  source_turn_end_index: number;
+  reviewer_session_id: string | null;
+  review_focus: string | null;
+  review_target: string | null;
+  feedback_snapshot: string | null;
+  status: WorkflowRunStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type AgentSessionStatus = 'running' | 'stopped' | 'error';
 
 export interface AgentSession {
@@ -641,6 +665,31 @@ export interface Storage {
     getById: (id: string) => Promise<Command | undefined>;
     update: (id: string, opts: { name?: string; content?: string; position?: number }) => Promise<Command | undefined>;
     delete: (id: string) => Promise<void>;
+  };
+  workflowRuns: {
+    create(opts: {
+      id: string;
+      project_id: string;
+      branch: string | null;
+      source_session_id: string;
+      source_turn_end_index: number;
+      review_focus: string | null;
+      review_target: string | null;
+    }): Promise<WorkflowRun>;
+    getById(id: string): Promise<WorkflowRun | undefined>;
+    getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
+    getAllActive(): Promise<WorkflowRun[]>;
+    getActiveBySession(sessionId: string): Promise<WorkflowRun | undefined>;
+    update(
+      id: string,
+      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error">>,
+    ): Promise<WorkflowRun | undefined>;
+    transition(
+      id: string,
+      from: WorkflowRunStatus,
+      to: WorkflowRunStatus,
+      patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">>,
+    ): Promise<boolean>;
   };
   close: () => Promise<void>;
 }
