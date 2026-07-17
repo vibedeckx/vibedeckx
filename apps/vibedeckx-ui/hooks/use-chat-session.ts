@@ -3,13 +3,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getFreshToken, authFetch, api } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, authFetch, api, type WorkflowRun } from "@/lib/api";
 import { sendCommandToIframe, openPreviewFrame } from "@/components/preview/browser-frames-provider";
 
 // ============ Types (reused from agent session) ============
 
 export type AgentMessage =
-  | { type: "user"; content: string; timestamp: number }
+  | { type: "user"; content: string; timestamp: number; event?: { kind: string; sessionId: string; turnEndEntryIndex: number } }
   | { type: "assistant"; content: string; partial?: boolean; timestamp: number }
   | { type: "tool_use"; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }
@@ -60,7 +60,8 @@ type AgentWsMessage =
   | { finished: true }
   | { error: string }
   | { browserCommand: BrowserCommand }
-  | { openPreviewFrame: { projectId: string; url: string } };
+  | { openPreviewFrame: { projectId: string; url: string } }
+  | { WorkflowRunUpdated: WorkflowRun };
 
 interface PatchContainer {
   entries: AgentMessage[];
@@ -180,6 +181,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [workflowRunUpdate, setWorkflowRunUpdate] = useState<WorkflowRun | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const openSocketRef = useRef<(sessionId: string) => void>(() => {});
@@ -289,6 +291,11 @@ export function useChatSession(projectId: string | null, branch: string | null) 
 
         if ("openPreviewFrame" in msg) {
           openPreviewFrame(msg.openPreviewFrame.projectId, msg.openPreviewFrame.url);
+          return;
+        }
+
+        if ("WorkflowRunUpdated" in msg) {
+          setWorkflowRunUpdate(msg.WorkflowRunUpdated);
           return;
         }
 
@@ -579,6 +586,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     isInitialized,
     isLoading,
     error,
+    workflowRunUpdate,
     sendMessage,
     stopGeneration,
     restartSession,

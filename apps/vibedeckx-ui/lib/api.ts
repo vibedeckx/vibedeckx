@@ -920,6 +920,24 @@ export async function setSessionFavorited(sessionId: string, favorited: boolean)
   if (!res.ok) throw new Error(`setSessionFavorited failed: ${res.status}`);
 }
 
+// ============ Workflow Runs (agent-review loop) ============
+
+export interface WorkflowRun {
+  id: string;
+  project_id: string;
+  branch: string | null;
+  source_session_id: string;
+  source_turn_end_index: number;
+  reviewer_session_id: string | null;
+  review_focus: string | null;
+  review_target: string | null;
+  feedback_snapshot: string | null;
+  status: "waiting_reviewer" | "waiting_feedback" | "sending_feedback" | "completed" | "cancelled" | "failed";
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     // Revalidate the persisted config once per page load and share that single
@@ -2298,5 +2316,50 @@ export const api = {
     const base = getApiBase();
     if (base) return new URL(base).origin;
     return typeof window !== "undefined" ? window.location.origin : "";
+  },
+
+  // ---- Workflow Runs ----
+
+  async createWorkflowRun(opts: {
+    projectId: string; branch: string | null; sourceSessionId: string;
+    reviewFocus?: string; sourceTurnEndIndex?: number;
+  }): Promise<WorkflowRun> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to start review: ${res.status}`);
+    }
+    return (await res.json()).run;
+  },
+
+  async getActiveWorkflowRuns(projectId: string, branch: string | null): Promise<WorkflowRun[]> {
+    const params = new URLSearchParams({ projectId });
+    if (branch) params.set("branch", branch);
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs?${params}`);
+    if (!res.ok) throw new Error(`Failed to fetch workflow runs: ${res.status}`);
+    return (await res.json()).runs;
+  },
+
+  async workflowRunGate(runId: string, action: "approve" | "cancel", editedPayload?: string): Promise<WorkflowRun> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/gate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, editedPayload }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Gate action failed: ${res.status}`);
+    }
+    return (await res.json()).run;
+  },
+
+  async cancelWorkflowRun(runId: string): Promise<WorkflowRun> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/cancel`, { method: "POST" });
+    if (!res.ok) throw new Error(`Failed to cancel run: ${res.status}`);
+    return (await res.json()).run;
   },
 };
