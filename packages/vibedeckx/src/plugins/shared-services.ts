@@ -215,6 +215,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   await workflowEngine.init();
   fastify.decorate("workflowEngine", workflowEngine);
   chatSessionManager.setWorkflowEngine(workflowEngine);
+  agentSessionManager.setWorkflowSuppressionCheck((sessionId) => workflowEngine.shouldSuppressAgentEvent(sessionId));
 
   chatSessionManager.setEventBus(eventBus);
   chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);

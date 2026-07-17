@@ -164,6 +164,7 @@ export class AgentSessionManager {
   private capacityQueue: Promise<void> = Promise.resolve();
   /** Grace window before committing a held completion (injectable for tests). */
   private readonly completionGraceMs: number;
+  private workflowSuppressionCheck: ((sessionId: string) => boolean) | null = null;
 
   constructor(storage: Storage, opts?: { completionGraceMs?: number }) {
     this.storage = storage;
@@ -172,6 +173,16 @@ export class AgentSessionManager {
 
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
+  }
+
+  /**
+   * Injected by shared-services: lets commitCompletion mark taskCompleted WS
+   * frames whose completion the local WorkflowEngine claims (reviewer
+   * sessions of active runs). A front server bridging this frame must not
+   * wake its commander for it (spec §Phase 1.5 抑制协调).
+   */
+  setWorkflowSuppressionCheck(check: (sessionId: string) => boolean): void {
+    this.workflowSuppressionCheck = check;
   }
 
   /**
@@ -866,6 +877,8 @@ export class AgentSessionManager {
         input_tokens: payload.input_tokens,
         output_tokens: payload.output_tokens,
         summaryText,
+        turnEndEntryIndex: turnEndEntryIndex ?? undefined,
+        workflowSuppressed: this.workflowSuppressionCheck?.(sessionId) || undefined,
       },
     });
     this.eventBus?.emit({
