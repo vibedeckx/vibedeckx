@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type WorkflowRun } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, X } from "lucide-react";
+import { MessageResponse } from "@/components/ai-elements/message";
+import { Eye, Loader2, Pencil, X } from "lucide-react";
 
 const ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "sending_feedback"]);
 
@@ -21,6 +22,7 @@ export function ReviewRunPanel({
 }) {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -84,17 +86,31 @@ export function ReviewRunPanel({
           )}
           {run.status === "waiting_feedback" && (
             <>
-              {/* max-h caps the field-sizing-content auto-grow — a long review
-                  scrolls inside the textarea instead of inflating the panel. */}
-              <Textarea
-                className="text-xs font-mono min-h-28 max-h-72"
-                value={draft[run.id] ?? run.feedback_snapshot ?? ""}
-                onChange={(e) => setDraft((d) => ({ ...d, [run.id]: e.target.value }))}
-              />
+              {/* Rendered markdown by default; the textarea only appears while
+                  editing. Both are max-h capped (the textarea auto-grows via
+                  field-sizing-content) so a long review scrolls inside its box
+                  instead of inflating the panel. */}
+              {editing[run.id] ? (
+                <Textarea
+                  className="text-xs font-mono min-h-28 max-h-72"
+                  value={draft[run.id] ?? run.feedback_snapshot ?? ""}
+                  onChange={(e) => setDraft((d) => ({ ...d, [run.id]: e.target.value }))}
+                />
+              ) : (
+                <div className="text-xs border rounded-md bg-background px-3 py-2 max-h-72 overflow-y-auto">
+                  <MessageResponse>{draft[run.id] ?? run.feedback_snapshot ?? ""}</MessageResponse>
+                </div>
+              )}
               <div className="flex gap-2">
                 <Button size="sm" disabled={busy === run.id}
                   onClick={() => act(() => api.workflowRunGate(run.id, "approve", draft[run.id] ?? undefined), run.id)}>
                   发送反馈给原 session
+                </Button>
+                <Button variant="outline" size="sm" disabled={busy === run.id}
+                  onClick={() => setEditing((e) => ({ ...e, [run.id]: !e[run.id] }))}>
+                  {editing[run.id]
+                    ? <><Eye className="h-3 w-3 mr-1" />预览</>
+                    : <><Pencil className="h-3 w-3 mr-1" />编辑</>}
                 </Button>
               </div>
             </>
