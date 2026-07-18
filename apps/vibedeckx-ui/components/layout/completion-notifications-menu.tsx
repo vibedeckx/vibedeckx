@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Bell, CheckCheck, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -62,13 +63,29 @@ export function CompletionNotificationsMenu({
   const projectName = (projectId: string) =>
     projects.find((p) => p.id === projectId)?.name ?? "Unknown project";
 
+  const [open, setOpen] = useState(false);
+
+  // Cmd/Ctrl+J toggles the menu (same family as Cmd+K switcher / Cmd+B
+  // sidebar). preventDefault keeps Chrome's downloads panel from opening.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "j" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        setOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           size="icon-sm"
           className="relative"
+          title="Notifications (⌘J)"
           aria-label={
             unreadCount > 0
               ? `${unreadCount} unread completion notifications`
