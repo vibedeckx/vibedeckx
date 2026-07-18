@@ -1,10 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type AgentProviderInfo, type AgentType } from "@/lib/api";
+import {
+  api,
+  type AgentProviderInfo,
+  type AgentType,
+  type ReviewerCandidate,
+} from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -48,6 +53,10 @@ export function ReviewDialog({
   const [open, setOpen] = useState(false);
   const [focus, setFocus] = useState("");
   const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
+  const [reviewerMode, setReviewerMode] = useState<"reuse" | "new">("new");
+  const [candidate, setCandidate] = useState<ReviewerCandidate | null>(null);
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [candidateNotice, setCandidateNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,23 +69,66 @@ export function ReviewDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  useEffect(() => {
+    if (!open || !sessionId) return;
+
+    let cancelled = false;
+    setReviewerMode("new");
+    setCandidate(null);
+    setCandidateNotice(null);
+    setCandidateLoading(true);
+
+    void api.getReviewerCandidate(projectId, sessionId)
+      .then((nextCandidate) => {
+        if (cancelled) return;
+        setCandidate(nextCandidate);
+        if (nextCandidate?.available && nextCandidate.sessionId) {
+          setReviewerMode("reuse");
+        } else if (nextCandidate) {
+          setCandidateNotice("上次 reviewer 已不可用，将创建新 session");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCandidateNotice("无法加载上次 reviewer，将创建新 session");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCandidateLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectId, sessionId]);
+
   if (!sessionId) return null;
 
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
+      const reviewer = reviewerMode === "reuse" && candidate?.sessionId
+        ? { reviewerSessionId: candidate.sessionId }
+        : { reviewerAgentType: reviewerAgent };
       await api.createWorkflowRun({
         projectId,
         branch,
         sourceSessionId: sessionId,
         reviewFocus: focus.trim() || undefined,
-        reviewerAgentType: reviewerAgent,
+        ...reviewer,
       });
       setOpen(false);
       setFocus("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      void api.getReviewerCandidate(projectId, sessionId).then((nextCandidate) => {
+        setCandidate(nextCandidate);
+        if (!nextCandidate?.available || !nextCandidate.sessionId) {
+          setReviewerMode("new");
+          setCandidateNotice("上次 reviewer 已不可用，将创建新 session");
+        }
+      }).catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -92,26 +144,53 @@ export function ReviewDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>发起 Review</DialogTitle>
+          <DialogDescription>
+            默认继续上次 reviewer 的上下文，也可以创建新 reviewer session。反馈会先经你确认，再发回本 session。
+          </DialogDescription>
         </DialogHeader>
-        <p className="text-sm text-muted-foreground">
-          将创建一个 reviewer session 审查本 session 最近完成的工作。反馈会先经你确认，再发回本 session。
-        </p>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground shrink-0">Reviewer agent</span>
-          <Select value={reviewerAgent} onValueChange={(v) => setReviewerAgent(v as AgentType)}>
-            <SelectTrigger className="h-8 text-sm flex-1">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {options.map((p) => (
-                <SelectItem key={p.type} value={p.type} disabled={!p.available}>
-                  {p.displayName}
-                  {p.type === currentAgentType ? "（当前 agent）" : ""}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        <div className="grid gap-2">
+          {candidate?.available && candidate.sessionId && (
+            <Button
+              type="button"
+              variant={reviewerMode === "reuse" ? "secondary" : "outline"}
+              className="h-auto justify-start whitespace-normal py-2 text-left"
+              aria-pressed={reviewerMode === "reuse"}
+              onClick={() => setReviewerMode("reuse")}
+            >
+              继续上次 Reviewer — {candidate.title ?? "Review session"}
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant={reviewerMode === "new" ? "secondary" : "outline"}
+            className="justify-start"
+            aria-pressed={reviewerMode === "new"}
+            onClick={() => setReviewerMode("new")}
+          >
+            创建新 Reviewer Session
+          </Button>
         </div>
+        {candidateNotice && (
+          <p className="text-sm text-amber-600 dark:text-amber-400">{candidateNotice}</p>
+        )}
+        {reviewerMode === "new" && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground shrink-0">Reviewer agent</span>
+            <Select value={reviewerAgent} onValueChange={(v) => setReviewerAgent(v as AgentType)}>
+              <SelectTrigger className="h-8 text-sm flex-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {options.map((p) => (
+                  <SelectItem key={p.type} value={p.type} disabled={!p.available}>
+                    {p.displayName}
+                    {p.type === currentAgentType ? "（当前 agent）" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <input
           className="w-full rounded-md border bg-transparent px-3 py-2 text-sm"
           placeholder="Review focus（可选）：本次审查重点…"
@@ -120,7 +199,7 @@ export function ReviewDialog({
         />
         {error && <p className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
-          <Button onClick={start} disabled={busy}>开始 Review</Button>
+          <Button onClick={start} disabled={busy || candidateLoading}>开始 Review</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

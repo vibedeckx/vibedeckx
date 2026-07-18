@@ -938,6 +938,22 @@ export interface WorkflowRun {
   updated_at: string;
 }
 
+export interface ReviewerCandidate {
+  available: boolean;
+  sessionId: string | null;
+  title: string | null;
+  agentType: AgentType | null;
+  reason:
+    | "deleted"
+    | "project-mismatch"
+    | "branch-mismatch"
+    | "running"
+    | "busy"
+    | "unsupported-agent"
+    | "unavailable"
+    | null;
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     // Revalidate the persisted config once per page load and share that single
@@ -2323,6 +2339,7 @@ export const api = {
   async createWorkflowRun(opts: {
     projectId: string; branch: string | null; sourceSessionId: string;
     reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: AgentType;
+    reviewerSessionId?: string;
   }): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs`, {
       method: "POST",
@@ -2334,6 +2351,20 @@ export const api = {
       throw new Error(body.error ?? `Failed to start review: ${res.status}`);
     }
     return (await res.json()).run;
+  },
+
+  async getReviewerCandidate(
+    projectId: string,
+    sourceSessionId: string,
+  ): Promise<ReviewerCandidate | null> {
+    const params = new URLSearchParams({ projectId, sourceSessionId });
+    const res = await authFetch(
+      `${getApiBase()}/api/workflow-runs/reviewer-candidate?${params}`,
+    );
+    if (!res.ok) {
+      throw new Error(`Failed to fetch reviewer candidate: ${res.status}`);
+    }
+    return (await res.json()).candidate;
   },
 
   async getActiveWorkflowRuns(projectId: string, branch: string | null): Promise<WorkflowRun[]> {
