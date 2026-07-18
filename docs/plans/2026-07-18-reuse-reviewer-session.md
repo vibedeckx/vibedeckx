@@ -163,6 +163,7 @@ export interface ReviewerCandidate {
     | "running"
     | "busy"
     | "unsupported-agent"
+    | "unavailable"
     | null;
 }
 ```
@@ -686,6 +687,7 @@ export interface ReviewerCandidate {
     | "running"
     | "busy"
     | "unsupported-agent"
+    | "unavailable"
     | null;
 }
 ```
