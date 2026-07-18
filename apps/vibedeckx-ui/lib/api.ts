@@ -2322,7 +2322,7 @@ export const api = {
 
   async createWorkflowRun(opts: {
     projectId: string; branch: string | null; sourceSessionId: string;
-    reviewFocus?: string; sourceTurnEndIndex?: number;
+    reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: AgentType;
   }): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs`, {
       method: "POST",

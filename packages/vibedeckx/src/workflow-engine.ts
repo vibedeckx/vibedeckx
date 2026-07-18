@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import type { Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
-import type { AgentMessage } from "./agent-types.js";
+import type { AgentMessage, AgentType } from "./agent-types.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
@@ -167,6 +167,8 @@ export class WorkflowEngine {
     sourceSessionId: string;
     reviewFocus?: string;
     sourceTurnEndIndex?: number;
+    /** Agent that runs the review; defaults to claude-code. */
+    reviewerAgentType?: AgentType;
   }): Promise<WorkflowRun> {
     if (this.participants.has(opts.sourceSessionId)) {
       throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
@@ -219,8 +221,10 @@ export class WorkflowEngine {
         // Reviewer runs in plan (read-only) mode: it shares the worktree with
         // the implementer session it's reviewing, and an unrestricted
         // reviewer could mutate the very code it's supposed to be judging.
+        // Plan mode is read-only for both agents (codex maps it to
+        // sandbox: "read-only"), so any reviewer agent is safe here.
         const reviewerId = await this.agentOps.createNewSession(
-          opts.project.id, opts.branch, opts.project.path, false, "plan", "claude-code", true,
+          opts.project.id, opts.branch, opts.project.path, false, "plan", opts.reviewerAgentType ?? "claude-code", true,
         );
         const taskContext = extractTaskContextBefore(entries, turnEndIndex);
         // Deterministic "Review - <source title>" (same pattern as Branch

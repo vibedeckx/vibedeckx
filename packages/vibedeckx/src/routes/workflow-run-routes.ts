@@ -6,6 +6,14 @@ import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteRun } from "./remote-status-bridge.js";
 import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { WorkflowRun } from "../storage/types.js";
+import type { AgentType } from "../agent-types.js";
+
+const REVIEWER_AGENT_TYPES = new Set<string>(["claude-code", "codex"]);
+/** undefined → engine default; null → invalid (reject with 400). */
+function parseReviewerAgentType(raw: unknown): AgentType | undefined | null {
+  if (raw === undefined) return undefined;
+  return typeof raw === "string" && REVIEWER_AGENT_TYPES.has(raw) ? (raw as AgentType) : null;
+}
 
 function errStatus(err: unknown): number | null {
   if (!(err instanceof WorkflowError)) return null;
@@ -78,12 +86,14 @@ async function routes(fastify: FastifyInstance) {
   };
 
   fastify.post<{
-    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number };
+    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string };
   }>("/api/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
     const { projectId, branch, sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!projectId || !sourceSessionId) return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
+    const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
+    if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     if (sourceSessionId.startsWith("remote-")) {
       // Remote workspace: the run lives on the worker (spec §Phase 1.5 —
       // engine runs where the session/worktree live). Authz follows the
@@ -102,6 +112,7 @@ async function routes(fastify: FastifyInstance) {
         sourceSessionId: remoteInfo.remoteSessionId,
         reviewFocus,
         sourceTurnEndIndex,
+        reviewerAgentType,
       });
       if (!result.ok) return sendProxyFailure(reply, result);
 
@@ -193,6 +204,7 @@ async function routes(fastify: FastifyInstance) {
         sourceSessionId,
         reviewFocus,
         sourceTurnEndIndex,
+        reviewerAgentType,
       });
       return reply.code(201).send({ run });
     } catch (err) {
@@ -325,12 +337,14 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
     const { sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
+    const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
+    if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
     if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
     const project = await fastify.storage.projects.getById(sourceSession.project_id);
@@ -343,6 +357,7 @@ async function routes(fastify: FastifyInstance) {
         sourceSessionId,
         reviewFocus,
         sourceTurnEndIndex,
+        reviewerAgentType,
       });
       return reply.code(201).send({ run });
     } catch (err) {

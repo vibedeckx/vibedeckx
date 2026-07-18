@@ -99,6 +99,13 @@ describe("WorkflowEngine", () => {
       .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
   });
 
+  it("spawns the reviewer with the requested agent type", async () => {
+    await engine.startAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src", reviewerAgentType: "codex",
+    });
+    expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "plan", "codex", true);
+  });
+
   it("reviewer title prefers the source session's own title", async () => {
     await storage.agentSessions.updateTitle("s-src", "Fix login bug");
     await start();

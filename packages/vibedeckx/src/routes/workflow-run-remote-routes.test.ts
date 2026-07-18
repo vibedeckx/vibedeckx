@@ -66,12 +66,12 @@ describe("workflow-run remote proxying (front server)", () => {
 
     const res = await app.inject({
       method: "POST", url: "/api/workflow-runs",
-      payload: { projectId: "p1", sourceSessionId: SRC, reviewFocus: "tests", sourceTurnEndIndex: 4 },
+      payload: { projectId: "p1", sourceSessionId: SRC, reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" },
     });
     expect(res.statusCode).toBe(201);
     const [serverId, url, key, method, apiPath, body] = proxyMock.mock.calls[0];
     expect([serverId, url, key, method, apiPath]).toEqual(["srv1", "http://r", "k", "POST", "/api/path/workflow-runs"]);
-    expect(body).toMatchObject({ sourceSessionId: "src1", reviewFocus: "tests", sourceTurnEndIndex: 4 });
+    expect(body).toMatchObject({ sourceSessionId: "src1", reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" });
 
     const run = res.json().run;
     expect(run.id).toBe("remote-srv1-p1-run1");

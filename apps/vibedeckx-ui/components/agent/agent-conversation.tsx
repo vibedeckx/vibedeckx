@@ -717,7 +717,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         </div>
         <div className="flex items-center gap-1">
           {projectId && (
-            <ReviewDialog projectId={projectId} branch={branch} sessionId={session?.id ?? null} />
+            <ReviewDialog
+              projectId={projectId}
+              branch={branch}
+              sessionId={session?.id ?? null}
+              currentAgentType={agentType}
+              providers={providers}
+            />
           )}
           {projectId && (
             <SessionHistoryDropdown
