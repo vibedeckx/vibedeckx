@@ -64,7 +64,7 @@ export function AgentMessageItem({ message, messageIndex }: AgentMessageProps) {
 function renderBody(message: AgentMessage, messageIndex: number) {
   switch (message.type) {
     case "user":
-      return <UserMessage content={message.content} />;
+      return <UserMessage content={message.content} origin={message.origin} />;
 
     case "assistant":
       return <AssistantMessage content={message.content} agentType={message.agentType} />;
@@ -143,7 +143,27 @@ function renderTextWithVPaste(text: string) {
   );
 }
 
-function UserMessage({ content }: { content: string | ContentPart[] }) {
+function UserMessage({ content, origin }: { content: string | ContentPart[]; origin?: "workflow" }) {
+  // Workflow-injected prompts are machine-authored markdown — render them as
+  // such, visually distinct from what the user actually typed.
+  if (origin === "workflow" && typeof content === "string") {
+    return (
+      <div className="flex gap-3 py-3">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
+          <Workflow className="w-3.5 h-3.5 text-sky-500" />
+        </div>
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <p className="text-sm font-medium text-sky-500 mb-1">Workflow</p>
+          <div
+            className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+            style={{ fontSize: "var(--conv-font-size, 14px)" }}
+          >
+            <AgentMarkdown>{content}</AgentMarkdown>
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex gap-3 py-3">
       <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center">

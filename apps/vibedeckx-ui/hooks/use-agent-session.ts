@@ -21,7 +21,9 @@ export type ContentPart = TextPart | ImagePart;
 // ============ Types ============
 
 export type AgentMessage =
-  | { type: "user"; content: string | ContentPart[]; timestamp: number }
+  // origin marks machine-authored user turns (workflow-injected prompts);
+  // the UI renders them as markdown under a distinct header.
+  | { type: "user"; content: string | ContentPart[]; timestamp: number; origin?: "workflow" }
   | { type: "assistant"; content: string; partial?: boolean; agentType?: AgentType; timestamp: number }
   | { type: "tool_use"; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }

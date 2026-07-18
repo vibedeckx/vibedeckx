@@ -1432,6 +1432,7 @@ export class AgentSessionManager {
     content: string | ContentPart[],
     projectPath?: string,
     userId: string = "local",
+    opts?: { origin?: "workflow" },
   ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
@@ -1442,7 +1443,7 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Cannot wake dormant session ${sessionId} without projectPath`);
         return false;
       }
-      await this.wakeDormantSession(session, projectPath, content, userId);
+      await this.wakeDormantSession(session, projectPath, content, userId, opts?.origin);
       return true;
     }
 
@@ -1478,6 +1479,7 @@ export class AgentSessionManager {
       type: "user",
       content,
       timestamp: Date.now(),
+      ...(opts?.origin ? { origin: opts.origin } : {}),
     }, true, userId);
 
     // Send to agent stdin via provider
@@ -2081,6 +2083,7 @@ export class AgentSessionManager {
     projectPath: string,
     userMessage: string | ContentPart[],
     userId: string = "local",
+    origin?: "workflow",
   ): Promise<void> {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
@@ -2113,6 +2116,7 @@ export class AgentSessionManager {
       type: "user",
       content: userMessage,
       timestamp: Date.now(),
+      ...(origin ? { origin } : {}),
     }, true, userId);
     session.turnOpenSince = Date.now();
 

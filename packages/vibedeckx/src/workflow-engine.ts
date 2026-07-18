@@ -17,7 +17,13 @@ export interface AgentOps {
     agentType?: string,
     announceRunning?: boolean,
   ): Promise<string>;
-  sendUserMessage(sessionId: string, content: string, projectPath?: string): Promise<boolean>;
+  sendUserMessage(
+    sessionId: string,
+    content: string,
+    projectPath?: string,
+    userId?: string,
+    opts?: { origin?: "workflow" },
+  ): Promise<boolean>;
   /** Write a final title and claim the one-shot slot (AI titling never fires). */
   setFinalSessionTitle(sessionId: string, title: string): Promise<void>;
   switchMode(sessionId: string, projectPath: string, newMode: "plan" | "edit"): Promise<boolean>;
@@ -483,7 +489,7 @@ export class WorkflowEngine {
           target,
         });
         const sent = await this.agentOps
-          .sendUserMessage(opts.reviewerSessionId, prompt, opts.project.path)
+          .sendUserMessage(opts.reviewerSessionId, prompt, opts.project.path, undefined, { origin: "workflow" })
           .catch(() => false);
         if (!sent) {
           await this.failRun(run, "向上次 reviewer 投递复审任务失败");
@@ -521,7 +527,7 @@ export class WorkflowEngine {
           reviewFocus: opts.reviewFocus ?? null,
           target,
         });
-        const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path);
+        const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path, undefined, { origin: "workflow" });
         if (!sent) {
           const failed = await this.storage.workflowRuns.update(run.id, {
             status: "failed",
@@ -591,7 +597,7 @@ export class WorkflowEngine {
     const feedback = editedPayload ?? run.feedback_snapshot ?? "";
     const project = await this.storage.projects.getById(run.project_id);
     const ok = await this.agentOps
-      .sendUserMessage(run.source_session_id, buildFeedbackMessage(feedback), project?.path ?? undefined)
+      .sendUserMessage(run.source_session_id, buildFeedbackMessage(feedback), project?.path ?? undefined, undefined, { origin: "workflow" })
       .catch(() => false);
 
     if (!ok) {

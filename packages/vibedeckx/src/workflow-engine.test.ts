@@ -301,6 +301,8 @@ describe("WorkflowEngine", () => {
     expect(run.source_turn_end_index).toBe(4); // derived from entries
     expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "plan", "claude-code", true);
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
+    // Machine-authored: marked so the UI renders it as markdown, not verbatim.
+    expect(agentOps.sendUserMessage.mock.calls[0][4]).toEqual({ origin: "workflow" });
     expect(prompt).toContain("please fix the bug");   // task context
     expect(prompt).toContain("focus on tests");        // review focus
     expect(prompt).toContain("read-only review mode"); // reviewer must not edit
@@ -382,6 +384,8 @@ describe("WorkflowEngine", () => {
       "s-rev",
       expect.stringContaining("previous review"),
       project.path,
+      undefined,
+      { origin: "workflow" },
     );
     const prompt = agentOps.sendUserMessage.mock.calls.at(-1)?.[1] as string;
     expect(prompt).toContain("please fix the bug");
