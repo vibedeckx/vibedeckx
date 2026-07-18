@@ -138,13 +138,14 @@ describe("pure helpers", () => {
     });
     expect(prompt).toContain("## Original request");
     expect(prompt).toContain("build a public API for widgets");
+    expect(prompt).toContain("## Latest user message (verbatim)");
     expect(prompt).toContain("now add rate limiting");
     expect(prompt).toContain("<author-self-report>");
     expect(prompt).toContain("Treat every claim as unverified");
     expect(prompt).toContain("deterministic excerpt");
   });
 
-  it("buildReviewerPrompt: an intent brief replaces the original request but keeps the self-report", () => {
+  it("buildReviewerPrompt: an intent brief replaces both verbatim sections but keeps the self-report", () => {
     const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
     const prompt = buildReviewerPrompt({
       taskContext: "now add rate limiting",
@@ -156,8 +157,11 @@ describe("pure helpers", () => {
     });
     expect(prompt).toContain("## Intent brief (distilled from the source conversation)");
     expect(prompt).toContain("no external deps");
-    expect(prompt).toContain("now add rate limiting");            // verbatim task stays
-    expect(prompt).not.toContain("## Original request");          // replaced by brief
+    // The brief subsumes both verbatim excerpts — in confirmation-style
+    // conversations the latest user message is often just "ok".
+    expect(prompt).not.toContain("now add rate limiting");
+    expect(prompt).not.toContain("## Latest user message");
+    expect(prompt).not.toContain("## Original request");
     // The self-report stays: it carries the author's claims to audit, which
     // the distillation deliberately strips from the brief.
     expect(prompt).toContain("<author-self-report>");
@@ -191,7 +195,7 @@ describe("pure helpers", () => {
       target,
     });
     expect(single).not.toContain("## Original request");
-    expect(single).toContain("## Original task");
+    expect(single).toContain("## Latest user message (verbatim)");
 
     const bare = buildReviewerPrompt({
       taskContext: null, originalIntent: null, authorSelfReport: null, reviewFocus: null, target,
@@ -318,6 +322,9 @@ describe("WorkflowEngine", () => {
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
     expect(prompt).toContain("keep the session API stable");
     expect(prompt).toContain("distilled intent brief");
+    // The brief subsumes the verbatim conversation excerpts.
+    expect(prompt).not.toContain("## Latest user message");
+    expect(prompt).not.toContain("## Original request");
     // Self-report rides along with the brief (claims to audit).
     expect(prompt).toContain("<author-self-report>");
   });

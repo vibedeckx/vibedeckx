@@ -151,10 +151,13 @@ export function buildReviewerPrompt(opts: {
   originalIntent: string | null;
   authorSelfReport: string | null;
   /**
-   * Tier 1: LLM-distilled brief; replaces the verbatim original-request
-   * section. The author self-report stays alongside it — the brief carries
-   * intent, the self-report carries the author's claims to audit; they are
-   * orthogonal (distillation deliberately strips completion claims).
+   * Tier 1: LLM-distilled brief; replaces both verbatim conversation
+   * sections (original request + latest user message) — the distiller has
+   * read the whole conversation, so a verbatim excerpt adds nothing but
+   * noise (often a bare "ok" confirming a proposal). The author self-report
+   * stays alongside it — the brief carries intent, the self-report carries
+   * the author's claims to audit; they are orthogonal (distillation
+   * deliberately strips completion claims).
    */
   intentBrief?: string | null;
   reviewFocus: string | null;
@@ -169,7 +172,10 @@ export function buildReviewerPrompt(opts: {
     "You are a code reviewer agent. Another agent just completed work in this workspace; review it critically and independently.",
     brief ? `\n## Intent brief (distilled from the source conversation)\n${brief}` : null,
     !brief && intent ? `\n## Original request (the user's first message in this session, verbatim)\n${intent}` : null,
-    opts.taskContext ? `\n## Original task\n${opts.taskContext}` : null,
+    // Deliberately not titled "Original task": in confirmation-style
+    // conversations the latest message is often just "ok" — informative as
+    // the user's last word, misleading as a statement of the task.
+    !brief && opts.taskContext ? `\n## Latest user message (verbatim)\n${opts.taskContext}` : null,
     selfReportSection(opts.authorSelfReport),
     opts.reviewFocus ? `\n## Review focus (from the user)\n${opts.reviewFocus}` : null,
     "\n## How to review",
