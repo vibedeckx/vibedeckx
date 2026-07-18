@@ -2,6 +2,7 @@ import type { AgentSessionStatus } from "../conversation-patch.js";
 import type { GlobalEvent } from "../event-bus.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import type { WorkflowRun } from "../storage/types.js";
+import type { ReviewerCandidate } from "../workflow-engine.js";
 
 /**
  * Extract the projectId from a synthetic remote session id.
@@ -112,6 +113,18 @@ export function mapRemoteRun<
     project_id: projectId,
     source_session_id: `${prefix}${run.source_session_id}`,
     reviewer_session_id: run.reviewer_session_id ? `${prefix}${run.reviewer_session_id}` : null,
+  };
+}
+
+export function mapRemoteReviewerCandidate(
+  candidate: ReviewerCandidate | null,
+  remoteServerId: string,
+  projectId: string,
+): ReviewerCandidate | null {
+  if (!candidate?.sessionId) return candidate;
+  return {
+    ...candidate,
+    sessionId: `remote-${remoteServerId}-${projectId}-${candidate.sessionId}`,
   };
 }
 

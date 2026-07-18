@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import { requireAuth } from "../server.js";
 import { REVIEWER_AGENT_TYPES, WorkflowError } from "../workflow-engine.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { projectIdFromRemoteSessionId, mapRemoteRun } from "./remote-status-bridge.js";
+import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun } from "./remote-status-bridge.js";
 import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { WorkflowRun } from "../storage/types.js";
 import type { AgentType } from "../agent-types.js";
@@ -115,6 +115,17 @@ async function routes(fastify: FastifyInstance) {
       const remoteProject = await fastify.storage.projects.getById(projectId, userId);
       if (!remoteProject) return reply.code(404).send({ error: "Project not found" });
 
+      let bareReviewerSessionId: string | undefined;
+      if (reviewerSessionId) {
+        const reviewerInfo = fastify.remoteSessionMap.get(reviewerSessionId);
+        if (!reviewerInfo ||
+            reviewerInfo.remoteServerId !== remoteInfo.remoteServerId ||
+            projectIdFromRemoteSessionId(reviewerSessionId, reviewerInfo) !== projectId) {
+          return reply.code(404).send({ error: "Reviewer session not found" });
+        }
+        bareReviewerSessionId = reviewerInfo.remoteSessionId;
+      }
+
       // The worker derives branch from its own session row — the body branch
       // is not forwarded (server-derived branch, same rule as the local path).
       const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
@@ -122,7 +133,7 @@ async function routes(fastify: FastifyInstance) {
         reviewFocus,
         sourceTurnEndIndex,
         reviewerAgentType,
-        reviewerSessionId,
+        reviewerSessionId: bareReviewerSessionId,
       });
       if (!result.ok) return sendProxyFailure(reply, result);
 
@@ -236,6 +247,39 @@ async function routes(fastify: FastifyInstance) {
     }
     const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return reply.code(404).send({ error: "Project not found" });
+    if (sourceSessionId.startsWith("remote-")) {
+      const remoteInfo = fastify.remoteSessionMap.get(sourceSessionId);
+      if (!remoteInfo || projectIdFromRemoteSessionId(sourceSessionId, remoteInfo) !== projectId) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+      const params = new URLSearchParams({ sourceSessionId: remoteInfo.remoteSessionId });
+      const result = await proxyAuto(
+        remoteInfo,
+        "GET",
+        `/api/path/workflow-runs/reviewer-candidate?${params}`,
+      );
+      if (!result.ok) return sendProxyFailure(reply, result);
+      const bareCandidate = (result.data as { candidate: import("../workflow-engine.js").ReviewerCandidate | null }).candidate;
+      const candidate = mapRemoteReviewerCandidate(bareCandidate, remoteInfo.remoteServerId, projectId);
+      if (bareCandidate?.sessionId && candidate?.sessionId) {
+        const reviewerInfo = {
+          remoteServerId: remoteInfo.remoteServerId,
+          remoteUrl: remoteInfo.remoteUrl,
+          remoteApiKey: remoteInfo.remoteApiKey,
+          remoteSessionId: bareCandidate.sessionId,
+          branch: remoteInfo.branch,
+        };
+        fastify.remoteSessionMap.set(candidate.sessionId, reviewerInfo);
+        await fastify.storage.remoteSessionMappings.upsert(
+          candidate.sessionId,
+          projectId,
+          remoteInfo.remoteServerId,
+          bareCandidate.sessionId,
+          remoteInfo.branch,
+        );
+      }
+      return reply.send({ candidate });
+    }
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
     if (!sourceSession || sourceSession.project_id !== projectId) {
       return reply.code(404).send({ error: "Session not found" });

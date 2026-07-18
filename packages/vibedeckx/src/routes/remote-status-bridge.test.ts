@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { taskCompletedEventFromRemoteFrame, mapRemoteRun, runUpdatedEventFromRemoteFrame } from "./remote-status-bridge.js";
+import {
+  taskCompletedEventFromRemoteFrame,
+  mapRemoteReviewerCandidate,
+  mapRemoteRun,
+  runUpdatedEventFromRemoteFrame,
+} from "./remote-status-bridge.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 
 const remoteInfo: RemoteSessionInfo = {
@@ -59,6 +64,25 @@ describe("mapRemoteRun", () => {
       "p1",
     );
     expect(mapped.reviewer_session_id).toBeNull();
+  });
+});
+
+describe("mapRemoteReviewerCandidate", () => {
+  it("prefixes an available reviewer id and preserves unavailable/null candidates", () => {
+    expect(mapRemoteReviewerCandidate({
+      available: true,
+      sessionId: "rev1",
+      title: "Review - Task",
+      agentType: "codex",
+      reason: null,
+    }, "srv1", "p1")).toMatchObject({
+      available: true,
+      sessionId: "remote-srv1-p1-rev1",
+    });
+    expect(mapRemoteReviewerCandidate(null, "srv1", "p1")).toBeNull();
+    expect(mapRemoteReviewerCandidate({
+      available: false, sessionId: null, title: null, agentType: null, reason: "deleted",
+    }, "srv1", "p1")?.sessionId).toBeNull();
   });
 });
 

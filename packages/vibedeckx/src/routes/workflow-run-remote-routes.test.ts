@@ -59,6 +59,59 @@ function makeApp() {
 }
 
 describe("workflow-run remote proxying (front server)", () => {
+  it("GET reviewer candidate proxies to the worker and hydrates the mapped reviewer handle", async () => {
+    const { remoteSessionMap, upsert } = makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      data: { candidate: {
+        available: true, sessionId: "rev1", title: "Review - Task", agentType: "codex", reason: null,
+      } },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/workflow-runs/reviewer-candidate?projectId=p1&sourceSessionId=${SRC}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().candidate.sessionId).toBe("remote-srv1-p1-rev1");
+    expect(proxyMock.mock.calls[0][4]).toBe(
+      "/api/path/workflow-runs/reviewer-candidate?sourceSessionId=src1",
+    );
+    expect(remoteSessionMap.get("remote-srv1-p1-rev1")).toMatchObject({
+      remoteSessionId: "rev1", branch: "dev",
+    });
+    expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev");
+    expect(ensureStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("POST reuse forwards the bare reviewer id and rejects an unmapped reviewer", async () => {
+    const { remoteSessionMap } = makeApp();
+    remoteSessionMap.set("remote-srv1-p1-rev1", {
+      remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+      remoteSessionId: "rev1", branch: "dev",
+    });
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
+
+    const ok = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-rev1" },
+    });
+    expect(ok.statusCode).toBe(201);
+    expect(proxyMock.mock.calls[0][5]).toMatchObject({
+      sourceSessionId: "src1", reviewerSessionId: "rev1",
+    });
+
+    const missing = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-missing" },
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
     const { remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem } = makeApp();
     await app.register(workflowRunRoutes);
