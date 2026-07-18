@@ -280,6 +280,21 @@ export class AgentSessionManager {
     return true;
   }
 
+  /**
+   * Write a caller-determined final title and claim the one-shot slot so the
+   * AI title generator never fires for this session — same pattern as the
+   * Branch path's "Branch - <source title>". The slot is claimed before the
+   * DB write: even if the write fails, a degraded placeholder title beats an
+   * AI title racing in over the caller's intent.
+   */
+  async setFinalSessionTitle(sessionId: string, title: string): Promise<void> {
+    this.markTitleResolved(sessionId);
+    await this.storage.agentSessions.updateTitle(sessionId, title);
+    this.broadcastRaw(sessionId, { titleUpdated: { title } });
+    const session = this.sessions.get(sessionId);
+    if (session) this.emitSessionTitle(session.projectId, session.branch, sessionId, title);
+  }
+
   private isProcessAlive(session: RunningSession): boolean {
     return !!session.process && session.process.exitCode === null && !session.dormant;
   }

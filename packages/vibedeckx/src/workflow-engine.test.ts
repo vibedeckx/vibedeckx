@@ -46,6 +46,7 @@ describe("WorkflowEngine", () => {
   const agentOps = {
     createNewSession: vi.fn(async () => "s-rev"),
     sendUserMessage: vi.fn(async () => true),
+    setFinalSessionTitle: vi.fn(async () => undefined),
     getRawMessages: vi.fn((sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : entries)),
     broadcastRawToSession: vi.fn(),
   };
@@ -91,6 +92,17 @@ describe("WorkflowEngine", () => {
     expect(prompt).toContain("please fix the bug");   // task context
     expect(prompt).toContain("focus on tests");        // review focus
     expect(prompt).toContain("read-only review mode"); // reviewer must not edit
+    // Deterministic title, set before the prompt goes out (no AI generation).
+    // Source has no title here → falls back to the task-context snippet.
+    expect(agentOps.setFinalSessionTitle).toHaveBeenCalledWith("s-rev", "Review - please fix the bug");
+    expect(agentOps.setFinalSessionTitle.mock.invocationCallOrder[0])
+      .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
+  });
+
+  it("reviewer title prefers the source session's own title", async () => {
+    await storage.agentSessions.updateTitle("s-src", "Fix login bug");
+    await start();
+    expect(agentOps.setFinalSessionTitle).toHaveBeenCalledWith("s-rev", "Review - Fix login bug");
   });
 
   it("mirrors run updates onto participant session streams", async () => {

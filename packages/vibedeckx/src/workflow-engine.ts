@@ -3,6 +3,7 @@ import type { Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage } from "./agent-types.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
+import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
 /** Minimal surface the engine needs from AgentSessionManager (structural). */
@@ -17,6 +18,8 @@ export interface AgentOps {
     announceRunning?: boolean,
   ): Promise<string>;
   sendUserMessage(sessionId: string, content: string, projectPath?: string): Promise<boolean>;
+  /** Write a final title and claim the one-shot slot (AI titling never fires). */
+  setFinalSessionTitle(sessionId: string, title: string): Promise<void>;
   /** Raw sparse entries (holes preserved) — index space matches entry indices. */
   getRawMessages(sessionId: string): AgentMessage[];
   /** Optional: push a raw WS frame to a session's stream subscribers. */
@@ -219,8 +222,19 @@ export class WorkflowEngine {
         const reviewerId = await this.agentOps.createNewSession(
           opts.project.id, opts.branch, opts.project.path, false, "plan", "claude-code", true,
         );
+        const taskContext = extractTaskContextBefore(entries, turnEndIndex);
+        // Deterministic "Review - <source title>" (same pattern as Branch
+        // sessions) — no AI generation. Set BEFORE the prompt is delivered so
+        // the first-user-message AI titler can never race it; best-effort
+        // because a title failure must not abort the run.
+        await this.agentOps
+          .setFinalSessionTitle(
+            reviewerId,
+            `Review - ${sourceSession?.title || (taskContext ? snippetTitle(taskContext) : null) || "Conversation"}`,
+          )
+          .catch((err) => console.warn(`[WorkflowEngine] failed to set reviewer title for ${reviewerId}:`, err));
         const prompt = buildReviewerPrompt({
-          taskContext: extractTaskContextBefore(entries, turnEndIndex),
+          taskContext,
           reviewFocus: opts.reviewFocus ?? null,
           target,
         });

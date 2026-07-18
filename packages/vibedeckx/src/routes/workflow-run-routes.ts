@@ -119,13 +119,14 @@ async function routes(fastify: FastifyInstance) {
       // and open the resident stream — that stream is what carries the
       // reviewer's suppressed taskCompleted and the workflowRunUpdated frames.
       if (bareRun.reviewer_session_id && localRun.reviewer_session_id) {
-        fastify.remoteSessionMap.set(localRun.reviewer_session_id, {
+        const reviewerInfo = {
           remoteServerId: remoteInfo.remoteServerId,
           remoteUrl: remoteInfo.remoteUrl,
           remoteApiKey: remoteInfo.remoteApiKey,
           remoteSessionId: bareRun.reviewer_session_id,
           branch: bareRun.branch,
-        });
+        };
+        fastify.remoteSessionMap.set(localRun.reviewer_session_id, reviewerInfo);
         await fastify.storage.remoteSessionMappings.upsert(
           localRun.reviewer_session_id, projectId, remoteInfo.remoteServerId,
           bareRun.reviewer_session_id, bareRun.branch,
@@ -137,6 +138,32 @@ async function routes(fastify: FastifyInstance) {
           eventBus: fastify.eventBus,
           agentSessionManager: fastify.agentSessionManager,
         });
+        // The worker's spawn-time announcements (session:status/processAlive)
+        // fire before this front subscribes, so nothing surfaces the reviewer
+        // here on its own. Same intent as the commander's remote spawn path:
+        // session:process makes the sidebar (useResidentSessions) refetch the
+        // branch list — which now includes the reviewer — and session:status
+        // surfaces it in an open agent window on this workspace.
+        fastify.eventBus.emit({
+          type: "session:process",
+          projectId,
+          branch: bareRun.branch,
+          sessionId: localRun.reviewer_session_id,
+          alive: true,
+        });
+        fastify.eventBus.emit({
+          type: "session:status",
+          projectId,
+          branch: bareRun.branch,
+          sessionId: localRun.reviewer_session_id,
+          status: "running",
+        });
+        // The worker's engine already wrote the final "Review - …" title
+        // before responding (the session:process refetch above picks it up).
+        // Claim the front's one-shot title slots so a later /message through
+        // the front (human takeover) can't regenerate an AI title over it.
+        fastify.agentSessionManager.markTitleResolved(localRun.reviewer_session_id);
+        await fastify.storage.remoteSessionMappings.markTitleResolved(localRun.reviewer_session_id);
       }
       fastify.eventBus.emit({ type: "workflow:run-updated", projectId, branch: bareRun.branch, run: localRun });
       return reply.code(201).send({ run: localRun });

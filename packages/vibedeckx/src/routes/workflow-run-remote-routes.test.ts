@@ -32,6 +32,8 @@ function makeApp() {
     remoteSessionId: "src1", branch: "dev",
   });
   const upsert = vi.fn(async () => undefined);
+  const markTitleResolvedDb = vi.fn(async () => undefined);
+  const markTitleResolvedMem = vi.fn(() => true);
   const emit = vi.fn();
   app = Fastify();
   app.decorate("authEnabled", false);
@@ -43,7 +45,7 @@ function makeApp() {
           ? { remote_path: "/w/repo", server_url: "http://r", server_api_key: "k", remote_server_id: "srv1" }
           : undefined,
     },
-    remoteSessionMappings: { upsert },
+    remoteSessionMappings: { upsert, markTitleResolved: markTitleResolvedDb },
     workflowRuns: { getActive: async () => [], getById: async () => undefined },
     agentSessions: { getById: async () => undefined },
   } as never);
@@ -52,13 +54,13 @@ function makeApp() {
   app.decorate("remotePatchCache", {} as never);
   app.decorate("reverseConnectManager", null);
   app.decorate("eventBus", { emit } as never);
-  app.decorate("agentSessionManager", {} as never);
-  return { remoteSessionMap, upsert, emit };
+  app.decorate("agentSessionManager", { markTitleResolved: markTitleResolvedMem } as never);
+  return { remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem };
 }
 
 describe("workflow-run remote proxying (front server)", () => {
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
-    const { remoteSessionMap, upsert, emit } = makeApp();
+    const { remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem } = makeApp();
     await app.register(workflowRunRoutes);
     proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
 
@@ -81,6 +83,19 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev");
     expect(ensureStreamMock).toHaveBeenCalledWith("remote-srv1-p1-rev1", expect.anything());
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated", projectId: "p1" }));
+    // Sidebar/window surfacing for the worker-spawned reviewer: the worker's
+    // own announcements fire before the front subscribes, so the route must
+    // emit them itself.
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "session:process", projectId: "p1", branch: "dev", sessionId: "remote-srv1-p1-rev1", alive: true,
+    }));
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "session:status", projectId: "p1", branch: "dev", sessionId: "remote-srv1-p1-rev1", status: "running",
+    }));
+    // The worker set the final "Review - …" title; the front claims its
+    // one-shot slots so a takeover /message can't regenerate over it.
+    expect(markTitleResolvedMem).toHaveBeenCalledWith("remote-srv1-p1-rev1");
+    expect(markTitleResolvedDb).toHaveBeenCalledWith("remote-srv1-p1-rev1");
   });
 
   it("POST forwards the worker's semantic 4xx body and 404s an unmapped source", async () => {

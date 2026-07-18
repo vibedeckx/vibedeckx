@@ -55,7 +55,11 @@ export function ReviewRunPanel({
   if (activeRuns.length === 0) return null;
 
   return (
-    <div className="border-b bg-muted/30 px-4 py-2 space-y-2">
+    // shrink-0 + max-h: the panel sits above the flex-1 conversation; without a
+    // cap, the content-sized feedback textarea below would grow the panel past
+    // the viewport and push the rest of the chat off-screen with no way to
+    // scroll to it.
+    <div className="shrink-0 border-b bg-muted/30 px-4 py-2 space-y-2 max-h-[50vh] overflow-y-auto">
       {activeRuns.map((run) => (
         <div key={run.id} className="text-sm space-y-2">
           <div className="flex items-center justify-between">
@@ -80,8 +84,10 @@ export function ReviewRunPanel({
           )}
           {run.status === "waiting_feedback" && (
             <>
+              {/* max-h caps the field-sizing-content auto-grow — a long review
+                  scrolls inside the textarea instead of inflating the panel. */}
               <Textarea
-                className="text-xs font-mono min-h-28"
+                className="text-xs font-mono min-h-28 max-h-72"
                 value={draft[run.id] ?? run.feedback_snapshot ?? ""}
                 onChange={(e) => setDraft((d) => ({ ...d, [run.id]: e.target.value }))}
               />
