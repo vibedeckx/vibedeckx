@@ -675,6 +675,7 @@ export interface Storage {
       source_turn_end_index: number;
       review_focus: string | null;
       review_target: string | null;
+      reviewer_session_id?: string | null;
     }): Promise<WorkflowRun>;
     getById(id: string): Promise<WorkflowRun | undefined>;
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;

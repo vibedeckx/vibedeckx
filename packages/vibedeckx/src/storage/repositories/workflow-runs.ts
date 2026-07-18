@@ -9,7 +9,11 @@ const asRun = (row: unknown): WorkflowRun => row as WorkflowRun;
 export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflowRuns"> => ({
   workflowRuns: {
     create: async (opts) => {
-      await kdb.insertInto("workflow_runs").values({ ...opts, status: "waiting_reviewer" }).execute();
+      await kdb.insertInto("workflow_runs").values({
+        ...opts,
+        reviewer_session_id: opts.reviewer_session_id ?? null,
+        status: "waiting_reviewer",
+      }).execute();
       const row = await kdb
         .selectFrom("workflow_runs").selectAll().where("id", "=", opts.id)
         .executeTakeFirstOrThrow();

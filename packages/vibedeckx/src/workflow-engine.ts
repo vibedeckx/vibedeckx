@@ -20,6 +20,7 @@ export interface AgentOps {
   sendUserMessage(sessionId: string, content: string, projectPath?: string): Promise<boolean>;
   /** Write a final title and claim the one-shot slot (AI titling never fires). */
   setFinalSessionTitle(sessionId: string, title: string): Promise<void>;
+  switchMode(sessionId: string, projectPath: string, newMode: "plan" | "edit"): Promise<boolean>;
   /** Raw sparse entries (holes preserved) — index space matches entry indices. */
   getRawMessages(sessionId: string): AgentMessage[];
   /** Optional: push a raw WS frame to a session's stream subscribers. */
@@ -27,7 +28,7 @@ export interface AgentOps {
 }
 
 export class WorkflowError extends Error {
-  constructor(public code: "session-busy" | "no-completed-turn" | "spawn-failed" | "bad-state" | "send-failed" | "source-running", message: string) {
+  constructor(public code: "session-busy" | "no-completed-turn" | "spawn-failed" | "bad-state" | "send-failed" | "source-running" | "reviewer-unavailable", message: string) {
     super(message);
   }
 }
@@ -44,6 +45,15 @@ export function extractLatestTurnEndIndex(entries: AgentMessage[]): number | nul
 export function extractLastAssistantBefore(entries: AgentMessage[], beforeIndex: number): string | null {
   for (let i = beforeIndex - 1; i >= 0; i--) {
     const e = entries[i];
+    if (e?.type === "assistant" && typeof e.content === "string" && e.content.trim()) return e.content;
+  }
+  return null;
+}
+
+export function extractLastAssistantInTurn(entries: AgentMessage[], beforeIndex: number): string | null {
+  for (let i = beforeIndex - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e?.type === "user") return null;
     if (e?.type === "assistant" && typeof e.content === "string" && e.content.trim()) return e.content;
   }
   return null;
@@ -81,6 +91,33 @@ export function buildReviewerPrompt(opts: {
     .join("\n");
 }
 
+function reviewTargetPromptLine(target: ReviewTarget): string | null {
+  return target.baseHead
+    ? `- The work was captured at commit ${target.baseHead}${target.diffStat ? ` with uncommitted changes (${target.diffStat})` : " with no uncommitted changes"}.`
+    : null;
+}
+
+export function buildRereviewerPrompt(opts: {
+  taskContext: string | null;
+  reviewFocus: string | null;
+  target: ReviewTarget;
+}): string {
+  return [
+    "The source agent has addressed feedback from your previous review.",
+    "Review the latest workspace state again.",
+    opts.taskContext ? `\n## Latest source turn\n${opts.taskContext}` : null,
+    opts.reviewFocus ? `\n## Review focus\n${opts.reviewFocus}` : null,
+    "\n## How to review",
+    "- Verify whether your previous feedback was addressed correctly.",
+    "- Check for regressions and remaining correctness or test gaps.",
+    "- Do NOT modify files — remain in read-only review mode.",
+    reviewTargetPromptLine(opts.target),
+    "- End with actionable feedback, or explicitly state that it looks good.",
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
 export function buildFeedbackMessage(feedback: string): string {
   return [
     "[Review Feedback]",
@@ -96,6 +133,25 @@ interface Participant {
   runId: string;
   role: "source" | "reviewer";
 }
+
+export type ReviewerCandidateUnavailableReason =
+  | "deleted"
+  | "project-mismatch"
+  | "branch-mismatch"
+  | "running"
+  | "busy"
+  | "unsupported-agent"
+  | "unavailable";
+
+export interface ReviewerCandidate {
+  available: boolean;
+  sessionId: string | null;
+  title: string | null;
+  agentType: AgentType | null;
+  reason: ReviewerCandidateUnavailableReason | null;
+}
+
+export const REVIEWER_AGENT_TYPES = new Set<AgentType>(["claude-code", "codex"]);
 
 export class WorkflowEngine {
   private eventBus?: EventBus;
@@ -152,6 +208,17 @@ export class WorkflowEngine {
     }
   }
 
+  private releaseReservations(runId: string): void {
+    for (const [sid, participant] of this.participants) {
+      if (participant.runId === runId) this.participants.delete(sid);
+    }
+  }
+
+  private async failRun(run: WorkflowRun, error: string): Promise<void> {
+    const failed = await this.storage.workflowRuns.update(run.id, { status: "failed", error });
+    if (failed) this.untrackRun(failed);
+  }
+
   /** Sync check used by ChatSessionManager before waking the commander model. */
   shouldSuppressAgentEvent(sessionId: string): boolean {
     return this.participants.get(sessionId)?.role === "reviewer";
@@ -161,36 +228,79 @@ export class WorkflowEngine {
     return this.participants.has(sessionId);
   }
 
+  async getReviewerCandidate(sourceSessionId: string): Promise<ReviewerCandidate | null> {
+    const previous = await this.storage.workflowRuns.getLatestCompletedBySource(sourceSessionId);
+    if (!previous?.reviewer_session_id) return null;
+
+    const unavailable = (reason: ReviewerCandidateUnavailableReason): ReviewerCandidate => ({
+      available: false,
+      sessionId: null,
+      title: null,
+      agentType: null,
+      reason,
+    });
+    const source = await this.storage.agentSessions.getById(sourceSessionId);
+    const reviewer = await this.storage.agentSessions.getById(previous.reviewer_session_id);
+    if (!reviewer) return unavailable("deleted");
+    if (!source || reviewer.project_id !== source.project_id || reviewer.project_id !== previous.project_id) {
+      return unavailable("project-mismatch");
+    }
+    if ((reviewer.branch || null) !== (source.branch || null) || (reviewer.branch || null) !== previous.branch) {
+      return unavailable("branch-mismatch");
+    }
+    if (!REVIEWER_AGENT_TYPES.has(reviewer.agent_type as AgentType)) {
+      return unavailable("unsupported-agent");
+    }
+    if (reviewer.status === "running") return unavailable("running");
+    if (reviewer.status !== "stopped") return unavailable("unavailable");
+    if (this.participants.has(reviewer.id) || await this.storage.workflowRuns.getActiveBySession(reviewer.id)) {
+      return unavailable("busy");
+    }
+    return {
+      available: true,
+      sessionId: reviewer.id,
+      title: reviewer.title ?? null,
+      agentType: reviewer.agent_type as AgentType,
+      reason: null,
+    };
+  }
+
   async startAdhocReview(opts: {
     project: { id: string; path: string };
     branch: string | null;
     sourceSessionId: string;
     reviewFocus?: string;
     sourceTurnEndIndex?: number;
+    /** Existing reviewer session to continue. Mutually exclusive with reviewerAgentType. */
+    reviewerSessionId?: string;
     /** Agent that runs the review; defaults to claude-code. */
     reviewerAgentType?: AgentType;
   }): Promise<WorkflowRun> {
-    if (this.participants.has(opts.sourceSessionId)) {
-      throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
+    if (opts.reviewerSessionId === opts.sourceSessionId) {
+      throw new WorkflowError("reviewer-unavailable", "reviewer session 不能与 source session 相同");
     }
-    // Reserve the source session synchronously — before any `await` below —
-    // so two concurrent calls for the same session can't both pass the
-    // check above. JS only yields to another call at an `await`; by the
-    // time it does, this call has already claimed the map entry, so the
-    // other call's synchronous `has()` check (above) sees it and throws.
-    // There is deliberately no DB unique constraint backing this: this is a
-    // single-writer server process and every run creation flows through
-    // this one WorkflowEngine instance, so the in-memory map alone is
-    // authoritative. The run row doesn't exist yet, so reserve with a
-    // "pending" placeholder; the outer catch below releases it on any
-    // failure that happens before `trackParticipants(run)` replaces it with
-    // the real run id (the inner reviewer-spawn try/catch handles cleanup
-    // for failures after that point via the real run id instead).
-    this.participants.set(opts.sourceSessionId, { runId: "pending", role: "source" });
+    const runId = randomUUID();
+    const participantIds = [opts.sourceSessionId, opts.reviewerSessionId]
+      .filter((id): id is string => Boolean(id));
+    for (const sessionId of participantIds) {
+      if (this.participants.has(sessionId)) {
+        throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
+      }
+    }
+    // This check-and-reserve block is deliberately synchronous. JavaScript
+    // cannot interleave a competing start until the first await below, by
+    // which point every known participant is already claimed by this run id.
+    this.participants.set(opts.sourceSessionId, { runId, role: "source" });
+    if (opts.reviewerSessionId) {
+      this.participants.set(opts.reviewerSessionId, { runId, role: "reviewer" });
+    }
 
     try {
-      const busy = await this.storage.workflowRuns.getActiveBySession(opts.sourceSessionId);
-      if (busy) throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
+      for (const sessionId of participantIds) {
+        if (await this.storage.workflowRuns.getActiveBySession(sessionId)) {
+          throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
+        }
+      }
 
       const sourceSession = await this.storage.agentSessions.getById(opts.sourceSessionId);
       if (sourceSession?.status === "running") {
@@ -206,16 +316,64 @@ export class WorkflowEngine {
       const worktreePath = resolveWorktreePath(opts.project.path, opts.branch);
       const target = captureReviewTarget(worktreePath);
 
+      let reviewerSession = null;
+      if (opts.reviewerSessionId) {
+        reviewerSession = await this.storage.agentSessions.getById(opts.reviewerSessionId);
+        if (!reviewerSession) {
+          throw new WorkflowError("reviewer-unavailable", "上次 reviewer session 已不存在");
+        }
+        if (reviewerSession.project_id !== opts.project.id) {
+          throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前项目");
+        }
+        if ((reviewerSession.branch || null) !== opts.branch) {
+          throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前 branch");
+        }
+        if (!REVIEWER_AGENT_TYPES.has(reviewerSession.agent_type as AgentType)) {
+          throw new WorkflowError("reviewer-unavailable", "reviewer agent 类型不可用");
+        }
+        if (reviewerSession.status !== "stopped") {
+          throw new WorkflowError("reviewer-unavailable", "reviewer session 正在运行或不可用");
+        }
+      }
+
       const run = await this.storage.workflowRuns.create({
-        id: randomUUID(),
+        id: runId,
         project_id: opts.project.id,
         branch: opts.branch,
         source_session_id: opts.sourceSessionId,
         source_turn_end_index: turnEndIndex,
         review_focus: opts.reviewFocus ?? null,
         review_target: JSON.stringify(target),
+        reviewer_session_id: opts.reviewerSessionId ?? null,
       });
       this.trackParticipants(run);
+
+      if (opts.reviewerSessionId && reviewerSession) {
+        if (reviewerSession.permission_mode !== "plan") {
+          let switched = false;
+          try {
+            switched = await this.agentOps.switchMode(opts.reviewerSessionId, opts.project.path, "plan");
+          } catch { /* normalized to a stable workflow error below */ }
+          if (!switched) {
+            await this.failRun(run, "无法将 reviewer 恢复为只读 plan 模式");
+            throw new WorkflowError("reviewer-unavailable", "无法将 reviewer 恢复为只读 plan 模式");
+          }
+        }
+        const prompt = buildRereviewerPrompt({
+          taskContext: extractTaskContextBefore(entries, turnEndIndex),
+          reviewFocus: opts.reviewFocus ?? null,
+          target,
+        });
+        const sent = await this.agentOps
+          .sendUserMessage(opts.reviewerSessionId, prompt, opts.project.path)
+          .catch(() => false);
+        if (!sent) {
+          await this.failRun(run, "向上次 reviewer 投递复审任务失败");
+          throw new WorkflowError("send-failed", "向上次 reviewer 投递复审任务失败");
+        }
+        this.emitRunUpdated(run);
+        return run;
+      }
 
       try {
         // Reviewer runs in plan (read-only) mode: it shares the worktree with
@@ -265,9 +423,7 @@ export class WorkflowEngine {
         throw new WorkflowError("spawn-failed", "创建 reviewer session 失败");
       }
     } catch (err) {
-      if (this.participants.get(opts.sourceSessionId)?.runId === "pending") {
-        this.participants.delete(opts.sourceSessionId);
-      }
+      this.releaseReservations(runId);
       throw err;
     }
   }
@@ -280,7 +436,7 @@ export class WorkflowEngine {
 
     const entries = this.agentOps.getRawMessages(event.sessionId);
     const boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries) ?? entries.length;
-    const feedback = extractLastAssistantBefore(entries, boundary) ?? "(reviewer 没有输出可用的反馈文本)";
+    const feedback = extractLastAssistantInTurn(entries, boundary) ?? "(reviewer 没有输出可用的反馈文本)";
 
     let driftNote: string | null = null;
     try {

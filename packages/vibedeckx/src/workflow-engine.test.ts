@@ -8,8 +8,10 @@ import { EventBus } from "./event-bus.js";
 import {
   WorkflowEngine,
   WorkflowError,
+  buildRereviewerPrompt,
   extractLatestTurnEndIndex,
   extractLastAssistantBefore,
+  extractLastAssistantInTurn,
   extractTaskContextBefore,
 } from "./workflow-engine.js";
 import type { AgentMessage } from "./agent-types.js";
@@ -35,6 +37,31 @@ describe("pure helpers", () => {
   it("extractTaskContextBefore finds the turn's user message", () => {
     expect(extractTaskContextBefore(entries, 4)).toBe("please fix the bug");
   });
+
+  it("extractLastAssistantInTurn never falls back to an older review", () => {
+    const turns: AgentMessage[] = [
+      { type: "assistant", content: "old feedback", timestamp: 1 },
+      { type: "turn_end", timestamp: 2 },
+      { type: "user", content: "review again", timestamp: 3 },
+      { type: "tool_result", tool: "Read", output: "ok", timestamp: 4 },
+      { type: "turn_end", timestamp: 5 },
+    ];
+    expect(extractLastAssistantInTurn(turns, 4)).toBeNull();
+    turns.splice(4, 0, { type: "assistant", content: "new feedback", timestamp: 5 });
+    expect(extractLastAssistantInTurn(turns, 5)).toBe("new feedback");
+  });
+
+  it("buildRereviewerPrompt anchors the latest source turn and workspace target", () => {
+    const prompt = buildRereviewerPrompt({
+      taskContext: "also cover the new API requirement",
+      reviewFocus: "tests",
+      target: { baseHead: "abc123", diffDigest: "digest", diffStat: "2 files changed", capturedAt: 1 },
+    });
+    expect(prompt).toContain("also cover the new API requirement");
+    expect(prompt).toContain("abc123");
+    expect(prompt).toContain("2 files changed");
+    expect(prompt).toContain("read-only review mode");
+  });
 });
 
 describe("WorkflowEngine", () => {
@@ -46,6 +73,7 @@ describe("WorkflowEngine", () => {
   const agentOps = {
     createNewSession: vi.fn(async () => "s-rev"),
     sendUserMessage: vi.fn(async () => true),
+    switchMode: vi.fn(async () => true),
     setFinalSessionTitle: vi.fn(async () => undefined),
     getRawMessages: vi.fn((sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : entries)),
     broadcastRawToSession: vi.fn(),
@@ -82,6 +110,49 @@ describe("WorkflowEngine", () => {
     });
   }
 
+  async function createReviewer(opts: {
+    id?: string;
+    projectId?: string;
+    branch?: string;
+    status?: "running" | "stopped" | "error";
+    permissionMode?: "plan" | "edit";
+    agentType?: "claude-code" | "codex";
+    title?: string;
+  } = {}) {
+    const id = opts.id ?? "s-rev";
+    const projectId = opts.projectId ?? "p1";
+    if (projectId !== "p1" && !(await storage.projects.getById(projectId))) {
+      await storage.projects.create({ id: projectId, name: projectId, path: project.path });
+    }
+    await storage.agentSessions.create({
+      id,
+      project_id: projectId,
+      branch: opts.branch ?? "dev",
+      permission_mode: opts.permissionMode ?? "plan",
+      agent_type: opts.agentType ?? "codex",
+    });
+    await storage.agentSessions.updateStatus(id, opts.status ?? "stopped");
+    if (opts.title) await storage.agentSessions.updateTitle(id, opts.title);
+    return id;
+  }
+
+  async function seedCompletedReview(reviewerId = "s-rev") {
+    const run = await storage.workflowRuns.create({
+      id: `past-${reviewerId}`,
+      project_id: "p1",
+      branch: "dev",
+      source_session_id: "s-src",
+      source_turn_end_index: 4,
+      review_focus: null,
+      review_target: null,
+    });
+    await storage.workflowRuns.update(run.id, {
+      reviewer_session_id: reviewerId,
+      status: "completed",
+    });
+    return run;
+  }
+
   it("startAdhocReview creates run, spawns reviewer, sends prompt", async () => {
     const run = await start();
     expect(run.status).toBe("waiting_reviewer");
@@ -110,6 +181,127 @@ describe("WorkflowEngine", () => {
     await storage.agentSessions.updateTitle("s-src", "Fix login bug");
     await start();
     expect(agentOps.setFinalSessionTitle).toHaveBeenCalledWith("s-rev", "Review - Fix login bug");
+  });
+
+  it("returns the most recent compatible reviewer candidate", async () => {
+    await createReviewer({ title: "Review - Fix login bug" });
+    await seedCompletedReview();
+
+    await expect(engine.getReviewerCandidate("s-src")).resolves.toEqual({
+      available: true,
+      sessionId: "s-rev",
+      title: "Review - Fix login bug",
+      agentType: "codex",
+      reason: null,
+    });
+  });
+
+  it("classifies a deleted previous reviewer as unavailable without falling back", async () => {
+    await seedCompletedReview("missing-reviewer");
+    await expect(engine.getReviewerCandidate("s-src")).resolves.toEqual({
+      available: false,
+      sessionId: null,
+      title: null,
+      agentType: null,
+      reason: "deleted",
+    });
+  });
+
+  it("reuses an existing reviewer session instead of creating one", async () => {
+    await createReviewer();
+    const run = await engine.startAdhocReview({
+      project,
+      branch: "dev",
+      sourceSessionId: "s-src",
+      reviewerSessionId: "s-rev",
+      reviewFocus: "focus on tests",
+    });
+
+    expect(run.reviewer_session_id).toBe("s-rev");
+    expect(agentOps.createNewSession).not.toHaveBeenCalled();
+    expect(agentOps.sendUserMessage).toHaveBeenCalledWith(
+      "s-rev",
+      expect.stringContaining("previous review"),
+      project.path,
+    );
+    const prompt = agentOps.sendUserMessage.mock.calls.at(-1)?.[1] as string;
+    expect(prompt).toContain("please fix the bug");
+    expect(prompt).toContain("focus on tests");
+  });
+
+  it("switches a stopped edit-mode reviewer back to plan before reuse", async () => {
+    await createReviewer({ permissionMode: "edit" });
+    await engine.startAdhocReview({
+      project,
+      branch: "dev",
+      sourceSessionId: "s-src",
+      reviewerSessionId: "s-rev",
+    });
+
+    expect(agentOps.switchMode).toHaveBeenCalledWith("s-rev", project.path, "plan");
+    expect(agentOps.switchMode.mock.invocationCallOrder[0])
+      .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
+  });
+
+  it("fails the run and releases both sessions when plan-mode restoration fails", async () => {
+    await createReviewer({ permissionMode: "edit" });
+    agentOps.switchMode.mockResolvedValueOnce(false);
+
+    await expect(engine.startAdhocReview({
+      project,
+      branch: "dev",
+      sourceSessionId: "s-src",
+      reviewerSessionId: "s-rev",
+    })).rejects.toMatchObject({ code: "reviewer-unavailable" });
+
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+    expect(engine.isSessionInActiveRun("s-rev")).toBe(false);
+    expect(await storage.workflowRuns.getActive("p1", "dev")).toEqual([]);
+  });
+
+  it("rejects an incompatible or running reviewer and releases reservations", async () => {
+    await createReviewer({ branch: "other" });
+    await expect(engine.startAdhocReview({
+      project,
+      branch: "dev",
+      sourceSessionId: "s-src",
+      reviewerSessionId: "s-rev",
+    })).rejects.toMatchObject({ code: "reviewer-unavailable" });
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+    expect(engine.isSessionInActiveRun("s-rev")).toBe(false);
+  });
+
+  it("allows exactly one concurrent run to reserve a reused reviewer", async () => {
+    await storage.agentSessions.create({ id: "s-src-2", project_id: "p1", branch: "dev" });
+    await storage.agentSessions.updateStatus("s-src-2", "stopped");
+    await createReviewer();
+    let releaseSend!: () => void;
+    const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+    agentOps.sendUserMessage.mockImplementationOnce(async () => {
+      await sendGate;
+      return true;
+    });
+
+    const first = engine.startAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src", reviewerSessionId: "s-rev",
+    });
+    const second = engine.startAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src-2", reviewerSessionId: "s-rev",
+    });
+    await expect(second).rejects.toMatchObject({ code: "session-busy" });
+    releaseSend();
+    await expect(first).resolves.toMatchObject({ reviewer_session_id: "s-rev" });
+  });
+
+  it("marks the run failed and releases both sessions when reused-reviewer delivery fails", async () => {
+    await createReviewer();
+    agentOps.sendUserMessage.mockResolvedValueOnce(false);
+    await expect(engine.startAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src", reviewerSessionId: "s-rev",
+    })).rejects.toMatchObject({ code: "send-failed" });
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+    expect(engine.isSessionInActiveRun("s-rev")).toBe(false);
+    expect((await storage.workflowRuns.getActive("p1", "dev"))).toHaveLength(0);
   });
 
   it("mirrors run updates onto participant session streams", async () => {
