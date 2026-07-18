@@ -115,6 +115,9 @@ describe("workflow-run remote proxying (front server)", () => {
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
     const { remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem } = makeApp();
     await app.register(workflowRunRoutes);
+    // Fresh review → the front first pulls the source history (intent brief
+    // input) over the session proxy, then POSTs to the worker mirror.
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { session: { id: "src1" }, messages: [] } });
     proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
 
     const res = await app.inject({
@@ -122,7 +125,8 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { projectId: "p1", sourceSessionId: SRC, reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" },
     });
     expect(res.statusCode).toBe(201);
-    const [serverId, url, key, method, apiPath, body] = proxyMock.mock.calls[0];
+    expect(proxyMock.mock.calls[0][4]).toBe("/api/agent-sessions/src1");
+    const [serverId, url, key, method, apiPath, body] = proxyMock.mock.calls[1];
     expect([serverId, url, key, method, apiPath]).toEqual(["srv1", "http://r", "k", "POST", "/api/path/workflow-runs"]);
     expect(body).toMatchObject({ sourceSessionId: "src1", reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" });
 
@@ -154,6 +158,7 @@ describe("workflow-run remote proxying (front server)", () => {
   it("POST forwards the worker's semantic 4xx body and 404s an unmapped source", async () => {
     makeApp();
     await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { session: { id: "src1" }, messages: [] } }); // history pull
     proxyMock.mockResolvedValueOnce({ ok: false, status: 409, data: { error: "该 session 已在一个进行中的 review 里" } });
     const busy = await app.inject({
       method: "POST", url: "/api/workflow-runs",

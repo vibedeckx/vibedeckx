@@ -2,6 +2,9 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth } from "../server.js";
 import { REVIEWER_AGENT_TYPES, WorkflowError } from "../workflow-engine.js";
+import { generateIntentBrief } from "../utils/review-brief.js";
+import { resolveUserId } from "../utils/resolve-user-id.js";
+import type { AgentMessage } from "../agent-types.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun } from "./remote-status-bridge.js";
 import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
@@ -126,6 +129,27 @@ async function routes(fastify: FastifyInstance) {
         bareReviewerSessionId = reviewerInfo.remoteSessionId;
       }
 
+      // Tier-1 context (fresh reviews only): distill the source conversation
+      // into an intent brief HERE — the chat-provider keys live on this front,
+      // never on workers (same split as remote title generation). The history
+      // comes over the existing session proxy; any failure in this block
+      // degrades to the worker's deterministic excerpt (tier 2) by simply
+      // omitting the field.
+      let intentBrief: string | undefined;
+      if (!bareReviewerSessionId) {
+        try {
+          const historyResult = await proxyAuto(
+            remoteInfo, "GET", `/api/agent-sessions/${remoteInfo.remoteSessionId}`,
+          );
+          if (historyResult.ok) {
+            const messages = (historyResult.data as { messages?: AgentMessage[] }).messages ?? [];
+            intentBrief = (await generateIntentBrief(fastify.storage, resolveUserId(userId), messages)) ?? undefined;
+          }
+        } catch (err) {
+          console.warn("[WorkflowRuns] intent brief generation failed (remote source):", err);
+        }
+      }
+
       // The worker derives branch from its own session row — the body branch
       // is not forwarded (server-derived branch, same rule as the local path).
       const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
@@ -134,6 +158,7 @@ async function routes(fastify: FastifyInstance) {
         sourceTurnEndIndex,
         reviewerAgentType,
         reviewerSessionId: bareReviewerSessionId,
+        intentBrief,
       });
       if (!result.ok) return sendProxyFailure(reply, result);
 
@@ -218,6 +243,21 @@ async function routes(fastify: FastifyInstance) {
     if (branch !== undefined && (branch || null) !== runBranch) {
       return reply.code(400).send({ error: "branch does not match source session" });
     }
+    // Tier-1 context (fresh reviews only): same as the remote branch, but the
+    // history is in-process. Null (no model configured / LLM failure) simply
+    // means the engine falls back to the deterministic excerpt.
+    let intentBrief: string | undefined;
+    if (!reviewerSessionId) {
+      try {
+        intentBrief = (await generateIntentBrief(
+          fastify.storage,
+          resolveUserId(userId),
+          fastify.agentSessionManager.getMessages(sourceSessionId),
+        )) ?? undefined;
+      } catch (err) {
+        console.warn("[WorkflowRuns] intent brief generation failed (local source):", err);
+      }
+    }
     try {
       const run = await fastify.workflowEngine.startAdhocReview({
         project: { id: project.id, path: project.path },
@@ -227,6 +267,7 @@ async function routes(fastify: FastifyInstance) {
         sourceTurnEndIndex,
         reviewerAgentType,
         reviewerSessionId,
+        intentBrief,
       });
       return reply.code(201).send({ run });
     } catch (err) {
@@ -275,7 +316,7 @@ async function routes(fastify: FastifyInstance) {
           projectId,
           remoteInfo.remoteServerId,
           bareCandidate.sessionId,
-          remoteInfo.branch,
+          remoteInfo.branch ?? null,
         );
       }
       return reply.send({ candidate });
@@ -411,12 +452,20 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
     const { sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
+    const intentBriefRaw = req.body?.intentBrief;
+    if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
+      return reply.code(400).send({ error: "intentBrief must be a string" });
+    }
+    // Opaque text to this worker; bound it so a front bug can't balloon the prompt.
+    const intentBrief = intentBriefRaw?.trim()
+      ? intentBriefRaw.length > 8000 ? intentBriefRaw.slice(0, 8000) + "…" : intentBriefRaw
+      : undefined;
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     const reviewerSessionIdRaw = req.body?.reviewerSessionId;
@@ -442,6 +491,7 @@ async function routes(fastify: FastifyInstance) {
         sourceTurnEndIndex,
         reviewerAgentType,
         reviewerSessionId,
+        intentBrief,
       });
       return reply.code(201).send({ run });
     } catch (err) {

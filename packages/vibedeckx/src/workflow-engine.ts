@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import type { Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
-import type { AgentMessage, AgentType } from "./agent-types.js";
+import type { AgentMessage, AgentType, TextPart } from "./agent-types.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
@@ -34,6 +34,25 @@ export class WorkflowError extends Error {
 }
 
 // ---------- pure helpers (exported for tests / reuse) ----------
+
+const MAX_CONTEXT_CHARS = 2000;
+const MAX_SELF_REPORT_CHARS = 4000;
+/** Below this length an assistant message is treated as a "done" stub, not a self-report. */
+const SELF_REPORT_MIN_CHARS = 80;
+
+function cap(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) + "…" : text;
+}
+
+function userTextOf(e: AgentMessage): string | null {
+  if (e.type !== "user") return null;
+  if (typeof e.content === "string") return e.content;
+  const text = e.content
+    .filter((p): p is TextPart => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+  return text || null;
+}
 
 export function extractLatestTurnEndIndex(entries: AgentMessage[]): number | null {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -69,23 +88,96 @@ export function extractTaskContextBefore(entries: AgentMessage[], turnEndIndex: 
   return null;
 }
 
+/**
+ * First real user message of the session — the original intent, verbatim.
+ * Skips harness-injected event notifications (they are user-typed but not
+ * something the user wrote).
+ */
+export function extractFirstUserMessage(entries: AgentMessage[]): string | null {
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e?.type !== "user" || e.event) continue;
+    const text = userTextOf(e)?.trim();
+    if (text) return cap(text, MAX_CONTEXT_CHARS);
+  }
+  return null;
+}
+
+/**
+ * The author's own account of the work: last substantial assistant message
+ * before `beforeIndex`. Short "done"-style stubs are skipped in favor of an
+ * earlier substantial summary; if nothing substantial exists, the last
+ * non-empty stub is returned rather than nothing. `withinTurn` stops the walk
+ * at the previous user message — used for re-reviews, where an older turn's
+ * summary would describe stale work.
+ */
+export function extractAuthorSelfReport(
+  entries: AgentMessage[],
+  beforeIndex: number,
+  opts?: { withinTurn?: boolean },
+): string | null {
+  let fallback: string | null = null;
+  for (let i = beforeIndex - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e?.type === "user" && opts?.withinTurn) break;
+    if (e?.type !== "assistant" || typeof e.content !== "string") continue;
+    const text = e.content.trim();
+    if (!text) continue;
+    if (text.length >= SELF_REPORT_MIN_CHARS) return cap(text, MAX_SELF_REPORT_CHARS);
+    if (fallback === null) fallback = text;
+  }
+  return fallback;
+}
+
+/**
+ * Frames the author's summary as claims to verify, not facts (anchoring
+ * antidote): reviewers inherit confidence from context, so the self-report is
+ * explicitly re-labeled as the object under review. Tag-delimited because the
+ * report may itself contain markdown fences.
+ */
+function selfReportSection(report: string | null): string | null {
+  if (!report) return null;
+  return [
+    "\n## Author's self-report (unverified)",
+    "The implementing agent described its own work as follows. Treat every claim as unverified — check each one against the actual code, and look for problems the self-report does not mention.",
+    "<author-self-report>",
+    report,
+    "</author-self-report>",
+  ].join("\n");
+}
+
 export function buildReviewerPrompt(opts: {
   taskContext: string | null;
+  originalIntent: string | null;
+  authorSelfReport: string | null;
+  /** Tier 1: LLM-distilled brief; replaces the deterministic excerpt sections. */
+  intentBrief?: string | null;
   reviewFocus: string | null;
   target: ReviewTarget;
 }): string {
+  // In single-turn sessions the first user message IS the turn's task — don't
+  // print it twice.
+  const intent = opts.originalIntent !== opts.taskContext ? opts.originalIntent : null;
+  const brief = opts.intentBrief || null;
+  const hasExcerpt = Boolean(intent || opts.taskContext || opts.authorSelfReport);
   return [
     "You are a code reviewer agent. Another agent just completed work in this workspace; review it critically and independently.",
+    brief ? `\n## Intent brief (distilled from the source conversation)\n${brief}` : null,
+    !brief && intent ? `\n## Original request (the user's first message in this session, verbatim)\n${intent}` : null,
     opts.taskContext ? `\n## Original task\n${opts.taskContext}` : null,
+    brief ? null : selfReportSection(opts.authorSelfReport),
     opts.reviewFocus ? `\n## Review focus (from the user)\n${opts.reviewFocus}` : null,
     "\n## How to review",
     "- Do NOT modify any files — you are in read-only review mode.",
     "- Inspect the actual workspace state yourself: read the relevant files, run `git diff`, `git status` and `git log`.",
-    opts.target.baseHead
-      ? `- The work was captured at commit ${opts.target.baseHead}${opts.target.diffStat ? ` with uncommitted changes (${opts.target.diffStat})` : " with no uncommitted changes"}.`
-      : null,
+    reviewTargetPromptLine(opts.target),
     "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
     "\nEnd your final message with a clear, actionable list of feedback items — or state explicitly that the work looks good.",
+    brief
+      ? "\n(review context: distilled intent brief + live workspace)"
+      : hasExcerpt
+        ? "\n(review context: deterministic excerpt of the source conversation + live workspace)"
+        : "\n(review context: live workspace only — the source conversation was unavailable)",
   ]
     .filter((l): l is string => l !== null)
     .join("\n");
@@ -99,6 +191,7 @@ function reviewTargetPromptLine(target: ReviewTarget): string | null {
 
 export function buildRereviewerPrompt(opts: {
   taskContext: string | null;
+  authorSelfReport: string | null;
   reviewFocus: string | null;
   target: ReviewTarget;
 }): string {
@@ -106,9 +199,11 @@ export function buildRereviewerPrompt(opts: {
     "The source agent has addressed feedback from your previous review.",
     "Review the latest workspace state again.",
     opts.taskContext ? `\n## Latest source turn\n${opts.taskContext}` : null,
+    selfReportSection(opts.authorSelfReport),
     opts.reviewFocus ? `\n## Review focus\n${opts.reviewFocus}` : null,
     "\n## How to review",
     "- Verify whether your previous feedback was addressed correctly.",
+    "- Treat the changed areas as new code: look for bugs the fix itself may have introduced, not only whether your old items were closed.",
     "- Check for regressions and remaining correctness or test gaps.",
     "- Do NOT modify files — remain in read-only review mode.",
     reviewTargetPromptLine(opts.target),
@@ -271,6 +366,13 @@ export class WorkflowEngine {
     sourceSessionId: string;
     reviewFocus?: string;
     sourceTurnEndIndex?: number;
+    /**
+     * Tier-1 context: LLM-distilled brief of the source conversation, produced
+     * front-side (that's where chat-provider keys live). Opaque text to the
+     * engine; when absent the prompt falls back to the deterministic excerpt.
+     * Fresh reviews only — re-reviews keep their own turn-scoped context.
+     */
+    intentBrief?: string;
     /** Existing reviewer session to continue. Mutually exclusive with reviewerAgentType. */
     reviewerSessionId?: string;
     /** Agent that runs the review; defaults to claude-code. */
@@ -361,6 +463,9 @@ export class WorkflowEngine {
         }
         const prompt = buildRereviewerPrompt({
           taskContext: extractTaskContextBefore(entries, turnEndIndex),
+          // Scoped to the fix turn: an older turn's summary would describe the
+          // pre-review state and mislead the acceptance pass.
+          authorSelfReport: extractAuthorSelfReport(entries, turnEndIndex, { withinTurn: true }),
           reviewFocus: opts.reviewFocus ?? null,
           target,
         });
@@ -397,6 +502,9 @@ export class WorkflowEngine {
           .catch((err) => console.warn(`[WorkflowEngine] failed to set reviewer title for ${reviewerId}:`, err));
         const prompt = buildReviewerPrompt({
           taskContext,
+          originalIntent: extractFirstUserMessage(entries),
+          authorSelfReport: extractAuthorSelfReport(entries, turnEndIndex),
+          intentBrief: opts.intentBrief ?? null,
           reviewFocus: opts.reviewFocus ?? null,
           target,
         });

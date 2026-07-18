@@ -95,17 +95,16 @@ export async function generateSessionTitleWithModel(
     : undefined;
 
   try {
-    const result = await Promise.race([
-      generateText({
-        model,
-        system: SYSTEM_PROMPT,
-        prompt: buildPrompt(userMessage),
-        experimental_telemetry: telemetry,
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("title generation timed out")), AI_TIMEOUT_MS),
-      ),
-    ]);
+    // Native SDK timeout: aborts the underlying request on expiry (a
+    // Promise.race would only detach from it, leaving the model generating
+    // billable tokens in the background) and leaves no dangling timer.
+    const result = await generateText({
+      model,
+      system: SYSTEM_PROMPT,
+      prompt: buildPrompt(userMessage),
+      timeout: AI_TIMEOUT_MS,
+      experimental_telemetry: telemetry,
+    });
 
     const text = (result as { text?: string }).text ?? "";
     const sanitized = sanitizeTitle(text);

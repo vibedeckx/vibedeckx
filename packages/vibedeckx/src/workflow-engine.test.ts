@@ -8,11 +8,14 @@ import { EventBus } from "./event-bus.js";
 import {
   WorkflowEngine,
   WorkflowError,
+  buildReviewerPrompt,
   buildRereviewerPrompt,
   extractLatestTurnEndIndex,
   extractLastAssistantBefore,
   extractLastAssistantInTurn,
   extractTaskContextBefore,
+  extractFirstUserMessage,
+  extractAuthorSelfReport,
 } from "./workflow-engine.js";
 import type { AgentMessage } from "./agent-types.js";
 
@@ -54,6 +57,7 @@ describe("pure helpers", () => {
   it("buildRereviewerPrompt anchors the latest source turn and workspace target", () => {
     const prompt = buildRereviewerPrompt({
       taskContext: "also cover the new API requirement",
+      authorSelfReport: "I reworked the API layer and added the missing integration test as requested.",
       reviewFocus: "tests",
       target: { baseHead: "abc123", diffDigest: "digest", diffStat: "2 files changed", capturedAt: 1 },
     });
@@ -61,6 +65,121 @@ describe("pure helpers", () => {
     expect(prompt).toContain("abc123");
     expect(prompt).toContain("2 files changed");
     expect(prompt).toContain("read-only review mode");
+    expect(prompt).toContain("I reworked the API layer");
+    expect(prompt).toContain("Treat every claim as unverified");
+    expect(prompt).toContain("Treat the changed areas as new code");
+  });
+
+  it("extractFirstUserMessage skips event notifications and joins content parts", () => {
+    const msgs: AgentMessage[] = [];
+    msgs[1] = {
+      type: "user", content: "notify", timestamp: 1,
+      event: { kind: "agent_task_completed", sessionId: "x", turnEndEntryIndex: 0 },
+    };
+    msgs[3] = {
+      type: "user",
+      content: [
+        { type: "image", mediaType: "image/png", data: "AAAA" },
+        { type: "text", text: "build the login page" },
+      ],
+      timestamp: 2,
+    };
+    expect(extractFirstUserMessage(msgs)).toBe("build the login page");
+    expect(extractFirstUserMessage([])).toBeNull();
+  });
+
+  it("extractFirstUserMessage caps long intents", () => {
+    const msgs: AgentMessage[] = [{ type: "user", content: "x".repeat(3000), timestamp: 1 }];
+    expect(extractFirstUserMessage(msgs)).toHaveLength(2001); // 2000 + ellipsis
+  });
+
+  it("extractAuthorSelfReport prefers a substantial summary over a done-stub", () => {
+    const long = "I implemented the feature by refactoring the session manager and adding the new review-context extraction path with tests.";
+    const msgs: AgentMessage[] = [
+      { type: "user", content: "go", timestamp: 1 },
+      { type: "assistant", content: long, timestamp: 2 },
+      { type: "assistant", content: "Done.", timestamp: 3 },
+      { type: "turn_end", timestamp: 4 },
+    ];
+    expect(extractAuthorSelfReport(msgs, 3)).toBe(long);
+  });
+
+  it("extractAuthorSelfReport falls back to the last stub when nothing substantial exists", () => {
+    const msgs: AgentMessage[] = [
+      { type: "assistant", content: "ok", timestamp: 1 },
+      { type: "assistant", content: "Done.", timestamp: 2 },
+      { type: "turn_end", timestamp: 3 },
+    ];
+    expect(extractAuthorSelfReport(msgs, 2)).toBe("Done.");
+    expect(extractAuthorSelfReport([], 0)).toBeNull();
+  });
+
+  it("extractAuthorSelfReport withinTurn stops at the previous user message", () => {
+    const staleSummary = "Earlier I built the whole feature end to end, including the schema migration and the UI wiring.";
+    const msgs: AgentMessage[] = [
+      { type: "assistant", content: staleSummary, timestamp: 1 },
+      { type: "turn_end", timestamp: 2 },
+      { type: "user", content: "[Review Feedback] fix X", timestamp: 3 },
+      { type: "assistant", content: "Fixed.", timestamp: 4 },
+      { type: "turn_end", timestamp: 5 },
+    ];
+    expect(extractAuthorSelfReport(msgs, 4, { withinTurn: true })).toBe("Fixed.");
+    expect(extractAuthorSelfReport(msgs, 4)).toBe(staleSummary);
+  });
+
+  it("buildReviewerPrompt frames the self-report as unverified and marks the context tier", () => {
+    const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
+    const prompt = buildReviewerPrompt({
+      taskContext: "now add rate limiting",
+      originalIntent: "build a public API for widgets",
+      authorSelfReport: "I added a token-bucket limiter in middleware and covered it with tests.",
+      reviewFocus: null,
+      target,
+    });
+    expect(prompt).toContain("## Original request");
+    expect(prompt).toContain("build a public API for widgets");
+    expect(prompt).toContain("now add rate limiting");
+    expect(prompt).toContain("<author-self-report>");
+    expect(prompt).toContain("Treat every claim as unverified");
+    expect(prompt).toContain("deterministic excerpt");
+  });
+
+  it("buildReviewerPrompt: an intent brief replaces the deterministic excerpt sections", () => {
+    const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
+    const prompt = buildReviewerPrompt({
+      taskContext: "now add rate limiting",
+      originalIntent: "build a public API for widgets",
+      authorSelfReport: "I added a token-bucket limiter in middleware and covered it with tests.",
+      intentBrief: "1. Goal: public widgets API\n2. Constraints: no external deps",
+      reviewFocus: null,
+      target,
+    });
+    expect(prompt).toContain("## Intent brief (distilled from the source conversation)");
+    expect(prompt).toContain("no external deps");
+    expect(prompt).toContain("now add rate limiting");            // verbatim task stays
+    expect(prompt).not.toContain("## Original request");          // replaced by brief
+    expect(prompt).not.toContain("<author-self-report>");         // replaced by brief
+    expect(prompt).toContain("distilled intent brief + live workspace");
+    expect(prompt).not.toContain("deterministic excerpt");
+  });
+
+  it("buildReviewerPrompt dedupes intent in single-turn sessions and degrades to workspace-only", () => {
+    const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
+    const single = buildReviewerPrompt({
+      taskContext: "fix the bug",
+      originalIntent: "fix the bug",
+      authorSelfReport: null,
+      reviewFocus: null,
+      target,
+    });
+    expect(single).not.toContain("## Original request");
+    expect(single).toContain("## Original task");
+
+    const bare = buildReviewerPrompt({
+      taskContext: null, originalIntent: null, authorSelfReport: null, reviewFocus: null, target,
+    });
+    expect(bare).toContain("live workspace only");
+    expect(bare).not.toContain("deterministic excerpt");
   });
 });
 
@@ -163,11 +282,25 @@ describe("WorkflowEngine", () => {
     expect(prompt).toContain("please fix the bug");   // task context
     expect(prompt).toContain("focus on tests");        // review focus
     expect(prompt).toContain("read-only review mode"); // reviewer must not edit
+    // Author self-report wired through (fixture has only stubs → last stub used).
+    expect(prompt).toContain("done — fixed in foo.ts");
+    expect(prompt).toContain("Treat every claim as unverified");
     // Deterministic title, set before the prompt goes out (no AI generation).
     // Source has no title here → falls back to the task-context snippet.
     expect(agentOps.setFinalSessionTitle).toHaveBeenCalledWith("s-rev", "Review - please fix the bug");
     expect(agentOps.setFinalSessionTitle.mock.invocationCallOrder[0])
       .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
+  });
+
+  it("startAdhocReview threads an intent brief into the reviewer prompt", async () => {
+    await engine.startAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src",
+      intentBrief: "1. Goal: fix the login bug\n2. Constraints: keep the session API stable",
+    });
+    const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
+    expect(prompt).toContain("keep the session API stable");
+    expect(prompt).toContain("distilled intent brief");
+    expect(prompt).not.toContain("<author-self-report>");
   });
 
   it("spawns the reviewer with the requested agent type", async () => {
