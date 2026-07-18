@@ -680,6 +680,7 @@ export interface Storage {
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
     getAllActive(): Promise<WorkflowRun[]>;
     getActiveBySession(sessionId: string): Promise<WorkflowRun | undefined>;
+    getLatestCompletedBySource(sourceSessionId: string): Promise<WorkflowRun | undefined>;
     update(
       id: string,
       patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error">>,

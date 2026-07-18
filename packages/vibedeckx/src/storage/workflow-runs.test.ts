@@ -54,6 +54,35 @@ describe("workflowRuns repository", () => {
     expect(await storage.workflowRuns.getActiveBySession("nope")).toBeUndefined();
   });
 
+  it("getLatestCompletedBySource returns the newest completed run with a reviewer", async () => {
+    await storage.workflowRuns.create(baseRun);
+    await storage.workflowRuns.update("r1", {
+      reviewer_session_id: "rev-old",
+      status: "completed",
+    });
+    await storage.workflowRuns.create({ ...baseRun, id: "r2" });
+    await storage.workflowRuns.update("r2", {
+      reviewer_session_id: "rev-new",
+      status: "completed",
+    });
+
+    expect(
+      (await storage.workflowRuns.getLatestCompletedBySource("s-src"))?.reviewer_session_id,
+    ).toBe("rev-new");
+  });
+
+  it("getLatestCompletedBySource ignores non-completed and reviewer-less runs", async () => {
+    await storage.workflowRuns.create(baseRun);
+    await storage.workflowRuns.update("r1", { status: "completed" });
+    await storage.workflowRuns.create({ ...baseRun, id: "r2" });
+    await storage.workflowRuns.update("r2", {
+      reviewer_session_id: "rev-cancelled",
+      status: "cancelled",
+    });
+
+    expect(await storage.workflowRuns.getLatestCompletedBySource("s-src")).toBeUndefined();
+  });
+
   it("transition is an atomic CAS", async () => {
     await storage.workflowRuns.create(baseRun);
     const ok = await storage.workflowRuns.transition("r1", "waiting_reviewer", "waiting_feedback", {

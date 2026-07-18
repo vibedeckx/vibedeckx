@@ -46,6 +46,18 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         .executeTakeFirst();
       return row ? asRun(row) : undefined;
     },
+    getLatestCompletedBySource: async (sourceSessionId) => {
+      const row = await kdb
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("source_session_id", "=", sourceSessionId)
+        .where("status", "=", "completed")
+        .where("reviewer_session_id", "is not", null)
+        .orderBy("created_at", "desc")
+        .orderBy(sql`rowid`, "desc")
+        .executeTakeFirst();
+      return row ? asRun(row) : undefined;
+    },
     update: async (id, patch) => {
       if (Object.keys(patch).length > 0) {
         await kdb.updateTable("workflow_runs")
