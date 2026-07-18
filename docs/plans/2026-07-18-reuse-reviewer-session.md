@@ -156,7 +156,14 @@ export interface ReviewerCandidate {
   sessionId: string | null;
   title: string | null;
   agentType: AgentType | null;
-  reason: "deleted" | "project-mismatch" | "branch-mismatch" | null;
+  reason:
+    | "deleted"
+    | "project-mismatch"
+    | "branch-mismatch"
+    | "running"
+    | "busy"
+    | "unsupported-agent"
+    | null;
 }
 ```
 
@@ -171,7 +178,11 @@ Add tests proving:
 - `createNewSession` is not called;
 - `sendUserMessage` targets the existing reviewer;
 - the new run stores that reviewer ID;
-- the re-review prompt mentions previous feedback and remains read-only;
+- an edit-mode stopped reviewer is switched back to plan before delivery;
+- failure to restore plan mode fails the run and releases both reservations;
+- the re-review prompt mentions previous feedback, includes the captured
+  commit/dirty-worktree anchor and latest source-turn context, and remains
+  read-only;
 - reviewer equals source, project mismatch, branch mismatch, running reviewer,
   and active-run reviewer are rejected;
 - two concurrent starts for different sources but the same reviewer have one
@@ -211,17 +222,26 @@ Add:
 
 ```ts
 export function buildRereviewerPrompt(opts: {
+  taskContext: string | null;
   reviewFocus: string | null;
   target: ReviewTarget;
 }): string {
   return [
     "The source agent has addressed feedback from your previous review.",
     "Review the latest workspace state again.",
+    opts.taskContext ? `\n## Latest source turn\n${opts.taskContext}` : null,
     opts.reviewFocus ? `\n## Review focus\n${opts.reviewFocus}` : null,
     "\n## How to review",
     "- Verify whether your previous feedback was addressed correctly.",
     "- Check for regressions and remaining correctness or test gaps.",
     "- Do NOT modify files — remain in read-only review mode.",
+    opts.target.baseHead
+      ? `- Review target: commit ${opts.target.baseHead}${
+          opts.target.diffStat
+            ? ` with uncommitted changes (${opts.target.diffStat})`
+            : " with no uncommitted changes"
+        }.`
+      : null,
     "- End with actionable feedback, or explicitly state that it looks good.",
   ].filter((line): line is string => line !== null).join("\n");
 }
@@ -243,7 +263,11 @@ export function extractLastAssistantInTurn(
 ```
 
 Use `extractLastAssistantInTurn` in `handleTaskCompleted` so a silent follow-up
-cannot snapshot an old review.
+cannot snapshot an old review. A user entry carrying an injected
+`agent_task_completed` event is still a `type: "user"` boundary, so this helper
+already handles that variant. Do not add a separate persisted start-index or
+in-memory turn-boundary map unless a failing test demonstrates a case this
+boundary cannot represent.
 
 **Step 5: Implement candidate resolution**
 
@@ -255,6 +279,10 @@ candidate fields only; do not expose the whole database rows.
 Treat an unsupported or missing `agent_type` as unavailable. Use the same
 allowed reviewer agent set as the routes, ideally exported once from a shared
 workflow module to avoid drift.
+
+An edit-mode reviewer is not automatically unavailable: if it is stopped, the
+start path can safely normalize it back to plan mode. A genuinely running
+reviewer or one already reserved by a workflow is unavailable.
 
 **Step 6: Refactor participant reservation to support two known sessions**
 
@@ -287,6 +315,23 @@ both participants and validate the stored source/reviewer rows. A reviewer with
 status `running` is unavailable; a stopped or dormant reviewer may receive a
 new turn.
 
+Extend the structural `AgentOps` surface with the existing manager operation:
+
+```ts
+switchMode(
+  sessionId: string,
+  projectPath: string,
+  newMode: "plan" | "edit",
+): Promise<boolean>;
+```
+
+If the stored reviewer `permission_mode` is not `plan`, call `switchMode` after
+both participants are reserved and before delivering the re-review prompt.
+`AgentSessionManager.switchMode` preserves the entry history, persists the new
+mode, and respawns the provider with plan/read-only flags. Treat `false` or a
+throw as a failed start; never rely on the prompt alone to enforce read-only
+behavior.
+
 **Step 7: Implement the reused reviewer branch**
 
 Create the run, set `reviewer_session_id` before sending, track both
@@ -296,6 +341,7 @@ participants, and call:
 const sent = await this.agentOps.sendUserMessage(
   opts.reviewerSessionId,
   buildRereviewerPrompt({
+    taskContext: extractTaskContextBefore(entries, turnEndIndex),
     reviewFocus: opts.reviewFocus ?? null,
     target,
   }),
@@ -340,7 +386,9 @@ git commit -m "feat(workflow): continue previous reviewer session"
 
 **Files:**
 - Modify: `packages/vibedeckx/src/routes/workflow-run-routes.ts`
+- Modify: `packages/vibedeckx/src/routes/agent-session-routes.ts`
 - Test: `packages/vibedeckx/src/routes/workflow-run-routes.test.ts`
+- Create: `packages/vibedeckx/src/routes/agent-session-workflow-guard-routes.test.ts`
 
 **Step 1: Write failing route tests**
 
@@ -351,6 +399,7 @@ Add tests for:
 - passing `reviewerSessionId` into `startAdhocReview`;
 - rejecting a request containing both `reviewerSessionId` and
   `reviewerAgentType`;
+- rejecting an empty or whitespace-only `reviewerSessionId`;
 - the path-based candidate mirror and path-based reuse POST;
 - mapping reviewer validation errors to 400/409 without a 500.
 
@@ -390,20 +439,24 @@ Expected: FAIL because the candidate route and request field do not exist.
 **Step 3: Add request parsing and mutual-exclusion validation**
 
 Extend both POST body types with `reviewerSessionId?: string`. Reject non-string
-IDs and reject both modes together:
+or blank IDs and reject both modes together. Check property presence rather
+than truthiness so `""` cannot silently select new-session mode:
 
 ```ts
-if (reviewerSessionId !== undefined && typeof reviewerSessionId !== "string") {
-  return reply.code(400).send({ error: "reviewerSessionId must be a string" });
+if (reviewerSessionId !== undefined &&
+    (typeof reviewerSessionId !== "string" || reviewerSessionId.trim() === "")) {
+  return reply.code(400).send({
+    error: "reviewerSessionId must be a non-empty string",
+  });
 }
-if (reviewerSessionId && reviewerAgentType !== undefined) {
+if (reviewerSessionId !== undefined && reviewerAgentType !== undefined) {
   return reply.code(400).send({
     error: "reviewerSessionId and reviewerAgentType are mutually exclusive",
   });
 }
 ```
 
-Pass the existing reviewer ID to the engine. Do not trust the route body for
+Pass `reviewerSessionId.trim()` to the engine. Do not trust the route body for
 project or branch compatibility; the engine performs the authoritative checks.
 
 **Step 4: Add local and path candidate routes**
@@ -428,21 +481,42 @@ access. It resolves the source session locally and returns the same response.
 Register static candidate routes before generic `/:id` routes for readability,
 even though Fastify prioritizes static paths.
 
-**Step 5: Run route tests**
+**Step 5: Guard permission-mode changes during active reviews**
+
+Before running tests, guard permission changes during an active workflow. In
+the local/worker branches of both
+`/api/agent-sessions/:sessionId/switch-mode` and
+`/api/agent-sessions/:sessionId/accept-plan`, check
+`fastify.workflowEngine.isSessionInActiveRun(sessionId)` and return 409 before
+calling `AgentSessionManager.switchMode`/`acceptPlan`. Perform this after each
+synthetic-remote proxy branch so the front still proxies; the worker performs
+the authoritative bare-session check.
+This prevents a user from switching a reviewer back to edit after the engine
+has normalized it to plan.
+
+Add focused route tests for active and inactive sessions on both endpoints. The
+active cases must return 409 and must not call `switchMode` or `acceptPlan`; the
+inactive cases retain the current 200 behavior.
+
+**Step 6: Run route tests**
 
 Run:
 
 ```bash
-pnpm --filter vibedeckx test -- src/routes/workflow-run-routes.test.ts
+pnpm --filter vibedeckx test -- \
+  src/routes/workflow-run-routes.test.ts \
+  src/routes/agent-session-workflow-guard-routes.test.ts
 ```
 
 Expected: PASS.
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```bash
 git add packages/vibedeckx/src/routes/workflow-run-routes.ts \
-  packages/vibedeckx/src/routes/workflow-run-routes.test.ts
+  packages/vibedeckx/src/routes/workflow-run-routes.test.ts \
+  packages/vibedeckx/src/routes/agent-session-routes.ts \
+  packages/vibedeckx/src/routes/agent-session-workflow-guard-routes.test.ts
 git commit -m "feat(api): expose reusable reviewer selection"
 ```
 
@@ -510,8 +584,10 @@ GET /api/path/workflow-runs/reviewer-candidate?sourceSessionId=<bare-source-id>
 
 Map the response. If it contains a reviewer ID, add its bare/local mapping to
 `remoteSessionMap` and `remoteSessionMappings`, using the source's remote server
-and the candidate's branch. This makes a subsequent POST reuse independently
-authorizable after the candidate response.
+and the source handle's branch. Compatibility validation guarantees that the
+reviewer has the same branch, and the candidate DTO deliberately does not
+duplicate it. This makes a subsequent POST reuse independently authorizable
+after the candidate response.
 
 Do not open the reviewer stream during a read-only candidate lookup. The
 existing POST response path opens it when the re-review turn actually starts.
@@ -603,7 +679,14 @@ export interface ReviewerCandidate {
   sessionId: string | null;
   title: string | null;
   agentType: AgentType | null;
-  reason: "deleted" | "project-mismatch" | "branch-mismatch" | null;
+  reason:
+    | "deleted"
+    | "project-mismatch"
+    | "branch-mismatch"
+    | "running"
+    | "busy"
+    | "unsupported-agent"
+    | null;
 }
 ```
 
@@ -671,6 +754,10 @@ On a stale-candidate 409, keep the dialog open, show the server error, refetch
 the candidate, and allow the user to select a new reviewer. Do not automatically
 submit a second request.
 
+Do not add iteration counts or automatic context compaction in this change.
+Repeated reuse grows the reviewer conversation; the explicit new-session choice
+is the v1 reset mechanism documented in the design.
+
 **Step 5: Run the component test and frontend lint**
 
 Run:
@@ -709,6 +796,7 @@ pnpm --filter vibedeckx test -- \
   src/storage/workflow-runs.test.ts \
   src/workflow-engine.test.ts \
   src/routes/workflow-run-routes.test.ts \
+  src/routes/agent-session-workflow-guard-routes.test.ts \
   src/routes/remote-status-bridge.test.ts \
   src/routes/workflow-run-remote-routes.test.ts
 pnpm --filter vibedeckx-ui test -- components/agent/review-dialog.test.tsx
@@ -769,4 +857,3 @@ git commit -m "fix(workflow): address reviewer reuse verification"
 ```
 
 If no changes were required, do not create an empty commit.
-
