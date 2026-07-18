@@ -150,7 +150,12 @@ export function buildReviewerPrompt(opts: {
   taskContext: string | null;
   originalIntent: string | null;
   authorSelfReport: string | null;
-  /** Tier 1: LLM-distilled brief; replaces the deterministic excerpt sections. */
+  /**
+   * Tier 1: LLM-distilled brief; replaces the verbatim original-request
+   * section. The author self-report stays alongside it — the brief carries
+   * intent, the self-report carries the author's claims to audit; they are
+   * orthogonal (distillation deliberately strips completion claims).
+   */
   intentBrief?: string | null;
   reviewFocus: string | null;
   target: ReviewTarget;
@@ -165,7 +170,7 @@ export function buildReviewerPrompt(opts: {
     brief ? `\n## Intent brief (distilled from the source conversation)\n${brief}` : null,
     !brief && intent ? `\n## Original request (the user's first message in this session, verbatim)\n${intent}` : null,
     opts.taskContext ? `\n## Original task\n${opts.taskContext}` : null,
-    brief ? null : selfReportSection(opts.authorSelfReport),
+    selfReportSection(opts.authorSelfReport),
     opts.reviewFocus ? `\n## Review focus (from the user)\n${opts.reviewFocus}` : null,
     "\n## How to review",
     "- Do NOT modify any files — you are in read-only review mode.",
@@ -174,7 +179,9 @@ export function buildReviewerPrompt(opts: {
     "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
     "\nEnd your final message with a clear, actionable list of feedback items — or state explicitly that the work looks good.",
     brief
-      ? "\n(review context: distilled intent brief + live workspace)"
+      ? opts.authorSelfReport
+        ? "\n(review context: distilled intent brief + author self-report + live workspace)"
+        : "\n(review context: distilled intent brief + live workspace)"
       : hasExcerpt
         ? "\n(review context: deterministic excerpt of the source conversation + live workspace)"
         : "\n(review context: live workspace only — the source conversation was unavailable)",

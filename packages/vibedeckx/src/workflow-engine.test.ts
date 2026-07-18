@@ -144,7 +144,7 @@ describe("pure helpers", () => {
     expect(prompt).toContain("deterministic excerpt");
   });
 
-  it("buildReviewerPrompt: an intent brief replaces the deterministic excerpt sections", () => {
+  it("buildReviewerPrompt: an intent brief replaces the original request but keeps the self-report", () => {
     const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
     const prompt = buildReviewerPrompt({
       taskContext: "now add rate limiting",
@@ -158,9 +158,27 @@ describe("pure helpers", () => {
     expect(prompt).toContain("no external deps");
     expect(prompt).toContain("now add rate limiting");            // verbatim task stays
     expect(prompt).not.toContain("## Original request");          // replaced by brief
-    expect(prompt).not.toContain("<author-self-report>");         // replaced by brief
-    expect(prompt).toContain("distilled intent brief + live workspace");
+    // The self-report stays: it carries the author's claims to audit, which
+    // the distillation deliberately strips from the brief.
+    expect(prompt).toContain("<author-self-report>");
+    expect(prompt).toContain("I added a token-bucket limiter");
+    expect(prompt).toContain("Treat every claim as unverified");
+    expect(prompt).toContain("distilled intent brief + author self-report + live workspace");
     expect(prompt).not.toContain("deterministic excerpt");
+  });
+
+  it("buildReviewerPrompt: brief without a self-report omits it from the context trailer", () => {
+    const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
+    const prompt = buildReviewerPrompt({
+      taskContext: "now add rate limiting",
+      originalIntent: "build a public API for widgets",
+      authorSelfReport: null,
+      intentBrief: "1. Goal: public widgets API",
+      reviewFocus: null,
+      target,
+    });
+    expect(prompt).not.toContain("<author-self-report>");
+    expect(prompt).toContain("distilled intent brief + live workspace");
   });
 
   it("buildReviewerPrompt dedupes intent in single-turn sessions and degrades to workspace-only", () => {
@@ -300,7 +318,8 @@ describe("WorkflowEngine", () => {
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
     expect(prompt).toContain("keep the session API stable");
     expect(prompt).toContain("distilled intent brief");
-    expect(prompt).not.toContain("<author-self-report>");
+    // Self-report rides along with the brief (claims to audit).
+    expect(prompt).toContain("<author-self-report>");
   });
 
   it("spawns the reviewer with the requested agent type", async () => {
