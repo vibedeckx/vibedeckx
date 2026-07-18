@@ -18,7 +18,9 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
     },
     agentSessions: {
       getById: async (id: string) =>
-        id === "s-src" || id === "s" ? { id, project_id: "p1", branch: "dev" } : undefined,
+        id === "s-src" || id === "s" || id === "s-rev"
+          ? { id, project_id: "p1", branch: "dev" }
+          : undefined,
       ...(overrides.sessions ?? {}),
     },
     workflowRuns: {
@@ -29,6 +31,13 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
   } as never);
   app.decorate("workflowEngine", {
     startAdhocReview: vi.fn(async () => run),
+    getReviewerCandidate: vi.fn(async () => ({
+      available: true,
+      sessionId: "s-rev",
+      title: "Review - Task",
+      agentType: "codex",
+      reason: null,
+    })),
     approveFeedback: vi.fn(async () => ({ ...run, status: "completed" })),
     cancelRun: vi.fn(async () => ({ ...run, status: "cancelled" })),
     ...(overrides.engine ?? {}),
@@ -54,6 +63,53 @@ describe("workflow-run-routes", () => {
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().run.id).toBe("r1");
+  });
+
+  it("POST forwards an existing reviewer selection", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { startAdhocReview } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", reviewerSessionId: "s-rev" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(startAdhocReview).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewerSessionId: "s-rev" }),
+    );
+  });
+
+  it("POST rejects competing or blank reviewer selection fields", async () => {
+    const app = makeApp();
+    await app.register(workflowRunRoutes);
+    const both = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: {
+        projectId: "p1", sourceSessionId: "s-src",
+        reviewerSessionId: "s-rev", reviewerAgentType: "codex",
+      },
+    });
+    expect(both.statusCode).toBe(400);
+    const blank = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", reviewerSessionId: "  " },
+    });
+    expect(blank.statusCode).toBe(400);
+  });
+
+  it("GET returns the latest reviewer candidate for an authorized source", async () => {
+    const getReviewerCandidate = vi.fn(async () => ({
+      available: true, sessionId: "s-rev", title: "Review - Task", agentType: "codex", reason: null,
+    }));
+    const app = makeApp({ engine: { getReviewerCandidate } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/workflow-runs/reviewer-candidate?projectId=p1&sourceSessionId=s-src",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().candidate.sessionId).toBe("s-rev");
+    expect(getReviewerCandidate).toHaveBeenCalledWith("s-src");
   });
 
   it("POST 404s an unmapped remote session id and an unknown project", async () => {
@@ -194,6 +250,31 @@ describe("workflow-run-routes", () => {
       reviewFocus: "tests",
       sourceTurnEndIndex: 4,
     });
+  });
+
+  it("path routes support reviewer candidate lookup and reuse", async () => {
+    const getReviewerCandidate = vi.fn(async () => ({
+      available: true, sessionId: "s-rev", title: null, agentType: "codex", reason: null,
+    }));
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { getReviewerCandidate, startAdhocReview } });
+    await app.register(workflowRunRoutes);
+
+    const candidate = await app.inject({
+      method: "GET",
+      url: "/api/path/workflow-runs/reviewer-candidate?sourceSessionId=s-src",
+    });
+    expect(candidate.statusCode).toBe(200);
+    expect(candidate.json().candidate.sessionId).toBe("s-rev");
+
+    const created = await app.inject({
+      method: "POST", url: "/api/path/workflow-runs",
+      payload: { sourceSessionId: "s-src", reviewerSessionId: "s-rev" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(startAdhocReview).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewerSessionId: "s-rev" }),
+    );
   });
 
   it("path POST 404s an unknown source session and maps engine errors", async () => {

@@ -1231,6 +1231,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
+      if (fastify.workflowEngine.isSessionInActiveRun(req.params.sessionId)) {
+        return reply.code(409).send({ error: "Session is participating in an active review" });
+      }
+
       const session = fastify.agentSessionManager.getSession(req.params.sessionId);
       if (!session) {
         return reply.code(404).send({ error: "Session not found" });
@@ -1277,6 +1281,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
           { planContent }
         );
         return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      if (fastify.workflowEngine.isSessionInActiveRun(req.params.sessionId)) {
+        return reply.code(409).send({ error: "Session is participating in an active review" });
       }
 
       const session = fastify.agentSessionManager.getSession(req.params.sessionId);

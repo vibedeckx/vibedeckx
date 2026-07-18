@@ -1,18 +1,17 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth } from "../server.js";
-import { WorkflowError } from "../workflow-engine.js";
+import { REVIEWER_AGENT_TYPES, WorkflowError } from "../workflow-engine.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteRun } from "./remote-status-bridge.js";
 import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { WorkflowRun } from "../storage/types.js";
 import type { AgentType } from "../agent-types.js";
 
-const REVIEWER_AGENT_TYPES = new Set<string>(["claude-code", "codex"]);
 /** undefined → engine default; null → invalid (reject with 400). */
 function parseReviewerAgentType(raw: unknown): AgentType | undefined | null {
   if (raw === undefined) return undefined;
-  return typeof raw === "string" && REVIEWER_AGENT_TYPES.has(raw) ? (raw as AgentType) : null;
+  return typeof raw === "string" && REVIEWER_AGENT_TYPES.has(raw as AgentType) ? (raw as AgentType) : null;
 }
 
 function errStatus(err: unknown): number | null {
@@ -20,6 +19,7 @@ function errStatus(err: unknown): number | null {
   switch (err.code) {
     case "session-busy": return 409;
     case "source-running": return 409;
+    case "reviewer-unavailable": return 409;
     case "bad-state": return 409;
     case "no-completed-turn": return 400;
     case "send-failed": return 502;
@@ -86,7 +86,7 @@ async function routes(fastify: FastifyInstance) {
   };
 
   fastify.post<{
-    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string };
+    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string };
   }>("/api/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -94,6 +94,15 @@ async function routes(fastify: FastifyInstance) {
     if (!projectId || !sourceSessionId) return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    const reviewerSessionIdRaw = req.body?.reviewerSessionId;
+    if (reviewerSessionIdRaw !== undefined &&
+        (typeof reviewerSessionIdRaw !== "string" || reviewerSessionIdRaw.trim() === "")) {
+      return reply.code(400).send({ error: "reviewerSessionId must be a non-empty string" });
+    }
+    if (reviewerSessionIdRaw !== undefined && reviewerAgentType !== undefined) {
+      return reply.code(400).send({ error: "reviewerSessionId and reviewerAgentType are mutually exclusive" });
+    }
+    const reviewerSessionId = reviewerSessionIdRaw?.trim();
     if (sourceSessionId.startsWith("remote-")) {
       // Remote workspace: the run lives on the worker (spec §Phase 1.5 —
       // engine runs where the session/worktree live). Authz follows the
@@ -113,6 +122,7 @@ async function routes(fastify: FastifyInstance) {
         reviewFocus,
         sourceTurnEndIndex,
         reviewerAgentType,
+        reviewerSessionId,
       });
       if (!result.ok) return sendProxyFailure(reply, result);
 
@@ -205,6 +215,7 @@ async function routes(fastify: FastifyInstance) {
         reviewFocus,
         sourceTurnEndIndex,
         reviewerAgentType,
+        reviewerSessionId,
       });
       return reply.code(201).send({ run });
     } catch (err) {
@@ -212,6 +223,25 @@ async function routes(fastify: FastifyInstance) {
       if (status) return reply.code(status).send({ error: (err as Error).message });
       throw err;
     }
+  });
+
+  fastify.get<{
+    Querystring: { projectId?: string; sourceSessionId?: string };
+  }>("/api/workflow-runs/reviewer-candidate", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const { projectId, sourceSessionId } = req.query;
+    if (!projectId || !sourceSessionId) {
+      return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
+    }
+    const project = await fastify.storage.projects.getById(projectId, userId);
+    if (!project) return reply.code(404).send({ error: "Project not found" });
+    const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
+    if (!sourceSession || sourceSession.project_id !== projectId) {
+      return reply.code(404).send({ error: "Session not found" });
+    }
+    const candidate = await fastify.workflowEngine.getReviewerCandidate(sourceSessionId);
+    return reply.send({ candidate });
   });
 
   fastify.get<{ Querystring: { projectId: string; branch?: string } }>(
@@ -337,7 +367,7 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -345,6 +375,15 @@ async function routes(fastify: FastifyInstance) {
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    const reviewerSessionIdRaw = req.body?.reviewerSessionId;
+    if (reviewerSessionIdRaw !== undefined &&
+        (typeof reviewerSessionIdRaw !== "string" || reviewerSessionIdRaw.trim() === "")) {
+      return reply.code(400).send({ error: "reviewerSessionId must be a non-empty string" });
+    }
+    if (reviewerSessionIdRaw !== undefined && reviewerAgentType !== undefined) {
+      return reply.code(400).send({ error: "reviewerSessionId and reviewerAgentType are mutually exclusive" });
+    }
+    const reviewerSessionId = reviewerSessionIdRaw?.trim();
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
     if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
     const project = await fastify.storage.projects.getById(sourceSession.project_id);
@@ -358,6 +397,7 @@ async function routes(fastify: FastifyInstance) {
         reviewFocus,
         sourceTurnEndIndex,
         reviewerAgentType,
+        reviewerSessionId,
       });
       return reply.code(201).send({ run });
     } catch (err) {
@@ -365,6 +405,19 @@ async function routes(fastify: FastifyInstance) {
       if (status) return reply.code(status).send({ error: (err as Error).message });
       throw err;
     }
+  });
+
+  fastify.get<{
+    Querystring: { sourceSessionId?: string };
+  }>("/api/path/workflow-runs/reviewer-candidate", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const { sourceSessionId } = req.query;
+    if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
+    const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
+    if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
+    const candidate = await fastify.workflowEngine.getReviewerCandidate(sourceSessionId);
+    return reply.send({ candidate });
   });
 
   fastify.get<{
