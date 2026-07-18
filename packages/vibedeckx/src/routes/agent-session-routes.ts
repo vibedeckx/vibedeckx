@@ -209,7 +209,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         branch ?? null,
         projectPath,
         false,
-        permissionMode || "edit",
       );
 
       if (!sessionId) {
@@ -580,7 +579,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         branch ?? null,
         project.path,
         false,
-        permissionMode || "edit",
       );
 
       if (!sessionId) {

@@ -425,7 +425,6 @@ export class AgentSessionManager {
     branch: string | null,
     projectPath: string,
     skipDb = false,
-    permissionMode: "plan" | "edit" = "edit",
   ): Promise<string | null> {
     console.log(`[findExisting] ENTER projectId=${projectId} branch=${branch ?? "<null>"} skipDb=${skipDb} sessionsMapSize=${this.sessions.size}`);
     if (!skipDb) {
@@ -437,7 +436,7 @@ export class AgentSessionManager {
       if (latestDbRow) {
         const inMemory = this.sessions.get(latestDbRow.id);
         if (inMemory) {
-          return this.reuseExistingSession(inMemory, projectPath, permissionMode);
+          return this.reuseExistingSession(inMemory, projectPath);
         }
         // DB row exists but session isn't in memory. The restore path
         // populates in-memory on startup, so this shouldn't normally happen.
@@ -450,7 +449,7 @@ export class AgentSessionManager {
     for (const session of this.sessions.values()) {
       if (session.projectId === projectId && session.branch === branch) {
         console.log(`[findExisting] skipDb in-memory match: ${session.id} (entries=${session.store.entries.filter(Boolean).length})`);
-        return this.reuseExistingSession(session, projectPath, permissionMode);
+        return this.reuseExistingSession(session, projectPath);
       }
     }
     return null;
@@ -566,28 +565,26 @@ export class AgentSessionManager {
 
   /**
    * Handle reuse of an existing in-memory session found by findExistingSession:
-   * - dormant: update permission mode if differs (no respawn — wakes lazily)
+   * - dormant: return as-is (wakes lazily on next message)
    * - running OR process alive (stream-json between-turns: status="stopped"
-   *   but the CLI is still waiting on stdin): switchMode if mode differs,
-   *   leave entries intact
+   *   but the CLI is still waiting on stdin): return as-is, entries intact
    * - process actually dead: restart the process so callers always get a
    *   running session
    * Returns the session id.
+   *
+   * Deliberately does NOT touch the session's permission mode: this sits on
+   * the load path (workspace auto-start), so coercing mode here would let a
+   * read silently kill/respawn the process and flip a workflow reviewer out
+   * of read-only plan mode. Mode changes only happen through the explicit
+   * switch-mode route, which carries actual user intent.
    */
   private async reuseExistingSession(
     session: RunningSession,
     projectPath: string,
-    permissionMode: "plan" | "edit"
   ): Promise<string> {
     const entriesCount = session.store.entries.filter(Boolean).length;
     this.touchSession(session);
     if (session.dormant) {
-      if (session.permissionMode !== permissionMode) {
-        session.permissionMode = permissionMode;
-        if (!session.skipDb) {
-          await this.storage.agentSessions.updatePermissionMode(session.id, permissionMode);
-        }
-      }
       console.log(`[AgentSession] Returning dormant session ${session.id} (entries=${entriesCount})`);
       return session.id;
     }
@@ -599,10 +596,6 @@ export class AgentSessionManager {
     // to stdin on the next turn.
     const processAlive = session.process != null && session.process.exitCode === null;
     if (session.status === "running" || processAlive) {
-      if (session.permissionMode !== permissionMode) {
-        console.log(`[AgentSession] Session ${session.id} exists with mode ${session.permissionMode}, switching to ${permissionMode}`);
-        await this.switchMode(session.id, projectPath, permissionMode);
-      }
       console.log(`[AgentSession] Returning existing session ${session.id} (status=${session.status}, processAlive=${processAlive}, entries=${entriesCount})`);
       return session.id;
     }
@@ -1955,6 +1948,16 @@ export class AgentSessionManager {
     if (!session.skipDb) {
       await this.storage.agentSessions.updatePermissionMode(session.id, newMode);
     }
+
+    // Provider per-session state belongs to the killed process. Without this
+    // reset, getInitializationMessages sees initialized=true so the fresh
+    // process never receives initialize/thread-start, and the context replay
+    // fast-paths a turn/start with the dead process's threadId — Codex
+    // rejects it with "Not initialized" (mirrors wakeDormantSession and
+    // restartSession step 6).
+    const provider = getProvider(session.agentType);
+    provider.onSessionDestroyed?.(session.id);
+    provider.onSessionCreated?.(session.id, newMode);
 
     // 4. Update status to running, broadcast
     session.status = "running";
