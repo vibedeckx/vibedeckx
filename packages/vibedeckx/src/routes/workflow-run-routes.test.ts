@@ -1,7 +1,14 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+
+vi.mock("../utils/review-brief.js", () => ({
+  generateIntentBrief: vi.fn(async () => "distilled brief"),
+}));
+import { generateIntentBrief } from "../utils/review-brief.js";
 import workflowRunRoutes from "./workflow-run-routes.js";
 import { WorkflowError } from "../workflow-engine.js";
+
+const mockGenerateIntentBrief = vi.mocked(generateIntentBrief);
 
 const project = { id: "p1", name: "p", path: "/tmp/p" };
 const run = { id: "r1", project_id: "p1", branch: "dev", status: "waiting_feedback" };
@@ -48,10 +55,14 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
   app.decorate("remoteSessionMap", new Map() as never);
   app.decorate("reverseConnectManager", null as never);
   app.decorate("eventBus", { emit: vi.fn() } as never);
+  app.decorate("agentSessionManager", { getMessages: () => [] } as never);
   return app;
 }
 
-afterEach(async () => { if (app) await app.close(); });
+afterEach(async () => {
+  if (app) await app.close();
+  mockGenerateIntentBrief.mockClear();
+});
 
 describe("workflow-run-routes", () => {
   it("POST creates an ad-hoc run", async () => {
@@ -95,6 +106,68 @@ describe("workflow-run-routes", () => {
       payload: { projectId: "p1", sourceSessionId: "s-src", reviewerSessionId: "  " },
     });
     expect(blank.statusCode).toBe(400);
+  });
+
+  it("POST distills a tier-1 brief front-side for a fresh review, but not for reviewer reuse", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { startAdhocReview } });
+    await app.register(workflowRunRoutes);
+
+    const fresh = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src" },
+    });
+    expect(fresh.statusCode).toBe(201);
+    expect(mockGenerateIntentBrief).toHaveBeenCalledTimes(1);
+    expect(startAdhocReview).toHaveBeenCalledWith(
+      expect.objectContaining({ intentBrief: "distilled brief" }),
+    );
+
+    mockGenerateIntentBrief.mockClear();
+    const reuse = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", reviewerSessionId: "s-rev" },
+    });
+    expect(reuse.statusCode).toBe(201);
+    expect(mockGenerateIntentBrief).not.toHaveBeenCalled();
+  });
+
+  it("POST accepts a client pre-generated intentBrief and skips its own distillation", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { startAdhocReview } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", intentBrief: "client brief" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(mockGenerateIntentBrief).not.toHaveBeenCalled();
+    expect(startAdhocReview).toHaveBeenCalledWith(
+      expect.objectContaining({ intentBrief: "client brief" }),
+    );
+
+    const bad = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", intentBrief: 42 },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("POST /intent-brief pre-generates for an authorized source and 404s foreign sessions", async () => {
+    const app = makeApp();
+    await app.register(workflowRunRoutes);
+    const ok = await app.inject({
+      method: "POST", url: "/api/workflow-runs/intent-brief",
+      payload: { projectId: "p1", sourceSessionId: "s-src" },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().brief).toBe("distilled brief");
+
+    const foreign = await app.inject({
+      method: "POST", url: "/api/workflow-runs/intent-brief",
+      payload: { projectId: "p1", sourceSessionId: "s-other" },
+    });
+    expect(foreign.statusCode).toBe(404);
   });
 
   it("GET returns the latest reviewer candidate for an authorized source", async () => {

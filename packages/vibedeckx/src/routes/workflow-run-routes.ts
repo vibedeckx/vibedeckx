@@ -17,6 +17,15 @@ function parseReviewerAgentType(raw: unknown): AgentType | undefined | null {
   return typeof raw === "string" && REVIEWER_AGENT_TYPES.has(raw as AgentType) ? (raw as AgentType) : null;
 }
 
+/**
+ * Opaque tier-1 text handed over the wire (browser → front, front → worker).
+ * Bound it so a client/front bug can't balloon the reviewer prompt.
+ */
+function normalizeIntentBrief(raw: string | undefined): string | undefined {
+  if (!raw?.trim()) return undefined;
+  return raw.length > 8000 ? raw.slice(0, 8000) + "…" : raw;
+}
+
 function errStatus(err: unknown): number | null {
   if (!(err instanceof WorkflowError)) return null;
   switch (err.code) {
@@ -88,8 +97,40 @@ async function routes(fastify: FastifyInstance) {
     return info;
   };
 
+  /**
+   * Tier-1 context: distill the source conversation into an intent brief.
+   * Runs on this front — chat-provider keys live here, never on workers (same
+   * split as remote title generation). Remote sources pull their history over
+   * the existing session proxy. Caller must have authorized the session
+   * already. Never throws; undefined means the reviewer prompt falls back to
+   * the worker's deterministic excerpt (tier 2).
+   */
+  const distillIntentBrief = async (
+    userId: string | undefined,
+    sourceSessionId: string,
+  ): Promise<string | undefined> => {
+    try {
+      let messages: AgentMessage[];
+      if (sourceSessionId.startsWith("remote-")) {
+        const remoteInfo = fastify.remoteSessionMap.get(sourceSessionId);
+        if (!remoteInfo) return undefined;
+        const historyResult = await proxyAuto(
+          remoteInfo, "GET", `/api/agent-sessions/${remoteInfo.remoteSessionId}`,
+        );
+        if (!historyResult.ok) return undefined;
+        messages = (historyResult.data as { messages?: AgentMessage[] }).messages ?? [];
+      } else {
+        messages = fastify.agentSessionManager.getMessages(sourceSessionId);
+      }
+      return (await generateIntentBrief(fastify.storage, resolveUserId(userId), messages)) ?? undefined;
+    } catch (err) {
+      console.warn("[WorkflowRuns] intent brief generation failed:", err);
+      return undefined;
+    }
+  };
+
   fastify.post<{
-    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string };
+    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string };
   }>("/api/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -106,6 +147,15 @@ async function routes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: "reviewerSessionId and reviewerAgentType are mutually exclusive" });
     }
     const reviewerSessionId = reviewerSessionIdRaw?.trim();
+    const intentBriefRaw = req.body?.intentBrief;
+    if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
+      return reply.code(400).send({ error: "intentBrief must be a string" });
+    }
+    // A present field means the client already ran tier-1 pre-generation (the
+    // review dialog does this on open, via POST /api/workflow-runs/intent-brief,
+    // to hide the distillation latency) — don't distill again here.
+    const clientProvidedBrief = intentBriefRaw !== undefined;
+    const clientBrief = normalizeIntentBrief(intentBriefRaw);
     if (sourceSessionId.startsWith("remote-")) {
       // Remote workspace: the run lives on the worker (spec §Phase 1.5 —
       // engine runs where the session/worktree live). Authz follows the
@@ -129,25 +179,13 @@ async function routes(fastify: FastifyInstance) {
         bareReviewerSessionId = reviewerInfo.remoteSessionId;
       }
 
-      // Tier-1 context (fresh reviews only): distill the source conversation
-      // into an intent brief HERE — the chat-provider keys live on this front,
-      // never on workers (same split as remote title generation). The history
-      // comes over the existing session proxy; any failure in this block
+      // Tier-1 context (fresh reviews only): prefer the client's pre-generated
+      // brief; distill here only when the client didn't attempt it. Any failure
       // degrades to the worker's deterministic excerpt (tier 2) by simply
       // omitting the field.
-      let intentBrief: string | undefined;
-      if (!bareReviewerSessionId) {
-        try {
-          const historyResult = await proxyAuto(
-            remoteInfo, "GET", `/api/agent-sessions/${remoteInfo.remoteSessionId}`,
-          );
-          if (historyResult.ok) {
-            const messages = (historyResult.data as { messages?: AgentMessage[] }).messages ?? [];
-            intentBrief = (await generateIntentBrief(fastify.storage, resolveUserId(userId), messages)) ?? undefined;
-          }
-        } catch (err) {
-          console.warn("[WorkflowRuns] intent brief generation failed (remote source):", err);
-        }
+      let intentBrief = clientBrief;
+      if (!clientProvidedBrief && !bareReviewerSessionId) {
+        intentBrief = await distillIntentBrief(userId, sourceSessionId);
       }
 
       // The worker derives branch from its own session row — the body branch
@@ -243,20 +281,11 @@ async function routes(fastify: FastifyInstance) {
     if (branch !== undefined && (branch || null) !== runBranch) {
       return reply.code(400).send({ error: "branch does not match source session" });
     }
-    // Tier-1 context (fresh reviews only): same as the remote branch, but the
-    // history is in-process. Null (no model configured / LLM failure) simply
-    // means the engine falls back to the deterministic excerpt.
-    let intentBrief: string | undefined;
-    if (!reviewerSessionId) {
-      try {
-        intentBrief = (await generateIntentBrief(
-          fastify.storage,
-          resolveUserId(userId),
-          fastify.agentSessionManager.getMessages(sourceSessionId),
-        )) ?? undefined;
-      } catch (err) {
-        console.warn("[WorkflowRuns] intent brief generation failed (local source):", err);
-      }
+    // Tier-1 context (fresh reviews only): same rule as the remote branch —
+    // prefer the client's pre-generated brief, distill only when absent.
+    let intentBrief = clientBrief;
+    if (!clientProvidedBrief && !reviewerSessionId) {
+      intentBrief = await distillIntentBrief(userId, sourceSessionId);
     }
     try {
       const run = await fastify.workflowEngine.startAdhocReview({
@@ -275,6 +304,38 @@ async function routes(fastify: FastifyInstance) {
       if (status) return reply.code(status).send({ error: (err as Error).message });
       throw err;
     }
+  });
+
+  /**
+   * Tier-1 pre-generation: the review dialog calls this on open so the brief
+   * distills while the user is still picking a reviewer / typing the focus,
+   * then hands the result back via POST /api/workflow-runs { intentBrief }.
+   * Same authz shape as reviewer-candidate below.
+   */
+  fastify.post<{
+    Body: { projectId?: string; sourceSessionId?: string };
+  }>("/api/workflow-runs/intent-brief", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const { projectId, sourceSessionId } = req.body ?? {};
+    if (!projectId || !sourceSessionId) {
+      return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
+    }
+    const project = await fastify.storage.projects.getById(projectId, userId);
+    if (!project) return reply.code(404).send({ error: "Project not found" });
+    if (sourceSessionId.startsWith("remote-")) {
+      const remoteInfo = fastify.remoteSessionMap.get(sourceSessionId);
+      if (!remoteInfo || projectIdFromRemoteSessionId(sourceSessionId, remoteInfo) !== projectId) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+    } else {
+      const session = await fastify.storage.agentSessions.getById(sourceSessionId);
+      if (!session || session.project_id !== projectId) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+    }
+    const brief = await distillIntentBrief(userId, sourceSessionId);
+    return reply.send({ brief: brief ?? null });
   });
 
   fastify.get<{
@@ -462,10 +523,7 @@ async function routes(fastify: FastifyInstance) {
     if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
       return reply.code(400).send({ error: "intentBrief must be a string" });
     }
-    // Opaque text to this worker; bound it so a front bug can't balloon the prompt.
-    const intentBrief = intentBriefRaw?.trim()
-      ? intentBriefRaw.length > 8000 ? intentBriefRaw.slice(0, 8000) + "…" : intentBriefRaw
-      : undefined;
+    const intentBrief = normalizeIntentBrief(intentBriefRaw);
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     const reviewerSessionIdRaw = req.body?.reviewerSessionId;

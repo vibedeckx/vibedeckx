@@ -10,6 +10,9 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
   return { ...actual, proxyToRemoteAuto: proxyMock };
 });
 vi.mock("../remote-agent-sessions.js", () => ({ ensureRemoteAgentStream: ensureStreamMock }));
+vi.mock("../utils/review-brief.js", () => ({
+  generateIntentBrief: vi.fn(async () => "distilled brief"),
+}));
 
 import workflowRunRoutes from "./workflow-run-routes.js";
 
@@ -110,6 +113,37 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-missing" },
     });
     expect(missing.statusCode).toBe(404);
+  });
+
+  it("POST forwards a client pre-generated intentBrief without pulling history", async () => {
+    makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, intentBrief: "client brief" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(proxyMock).toHaveBeenCalledTimes(1); // no history pull, straight to the worker
+    const [, , , method, apiPath, body] = proxyMock.mock.calls[0];
+    expect([method, apiPath]).toEqual(["POST", "/api/path/workflow-runs"]);
+    expect(body).toMatchObject({ sourceSessionId: "src1", intentBrief: "client brief" });
+  });
+
+  it("POST /intent-brief pulls remote history over the session proxy and returns the brief", async () => {
+    makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { messages: [] } });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs/intent-brief",
+      payload: { projectId: "p1", sourceSessionId: SRC },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().brief).toBe("distilled brief");
+    expect(proxyMock.mock.calls[0][3]).toBe("GET");
+    expect(proxyMock.mock.calls[0][4]).toBe("/api/agent-sessions/src1");
   });
 
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {

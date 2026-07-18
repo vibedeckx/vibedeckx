@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   type AgentProviderInfo,
@@ -14,7 +14,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { SearchCheck } from "lucide-react";
+import { Loader2, SearchCheck } from "lucide-react";
 
 const FALLBACK_PROVIDERS: AgentProviderInfo[] = [
   { type: "claude-code", displayName: "Claude Code", available: true },
@@ -59,6 +59,10 @@ export function ReviewDialog({
   const [candidateNotice, setCandidateNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Tier-1 pre-generation: kicked off while the dialog is open so the LLM
+  // latency hides behind the user filling in the form. Null result = no brief
+  // (server degrades to the deterministic excerpt).
+  const briefPromiseRef = useRef<Promise<string | null> | null>(null);
 
   const options = providers?.length ? providers : FALLBACK_PROVIDERS;
 
@@ -102,6 +106,20 @@ export function ReviewDialog({
     };
   }, [open, projectId, sessionId]);
 
+  // Pre-generate the brief once per dialog open, but only when a NEW reviewer
+  // is in play (reuse continues the reviewer's own context — no brief). Waits
+  // for the candidate check so reuse-default opens don't spend an LLM call.
+  useEffect(() => {
+    if (!open) {
+      briefPromiseRef.current = null;
+      return;
+    }
+    if (!sessionId || candidateLoading || reviewerMode !== "new" || briefPromiseRef.current) return;
+    briefPromiseRef.current = api
+      .generateReviewIntentBrief(projectId, sessionId)
+      .catch(() => null);
+  }, [open, candidateLoading, reviewerMode, projectId, sessionId]);
+
   if (!sessionId) return null;
 
   const start = async () => {
@@ -111,12 +129,20 @@ export function ReviewDialog({
       const reviewer = reviewerMode === "reuse" && candidate?.sessionId
         ? { reviewerSessionId: candidate.sessionId }
         : { reviewerAgentType: reviewerAgent };
+      // Usually resolved by now (pre-generated on open); if not, the busy
+      // spinner covers the remaining wait. Null → omit the field so the
+      // server decides (it retries distillation, which is instant when no
+      // chat model is configured).
+      const intentBrief = "reviewerAgentType" in reviewer && briefPromiseRef.current
+        ? await briefPromiseRef.current
+        : null;
       await api.createWorkflowRun({
         projectId,
         branch,
         sourceSessionId: sessionId,
         reviewFocus: focus.trim() || undefined,
         ...reviewer,
+        ...(intentBrief ? { intentBrief } : {}),
       });
       setOpen(false);
       setFocus("");
@@ -199,7 +225,16 @@ export function ReviewDialog({
         />
         {error && <p className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
-          <Button onClick={start} disabled={busy || candidateLoading}>开始 Review</Button>
+          <Button onClick={start} disabled={busy || candidateLoading}>
+            {busy ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                正在准备 review 上下文…
+              </>
+            ) : (
+              "开始 Review"
+            )}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

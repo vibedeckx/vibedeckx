@@ -2340,6 +2340,8 @@ export const api = {
     projectId: string; branch: string | null; sourceSessionId: string;
     reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: AgentType;
     reviewerSessionId?: string;
+    /** Pre-generated tier-1 brief (see generateReviewIntentBrief); when present the server skips its own distillation. */
+    intentBrief?: string;
   }): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs`, {
       method: "POST",
@@ -2351,6 +2353,25 @@ export const api = {
       throw new Error(body.error ?? `Failed to start review: ${res.status}`);
     }
     return (await res.json()).run;
+  },
+
+  /**
+   * Distill the source conversation into a tier-1 intent brief for the
+   * reviewer. Called when the review dialog opens so the LLM latency hides
+   * behind the user filling in the form; null means no brief (no chat model
+   * configured, or distillation failed) — the review degrades to tier 2.
+   */
+  async generateReviewIntentBrief(
+    projectId: string,
+    sourceSessionId: string,
+  ): Promise<string | null> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs/intent-brief`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, sourceSessionId }),
+    });
+    if (!res.ok) throw new Error(`Failed to generate intent brief: ${res.status}`);
+    return (await res.json()).brief;
   },
 
   async getReviewerCandidate(
