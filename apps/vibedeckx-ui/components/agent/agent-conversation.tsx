@@ -105,6 +105,7 @@ interface AgentConversationProps {
 
 export interface AgentConversationHandle {
   submitMessage: (content: string) => Promise<void>;
+  startNewConversation: () => Promise<void>;
 }
 
 // TODO(paste): expose as configurable setting
@@ -368,7 +369,25 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     });
   }, [setInput, input]);
 
+  // Shared by the header button and the global ⌘⇧O shortcut (page.tsx).
+  // Multiple sessions can run concurrently per workspace, so opening a
+  // new conversation no longer stops the current one — `startNewConversation`
+  // just detaches this view and shows an empty placeholder. The running
+  // session keeps going in the background (reachable via session history).
+  const handleNewConversation = useCallback(async () => {
+    // Mirrors the button's disabled state — the keyboard path has no
+    // disabled attribute to stop it.
+    if (isLoading || !session) return;
+    await startNewConversation();
+    onNewConversation?.();
+    // Drop ?session=<id> from the URL — the new conversation has no
+    // sessionId yet (one is created on first user message). Without
+    // this, refreshing the page would reload the prior session.
+    setSessionUrlParam?.(null);
+  }, [isLoading, session, startNewConversation, onNewConversation, setSessionUrlParam]);
+
   useImperativeHandle(ref, () => ({
+    startNewConversation: handleNewConversation,
     submitMessage: async (content: string) => {
       onStatusChange?.();  // Optimistic "working" overlay — overrides any prior
       // "idle" overlay set by New Conversation so the dot turns blue immediately.
@@ -385,7 +404,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         sendMessage(content);
       }
     }
-  }), [session, ensureSession, sendMessage, permissionMode, onStatusChange]);
+  }), [handleNewConversation, session, ensureSession, sendMessage, permissionMode, onStatusChange]);
 
   const handlePasteText = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => {
@@ -748,21 +767,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           <Button
             variant="ghost"
             size="icon"
-            onClick={async () => {
-              // Multiple sessions can run concurrently per workspace, so opening a
-              // new conversation no longer stops the current one — `startNewConversation`
-              // just detaches this view and shows an empty placeholder. The running
-              // session keeps going in the background (reachable via session history).
-              await startNewConversation();
-              onNewConversation?.();
-              // Drop ?session=<id> from the URL — the new conversation has no
-              // sessionId yet (one is created on first user message). Without
-              // this, refreshing the page would reload the prior session.
-              setSessionUrlParam?.(null);
-            }}
+            onClick={handleNewConversation}
             disabled={isLoading || !session}
             className="h-7 w-7"
-            title="New Conversation"
+            title="New Conversation (⌘⇧O / Ctrl+Shift+O)"
           >
             <SquarePen className="h-3.5 w-3.5" />
           </Button>

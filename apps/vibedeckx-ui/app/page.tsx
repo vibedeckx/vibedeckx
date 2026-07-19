@@ -411,16 +411,30 @@ export default function Home() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
 
   // Cmd/Ctrl+K opens the quick switcher (same pattern as the sidebar's Cmd+B).
+  // Cmd/Ctrl+Shift+O starts a new agent conversation — same as clicking the
+  // New Conversation button. Workspace view only; also raises the Agent tab
+  // so the action is visible when Diff/Terminal/Executors is in front.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         setSwitcherOpen((o) => !o);
+        return;
+      }
+      if (
+        event.key.toLowerCase() === "o" &&
+        event.shiftKey &&
+        (event.metaKey || event.ctrlKey) &&
+        activeView === "workspace"
+      ) {
+        event.preventDefault();
+        setActivateAgentTabNonce((nonce) => nonce + 1);
+        void agentRef.current?.startNewConversation();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [activeView]);
 
   // Ignore further switcher selections while one navigation (which may await
   // a mode PATCH) is still in flight — a double-click or Enter+click race
