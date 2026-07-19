@@ -65,7 +65,8 @@ export function QuickSwitcher({
 
   // Abort in-flight requests on new input so a stale response can never
   // overwrite a newer query's results. Empty-query responses also feed the
-  // module cache, generation-guarded against the background refresher.
+  // module cache; the generation guard keeps a response fetched under a
+  // previous user (or superseded fetch) from being committed.
   const runSearch = useCallback(async (q: string) => {
     abortRef.current?.abort();
     const controller = new AbortController();

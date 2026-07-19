@@ -34,7 +34,7 @@ import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree, SearchResultWorkspace, SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
-import { refreshQuickSwitcherCache, touchRecentSessionOpen } from '@/lib/quick-switcher-cache';
+import { touchRecentSessionOpen } from '@/lib/quick-switcher-cache';
 import { toast } from 'sonner';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
@@ -275,11 +275,7 @@ export default function Home() {
     setSelectedBranch(branch);
     setSessionUrlParam(sessionId);
     setActivateAgentTabNonce((nonce) => nonce + 1);
-    // Navigating away is when recents ordering shifts (activity in the session
-    // just left) — absorb it into the quick-switcher seed now so the next
-    // Cmd+K paints with an already-fresh list instead of reordering on fetch.
-    refreshQuickSwitcherCache();
-    // And the session being opened counts as recent from this moment (VS Code
+    // The session being opened counts as recent from this moment (VS Code
     // MRU-by-open), even if no activity ever bumps it server-side. Id-only:
     // callers holding a full search row (quick switcher) touch it themselves.
     touchRecentSessionOpen(sessionId);

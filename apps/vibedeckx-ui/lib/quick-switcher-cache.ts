@@ -1,4 +1,4 @@
-import { searchAll, type SearchResponse, type SearchResultSession } from "@/lib/api";
+import type { SearchResponse, SearchResultSession } from "@/lib/api";
 
 // Client-side state behind the quick switcher's instant open:
 //
@@ -11,9 +11,17 @@ import { searchAll, type SearchResponse, type SearchResultSession } from "@/lib/
 //    opens are tracked here, per browser, and blended in at render.
 //
 // Both are scoped to the signed-in user (auth-wrapper calls
-// setQuickSwitcherCacheUser) and both writers of the response cache go
-// through a monotonic fetch generation so an out-of-order response can never
-// roll the cache back to an older snapshot.
+// setQuickSwitcherCacheUser). Cache writes go through a monotonic fetch
+// generation: it bars an out-of-order response from rolling the cache back,
+// and — more importantly — lets a user switch invalidate fetches already in
+// flight under the previous user's credentials.
+//
+// There is deliberately NO background refresh between opens. The ordering
+// key (last_user_message_at) only moves on user messages — which the user
+// sends *inside* an open session, so openedAt tracks it for free — plus rare
+// externals (injected prompts, wakes, sessions created elsewhere). Those are
+// corrected by the on-open fetch anyway; pre-absorbing them wasn't worth a
+// request per navigation.
 
 // Display cap for the merged Recent/Favorites groups — matches the server's
 // default limitPerGroup so merging never makes the palette longer than
@@ -115,24 +123,6 @@ export function commitEmptyQueryResults(gen: number, res: SearchResponse): void 
 
 export function getCachedEmptyResults(): SearchResponse | null {
   return cachedEmptyResults;
-}
-
-// Fire-and-forget background refresh, called from navigation choke points:
-// navigating away is when recents ordering shifts (activity in the session
-// just left), so absorbing it now means the next open paints with an
-// already-fresh list. Single-flight; errors leave the cache one generation
-// older, which the on-open fetch corrects anyway.
-let refreshInFlight = false;
-export function refreshQuickSwitcherCache(): void {
-  if (refreshInFlight) return;
-  refreshInFlight = true;
-  const gen = beginEmptyQuerySearch();
-  searchAll("")
-    .then((res) => commitEmptyQueryResults(gen, res))
-    .catch(() => {})
-    .finally(() => {
-      refreshInFlight = false;
-    });
 }
 
 /**
