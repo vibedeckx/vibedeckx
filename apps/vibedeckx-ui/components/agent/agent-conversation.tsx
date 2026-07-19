@@ -384,6 +384,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // sessionId yet (one is created on first user message). Without
     // this, refreshing the page would reload the prior session.
     setSessionUrlParam?.(null);
+    // Land the cursor in the input so typing can start immediately —
+    // covers both the header button and the ⌘⇧O shortcut. rAF waits for
+    // the detach re-render so the focus isn't stolen by the reset.
+    requestAnimationFrame(() => {
+      textareaWrapperRef.current?.querySelector("textarea")?.focus();
+    });
   }, [isLoading, session, startNewConversation, onNewConversation, setSessionUrlParam]);
 
   useImperativeHandle(ref, () => ({
