@@ -4,12 +4,21 @@ import { useEffect, useState } from "react";
 import { ClerkProvider, SignIn, useAuth } from "@clerk/clerk-react";
 import { ArrowLeft } from "lucide-react";
 import { setAuthToken, setTokenGetter, getFreshToken } from "@/lib/api";
+import { setQuickSwitcherCacheUser } from "@/lib/quick-switcher-cache";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { Button } from "@/components/ui/button";
 import { LandingPage } from "./landing-page";
 
 function AuthTokenSync({ children }: { children: React.ReactNode }) {
-  const { getToken, isSignedIn } = useAuth();
+  const { getToken, isSignedIn, userId } = useAuth();
+
+  // Scope the quick-switcher cache/MRU to the signed-in user: on sign-out or
+  // account switch the previous user's cached session titles must never seed
+  // the palette. No-auth (solo) deployments never mount this component and
+  // keep the module's default "solo" scope.
+  useEffect(() => {
+    setQuickSwitcherCacheUser(isSignedIn ? (userId ?? null) : null);
+  }, [isSignedIn, userId]);
 
   useEffect(() => {
     if (!isSignedIn) {

@@ -9,6 +9,9 @@ import {
   searchAll, refreshSearchCache,
   type SearchResponse, type SearchResultWorkspace, type SearchResultSession,
 } from "@/lib/api";
+import {
+  beginEmptyQuerySearch, commitEmptyQueryResults, getCachedEmptyResults, overlayRecents,
+} from "@/lib/quick-switcher-cache";
 import { FolderGit2, GitBranch, Loader2, MessageSquare, Star } from "lucide-react";
 
 export interface QuickSwitcherProps {
@@ -47,27 +50,31 @@ export function QuickSwitcher({
   // Reset query/results/error on each open→close→open transition. Adjusted
   // during render (React's documented pattern for "resetting state when a
   // prop changes") rather than in an effect, so it can't trigger a
-  // synchronous setState-in-effect cascade. Clearing results avoids flashing
-  // the previous session's rows on reopen.
+  // synchronous setState-in-effect cascade. Results seed from the cached
+  // empty-query response (matching the reset "" query) so reopen paints
+  // instantly; a filtered result set from the previous open never flashes.
   const [prevOpen, setPrevOpen] = useState(open);
   if (open !== prevOpen) {
     setPrevOpen(open);
     if (open) {
       setQuery("");
-      setResults(null);
+      setResults(getCachedEmptyResults());
       setError(false);
     }
   }
 
   // Abort in-flight requests on new input so a stale response can never
-  // overwrite a newer query's results.
+  // overwrite a newer query's results. Empty-query responses also feed the
+  // module cache, generation-guarded against the background refresher.
   const runSearch = useCallback(async (q: string) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    const gen = q === "" ? beginEmptyQuerySearch() : null;
     try {
       const res = await searchAll(q, { signal: controller.signal });
       if (!controller.signal.aborted) {
+        if (gen !== null) commitEmptyQueryResults(gen, res);
         setResults(res);
         setError(false);
       }
@@ -109,9 +116,17 @@ export function QuickSwitcher({
     };
   }, [open, runSearch]);
 
+  // Filtered results keep server relevance order; the empty-query view gets
+  // the MRU-by-open merge (locally opened sessions can outrank — or re-enter —
+  // the server's recency window).
+  const display = results
+    ? query.trim()
+      ? { sessions: results.sessions, favorites: results.favorites }
+      : overlayRecents(results)
+    : null;
   const loading = results === null;
-  const empty = !!results && results.projects.length === 0 && results.workspaces.length === 0
-    && results.sessions.length === 0 && results.favorites.length === 0;
+  const empty = !!display && results!.projects.length === 0 && results!.workspaces.length === 0
+    && display.sessions.length === 0 && display.favorites.length === 0;
   const syncing = results?.cacheState === "cold";
 
   const renderSession = (s: SearchResultSession) => (
@@ -186,14 +201,14 @@ export function QuickSwitcher({
             ))}
           </CommandGroup>
         )}
-        {results && results.sessions.length > 0 && (
+        {display && display.sessions.length > 0 && (
           <CommandGroup heading={query.trim() ? "Sessions" : "Recent"}>
-            {results.sessions.map(renderSession)}
+            {display.sessions.map(renderSession)}
           </CommandGroup>
         )}
-        {results && results.favorites.length > 0 && (
+        {display && display.favorites.length > 0 && (
           <CommandGroup heading="Favorites">
-            {results.favorites.map(renderSession)}
+            {display.favorites.map(renderSession)}
           </CommandGroup>
         )}
       </CommandList>

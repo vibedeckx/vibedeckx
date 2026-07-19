@@ -34,6 +34,7 @@ import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree, SearchResultWorkspace, SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
+import { refreshQuickSwitcherCache, touchRecentSessionOpen } from '@/lib/quick-switcher-cache';
 import { toast } from 'sonner';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
@@ -274,6 +275,14 @@ export default function Home() {
     setSelectedBranch(branch);
     setSessionUrlParam(sessionId);
     setActivateAgentTabNonce((nonce) => nonce + 1);
+    // Navigating away is when recents ordering shifts (activity in the session
+    // just left) — absorb it into the quick-switcher seed now so the next
+    // Cmd+K paints with an already-fresh list instead of reordering on fetch.
+    refreshQuickSwitcherCache();
+    // And the session being opened counts as recent from this moment (VS Code
+    // MRU-by-open), even if no activity ever bumps it server-side. Id-only:
+    // callers holding a full search row (quick switcher) touch it themselves.
+    touchRecentSessionOpen(sessionId);
   }, [currentProject?.id, setSessionUrlParam]);
 
   const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
@@ -485,6 +494,11 @@ export default function Home() {
     try {
       const project = await resolveProjectForTarget(s.projectId, s.targetId);
       if (!project) return;
+      // Full-row touch: keeps a copy the MRU merge can surface in Recents even
+      // after this session drops out of the server's recency window. The
+      // cross-project path never reaches selectBranchSession's id-only touch,
+      // so this is also what records the open at all in that case.
+      touchRecentSessionOpen(s.sessionId, s);
       setActiveView("workspace");
       if (project.id === currentProject?.id) {
         selectBranchSession(s.branch, s.sessionId, s.projectId);
