@@ -748,6 +748,9 @@ export interface SearchResponse {
   projects: SearchResultProject[];
   workspaces: SearchResultWorkspace[];
   sessions: SearchResultSession[];
+  // Recents mode (empty query) only: favorited sessions that didn't make the
+  // recency cut in `sessions`. Always [] when a query term is present.
+  favorites: SearchResultSession[];
   cacheState: SearchCacheState;
 }
 

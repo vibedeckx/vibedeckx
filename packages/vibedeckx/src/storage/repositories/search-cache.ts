@@ -165,7 +165,7 @@ export const createSearchCacheRepos = (
       const allProjects = await projQuery.execute();
       const projectIds = allProjects.map((p) => p.id);
       const nameById = new Map(allProjects.map((p) => [p.id, p.name]));
-      if (projectIds.length === 0) return { projects: [], workspaces: [], sessions: [] };
+      if (projectIds.length === 0) return { projects: [], workspaces: [], sessions: [], favorites: [] };
 
       const pattern = `%${escapeLike(q)}%`;
 
@@ -245,18 +245,22 @@ export const createSearchCacheRepos = (
 
       if (!q) {
         // Recents mode: projects/workspaces are irrelevant without a query
-        // term; sessions are the full (already project-scoped, self-healed)
+        // term. Two groups over the (already project-scoped, self-healed)
         // candidate set — ALL favorited sessions (uncapped side queries)
-        // plus the most-recently-active ones (200-row windows). Sorted
-        // favorited-first (then recency desc) BEFORE the limitPerGroup cap —
-        // otherwise an old favorite loses out to the N most-recently-active
-        // unfavorited sessions and never makes the cut, defeating the
-        // "recents AND favorited" contract at the default limit.
-        const sessions = [...sessionCandidates]
-          .sort((a, b) => Number(!!b.favoritedAt) - Number(!!a.favoritedAt)
-            || (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))
+        // plus the most-recently-active ones (200-row windows):
+        //   sessions  — pure recency desc, so many favorites can never crowd
+        //               the actually-recent sessions out of the cut;
+        //   favorites — favorited rows that DIDN'T make the recency cut
+        //               (recency desc, deduped), so an old favorite still
+        //               surfaces instead of losing to the N most-recent rows.
+        const byRecency = [...sessionCandidates]
+          .sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0));
+        const sessions = byRecency.slice(0, limitPerGroup);
+        const inSessions = new Set(sessions.map((s) => s.sessionId));
+        const favorites = byRecency
+          .filter((s) => s.favoritedAt && !inSessions.has(s.sessionId))
           .slice(0, limitPerGroup);
-        return { projects: [], workspaces: [], sessions };
+        return { projects: [], workspaces: [], sessions, favorites };
       }
 
       const projects: SearchResultProjectRow[] = rankAndCap(allProjects.map((p) => ({
@@ -297,7 +301,7 @@ export const createSearchCacheRepos = (
         recency: s.lastActiveAt ?? 0,
       })), limitPerGroup);
 
-      return { projects, workspaces, sessions };
+      return { projects, workspaces, sessions, favorites: [] };
     },
   },
 });

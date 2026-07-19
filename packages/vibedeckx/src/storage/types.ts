@@ -326,6 +326,9 @@ export interface SearchResults {
   projects: SearchResultProjectRow[];
   workspaces: SearchResultWorkspaceRow[];
   sessions: SearchResultSessionRow[];
+  // Recents mode (empty query) only: favorited sessions that didn't make the
+  // recency cut in `sessions`. Always [] when a query term is present.
+  favorites: SearchResultSessionRow[];
 }
 
 export interface Storage {

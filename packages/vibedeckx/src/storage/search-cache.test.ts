@@ -235,10 +235,13 @@ describe("searchCache", () => {
       expect(new Set(ids).size).toBe(ids.length);
     });
 
-    it("empty query at the DEFAULT limit still surfaces an old favorited session, ranked first", async () => {
-      // Regression: recents mode used to sort purely by recency before
-      // capping, so an old favorite lost out to the N most-recently-active
-      // unfavorited sessions and never made the (default) top-10 cut.
+    it("empty query at the DEFAULT limit keeps sessions purely recency-ordered and surfaces an old favorite in the favorites group", async () => {
+      // Regression (both directions): sorting favorited-first before the cap
+      // let many favorites crowd every recent session out of the top-10; pure
+      // recency let old favorites never make the cut. The split contract:
+      // `sessions` = pure recency, `favorites` = favorited rows that didn't
+      // make the recency cut.
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [] }); // drop seeded s1/s2 (s2 is favorited)
       await storage.agentSessions.create({ id: "old-fav", project_id: "p1", branch: "dev" });
       await storage.agentSessions.updateTitle("old-fav", "ancient favorite");
       await storage.agentSessions.setFavorited("old-fav", true);
@@ -250,8 +253,47 @@ describe("searchCache", () => {
       }
       const res = await storage.searchCache.search({ query: "", limitPerGroup: 10 });
       expect(res.sessions).toHaveLength(10);
-      expect(res.sessions.map(s => s.sessionId)).toContain("old-fav");
-      expect(res.sessions[0].sessionId).toBe("old-fav");
+      expect(res.sessions.map(s => s.sessionId)).not.toContain("old-fav");
+      expect(res.favorites.map(s => s.sessionId)).toEqual(["old-fav"]);
+    });
+
+    it("recents mode: many favorites do not crowd recent sessions out of the sessions group", async () => {
+      // 12 old favorites + 3 newer unfavorited sessions, limit 10: under the
+      // old favorited-first sort the favorites filled all 10 slots and the
+      // actually-recent sessions vanished.
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [] }); // drop seeded s1/s2 (s2 is favorited)
+      for (let i = 0; i < 12; i++) {
+        const id = `fav-${i}`;
+        await storage.agentSessions.create({ id, project_id: "p1", branch: "dev" });
+        await storage.agentSessions.updateTitle(id, `favorite ${i}`);
+        await storage.agentSessions.setFavorited(id, true);
+      }
+      await new Promise((r) => setTimeout(r, 10)); // recents strictly newer than the favorites
+      for (let i = 0; i < 3; i++) {
+        const id = `recent-${i}`;
+        await storage.agentSessions.create({ id, project_id: "p1", branch: "dev" });
+        await storage.agentSessions.updateTitle(id, `recent session ${i}`);
+      }
+      const res = await storage.searchCache.search({ query: "", limitPerGroup: 10 });
+      const ids = res.sessions.map(s => s.sessionId);
+      expect(ids.slice(0, 3).sort()).toEqual(["recent-0", "recent-1", "recent-2"]);
+      // Favorites group holds the overflow, recency-ordered, deduped against
+      // the sessions group, capped at limitPerGroup.
+      expect(res.favorites).toHaveLength(5); // 12 favs - 7 already in sessions
+      const sessionIds = new Set(ids);
+      for (const f of res.favorites) expect(sessionIds.has(f.sessionId)).toBe(false);
+    });
+
+    it("recents mode: a favorite inside the recency cut appears only in sessions, not duplicated into favorites", async () => {
+      // Seeded snapshot: s2 is favorited AND most recent → sessions only.
+      const res = await storage.searchCache.search({ query: "", limitPerGroup: 10 });
+      expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s2", "remote-w1-p1-s1"]);
+      expect(res.favorites).toHaveLength(0);
+    });
+
+    it("query mode returns an empty favorites group", async () => {
+      const res = await storage.searchCache.search({ query: "auth", limitPerGroup: 10 });
+      expect(res.favorites).toEqual([]);
     });
 
     it("limitPerGroup truncates each group to the top-ranked rows", async () => {

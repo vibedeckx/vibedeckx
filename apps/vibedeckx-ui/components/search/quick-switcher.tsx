@@ -110,8 +110,20 @@ export function QuickSwitcher({
   }, [open, runSearch]);
 
   const loading = results === null;
-  const empty = !!results && results.projects.length === 0 && results.workspaces.length === 0 && results.sessions.length === 0;
+  const empty = !!results && results.projects.length === 0 && results.workspaces.length === 0
+    && results.sessions.length === 0 && results.favorites.length === 0;
   const syncing = results?.cacheState === "cold";
+
+  const renderSession = (s: SearchResultSession) => (
+    <CommandItem key={s.sessionId} value={`session-${s.sessionId}`} onSelect={() => onNavigateSession(s)}>
+      <MessageSquare />
+      <span className="truncate">{s.title ?? "Untitled session"}</span>
+      {s.favoritedAt && <Star className="h-3.5 w-3.5 shrink-0 fill-current text-amber-500" />}
+      <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+        {s.projectName} · {s.branch ?? "main"} · {relativeTime(s.lastActiveAt)}
+      </span>
+    </CommandItem>
+  );
 
   return (
     <CommandDialog
@@ -175,17 +187,13 @@ export function QuickSwitcher({
           </CommandGroup>
         )}
         {results && results.sessions.length > 0 && (
-          <CommandGroup heading="Sessions">
-            {results.sessions.map((s) => (
-              <CommandItem key={s.sessionId} value={`session-${s.sessionId}`} onSelect={() => onNavigateSession(s)}>
-                <MessageSquare />
-                <span className="truncate">{s.title ?? "Untitled session"}</span>
-                {s.favoritedAt && <Star className="h-3.5 w-3.5 shrink-0 fill-current text-amber-500" />}
-                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                  {s.projectName} · {s.branch ?? "main"} · {relativeTime(s.lastActiveAt)}
-                </span>
-              </CommandItem>
-            ))}
+          <CommandGroup heading={query.trim() ? "Sessions" : "Recent"}>
+            {results.sessions.map(renderSession)}
+          </CommandGroup>
+        )}
+        {results && results.favorites.length > 0 && (
+          <CommandGroup heading="Favorites">
+            {results.favorites.map(renderSession)}
           </CommandGroup>
         )}
       </CommandList>
