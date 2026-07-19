@@ -3,8 +3,14 @@ import type { SearchResponse, SearchResultSession } from "@/lib/api";
 // Client-side state behind the quick switcher's instant open:
 //
 // 1. The last empty-query SearchResponse, seeded into the palette on open
-//    (stale-while-revalidate) so "Searching…" only ever shows once per page
-//    lifetime.
+//    (stale-while-revalidate). Persisted to localStorage so even the first
+//    open after a page reload paints instantly; a TTL keeps a long-dormant
+//    snapshot from seeding (better one "Searching…" than content from last
+//    week). Synthesizing the seed from the MRU alone was rejected: server
+//    recents contain rows this browser never opened (spawned sessions, other
+//    devices, never-clicked favorites) — an MRU-only seed would omit them and
+//    they'd insert mid-list when the fetch lands. The snapshot also carries
+//    cacheState, which the "Syncing history…" empty state needs.
 // 2. An MRU-by-open ledger (VS Code Quick Open semantics): merely *opening*
 //    a session surfaces it in Recents. The server only orders by activity
 //    (last_user_message_at ?? updated_at) and never learns about opens, so
@@ -28,6 +34,7 @@ import type { SearchResponse, SearchResultSession } from "@/lib/api";
 // server-only rendering did.
 const DISPLAY_LIMIT = 10;
 const MRU_MAX = 50;
+const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface RecentOpen {
   openedAt: number;
@@ -63,6 +70,27 @@ export function setQuickSwitcherCacheUser(userId: string | null): void {
 
 function storageKey(): string {
   return `vibedeckx.quickSwitcher.recentOpens.${scopeKey}`;
+}
+
+function snapshotKey(): string {
+  return `vibedeckx.quickSwitcher.emptyResults.${scopeKey}`;
+}
+
+function loadSnapshot(): SearchResponse | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(snapshotKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { at?: unknown; res?: Partial<SearchResponse> } | null;
+    if (typeof parsed?.at !== "number" || Date.now() - parsed.at > SNAPSHOT_TTL_MS) return null;
+    const res = parsed.res;
+    if (!res || ![res.projects, res.workspaces, res.sessions, res.favorites].every(Array.isArray)) {
+      return null;
+    }
+    return res as SearchResponse;
+  } catch {
+    return null;
+  }
 }
 
 function getMru(): Map<string, RecentOpen> {
@@ -108,6 +136,11 @@ export function commitEmptyQueryResults(gen: number, res: SearchResponse): void 
   if (gen <= committedGeneration) return;
   committedGeneration = gen;
   cachedEmptyResults = res;
+  try {
+    localStorage.setItem(snapshotKey(), JSON.stringify({ at: Date.now(), res }));
+  } catch {
+    // Quota/private-mode failures degrade to memory-only seeding.
+  }
   // Refresh stored MRU copies from the fresher server rows.
   const opens = getMru();
   let dirty = false;
@@ -122,6 +155,10 @@ export function commitEmptyQueryResults(gen: number, res: SearchResponse): void 
 }
 
 export function getCachedEmptyResults(): SearchResponse | null {
+  // Memory-miss (first open after reload, or after a user switch) falls back
+  // to the persisted snapshot. Called once per palette open, so re-probing
+  // storage when both are absent is fine.
+  cachedEmptyResults ??= loadSnapshot();
   return cachedEmptyResults;
 }
 
