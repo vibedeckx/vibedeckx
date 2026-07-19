@@ -5,13 +5,18 @@ const recordPath = process.env.VIBEDECKX_TEST_DAEMON_RECORD;
 const pidRecordPath = process.env.VIBEDECKX_TEST_DAEMON_PID_RECORD;
 
 if (pidRecordPath) {
+  // Written atomically: the parent may SIGTERM this child at any moment (e.g.
+  // the timeout test), and a truncated record would crash the test harness's
+  // JSON.parse in its finally block, masking the real assertion.
+  const tmpPath = `${pidRecordPath}.tmp-${process.pid}`;
   fs.writeFileSync(
-    pidRecordPath,
+    tmpPath,
     JSON.stringify({
       pid: process.pid,
       processStartTicks: readStartTicks(process.pid),
     }),
   );
+  fs.renameSync(tmpPath, pidRecordPath);
 }
 
 if (recordPath) {
