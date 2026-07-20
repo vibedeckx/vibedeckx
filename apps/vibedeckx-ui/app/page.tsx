@@ -34,7 +34,7 @@ import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree, SearchResultWorkspace, SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
-import { touchRecentSessionOpen } from '@/lib/quick-switcher-cache';
+import { touchRecentSessionOpen, touchSessionStarted } from '@/lib/quick-switcher-cache';
 import { toast } from 'sonner';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
@@ -288,6 +288,19 @@ export default function Home() {
 
   const handleSessionStarted = useCallback((startedSession: AgentSession) => {
     refetchBranchActivity();
+    // Full-row MRU touch: the quick switcher's instant first frame renders
+    // from a cached snapshot that predates this session; without a full copy
+    // the overlay can't show it, so it would pop in when the first
+    // /api/search lands — shifting rows under the cmdk highlight. Before the
+    // processAlive gate: opening counts as recent regardless of process state.
+    const startedProject = projects.find((p) => p.id === startedSession.projectId);
+    touchSessionStarted({
+      sessionId: startedSession.id,
+      projectId: startedSession.projectId,
+      projectName: startedProject?.name ?? '',
+      targetId: startedProject?.agent_mode ?? 'local',
+      branch: startedSession.branch,
+    });
     if (startedSession.processAlive === false) return;
     setResidentSessionSeed({
       id: startedSession.id,
@@ -298,7 +311,7 @@ export default function Home() {
       processAlive: true,
       updated_at: new Date().toISOString(),
     });
-  }, [refetchBranchActivity]);
+  }, [refetchBranchActivity, projects]);
 
   const handleSessionTitleUpdated = useCallback((sessionId: string, title: string) => {
     if (!currentProject?.id || !title.trim()) return;

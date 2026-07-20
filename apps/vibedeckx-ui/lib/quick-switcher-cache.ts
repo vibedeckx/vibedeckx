@@ -171,11 +171,48 @@ export function touchRecentSessionOpen(sessionId: string, session?: SearchResult
   const opens = getMru();
   const prev = opens.get(sessionId);
   opens.delete(sessionId); // re-insert so Map order stays oldest→newest
-  opens.set(sessionId, { openedAt: Date.now(), session: session ?? prev?.session ?? null });
+  // A fresher touch must never erase a known title: synthesized rows
+  // (touchSessionStarted) carry title null, while the stored copy may hold
+  // the real one from a server row. Server responses overwrite copies on
+  // every commit, so preferring the non-null title can't fossilize it.
+  const merged = session
+    ? { ...session, title: session.title ?? prev?.session?.title ?? null }
+    : prev?.session ?? null;
+  opens.set(sessionId, { openedAt: Date.now(), session: merged });
   while (opens.size > MRU_MAX) {
     opens.delete(opens.keys().next().value as string);
   }
   persistMru();
+}
+
+/**
+ * Record a session that just started in this window (create / wake /
+ * reconnect), synthesizing a full row from what the caller knows. A
+ * just-created session exists nowhere the palette reads from at open time —
+ * the cached snapshot predates it and an id-only touch can't materialize a
+ * row — so without this the session pops in only when the first /api/search
+ * lands, shifting rows under the cmdk highlight. Title is unknown at creation
+ * (generated async server-side); the merge in touchRecentSessionOpen keeps
+ * any previously known title, and every committed empty-query response
+ * refreshes the copy with the server's row afterwards.
+ */
+export function touchSessionStarted(entry: {
+  sessionId: string;
+  projectId: string;
+  projectName: string;
+  targetId: string;
+  branch: string | null;
+}): void {
+  touchRecentSessionOpen(entry.sessionId, {
+    sessionId: entry.sessionId,
+    projectId: entry.projectId,
+    projectName: entry.projectName,
+    targetId: entry.targetId,
+    branch: entry.branch,
+    title: null,
+    lastActiveAt: Date.now(),
+    favoritedAt: null,
+  });
 }
 
 /**
