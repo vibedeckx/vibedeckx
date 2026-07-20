@@ -792,7 +792,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       favorited_at INTEGER,
       entry_count INTEGER NOT NULL DEFAULT 0,
       generation INTEGER NOT NULL,
-      deleted_at INTEGER
+      deleted_at INTEGER,
+      written_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_session_search_cache_project
       ON session_search_cache(project_id, target_id);
@@ -833,6 +834,15 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
   `);
+
+  // Migration: add written_at to session_search_cache — the timestamp of the
+  // last out-of-band write-through (session create/delete/title transiting the
+  // server). Snapshot reconciliation only overrides rows whose write-through
+  // is older than the snapshot's collection time.
+  const sessionSearchCacheInfo = db.prepare("PRAGMA table_info(session_search_cache)").all() as { name: string }[];
+  if (!sessionSearchCacheInfo.some((col) => col.name === "written_at")) {
+    db.exec("ALTER TABLE session_search_cache ADD COLUMN written_at INTEGER");
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_settings (

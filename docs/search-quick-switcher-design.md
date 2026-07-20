@@ -135,6 +135,7 @@ session_search_cache
   entry_count INTEGER
   generation INTEGER NOT NULL      -- snapshot generation that last contained this row
   deleted_at INTEGER               -- set when absent from a newer snapshot
+  written_at INTEGER               -- last out-of-band write-through; NULL = snapshot-owned
 
 workspace_search_cache
   project_id TEXT NOT NULL
@@ -179,14 +180,95 @@ same (project, target) with an older generation as deleted, update
 `last_success_at`. A timeout, partial failure, or parse failure records
 `last_attempt_at`/`last_error` and **never runs deletion reconciliation**.
 
-Opportunistic freshness: wherever titles/favorites already transit the server
-(list proxy, title PATCH proxy, `session:title` events), update the cache rows
-in passing (without touching generation).
+#### Deletion detection: why `generation < N` (mark-and-sweep)
+
+A snapshot only says what exists *now* — a session deleted on the worker shows
+up as nothing but a missing row. The cache must infer deletions by set
+difference: **a row the latest snapshot didn't touch is a row the worker no
+longer has.** The generation counter is that set difference as one SQL
+statement (mark-and-sweep): the upsert stamps every row the snapshot contains
+with the new generation N (mark), then `WHERE generation < N → deleted_at`
+catches exactly the rows the snapshot did not contain (sweep). A row's
+generation is thus "the last snapshot that attested this row exists".
+
+This rests on an invariant — *every row comes from some snapshot* — which is
+exactly what the write-through layer below has to negotiate around (see the
+in-flight race). Wipe-and-replace inside the transaction would be equally
+correct but was not chosen: soft-delete keeps timestamped tombstones, avoids
+rewriting every row on each ~30 s refresh, and lets write-through rows carry
+state (`written_at`) that a full wipe would destroy.
+
+#### Three freshness layers
+
+The cache is maintained by three cooperating layers; each exists because of
+the previous one's failure mode:
+
+1. **Event write-through** (instant): session create / delete / title changes
+   all transit the front server (UI proxies, commander spawn, scheduler, local
+   AI title generation), so the cache is updated at the event itself — a new
+   session is searchable in Cmd+K immediately. Write-through is *at-most-once*:
+   a crash between the proxied call and the cache write, a path that bypasses
+   the server (worker-local ops), or a simply-forgotten hook loses the event
+   permanently — which is why it is an optimization, never the source of truth.
+2. **On-open refresh** (bounded staleness): `POST /api/search/refresh` pulls
+   full catalogs on palette open (TTL'd, see below), absorbing everything the
+   write-through layer missed within one open-to-open interval — including
+   bootstrap (linking a remote that already has hundreds of sessions, whose
+   "create events" predate the cache).
+3. **Generation sweep** (anti-entropy): the reconciliation above converges the
+   cache to the worker's actual state *without needing to have seen any
+   event*, downgrading any missed write-through from a permanent ghost row to
+   "wrong until the next refresh".
+
+#### Write-through & the in-flight snapshot race
+
+A snapshot is a photo of the worker taken at collection time; applying it
+overwrites the wall — including anything painted since the photo was taken.
+The race is not theoretical: refresh fires on palette open, and the flow being
+optimized is "create a session, then press Cmd+K", so a create write-through
+routinely lands *while* a snapshot (collected milliseconds earlier, without
+the new session) is in flight. Unprotected, the sweep would mark the new row
+deleted — it is indistinguishable from a genuinely-deleted stale row by
+generation alone — and the session would flicker into search and vanish until
+the next refresh. Deletion has the mirror race: a stale snapshot still
+containing the just-deleted row would resurrect it via the upsert's
+`deleted_at: NULL`.
+
+The fix is a time exemption, all timestamps server-local (no cross-machine
+clock comparison):
+
+- `written_at` = when an out-of-band write-through last touched the row
+  (`NULL` = snapshot-owned). Set by `noteSessionCreated` (INSERT, generation
+  0 = never snapshot-confirmed), `noteSessionDeleted` (UPDATE-only
+  soft-delete), and `updateCachedSessionTitle` (UPDATE-only, accepts `NULL`
+  to clear).
+- `applyCatalogSnapshot(…, collectedAt)` takes the instant the refresher
+  *started* fetching the catalog. Rows with `written_at >= collectedAt` are
+  newer than the photo, so their absence from it proves nothing: they are
+  exempt from **both** the deletion sweep (can't kill a just-created row) and
+  the upsert override (can't resurrect a just-deleted row or clobber a fresh
+  rename).
+- The exemption expires naturally: the next snapshot is collected *after* the
+  write-through, so it confirms the row (upsert → new generation,
+  `written_at` reset to NULL) or deletes it normally. The worker catalog
+  stays the source of truth — e.g. if the proxied DELETE actually failed on
+  the worker, the next snapshot resurrects the row.
+
+Write-through call sites: `createRemoteAgentSession` (covers UI create and
+commander spawn), the remote branch-from-history route, the remote session
+DELETE route, the title PATCH route (including clearing to NULL), and
+`generateAndPushRemoteSessionTitle` (AI titles PATCH the worker directly and
+bypass the title route). All best-effort — a cache failure must never fail
+the user-facing operation. Local sessions need no write-through at all: they
+are UNIONed live from `agent_sessions`.
 
 ### Refresh: explicit, singleflight, never on the search path
 
 - `GET /api/search?q=` is **cache-only** — it never triggers proxy traffic or
-  subprocesses.
+  subprocesses. It fires on every keystroke (150 ms debounce), so contacting
+  workers here would hang typing behind a 2 s timeout per offline worker; and
+  offline workers' sessions exist *only* in the cache, so a live-fetch design
+  would lose them entirely.
 - `POST /api/search/refresh` is called once when the palette opens. Per
   (project, target) it applies a TTL (~30 s against
   `sync_state.last_success_at`, skip if fresh) and singleflight (concurrent
@@ -194,8 +276,15 @@ in passing (without touching generation).
   point at the same worker, so concurrency is capped per worker (e.g. 3
   catalog calls in flight) with a per-call timeout (2 s) and an **overall
   refresh deadline** (~5 s) after which the endpoint returns with whatever
-  completed. The frontend re-queries once on completion — no SSE/versioning
-  machinery needed for v1.
+  completed. The refresher records `collectedAt = now()` *before* each catalog
+  fetch and passes it to `applyCatalogSnapshot` — the anchor for the
+  write-through exemption above. The frontend re-queries once on completion —
+  no SSE/versioning machinery needed for v1.
+- Net palette-open sequence (visible in the network tab): `GET /api/search?q=`
+  (instant paint from cache) ∥ `POST /api/search/refresh` → on completion a
+  second `GET /api/search?q=` with whatever the user has typed. With the
+  write-through layer, a just-created session is already in the *first*
+  response; the refresh pass remains the reconciliation backstop.
 - The refresh (and search) response includes `cacheState: cold | stale |
   fresh` derived from sync state, so the palette can distinguish "still
   syncing" from "genuinely no results".
@@ -242,6 +331,10 @@ Query handling:
   sentinel round-trip) and snapshot reconciliation (upsert, generation-based
   mark-deleted, reappearing rows clear deleted_at, **failed/partial snapshot
   never deletes**, empty snapshot updates sync state, mapping table untouched).
+  Write-through race semantics: a snapshot collected *before* a
+  create/delete/rename neither sweeps, resurrects, nor clobbers it; one
+  collected *after* wins (confirm, sweep, or resurrect); title clear (NULL)
+  writes through; `written_at` column migration on a pre-existing database.
 - Routes: authz test — user A must not see user B's projects/sessions in
   results; refresh singleflight/TTL behavior; cacheState cold vs fresh.
 - Frontend: stale-request cancellation (old response must not overwrite newer

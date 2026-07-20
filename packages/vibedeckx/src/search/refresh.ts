@@ -83,10 +83,13 @@ export function createSearchRefresher(deps: RefreshDeps) {
     if (existing) return existing;
     const run = (async () => {
       try {
+        // Collection starts now: anything written through at or after this
+        // instant is newer than the snapshot and must survive its apply.
+        const collectedAt = now();
         const snapshot = t.targetId === "local"
           ? await deps.buildLocalCatalog(t.projectId, t.projectPath ?? "")
           : await deps.fetchRemoteCatalog(t);
-        await deps.storage.searchCache.applyCatalogSnapshot(t.projectId, t.targetId, snapshot);
+        await deps.storage.searchCache.applyCatalogSnapshot(t.projectId, t.targetId, snapshot, collectedAt);
       } catch (err) {
         // A failed fetch must never delete cache rows — record and move on.
         await deps.storage.searchCache.recordSyncFailure(

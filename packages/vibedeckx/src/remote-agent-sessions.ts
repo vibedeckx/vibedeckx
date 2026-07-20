@@ -100,6 +100,12 @@ export async function createRemoteAgentSession(
     }
 
     await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null);
+    // Search-cache write-through: surface the new session in Cmd+K now instead
+    // of after the next on-open refresh. Best-effort — the session exists on
+    // the remote at this point, so a cache failure must not fail the create.
+    await deps.storage.searchCache.noteSessionCreated({
+      localSessionId, projectId, targetId: agentMode, branch: branch ?? null,
+    }).catch((err) => console.error("[RemoteSession] search-cache create write-through failed:", err));
   } catch (err) {
     // A thrown transport error (reverse-connect send) or DB write rejection leaves
     // the pre-registered entry orphaned. Remove it, then rethrow so the caller's
@@ -579,6 +585,11 @@ export async function generateAndPushRemoteSessionTitle(
     return;
   }
   await deps.storage.remoteSessionMappings.markTitleResolved(localSessionId);
+  // Keep the search cache's copy fresh too — the generated title transits
+  // this server only here (the direct proxy PATCH bypasses the title route's
+  // write-through).
+  await deps.storage.searchCache.updateCachedSessionTitle(localSessionId, finalTitle)
+    .catch((err) => console.error("[SessionTitle] search-cache title write-through failed:", err));
   deps.remotePatchCache.broadcast(
     localSessionId,
     JSON.stringify({ titleUpdated: { title: finalTitle } }),

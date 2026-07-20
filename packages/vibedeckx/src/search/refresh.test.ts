@@ -50,6 +50,25 @@ describe("search refresh", () => {
     expect(states[0].last_success_at).toBeGreaterThan(0);
   });
 
+  it("a session created while its target's fetch is in flight survives the snapshot apply", async () => {
+    // The fetch takes 50ms; mid-flight a create write-through lands. The
+    // snapshot (collected at fetch start, without the new session) must not
+    // sweep it — refreshTarget passes the fetch start time as collectedAt.
+    const refresher = createSearchRefresher({
+      storage,
+      buildLocalCatalog: async () => emptySnap,
+      fetchRemoteCatalog: async () => { await wait(50); return emptySnap; },
+    });
+    const refreshing = refresher.refreshAll();
+    await wait(20);
+    await storage.searchCache.noteSessionCreated({
+      localSessionId: "remote-w1-p1-mid", projectId: "p1", targetId: serverId, branch: null,
+    });
+    await refreshing;
+    const res = await storage.searchCache.search({ query: "", limitPerGroup: 10 });
+    expect(res.sessions.map((s) => s.sessionId)).toContain("remote-w1-p1-mid");
+  });
+
   it("TTL: a fresh target is not refetched", async () => {
     let calls = 0;
     const refresher = createSearchRefresher({

@@ -69,8 +69,18 @@ export const createSearchCacheRepos = (
     // Generation-based reconciliation: only a FULLY successful snapshot may
     // mark rows deleted. Runs in one transaction so a crash mid-apply can't
     // leave a half-deleted cache.
-    applyCatalogSnapshot: async (projectId, targetId, snapshot) => {
+    //
+    // Write-through exemption: a snapshot is a photo of the worker taken at
+    // `collectedAt`; session rows written through AT or AFTER that instant
+    // (written_at >= collectedAt) are newer than the photo, so their absence
+    // from it proves nothing and their local state must win. They are skipped
+    // by both the upsert (a stale snapshot must not resurrect a just-deleted
+    // row or clobber a fresh rename) and the deletion sweep (it must not kill
+    // a just-created row). The next snapshot — collected after the
+    // write-through — confirms or deletes them normally.
+    applyCatalogSnapshot: async (projectId, targetId, snapshot, collectedAt) => {
       const now = Date.now();
+      const snapshotCollectedAt = collectedAt ?? now;
       await kdb.transaction().execute(async (trx) => {
         const state = await trx.selectFrom("search_catalog_sync_state")
           .select("snapshot_generation")
@@ -92,12 +102,16 @@ export const createSearchCacheRepos = (
               local_session_id: s.id, project_id: projectId, target_id: targetId,
               branch: toDbBranch(s.branch), title: s.title, last_active_at: s.lastActiveAt,
               favorited_at: s.favoritedAt, entry_count: s.entryCount, generation, deleted_at: null,
+              written_at: null,
             })
             .onConflict((oc) => oc.column("local_session_id").doUpdateSet({
               project_id: projectId, target_id: targetId, branch: toDbBranch(s.branch),
               title: s.title, last_active_at: s.lastActiveAt, favorited_at: s.favoritedAt,
-              entry_count: s.entryCount, generation, deleted_at: null,
-            }))
+              entry_count: s.entryCount, generation, deleted_at: null, written_at: null,
+            }).where((eb) => eb.or([
+              eb("session_search_cache.written_at", "is", null),
+              eb("session_search_cache.written_at", "<", snapshotCollectedAt),
+            ])))
             .execute();
         }
         await trx.updateTable("workspace_search_cache")
@@ -109,6 +123,10 @@ export const createSearchCacheRepos = (
           .set({ deleted_at: now })
           .where("project_id", "=", projectId).where("target_id", "=", targetId)
           .where("generation", "<", generation).where("deleted_at", "is", null)
+          .where((eb) => eb.or([
+            eb("written_at", "is", null),
+            eb("written_at", "<", snapshotCollectedAt),
+          ]))
           .execute();
         await trx.insertInto("search_catalog_sync_state")
           .values({
@@ -146,11 +164,46 @@ export const createSearchCacheRepos = (
     },
 
     // Opportunistic freshness: called where a title transits the server
-    // anyway (remote title PATCH proxy). UPDATE-only — inserting here would
-    // fabricate a row outside snapshot generations.
+    // anyway (remote title PATCH proxy + local AI title generation).
+    // UPDATE-only — a title alone must not fabricate a session's existence.
+    // Stamps written_at so an in-flight snapshot doesn't clobber the fresher
+    // title with its stale copy.
     updateCachedSessionTitle: async (localSessionId, title) => {
       await kdb.updateTable("session_search_cache")
-        .set({ title })
+        .set({ title, written_at: Date.now() })
+        .where("local_session_id", "=", localSessionId)
+        .execute();
+    },
+
+    // Create write-through: called where a remote session's creation transits
+    // the server (UI create proxy, commander spawn, branch-from-history). The
+    // written_at stamp keeps the row exempt from snapshot reconciliation until
+    // a snapshot collected after this instant confirms or deletes it — see
+    // applyCatalogSnapshot. generation 0 marks it as never snapshot-confirmed.
+    noteSessionCreated: async ({ localSessionId, projectId, targetId, branch, title }) => {
+      const now = Date.now();
+      await kdb.insertInto("session_search_cache")
+        .values({
+          local_session_id: localSessionId, project_id: projectId, target_id: targetId,
+          branch: toDbBranch(branch), title: title ?? null, last_active_at: now,
+          favorited_at: null, entry_count: 0, generation: 0, deleted_at: null, written_at: now,
+        })
+        .onConflict((oc) => oc.column("local_session_id").doUpdateSet({
+          project_id: projectId, target_id: targetId, branch: toDbBranch(branch),
+          last_active_at: now, deleted_at: null, written_at: now,
+          ...(title !== undefined ? { title } : {}),
+        }))
+        .execute();
+    },
+
+    // Delete write-through: soft-delete on the proxied DELETE path. UPDATE-only
+    // (no row → nothing to hide). If the worker-side delete actually failed,
+    // the next snapshot — collected after this instant — resurrects the row:
+    // the worker's catalog stays the source of truth.
+    noteSessionDeleted: async (localSessionId) => {
+      const now = Date.now();
+      await kdb.updateTable("session_search_cache")
+        .set({ deleted_at: now, written_at: now })
         .where("local_session_id", "=", localSessionId)
         .execute();
     },

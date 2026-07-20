@@ -24,6 +24,8 @@ type ProxyResult = { ok: boolean; status: number; data: unknown };
 
 function makeApp() {
   const upsert = vi.fn(async () => undefined);
+  const noteSessionCreated = vi.fn(async () => undefined);
+  const updateCachedSessionTitle = vi.fn(async () => undefined);
   const projectsGetById = vi.fn(async () => ({ id: "p1" }));
   const branchSession = vi.fn(async () => ({ ok: true, sessionId: "new-local-id" }));
   const remoteSessionMap = new Map<string, unknown>();
@@ -43,18 +45,20 @@ function makeApp() {
     remoteServers: { getAll: async () => [{ id: "other", cross_remote_access: "read" }] },
     settings: { getOrCreate: async () => SECRET },
     remoteSessionMappings: { upsert, markTitleResolved: vi.fn(async () => undefined) },
+    searchCache: { noteSessionCreated, updateCachedSessionTitle },
   });
   app.decorate("agentSessionManager", {
     branchSession,
     getSession: () => ({ id: "new-local-id", projectId: "p1", branch: null, status: "stopped", permissionMode: "edit", agentType: "claude-code" }),
     getMessages: () => [],
     markTitleResolved: vi.fn(),
+    emitSessionTitle: vi.fn(),
   });
   app.decorate("remoteSessionMap", remoteSessionMap);
   app.decorate("remotePatchCache", { getOrCreate: () => ({ messages: [] }), appendMessage: vi.fn() });
   app.decorate("reverseConnectManager", null);
 
-  return { app, upsert, projectsGetById, branchSession, remoteSessionMap };
+  return { app, upsert, noteSessionCreated, updateCachedSessionTitle, projectsGetById, branchSession, remoteSessionMap };
 }
 
 /** Echo the center-supplied branch id back, as an upgraded remote would. */
@@ -111,6 +115,28 @@ describe("center-side remote branch protocol", () => {
     expect(ctx.remoteSessionMap.has(localSessionId)).toBe(true);
     expect(ctx.upsert).toHaveBeenCalledOnce();
     expect(res.json().session.id).toBe(localSessionId);
+
+    // Search-cache write-through: the branched session is searchable now,
+    // not after the next on-open refresh.
+    expect(ctx.noteSessionCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ localSessionId, projectId: "p1", targetId: "srv1" }),
+    );
+  });
+
+  it("remote title PATCH: a rename writes the trimmed title through to the search cache", async () => {
+    proxyMock.mockImplementation(async () => ({ ok: true, status: 200, data: { success: true } }));
+    const res = await app.inject({ method: "PATCH", url: `/api/agent-sessions/${SRC_SESSION_ID}/title`, payload: { title: "  New name  " } });
+    expect(res.statusCode).toBe(200);
+    expect(ctx.updateCachedSessionTitle).toHaveBeenCalledWith(SRC_SESSION_ID, "New name");
+  });
+
+  it("remote title PATCH: clearing the title writes null through to the search cache", async () => {
+    // Regression: the old guard skipped the cache write for a cleared title,
+    // leaving the stale title searchable in Cmd+K until the next refresh.
+    proxyMock.mockImplementation(async () => ({ ok: true, status: 200, data: { success: true } }));
+    const res = await app.inject({ method: "PATCH", url: `/api/agent-sessions/${SRC_SESSION_ID}/title`, payload: { title: "   " } });
+    expect(res.statusCode).toBe(200);
+    expect(ctx.updateCachedSessionTitle).toHaveBeenCalledWith(SRC_SESSION_ID, null);
   });
 
   it("fails closed with 409 and no registration when the remote returns a different id", async () => {

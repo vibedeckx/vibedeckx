@@ -1126,6 +1126,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           await fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
           fastify.agentSessionManager.markTitleResolved(localSessionId);
 
+          // Search-cache write-through so the branched session shows in Cmd+K
+          // immediately. Best-effort: it exists on the remote at this point.
+          await fastify.storage.searchCache.noteSessionCreated({
+            localSessionId, projectId, targetId: remoteInfo.remoteServerId,
+            branch: remoteInfo.branch ?? null,
+            title: (remoteData.session as { title?: string | null }).title ?? null,
+          }).catch((err) => console.error("[Branch] search-cache create write-through failed:", err));
+
           // Seed remotePatchCache with the copied messages so WS replay has data
           // immediately (mirrors the create/findExisting proxy paths).
           if (remoteData.messages && remoteData.messages.length > 0) {
@@ -1378,6 +1386,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         fastify.remoteSessionMap.delete(req.params.sessionId);
         await fastify.storage.remoteSessionMappings.delete(req.params.sessionId);
         fastify.remotePatchCache.delete(req.params.sessionId);
+        // Search-cache write-through: drop the session from Cmd+K now. Done
+        // unconditionally, mirroring the map/mapping cleanup above — if the
+        // worker-side delete actually failed, the next snapshot (collected
+        // after this write) resurrects the row.
+        await fastify.storage.searchCache.noteSessionDeleted(req.params.sessionId)
+          .catch((err) => console.error("[API] search-cache delete write-through failed:", err));
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
@@ -1428,17 +1442,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
         );
         // Opportunistic write-through: keep the search cache's copy of this
         // session's title fresh since a title change transits the server
-        // anyway. UPDATE-only (no insert for a null/cleared title — the
-        // cache column stays whatever the last snapshot/refresh set it to).
-        if (normalizedTitle) {
-          try {
-            await fastify.storage.searchCache.updateCachedSessionTitle(req.params.sessionId, normalizedTitle);
-          } catch (err) {
-            // Best-effort cache freshness only — the remote PATCH already
-            // succeeded, so a write-through failure here must not 500 an
-            // otherwise-successful title change.
-            console.error("[API] searchCache.updateCachedSessionTitle failed:", err);
-          }
+        // anyway — including a cleared (null) title, which must stop matching
+        // its old text in Cmd+K. UPDATE-only: a title alone never fabricates
+        // a session's existence.
+        try {
+          await fastify.storage.searchCache.updateCachedSessionTitle(req.params.sessionId, normalizedTitle);
+        } catch (err) {
+          // Best-effort cache freshness only — the remote PATCH already
+          // succeeded, so a write-through failure here must not 500 an
+          // otherwise-successful title change.
+          console.error("[API] searchCache.updateCachedSessionTitle failed:", err);
         }
       }
       return reply.code(proxyStatus(result)).send(result.data);

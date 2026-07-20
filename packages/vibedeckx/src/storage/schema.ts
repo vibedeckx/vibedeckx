@@ -217,6 +217,7 @@ export interface SessionSearchCacheTable {
   entry_count: number;
   generation: number;
   deleted_at: number | null;
+  written_at: number | null;  // last out-of-band write-through; null = snapshot-owned
 }
 
 export interface WorkspaceSearchCacheTable {

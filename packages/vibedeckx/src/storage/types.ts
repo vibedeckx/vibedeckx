@@ -572,10 +572,26 @@ export interface Storage {
     markTitleResolved: (localSessionId: string) => Promise<void>;
   };
   searchCache: {
-    applyCatalogSnapshot(projectId: string, targetId: string, snapshot: SearchCatalogSnapshot): Promise<void>;
+    /**
+     * Reconcile one (project, target) snapshot into the cache. `collectedAt`
+     * (default: now) is when the snapshot's data was collected — write-through
+     * rows written at or after it are exempt from both the deletion sweep and
+     * the upsert override, so an in-flight snapshot can never clobber a
+     * create/delete/rename that happened while it was being fetched.
+     */
+    applyCatalogSnapshot(projectId: string, targetId: string, snapshot: SearchCatalogSnapshot, collectedAt?: number): Promise<void>;
     recordSyncFailure(projectId: string, targetId: string, error: string): Promise<void>;
     getSyncStates(projectIds: string[]): Promise<SearchSyncState[]>;
-    updateCachedSessionTitle(localSessionId: string, title: string): Promise<void>;
+    updateCachedSessionTitle(localSessionId: string, title: string | null): Promise<void>;
+    /**
+     * Write-through for a remote session created via this server: surfaces it
+     * in search immediately instead of after the next on-open refresh. The
+     * row stays exempt from snapshot reconciliation until a snapshot collected
+     * after this call confirms (or deletes) it.
+     */
+    noteSessionCreated(entry: { localSessionId: string; projectId: string; targetId: string; branch: string | null; title?: string | null }): Promise<void>;
+    /** Write-through for a remote session deleted via this server (soft-delete). */
+    noteSessionDeleted(localSessionId: string): Promise<void>;
     /**
      * Cache-only tiered search across projects/workspaces/sessions, scoped to
      * `userId` (skipped in solo mode). Empty/whitespace `query` switches to
