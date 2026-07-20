@@ -378,7 +378,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
       </Conversation>
 
       {/* Input area */}
-      <div className="flex-shrink-0 border-t border-border/60 p-3">
+      <div className="flex-shrink-0 p-3">
         {isGenerating && (
           <div className="flex justify-center mb-2">
             <Button
@@ -414,7 +414,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               textarea's font classes; 1.5rem = its py-3): centered on a
               single line, hugs the last line when multiline */}
           <div
-            className="pointer-events-none absolute bottom-0 right-1 flex items-center text-base md:text-sm"
+            className="pointer-events-none absolute bottom-0 right-2 flex items-center text-base md:text-sm"
             style={{
               fontSize: "var(--conv-font-size, 14px)",
               height: "calc(1lh + 1.5rem)",
