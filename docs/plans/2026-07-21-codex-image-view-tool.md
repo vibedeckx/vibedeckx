@@ -65,6 +65,7 @@ Expected: PASS.
 **Files:**
 - Create: `apps/vibedeckx-ui/components/agent/agent-message.image-view.test.tsx`
 - Modify: `apps/vibedeckx-ui/components/agent/agent-message.tsx:1-500`
+- Modify: `packages/vibedeckx/src/protocol/claude-code/schema.ts:47-68`
 
 **Step 1: Write the failing UI test**
 
@@ -91,6 +92,8 @@ Expected: FAIL because the generic tool renderer includes `Tool: ImageView` and 
 **Step 3: Write the minimal implementation**
 
 Add an `ImageView` branch to `ToolUseMessage` using the existing tool-row structure. Render an image icon, `View Image`, and the path extracted defensively from the tool input as wrapping monospace text.
+
+Add `ImageView` to `FRONTEND_RENDERED_TOOLS` so the existing frontend/protocol contract test recognizes the dedicated renderer. This registry update must not alter Claude Code parsing.
 
 **Step 4: Run the UI test**
 

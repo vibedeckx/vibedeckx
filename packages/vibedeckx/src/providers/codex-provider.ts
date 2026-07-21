@@ -236,6 +236,16 @@ export class CodexProvider implements AgentProvider {
         ];
       }
 
+      case "imageView": {
+        const id = item.id ?? this.generateId();
+        return [{
+          type: "tool_use",
+          tool: "ImageView",
+          input: { path: item.path ?? "" },
+          toolUseId: id,
+        }];
+      }
+
       case "plan":
         return [{ type: "text", content: item.text ?? "" }];
 
@@ -278,7 +288,7 @@ export class CodexProvider implements AgentProvider {
       }
 
       default:
-        // imageView, contextCompaction, enteredReviewMode, exitedReviewMode, dynamicToolCall, etc.
+        // contextCompaction, enteredReviewMode, exitedReviewMode, dynamicToolCall, etc.
         return [{ type: "system", content: `[${item.type}]` }];
     }
   }

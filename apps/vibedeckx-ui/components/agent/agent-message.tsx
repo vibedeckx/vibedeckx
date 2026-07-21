@@ -255,6 +255,29 @@ function AssistantMessage({ content, agentType: messageAgentType }: { content: s
 }
 
 function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: unknown; messageIndex: number }) {
+  if (tool === "ImageView") {
+    const path =
+      typeof input === "object" && input !== null && "path" in input && typeof input.path === "string"
+        ? input.path
+        : "";
+    return (
+      <div className="flex gap-3 py-3">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
+          <Eye className="w-4 h-4 text-sky-500" />
+        </div>
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <p className="text-sm font-medium text-sky-500 mb-1">View Image</p>
+          <p
+            className="font-mono text-muted-foreground break-all"
+            style={{ fontSize: "var(--conv-font-size, 12px)" }}
+          >
+            {path}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (tool === "AskUserQuestion") {
     return (
       <div className="flex gap-3 py-3">

@@ -65,6 +65,7 @@ export const FRONTEND_RENDERED_TOOLS = [
   "WebSearch",
   "Skill",
   "FileChange",
+  "ImageView",
 ] as const;
 
 // ---- Content blocks ----

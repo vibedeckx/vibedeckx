@@ -18,8 +18,10 @@ When `CodexProvider` receives an `item/completed` notification whose item type i
 
 The Agent UI recognizes `ImageView` and renders a dedicated tool row using the existing tool-message layout, with an image/eye icon, the label `View Image`, and a compact, wrapping path value. Missing paths render an empty path safely rather than falling back to a raw JSON block.
 
+Because the protocol compatibility suite maintains a registry of every tool with dedicated frontend rendering, `ImageView` is also added to `FRONTEND_RENDERED_TOOLS`. This is registry bookkeeping only and does not change Claude Code event parsing.
+
 ## Testing
 
 - Provider test: an `imageView` notification produces exactly one `ImageView` tool-use event and no system or result event.
 - UI test: an `ImageView` tool message renders `View Image` and its path without the generic `Tool: ImageView`/`Input` presentation.
-
+- Contract test: the frontend tool registry remains synchronized with the dedicated renderer.

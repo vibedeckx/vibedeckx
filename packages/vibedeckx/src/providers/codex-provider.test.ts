@@ -131,6 +131,36 @@ describe("CodexProvider", () => {
     expect(events).toEqual([]);
   });
 
+  it("renders image views as tool activity with the image path", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+
+    const events = provider.parseStdoutLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          turnId: "turn-1",
+          item: {
+            type: "imageView",
+            id: "image-1",
+            path: "/tmp/screenshot.png",
+          },
+        },
+      }),
+      "session-1",
+    );
+
+    expect(events).toEqual([
+      {
+        type: "tool_use",
+        tool: "ImageView",
+        input: { path: "/tmp/screenshot.png" },
+        toolUseId: "image-1",
+      },
+    ]);
+  });
+
   it("surfaces JSON-RPC error responses as error results", () => {
     const provider = new CodexProvider();
     provider.onSessionCreated("session-1", "edit");
