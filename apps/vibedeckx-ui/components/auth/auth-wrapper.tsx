@@ -100,17 +100,6 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="h-screen flex flex-col items-center justify-center bg-background">
         <div className="w-full max-w-md">
-          <Button
-            variant="ghost"
-            className="mb-4 text-muted-foreground hover:text-foreground"
-            onClick={() => {
-              setShowSignIn(false);
-              setSessionExpired(false);
-            }}
-          >
-            <ArrowLeft className="mr-2 h-4 w-4" />
-            Back
-          </Button>
           {sessionExpired && (
             <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-600 dark:text-amber-400">
               <Clock className="mt-0.5 h-4 w-4 shrink-0" />
@@ -129,6 +118,21 @@ function AuthGate({ children }: { children: React.ReactNode }) {
               },
             }}
           />
+          {!sessionExpired && (
+            <div className="mt-4 flex justify-center">
+              <Button
+                variant="ghost"
+                className="text-muted-foreground hover:text-foreground"
+                onClick={() => {
+                  setShowSignIn(false);
+                  setSessionExpired(false);
+                }}
+              >
+                <ArrowLeft className="mr-2 h-4 w-4" />
+                Back to home
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     );
