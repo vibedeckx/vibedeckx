@@ -64,8 +64,12 @@ function AttachmentHeader() {
   const attachments = usePromptInputAttachments();
   if (attachments.files.length === 0) return null;
   return (
-    <PromptInputHeader>
-      <PromptInputAttachments>
+    // pt-3/pb-0 + p-0: the block-end addon variant pads its bottom and the
+    // attachments div pads all sides — stacked with the textarea's pt-3 they
+    // left ~31px under the thumbnails; separation now comes from the textarea
+    // padding alone
+    <PromptInputHeader className="pt-3 pb-0">
+      <PromptInputAttachments className="p-0">
         {(attachment) => <PromptInputAttachment data={attachment} />}
       </PromptInputAttachments>
     </PromptInputHeader>
