@@ -10,7 +10,15 @@ const clerkState = vi.hoisted(() => ({
 
 vi.mock("@clerk/clerk-react", () => ({
   ClerkProvider: ({ children }: { children: React.ReactNode }) => children,
-  SignIn: () => <div data-testid="clerk-sign-in">Clerk sign in</div>,
+  SignIn: ({
+    appearance,
+  }: {
+    appearance: { elements: { rootBox: string } };
+  }) => (
+    <div data-testid="clerk-sign-in" className={appearance.elements.rootBox}>
+      Clerk sign in
+    </div>
+  ),
   useAuth: () => ({
     getToken: vi.fn(),
     isLoaded: true,
@@ -101,7 +109,19 @@ describe("AuthWrapper sign-in navigation", () => {
     authState.isSignedIn = false;
     act(() => clerkState.listener!({ session: null }));
 
-    expect(container.textContent).toContain("Your session expired");
+    const alertCopy = Array.from(container.querySelectorAll("span")).find(
+      (element) =>
+        element.textContent?.trim() ===
+        "Session expired. Sign in again to continue.",
+    );
+    expect(alertCopy).toBeTruthy();
+
+    const alert = alertCopy!.parentElement!;
+    const signIn = container.querySelector('[data-testid="clerk-sign-in"]')!;
+    for (const element of [alert, signIn]) {
+      expect(element.classList.contains("w-full")).toBe(true);
+      expect(element.classList.contains("max-w-[400px]")).toBe(true);
+    }
     expect(
       Array.from(container.querySelectorAll("button")).some((button) =>
         button.textContent?.includes("Back"),

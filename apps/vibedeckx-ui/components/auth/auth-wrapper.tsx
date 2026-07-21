@@ -101,19 +101,16 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       <div className="h-screen flex flex-col items-center justify-center bg-background">
         <div className="w-full max-w-md">
           {sessionExpired && (
-            <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-600 dark:text-amber-400">
+            <div className="mx-auto mb-4 flex w-full max-w-[400px] items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-600 dark:text-amber-400">
               <Clock className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>
-                Your session expired. Sign in again to pick up where you left
-                off.
-              </span>
+              <span>Session expired. Sign in again to continue.</span>
             </div>
           )}
           <SignIn
             routing="hash"
             appearance={{
               elements: {
-                rootBox: "mx-auto",
+                rootBox: "mx-auto w-full max-w-[400px]",
                 card: "shadow-lg",
               },
             }}
