@@ -49,6 +49,21 @@ describe("captureSnapshot", () => {
     expect(snap.dirty["kept.ts"]).toBe(ABSENT);
   });
 
+  it("hashes a staged (added, not committed) file", () => {
+    writeFileSync(path.join(dir, "staged.ts"), "y\n");
+    git(dir, ["add", "staged.ts"]);
+    const snap = captureSnapshot(dir)!;
+    expect(snap.dirty["staged.ts"]).toBe(git(dir, ["hash-object", "staged.ts"]));
+  });
+
+  it("hashes an untracked file with a non-ASCII name", () => {
+    const name = "café.ts";
+    writeFileSync(path.join(dir, name), "z\n");
+    const snap = captureSnapshot(dir)!;
+    expect(snap).not.toBeNull();
+    expect(snap.dirty[name]).toBe(git(dir, ["hash-object", name]));
+  });
+
   it("returns null when not a git repo", () => {
     const empty = mkdtempSync(path.join(tmpdir(), "vdx-norepo-"));
     expect(captureSnapshot(empty)).toBeNull();

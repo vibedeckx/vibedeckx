@@ -33,7 +33,21 @@ export function captureSnapshot(worktreePath: string): SnapshotState | null {
 
     // Tracked changes vs HEAD (staged + unstaged), no rename detection.
     // Lines: "<status>\t<path>", e.g. "M\tsrc/a.ts", "D\tsrc/gone.ts".
-    const nameStatus = git(worktreePath, ["diff", "HEAD", "--name-status", "--no-renames"]);
+    // -c core.quotepath=false: emit non-ASCII paths as literal UTF-8 bytes
+    // instead of git's default octal-escaped/double-quoted form (e.g.
+    // "caf\303\251.ts"), which the tab/line-split parsing below can't
+    // recover the real path from. Residual: a path containing a literal
+    // double-quote, backslash, tab, or newline is still git-quoted
+    // regardless of this setting — accepted as far rarer than accented
+    // filenames.
+    const nameStatus = git(worktreePath, [
+      "-c",
+      "core.quotepath=false",
+      "diff",
+      "HEAD",
+      "--name-status",
+      "--no-renames",
+    ]);
     for (const line of nameStatus.split("\n")) {
       if (!line.trim()) continue;
       const tab = line.indexOf("\t");
@@ -44,7 +58,13 @@ export function captureSnapshot(worktreePath: string): SnapshotState | null {
     }
 
     // Untracked files (never added) — always additions.
-    const untracked = git(worktreePath, ["ls-files", "--others", "--exclude-standard"]);
+    const untracked = git(worktreePath, [
+      "-c",
+      "core.quotepath=false",
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+    ]);
     for (const p of untracked.split("\n")) {
       const t = p.trim();
       if (t) dirty[t] = git(worktreePath, ["hash-object", t]).trim();
