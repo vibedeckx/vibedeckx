@@ -102,4 +102,11 @@ describe("workflowRuns repository", () => {
     await storage.workflowRuns.update("r2", { status: "cancelled" });
     expect((await storage.workflowRuns.getAllActive()).map((r) => r.id)).toEqual(["r1"]);
   });
+
+  it("defaults review_span to this_turn and round-trips an explicit span", async () => {
+    const run = await storage.workflowRuns.create(baseRun);
+    expect(run.review_span).toBe("this_turn");
+    const run2 = await storage.workflowRuns.create({ ...baseRun, id: "r2", review_span: "session_start" });
+    expect(run2.review_span).toBe("session_start");
+  });
 });

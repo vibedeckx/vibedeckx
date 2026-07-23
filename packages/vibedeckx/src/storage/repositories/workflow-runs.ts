@@ -12,6 +12,7 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
       await kdb.insertInto("workflow_runs").values({
         ...opts,
         reviewer_session_id: opts.reviewer_session_id ?? null,
+        review_span: opts.review_span ?? "this_turn",
         status: "waiting_reviewer",
       }).execute();
       const row = await kdb

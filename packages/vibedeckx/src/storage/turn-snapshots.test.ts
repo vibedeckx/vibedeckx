@@ -41,4 +41,11 @@ describe("turnSnapshots repository", () => {
     expect((await storage.turnSnapshots.getStartBoundary("s1", 7))?.head).toBe("H0");
     expect(await storage.turnSnapshots.getStartBoundary("s1", -1)).toBeUndefined();
   });
+
+  it("getSessionStart returns the -1 row and undefined when absent", async () => {
+    expect(await storage.turnSnapshots.getSessionStart("s1")).toBeUndefined();
+    await storage.turnSnapshots.create({ session_id: "s1", turn_end_index: -1, head: "H0", dirty: { "a.ts": "sha" } });
+    await storage.turnSnapshots.create({ session_id: "s1", turn_end_index: 4, head: "H4", dirty: {} });
+    expect(await storage.turnSnapshots.getSessionStart("s1")).toEqual({ head: "H0", dirty: { "a.ts": "sha" } });
+  });
 });

@@ -277,6 +277,7 @@ export interface WorkflowRunsTable {
   reviewer_session_id: string | null;
   review_focus: string | null;
   review_target: string | null;
+  review_span: Generated<string>;
   feedback_snapshot: string | null;
   status: string;
   error: string | null;

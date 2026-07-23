@@ -240,6 +240,8 @@ export type WorkflowRunStatus =
   | "cancelled"
   | "failed";
 
+export type ReviewSpan = "this_turn" | "session_start";
+
 export interface WorkflowRun {
   id: string;
   project_id: string;
@@ -249,6 +251,7 @@ export interface WorkflowRun {
   reviewer_session_id: string | null;
   review_focus: string | null;
   review_target: string | null;
+  review_span: string;
   feedback_snapshot: string | null;
   status: WorkflowRunStatus;
   error: string | null;
@@ -695,6 +698,7 @@ export interface Storage {
       review_focus: string | null;
       review_target: string | null;
       reviewer_session_id?: string | null;
+      review_span?: ReviewSpan;
     }): Promise<WorkflowRun>;
     getById(id: string): Promise<WorkflowRun | undefined>;
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
@@ -722,6 +726,9 @@ export interface Storage {
     getStartBoundary(
       session_id: string,
       turnEndIndex: number,
+    ): Promise<{ head: string; dirty: Record<string, string> } | undefined>;
+    getSessionStart(
+      session_id: string,
     ): Promise<{ head: string; dirty: Record<string, string> } | undefined>;
   };
   close: () => Promise<void>;

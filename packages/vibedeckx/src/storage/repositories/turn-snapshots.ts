@@ -29,5 +29,15 @@ export const createTurnSnapshotRepos = (kdb: Kysely<DB>): Pick<Storage, "turnSna
       if (!row) return undefined;
       return { head: row.head, dirty: JSON.parse(row.dirty) as Record<string, string> };
     },
+    getSessionStart: async (session_id) => {
+      const row = await kdb
+        .selectFrom("turn_snapshots")
+        .select(["head", "dirty"])
+        .where("session_id", "=", session_id)
+        .where("turn_end_index", "=", -1)
+        .executeTakeFirst();
+      if (!row) return undefined;
+      return { head: row.head, dirty: JSON.parse(row.dirty) as Record<string, string> };
+    },
   },
 });

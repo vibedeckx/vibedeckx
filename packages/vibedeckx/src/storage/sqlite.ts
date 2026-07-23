@@ -827,6 +827,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       reviewer_session_id TEXT,
       review_focus TEXT,
       review_target TEXT,
+      review_span TEXT NOT NULL DEFAULT 'this_turn',
       feedback_snapshot TEXT,
       status TEXT NOT NULL DEFAULT 'waiting_reviewer',
       error TEXT,
@@ -853,6 +854,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const sessionSearchCacheInfo = db.prepare("PRAGMA table_info(session_search_cache)").all() as { name: string }[];
   if (!sessionSearchCacheInfo.some((col) => col.name === "written_at")) {
     db.exec("ALTER TABLE session_search_cache ADD COLUMN written_at INTEGER");
+  }
+
+  // Migration: add review_span to workflow_runs — the review-scope span
+  // (this_turn default, or session_start). Existing rows default to this_turn.
+  const workflowRunsInfo = db.prepare("PRAGMA table_info(workflow_runs)").all() as { name: string }[];
+  if (!workflowRunsInfo.some((col) => col.name === "review_span")) {
+    db.exec("ALTER TABLE workflow_runs ADD COLUMN review_span TEXT NOT NULL DEFAULT 'this_turn'");
   }
 
   db.exec(`
