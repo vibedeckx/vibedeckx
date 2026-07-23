@@ -3,7 +3,6 @@ import { execFileSync } from "child_process";
 import { mkdtempSync, rmSync, writeFileSync, rmSync as rmFile } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { randomBytes } from "crypto";
 import { captureSnapshot, computeScope, ABSENT, recordTurnSnapshot } from "./review-snapshot.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 

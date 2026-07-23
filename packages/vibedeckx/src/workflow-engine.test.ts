@@ -228,6 +228,25 @@ describe("buildReviewerPrompt scope", () => {
     });
     expect(prompt).toContain("scope unknown");
   });
+
+  it("still renders a scope note (not a free-roam fallback) when the turn changed no files", () => {
+    const prompt = buildReviewerPrompt({
+      taskContext: "fix login", originalIntent: "fix login",
+      authorSelfReport: null, intentBrief: null, reviewFocus: null, target,
+      scope: { changedFiles: [], startHead: "base9" },
+    });
+    expect(prompt).toContain("## Scope — the change under review");
+    expect(prompt).toContain("changed no files");
+    expect(prompt).not.toContain("scope unknown");
+  });
+
+  it("renders no Scope section when scope is omitted entirely (back-compat)", () => {
+    const prompt = buildReviewerPrompt({
+      taskContext: "fix login", originalIntent: "fix login",
+      authorSelfReport: null, intentBrief: null, reviewFocus: null, target,
+    });
+    expect(prompt).not.toContain("## Scope");
+  });
 });
 
 describe("WorkflowEngine", () => {
