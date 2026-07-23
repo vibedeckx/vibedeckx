@@ -16,13 +16,12 @@ const HEAD_CHARS = 8_000;
 const TAIL_CHARS = 15_000;
 const BRIEF_MAX_CHARS = 4_000;
 
-const SYSTEM_PROMPT = [
+export const SYSTEM_PROMPT = [
   "You distill a coding-agent conversation into an intent brief for an independent code reviewer.",
   "The reviewer will NOT see the conversation — only your brief plus the actual code, so capture what the code alone cannot show:",
   "1. The original request and its goal.",
   "2. Constraints and explicit user decisions, including approaches the user rejected.",
-  "3. The intended scope of the changes.",
-  "4. Trade-offs or limitations that were acknowledged and accepted.",
+  "3. Trade-offs or limitations that were acknowledged and accepted.",
   "Do NOT include the agent's reasoning, self-assessment, or claims that the work is correct or complete — the reviewer must judge that independently.",
   "Write concise markdown bullets under those numbered headings, under 400 words total, in the same language as the conversation. Reply with the brief only.",
 ].join("\n");

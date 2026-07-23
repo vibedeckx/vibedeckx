@@ -3,7 +3,7 @@ import type { AgentMessage } from "../agent-types.js";
 
 vi.mock("ai", () => ({ generateText: vi.fn() }));
 import { generateText } from "ai";
-import { serializeConversationForBrief, generateIntentBriefWithModel } from "./review-brief.js";
+import { serializeConversationForBrief, generateIntentBriefWithModel, SYSTEM_PROMPT } from "./review-brief.js";
 
 const mockGenerateText = vi.mocked(generateText);
 
@@ -96,5 +96,13 @@ describe("generateIntentBriefWithModel", () => {
     mockGenerateText.mockResolvedValue({ text: "y".repeat(9000) } as never);
     const capped = await generateIntentBriefWithModel({}, "User: build it");
     expect(capped).toHaveLength(4001); // 4000 + ellipsis
+  });
+});
+
+describe("SYSTEM_PROMPT", () => {
+  it("no longer asks the distiller to guess the intended scope, but keeps goal/constraints/trade-offs", () => {
+    expect(SYSTEM_PROMPT).not.toMatch(/intended scope/i);
+    expect(SYSTEM_PROMPT).toMatch(/original request/i);
+    expect(SYSTEM_PROMPT).toMatch(/trade-offs|limitations/i);
   });
 });
