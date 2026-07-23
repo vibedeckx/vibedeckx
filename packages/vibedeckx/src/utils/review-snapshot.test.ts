@@ -3,6 +3,7 @@ import { execFileSync } from "child_process";
 import { mkdtempSync, rmSync, writeFileSync, rmSync as rmFile } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import { randomBytes } from "crypto";
 import { captureSnapshot, computeScope, ABSENT, recordTurnSnapshot } from "./review-snapshot.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 
@@ -139,5 +140,48 @@ describe("recordTurnSnapshot", () => {
     const storage = await createSqliteStorage(path.join(dir, "db2.sqlite"));
     await expect(recordTurnSnapshot(storage, "missing", -1, "/no/such/path")).resolves.toBeUndefined();
     await storage.close();
+  });
+});
+
+describe("scenario: fix isolated from pre-existing dirt", () => {
+  let dir: string;
+  let dbDir: string;
+  beforeEach(() => {
+    dir = initRepo();
+    dbDir = mkdtempSync(path.join(tmpdir(), "vdx-db-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dbDir, { recursive: true, force: true });
+  });
+
+  it("names only the fix file, not the pre-existing uncommitted change", async () => {
+    const dbPath = path.join(dbDir, "db.sqlite");
+    const storage = await createSqliteStorage(dbPath);
+    await storage.projects.create({ id: "p1", name: "p", path: dir });
+    await storage.agentSessions.create({
+      id: "s1", project_id: "p1", branch: "dev",
+      permission_mode: "edit", agent_type: "claude-code",
+    });
+    // Close database to finalize files before snapshot baseline.
+    await storage.close();
+
+    // Pre-existing uncommitted change from earlier work.
+    writeFileSync(path.join(dir, "request-url.ts"), "earlier work\n");
+    // Session-start baseline (index -1).
+    const storage2 = await createSqliteStorage(dbPath);
+    await recordTurnSnapshot(storage2, "s1", -1, dir);
+
+    // The fix turn edits actions.ts only, leaves it uncommitted.
+    writeFileSync(path.join(dir, "actions.ts"), "the fix\n");
+    await recordTurnSnapshot(storage2, "s1", 5, dir);
+
+    // Review turn 5, "this turn" span: start = getStartBoundary(5) = the -1 baseline.
+    const startSnap = (await storage2.turnSnapshots.getStartBoundary("s1", 5))!;
+    await storage2.close();
+    const endSnap = captureSnapshot(dir)!;
+    const scope = computeScope(startSnap, endSnap, dir);
+
+    expect(scope.changedFiles).toEqual(["actions.ts"]);
   });
 });
