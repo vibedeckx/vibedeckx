@@ -1,9 +1,9 @@
 import { randomUUID } from "crypto";
-import type { Storage, WorkflowRun } from "./storage/types.js";
+import type { ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, TextPart } from "./agent-types.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
-import { captureSnapshot, computeScope } from "./utils/review-snapshot.js";
+import { captureSnapshot, computeScope, resolveStartSnapshot } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
@@ -402,6 +402,7 @@ export class WorkflowEngine {
     sourceSessionId: string;
     reviewFocus?: string;
     sourceTurnEndIndex?: number;
+    reviewSpan?: ReviewSpan;
     /**
      * Tier-1 context: LLM-distilled brief of the source conversation, produced
      * front-side (that's where chat-provider keys live). Opaque text to the
@@ -483,6 +484,7 @@ export class WorkflowEngine {
         review_focus: opts.reviewFocus ?? null,
         review_target: JSON.stringify(target),
         reviewer_session_id: opts.reviewerSessionId ?? null,
+        review_span: opts.reviewSpan ?? "this_turn",
       });
       this.trackParticipants(run);
 
@@ -519,7 +521,9 @@ export class WorkflowEngine {
       let scope: { changedFiles: string[]; startHead: string } | null = null;
       try {
         const endSnap = captureSnapshot(worktreePath);
-        const startSnap = await this.storage.turnSnapshots.getStartBoundary(opts.sourceSessionId, turnEndIndex);
+        const startSnap = await resolveStartSnapshot(
+          this.storage, opts.sourceSessionId, opts.reviewSpan ?? "this_turn", turnEndIndex,
+        );
         if (endSnap && startSnap) scope = computeScope(startSnap, endSnap, worktreePath);
       } catch (err) {
         console.warn("[WorkflowEngine] scope computation failed:", (err as Error).message);

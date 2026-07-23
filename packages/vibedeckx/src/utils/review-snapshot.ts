@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import type { Storage } from "../storage/types.js";
+import type { ReviewSpan, Storage } from "../storage/types.js";
 
 const MAX_BUFFER = 10 * 1024 * 1024;
 
@@ -152,4 +152,22 @@ export async function recordTurnSnapshot(
   } catch (err) {
     console.warn(`[ReviewSnapshot] failed to record snapshot for ${sessionId}@${turnEndIndex}:`, (err as Error).message);
   }
+}
+
+/**
+ * Resolve the start-boundary snapshot for a review's span. `session_start`
+ * uses the session-start (-1) snapshot; `this_turn` uses the snapshot
+ * immediately before the reviewed turn. Undefined when the chosen snapshot
+ * is missing (pre-feature session / capture failure) — the caller degrades
+ * to a null scope.
+ */
+export async function resolveStartSnapshot(
+  storage: Storage,
+  sessionId: string,
+  span: ReviewSpan,
+  turnEndIndex: number,
+): Promise<SnapshotState | undefined> {
+  return span === "session_start"
+    ? storage.turnSnapshots.getSessionStart(sessionId)
+    : storage.turnSnapshots.getStartBoundary(sessionId, turnEndIndex);
 }

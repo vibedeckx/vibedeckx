@@ -3,7 +3,7 @@ import { execFileSync } from "child_process";
 import { mkdtempSync, rmSync, writeFileSync, rmSync as rmFile } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { captureSnapshot, computeScope, ABSENT, recordTurnSnapshot } from "./review-snapshot.js";
+import { captureSnapshot, computeScope, ABSENT, recordTurnSnapshot, resolveStartSnapshot } from "./review-snapshot.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 
 function git(cwd: string, args: string[]): string {
@@ -182,5 +182,28 @@ describe("scenario: fix isolated from pre-existing dirt", () => {
     const scope = computeScope(startSnap, endSnap, dir);
 
     expect(scope.changedFiles).toEqual(["actions.ts"]);
+  });
+});
+
+describe("resolveStartSnapshot", () => {
+  let dir: string;
+  beforeEach(() => { dir = initRepo(); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("this_turn picks the boundary before the turn; session_start picks the -1 row", async () => {
+    const storage = await createSqliteStorage(path.join(mkdtempSync(path.join(tmpdir(), "vdx-rss-")), "db.sqlite"));
+    await storage.projects.create({ id: "p1", name: "p", path: dir });
+    await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev", permission_mode: "edit", agent_type: "claude-code" });
+    await storage.turnSnapshots.create({ session_id: "s1", turn_end_index: -1, head: "H0", dirty: { "start.ts": "s0" } });
+    await storage.turnSnapshots.create({ session_id: "s1", turn_end_index: 5, head: "H5", dirty: { "mid.ts": "s5" } });
+
+    const thisTurn = await resolveStartSnapshot(storage, "s1", "this_turn", 9);
+    expect(thisTurn?.head).toBe("H5"); // boundary before turn 9
+
+    const sessionStart = await resolveStartSnapshot(storage, "s1", "session_start", 9);
+    expect(sessionStart?.head).toBe("H0"); // the -1 session-start row
+
+    expect(await resolveStartSnapshot(storage, "s2-missing", "session_start", 9)).toBeUndefined();
+    await storage.close();
   });
 });
