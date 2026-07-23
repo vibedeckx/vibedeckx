@@ -697,6 +697,9 @@ export const CONVERSATION_SETTINGS_LIMITS = {
 
 export type AgentType = "claude-code" | "codex";
 
+/** Review-scope span; mirrors the backend `ReviewSpan` (frontend can't import backend types). */
+export type ReviewSpan = "this_turn" | "session_start";
+
 export interface AgentProviderInfo {
   type: AgentType;
   displayName: string;
@@ -2343,6 +2346,8 @@ export const api = {
     projectId: string; branch: string | null; sourceSessionId: string;
     reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: AgentType;
     reviewerSessionId?: string;
+    /** Review-scope span: `this_turn` (default) or `session_start`. */
+    reviewSpan?: ReviewSpan;
     /** Pre-generated tier-1 brief (see generateReviewIntentBrief); when present the server skips its own distillation. */
     intentBrief?: string;
   }): Promise<WorkflowRun> {

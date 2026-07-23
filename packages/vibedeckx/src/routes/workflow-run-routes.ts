@@ -8,13 +8,19 @@ import type { AgentMessage } from "../agent-types.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun } from "./remote-status-bridge.js";
 import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
-import type { WorkflowRun } from "../storage/types.js";
+import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
 import type { AgentType } from "../agent-types.js";
 
 /** undefined → engine default; null → invalid (reject with 400). */
 function parseReviewerAgentType(raw: unknown): AgentType | undefined | null {
   if (raw === undefined) return undefined;
   return typeof raw === "string" && REVIEWER_AGENT_TYPES.has(raw as AgentType) ? (raw as AgentType) : null;
+}
+
+/** undefined → this_turn (back-compat); a valid span passes; anything else → null (reject with 400). */
+export function parseReviewSpan(raw: unknown): ReviewSpan | null {
+  if (raw === undefined) return "this_turn";
+  return raw === "this_turn" || raw === "session_start" ? raw : null;
 }
 
 /**
@@ -130,7 +136,7 @@ async function routes(fastify: FastifyInstance) {
   };
 
   fastify.post<{
-    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string };
+    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string };
   }>("/api/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -138,6 +144,8 @@ async function routes(fastify: FastifyInstance) {
     if (!projectId || !sourceSessionId) return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
+    if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
     const reviewerSessionIdRaw = req.body?.reviewerSessionId;
     if (reviewerSessionIdRaw !== undefined &&
         (typeof reviewerSessionIdRaw !== "string" || reviewerSessionIdRaw.trim() === "")) {
@@ -194,6 +202,7 @@ async function routes(fastify: FastifyInstance) {
         sourceSessionId: remoteInfo.remoteSessionId,
         reviewFocus,
         sourceTurnEndIndex,
+        reviewSpan,
         reviewerAgentType,
         reviewerSessionId: bareReviewerSessionId,
         intentBrief,
@@ -294,6 +303,7 @@ async function routes(fastify: FastifyInstance) {
         sourceSessionId,
         reviewFocus,
         sourceTurnEndIndex,
+        reviewSpan,
         reviewerAgentType,
         reviewerSessionId,
         intentBrief,
@@ -513,12 +523,14 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
     const { sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
+    const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
+    if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
     const intentBriefRaw = req.body?.intentBrief;
     if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
       return reply.code(400).send({ error: "intentBrief must be a string" });
@@ -547,6 +559,7 @@ async function routes(fastify: FastifyInstance) {
         sourceSessionId,
         reviewFocus,
         sourceTurnEndIndex,
+        reviewSpan,
         reviewerAgentType,
         reviewerSessionId,
         intentBrief,
