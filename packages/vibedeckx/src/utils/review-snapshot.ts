@@ -75,3 +75,56 @@ export function captureSnapshot(worktreePath: string): SnapshotState | null {
     return null;
   }
 }
+
+/** Blob sha of `path` at `head`, or ABSENT if it does not exist there. */
+function blobShaOrAbsent(worktreePath: string, head: string, filePath: string): string {
+  try {
+    return git(worktreePath, ["rev-parse", `${head}:${filePath}`]).trim();
+  } catch {
+    return ABSENT;
+  }
+}
+
+/**
+ * The set of files whose effective content changed between two boundary
+ * snapshots. Effective content = the uncommitted blob if the file is dirty at
+ * that boundary, otherwise the committed blob at that boundary's HEAD.
+ * Comparison is by content sha, so pure status churn (staging, committing the
+ * same content, prior-turn dirt left untouched) is correctly excluded.
+ */
+export function computeScope(
+  start: SnapshotState,
+  end: SnapshotState,
+  worktreePath: string,
+): { changedFiles: string[]; startHead: string } {
+  const candidates = new Set<string>();
+
+  if (start.head !== end.head) {
+    // -c core.quotepath=false: see captureSnapshot's name-status call above —
+    // same rationale, this is another git call that emits paths.
+    const committed = git(worktreePath, [
+      "-c",
+      "core.quotepath=false",
+      "diff",
+      "--name-only",
+      "--no-renames",
+      start.head,
+      end.head,
+    ]);
+    for (const line of committed.split("\n")) {
+      const p = line.trim();
+      if (p) candidates.add(p);
+    }
+  }
+  for (const p of Object.keys(start.dirty)) candidates.add(p);
+  for (const p of Object.keys(end.dirty)) candidates.add(p);
+
+  const changed: string[] = [];
+  for (const f of candidates) {
+    const startSha = start.dirty[f] ?? blobShaOrAbsent(worktreePath, start.head, f);
+    const endSha = end.dirty[f] ?? blobShaOrAbsent(worktreePath, end.head, f);
+    if (startSha !== endSha) changed.push(f);
+  }
+  changed.sort();
+  return { changedFiles: changed, startHead: start.head };
+}
