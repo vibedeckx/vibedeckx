@@ -5,6 +5,7 @@ import {
   api,
   type AgentProviderInfo,
   type AgentType,
+  type ReviewSpan,
   type ReviewerCandidate,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,7 @@ export function ReviewDialog({
   const [open, setOpen] = useState(false);
   const [focus, setFocus] = useState("");
   const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
+  const [reviewSpan, setReviewSpan] = useState<ReviewSpan>("this_turn");
   const [reviewerMode, setReviewerMode] = useState<"reuse" | "new">("new");
   const [candidate, setCandidate] = useState<ReviewerCandidate | null>(null);
   const [candidateLoading, setCandidateLoading] = useState(false);
@@ -69,7 +71,10 @@ export function ReviewDialog({
   // Re-derive the default on every open: the source session's agent (and thus
   // the "other" agent) may have changed since the last time the dialog closed.
   useEffect(() => {
-    if (open) setReviewerAgent(defaultReviewerAgent(options, currentAgentType ?? null));
+    if (open) {
+      setReviewerAgent(defaultReviewerAgent(options, currentAgentType ?? null));
+      setReviewSpan("this_turn");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -141,6 +146,7 @@ export function ReviewDialog({
         branch,
         sourceSessionId: sessionId,
         reviewFocus: focus.trim() || undefined,
+        reviewSpan,
         ...reviewer,
         ...(intentBrief ? { intentBrief } : {}),
       });
@@ -213,6 +219,20 @@ export function ReviewDialog({
                     {p.type === currentAgentType ? "（当前 agent）" : ""}
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+        {reviewerMode === "new" && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground shrink-0">审查范围</span>
+            <Select value={reviewSpan} onValueChange={(v) => setReviewSpan(v as ReviewSpan)}>
+              <SelectTrigger className="h-8 text-sm flex-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="this_turn">仅本次 turn（默认）</SelectItem>
+                <SelectItem value="session_start">整个 session（自起点）</SelectItem>
               </SelectContent>
             </Select>
           </div>

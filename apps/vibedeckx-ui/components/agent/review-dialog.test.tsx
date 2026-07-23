@@ -3,14 +3,18 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { getReviewerCandidate, createWorkflowRun } = vi.hoisted(() => ({
+const { getReviewerCandidate, createWorkflowRun, generateReviewIntentBrief } = vi.hoisted(() => ({
   getReviewerCandidate: vi.fn(),
   createWorkflowRun: vi.fn(),
+  generateReviewIntentBrief: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
-  return { ...actual, api: { ...actual.api, getReviewerCandidate, createWorkflowRun } };
+  return {
+    ...actual,
+    api: { ...actual.api, getReviewerCandidate, createWorkflowRun, generateReviewIntentBrief },
+  };
 });
 
 import { ReviewDialog } from "./review-dialog";
@@ -120,5 +124,38 @@ describe("ReviewDialog reviewer reuse", () => {
 
     expect(document.body.textContent).toContain("上次 reviewer 已不可用");
     expect(document.body.textContent).toContain("Reviewer agent");
+  });
+});
+
+describe("ReviewDialog review span", () => {
+  it("sends reviewSpan this_turn by default on a fresh review", async () => {
+    await renderAndOpen({
+      available: false,
+      sessionId: null,
+      title: null,
+      agentType: null,
+      reason: "deleted",
+    });
+    await act(async () => {
+      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewSpan: "this_turn" }),
+    );
+  });
+
+  it("hides the span selector in reuse mode", async () => {
+    await renderAndOpen({
+      available: true,
+      sessionId: "s-rev",
+      title: "Prev",
+      agentType: "claude-code",
+      reason: null,
+    });
+    // reuse mode is auto-selected when a reusable candidate exists
+    expect(
+      Array.from(document.body.querySelectorAll("*")).some((el) => el.textContent === "审查范围"),
+    ).toBe(false);
   });
 });
