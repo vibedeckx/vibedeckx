@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, type ReactNode, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Fragment, type ReactNode, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { Terminal, GitBranch, SquareTerminal, Bot, Globe, FolderOpen } from 'lucide-react';
 import { ExecutorPanel } from '@/components/executor';
@@ -29,6 +29,13 @@ interface RightPanelProps {
 
 type TabType = 'agent' | 'executors' | 'diff' | 'terminal' | 'preview' | 'files';
 
+// Tab reconciliation must run before the browser paints, otherwise navigating
+// to a session (which bumps activateAgentTabNonce) paints the persisted tab
+// (e.g. Executors) for one frame before the effect switches to Agent, causing a
+// visible flash. useLayoutEffect runs after DOM mutation but before paint; fall
+// back to useEffect on the server (static export) to avoid the SSR warning.
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
+
 function usePersistedTab(projectId: string | null, branch: string | null | undefined): [TabType, (tab: TabType) => void] {
   const key = `vibedeckx:activeTab:${projectId ?? 'none'}:${branch ?? 'main'}`;
   const [activeTab, setActiveTabState] = useState<TabType>(() => {
@@ -36,7 +43,7 @@ function usePersistedTab(projectId: string | null, branch: string | null | undef
     return (localStorage.getItem(key) as TabType) ?? 'agent';
   });
 
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     const saved = localStorage.getItem(key) as TabType | null;
     setActiveTabState(saved ?? 'agent');
   }, [key]);
@@ -64,7 +71,7 @@ export function RightPanel({
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
   const prevActivateAgentTabNonceRef = useRef(activateAgentTabNonce);
 
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (activateAgentTabNonce === undefined) return;
     if (prevActivateAgentTabNonceRef.current === activateAgentTabNonce) return;
     prevActivateAgentTabNonceRef.current = activateAgentTabNonce;
@@ -72,7 +79,7 @@ export function RightPanel({
   }, [activateAgentTabNonce, setActiveTab]);
 
   const prevDiffCompareNonceRef = useRef(diffCompareNonce);
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (diffCompareNonce === undefined) return;
     if (prevDiffCompareNonceRef.current === diffCompareNonce) return;
     prevDiffCompareNonceRef.current = diffCompareNonce;
