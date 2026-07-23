@@ -207,3 +207,29 @@ describe("resolveStartSnapshot", () => {
     await storage.close();
   });
 });
+
+describe("scenario: span widens scope from one turn to the whole session", () => {
+  let dir: string;
+  beforeEach(() => { dir = initRepo(); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("this_turn = last turn only; session_start = both turns", async () => {
+    const storage = await createSqliteStorage(path.join(mkdtempSync(path.join(tmpdir(), "vdx-span-")), "db.sqlite"));
+    await storage.projects.create({ id: "p1", name: "p", path: dir });
+    await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev", permission_mode: "edit", agent_type: "claude-code" });
+
+    await recordTurnSnapshot(storage, "s1", -1, dir);        // session start (clean)
+    writeFileSync(path.join(dir, "turnA.ts"), "A\n");
+    await recordTurnSnapshot(storage, "s1", 3, dir);          // end of turn A (turnA.ts dirty)
+    writeFileSync(path.join(dir, "turnB.ts"), "B\n");
+    // review turn B (index 7): end boundary = live worktree (turnA.ts + turnB.ts dirty)
+
+    const end = captureSnapshot(dir)!;
+    const thisTurnStart = (await resolveStartSnapshot(storage, "s1", "this_turn", 7))!;   // -> index 3 snapshot
+    const sessionStart = (await resolveStartSnapshot(storage, "s1", "session_start", 7))!; // -> -1 snapshot
+
+    expect(computeScope(thisTurnStart, end, dir).changedFiles).toEqual(["turnB.ts"]);
+    expect(computeScope(sessionStart, end, dir).changedFiles).toEqual(["turnA.ts", "turnB.ts"]);
+    await storage.close();
+  });
+});
