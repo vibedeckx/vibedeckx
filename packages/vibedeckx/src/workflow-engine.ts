@@ -3,6 +3,7 @@ import type { Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, TextPart } from "./agent-types.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
+import { captureSnapshot, computeScope } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
@@ -168,12 +169,21 @@ export function buildReviewerPrompt(opts: {
   intentBrief?: string | null;
   reviewFocus: string | null;
   target: ReviewTarget;
+  /**
+   * Files the reviewed turn actually changed, from snapshot delta. When set
+   * with a non-empty list, the prompt confines the reviewer to these files and
+   * treats everything else in the worktree as out of scope. Null when snapshots
+   * were unavailable (pre-feature session or capture failure) — the prompt then
+   * tells the reviewer the scope is unknown.
+   */
+  scope?: { changedFiles: string[]; startHead: string } | null;
 }): string {
   // In single-turn sessions the first user message IS the turn's task — don't
   // print it twice.
   const intent = opts.originalIntent !== opts.taskContext ? opts.originalIntent : null;
   const brief = opts.intentBrief || null;
   const hasExcerpt = Boolean(intent || opts.taskContext || opts.authorSelfReport);
+  const scope = opts.scope && opts.scope.changedFiles.length > 0 ? opts.scope : null;
   return [
     "You are a code reviewer agent. Another agent just completed work in this workspace; review it critically and independently.",
     brief ? `\n## Intent brief (distilled from the source conversation)\n${brief}` : null,
@@ -184,6 +194,11 @@ export function buildReviewerPrompt(opts: {
     !brief && opts.taskContext ? `\n## Latest user message (verbatim)\n${opts.taskContext}` : null,
     selfReportSection(opts.authorSelfReport),
     opts.reviewFocus ? `\n## Review focus (from the user)\n${opts.reviewFocus}` : null,
+    scope
+      ? `\n## Scope — the change under review\nThe reviewed turn changed exactly these files:\n${scope.changedFiles.map((f) => `- ${f}`).join("\n")}\nIt starts from commit \`${scope.startHead}\` — use \`git diff ${scope.startHead} -- <file>\` and \`git log ${scope.startHead}..HEAD\` to see the content.\nConfine your review to these files and changes. Other uncommitted or pre-existing changes in the worktree, or changes from other turns, are out of scope unless this change depends on them.`
+      : opts.scope === null
+        ? "\n## Scope\nThe changed-file set could not be determined (scope unknown) — inspect `git diff`/`git status`/`git log` and judge the relevant range yourself."
+        : null,
     "\n## How to review",
     "- Do NOT modify any files — you are in read-only review mode.",
     "- Inspect the actual workspace state yourself: read the relevant files, run `git diff`, `git status` and `git log`.",
@@ -437,6 +452,15 @@ export class WorkflowEngine {
       const worktreePath = resolveWorktreePath(opts.project.path, opts.branch);
       const target = captureReviewTarget(worktreePath);
 
+      let scope: { changedFiles: string[]; startHead: string } | null = null;
+      try {
+        const endSnap = captureSnapshot(worktreePath);
+        const startSnap = await this.storage.turnSnapshots.getStartBoundary(opts.sourceSessionId, turnEndIndex);
+        if (endSnap && startSnap) scope = computeScope(startSnap, endSnap, worktreePath);
+      } catch (err) {
+        console.warn("[WorkflowEngine] scope computation failed:", (err as Error).message);
+      }
+
       let reviewerSession = null;
       if (opts.reviewerSessionId) {
         reviewerSession = await this.storage.agentSessions.getById(opts.reviewerSessionId);
@@ -526,6 +550,7 @@ export class WorkflowEngine {
           intentBrief: opts.intentBrief ?? null,
           reviewFocus: opts.reviewFocus ?? null,
           target,
+          scope,
         });
         const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path, undefined, { origin: "workflow" });
         if (!sent) {

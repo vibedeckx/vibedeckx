@@ -205,6 +205,31 @@ describe("pure helpers", () => {
   });
 });
 
+describe("buildReviewerPrompt scope", () => {
+  const target = { baseHead: "abc123", diffDigest: "d", diffStat: "1 file changed", capturedAt: 1 };
+
+  it("names the scoped files and start commit when scope is present", () => {
+    const prompt = buildReviewerPrompt({
+      taskContext: "fix login", originalIntent: "fix login",
+      authorSelfReport: null, intentBrief: null, reviewFocus: null, target,
+      scope: { changedFiles: ["app/signin/actions.ts"], startHead: "base9" },
+    });
+    expect(prompt).toContain("app/signin/actions.ts");
+    expect(prompt).toContain("base9");
+    expect(prompt).toContain("Confine your review");
+    expect(prompt).not.toContain("scope unknown");
+  });
+
+  it("falls back to a scope-unknown note when scope is null", () => {
+    const prompt = buildReviewerPrompt({
+      taskContext: "fix login", originalIntent: "fix login",
+      authorSelfReport: null, intentBrief: null, reviewFocus: null, target,
+      scope: null,
+    });
+    expect(prompt).toContain("scope unknown");
+  });
+});
+
 describe("WorkflowEngine", () => {
   let dir: string;
   let storage: Storage;
