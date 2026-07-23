@@ -2209,6 +2209,14 @@ export class AgentSessionManager {
    * shows "interrupted" instead of a fabricated number). Runs BEFORE
    * rebuildStoreFromRows so the store is built from the repaired rows.
    * The other constructor of turn_end entries is endActiveTurn (live paths).
+   *
+   * Also records a turn_snapshots row at the repair index (mirrors
+   * endActiveTurn's hook), capturing the worktree exactly as the crash left
+   * it. Without this, review's getStartBoundary would skip the snapshot-less
+   * repair boundary and scope the NEXT turn from the stale pre-crash
+   * snapshot, folding the interrupted turn's changes into it. Best-effort —
+   * this runs on server boot for every restored session and must never
+   * throw into the restore path.
    */
   private async repairInterruptedTurn(
     sessionId: string,
@@ -2230,11 +2238,25 @@ export class AgentSessionManager {
     if (landingType === null || landingType === "turn_end") return rows;
 
     const maxIndex = rows.reduce((m, r) => Math.max(m, r.entry_index), -1);
+    const repairIndex = maxIndex + 1;
     const repair: AgentMessage = { type: "turn_end", timestamp: Date.now(), outcome: "server_restart" };
     const data = JSON.stringify(repair);
-    await this.storage.agentSessions.upsertEntry(sessionId, maxIndex + 1, data);
-    console.log(`[AgentSession] Repaired interrupted turn for ${sessionId} (server_restart turn_end at ${maxIndex + 1})`);
-    return [...rows, { entry_index: maxIndex + 1, data }];
+    await this.storage.agentSessions.upsertEntry(sessionId, repairIndex, data);
+    console.log(`[AgentSession] Repaired interrupted turn for ${sessionId} (server_restart turn_end at ${repairIndex})`);
+
+    try {
+      const dbSession = await this.storage.agentSessions.getById(sessionId);
+      if (dbSession) {
+        const project = await this.storage.projects.getById(dbSession.project_id);
+        if (project?.path) {
+          await recordTurnSnapshot(this.storage, sessionId, repairIndex, resolveWorktreePath(project.path, dbSession.branch));
+        }
+      }
+    } catch (error) {
+      console.warn(`[AgentSession] Turn snapshot lookup failed for ${sessionId}@${repairIndex}:`, error);
+    }
+
+    return [...rows, { entry_index: repairIndex, data }];
   }
 
   /**

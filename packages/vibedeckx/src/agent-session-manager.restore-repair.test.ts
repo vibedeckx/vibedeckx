@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
 import { AgentSessionManager } from "./agent-session-manager.js";
+import { createSqliteStorage } from "./storage/sqlite.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
 
@@ -98,5 +103,89 @@ describe("restore-time turn repair", () => {
     expect(turnEnds).toHaveLength(1);
     expect(turnEnds[0].index).toBe(2); // maxIndex + 1
     expect((turnEnds[0].msg as { outcome?: string }).outcome).toBe("server_restart");
+  });
+});
+
+/**
+ * Repair inserts the server_restart turn_end, but review scoping needs a
+ * snapshot at that same index too (see recordTurnSnapshot / endActiveTurn's
+ * hook) — otherwise getStartBoundary for the NEXT turn skips the crash
+ * boundary and jumps back to the stale pre-crash snapshot, folding the
+ * interrupted turn's changes into the next turn's review scope. Uses real
+ * sqlite storage + a real git worktree (the mocked harness above has no
+ * `projects` table or filesystem, so it can't exercise resolveWorktreePath /
+ * captureSnapshot) — mirrors the pattern in review-snapshot.test.ts.
+ */
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+}
+
+function initRepo(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "vdx-repair-repo-"));
+  git(dir, ["init", "-q"]);
+  git(dir, ["config", "user.email", "t@t.com"]);
+  git(dir, ["config", "user.name", "t"]);
+  writeFileSync(path.join(dir, "base.ts"), "const a = 1;\n");
+  git(dir, ["add", "."]);
+  git(dir, ["commit", "-qm", "base"]);
+  return dir;
+}
+
+describe("restore-time turn repair: snapshot at the repair boundary", () => {
+  it("records a turn_snapshots row at the repair index, so a later turn's getStartBoundary resolves to the restart state instead of the stale pre-crash snapshot", async () => {
+    const repoDir = initRepo();
+    const dbDir = mkdtempSync(path.join(tmpdir(), "vdx-repair-db-"));
+    const storage: Storage = await createSqliteStorage(path.join(dbDir, "db.sqlite"));
+
+    try {
+      await storage.projects.create({ id: "p1", name: "p", path: repoDir });
+      // branch: "" is how the manager records "no worktree branch" (see
+      // spawnSession) — resolveWorktreePath treats it as falsy and resolves
+      // straight to the project path, same as branch: null.
+      await storage.agentSessions.create({
+        id: "s1", project_id: "p1", branch: "",
+        permission_mode: "edit", agent_type: "claude-code",
+      });
+
+      // Turn 0 completes cleanly; its turn_end (index 2) gets a snapshot of
+      // the clean-tree state, exactly as endActiveTurn would record live.
+      await storage.agentSessions.upsertEntry("s1", 0, JSON.stringify({ type: "user", content: "turn 0", timestamp: 1 } satisfies AgentMessage));
+      await storage.agentSessions.upsertEntry("s1", 1, JSON.stringify({ type: "assistant", content: "done", timestamp: 2 } satisfies AgentMessage));
+      await storage.agentSessions.upsertEntry("s1", 2, JSON.stringify({ type: "turn_end", timestamp: 3, durationMs: 2, outcome: "completed" } satisfies AgentMessage));
+      await storage.turnSnapshots.create({
+        session_id: "s1",
+        turn_end_index: 2,
+        head: git(repoDir, ["rev-parse", "HEAD"]),
+        dirty: {},
+      });
+
+      // Turn 1 starts and the agent writes an uncommitted file, then the
+      // process is killed mid-turn — no turn_end persisted, and the dirty
+      // file is left on disk exactly as it was at crash time.
+      await storage.agentSessions.upsertEntry("s1", 3, JSON.stringify({ type: "user", content: "turn 1", timestamp: 4 } satisfies AgentMessage));
+      await storage.agentSessions.upsertEntry("s1", 4, JSON.stringify({ type: "tool_use", tool: "Write", input: {}, timestamp: 5 } satisfies AgentMessage));
+      writeFileSync(path.join(repoDir, "mid-turn.ts"), "const inflight = true;\n");
+
+      // Session row's status is "running" (create()'s default) — the crash
+      // never got to mark it stopped, so restore's repair gate fires.
+      const manager = new AgentSessionManager(storage);
+      await manager.restoreSessionsFromDb();
+
+      // The repair turn_end lands at index 5 (maxIndex 4 + 1). A snapshot
+      // must exist at that same index, capturing the crash-time dirty file.
+      const repairSnap = await storage.turnSnapshots.getStartBoundary("s1", 6);
+      expect(repairSnap).toBeDefined();
+      expect(repairSnap?.head).toBe(git(repoDir, ["rev-parse", "HEAD"]));
+      expect(repairSnap?.dirty["mid-turn.ts"]).toBe(git(repoDir, ["hash-object", "mid-turn.ts"]));
+
+      // End-to-end: a subsequent turn's start boundary must be the repair
+      // snapshot (dirty includes mid-turn.ts), not the pre-crash one at
+      // index 2 (dirty {}) — the exact folding bug this test guards against.
+      expect(repairSnap?.dirty).not.toEqual({});
+    } finally {
+      await storage.close();
+      rmSync(repoDir, { recursive: true, force: true });
+      rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 });
