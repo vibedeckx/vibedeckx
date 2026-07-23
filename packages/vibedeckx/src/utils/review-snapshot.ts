@@ -1,4 +1,5 @@
 import { execFileSync } from "child_process";
+import type { Storage } from "../storage/types.js";
 
 const MAX_BUFFER = 10 * 1024 * 1024;
 
@@ -127,4 +128,28 @@ export function computeScope(
   }
   changed.sort();
   return { changedFiles: changed, startHead: start.head };
+}
+
+/**
+ * Capture + persist a turn-boundary snapshot. Best-effort: any failure logs and
+ * returns, so review scoping degrades but the turn lifecycle is never disrupted.
+ */
+export async function recordTurnSnapshot(
+  storage: Storage,
+  sessionId: string,
+  turnEndIndex: number,
+  worktreePath: string,
+): Promise<void> {
+  try {
+    const snap = captureSnapshot(worktreePath);
+    if (!snap) return;
+    await storage.turnSnapshots.create({
+      session_id: sessionId,
+      turn_end_index: turnEndIndex,
+      head: snap.head,
+      dirty: snap.dirty,
+    });
+  } catch (err) {
+    console.warn(`[ReviewSnapshot] failed to record snapshot for ${sessionId}@${turnEndIndex}:`, (err as Error).message);
+  }
 }

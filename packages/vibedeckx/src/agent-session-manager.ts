@@ -19,6 +19,7 @@ import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
+import { recordTurnSnapshot } from "./utils/review-snapshot.js";
 import {
   BranchActivityDedupe,
   computeBranchActivity,
@@ -488,6 +489,10 @@ export class AgentSessionManager {
         permission_mode: permissionMode,
         agent_type: agentType,
       });
+    }
+
+    if (!skipDb) {
+      await recordTurnSnapshot(this.storage, sessionId, -1, absoluteWorktreePath);
     }
 
     // Initialize message store with EntryIndexProvider
@@ -1414,6 +1419,16 @@ export class AgentSessionManager {
     const durationMs = endedAt - session.turnOpenSince;
     const index = await this.pushEntry(session.id, { type: "turn_end", timestamp: endedAt, durationMs, outcome }, true);
     session.turnOpenSince = null; // cleared only after the write resolves
+    if (!session.skipDb && index >= 0) {
+      try {
+        const project = await this.storage.projects.getById(session.projectId);
+        if (project?.path) {
+          await recordTurnSnapshot(this.storage, session.id, index, resolveWorktreePath(project.path, session.branch));
+        }
+      } catch (error) {
+        console.warn(`[AgentSession] Turn snapshot lookup failed for ${session.id}@${index}:`, error);
+      }
+    }
     return index >= 0 ? index : null;
   }
 

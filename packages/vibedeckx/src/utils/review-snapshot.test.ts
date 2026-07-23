@@ -3,7 +3,8 @@ import { execFileSync } from "child_process";
 import { mkdtempSync, rmSync, writeFileSync, rmSync as rmFile } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { captureSnapshot, computeScope, ABSENT } from "./review-snapshot.js";
+import { captureSnapshot, computeScope, ABSENT, recordTurnSnapshot } from "./review-snapshot.js";
+import { createSqliteStorage } from "../storage/sqlite.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
@@ -111,5 +112,32 @@ describe("computeScope", () => {
     const endHead = git(dir, ["rev-parse", "HEAD"]);
     const scope = computeScope({ head: startHead, dirty: {} }, { head: endHead, dirty: {} }, dir);
     expect(scope.changedFiles).toEqual(["kept.ts"]);
+  });
+});
+
+describe("recordTurnSnapshot", () => {
+  let dir: string;
+  beforeEach(() => { dir = initRepo(); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("persists a snapshot that getStartBoundary can read back", async () => {
+    const storage = await createSqliteStorage(path.join(dir, "db.sqlite"));
+    await storage.projects.create({ id: "p1", name: "p", path: dir });
+    await storage.agentSessions.create({
+      id: "s1", project_id: "p1", branch: "dev",
+      permission_mode: "edit", agent_type: "claude-code",
+    });
+    writeFileSync(path.join(dir, "new.ts"), "x\n");
+    await recordTurnSnapshot(storage, "s1", -1, dir);
+    const snap = await storage.turnSnapshots.getStartBoundary("s1", 0);
+    expect(snap?.head).toBe(git(dir, ["rev-parse", "HEAD"]));
+    expect(snap?.dirty["new.ts"]).toBe(git(dir, ["hash-object", "new.ts"]));
+    await storage.close();
+  });
+
+  it("never throws on a bad worktree path", async () => {
+    const storage = await createSqliteStorage(path.join(dir, "db2.sqlite"));
+    await expect(recordTurnSnapshot(storage, "missing", -1, "/no/such/path")).resolves.toBeUndefined();
+    await storage.close();
   });
 });
