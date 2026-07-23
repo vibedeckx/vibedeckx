@@ -712,5 +712,17 @@ export interface Storage {
       patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">>,
     ): Promise<boolean>;
   };
+  turnSnapshots: {
+    create(opts: {
+      session_id: string;
+      turn_end_index: number;
+      head: string;
+      dirty: Record<string, string>;
+    }): Promise<void>;
+    getStartBoundary(
+      session_id: string,
+      turnEndIndex: number,
+    ): Promise<{ head: string; dirty: Record<string, string> } | undefined>;
+  };
   close: () => Promise<void>;
 }

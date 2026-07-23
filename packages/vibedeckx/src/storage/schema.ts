@@ -284,6 +284,14 @@ export interface WorkflowRunsTable {
   updated_at: Generated<string>;
 }
 
+export interface TurnSnapshotsTable {
+  session_id: string;
+  turn_end_index: number;
+  head: string;
+  dirty: string; // JSON: Record<string, string> (path -> blobSha | "absent")
+  captured_at: number;
+}
+
 export interface CrossRemoteAuditTable {
   seq: Generated<number>;
   id: string;
@@ -324,4 +332,5 @@ export interface DB {
   scheduled_task_runs: ScheduledTaskRunsTable;
   cross_remote_audit: CrossRemoteAuditTable;
   workflow_runs: WorkflowRunsTable;
+  turn_snapshots: TurnSnapshotsTable;
 }

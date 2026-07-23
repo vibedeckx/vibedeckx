@@ -17,6 +17,7 @@ import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
+import { createTurnSnapshotRepos } from "./repositories/turn-snapshots.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -833,6 +834,16 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS turn_snapshots (
+      session_id TEXT NOT NULL,
+      turn_end_index INTEGER NOT NULL,
+      head TEXT NOT NULL,
+      dirty TEXT NOT NULL,
+      captured_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, turn_end_index),
+      FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+    );
   `);
 
   // Migration: add written_at to session_search_cache — the timestamp of the
@@ -901,6 +912,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createMergeTargetsRepo(kdb),
     ...createSearchCacheRepos(kdb, h),
     ...createWorkflowRunRepos(kdb),
+    ...createTurnSnapshotRepos(kdb),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
