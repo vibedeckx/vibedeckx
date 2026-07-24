@@ -78,7 +78,25 @@ PTY) **without** calling preventDefault/stopPropagation, so the event bubbles
 to the window listener and the tab switch happens. This covers both the
 Terminal tab and Executors log views (same component).
 
-## 4. Follow-up: Browser-preview iframe key bridge (not built)
+## 4. Shortcut overview overlay (`?`)
+
+GitHub-style cheat sheet listing every global shortcut, in
+`components/layout/keyboard-shortcuts-overlay.tsx`:
+
+- **Triggers:** `?` toggles it when focus is outside editable elements (in an
+  input, `?` must keep typing a question mark; a focused xterm never lets the
+  key bubble, which is the right behavior for shells). `⌘/` (Ctrl+/) toggles
+  from anywhere, including inputs. Esc closes. A `Keyboard` icon button in
+  the header is the non-shortcut entry point — `?` itself needs discovering.
+- **Content** renders from `lib/shortcut-registry.ts`, which derives the tab
+  rows from `TAB_SHORTCUTS` (also the source for the actual bindings, panel
+  buttons, and tooltips). There is deliberately no second hand-written list
+  anywhere: adding a global shortcut = adding one registry entry, and the
+  overlay structurally can't drift from the real keys.
+- Deliberately omitted at this scale (~11 shortcuts): search box, tabs,
+  Figma-style used-key highlighting, any training mechanics.
+
+## 5. Follow-up: Browser-preview iframe key bridge (not built)
 
 While focus is inside the Browser tab's preview iframe, **no** global
 shortcut fires — keyboard events don't cross document boundaries. This
@@ -109,7 +127,7 @@ Limitation to document when built: the bridge only covers proxied previews.
 A direct cross-origin iframe can't be injected into; focus loss there is a
 platform constraint.
 
-## 5. Follow-up: alternative / user-defined bindings (not built)
+## 6. Follow-up: alternative / user-defined bindings (not built)
 
 The combos are hardcoded, but deliberately in one place:
 `matchTabShortcut()` in `lib/tab-shortcuts.ts` is the only decision point,

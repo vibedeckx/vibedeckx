@@ -40,6 +40,7 @@ import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
 import { useResidentSessions, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
 import { CompletionNotificationsMenu } from '@/components/layout/completion-notifications-menu';
+import { KeyboardShortcutsOverlay } from '@/components/layout/keyboard-shortcuts-overlay';
 import { ConnectionStatusIndicator } from '@/components/layout/connection-status-indicator';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
@@ -726,6 +727,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             >
               <Search className="h-4 w-4" />
             </Button>
+            <KeyboardShortcutsOverlay />
             <ConnectionStatusIndicator />
             <CompletionNotificationsMenu
               notifications={notifications}

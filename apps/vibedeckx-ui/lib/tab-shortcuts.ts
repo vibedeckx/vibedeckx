@@ -16,16 +16,23 @@
 
 export type TabShortcutTarget = 'agent' | 'executors' | 'diff' | 'terminal' | 'preview' | 'files';
 
+// Single source of truth for tab ids, display labels, and bound keys — the
+// right panel (buttons + tooltips), the shortcuts overlay, and the xterm
+// passthrough all render/match from this list so they can't drift apart.
 // event.code (physical key) keeps the match stable under IMEs and non-latin
 // layouts.
-const CODE_TO_TAB: Record<string, TabShortcutTarget> = {
-  KeyA: 'agent',
-  KeyE: 'executors',
-  KeyD: 'diff',
-  KeyT: 'terminal',
-  KeyB: 'preview',
-  KeyF: 'files',
-};
+export const TAB_SHORTCUTS = [
+  { id: 'agent', label: 'Agent', code: 'KeyA' },
+  { id: 'executors', label: 'Executors', code: 'KeyE' },
+  { id: 'diff', label: 'Diff', code: 'KeyD' },
+  { id: 'terminal', label: 'Terminal', code: 'KeyT' },
+  { id: 'preview', label: 'Browser', code: 'KeyB' },
+  { id: 'files', label: 'Files', code: 'KeyF' },
+] as const satisfies ReadonlyArray<{ id: TabShortcutTarget; label: string; code: string }>;
+
+const CODE_TO_TAB: Record<string, TabShortcutTarget> = Object.fromEntries(
+  TAB_SHORTCUTS.map((t) => [t.code, t.id]),
+);
 
 export const isMacPlatform = () =>
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);

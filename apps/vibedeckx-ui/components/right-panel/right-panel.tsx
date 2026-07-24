@@ -10,7 +10,7 @@ import { PreviewPanel } from '@/components/preview';
 import { FilesView } from '@/components/files';
 import type { Project, ExecutionMode } from '@/lib/api';
 import { FileNavigationProvider } from '@/components/agent/file-navigation-context';
-import { matchTabShortcut, isMacPlatform, tabShortcutHint, type TabShortcutTarget } from '@/lib/tab-shortcuts';
+import { matchTabShortcut, isMacPlatform, tabShortcutHint, TAB_SHORTCUTS, type TabShortcutTarget } from '@/lib/tab-shortcuts';
 import { useFileRefIndex } from '@/hooks/use-file-ref-index';
 
 interface RightPanelProps {
@@ -37,15 +37,18 @@ interface RightPanelProps {
 
 type TabType = TabShortcutTarget;
 
-// Shortcut design rationale and known conflicts live in lib/tab-shortcuts.ts.
-const TABS = [
-  { id: 'agent', icon: Bot, label: 'Agent', code: 'KeyA' },
-  { id: 'executors', icon: Terminal, label: 'Executors', code: 'KeyE' },
-  { id: 'diff', icon: GitBranch, label: 'Diff', code: 'KeyD' },
-  { id: 'terminal', icon: SquareTerminal, label: 'Terminal', code: 'KeyT' },
-  { id: 'preview', icon: Globe, label: 'Browser', code: 'KeyB' },
-  { id: 'files', icon: FolderOpen, label: 'Files', code: 'KeyF' },
-] as const satisfies ReadonlyArray<{ id: TabType; icon: unknown; label: string; code: string }>;
+// Ids/labels/keys come from the shared registry (lib/tab-shortcuts.ts, which
+// also documents the shortcut design rationale); only the icons are local.
+const TAB_ICONS: Record<TabType, typeof Bot> = {
+  agent: Bot,
+  executors: Terminal,
+  diff: GitBranch,
+  terminal: SquareTerminal,
+  preview: Globe,
+  files: FolderOpen,
+};
+
+const TABS = TAB_SHORTCUTS.map((t) => ({ ...t, icon: TAB_ICONS[t.id] }));
 
 const noopSubscribe = () => () => {};
 
