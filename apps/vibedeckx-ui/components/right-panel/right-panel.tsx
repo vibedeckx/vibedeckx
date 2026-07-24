@@ -22,6 +22,13 @@ interface RightPanelProps {
   activateAgentTabNonce?: number;
   diffCompareNonce?: number;
   mergeTarget?: string | null;
+  // True while a session-targeted navigation is still resolving (notably a
+  // cross-project jump, where the project switches and worktrees reload before
+  // the branch/session — and the activateAgentTabNonce bump — land). During
+  // that window selectedBranch is null and the panel would otherwise show the
+  // new project's persisted tab (often Executors) until the deferred selection
+  // completes. Forcing Agent here keeps that intermediate tab from showing.
+  forceAgentTab?: boolean;
   // Whether the workspace view is currently shown. The panel stays mounted
   // (hidden via CSS) on other views, so this gates the file-ref index load.
   active?: boolean;
@@ -67,18 +74,23 @@ export function RightPanel({
   activateAgentTabNonce,
   diffCompareNonce,
   mergeTarget,
+  forceAgentTab = false,
   active = true,
 }: RightPanelProps) {
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
+  // What the UI actually renders. While a session navigation is still resolving
+  // we pin Agent, masking the transient persisted tab (e.g. Executors) that the
+  // internal activeTab state briefly holds before the branch/nonce land.
+  const displayTab: TabType = forceAgentTab ? 'agent' : activeTab;
   const prevActivateAgentTabNonceRef = useRef(activateAgentTabNonce);
 
   // TEMP DEBUG (tab-flash): logs every committed activeTab (render), every
   // layout-effect tab set (pre-paint), and — via useEffect — what was actually
   // PAINTED (post-paint). If you see NO [tabflash] logs when reproducing, you
   // are running a stale UI bundle. Remove this block once diagnosed.
-  console.log('[tabflash] render', { activeTab, projectId, selectedBranch, nonce: activateAgentTabNonce });
+  console.log('[tabflash] render', { activeTab, displayTab, forceAgentTab, projectId, selectedBranch, nonce: activateAgentTabNonce });
   useEffect(() => {
-    console.log('[tabflash] PAINTED', { activeTab, selectedBranch });
+    console.log('[tabflash] PAINTED', { displayTab, activeTab, forceAgentTab, selectedBranch });
   });
 
   useIsomorphicLayoutEffect(() => {
@@ -133,7 +145,7 @@ export function RightPanel({
               onClick={() => setActiveTab(id)}
               className={cn(
                 'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
-                activeTab === id
+                displayTab === id
                   ? 'text-foreground border-primary'
                   : 'text-muted-foreground border-transparent hover:text-foreground/70'
               )}
@@ -156,12 +168,12 @@ export function RightPanel({
         <div
           className={cn(
             "absolute inset-0 overflow-hidden",
-            activeTab !== 'agent' && 'invisible pointer-events-none'
+            displayTab !== 'agent' && 'invisible pointer-events-none'
           )}
         >
           {agentSlot}
         </div>
-        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'executors' && 'hidden')}>
+        <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'executors' && 'hidden')}>
           <ExecutorPanel
             projectId={projectId}
             selectedBranch={selectedBranch}
@@ -169,7 +181,7 @@ export function RightPanel({
             onExecutorModeChange={onExecutorModeChange}
           />
         </div>
-        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'diff' && 'hidden')}>
+        <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'diff' && 'hidden')}>
           <DiffPanel
             projectId={projectId}
             selectedBranch={selectedBranch}
@@ -179,21 +191,21 @@ export function RightPanel({
             compareRequestNonce={diffCompareNonce}
           />
         </div>
-        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'terminal' && 'hidden')}>
+        <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'terminal' && 'hidden')}>
           <TerminalPanel
             projectId={projectId}
             selectedBranch={selectedBranch}
             project={project}
           />
         </div>
-        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'preview' && 'hidden')}>
+        <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'preview' && 'hidden')}>
           <PreviewPanel
             projectId={projectId}
             selectedBranch={selectedBranch}
             project={project}
           />
         </div>
-        <div className={cn("absolute inset-0 overflow-hidden", activeTab !== 'files' && 'hidden')}>
+        <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'files' && 'hidden')}>
           <FilesView
             projectId={projectId}
             project={project}

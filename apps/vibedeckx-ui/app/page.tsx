@@ -110,6 +110,13 @@ export default function Home() {
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
   const [activateAgentTabNonce, setActivateAgentTabNonce] = useState(0);
   const [diffCompareNonce, setDiffCompareNonce] = useState(0);
+  // True while a cross-project session jump is still resolving: the project has
+  // switched but its worktrees haven't loaded, so selectedBranch is null and the
+  // activateAgentTabNonce bump hasn't landed yet. RightPanel uses this to pin the
+  // Agent tab across that window instead of briefly showing the new project's
+  // persisted tab (e.g. Executors). Cleared the moment the pending selection is
+  // consumed (see selectBranchSession and the worktrees-loaded effect).
+  const [sessionNavPending, setSessionNavPending] = useState(false);
   const agentRef = useRef<AgentConversationHandle>(null);
   // The project id we last reset the branch for. State (not a ref) so the
   // render-time reset below is concurrent-safe.
@@ -275,6 +282,9 @@ export default function Home() {
     setSelectedBranch(branch);
     setSessionUrlParam(sessionId);
     setActivateAgentTabNonce((nonce) => nonce + 1);
+    // Selection resolved — end any pending-nav Agent-tab pin (the nonce bump
+    // above now owns keeping the Agent tab active).
+    setSessionNavPending(false);
     // The session being opened counts as recent from this moment (VS Code
     // MRU-by-open), even if no activity ever bumps it server-side. Id-only:
     // callers holding a full search row (quick switcher) touch it themselves.
@@ -390,13 +400,32 @@ export default function Home() {
         return;
       }
       // Target branch isn't in the freshly-loaded project — drop it and fall
-      // through to the normal auto-select.
+      // through to the normal auto-select. Release the Agent-tab pin too, since
+      // no session selection will complete for this navigation.
       pendingWorkspaceRef.current = undefined;
+      setSessionNavPending(false);
     }
     if (!worktrees.some(w => w.branch === selectedBranch)) {
       setSelectedBranch(worktrees[0].branch);
     }
   }, [worktrees, worktreesLoading, selectedBranch, selectBranchSession]);
+
+  // Safety net for the Agent-tab pin. sessionNavPending only exists to bridge
+  // the window where a cross-project session jump has nulled selectedBranch and
+  // not yet reselected it; the explicit clears above cover the happy paths, but
+  // a superseding navigation (project/workspace switch, branch-only jump that
+  // overwrites pendingWorkspaceRef) or an empty worktree list could otherwise
+  // leave the pin stuck, permanently forcing the Agent tab and swallowing manual
+  // tab clicks. Tie its lifetime to the invariant instead: once a branch has
+  // resolved (non-null), or the target project has no worktrees to resolve
+  // against, the pin's job is done. It never fires during the window we need
+  // (selectedBranch is null and worktrees are still loading / non-empty then).
+  useEffect(() => {
+    if (!sessionNavPending) return;
+    if (selectedBranch !== null || (!worktreesLoading && worktrees.length === 0)) {
+      setSessionNavPending(false);
+    }
+  }, [sessionNavPending, selectedBranch, worktreesLoading, worktrees]);
 
   // Jump to the workspace a completion notification points at. Same project →
   // select the branch (and, when known, the exact completed session) directly;
@@ -415,6 +444,9 @@ export default function Home() {
       }
       const target = projects.find((p) => p.id === projectId);
       if (!target) return;
+      // Same cross-project Agent-tab pin as the quick switcher, but only when a
+      // specific session is targeted (branch-only jumps keep their persisted tab).
+      if (sessionId) setSessionNavPending(true);
       pendingWorkspaceRef.current = { branch, sessionId };
       selectProject(target);
     },
@@ -530,6 +562,9 @@ export default function Home() {
         // worktrees-loaded effect call selectBranchSession once the target
         // project is current — it then stamps pendingSessionSelectionRef with
         // the *new* project id, so the URL-sync effect keeps ?session=.
+        // Pin the Agent tab for the whole load window so the new project's
+        // persisted tab (e.g. Executors) never shows before the session lands.
+        setSessionNavPending(true);
         pendingWorkspaceRef.current = { branch: s.branch, sessionId: s.sessionId };
         selectProject(project);
       }
@@ -811,6 +846,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     selectedBranch={selectedBranch}
                     activateAgentTabNonce={activateAgentTabNonce}
                     diffCompareNonce={diffCompareNonce}
+                    forceAgentTab={sessionNavPending}
                     mergeTarget={
                       selectedBranch
                         ? (effectiveTarget(mergeStatuses.get(selectedBranch)) ??
