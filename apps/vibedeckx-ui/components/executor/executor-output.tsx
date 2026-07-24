@@ -9,6 +9,7 @@ import { Circle, Square, Info, Copy } from "lucide-react";
 import { toast } from "sonner";
 import type { LogMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { matchTabShortcut } from "@/lib/tab-shortcuts";
 import { useTerminalSettings } from "@/hooks/use-terminal-settings";
 import {
   DropdownMenu,
@@ -166,6 +167,12 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
 
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
+
+    // Let workspace tab shortcuts pass through a focused terminal: returning
+    // false makes xterm skip the key entirely (no control bytes reach the
+    // PTY — ⌃⇧D would otherwise arrive as ^D and EOF the shell) while the
+    // event still bubbles to the window listener that switches tabs.
+    terminal.attachCustomKeyEventHandler((event) => matchTabShortcut(event) === null);
 
     terminal.open(containerRef.current);
 

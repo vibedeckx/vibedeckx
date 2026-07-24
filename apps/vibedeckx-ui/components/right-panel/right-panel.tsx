@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, type ReactNode, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react';
+import { Fragment, type ReactNode, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 import { cn } from '@/lib/utils';
 import { Terminal, GitBranch, SquareTerminal, Bot, Globe, FolderOpen } from 'lucide-react';
 import { ExecutorPanel } from '@/components/executor';
@@ -10,6 +10,7 @@ import { PreviewPanel } from '@/components/preview';
 import { FilesView } from '@/components/files';
 import type { Project, ExecutionMode } from '@/lib/api';
 import { FileNavigationProvider } from '@/components/agent/file-navigation-context';
+import { matchTabShortcut, isMacPlatform, tabShortcutHint, type TabShortcutTarget } from '@/lib/tab-shortcuts';
 import { useFileRefIndex } from '@/hooks/use-file-ref-index';
 
 interface RightPanelProps {
@@ -34,7 +35,19 @@ interface RightPanelProps {
   active?: boolean;
 }
 
-type TabType = 'agent' | 'executors' | 'diff' | 'terminal' | 'preview' | 'files';
+type TabType = TabShortcutTarget;
+
+// Shortcut design rationale and known conflicts live in lib/tab-shortcuts.ts.
+const TABS = [
+  { id: 'agent', icon: Bot, label: 'Agent', code: 'KeyA' },
+  { id: 'executors', icon: Terminal, label: 'Executors', code: 'KeyE' },
+  { id: 'diff', icon: GitBranch, label: 'Diff', code: 'KeyD' },
+  { id: 'terminal', icon: SquareTerminal, label: 'Terminal', code: 'KeyT' },
+  { id: 'preview', icon: Globe, label: 'Browser', code: 'KeyB' },
+  { id: 'files', icon: FolderOpen, label: 'Files', code: 'KeyF' },
+] as const satisfies ReadonlyArray<{ id: TabType; icon: unknown; label: string; code: string }>;
+
+const noopSubscribe = () => () => {};
 
 // Tab reconciliation must run before the browser paints, otherwise navigating
 // to a session (which bumps activateAgentTabNonce) paints the persisted tab
@@ -98,6 +111,26 @@ export function RightPanel({
     setActiveTab('diff');
   }, [diffCompareNonce, setActiveTab]);
 
+  // Tab shortcuts (see lib/tab-shortcuts.ts). Deliberately active even while
+  // an input/textarea is focused — the modifier pairs don't produce text, and
+  // jumping to a tab mid-typing is the point. The panel stays mounted on
+  // other views, so `active` gates the listener.
+  useEffect(() => {
+    if (!active) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const tab = matchTabShortcut(event);
+      if (!tab) return;
+      event.preventDefault();
+      setActiveTab(tab);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [active, setActiveTab]);
+
+  // The server snapshot (static-export prerender, no `navigator`) is false;
+  // useSyncExternalStore re-reads on the client so hydration stays clean.
+  const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
+
   const target = project && !project.path ? ("remote" as const) : undefined;
   const index = useFileRefIndex({ projectId, branch: selectedBranch, target, enabled: active });
 
@@ -121,17 +154,11 @@ export function RightPanel({
     <div className="h-full flex flex-col">
       {/* Tab Bar */}
       <div className="flex items-center px-3 gap-4 border-b border-border">
-        {([
-          { id: 'agent' as const, icon: Bot, label: 'Agent' },
-          { id: 'executors' as const, icon: Terminal, label: 'Executors' },
-          { id: 'diff' as const, icon: GitBranch, label: 'Diff' },
-          { id: 'terminal' as const, icon: SquareTerminal, label: 'Terminal' },
-          { id: 'preview' as const, icon: Globe, label: 'Browser' },
-          { id: 'files' as const, icon: FolderOpen, label: 'Files' },
-        ]).map(({ id, icon: Icon, label }) => (
+        {TABS.map(({ id, icon: Icon, label, code }) => (
           <Fragment key={id}>
             <button
               onClick={() => setActiveTab(id)}
+              title={`${label} (${tabShortcutHint(isMac, code)})`}
               className={cn(
                 'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
                 displayTab === id
