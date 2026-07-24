@@ -216,6 +216,43 @@ export function touchSessionStarted(entry: {
 }
 
 /**
+ * Write an async-generated (or cleared) title into both client caches: the
+ * MRU copy and any row in the cached empty-query snapshot. Titles are
+ * generated server-side after session creation, so the copy stored by
+ * touchSessionStarted carries title null; committed responses only refresh
+ * copies of sessions still inside the server's recency window, so once a
+ * session slides out, nothing else would ever correct the null and the
+ * palette would show "Untitled session" forever. The snapshot must be patched
+ * too — overlayRecents prefers snapshot rows over MRU copies, so a stale
+ * snapshot row would otherwise mask the updated copy on the seeded frame.
+ */
+export function updateCachedSessionTitle(sessionId: string, title: string | null): void {
+  const opens = getMru();
+  const entry = opens.get(sessionId);
+  if (entry?.session && entry.session.title !== title) {
+    entry.session = { ...entry.session, title };
+    persistMru();
+  }
+  const res = getCachedEmptyResults();
+  if (!res) return;
+  let dirty = false;
+  const patch = (rows: SearchResultSession[]) =>
+    rows.map((s) => {
+      if (s.sessionId !== sessionId || s.title === title) return s;
+      dirty = true;
+      return { ...s, title };
+    });
+  const next = { ...res, sessions: patch(res.sessions), favorites: patch(res.favorites) };
+  if (!dirty) return;
+  cachedEmptyResults = next;
+  try {
+    localStorage.setItem(snapshotKey(), JSON.stringify({ at: Date.now(), res: next }));
+  } catch {
+    // Quota/private-mode failures degrade to memory-only patching.
+  }
+}
+
+/**
  * Merge a server response's Recents with the local open ledger:
  * union (server rows win over stored copies) → sort by
  * max(lastActiveAt, openedAt) → dedup by sessionId → cap. Favorites keep the

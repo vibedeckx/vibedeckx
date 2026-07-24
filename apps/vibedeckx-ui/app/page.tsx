@@ -34,7 +34,7 @@ import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import type { ExecutionMode, Task, Worktree, SearchResultWorkspace, SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
-import { touchRecentSessionOpen, touchSessionStarted } from '@/lib/quick-switcher-cache';
+import { touchRecentSessionOpen, touchSessionStarted, updateCachedSessionTitle } from '@/lib/quick-switcher-cache';
 import { toast } from 'sonner';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
@@ -324,6 +324,11 @@ export default function Home() {
   }, [refetchBranchActivity, projects]);
 
   const handleSessionTitleUpdated = useCallback((sessionId: string, title: string) => {
+    // Per-session WS path: also write the title into the quick-switcher
+    // caches. The global `session:title` SSE listener (QuickSwitcher) is the
+    // primary channel, but WS can deliver while the shared SSE stream is
+    // stale — and the write-through is idempotent.
+    if (title.trim()) updateCachedSessionTitle(sessionId, title.trim());
     if (!currentProject?.id || !title.trim()) return;
     setResidentSessionSeed((prev) => ({
       id: sessionId,

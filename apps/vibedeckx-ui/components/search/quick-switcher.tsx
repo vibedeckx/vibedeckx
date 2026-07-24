@@ -11,7 +11,9 @@ import {
 } from "@/lib/api";
 import {
   beginEmptyQuerySearch, commitEmptyQueryResults, getCachedEmptyResults, overlayRecents,
+  updateCachedSessionTitle,
 } from "@/lib/quick-switcher-cache";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 import { FolderGit2, GitBranch, Loader2, MessageSquare, Star } from "lucide-react";
 
 export interface QuickSwitcherProps {
@@ -46,6 +48,17 @@ export function QuickSwitcher({
   useLayoutEffect(() => {
     queryRef.current = query;
   }, [query]);
+
+  // Async title generation lands after touchSessionStarted stored a title-null
+  // MRU copy; write it through here (no project filter — sessions from any
+  // project live in the palette's caches). Without this, a session that
+  // slides out of the server's recency window shows "Untitled session"
+  // forever, while opening it shows the real title.
+  useGlobalEventStream((event) => {
+    if (event.type !== "session:title" || typeof event.sessionId !== "string") return;
+    const trimmed = typeof event.title === "string" ? event.title.trim() : "";
+    updateCachedSessionTitle(event.sessionId, trimmed || null);
+  });
 
   // Reset query/results/error on each open→close→open transition. Adjusted
   // during render (React's documented pattern for "resetting state when a

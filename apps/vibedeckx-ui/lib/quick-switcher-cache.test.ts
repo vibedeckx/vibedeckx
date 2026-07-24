@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  beginEmptyQuerySearch,
+  commitEmptyQueryResults,
+  getCachedEmptyResults,
   overlayRecents,
   setQuickSwitcherCacheUser,
   touchRecentSessionOpen,
   touchSessionStarted,
+  updateCachedSessionTitle,
 } from "./quick-switcher-cache";
 import type { SearchResponse, SearchResultSession } from "@/lib/api";
 
@@ -56,5 +60,59 @@ describe("touchSessionStarted", () => {
     const { sessions } = overlayRecents(emptyResponse());
     expect(sessions.map((s) => s.sessionId)).toEqual(["s1"]);
     expect(sessions[0].title).toBe("Known title");
+  });
+});
+
+describe("updateCachedSessionTitle", () => {
+  it("updates a title-null MRU copy so the overlay stops showing Untitled", () => {
+    // Session created in this window (title generated async → stored null).
+    touchSessionStarted({
+      sessionId: "s-new", projectId: "p1", projectName: "proj", targetId: "local", branch: "dev",
+    });
+    updateCachedSessionTitle("s-new", "Generated title");
+    const { sessions } = overlayRecents(emptyResponse());
+    expect(sessions.map((s) => s.sessionId)).toEqual(["s-new"]);
+    expect(sessions[0].title).toBe("Generated title");
+  });
+
+  it("patches a title-null row in the cached empty-query snapshot (snapshot rows win over MRU)", () => {
+    // The snapshot captured the session before its title was generated.
+    touchSessionStarted({
+      sessionId: "s-new", projectId: "p1", projectName: "proj", targetId: "local", branch: "dev",
+    });
+    const res = emptyResponse();
+    res.sessions = [serverRow({ sessionId: "s-new", title: null })];
+    commitEmptyQueryResults(beginEmptyQuerySearch(), res);
+    updateCachedSessionTitle("s-new", "Generated title");
+    // Seeded first frame renders from the cached snapshot; overlayRecents
+    // prefers snapshot rows over MRU copies, so the snapshot row itself must
+    // carry the new title.
+    const cached = getCachedEmptyResults();
+    expect(cached?.sessions.find((s) => s.sessionId === "s-new")?.title).toBe("Generated title");
+    const { sessions } = overlayRecents(cached!);
+    expect(sessions[0].title).toBe("Generated title");
+  });
+
+  it("keeps the updated title after the session slides out of the server's recency window", () => {
+    touchSessionStarted({
+      sessionId: "s-old", projectId: "p1", projectName: "proj", targetId: "local", branch: "dev",
+    });
+    updateCachedSessionTitle("s-old", "Generated title");
+    // A later response no longer contains the session (it fell out of the
+    // server's recent-10); the overlay must render it from the MRU copy with
+    // the written-back title, not fossilized null.
+    const later = emptyResponse();
+    later.sessions = [serverRow({ sessionId: "srv-other", lastActiveAt: Date.now() })];
+    commitEmptyQueryResults(beginEmptyQuerySearch(), later);
+    const { sessions } = overlayRecents(later);
+    const old = sessions.find((s) => s.sessionId === "s-old");
+    expect(old?.title).toBe("Generated title");
+  });
+
+  it("writes a cleared title back as null so the palette falls back to Untitled", () => {
+    touchRecentSessionOpen("s1", serverRow({ sessionId: "s1", title: "Old name" }));
+    updateCachedSessionTitle("s1", null);
+    const { sessions } = overlayRecents(emptyResponse());
+    expect(sessions[0].title).toBeNull();
   });
 });
