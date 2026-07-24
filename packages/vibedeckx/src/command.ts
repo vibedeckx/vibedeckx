@@ -21,6 +21,7 @@ import {
   type ConnectDaemonState,
   type DaemonCommandResult,
 } from "./connect-daemon.js";
+import { preflightIdentityCheck } from "./connect-preflight.js";
 import open from "open";
 import { redactErrorSecret } from "./secret-redaction.js";
 
@@ -275,6 +276,11 @@ const connectCommand = buildCommand({
         brief: "Run in the background after initialization (Linux only)",
         optional: true,
       },
+      force: {
+        kind: "boolean",
+        brief: "Re-pin this machine to the token's remote, overriding the pinned-identity mismatch guard",
+        optional: true,
+      },
       port: {
         kind: "parsed",
         parse: parseInt,
@@ -305,6 +311,7 @@ const connectCommand = buildCommand({
     "connect-to": string;
     token: string | undefined;
     daemon: boolean | undefined;
+    force: boolean | undefined;
     port: number | undefined;
     "data-dir": string | undefined;
     "env-file": string | undefined;
@@ -392,6 +399,24 @@ const connectCommand = buildCommand({
 
       const dbPath = path.join(dataDir, "data.sqlite");
       storage = await createSqliteStorage(dbPath);
+
+      // Guard against running the wrong remote's token on this machine. Must
+      // complete BEFORE the WS client exists: connecting under the wrong
+      // server ID kicks the legitimate worker and can plant a server alias on
+      // the hub. Throws on mismatch (caught below → daemon parent is notified
+      // of the error, never "ready"). Old hubs without the identity endpoint
+      // skip the check.
+      const preflight = await preflightIdentityCheck({
+        connectTo: flags["connect-to"],
+        token,
+        settings: storage.settings,
+        force: flags.force ?? false,
+      });
+      if (preflight.checked && preflight.identity) {
+        console.log(
+          `Remote identity verified: ${preflight.identity.name || preflight.identity.serverId}`,
+        );
+      }
       // Reverse-connect mode is inherently a remote-provider role: the inbound
       // server proxies requests through the tunnel into this instance, so the
       // path-based endpoints must be exposed. The UI is served by the upstream

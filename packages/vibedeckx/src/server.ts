@@ -211,6 +211,16 @@ export const createServer = async (opts: {
     if (!req.url.startsWith("/api/")) return done();
     if (req.method === "OPTIONS") return done();
 
+    // Self-authenticating / public endpoints: /api/config is the public
+    // bootstrap endpoint (its authEnabled-only escape below never fires on
+    // API-key-only deployments, so it needs an explicit exemption), and the
+    // reverse-connect identity preflight authenticates itself with the
+    // connect token — same trust level as the token-authenticated WS upgrade.
+    const pathname = req.url.split("?")[0];
+    if (pathname === "/api/config" || pathname === "/api/reverse-connect/identity") {
+      return done();
+    }
+
     // When both API_KEY and Clerk auth are enabled, API key takes precedence
     // (used by remote proxy). If no API key header present and Clerk is enabled,
     // let Clerk handle auth.
@@ -272,6 +282,11 @@ export const createServer = async (opts: {
     authEnabled,
     clerkPublishableKey: authEnabled ? process.env.CLERK_PUBLISHABLE_KEY : undefined,
     localProjectsEnabled: !noLocalProjects,
+    // Capability flag for the reverse-connect identity preflight. Workers
+    // check this before calling /api/reverse-connect/identity so an auth
+    // middleware 401 from an older hub (which lacks the endpoint AND its
+    // exemptions) is never confused with a genuinely rejected token.
+    reverseConnectIdentity: true,
   }));
 
   // Register plugins and routes
@@ -294,6 +309,11 @@ export const createServer = async (opts: {
     server.addHook("preHandler", async (req, reply) => {
       // Skip WebSocket upgrades — they handle auth via query param token
       if (req.headers.upgrade?.toLowerCase() === "websocket") return;
+
+      // Skip the reverse-connect identity preflight — it authenticates itself
+      // with the connect token (its route is registered after this hook, so
+      // unlike /api/config it can't rely on registration order to escape).
+      if (req.url.split("?")[0] === "/api/reverse-connect/identity") return;
 
       // Convert Fastify request to standard Request (same as clerkPlugin does)
       const headers = new Headers();

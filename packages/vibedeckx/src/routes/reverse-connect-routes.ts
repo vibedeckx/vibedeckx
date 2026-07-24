@@ -8,6 +8,30 @@ import "../server-types.js";
 const MACHINE_HANDSHAKE_TIMEOUT_MS = 5000;
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  // GET /api/reverse-connect/identity — pre-connect preflight. Resolves which
+  // remote record a connect token belongs to so a worker can detect "wrong
+  // token for this machine" BEFORE opening the WS: connecting first would
+  // kick the legitimate worker (last-writer-wins in registerConnection) and
+  // the recovery hook that fires on `online` can plant a server alias.
+  // Authenticates itself via the connect-token header — server.ts exempts
+  // this exact path from the API-key and Clerk middlewares, mirroring the
+  // token-authenticated WS upgrade below. Workers discover the endpoint via
+  // the `reverseConnectIdentity` capability flag on public /api/config.
+  fastify.get("/api/reverse-connect/identity", async (req, reply) => {
+    const token = req.headers["x-vibedeckx-connect-token"];
+    if (typeof token !== "string" || token.length === 0) {
+      return reply.code(401).send({ error: "Connect token required" });
+    }
+    const server = await fastify.storage.remoteServers.getByToken(token);
+    if (!server) {
+      return reply.code(401).send({ error: "Invalid token" });
+    }
+    if (server.connection_mode !== "inbound") {
+      return reply.code(403).send({ error: "Server is not configured for inbound connections" });
+    }
+    return { serverId: server.id, name: server.name };
+  });
+
   // Must be registered after websocket plugin
   fastify.after(() => {
     // GET /api/reverse-connect?token=<token> — WebSocket upgrade for inbound remote nodes
