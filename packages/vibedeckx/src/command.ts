@@ -490,7 +490,9 @@ const connectStatusCommand = buildCommand({
   parameters: { flags: connectManagementFlags },
   func: async (flags: { "data-dir": string | undefined }) => {
     assertConnectDaemonPlatform();
-    const result = describeConnectDaemon(flags["data-dir"] ?? VIBEDECKX_HOME);
+    const result = await describeConnectDaemon(
+      flags["data-dir"] ?? VIBEDECKX_HOME,
+    );
     return reportDaemonCommandResult(result);
   },
   docs: { brief: "Show the connect daemon status" },

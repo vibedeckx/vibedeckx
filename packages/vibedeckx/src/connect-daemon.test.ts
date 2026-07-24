@@ -799,46 +799,86 @@ describe("daemon state inspection", () => {
 });
 
 describe("daemon status", () => {
-  it("formats a running daemon with its identity, target, and log path", () => {
+  it("formats a running daemon with its identity, target, and log path", async () => {
     const state = validState({
+      version: "0.5.4",
       startedAt: "2026-07-13T10:00:00.000Z",
       connectTo: "https://connect.example.com",
     });
     writeState(state);
 
-    const result = describeConnectDaemon(dataDir);
+    const result = await describeConnectDaemon(dataDir, async () => "0.5.4");
 
     expect(result.exitCode).toBe(0);
     expect(result.message).toContain(`Running (PID ${state.pid}`);
     expect(result.message).toContain(state.startedAt);
+    expect(result.message).toContain(`Version: ${state.version} (up to date)`);
     expect(result.message).toContain(`Target: ${state.connectTo}`);
     expect(result.message).toContain(
       `Logs: ${path.join(dataDir, "logs", "vibedeckx.log")}`,
     );
   });
 
-  it("returns non-zero when the daemon is not running", () => {
-    expect(describeConnectDaemon(dataDir)).toMatchObject({
+  it("reports an available update from the npm registry", async () => {
+    writeState(validState({ version: "0.5.2" }));
+
+    const result = await describeConnectDaemon(dataDir, async () => "0.5.4");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toContain(
+      "Version: 0.5.2 (update available: 0.5.4)",
+    );
+  });
+
+  it("reports a failed update check when the registry is unreachable", async () => {
+    writeState(validState({ version: "0.5.2" }));
+
+    const result = await describeConnectDaemon(dataDir, async () => undefined);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toContain("Version: 0.5.2 (update check failed)");
+  });
+
+  it("reports a failed update check for an incomparable daemon version", async () => {
+    writeState(validState({ version: "unknown" }));
+
+    const result = await describeConnectDaemon(dataDir, async () => "0.5.4");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toContain("Version: unknown (update check failed)");
+  });
+
+  it("returns non-zero without an update check when the daemon is not running", async () => {
+    const fetchLatestVersion = vi.fn(async () => "0.5.4");
+
+    await expect(
+      describeConnectDaemon(dataDir, fetchLatestVersion),
+    ).resolves.toMatchObject({
       exitCode: 1,
       message: expect.stringMatching(/not running/i),
     });
+    expect(fetchLatestVersion).not.toHaveBeenCalled();
   });
 
-  it("reports stale state without deleting it", () => {
+  it("reports stale state without deleting it or checking for updates", async () => {
     writeState(validState({ processStartTicks: "0" }));
+    const fetchLatestVersion = vi.fn(async () => "0.5.4");
 
-    expect(describeConnectDaemon(dataDir)).toMatchObject({
+    await expect(
+      describeConnectDaemon(dataDir, fetchLatestVersion),
+    ).resolves.toMatchObject({
       exitCode: 1,
       message: expect.stringMatching(/stale.*PID/i),
     });
+    expect(fetchLatestVersion).not.toHaveBeenCalled();
     expect(fs.existsSync(daemonStatePath(dataDir))).toBe(true);
   });
 
-  it("reports invalid state with its path without deleting it", () => {
+  it("reports invalid state with its path without deleting it", async () => {
     writeState("{");
     const statePath = daemonStatePath(dataDir);
 
-    const result = describeConnectDaemon(dataDir);
+    const result = await describeConnectDaemon(dataDir);
 
     expect(result.exitCode).toBe(1);
     expect(result.message).toMatch(/invalid|cannot read/i);

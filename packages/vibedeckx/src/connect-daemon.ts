@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { redactSecretForms } from "./secret-redaction.js";
+import {
+  compareUpdateStatus,
+  fetchLatestPublishedVersion,
+} from "./update-check.js";
 
 export const CONNECT_DAEMON_CHILD_ENV = "VIBEDECKX_INTERNAL_CONNECT_DAEMON";
 export const CONNECT_DAEMON_TOKEN_ENV = "VIBEDECKX_INTERNAL_CONNECT_TOKEN";
@@ -844,19 +848,41 @@ export function inspectDaemonState(dataDir: string): ConnectDaemonInspection {
     : { kind: "stale", state: parsed };
 }
 
-export function describeConnectDaemon(dataDir: string): DaemonCommandResult {
+function describeUpdateStatus(
+  current: string,
+  latest: string | undefined,
+): string {
+  switch (compareUpdateStatus(current, latest)) {
+    case "update-available":
+      return `(update available: ${latest})`;
+    case "up-to-date":
+      return "(up to date)";
+    case "unknown":
+      return "(update check failed)";
+  }
+}
+
+export async function describeConnectDaemon(
+  dataDir: string,
+  fetchLatestVersion: () => Promise<
+    string | undefined
+  > = fetchLatestPublishedVersion,
+): Promise<DaemonCommandResult> {
   const inspection = inspectDaemonState(dataDir);
 
   switch (inspection.kind) {
-    case "running":
+    case "running": {
+      const latest = await fetchLatestVersion();
       return {
         exitCode: 0,
         message: [
           `Running (PID ${inspection.state.pid}, since ${inspection.state.startedAt})`,
+          `Version: ${inspection.state.version} ${describeUpdateStatus(inspection.state.version, latest)}`,
           `Target: ${inspection.state.connectTo}`,
           `Logs: ${path.join(dataDir, "logs", "vibedeckx.log")}`,
         ].join("\n"),
       };
+    }
     case "missing":
       return { exitCode: 1, message: "Vibedeckx connect is not running" };
     case "stale":
