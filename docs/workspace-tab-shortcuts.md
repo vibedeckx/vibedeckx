@@ -1,9 +1,9 @@
 # Workspace Tab Keyboard Shortcuts
 
 Jump to any right-panel tab from the keyboard, including while typing in a
-chat input. Shipped in `f665ded`; this doc records the binding design, why the
-modifiers look the way they do, the xterm passthrough, and two agreed
-follow-ups (iframe key bridge, custom bindings).
+chat input. Shipped 2026-07-24; this doc records the binding design, why the
+modifiers look the way they do, the xterm passthrough, the `?` overlay, and
+two agreed follow-ups (iframe key bridge, custom bindings).
 
 Code lives in `apps/vibedeckx-ui/lib/tab-shortcuts.ts` (single source of
 truth for the combos), consumed by
