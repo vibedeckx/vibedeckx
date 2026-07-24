@@ -237,7 +237,36 @@ describe("buildReviewerPrompt scope", () => {
     });
     expect(prompt).toContain("## Scope — the change under review");
     expect(prompt).toContain("changed no files");
+    expect(prompt).toContain("nothing in scope for this turn");
     expect(prompt).not.toContain("scope unknown");
+  });
+
+  it("points a no-diff turn with a substantial self-report at the analysis/plan itself", () => {
+    const prompt = buildReviewerPrompt({
+      taskContext: "why is the adjacency asymmetric?", originalIntent: "why is the adjacency asymmetric?",
+      authorSelfReport:
+        "Root cause located: computeBidirectionalAdjacency can't see the unloaded cross-graph peer, so only the loaded endpoint gets symmetrized. Proposed fix: make the handler async and prefetch peers first. Not implemented yet.",
+      intentBrief: null, reviewFocus: null, target,
+      scope: { changedFiles: [], startHead: "base9" },
+    });
+    expect(prompt).toContain("## Scope — the change under review");
+    expect(prompt).toContain("changed no files");
+    // Redirected to the deliverable, not told "nothing in scope".
+    expect(prompt).toContain("deliverable is the analysis and proposed approach");
+    expect(prompt).toContain("stress-test the proposed fix as a plan");
+    expect(prompt).not.toContain("nothing in scope for this turn");
+    // How-to line reflects that there is no diff to judge for code quality.
+    expect(prompt).toContain("the work under review is the reasoning and the proposal");
+  });
+
+  it("keeps the plain no-op scope note when the no-diff turn left only a stub self-report", () => {
+    const prompt = buildReviewerPrompt({
+      taskContext: "fix login", originalIntent: "fix login",
+      authorSelfReport: "done", intentBrief: null, reviewFocus: null, target,
+      scope: { changedFiles: [], startHead: "base9" },
+    });
+    expect(prompt).toContain("nothing in scope for this turn");
+    expect(prompt).not.toContain("deliverable is the analysis");
   });
 
   it("renders no Scope section when scope is omitted entirely (back-compat)", () => {

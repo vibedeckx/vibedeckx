@@ -184,6 +184,11 @@ export function buildReviewerPrompt(opts: {
   const brief = opts.intentBrief || null;
   const hasExcerpt = Boolean(intent || opts.taskContext || opts.authorSelfReport);
   const scope = opts.scope && opts.scope.changedFiles.length > 0 ? opts.scope : null;
+  // A no-diff turn whose author left a substantial self-report was almost
+  // certainly an analysis/plan turn: the deliverable IS that reasoning, not a
+  // diff. Point the reviewer at it instead of declaring "nothing in scope".
+  const noDiffWithAnalysis =
+    Boolean(opts.authorSelfReport) && (opts.authorSelfReport as string).trim().length >= SELF_REPORT_MIN_CHARS;
   return [
     "You are a code reviewer agent. Another agent just completed work in this workspace; review it critically and independently.",
     brief ? `\n## Intent brief (distilled from the source conversation)\n${brief}` : null,
@@ -197,7 +202,9 @@ export function buildReviewerPrompt(opts: {
     scope
       ? `\n## Scope — the change under review\nThe reviewed turn changed exactly these files:\n${scope.changedFiles.map((f) => `- ${f}`).join("\n")}\nIt starts from commit \`${scope.startHead}\` — use \`git diff ${scope.startHead} -- <file>\` and \`git log ${scope.startHead}..HEAD\` to see the content.\nConfine your review to these files and changes. Other uncommitted or pre-existing changes in the worktree, or changes from other turns, are out of scope unless this change depends on them.`
       : opts.scope != null && opts.scope.changedFiles.length === 0
-        ? "\n## Scope — the change under review\nThe reviewed turn changed no files. Do not review unrelated uncommitted or pre-existing changes in the worktree — there is nothing in scope for this turn. If you believe the turn should have changed something, say so rather than reviewing out-of-scope code."
+        ? noDiffWithAnalysis
+          ? "\n## Scope — the change under review\nThe reviewed turn changed no files. Its deliverable is the analysis and proposed approach in the author self-report above, not a diff — review THAT. Verify the diagnosis against the actual code: are the cited files/lines real and the described mechanism correct? Then stress-test the proposed fix as a plan, before implementation — correctness, side-effects, and completeness. If you instead conclude the turn should have produced a code change and didn't, say so. Do not review unrelated uncommitted or pre-existing changes in the worktree."
+          : "\n## Scope — the change under review\nThe reviewed turn changed no files. Do not review unrelated uncommitted or pre-existing changes in the worktree — there is nothing in scope for this turn. If you believe the turn should have changed something, say so rather than reviewing out-of-scope code."
         : opts.scope === null
           ? "\n## Scope\nThe changed-file set could not be determined (scope unknown) — inspect `git diff`/`git status`/`git log` and judge the relevant range yourself."
           : null,
@@ -205,7 +212,9 @@ export function buildReviewerPrompt(opts: {
     "- Do NOT modify any files — you are in read-only review mode.",
     "- Inspect the actual workspace state yourself: read the relevant files, run `git diff`, `git status` and `git log`.",
     reviewTargetPromptLine(opts.target),
-    "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
+    noDiffWithAnalysis
+      ? "- Judge correctness and completeness against the task. For this analysis/plan turn the work under review is the reasoning and the proposal, not code quality of a diff. Be specific: reference files and lines."
+      : "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
     "\nEnd your final message with a clear, actionable list of feedback items — or state explicitly that the work looks good.",
     brief
       ? opts.authorSelfReport
