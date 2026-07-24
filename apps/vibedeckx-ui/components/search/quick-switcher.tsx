@@ -161,6 +161,9 @@ export function QuickSwitcher({
       title="Quick Switcher"
       description="Search projects, workspaces, and sessions"
       shouldFilter={false}
+      // Full height is 48px input + 300px list + 2px border; anchor by half
+      // that height so filtering shrinks only the bottom edge.
+      className="top-[max(1rem,calc(50%_-_175px))] translate-y-0"
     >
       <CommandInput
         placeholder="Search projects, workspaces, sessions…"
