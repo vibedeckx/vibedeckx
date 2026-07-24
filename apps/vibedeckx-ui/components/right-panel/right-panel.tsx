@@ -52,7 +52,6 @@ function usePersistedTab(projectId: string | null, branch: string | null | undef
 
   useIsomorphicLayoutEffect(() => {
     const saved = localStorage.getItem(key) as TabType | null;
-    console.log('[tabflash] persisted-read -> ', saved ?? 'agent', { key });
     setActiveTabState(saved ?? 'agent');
   }, [key]);
 
@@ -84,20 +83,10 @@ export function RightPanel({
   const displayTab: TabType = forceAgentTab ? 'agent' : activeTab;
   const prevActivateAgentTabNonceRef = useRef(activateAgentTabNonce);
 
-  // TEMP DEBUG (tab-flash): logs every committed activeTab (render), every
-  // layout-effect tab set (pre-paint), and — via useEffect — what was actually
-  // PAINTED (post-paint). If you see NO [tabflash] logs when reproducing, you
-  // are running a stale UI bundle. Remove this block once diagnosed.
-  console.log('[tabflash] render', { activeTab, displayTab, forceAgentTab, projectId, selectedBranch, nonce: activateAgentTabNonce });
-  useEffect(() => {
-    console.log('[tabflash] PAINTED', { displayTab, activeTab, forceAgentTab, selectedBranch });
-  });
-
   useIsomorphicLayoutEffect(() => {
     if (activateAgentTabNonce === undefined) return;
     if (prevActivateAgentTabNonceRef.current === activateAgentTabNonce) return;
     prevActivateAgentTabNonceRef.current = activateAgentTabNonce;
-    console.log('[tabflash] nonce-effect -> agent', { nonce: activateAgentTabNonce });
     setActiveTab('agent');
   }, [activateAgentTabNonce, setActiveTab]);
 
