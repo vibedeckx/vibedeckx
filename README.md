@@ -234,11 +234,14 @@ To keep a remote node running after disconnecting SSH on Linux:
 npx -y vibedeckx@latest connect --connect-to https://example.com --token abc123 --daemon
 ```
 
-Manage the background process with the same CLI:
+Manage the background process with the same CLI. `--prefer-offline` reuses the
+already-downloaded CLI instead of checking npm for a newer version first —
+status and stop don't need an update (`connect status` reports whether one is
+available, and the next `connect ... --daemon` start picks it up via `@latest`):
 
 ```bash
-npx -y vibedeckx@latest connect status
-npx -y vibedeckx@latest connect stop
+npx -y --prefer-offline vibedeckx connect status
+npx -y --prefer-offline vibedeckx connect stop
 ```
 
 Daemon status is scoped by `--data-dir`; when using a custom directory, pass
