@@ -120,8 +120,11 @@ Sketch for making it configurable:
 
 - Represent a scheme as `{ ctrl, shift, alt, meta }` required-modifier mask;
   `matchTabShortcut` reads the active scheme instead of the platform
-  ternary. Persist the choice in `localStorage` next to the other UI prefs
-  (per-user server-side settings are a separate pending project).
+  ternary. Persist the choice in per-user settings (`storage.userSettings`,
+  keyed like the existing `terminal`/`conversation` UI prefs — e.g. a
+  `keybindings` key) so it follows the user across browsers; mirror it into
+  `localStorage` so the first paint after login doesn't flash default
+  tooltips.
 - Offer **vetted presets** rather than free-form capture first: e.g.
   macOS `⌃⇧` (default) / `⌃⌥` (also clean, minus the Rectangle caveat);
   Windows `Ctrl+Alt` (default) / `Alt+Shift` (caveat: bare Alt+Shift is the
