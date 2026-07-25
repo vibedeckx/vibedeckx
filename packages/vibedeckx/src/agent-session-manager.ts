@@ -2,14 +2,20 @@ import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import type { WebSocket } from "@fastify/websocket";
-import type { Storage } from "./storage/types.js";
+import type { AgentSession as AgentSessionRow, Storage } from "./storage/types.js";
 import type {
   AgentMessage,
   AgentSessionStatus,
   AgentType,
   ContentPart,
+  NotificationDisposition,
   TurnOutcome,
 } from "./agent-types.js";
+import {
+  findTurnOpeningUserEntry,
+  resolveNotificationDisposition,
+  sessionMilestoneForTurnEnd,
+} from "./notification-milestones.js";
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
@@ -127,6 +133,16 @@ interface RunningSession {
    * restoreSessionsFromDb (see repairInterruptedTurn).
    */
   turnOpenSince: number | null;
+  /**
+   * Notification disposition of the currently open turn, set alongside
+   * `turnOpenSince` (so steering messages don't change it) and cleared with it.
+   * The live path reads it here rather than re-deriving it from history: the
+   * intent is known at send time, and a history scan can't distinguish a
+   * steering message from a turn opener when a previous turn was left unclosed.
+   * The same value is ALSO persisted on the opening user entry, which is what
+   * lets crash repair recover it after this field is gone.
+   */
+  turnDisposition: NotificationDisposition | null;
   /** Injected at spawn, never persisted: a token is useless once the process holding it exits. */
   crossRemoteMcp?: CrossRemoteMcpConfig;
 }
@@ -186,6 +202,42 @@ export class AgentSessionManager {
 
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
+  }
+
+  /**
+   * Injected by shared-services: nudges NotificationService to drain the local
+   * outbox right after a milestone lands, so the bell is fast in the common
+   * case. Purely a latency optimization — correctness comes from the periodic
+   * and startup drains, because this hook can't fire if the process dies
+   * between the commit and the import.
+   */
+  setMilestoneListener(listener: () => void): void {
+    this.onMilestoneCreated = listener;
+  }
+
+  private onMilestoneCreated: (() => void) | null = null;
+
+  /**
+   * Decide the disposition to persist on an outgoing user turn.
+   *
+   * Ordinary user input defaults to `result`. Workflow callers must be explicit:
+   * `origin: "workflow"` alone is NOT enough to infer `internal`, because
+   * approved review feedback is also a workflow-authored turn yet starts a
+   * user-visible source result. An omission is therefore a caller bug — warn
+   * loudly rather than silently picking a disposition that suppresses a real
+   * notification.
+   */
+  private resolveOutgoingDisposition(
+    sessionId: string,
+    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
+  ): NotificationDisposition {
+    if (opts?.notificationDisposition) return opts.notificationDisposition;
+    if (opts?.origin === "workflow") {
+      console.warn(
+        `[AgentSession] workflow-origin turn for ${sessionId} carries no explicit notificationDisposition; defaulting to "result"`,
+      );
+    }
+    return "result";
   }
 
   /**
@@ -587,6 +639,7 @@ export class AgentSessionManager {
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
       turnOpenSince: null,
+      turnDisposition: null,
     };
 
     this.sessions.set(sessionId, session);
@@ -1384,6 +1437,19 @@ export class AgentSessionManager {
     return msg;
   }
 
+  /**
+   * Allocate the next entry index, record the message in the in-memory store,
+   * and build its ADD replay patch. Shared by `pushEntry` and `pushTurnEnd` so
+   * the two persistence paths can't drift on index allocation or patch shape.
+   */
+  private stageEntry(session: RunningSession, message: AgentMessage): { index: number; patch: Patch } {
+    const index = session.store.indexProvider.next();
+    session.store.entries[index] = message;
+    const patch = ConversationPatch.addEntry(index, message);
+    session.store.patches.push(patch);
+    return { index, patch };
+  }
+
   private async pushEntry(
     sessionId: string,
     message: AgentMessage,
@@ -1393,17 +1459,7 @@ export class AgentSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return -1;
 
-    const { store } = session;
-
-    // Get next index from provider
-    const index = store.indexProvider.next();
-
-    // Store the entry
-    store.entries[index] = message;
-
-    // Create ADD patch
-    const patch = ConversationPatch.addEntry(index, message);
-    store.patches.push(patch);
+    const { index, patch } = this.stageEntry(session, message);
 
     // Persist to DB (skip streaming assistant text — those get finalized later)
     if (!session.skipDb && message.type !== "assistant") {
@@ -1414,6 +1470,74 @@ export class AgentSessionManager {
       this.broadcastPatch(sessionId, patch);
     }
 
+    return index;
+  }
+
+  /**
+   * Persist a `turn_end` together with the attention milestone it earns.
+   *
+   * Deliberately NOT routed through `pushEntry`: the milestone id embeds the
+   * turn_end's entry index, so the index has to be allocated before the write,
+   * and the write itself has to be the atomic turn-end/outbox operation rather
+   * than a plain entry upsert. Ordering matches `pushEntry` (persist, then
+   * broadcast) so the existing turn_end-before-status contract still holds.
+   *
+   * `entryIndexOverride` re-persists an already-staged boundary (crash-repair
+   * replay); without it a fresh index is allocated.
+   */
+  private async pushTurnEnd(
+    session: RunningSession,
+    outcome: TurnOutcome,
+    disposition: NotificationDisposition,
+    endedAt: number,
+    durationMs?: number,
+    entryIndexOverride?: number,
+  ): Promise<number> {
+    const message: AgentMessage = {
+      type: "turn_end",
+      timestamp: endedAt,
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      outcome,
+      notificationDisposition: disposition,
+    };
+
+    let index: number;
+    let patch: Patch;
+    if (entryIndexOverride !== undefined) {
+      index = entryIndexOverride;
+      patch = ConversationPatch.addEntry(index, message);
+    } else {
+      ({ index, patch } = this.stageEntry(session, message));
+    }
+
+    // skipDb sessions (remote path-based pseudo-sessions) have no durable store,
+    // so no milestone is possible — an explicit non-durable internal path, not a
+    // silent promise of recovery.
+    if (!session.skipDb) {
+      const outbox = sessionMilestoneForTurnEnd({
+        sessionId: session.id,
+        projectId: session.projectId,
+        branch: session.branch,
+        entryIndex: index,
+        outcome,
+        disposition,
+        createdAt: endedAt,
+      });
+      try {
+        await this.storage.agentSessions.upsertTurnEndWithOutbox({
+          sessionId: session.id,
+          entryIndex: index,
+          entryData: JSON.stringify(message),
+          outbox,
+        });
+        await this.storage.agentSessions.touchUpdatedAt(session.id);
+        if (outbox) this.onMilestoneCreated?.();
+      } catch (error) {
+        console.error(`[AgentSession] Failed to persist turn_end ${index} for ${session.id}:`, error);
+      }
+    }
+
+    if (entryIndexOverride === undefined) this.broadcastPatch(session.id, patch);
     return index;
   }
 
@@ -1463,11 +1587,13 @@ export class AgentSessionManager {
   }
 
   /**
-   * Close the open turn with a persisted turn_end stop-point entry.
+   * Close the open turn with a persisted turn_end stop-point entry, plus the
+   * attention milestone the turn's disposition earns (written in the same
+   * storage transaction — see pushTurnEnd).
+   *
    * turn_end entries are constructed ONLY here and in repairInterruptedTurn
    * (restore path). Wall clock only — see design doc for why the CLI's
-   * payload.duration_ms is not used. Rides the normal best-effort entry
-   * persistence on purpose (no strict path — design decision).
+   * payload.duration_ms is not used.
    */
   private async endActiveTurn(
     session: RunningSession,
@@ -1476,8 +1602,15 @@ export class AgentSessionManager {
     if (session.turnOpenSince === null) return null; // no turn in flight
     const endedAt = Date.now(); // single clock read: timestamp === end bound of durationMs
     const durationMs = endedAt - session.turnOpenSince;
-    const index = await this.pushEntry(session.id, { type: "turn_end", timestamp: endedAt, durationMs, outcome }, true);
+    // Live path: the disposition was decided when this turn opened. The history
+    // fallback only covers a turn whose open state predates the field (and is
+    // the same resolution crash repair uses), so the two paths never disagree.
+    const disposition = session.turnDisposition ?? resolveNotificationDisposition(
+      findTurnOpeningUserEntry(session.store.entries, session.store.entries.length),
+    );
+    const index = await this.pushTurnEnd(session, outcome, disposition, endedAt, durationMs);
     session.turnOpenSince = null; // cleared only after the write resolves
+    session.turnDisposition = null;
     if (!session.skipDb && index >= 0) {
       try {
         const project = await this.storage.projects.getById(session.projectId);
@@ -1499,10 +1632,12 @@ export class AgentSessionManager {
     content: string | ContentPart[],
     projectPath?: string,
     userId: string = "local",
-    opts?: { origin?: "workflow" },
+    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
   ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
+
+    const disposition = this.resolveOutgoingDisposition(sessionId, opts);
 
     // If session is dormant, wake it up
     if (session.dormant) {
@@ -1510,7 +1645,7 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Cannot wake dormant session ${sessionId} without projectPath`);
         return false;
       }
-      await this.wakeDormantSession(session, projectPath, content, userId, opts?.origin);
+      await this.wakeDormantSession(session, projectPath, content, userId, opts?.origin, disposition);
       return true;
     }
 
@@ -1541,12 +1676,16 @@ export class AgentSessionManager {
     await this.finalizeStreamingEntry(session);
     session.store.currentAssistantIndex = null;
 
-    // Add user message with ADD patch
+    // Add user message with ADD patch. The disposition is persisted here, on
+    // the turn's opening entry, because that's the only place the *intent*
+    // behind the turn is known — and it has to survive a restart for crash
+    // repair and remote outbox generation to agree with the live path.
     await this.pushEntry(sessionId, {
       type: "user",
       content,
       timestamp: Date.now(),
       ...(opts?.origin ? { origin: opts.origin } : {}),
+      notificationDisposition: disposition,
     }, true, userId);
 
     // Send to agent stdin via provider
@@ -1561,7 +1700,10 @@ export class AgentSessionManager {
         // before the thread/start response). The send is initiated — the
         // provider flushes the buffered turn/start itself — so the turn opens
         // here too, or its completion would skip the turn_end stop point.
-        if (session.turnOpenSince === null) session.turnOpenSince = Date.now();
+        if (session.turnOpenSince === null) {
+          session.turnOpenSince = Date.now();
+          session.turnDisposition = disposition;
+        }
         return true;
       }
       console.log(
@@ -1569,8 +1711,13 @@ export class AgentSessionManager {
       );
       session.process.stdin.write(formatted);
       // A turn is now genuinely in flight. Steering messages (sent while a
-      // turn is already open) must not reset the clock.
-      if (session.turnOpenSince === null) session.turnOpenSince = Date.now();
+      // turn is already open) must not reset the clock — nor the disposition:
+      // a user steering an in-flight reviewer turn doesn't turn it into a
+      // generic session result.
+      if (session.turnOpenSince === null) {
+        session.turnOpenSince = Date.now();
+        session.turnDisposition = disposition;
+      }
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to send message:`, error);
@@ -2161,6 +2308,7 @@ export class AgentSessionManager {
     userMessage: string | ContentPart[],
     userId: string = "local",
     origin?: "workflow",
+    notificationDisposition: NotificationDisposition = "result",
   ): Promise<void> {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
@@ -2194,8 +2342,10 @@ export class AgentSessionManager {
       content: userMessage,
       timestamp: Date.now(),
       ...(origin ? { origin } : {}),
+      notificationDisposition,
     }, true, userId);
     session.turnOpenSince = Date.now();
+    session.turnDisposition = notificationDisposition;
 
     // After process ready: send full context + new message to stdin
     setTimeout(() => {
@@ -2278,9 +2428,10 @@ export class AgentSessionManager {
    * throw into the restore path.
    */
   private async repairInterruptedTurn(
-    sessionId: string,
+    dbSession: AgentSessionRow,
     rows: Array<{ entry_index: number; data: string }>,
   ): Promise<Array<{ entry_index: number; data: string }>> {
+    const sessionId = dbSession.id;
     // Scan past trailing system entries (e.g. the hibernate note lands after
     // the turn's turn_end).
     let landingType: string | null = null; // null = no non-system row found
@@ -2298,18 +2449,50 @@ export class AgentSessionManager {
 
     const maxIndex = rows.reduce((m, r) => Math.max(m, r.entry_index), -1);
     const repairIndex = maxIndex + 1;
-    const repair: AgentMessage = { type: "turn_end", timestamp: Date.now(), outcome: "server_restart" };
+
+    // The interrupted turn's disposition has to come off its persisted opening
+    // user entry — process memory died with the crash. A crash mid-`result`
+    // turn is a genuine attention milestone (the user asked for something that
+    // never finished), so it becomes one durable session_failed; a workflow
+    // helper or reviewer turn gets its boundary repaired silently.
+    const entries: Array<AgentMessage | undefined> = [];
+    for (const row of rows) {
+      try {
+        entries[row.entry_index] = JSON.parse(row.data) as AgentMessage;
+      } catch { /* corrupted row: a hole, not a boundary */ }
+    }
+    const disposition = resolveNotificationDisposition(
+      findTurnOpeningUserEntry(entries, repairIndex),
+    );
+
+    const repair: AgentMessage = {
+      type: "turn_end",
+      timestamp: Date.now(),
+      outcome: "server_restart",
+      notificationDisposition: disposition,
+    };
     const data = JSON.stringify(repair);
-    await this.storage.agentSessions.upsertEntry(sessionId, repairIndex, data);
-    console.log(`[AgentSession] Repaired interrupted turn for ${sessionId} (server_restart turn_end at ${repairIndex})`);
+    const outbox = sessionMilestoneForTurnEnd({
+      sessionId,
+      projectId: dbSession.project_id,
+      branch: dbSession.branch || null,
+      entryIndex: repairIndex,
+      outcome: "server_restart",
+      disposition,
+      createdAt: repair.timestamp,
+    });
+    await this.storage.agentSessions.upsertTurnEndWithOutbox({
+      sessionId,
+      entryIndex: repairIndex,
+      entryData: data,
+      outbox,
+    });
+    console.log(`[AgentSession] Repaired interrupted turn for ${sessionId} (server_restart turn_end at ${repairIndex}, disposition=${disposition})`);
 
     try {
-      const dbSession = await this.storage.agentSessions.getById(sessionId);
-      if (dbSession) {
-        const project = await this.storage.projects.getById(dbSession.project_id);
-        if (project?.path) {
-          await recordTurnSnapshot(this.storage, sessionId, repairIndex, resolveWorktreePath(project.path, dbSession.branch));
-        }
+      const project = await this.storage.projects.getById(dbSession.project_id);
+      if (project?.path) {
+        await recordTurnSnapshot(this.storage, sessionId, repairIndex, resolveWorktreePath(project.path, dbSession.branch));
       }
     } catch (error) {
       console.warn(`[AgentSession] Turn snapshot lookup failed for ${sessionId}@${repairIndex}:`, error);
@@ -2339,7 +2522,7 @@ export class AgentSessionManager {
       // histories untouched and makes repair idempotent — this run resets
       // the row to "stopped" below.
       if (dbSession.status === "running") {
-        entries = await this.repairInterruptedTurn(dbSession.id, entries);
+        entries = await this.repairInterruptedTurn(dbSession, entries);
       }
 
       const store = this.rebuildStoreFromRows(entries, dbSession.id);
@@ -2366,6 +2549,7 @@ export class AgentSessionManager {
         taskStartedThisTurn: 0,
         lastActiveAt: Date.now(),
         turnOpenSince: null,
+        turnDisposition: null,
       };
 
       this.sessions.set(dbSession.id, runningSession);
@@ -2500,6 +2684,7 @@ export class AgentSessionManager {
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
       turnOpenSince: null,
+      turnDisposition: null,
       crossRemoteMcp: opts.crossRemoteMcp,
     };
     this.sessions.set(newId, branched);

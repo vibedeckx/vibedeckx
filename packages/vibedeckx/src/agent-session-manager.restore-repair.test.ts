@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import { createSqliteStorage } from "./storage/sqlite.js";
-import type { AgentSession, Storage } from "./storage/types.js";
+import type { AgentSession, NotificationOutboxEvent, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
 
 /**
@@ -26,6 +26,8 @@ function makeHarness(status: AgentSession["status"], rows: Row[]) {
     last_user_message_at: 1, last_completed_at: null,
   };
   const upserts: Array<{ index: number; msg: AgentMessage }> = [];
+  const outbox: Array<Omit<NotificationOutboxEvent, "seq">> = [];
+  const outboxIds = new Set<string>();
   const storage = {
     agentSessions: {
       getAll: async () => [row],
@@ -38,10 +40,23 @@ function makeHarness(status: AgentSession["status"], rows: Row[]) {
         upserts.push({ index, msg });
         rows.push(entry(index, msg)); // simulate persistence for a second restore
       }),
+      upsertTurnEndWithOutbox: vi.fn(async (o: {
+        entryIndex: number;
+        entryData: string;
+        outbox?: Omit<NotificationOutboxEvent, "seq">;
+      }) => {
+        const msg = JSON.parse(o.entryData) as AgentMessage;
+        upserts.push({ index: o.entryIndex, msg });
+        rows.push(entry(o.entryIndex, msg));
+        if (o.outbox && !outboxIds.has(o.outbox.id)) {
+          outboxIds.add(o.outbox.id);
+          outbox.push(o.outbox);
+        }
+      }),
       touchUpdatedAt: vi.fn(async () => undefined),
     },
   } as unknown as Storage;
-  return { storage, row, rows, upserts };
+  return { storage, row, rows, upserts, outbox };
 }
 
 describe("restore-time turn repair", () => {
@@ -90,6 +105,77 @@ describe("restore-time turn repair", () => {
     ]);
     await new AgentSessionManager(h.storage).restoreSessionsFromDb();
     expect(h.upserts).toHaveLength(0);
+  });
+
+  /**
+   * A crash mid-`result` turn is a real attention milestone: the user asked for
+   * something and it never finished. Repair therefore has to write the failure
+   * milestone in the SAME storage operation as the server_restart turn_end, and
+   * it must recover the turn's disposition from the persisted opening user entry
+   * (process memory is gone by definition).
+   */
+  it("writes session_failed atomically with the server_restart turn_end for a result turn", async () => {
+    const h = makeHarness("running", [
+      entry(0, { type: "user", content: "go", timestamp: 1, notificationDisposition: "result" }),
+      entry(1, { type: "tool_use", tool: "Bash", input: {}, timestamp: 2 }),
+    ]);
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+
+    const turnEnds = h.upserts.filter((u) => u.msg.type === "turn_end");
+    expect(turnEnds).toHaveLength(1);
+    expect(h.outbox).toHaveLength(1);
+    // Keyed on the real repair index (maxIndex + 1 = 2).
+    expect(h.outbox[0].id).toBe("session:s1:turn:2:failed");
+    expect(h.outbox[0].kind).toBe("session_failed");
+    expect(h.outbox[0].session_id).toBe("s1");
+    expect(h.outbox[0].project_id).toBe("p1");
+    expect(h.outbox[0].branch).toBe("main");
+    // The repaired turn_end carries the recovered disposition forward.
+    expect((turnEnds[0].msg as { notificationDisposition?: string }).notificationDisposition).toBe("result");
+  });
+
+  it.each(["internal", "milestone-managed"] as const)(
+    "repairs a %s turn's boundary without a generic notification",
+    async (disposition) => {
+      const h = makeHarness("running", [
+        entry(0, { type: "user", content: "review", timestamp: 1, origin: "workflow", notificationDisposition: disposition }),
+        entry(1, { type: "assistant", content: "half", timestamp: 2 }),
+      ]);
+      await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+
+      expect(h.upserts.filter((u) => u.msg.type === "turn_end")).toHaveLength(1);
+      expect(h.outbox).toHaveLength(0);
+    },
+  );
+
+  it("a legacy origin:workflow turn with no persisted disposition repairs without a notification", async () => {
+    const h = makeHarness("running", [
+      entry(0, { type: "user", content: "old reviewer prompt", timestamp: 1, origin: "workflow" }),
+      entry(1, { type: "assistant", content: "half", timestamp: 2 }),
+    ]);
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+    expect(h.upserts.filter((u) => u.msg.type === "turn_end")).toHaveLength(1);
+    expect(h.outbox).toHaveLength(0);
+  });
+
+  it("a legacy ordinary user turn with no persisted disposition repairs as a failure", async () => {
+    const h = makeHarness("running", [
+      entry(0, { type: "user", content: "go", timestamp: 1 }),
+      entry(1, { type: "assistant", content: "half", timestamp: 2 }),
+    ]);
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+    expect(h.outbox).toHaveLength(1);
+    expect(h.outbox[0].kind).toBe("session_failed");
+  });
+
+  it("repair is idempotent for the milestone too: a second restore adds nothing", async () => {
+    const h = makeHarness("running", [
+      entry(0, { type: "user", content: "go", timestamp: 1, notificationDisposition: "result" }),
+      entry(1, { type: "assistant", content: "half", timestamp: 2 }),
+    ]);
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+    expect(h.outbox).toHaveLength(1);
   });
 
   it("repairs when the landing row is unparsable (truncated tail write from a hard kill)", async () => {

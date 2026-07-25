@@ -8,6 +8,8 @@ import type {
   NotificationSyncStart,
   RemoteSessionMapping,
 } from "../types.js";
+// NotificationOutboxEvent is referenced only through Storage's method
+// signatures, which this factory's return type already pins.
 
 const mapRemoteSessionMapping = (
   row: Selectable<RemoteSessionMappingsTable>,
@@ -184,6 +186,24 @@ export const createAgentSessionRepos = (
         .values({ session_id: sessionId, entry_index: entryIndex, data })
         .onConflict((oc) => oc.columns(["session_id", "entry_index"]).doUpdateSet({ data }))
         .execute();
+    },
+
+    // One transaction, both writes idempotent — see the contract note in
+    // types.ts for why the milestone must ride with the turn_end rather than
+    // being written next to it.
+    upsertTurnEndWithOutbox: async ({ sessionId, entryIndex, entryData, outbox }) => {
+      await kdb.transaction().execute(async (trx) => {
+        await trx.insertInto("agent_session_entries")
+          .values({ session_id: sessionId, entry_index: entryIndex, data: entryData })
+          .onConflict((oc) => oc.columns(["session_id", "entry_index"]).doUpdateSet({ data: entryData }))
+          .execute();
+        if (outbox) {
+          await trx.insertInto("notification_outbox")
+            .values(outbox)
+            .onConflict((oc) => oc.column("id").doNothing())
+            .execute();
+        }
+      });
     },
 
     getEntries: async (sessionId) => {

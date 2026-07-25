@@ -374,8 +374,14 @@ describe("WorkflowEngine", () => {
     expect(run.source_turn_end_index).toBe(4); // derived from entries
     expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "plan", "claude-code", true);
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
-    // Machine-authored: marked so the UI renders it as markdown, not verbatim.
-    expect(agentOps.sendUserMessage.mock.calls[0][4]).toEqual({ origin: "workflow" });
+    // Machine-authored: `origin` marks it so the UI renders it as markdown
+    // rather than verbatim, and the disposition hands the attention event to
+    // the run — the reviewer's own completion must not also ding as a generic
+    // session result.
+    expect(agentOps.sendUserMessage.mock.calls[0][4]).toEqual({
+      origin: "workflow",
+      notificationDisposition: "milestone-managed",
+    });
     expect(prompt).toContain("please fix the bug");   // task context
     expect(prompt).toContain("focus on tests");        // review focus
     expect(prompt).toContain("read-only review mode"); // reviewer must not edit
@@ -458,7 +464,8 @@ describe("WorkflowEngine", () => {
       expect.stringContaining("previous review"),
       project.path,
       undefined,
-      { origin: "workflow" },
+      // A reused reviewer is still a reviewer: the run owns its milestone.
+      { origin: "workflow", notificationDisposition: "milestone-managed" },
     );
     const prompt = agentOps.sendUserMessage.mock.calls.at(-1)?.[1] as string;
     expect(prompt).toContain("please fix the bug");
@@ -627,6 +634,9 @@ describe("WorkflowEngine", () => {
     const sent = agentOps.sendUserMessage.mock.calls.at(-1)!;
     expect(sent[0]).toBe("s-src");
     expect(sent[1]).toContain("edited feedback");
+    // Workflow-authored, but disposition "result": the source's modification is
+    // its own attention milestone, separate from the review-ready one.
+    expect(sent[4]).toEqual({ origin: "workflow", notificationDisposition: "result" });
     expect(engine.isSessionInActiveRun("s-src")).toBe(false);
   });
 

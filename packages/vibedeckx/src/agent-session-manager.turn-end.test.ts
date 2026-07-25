@@ -2,8 +2,11 @@ import { readFileSync } from "fs";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
-import type { AgentSession, Storage } from "./storage/types.js";
+import type { AgentSession, NotificationOutboxEvent, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
+
+type OutboxWrite = Omit<NotificationOutboxEvent, "seq">;
+type TurnEndWrite = { sessionId: string; entryIndex: number; entryData: string; outbox?: OutboxWrite };
 
 /**
  * turn_end lifecycle wiring: a completed turn writes exactly one turn_end
@@ -43,6 +46,11 @@ function makeHarness(agentType: "claude-code" | "codex" = "claude-code") {
   };
   const ops: string[] = [];
   const turnEnds: Array<AgentMessage & { type: "turn_end" }> = [];
+  const userEntries: Array<AgentMessage & { type: "user" }> = [];
+  const outbox: OutboxWrite[] = [];
+  // Mirrors the real ON CONFLICT(id) DO NOTHING so "retrying the same turn-end
+  // write creates no duplicate" is a genuine assertion, not a harness artifact.
+  const outboxIds = new Set<string>();
   const storage = {
     agentSessions: {
       getAll: async () => [row],
@@ -58,14 +66,26 @@ function makeHarness(agentType: "claude-code" | "codex" = "claude-code") {
       upsertEntry: vi.fn(async (_id: string, _idx: number, data: string) => {
         const msg = JSON.parse(data) as AgentMessage;
         ops.push(`entry:${msg.type}`);
+        if (msg.type === "user") userEntries.push(msg);
+        // turn_end must NOT arrive here any more — it goes through the atomic
+        // turn-end/outbox operation below.
         if (msg.type === "turn_end") turnEnds.push(msg);
+      }),
+      upsertTurnEndWithOutbox: vi.fn(async (o: TurnEndWrite) => {
+        const msg = JSON.parse(o.entryData) as AgentMessage;
+        ops.push(`entry:${msg.type}`);
+        if (msg.type === "turn_end") turnEnds.push(msg);
+        if (o.outbox && !outboxIds.has(o.outbox.id)) {
+          outboxIds.add(o.outbox.id);
+          outbox.push(o.outbox);
+        }
       }),
       touchUpdatedAt: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
     },
     tasks: { completeIfAssigned: vi.fn(async () => undefined) },
   } as unknown as Storage;
-  return { storage, ops, turnEnds };
+  return { storage, ops, turnEnds, userEntries, outbox };
 }
 
 async function liveSession(manager: AgentSessionManager, openSince: number | null) {
@@ -234,5 +254,251 @@ describe("codex buffered first turn", () => {
 
     await manager.stopSession(SESSION_ID);
     expect(turnEnds).toHaveLength(0);
+  });
+});
+
+/**
+ * Per-turn notification disposition. The decision of whether a turn's outcome
+ * deserves a user-facing notification is made when the turn is *started* and
+ * PERSISTED on the opening user entry — not held in process memory — because
+ * crash repair and remote outbox generation must reach the same decision after
+ * a restart. See docs/plans/2026-07-25-persistent-notification-milestones-design.md
+ * §Per-turn Notification Intent.
+ */
+describe("notification disposition persistence", () => {
+  type FakeProcess = { stdin: { write: (s: string) => boolean }; exitCode: null; pid: number };
+
+  async function writableSession(manager: AgentSessionManager) {
+    const { session } = await liveSession(manager, null);
+    (session as unknown as { process: FakeProcess }).process = {
+      stdin: { write: () => true }, exitCode: null, pid: 1234,
+    };
+    return session;
+  }
+
+  it("an ordinary user turn persists disposition=result", async () => {
+    const { storage, userEntries } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await writableSession(manager);
+    await manager.sendUserMessage(SESSION_ID, "do the thing");
+    expect(userEntries.at(-1)?.notificationDisposition).toBe("result");
+  });
+
+  it("a reviewer workflow prompt persists disposition=milestone-managed", async () => {
+    const { storage, userEntries } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await writableSession(manager);
+    await manager.sendUserMessage(SESSION_ID, "review this", undefined, "local", {
+      origin: "workflow",
+      notificationDisposition: "milestone-managed",
+    });
+    expect(userEntries.at(-1)?.notificationDisposition).toBe("milestone-managed");
+    expect(userEntries.at(-1)?.origin).toBe("workflow");
+  });
+
+  it("approved feedback sent to the source persists disposition=result", async () => {
+    const { storage, userEntries } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await writableSession(manager);
+    await manager.sendUserMessage(SESSION_ID, "[Review Feedback] fix it", undefined, "local", {
+      origin: "workflow",
+      notificationDisposition: "result",
+    });
+    expect(userEntries.at(-1)?.notificationDisposition).toBe("result");
+  });
+
+  it("copies the opening turn's disposition onto its turn_end", async () => {
+    const { storage, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await writableSession(manager);
+    await manager.sendUserMessage(SESSION_ID, "internal helper", undefined, "local", {
+      origin: "workflow",
+      notificationDisposition: "internal",
+    });
+    await manager.stopSession(SESSION_ID);
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].notificationDisposition).toBe("internal");
+  });
+
+  it("a steering message inside an open turn does not change the turn's disposition", async () => {
+    const { storage, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await writableSession(manager);
+    await manager.sendUserMessage(SESSION_ID, "review this", undefined, "local", {
+      origin: "workflow",
+      notificationDisposition: "milestone-managed",
+    });
+    // Steering: a second send while the turn is already open.
+    await manager.sendUserMessage(SESSION_ID, "also check tests");
+    await manager.stopSession(SESSION_ID);
+    expect(turnEnds[0].notificationDisposition).toBe("milestone-managed");
+  });
+});
+
+/**
+ * Deterministic session milestones. A `result` turn's terminal outcome writes
+ * exactly one outbox row, in the same storage operation as its turn_end, keyed
+ * on the REAL turn_end entry index so a retried write is absorbed by the
+ * outbox's UNIQUE(id) instead of producing a second notification.
+ */
+describe("session result milestones", () => {
+  type FakeProcess = { stdin: { write: (s: string) => boolean }; exitCode: null; pid: number };
+
+  async function turnFrom(
+    manager: AgentSessionManager,
+    opts?: { origin?: "workflow"; notificationDisposition?: "result" | "internal" | "milestone-managed" },
+  ) {
+    const { session } = await liveSession(manager, null);
+    (session as unknown as { process: FakeProcess }).process = {
+      stdin: { write: () => true }, exitCode: null, pid: 1234,
+    };
+    await manager.sendUserMessage(SESSION_ID, "go", undefined, "local", opts);
+    return session;
+  }
+
+  it("a completed result turn creates exactly one session_result_ready keyed on the turn_end index", async () => {
+    const { storage, outbox, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const session = await turnFrom(manager);
+
+    await (manager as unknown as {
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    }).endActiveTurn(session, "completed");
+
+    expect(turnEnds).toHaveLength(1);
+    expect(outbox).toHaveLength(1);
+    // Index 2: restore seeds entry 0 (user "go"), sendUserMessage adds 1, turn_end is 2.
+    expect(outbox[0].id).toBe(`session:${SESSION_ID}:turn:2:result-ready`);
+    expect(outbox[0].kind).toBe("session_result_ready");
+    expect(outbox[0].session_id).toBe(SESSION_ID);
+    expect(outbox[0].project_id).toBe("p1");
+    expect(outbox[0].branch).toBe("main");
+    expect(outbox[0].workflow_run_id).toBeNull();
+    // The outbox stores semantic identity only — copy is the front's job.
+    expect(outbox[0]).not.toHaveProperty("title");
+    expect(outbox[0]).not.toHaveProperty("body");
+  });
+
+  it.each(["failed", "process_exit"] as const)(
+    "a %s result turn creates one session_failed",
+    async (outcome) => {
+      const { storage, outbox } = makeHarness();
+      const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+      const session = await turnFrom(manager);
+
+      await (manager as unknown as {
+        endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+      }).endActiveTurn(session, outcome);
+
+      expect(outbox).toHaveLength(1);
+      expect(outbox[0].id).toBe(`session:${SESSION_ID}:turn:2:failed`);
+      expect(outbox[0].kind).toBe("session_failed");
+    },
+  );
+
+  it("a stopped result turn creates no milestone (user-initiated Stop never dings)", async () => {
+    const { storage, outbox, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    await turnFrom(manager);
+    await manager.stopSession(SESSION_ID);
+    expect(turnEnds[0].outcome).toBe("stopped");
+    expect(outbox).toHaveLength(0);
+  });
+
+  it.each(["internal", "milestone-managed"] as const)(
+    "a completed %s turn creates no generic session milestone",
+    async (disposition) => {
+      const { storage, outbox, turnEnds } = makeHarness();
+      const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+      const session = await turnFrom(manager, { origin: "workflow", notificationDisposition: disposition });
+
+      await (manager as unknown as {
+        endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+      }).endActiveTurn(session, "completed");
+
+      expect(turnEnds).toHaveLength(1);
+      expect(outbox).toHaveLength(0);
+    },
+  );
+
+  it("a failed milestone-managed turn creates no generic session milestone either", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const session = await turnFrom(manager, { origin: "workflow", notificationDisposition: "milestone-managed" });
+
+    await (manager as unknown as {
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    }).endActiveTurn(session, "failed");
+
+    expect(outbox).toHaveLength(0);
+  });
+
+  it("re-writing the same turn end does not create a duplicate milestone", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const session = await turnFrom(manager);
+    const internals = manager as unknown as {
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+      pushTurnEnd: (s: unknown, o: string, d: string, endedAt: number, dur?: number, index?: number) => Promise<number>;
+    };
+
+    await internals.endActiveTurn(session, "completed");
+    // Replay the identical persistence step (same session + same turn_end
+    // index): the deterministic id must collapse it.
+    await internals.pushTurnEnd(session, "completed", "result", Date.now(), 1, 2);
+
+    expect(outbox).toHaveLength(1);
+  });
+
+  it("legacy user entries with no persisted disposition default by origin", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session } = await liveSession(manager, Date.now() - 10);
+    const internals = manager as unknown as {
+      sessions: Map<string, { store: { entries: AgentMessage[] } }>;
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    };
+    const entries = internals.sessions.get(SESSION_ID)!.store.entries;
+
+    // Entry 0 is a legacy ordinary user turn (no notificationDisposition
+    // field at all) → treated as "result".
+    expect(entries[0]).toMatchObject({ type: "user" });
+    await internals.endActiveTurn(session, "completed");
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0].kind).toBe("session_result_ready");
+  });
+
+  it("a legacy origin:workflow user entry with no disposition defaults to internal", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session } = await liveSession(manager, Date.now() - 10);
+    const internals = manager as unknown as {
+      sessions: Map<string, { store: { entries: AgentMessage[] } }>;
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    };
+    // Rewrite entry 0 as a pre-feature workflow turn (origin set, no disposition).
+    internals.sessions.get(SESSION_ID)!.store.entries[0] = {
+      type: "user", content: "old reviewer prompt", timestamp: 1, origin: "workflow",
+    };
+
+    await internals.endActiveTurn(session, "completed");
+    expect(outbox).toHaveLength(0);
+  });
+
+  it("a skipDb session produces no durable milestone", async () => {
+    const { storage, outbox, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session } = await liveSession(manager, Date.now() - 10);
+    (session as unknown as { skipDb: boolean }).skipDb = true;
+
+    await (manager as unknown as {
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    }).endActiveTurn(session, "completed");
+
+    // The in-memory turn boundary still exists for the UI, but nothing is
+    // persisted — skipDb sessions are an explicit non-durable internal path,
+    // not a silent promise of recovery.
+    expect(turnEnds).toHaveLength(0);
+    expect(outbox).toHaveLength(0);
   });
 });

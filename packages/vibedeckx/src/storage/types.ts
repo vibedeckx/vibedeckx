@@ -644,6 +644,24 @@ export interface Storage {
     markCompleted: (id: string, timestampMs: number) => Promise<void>;
     delete: (id: string) => Promise<void>;
     upsertEntry: (sessionId: string, entryIndex: number, data: string) => Promise<void>;
+    /**
+     * Persist a `turn_end` entry and its optional attention milestone in ONE
+     * transaction. Used only for turn_end — ordinary entry persistence stays on
+     * `upsertEntry`.
+     *
+     * The milestone must be tied to the durable state that PROVES it: a
+     * committed turn_end with no outbox row would lose the notification
+     * forever, and an outbox row with no turn_end would notify about a turn
+     * that never closed. Both writes are idempotent (entry upsert on
+     * (session_id, entry_index), outbox on its deterministic id), so retrying
+     * the whole operation is safe.
+     */
+    upsertTurnEndWithOutbox: (opts: {
+      sessionId: string;
+      entryIndex: number;
+      entryData: string;
+      outbox?: Omit<NotificationOutboxEvent, "seq">;
+    }) => Promise<void>;
     getEntries: (sessionId: string) => Promise<Array<{ entry_index: number; data: string }>>;
     deleteEntries: (sessionId: string) => Promise<void>;
     countEntries: () => Promise<Array<{ session_id: string; cnt: number }>>;

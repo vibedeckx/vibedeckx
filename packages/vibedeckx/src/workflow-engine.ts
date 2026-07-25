@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import type { ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
-import type { AgentMessage, AgentType, TextPart } from "./agent-types.js";
+import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { captureSnapshot, computeScope, resolveStartSnapshot } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
@@ -23,7 +23,7 @@ export interface AgentOps {
     content: string,
     projectPath?: string,
     userId?: string,
-    opts?: { origin?: "workflow" },
+    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
   ): Promise<boolean>;
   /** Write a final title and claim the one-shot slot (AI titling never fires). */
   setFinalSessionTitle(sessionId: string, title: string): Promise<void>;
@@ -39,6 +39,30 @@ export class WorkflowError extends Error {
     super(message);
   }
 }
+
+// ---------- notification dispositions for workflow-authored turns ----------
+
+/**
+ * A reviewer's turn: the run — not the session — owns the attention event. Its
+ * completion becomes exactly one `review_ready` on the
+ * waiting_reviewer → waiting_feedback transition, so suppressing the generic
+ * session milestone here is what stops one review from dinging twice.
+ */
+const REVIEWER_TURN = {
+  origin: "workflow",
+  notificationDisposition: "milestone-managed",
+} as const satisfies { origin: "workflow"; notificationDisposition: NotificationDisposition };
+
+/**
+ * Approved feedback delivered to the source session. Workflow-authored, but the
+ * source's *modification* is a separate user-facing deliverable — reviewer
+ * feedback and the fix that follows it are two distinct attention milestones —
+ * so this turn is a plain `result`.
+ */
+const FEEDBACK_TURN = {
+  origin: "workflow",
+  notificationDisposition: "result",
+} as const satisfies { origin: "workflow"; notificationDisposition: NotificationDisposition };
 
 // ---------- pure helpers (exported for tests / reuse) ----------
 
@@ -517,7 +541,7 @@ export class WorkflowEngine {
           target,
         });
         const sent = await this.agentOps
-          .sendUserMessage(opts.reviewerSessionId, prompt, opts.project.path, undefined, { origin: "workflow" })
+          .sendUserMessage(opts.reviewerSessionId, prompt, opts.project.path, undefined, REVIEWER_TURN)
           .catch(() => false);
         if (!sent) {
           await this.failRun(run, "向上次 reviewer 投递复审任务失败");
@@ -567,7 +591,7 @@ export class WorkflowEngine {
           target,
           scope,
         });
-        const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path, undefined, { origin: "workflow" });
+        const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path, undefined, REVIEWER_TURN);
         if (!sent) {
           const failed = await this.storage.workflowRuns.update(run.id, {
             status: "failed",
@@ -637,7 +661,7 @@ export class WorkflowEngine {
     const feedback = editedPayload ?? run.feedback_snapshot ?? "";
     const project = await this.storage.projects.getById(run.project_id);
     const ok = await this.agentOps
-      .sendUserMessage(run.source_session_id, buildFeedbackMessage(feedback), project?.path ?? undefined, undefined, { origin: "workflow" })
+      .sendUserMessage(run.source_session_id, buildFeedbackMessage(feedback), project?.path ?? undefined, undefined, FEEDBACK_TURN)
       .catch(() => false);
 
     if (!ok) {
