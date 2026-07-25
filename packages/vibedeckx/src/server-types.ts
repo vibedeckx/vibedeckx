@@ -10,6 +10,7 @@ import type { BrowserManager } from "./browser-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { SchedulerService } from "./scheduler.js";
 import type { NotificationService } from "./notification-service.js";
+import type { RemoteNotificationSync } from "./remote-notification-sync.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -49,6 +50,7 @@ declare module "fastify" {
     browserManager: BrowserManager;
     scheduler: SchedulerService;
     notificationService: NotificationService;
+    remoteNotificationSync: RemoteNotificationSync;
     workflowEngine: import("./workflow-engine.js").WorkflowEngine;
   }
 }

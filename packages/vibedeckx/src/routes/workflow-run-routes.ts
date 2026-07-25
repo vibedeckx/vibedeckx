@@ -196,6 +196,16 @@ async function routes(fastify: FastifyInstance) {
         intentBrief = await distillIntentBrief(userId, sourceSessionId);
       }
 
+      // A reused reviewer is about to start a new turn on an already-mapped
+      // session: baseline its cursor first (see prepareForNewTurn) so the
+      // review we are starting can't be mistaken for that session's history.
+      if (reviewerSessionId &&
+          !(await fastify.remoteNotificationSync.prepareForNewTurn(reviewerSessionId))) {
+        return reply.code(502).send({
+          error: "Could not reach the remote server to prepare notification delivery",
+          errorCode: "notification_baseline_failed",
+        });
+      }
       // The worker derives branch from its own session row — the body branch
       // is not forwarded (server-derived branch, same rule as the local path).
       const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
@@ -231,9 +241,20 @@ async function routes(fastify: FastifyInstance) {
           branch: bareRun.branch,
         };
         fastify.remoteSessionMap.set(localRun.reviewer_session_id, reviewerInfo);
+        // from_start for a FRESH reviewer: it was created moments ago by this
+        // run, and its review may well finish before this mapping row lands —
+        // sequence zero is what recovers that race. Insert-only, so a REUSED
+        // reviewer keeps the cursor (and policy) it already had and does not
+        // replay its previous reviews.
         await fastify.storage.remoteSessionMappings.upsert(
           localRun.reviewer_session_id, projectId, remoteInfo.remoteServerId,
-          bareRun.reviewer_session_id, bareRun.branch,
+          bareRun.reviewer_session_id, bareRun.branch, "from_start",
+        );
+        // The reviewer may already have finished on the worker; ask for its
+        // milestones now rather than waiting for the next periodic sweep.
+        await fastify.remoteNotificationSync.extendWatch(localRun.reviewer_session_id);
+        fastify.remoteNotificationSync.enqueue(() =>
+          fastify.remoteNotificationSync.syncServer(remoteInfo.remoteServerId, { includeExpired: true }),
         );
         ensureRemoteAgentStream(localRun.reviewer_session_id, {
           remoteSessionMap: fastify.remoteSessionMap,
@@ -398,12 +419,15 @@ async function routes(fastify: FastifyInstance) {
           branch: remoteInfo.branch,
         };
         fastify.remoteSessionMap.set(candidate.sessionId, reviewerInfo);
+        // from_now: candidate lookup DISCOVERS a reviewer session from an
+        // earlier run. Its old reviews are not new attention milestones.
         await fastify.storage.remoteSessionMappings.upsert(
           candidate.sessionId,
           projectId,
           remoteInfo.remoteServerId,
           bareCandidate.sessionId,
           remoteInfo.branch ?? null,
+          "from_now",
         );
       }
       return reply.send({ candidate });

@@ -15,6 +15,7 @@ import { BrowserManager } from "../browser-manager.js";
 import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
+import { RemoteNotificationSync } from "../remote-notification-sync.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -218,6 +219,29 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("notificationService", notificationService);
   agentSessionManager.setMilestoneListener(() => notificationService.requestDrain());
 
+  // Pulls worker outboxes into the inbox. Independent of any session WebSocket
+  // or open browser tab — that independence is the whole point: a remote result
+  // produced while the front was down still arrives.
+  const remoteNotificationSync = new RemoteNotificationSync({
+    storage: opts.storage,
+    notificationService,
+    reverseConnectManager,
+  });
+  fastify.decorate("remoteNotificationSync", remoteNotificationSync);
+
+  // A worker that just reconnected may hold milestones produced while it was
+  // unreachable — sweep it immediately instead of waiting for the periodic tick,
+  // and include expired mappings since the downtime may have outlasted their
+  // watch windows. setStatusChangeHandler APPENDS (see ReverseConnectManager),
+  // so this composes with the executor-restore handler registered above rather
+  // than replacing it.
+  reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
+    if (status !== "online") return;
+    remoteNotificationSync.enqueue(() =>
+      remoteNotificationSync.syncServer(remoteServerId, { includeExpired: true }),
+    );
+  });
+
   const workflowEngine = new WorkflowEngine(opts.storage, agentSessionManager);
   workflowEngine.setEventBus(eventBus);   // subscribe BEFORE chatSessionManager so ordering is explicit
   workflowEngine.setMilestoneListener(() => notificationService.requestDrain());
@@ -236,6 +260,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // previous process died has no live nudge to ride, so it is recovered here.
   notificationService.start();
   notificationService.requestDrain();
+
+  // One bounded full sweep now that persisted mappings are hydrated — this is
+  // what recovers remote milestones produced while this front was offline. The
+  // periodic timer afterwards only polls mappings inside their watch window, so
+  // historical mappings aren't re-queried forever.
+  remoteNotificationSync.start();
+  remoteNotificationSync.enqueue(() => remoteNotificationSync.syncAll({ includeExpired: true }));
 
   // Restore remote executor processes from DB in the background.
   // Only processes direct-URL servers here; reverse-connect servers are
@@ -263,6 +294,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.addHook("onClose", async () => {
     scheduler.shutdown();
     notificationService.shutdown();
+    remoteNotificationSync.shutdown();
     agentSessionManager.shutdown();
     processManager.shutdown();
     remotePatchCache.shutdown();

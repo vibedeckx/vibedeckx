@@ -13,6 +13,7 @@ import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame, runUpdatedEventFromRemoteFrame, reviewerTurnEndOutcomeFromRemotePatch } from "./routes/remote-status-bridge.js";
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
 
 export interface RemoteAgentSessionDeps {
   remoteSessionMap: Map<string, RemoteSessionInfo>;
@@ -99,7 +100,15 @@ export async function createRemoteAgentSession(
       return { ok: false, status: 409, data: { error: "Remote returned an unexpected session id; upgrade the remote" } };
     }
 
-    await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null);
+    // from_start: this front just created the session, so it has no unrelated
+    // history to suppress — and sequence zero closes the race where the very
+    // first turn completes before this mapping row exists.
+    await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null, "from_start");
+    // Bring the new session into the periodic notification-poll set so its first
+    // result is picked up even if no stream or browser tab is watching.
+    await deps.remoteSessionMappings
+      .extendNotificationWatch(localSessionId, Date.now() + NOTIFICATION_WATCH_WINDOW_MS)
+      .catch((err) => console.warn("[RemoteSession] notification watch extend failed:", err));
     // Search-cache write-through: surface the new session in Cmd+K now instead
     // of after the next on-open refresh. Best-effort — the session exists on
     // the remote at this point, so a cache failure must not fail the create.

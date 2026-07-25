@@ -40,6 +40,12 @@ function makeApp() {
   const emitBranchActivityIfChanged = vi.fn();
   const markRemoteReviewerForReconcile = vi.fn();
   const emit = vi.fn();
+  // Notification sync seam: prepareForNewTurn gates a reused reviewer's new
+  // turn, and the reviewer registration asks for an immediate sweep.
+  const prepareForNewTurn = vi.fn(async () => true);
+  const extendWatch = vi.fn(async () => undefined);
+  const syncServer = vi.fn(async () => undefined);
+  const enqueue = vi.fn((work: () => Promise<void>) => { void work(); });
   app = Fastify();
   app.decorate("authEnabled", false);
   app.decorate("storage", {
@@ -64,9 +70,13 @@ function makeApp() {
     emitBranchActivityIfChanged,
     markRemoteReviewerForReconcile,
   } as never);
+  app.decorate("remoteNotificationSync", {
+    prepareForNewTurn, extendWatch, syncServer, enqueue,
+  } as never);
   return {
     remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem,
     emitBranchActivityIfChanged, markRemoteReviewerForReconcile,
+    prepareForNewTurn, extendWatch, syncServer, enqueue,
   };
 }
 
@@ -95,7 +105,9 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(remoteSessionMap.get("remote-srv1-p1-rev1")).toMatchObject({
       remoteSessionId: "rev1", branch: "dev",
     });
-    expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev");
+    // Candidate lookup DISCOVERS a reviewer from a past run: from_now, so its
+    // old reviews aren't replayed as new unread notifications.
+    expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev", "from_now");
     expect(ensureStreamMock).not.toHaveBeenCalled();
   });
 
@@ -122,6 +134,60 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-missing" },
     });
     expect(missing.statusCode).toBe(404);
+  });
+
+  it("POST reuse baselines the reused reviewer's notification cursor before dispatching", async () => {
+    const { remoteSessionMap, prepareForNewTurn } = makeApp();
+    remoteSessionMap.set("remote-srv1-p1-rev1", {
+      remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+      remoteSessionId: "rev1", branch: "dev",
+    });
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-rev1" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(prepareForNewTurn).toHaveBeenCalledWith("remote-srv1-p1-rev1");
+    // Baseline first, dispatch second — the other order would let the review we
+    // are starting be mistaken for this reviewer's history and be suppressed.
+    expect(prepareForNewTurn.mock.invocationCallOrder[0])
+      .toBeLessThan(proxyMock.mock.invocationCallOrder[0]);
+  });
+
+  it("POST reuse does not start the review when the notification baseline fails", async () => {
+    const { remoteSessionMap, prepareForNewTurn } = makeApp();
+    remoteSessionMap.set("remote-srv1-p1-rev1", {
+      remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+      remoteSessionId: "rev1", branch: "dev",
+    });
+    await app.register(workflowRunRoutes);
+    prepareForNewTurn.mockResolvedValueOnce(false);
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-rev1" },
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().errorCode).toBe("notification_baseline_failed");
+    expect(proxyMock).not.toHaveBeenCalled();
+  });
+
+  it("a fresh review needs no reviewer baseline (the reviewer does not exist yet)", async () => {
+    const { prepareForNewTurn } = makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: { ...bareRun, reviewer_session_id: null } } });
+
+    // intentBrief supplied so no distillation call competes for the single
+    // queued proxy response — this test is about the baseline gate.
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, intentBrief: "client brief" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(prepareForNewTurn).not.toHaveBeenCalled();
   });
 
   it("POST forwards a client pre-generated intentBrief without pulling history", async () => {
@@ -159,6 +225,7 @@ describe("workflow-run remote proxying (front server)", () => {
     const {
       remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem,
       emitBranchActivityIfChanged, markRemoteReviewerForReconcile,
+      extendWatch, syncServer,
     } = makeApp();
     await app.register(workflowRunRoutes);
     // Fresh review → the front first pulls the source history (intent brief
@@ -183,7 +250,12 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(run.reviewer_session_id).toBe("remote-srv1-p1-rev1");
 
     expect(remoteSessionMap.get("remote-srv1-p1-rev1")).toMatchObject({ remoteSessionId: "rev1", remoteServerId: "srv1" });
-    expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev");
+    // A reviewer this run just created: from_start, because the review can
+    // finish before this mapping row lands.
+    expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev", "from_start");
+    // ...and it is swept immediately rather than waiting for the periodic tick.
+    expect(extendWatch).toHaveBeenCalledWith("remote-srv1-p1-rev1");
+    expect(syncServer).toHaveBeenCalledWith("srv1", { includeExpired: true });
     expect(ensureStreamMock).toHaveBeenCalledWith("remote-srv1-p1-rev1", expect.anything());
     // Seed branch:activity `working` for the reviewer (its worker-side `working`
     // never bridges to the front, and the branch is stuck at the source's

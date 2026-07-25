@@ -405,8 +405,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
               branch: s.branch ?? null,
             });
           }
+          // from_now: listing DISCOVERS existing worker sessions (see
+          // search-routes for the same reasoning). Insert-only, so a session
+          // this front created keeps its from_start policy.
           await fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, project.id, project.agent_mode, s.id, s.branch ?? null,
+            localSessionId, project.id, project.agent_mode, s.id, s.branch ?? null, "from_now",
           );
           return { ...s, id: localSessionId, processAlive: s.processAlive ?? false, entry_count: s.entry_count ?? 0 };
         }));
@@ -531,8 +534,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
             remoteSessionId: remoteData.session.id,
             branch: branch ?? null,
           });
+          // from_now: this resolves an EXISTING worker session for the branch
+          // (a null session above means there is none) — a discovery, not a
+          // creation.
           await fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, project.id, agentMode, remoteData.session.id, branch ?? null,
+            localSessionId, project.id, agentMode, remoteData.session.id, branch ?? null, "from_now",
           );
 
           // Seed remotePatchCache with REST messages so WS replay has data immediately
@@ -801,6 +807,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!remoteInfo) {
         console.log(`[API] /message 404: remote session not found. Known keys: [${[...fastify.remoteSessionMap.keys()].join(', ')}]`);
         return reply.code(404).send({ error: "Remote session not found" });
+      }
+      // Baseline the notification cursor BEFORE the turn starts. For a
+      // `from_now` mapping that has never synced, a turn that completes before
+      // the baseline is recorded would be indistinguishable from history and
+      // silently suppressed — so if the baseline can't be established, the turn
+      // is not started at all.
+      if (!(await fastify.remoteNotificationSync.prepareForNewTurn(req.params.sessionId))) {
+        return reply.code(502).send({
+          error: "Could not reach the remote server to prepare notification delivery",
+          errorCode: "notification_baseline_failed",
+        });
       }
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
@@ -1118,8 +1135,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: remoteInfo.branch ?? null,
         });
         try {
+          // from_start: the branch operation just created this remote session.
           await fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, projectId, remoteInfo.remoteServerId, newRemoteSessionId, remoteInfo.branch ?? null,
+            localSessionId, projectId, remoteInfo.remoteServerId, newRemoteSessionId, remoteInfo.branch ?? null, "from_start",
           );
           // The remote already wrote the final "Branch - ..." title — claim both
           // title-generation guards so the first message here doesn't clobber it.

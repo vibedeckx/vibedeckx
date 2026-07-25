@@ -21,6 +21,7 @@ describe("createRemoteAgentSession", () => {
   let storage: Storage;
   let remoteSessionMap: Map<string, RemoteSessionInfo>;
   let upsert: ReturnType<typeof vi.fn>;
+  let extendNotificationWatch: ReturnType<typeof vi.fn>;
   let emitBranchActivityIfChanged: ReturnType<typeof vi.fn>;
 
   const agentMode = "srv-source";
@@ -28,7 +29,9 @@ describe("createRemoteAgentSession", () => {
 
   const makeDeps = (): RemoteAgentSessionDeps => ({
     remoteSessionMap,
-    remoteSessionMappings: { upsert } as unknown as Storage["remoteSessionMappings"],
+    remoteSessionMappings: {
+      upsert, extendNotificationWatch,
+    } as unknown as Storage["remoteSessionMappings"],
     remotePatchCache: new RemotePatchCache(),
     agentSessionManager: { emitBranchActivityIfChanged } as never,
     reverseConnectManager: null,
@@ -52,6 +55,7 @@ describe("createRemoteAgentSession", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     remoteSessionMap = new Map();
     upsert = vi.fn().mockResolvedValue(undefined);
+    extendNotificationWatch = vi.fn().mockResolvedValue(undefined);
     emitBranchActivityIfChanged = vi.fn();
 
     // Enable cross-remote MCP minting: a public URL plus an opted-in remote that
@@ -90,8 +94,12 @@ describe("createRemoteAgentSession", () => {
     expect(body.crossRemoteMcp?.url).toContain("/api/cross-remote-mcp");
     expect(body.crossRemoteMcp?.token).toBeTruthy();
 
-    // Persisted mapping written with the pre-computed id.
-    expect(upsert).toHaveBeenCalledWith(localSessionId, projectId, agentMode, remoteSessionId, "main");
+    // Persisted mapping written with the pre-computed id, and marked
+    // `from_start` — this front just created the session, so sequence zero is
+    // what recovers a first turn that completes before this row lands.
+    expect(upsert).toHaveBeenCalledWith(localSessionId, projectId, agentMode, remoteSessionId, "main", "from_start");
+    // Brought into the periodic notification-poll set.
+    expect(extendNotificationWatch).toHaveBeenCalledWith(localSessionId, expect.any(Number));
 
     // Map entry survives a successful create.
     expect(remoteSessionMap.has(localSessionId)).toBe(true);

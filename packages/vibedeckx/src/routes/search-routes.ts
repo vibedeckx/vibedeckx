@@ -81,8 +81,13 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
             branch: mapBranch,
           });
         }
+        // from_now: search DISCOVERS pre-existing worker sessions. Importing
+        // their whole milestone history would flood a fresh front database with
+        // unread notifications and a sound storm — the first sync just records
+        // the worker's current head. Insert-only, so a session this front
+        // created (from_start) is never downgraded by a later search pass.
         await fastify.storage.remoteSessionMappings.upsert(
-          localSessionId, target.projectId, target.targetId, s.id, mapBranch,
+          localSessionId, target.projectId, target.targetId, s.id, mapBranch, "from_now",
         );
         return { ...s, id: localSessionId };
       }));
