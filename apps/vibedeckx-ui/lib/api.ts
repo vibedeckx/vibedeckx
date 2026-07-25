@@ -105,14 +105,20 @@ let _configInFlight: Promise<AppConfig> | null = null;
 // is always revalidated against the server in the background — see getConfig.
 const CONFIG_STORAGE_KEY = "vibedeckx:app-config";
 
+// discordInviteUrl is network-only: it must never live in the synchronously-read
+// persisted cache, so a removed env var can't leave a stale button and a stale
+// invite can never resurrect from cache. Stripped on BOTH the write and the read
+// path so the guarantee holds no matter how a value entered storage.
+function withoutEphemeralFields(config: AppConfig): AppConfig {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { discordInviteUrl: _drop, ...rest } = config;
+  return rest;
+}
+
 function persistConfig(config: AppConfig): void {
   if (typeof window === "undefined") return;
   try {
-    // discordInviteUrl is intentionally omitted: it must never survive in the
-    // synchronously-read cache, so a removed env var can't leave a stale button.
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { discordInviteUrl: _drop, ...persistable } = config;
-    window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(persistable));
+    window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(withoutEphemeralFields(config)));
   } catch {
     // ignore storage failures (private mode / quota) — we still have it in memory
   }
@@ -126,7 +132,9 @@ export function getPersistedConfig(): AppConfig | null {
   try {
     const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY);
     if (!raw) return null;
-    _cachedConfig = JSON.parse(raw) as AppConfig;
+    // Strip again on read: a cache written by an older build (or otherwise
+    // seeded) may still carry discordInviteUrl — it must not surface here.
+    _cachedConfig = withoutEphemeralFields(JSON.parse(raw) as AppConfig);
     return _cachedConfig;
   } catch {
     return null;
