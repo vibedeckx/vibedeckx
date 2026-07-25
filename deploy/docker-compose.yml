@@ -56,6 +56,9 @@ services:
       # to the Clerk keys — see docker.env.example. Unset ⇒ feature stays off.
       # (Do NOT set it here as ${VIBEDECKX_PUBLIC_URL:-}: an empty environment:
       # value would override whatever docker.env provides.)
+      # Community/support Discord invite (VIBEDECKX_DISCORD_URL) is likewise
+      # optional and deployment-specific — set it in docker.env, not here.
+      # Unset ⇒ the "Join our Discord" header button stays hidden.
 
     # Clerk secrets. Lives next to this file in the runtime dir.
     env_file:
