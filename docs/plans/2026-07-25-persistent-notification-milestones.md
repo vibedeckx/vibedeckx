@@ -31,6 +31,9 @@ Cover:
 - inserting an inbox row and advancing its `(remoteServerId, remoteSessionId)`
   cursor is one transaction;
 - remote-session lookup resolves a persisted mapping;
+- mapping insertion preserves `from_start`/`from_now`, while re-upsert never
+  resets an existing policy or cursor;
+- watched-mapping queries exclude expired historical mappings;
 - project ownership lookup returns the stored user.
 
 Use a real temporary SQLite database:
@@ -46,8 +49,8 @@ it("imports a remote event and advances the session cursor atomically", async ()
       branch: "dev",
       session_id: "remote-srv1-p1-r1",
       workflow_run_id: null,
-      title: "Session completed",
-      body: null,
+      title: "Session result is ready",
+      body: "Fix login",
       created_at: 10,
     },
     remoteServerId: "srv1",
@@ -89,13 +92,20 @@ export interface NotificationOutboxEvent {
   branch: string | null;
   session_id: string;
   workflow_run_id: string | null;
-  title: string;
-  body: string | null;
   created_at: number;
 }
 
-export interface Notification extends Omit<NotificationOutboxEvent, "seq"> {
+export interface Notification {
+  id: string;
   user_id: string;
+  kind: NotificationKind;
+  project_id: string;
+  branch: string | null;
+  session_id: string | null;
+  workflow_run_id: string | null;
+  title: string;
+  body: string | null;
+  created_at: number;
   read_at: number | null;
 }
 ```
@@ -109,8 +119,30 @@ remoteSessionMappings.getByRemote(
   remoteSessionId: string,
 ): Promise<RemoteSessionMapping | undefined>;
 
+remoteSessionMappings.upsert(
+  localSessionId: string,
+  projectId: string,
+  remoteServerId: string,
+  remoteSessionId: string,
+  branch: string | null,
+  notificationSyncStart?: "from_start" | "from_now",
+): Promise<void>;
+
+remoteSessionMappings.extendNotificationWatch(
+  localSessionId: string,
+  until: number,
+): Promise<void>;
+
+remoteSessionMappings.getNotificationSyncCandidates(
+  opts: { now: number; includeExpired: boolean },
+): Promise<RemoteSessionMapping[]>;
+
 projects.getOwnerId(projectId: string): Promise<string | undefined>;
 ```
+
+`remoteServers.getOwnerId` already exists; it is not a substitute for the new
+project-owner lookup because notification ownership is derived from the mapped
+local project.
 
 **Step 4: Add SQLite DDL and Kysely table types**
 
@@ -125,8 +157,6 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
   branch TEXT,
   session_id TEXT NOT NULL,
   workflow_run_id TEXT,
-  title TEXT NOT NULL,
-  body TEXT,
   created_at INTEGER NOT NULL
 );
 
@@ -160,11 +190,24 @@ CREATE TABLE IF NOT EXISTS notification_sync_cursors (
 ```
 
 Represent all three tables in `storage/schema.ts` and add them to `DB`.
+Extend `remote_session_mappings` with:
+
+```sql
+notification_sync_start TEXT NOT NULL DEFAULT 'from_now',
+notification_watch_until INTEGER
+```
+
+Use an idempotent migration for existing databases. Existing mappings default
+to `from_now` to prevent an upgrade or rebuilt front from backfilling historical
+worker milestones as new unread notifications. `upsert` applies
+`notificationSyncStart` only on insert; its conflict update must not change the
+stored policy, watch boundary, or cursor.
 
 **Step 5: Implement repositories**
 
 In `repositories/notifications.ts`, use `onConflict(...).doNothing()` for
-outbox and inbox IDs. Implement `importRemote` with `kdb.transaction()`:
+outbox and inbox IDs. Import `sql` from Kysely and implement `importRemote` with
+`kdb.transaction()`:
 
 ```ts
 const result = await trx.insertInto("notifications")
@@ -175,12 +218,18 @@ const result = await trx.insertInto("notifications")
 await trx.insertInto("notification_sync_cursors")
   .values({ remote_server_id, remote_session_id, last_seq: seq, updated_at: Date.now() })
   .onConflict((oc) => oc.columns(["remote_server_id", "remote_session_id"])
-    .doUpdateSet({ last_seq: seq, updated_at: Date.now() }))
+    .doUpdateSet({
+      last_seq: sql<number>`
+        MAX(notification_sync_cursors.last_seq, excluded.last_seq)
+      `,
+      updated_at: Date.now(),
+    }))
   .execute();
 ```
 
 Return whether the notification row was newly inserted. Never move a cursor
-backward; guard the update with `last_seq < seq`.
+backward; the `MAX(existing, excluded)` expression enforces that requirement
+even if pages are retried out of order.
 
 Wire the repository factory into `createSqliteStorage`.
 
@@ -222,6 +271,10 @@ Add tests proving:
 - approved feedback sent to the source persists `"result"`;
 - completed `result` creates one `session_result_ready` outbox row;
 - failed/process-exit `result` creates `session_failed`;
+- restore repair of an interrupted `result` turn writes
+  `turn_end(server_restart)` and `session_failed` atomically;
+- restore repair of interrupted `internal`/`milestone-managed` turns writes the
+  turn boundary without a generic notification;
 - stopped `result` creates no row;
 - completed `internal` and `milestone-managed` turns create no generic row;
 - retrying the same turn-end write creates no duplicate.
@@ -252,7 +305,9 @@ export type NotificationDisposition =
   | "milestone-managed";
 ```
 
-Persist it on the user entry and `turn_end` entry. Extend
+Persist it on the user entry and copy it to the `turn_end` entry. The restore
+path must recover it by scanning back to the opening user entry before
+constructing `server_restart`. Extend
 `sendUserMessage` options:
 
 ```ts
@@ -265,6 +320,9 @@ opts?: {
 Default to `"result"` only for an ordinary user turn. Require workflow callers
 to pass an explicit disposition; do not infer every `origin: "workflow"` turn
 as internal because approved feedback starts a user-visible source result.
+For legacy persisted user entries with no disposition, resolve ordinary input
+as `"result"` and `origin: "workflow"` as `"internal"`; add a regression test
+for both defaults.
 
 **Step 4: Add one atomic repository operation**
 
@@ -296,7 +354,9 @@ const outbox =
         // remaining display and routing fields
       }
     : disposition === "result" &&
-        (outcome === "failed" || outcome === "process_exit")
+        (outcome === "failed" ||
+         outcome === "process_exit" ||
+         outcome === "server_restart")
       ? {
           id: `session:${session.id}:turn:${index}:failed`,
           kind: "session_failed" as const,
@@ -305,8 +365,18 @@ const outbox =
       : undefined;
 ```
 
-Persist the `turn_end` and outbox together. Ensure the in-memory entry and WS
-patch still follow the existing ordering contract.
+Persist the `turn_end` and outbox together. Route
+`repairInterruptedTurn` through this operation instead of its current direct
+`upsertEntry`; use the repaired entry index in the deterministic ID. Ensure the
+in-memory entry and WS patch still follow the existing ordering contract.
+
+The outbox stores no `title` or `body`. It stores only semantic kind and routing
+identity; the front importer owns notification copy.
+
+For `skipDb` sessions, document and test that no durable milestone is possible.
+Current live HTTP routes use persisted sessions, so this remains an explicit
+non-durable internal/testing path rather than silently pretending to provide
+recovery.
 
 **Step 6: Mark workflow calls explicitly**
 
@@ -453,6 +523,10 @@ Service tests:
 - import emits `notification:created` only for a newly inserted inbox row;
 - a crash/retry window does not emit a duplicate;
 - startup drain recovers an event committed before service startup.
+- import generates stable semantic copy and uses a non-placeholder,
+  front-known session title only as the body;
+- cleanup preserves every unread row and only the newest 500 read rows per
+  user.
 
 Route tests:
 
@@ -493,10 +567,29 @@ cursor, imports them into `notifications`, advances the cursor, and emits only
 new inserts. Use a reserved local cursor identity rather than an in-memory
 offset.
 
+Generate presentation at import time:
+
+```ts
+const TITLE_BY_KIND: Record<NotificationKind, string> = {
+  review_ready: "Review feedback is ready",
+  session_result_ready: "Session result is ready",
+  session_failed: "Session failed",
+  workflow_failed: "Workflow needs attention",
+};
+```
+
+For `body`, use the latest front-known session title only when it is non-empty
+and not a placeholder such as `New Session`; otherwise fall back to branch,
+then project name, then `null`. Do not accept worker-provided title/body text.
+
 Start one immediate drain during shared-services initialization and a short
 unref'd interval for crash-window recovery. Also request a drain immediately
 after successful milestone creation where practical; correctness must not
 depend on that fast path.
+
+Add periodic retention cleanup: keep all unread notifications and the newest
+500 read notifications per user; delete older read rows. Prune worker outbox
+rows older than 90 days.
 
 **Step 5: Implement authenticated browser routes**
 
@@ -549,6 +642,7 @@ Cover:
 - API-key authenticated callers can query requested session IDs;
 - response never includes an unrequested session;
 - each requested session uses its own `after` cursor;
+- a head-only request returns `headCursor` without event payloads;
 - results are ordered and limited per session;
 - malformed, duplicate, excessive session arrays and excessive limits return
   400;
@@ -562,6 +656,7 @@ Expected response:
   sessions: [{
     sessionId: "r1",
     events: [/* ordered rows */],
+    headCursor: 12,
     nextCursor: 12,
     hasMore: false,
   }]
@@ -590,6 +685,11 @@ const MAX_EVENTS_PER_SESSION = 100;
 Query only `notification_outbox.session_id` values explicitly present in the
 request. Do not expose user IDs or front inbox read state.
 
+Support `headOnly: true` per requested session. This returns the current
+per-session maximum sequence and an empty `events` array, allowing a
+search-discovered `from_now` mapping to establish a baseline without replaying
+or sounding historical milestones.
+
 **Step 4: Register and test**
 
 Run the command from Step 2.
@@ -612,7 +712,12 @@ git commit -m "feat(notifications): expose worker outbox cursor API"
 - Create: `packages/vibedeckx/src/remote-notification-sync.test.ts`
 - Modify: `packages/vibedeckx/src/notification-service.ts`
 - Modify: `packages/vibedeckx/src/plugins/shared-services.ts`
+- Modify: `packages/vibedeckx/src/remote-agent-sessions.ts`
+- Modify: `packages/vibedeckx/src/routes/agent-session-routes.ts`
+- Modify: `packages/vibedeckx/src/routes/search-routes.ts`
 - Modify: `packages/vibedeckx/src/routes/workflow-run-routes.ts`
+- Test: `packages/vibedeckx/src/remote-agent-sessions.test.ts`
+- Test: `packages/vibedeckx/src/routes/search-routes.test.ts`
 - Test: `packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts`
 
 **Step 1: Write failing remote sync tests**
@@ -629,7 +734,15 @@ Cover:
 - insert and cursor update are atomic;
 - replay after a simulated crash does not duplicate;
 - a proxy error leaves all affected cursors unchanged;
-- a newly added mapping starts at zero and can import an older event;
+- a front-created new session uses `from_start` and recovers a completion that
+  races mapping setup;
+- a search/list-discovered historical session uses `from_now`, records the
+  returned head, and emits no notification or sound for old events;
+- sending a new turn through an uninitialized `from_now` mapping first records
+  the head, then dispatches; a baseline failure prevents dispatch;
+- re-upserting/reusing a reviewer preserves its existing cursor;
+- periodic sync selects only mappings whose persisted watch window is active;
+- startup/server-online full sweeps are bounded and chunked;
 - direct URL and reverse-connect calls use the same sync logic.
 
 **Step 2: Run tests and verify failure**
@@ -639,6 +752,8 @@ Run:
 ```bash
 pnpm --filter vibedeckx test -- \
   src/remote-notification-sync.test.ts \
+  src/remote-agent-sessions.test.ts \
+  src/routes/search-routes.test.ts \
   src/routes/workflow-run-remote-routes.test.ts
 ```
 
@@ -667,32 +782,66 @@ Reject the session batch if any event's `session_id` differs from the requested
 remote session. Never accept worker `project_id` or user identity as the front
 authorization scope.
 
-**Step 4: Schedule synchronization**
+**Step 4: Initialize mappings according to provenance**
+
+Extend mapping upsert callers with an insert-only initial policy:
+
+```ts
+type NotificationSyncStart = "from_start" | "from_now";
+```
+
+Use:
+
+- `from_start` when this front creates a new remote session or new reviewer;
+- `from_now` when search, session listing, or opening an existing remote
+  session first discovers it;
+- preserve the stored policy and cursor on every re-upsert.
+
+For `from_now` without a cursor, send `headOnly: true`, persist `headCursor`,
+and emit nothing. For `from_start`, use cursor zero. Creating a session,
+sending a remote turn, starting a workflow, and observing live stream activity
+extend `notification_watch_until`.
+
+Add `prepareForNewTurn(localSessionId)` to the sync service. The remote message
+route and reused-reviewer workflow route must await it before proxying the
+operation that starts work. For an uninitialized `from_now` mapping it records
+the current head first; if that request fails, return a transport error and do
+not start the turn. A newly created session/reviewer remains `from_start`
+because its remote ID is only learned after creation/start and it has no
+unrelated history.
+
+**Step 5: Schedule synchronization**
 
 Run:
 
-- once after shared services hydrate persisted mappings;
+- one bounded full sweep after shared services hydrate persisted mappings;
 - immediately when a remote server transitions online;
-- periodically with an unref'd timer;
+- periodically for watched mappings only, with an unref'd timer;
 - immediately after workflow reviewer mapping is persisted.
 
-Avoid replacing existing reverse-connect status handlers. If
-`ReverseConnectManager` supports only one handler, first add a listener
-subscription API and migrate existing handlers to it.
+Verify and use the existing multi-handler behavior:
+`ReverseConnectManager.setStatusChangeHandler` already appends to
+`statusChangeHandlers`. Do not add another listener abstraction or replace
+existing handlers.
 
-**Step 5: Run tests**
+**Step 6: Run tests**
 
 Run the command from Step 2.
 
 Expected: PASS.
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```bash
 git add packages/vibedeckx/src/remote-notification-sync.ts \
   packages/vibedeckx/src/remote-notification-sync.test.ts \
   packages/vibedeckx/src/notification-service.ts \
   packages/vibedeckx/src/plugins/shared-services.ts \
+  packages/vibedeckx/src/remote-agent-sessions.ts \
+  packages/vibedeckx/src/remote-agent-sessions.test.ts \
+  packages/vibedeckx/src/routes/agent-session-routes.ts \
+  packages/vibedeckx/src/routes/search-routes.ts \
+  packages/vibedeckx/src/routes/search-routes.test.ts \
   packages/vibedeckx/src/routes/workflow-run-routes.ts \
   packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts
 git commit -m "feat(notifications): sync remote milestone outboxes"
@@ -707,6 +856,7 @@ git commit -m "feat(notifications): sync remote milestone outboxes"
 - Modify: `apps/vibedeckx-ui/components/layout/completion-notifications-menu.tsx`
 - Modify: `apps/vibedeckx-ui/components/layout/completion-notifications-menu.test.tsx`
 - Modify: `apps/vibedeckx-ui/app/page.tsx`
+- Create: `apps/vibedeckx-ui/public/sounds/failure.mp3`
 
 **Step 1: Write failing hook and menu tests**
 
@@ -720,6 +870,7 @@ Cover:
 - navigating into a target session marks its notifications read;
 - read-all updates the server and local state;
 - success, review-ready, and failure kinds render distinct copy/icons;
+- result, review-ready, and failure notifications select distinct sound paths;
 - clicking navigates to `notification.session_id`;
 - `branch:activity` no longer creates a bell entry or sound.
 
@@ -785,9 +936,11 @@ session_failed        -> Session failed
 workflow_failed       -> Workflow needs attention
 ```
 
-Retain the current sound for successful result/review notifications. Add no new
-failure audio in v1 unless an existing asset is approved; use visual styling
-only.
+Retain `sound1.mp3` for successful session results and `sound2.mp3` for
+review-ready. Add an original short, non-startling failure cue at
+`/sounds/failure.mp3` and use it for `session_failed` and `workflow_failed`.
+Keep sound selection in a pure exported map so tests verify the three distinct
+paths without playing audio.
 
 **Step 6: Run tests**
 
@@ -803,7 +956,8 @@ git add apps/vibedeckx-ui/lib/api.ts \
   apps/vibedeckx-ui/hooks/use-completion-notifications.test.ts \
   apps/vibedeckx-ui/components/layout/completion-notifications-menu.tsx \
   apps/vibedeckx-ui/components/layout/completion-notifications-menu.test.tsx \
-  apps/vibedeckx-ui/app/page.tsx
+  apps/vibedeckx-ui/app/page.tsx \
+  apps/vibedeckx-ui/public/sounds/failure.mp3
 git commit -m "feat(ui): consume persistent notification milestones"
 ```
 
@@ -888,7 +1042,11 @@ Use real temporary SQLite databases for front and worker. Cover:
 4. importing the same page again does not duplicate it;
 5. active-session read persists across another reopen;
 6. two sessions on the same branch retain separate notification IDs;
-7. review-ready and later source-result notifications both exist.
+7. review-ready and later source-result notifications both exist;
+8. a repaired `server_restart` result turn becomes one durable
+   `session_failed`;
+9. a search-discovered historical mapping initializes at head without
+   importing old events, while a front-created mapping recovers from zero.
 
 Mock transport only at `proxyToRemoteAuto`; exercise real storage and
 `NotificationService`.
@@ -950,6 +1108,10 @@ Verify both direct and reverse-connect deployments:
 - view Session A while same-branch Session B completes and confirm B remains
   unread;
 - Stop a session and confirm no notification is created.
+- crash/restart a worker during a result turn and confirm one failure
+  notification is recovered;
+- attach a fresh front database to a worker with old session history and
+  confirm initialization produces no stale unread flood or sound storm.
 
 **Step 7: Commit**
 
