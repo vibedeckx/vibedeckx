@@ -268,17 +268,18 @@ async function routes(fastify: FastifyInstance) {
         // the front doesn't subscribe to the worker's SSE and only reconstructs
         // remote branch:activity from its own outbound sends + `taskCompleted`
         // frames — and this branch is still sitting at the source's `completed`.
-        // Without this, the reviewer's terminal `completed` is a no-op transition
-        // and the dedupe drops it, so the completion notification never fires.
-        // Mirrors the /message route's post-proxy `working` emit. `reconcile`
-        // then derives the terminal `completed` from the reviewer's status patch
-        // (the taskCompleted frame it would otherwise rely on isn't replayed).
+        // Mirrors the /message route's post-proxy `working` emit.
+        //
+        // DISPLAY ONLY — this has no notification role. The reviewer's
+        // attention milestone is a durable `review_ready` outbox row written by
+        // the worker's WorkflowEngine and imported by RemoteNotificationSync;
+        // the bell no longer derives anything from branch:activity, so this emit
+        // exists purely to keep the workspace dot honest while a review runs.
         fastify.agentSessionManager.emitBranchActivityIfChanged(projectId, bareRun.branch, {
           activity: "working",
           since: Date.now(),
           sessionId: localRun.reviewer_session_id,
         });
-        fastify.agentSessionManager.markRemoteReviewerForReconcile(localRun.reviewer_session_id);
         // The worker's spawn-time announcements (session:status/processAlive)
         // fire before this front subscribes, so nothing surfaces the reviewer
         // here on its own. Same intent as the commander's remote spawn path:

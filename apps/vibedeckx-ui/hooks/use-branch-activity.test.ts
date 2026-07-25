@@ -309,3 +309,53 @@ describe("applyOptimisticActivity", () => {
     expect(outcome.kind).toBe("transition");
   });
 });
+
+/**
+ * Separation of concerns after the persistent-milestone redesign: branch
+ * activity drives the workspace/sidebar DOT and nothing else. Notifications come
+ * from the server inbox (`useCompletionNotifications`), keyed on per-session
+ * milestone ids — so `branch:activity` must have no notification role at all.
+ */
+describe("branch activity has no notification role", () => {
+  it("this module exports only dot-state helpers — no notification or sound API", async () => {
+    const mod = await import("./use-branch-activity");
+    const exported = Object.keys(mod).sort();
+    expect(exported).toEqual([
+      "applyOptimisticActivity",
+      "classifyActivityEvent",
+      "reconcileActivitySnapshot",
+      "useBranchActivity",
+    ]);
+    expect(exported.join(" ")).not.toMatch(/notif|sound|bell|unread/i);
+  });
+
+  it("the notification hook never reads branch:activity", async () => {
+    const source = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./use-completion-notifications.ts", import.meta.url), "utf-8"),
+    );
+    // A mention in prose explaining WHY it is not consumed is fine; a code
+    // reference to the event type is not.
+    expect(source).not.toMatch(/data\.type\s*===\s*['"]branch:activity['"]/);
+    expect(source).not.toMatch(/SOUND_FOR_ACTIVITY/);
+    expect(source).toMatch(/notification:created/);
+  });
+
+  it("a repeated branch-level completed state carries no per-session identity to notify on", () => {
+    // Two sessions finishing on one branch produce the SAME branch state, which
+    // is exactly why the bell can no longer be derived from it.
+    const first = classifyActivityEvent(
+      { branch: "feat-a", activity: "completed", since: 1000 },
+      new Map<string, BranchActivity>([["feat-a", "working"]]),
+      new Map<string, number>([["feat-a", 900]]),
+    );
+    expect(first.kind).toBe("transition");
+
+    const second = classifyActivityEvent(
+      { branch: "feat-a", activity: "completed", since: 2000 },
+      new Map<string, BranchActivity>([["feat-a", "completed"]]),
+      new Map<string, number>([["feat-a", 1000]]),
+    );
+    // Deduplicated away — the second session's completion is invisible here.
+    expect(second.kind).not.toBe("transition");
+  });
+});

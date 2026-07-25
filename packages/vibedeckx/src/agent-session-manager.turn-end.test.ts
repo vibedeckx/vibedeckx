@@ -485,6 +485,43 @@ describe("session result milestones", () => {
     expect(outbox).toHaveLength(0);
   });
 
+  /**
+   * The defect the milestone redesign exists to remove: `branch:activity`
+   * describes a `projectId + branch`, so a second session completing on a branch
+   * already sitting at `completed` was deduplicated away and never notified.
+   * Milestones are keyed per session+turn, so each gets its own row.
+   */
+  it("two independent sessions on one branch each create their own milestone", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session } = await liveSession(manager, null);
+    const internals = manager as unknown as {
+      sessions: Map<string, unknown>;
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    };
+
+    // Session A completes.
+    (session as unknown as { turnOpenSince: number | null; turnDisposition: string }).turnOpenSince = Date.now();
+    (session as unknown as { turnDisposition: string }).turnDisposition = "result";
+    await internals.endActiveTurn(session, "completed");
+
+    // Session B: same project + branch, different session id.
+    const sessionB = {
+      ...(session as object),
+      id: "s2",
+      turnOpenSince: Date.now(),
+      turnDisposition: "result",
+      store: { entries: [], indexProvider: { next: () => 7 }, patches: [] },
+      subscribers: new Set(),
+    };
+    await internals.endActiveTurn(sessionB, "completed");
+
+    expect(outbox).toHaveLength(2);
+    expect(outbox.map((e) => e.session_id).sort()).toEqual(["s1", "s2"]);
+    // Distinct ids — nothing collapses them, unlike the old branch-keyed entry.
+    expect(new Set(outbox.map((e) => e.id)).size).toBe(2);
+  });
+
   it("a skipDb session produces no durable milestone", async () => {
     const { storage, outbox, turnEnds } = makeHarness();
     const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });

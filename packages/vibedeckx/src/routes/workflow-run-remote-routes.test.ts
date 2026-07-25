@@ -38,7 +38,6 @@ function makeApp() {
   const markTitleResolvedDb = vi.fn(async () => undefined);
   const markTitleResolvedMem = vi.fn(() => true);
   const emitBranchActivityIfChanged = vi.fn();
-  const markRemoteReviewerForReconcile = vi.fn();
   const emit = vi.fn();
   // Notification sync seam: prepareForNewTurn gates a reused reviewer's new
   // turn, and the reviewer registration asks for an immediate sweep.
@@ -68,14 +67,13 @@ function makeApp() {
   app.decorate("agentSessionManager", {
     markTitleResolved: markTitleResolvedMem,
     emitBranchActivityIfChanged,
-    markRemoteReviewerForReconcile,
   } as never);
   app.decorate("remoteNotificationSync", {
     prepareForNewTurn, extendWatch, syncServer, enqueue,
   } as never);
   return {
     remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem,
-    emitBranchActivityIfChanged, markRemoteReviewerForReconcile,
+    emitBranchActivityIfChanged,
     prepareForNewTurn, extendWatch, syncServer, enqueue,
   };
 }
@@ -224,8 +222,7 @@ describe("workflow-run remote proxying (front server)", () => {
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
     const {
       remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem,
-      emitBranchActivityIfChanged, markRemoteReviewerForReconcile,
-      extendWatch, syncServer,
+      emitBranchActivityIfChanged, extendWatch, syncServer,
     } = makeApp();
     await app.register(workflowRunRoutes);
     // Fresh review → the front first pulls the source history (intent brief
@@ -257,14 +254,16 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(extendWatch).toHaveBeenCalledWith("remote-srv1-p1-rev1");
     expect(syncServer).toHaveBeenCalledWith("srv1", { includeExpired: true });
     expect(ensureStreamMock).toHaveBeenCalledWith("remote-srv1-p1-rev1", expect.anything());
-    // Seed branch:activity `working` for the reviewer (its worker-side `working`
-    // never bridges to the front, and the branch is stuck at the source's
-    // `completed`) + mark it for status-patch completion reconcile. Without the
-    // seed the reviewer's terminal `completed` is deduped and never notifies.
+    // The reviewer's `working` dot is still seeded (its worker-side `working`
+    // never bridges to the front), but purely for DISPLAY: the reviewer's
+    // attention milestone is now a durable review_ready outbox row, so no
+    // notification behavior depends on this emit — and nothing marks the
+    // reviewer for status-patch reconciliation any more.
     expect(emitBranchActivityIfChanged).toHaveBeenCalledWith("p1", "dev", expect.objectContaining({
       activity: "working", sessionId: "remote-srv1-p1-rev1",
     }));
-    expect(markRemoteReviewerForReconcile).toHaveBeenCalledWith("remote-srv1-p1-rev1");
+    // The harness's agentSessionManager stub no longer provides a reconcile
+    // marker at all — if the route still called one, this test would have thrown.
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated", projectId: "p1" }));
     // Sidebar/window surfacing for the worker-spawned reviewer: the worker's
     // own announcements fire before the front subscribes, so the route must

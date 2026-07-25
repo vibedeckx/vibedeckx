@@ -4,7 +4,6 @@ import {
   mapRemoteReviewerCandidate,
   mapRemoteRun,
   runUpdatedEventFromRemoteFrame,
-  reviewerTurnEndOutcomeFromRemotePatch,
 } from "./remote-status-bridge.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 
@@ -113,26 +112,3 @@ describe("runUpdatedEventFromRemoteFrame", () => {
   });
 });
 
-describe("reviewerTurnEndOutcomeFromRemotePatch", () => {
-  const entryPatch = (content: Record<string, unknown>) => ({
-    JsonPatch: [{ op: "add", path: "/entries/7", value: { type: "ENTRY", content } }],
-  });
-
-  it("returns the outcome of a turn_end entry patch", () => {
-    expect(
-      reviewerTurnEndOutcomeFromRemotePatch(entryPatch({ type: "turn_end", outcome: "completed", timestamp: 1 })),
-    ).toBe("completed");
-    expect(
-      reviewerTurnEndOutcomeFromRemotePatch(entryPatch({ type: "turn_end", outcome: "failed", timestamp: 1 })),
-    ).toBe("failed");
-  });
-
-  it("returns null for a non-turn_end entry, a /status patch, and non-JsonPatch frames", () => {
-    expect(reviewerTurnEndOutcomeFromRemotePatch(entryPatch({ type: "assistant", content: "hi", timestamp: 1 }))).toBeNull();
-    expect(
-      reviewerTurnEndOutcomeFromRemotePatch({ JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }] }),
-    ).toBeNull();
-    expect(reviewerTurnEndOutcomeFromRemotePatch({ taskCompleted: {} })).toBeNull();
-    expect(reviewerTurnEndOutcomeFromRemotePatch({ JsonPatch: "not-an-array" as unknown as [] })).toBeNull();
-  });
-});

@@ -815,6 +815,41 @@ describe("WorkflowEngine", () => {
       expect(failure[0].session_id).toBe("s-src");
     });
 
+    /**
+     * A reused reviewer keeps its whole prior history, including the turn_end of
+     * every earlier review. Keying review_ready on the RUN id (not on scanning
+     * back for a turn_end) is what makes a second review of the same reviewer
+     * produce a fresh, distinct milestone instead of colliding with the first.
+     */
+    it("a reused reviewer session yields a new review_ready keyed by run id", async () => {
+      // A real reviewer session row, so the reuse path's existence checks pass.
+      await createReviewer();
+      const reuse = () =>
+        engine.startAdhocReview({
+          project, branch: "dev", sourceSessionId: "s-src", reviewerSessionId: "s-rev",
+        });
+
+      const first = await reuse();
+      await completeReview(first);
+      await engine.approveFeedback(first.id, "fix it");
+
+      // Second review of the SAME reviewer session — its history still holds the
+      // first review's turn_end.
+      await storage.agentSessions.updateStatus("s-rev", "stopped");
+      reviewerEntries[2] = { type: "assistant", content: "Second round feedback", timestamp: 3 };
+      reviewerEntries[3] = { type: "turn_end", timestamp: 4 };
+      const second = await reuse();
+      await completeReview(second);
+
+      const reviewReady = (await outboxRows()).filter((r) => r.kind === "review_ready");
+      expect(reviewReady).toHaveLength(2);
+      expect(reviewReady.map((r) => r.id)).toEqual([
+        `workflow:${first.id}:review-ready`,
+        `workflow:${second.id}:review-ready`,
+      ]);
+      expect(second.id).not.toBe(first.id);
+    });
+
     it("failing an already-terminal run writes nothing (lost CAS)", async () => {
       const run = await start();
       await engine.cancelRun(run.id);

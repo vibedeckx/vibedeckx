@@ -67,29 +67,6 @@ export function statusEventFromRemotePatch(
 }
 
 /**
- * If `parsed` is a JsonPatch frame that adds a `turn_end` stop-point entry,
- * return its `outcome` (`"completed"` | `"failed"` | `"stopped"` |
- * `"process_exit"`); otherwise `null`. Unlike the transient `taskCompleted`
- * frame, turn_end entries are part of the replayed patch stream, so this is the
- * signal the front uses to reconcile a worker-spawned reviewer's completion
- * (incl. across a reconnect) while still distinguishing success from failure.
- */
-export function reviewerTurnEndOutcomeFromRemotePatch(
-  parsed: Record<string, unknown>,
-): string | null {
-  if (!("JsonPatch" in parsed)) return null;
-  const ops = parsed.JsonPatch;
-  if (!Array.isArray(ops)) return null;
-  for (const op of ops as Array<{ value?: { type?: string; content?: { type?: string; outcome?: unknown } } }>) {
-    const content = op?.value?.content;
-    if (op?.value?.type === "ENTRY" && content?.type === "turn_end" && typeof content.outcome === "string") {
-      return content.outcome;
-    }
-  }
-  return null;
-}
-
-/**
  * Build the front-server `session:taskCompleted` event from a worker's
  * `{ taskCompleted: {...} }` stream frame. Forwards the turn boundary (needed
  * by the front's event-card Review button) and the workflow-suppression mark
