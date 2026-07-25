@@ -110,6 +110,7 @@ function persistConfig(config: AppConfig): void {
   try {
     // discordInviteUrl is intentionally omitted: it must never survive in the
     // synchronously-read cache, so a removed env var can't leave a stale button.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { discordInviteUrl: _drop, ...persistable } = config;
     window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(persistable));
   } catch {

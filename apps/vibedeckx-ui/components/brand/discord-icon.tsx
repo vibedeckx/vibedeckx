@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-// Discord wordmark glyph (official mark path, simple-icons geometry). Uses
+// Discord logo mark (official mark path, simple-icons geometry). Uses
 // currentColor so it inherits the ghost button's foreground color and follows
 // the theme. lucide-react ships no Discord icon, hence this hand-rolled SVG.
 export function DiscordIcon({ className }: { className?: string }) {
