@@ -599,7 +599,6 @@ describe("WorkflowEngine", () => {
   });
 
   it("run fails and releases the source lock when the reviewer prompt send fails", async () => {
-    const updateSpy = vi.spyOn(storage.workflowRuns, "update");
     agentOps.sendUserMessage.mockResolvedValueOnce(false);
     await expect(start()).rejects.toMatchObject({ code: "spawn-failed" });
     expect(engine.isSessionInActiveRun("s-src")).toBe(false);
@@ -607,8 +606,17 @@ describe("WorkflowEngine", () => {
     const runs = await storage.workflowRuns.getActive("p1", "dev");
     expect(runs).toHaveLength(0); // not "active" — status flipped to failed
 
-    const failedCall = updateSpy.mock.calls.find(([, patch]) => patch.status === "failed");
-    expect(failedCall?.[1]).toMatchObject({ status: "failed", error: "向 reviewer 投递任务失败" });
+    // Assert the persisted outcome rather than the storage call used to reach
+    // it: failure now rides a guarded transition (so the failure milestone can
+    // only come from the caller that actually performed it), not a bare update.
+    const all = await storage.workflowRuns.getAllActive();
+    expect(all).toHaveLength(0);
+    const failed = (await storage.workflowRuns.getActiveBySession("s-src")) ?? undefined;
+    expect(failed).toBeUndefined();
+    const run = await storage.workflowRuns.getById(
+      (await storage.notificationOutbox.listAfter(0, 10))[0].workflow_run_id!,
+    );
+    expect(run).toMatchObject({ status: "failed", error: "向 reviewer 投递任务失败" });
   });
 
   it("claims reviewer completion: suppresses, snapshots full feedback, waits for gate", async () => {
@@ -716,5 +724,102 @@ describe("WorkflowEngine", () => {
     expect(after?.status).toBe("waiting_feedback");
     expect(after?.error).toContain("发送状态未知");
     expect(engine2.isSessionInActiveRun("s-src")).toBe(true);
+  });
+
+  /**
+   * Workflow attention milestones. The run — not the reviewer session — owns the
+   * "review is ready" event, and it is written in the same transaction as the
+   * waiting_reviewer → waiting_feedback transition that proves it.
+   */
+  describe("workflow milestones", () => {
+    const outboxRows = () => storage.notificationOutbox.listAfter(0, 100);
+
+    async function completeReview(run: { id: string }) {
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+      await vi.waitFor(async () => {
+        expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+      });
+    }
+
+    it("waiting_reviewer → waiting_feedback creates exactly one review_ready targeting the reviewer", async () => {
+      const run = await start();
+      await completeReview(run);
+
+      const rows = await outboxRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(`workflow:${run.id}:review-ready`);
+      expect(rows[0].kind).toBe("review_ready");
+      // The reviewer session is where the review controls live.
+      expect(rows[0].session_id).toBe("s-rev");
+      expect(rows[0].workflow_run_id).toBe(run.id);
+      expect(rows[0].project_id).toBe("p1");
+      expect(rows[0].branch).toBe("dev");
+    });
+
+    it("a duplicate reviewer taskCompleted cannot produce a second review_ready", async () => {
+      const run = await start();
+      await completeReview(run);
+      // Replay: the second event finds the run already past waiting_reviewer.
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(await outboxRows()).toHaveLength(1);
+    });
+
+    it("approving feedback creates no workflow milestone of its own", async () => {
+      const run = await start();
+      await completeReview(run);
+      await engine.approveFeedback(run.id, "go fix it");
+
+      const rows = await outboxRows();
+      // Only the review_ready. Feedback DELIVERY is not an attention milestone —
+      // the source's later completion is, and that arrives as its own session
+      // milestone from the agent-session manager (disposition "result").
+      expect(rows.map((r) => r.kind)).toEqual(["review_ready"]);
+    });
+
+    it("cancelling a run creates no failure milestone", async () => {
+      const run = await start();
+      await engine.cancelRun(run.id, "user took over");
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("cancelled");
+      expect(await outboxRows()).toEqual([]);
+    });
+
+    it("a transition to failed creates one workflow_failed stamped with the state it failed out of", async () => {
+      const run = await start();
+      await completeReview(run);
+      // Delivery fails → approveFeedback rolls back, then the run is failed.
+      // `Once`, not a persistent implementation: beforeEach's clearAllMocks
+      // resets call history but NOT implementations, so a sticky false would
+      // leak into later tests.
+      agentOps.sendUserMessage.mockResolvedValueOnce(false);
+      await expect(engine.approveFeedback(run.id)).rejects.toMatchObject({ code: "send-failed" });
+      await engine.failRunForTest(run.id, "delivery gave up");
+
+      const rows = await outboxRows();
+      const failure = rows.filter((r) => r.kind === "workflow_failed");
+      expect(failure).toHaveLength(1);
+      expect(failure[0].id).toBe(`workflow:${run.id}:failed:waiting_feedback`);
+      expect(failure[0].workflow_run_id).toBe(run.id);
+      // Targets the participant the user should inspect.
+      expect(failure[0].session_id).toBe("s-rev");
+    });
+
+    it("a reviewer-stage failure targets the source session when no reviewer exists yet", async () => {
+      agentOps.createNewSession.mockRejectedValueOnce(new Error("spawn boom"));
+      await expect(start()).rejects.toMatchObject({ code: "spawn-failed" });
+
+      const rows = await outboxRows();
+      const failure = rows.filter((r) => r.kind === "workflow_failed");
+      expect(failure).toHaveLength(1);
+      expect(failure[0].id).toMatch(/:failed:waiting_reviewer$/);
+      expect(failure[0].session_id).toBe("s-src");
+    });
+
+    it("failing an already-terminal run writes nothing (lost CAS)", async () => {
+      const run = await start();
+      await engine.cancelRun(run.id);
+      await engine.failRunForTest(run.id, "too late");
+      expect(await outboxRows()).toEqual([]);
+    });
   });
 });

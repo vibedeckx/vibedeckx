@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type { ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
+import { reviewReadyId, workflowFailedId } from "./notification-milestones.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { captureSnapshot, computeScope, resolveStartSnapshot } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
@@ -39,6 +40,9 @@ export class WorkflowError extends Error {
     super(message);
   }
 }
+
+/** Statuses a run can never leave — see failRun / cancelRun. */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled", "failed"]);
 
 // ---------- notification dispositions for workflow-authored turns ----------
 
@@ -378,10 +382,61 @@ export class WorkflowEngine {
     }
   }
 
+  /**
+   * The single place a run becomes `failed`. Goes through a guarded transition
+   * out of the run's CURRENT status rather than an unconditional status write,
+   * so the failure milestone can only be created by the caller that actually
+   * performed the transition — a run that concurrently completed or was
+   * cancelled fails the CAS and writes nothing.
+   *
+   * The milestone targets the participant the user should inspect: the reviewer
+   * when one exists, otherwise the source session (a run can fail before its
+   * reviewer is ever created).
+   */
   private async failRun(run: WorkflowRun, error: string): Promise<void> {
-    const failed = await this.storage.workflowRuns.update(run.id, { status: "failed", error });
+    // A run that already resolved is not failing now. Without this guard the
+    // CAS below would trivially succeed (from === the terminal status it is
+    // already in) and turn a completed or user-cancelled run into a spurious
+    // "Workflow needs attention" notification — same guard cancelRun applies.
+    if (TERMINAL_STATUSES.has(run.status)) return;
+    const from = run.status;
+    const ok = await this.storage.workflowRuns.transitionWithOutbox(
+      run.id, from, "failed", { error },
+      {
+        // The state the run failed OUT OF: two distinct failures of one run are
+        // distinct attention milestones, while a retried transition out of the
+        // same state is not.
+        id: workflowFailedId(run.id, from),
+        kind: "workflow_failed",
+        project_id: run.project_id,
+        branch: run.branch,
+        session_id: run.reviewer_session_id ?? run.source_session_id,
+        workflow_run_id: run.id,
+        created_at: Date.now(),
+      },
+    );
+    if (!ok) return;
+    const failed = await this.storage.workflowRuns.getById(run.id);
     if (failed) this.untrackRun(failed);
+    this.onMilestoneCreated?.();
   }
+
+  /** Test seam for the failure path (see failRun). */
+  async failRunForTest(runId: string, error: string): Promise<void> {
+    const run = await this.storage.workflowRuns.getById(runId);
+    if (run) await this.failRun(run, error);
+  }
+
+  /**
+   * Injected by shared-services: nudges NotificationService to drain the local
+   * outbox promptly. Latency only — correctness rests on the periodic/startup
+   * drains, since this can't fire if the process dies right after the commit.
+   */
+  setMilestoneListener(listener: () => void): void {
+    this.onMilestoneCreated = listener;
+  }
+
+  private onMilestoneCreated: (() => void) | null = null;
 
   /** Sync check used by ChatSessionManager before waking the commander model. */
   shouldSuppressAgentEvent(sessionId: string): boolean {
@@ -593,11 +648,10 @@ export class WorkflowEngine {
         });
         const sent = await this.agentOps.sendUserMessage(reviewerId, prompt, opts.project.path, undefined, REVIEWER_TURN);
         if (!sent) {
-          const failed = await this.storage.workflowRuns.update(run.id, {
-            status: "failed",
-            error: "向 reviewer 投递任务失败",
-          });
-          if (failed) this.untrackRun(failed);
+          // The reviewer session exists by now, so record it on the run before
+          // failing — otherwise the failure milestone would point at the source
+          // instead of the reviewer the user needs to inspect.
+          await this.failRun({ ...run, reviewer_session_id: reviewerId }, "向 reviewer 投递任务失败");
           throw new WorkflowError("spawn-failed", "向 reviewer 投递任务失败");
         }
         const updated = await this.storage.workflowRuns.update(run.id, { reviewer_session_id: reviewerId });
@@ -606,11 +660,7 @@ export class WorkflowEngine {
         return updated!;
       } catch (err) {
         if (err instanceof WorkflowError && err.code === "spawn-failed") throw err;
-        const failed = await this.storage.workflowRuns.update(run.id, {
-          status: "failed",
-          error: `创建 reviewer 失败：${err instanceof Error ? err.message : String(err)}`,
-        });
-        if (failed) this.untrackRun(failed);
+        await this.failRun(run, `创建 reviewer 失败：${err instanceof Error ? err.message : String(err)}`);
         throw new WorkflowError("spawn-failed", "创建 reviewer session 失败");
       }
     } catch (err) {
@@ -638,11 +688,31 @@ export class WorkflowEngine {
       }
     } catch { /* drift check is best-effort */ }
 
-    const ok = await this.storage.workflowRuns.transition(run.id, "waiting_reviewer", "waiting_feedback", {
-      feedback_snapshot: feedback,
-      ...(driftNote ? { error: driftNote } : {}),
-    });
+    // The attention milestone rides the state transition, NOT this event: the
+    // reviewer's raw completion is not itself "review feedback is ready", and
+    // deriving the notification from the event would ding even when the CAS
+    // loses (run already advanced or cancelled). One transition ⇒ one
+    // review_ready, guaranteed by the CAS plus the deterministic id.
+    const ok = await this.storage.workflowRuns.transitionWithOutbox(
+      run.id, "waiting_reviewer", "waiting_feedback",
+      {
+        feedback_snapshot: feedback,
+        ...(driftNote ? { error: driftNote } : {}),
+      },
+      {
+        id: reviewReadyId(run.id),
+        kind: "review_ready",
+        project_id: run.project_id,
+        branch: run.branch,
+        // Target the reviewer: that's where the feedback and the
+        // approve/discard controls are.
+        session_id: event.sessionId,
+        workflow_run_id: run.id,
+        created_at: Date.now(),
+      },
+    );
     if (!ok) return;
+    this.onMilestoneCreated?.();
     const updated = await this.storage.workflowRuns.getById(run.id);
     if (updated) this.emitRunUpdated(updated);
   }
@@ -687,7 +757,7 @@ export class WorkflowEngine {
   async cancelRun(runId: string, reason?: string): Promise<WorkflowRun | undefined> {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run) return undefined;
-    if (["completed", "cancelled", "failed"].includes(run.status)) return run;
+    if (TERMINAL_STATUSES.has(run.status)) return run;
 
     // CAS instead of an unconditional status write: `sending_feedback` is the
     // narrow window where approveFeedback is mid-`await` on

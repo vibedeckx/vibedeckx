@@ -1,6 +1,8 @@
 import { sql, type Kysely } from "kysely";
 import type { DB } from "../schema.js";
 import type { Storage, WorkflowRun, WorkflowRunStatus } from "../types.js";
+// NotificationOutboxEvent flows in through Storage["workflowRuns"] signatures,
+// which this factory's return type pins.
 
 const ACTIVE: WorkflowRunStatus[] = ["waiting_reviewer", "waiting_feedback", "sending_feedback"];
 
@@ -79,6 +81,26 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         .where("status", "=", from)
         .executeTakeFirst();
       return (result.numUpdatedRows ?? 0n) > 0n;
+    },
+
+    // Guarded update FIRST, then the outbox insert conditioned on it having
+    // applied: that ordering is what makes a lost CAS silent. Both statements
+    // share one transaction so a crash between them can't leave a notified
+    // transition unpersisted (or vice versa).
+    transitionWithOutbox: async (id, from, to, patch, outbox) => {
+      return kdb.transaction().execute(async (trx) => {
+        const result = await trx.updateTable("workflow_runs")
+          .set({ ...(patch ?? {}), status: to, updated_at: sql`datetime('now')` })
+          .where("id", "=", id)
+          .where("status", "=", from)
+          .executeTakeFirst();
+        if ((result.numUpdatedRows ?? 0n) === 0n) return false;
+        await trx.insertInto("notification_outbox")
+          .values(outbox)
+          .onConflict((oc) => oc.column("id").doNothing())
+          .execute();
+        return true;
+      });
     },
   },
 });

@@ -895,6 +895,19 @@ export interface Storage {
       to: WorkflowRunStatus,
       patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">>,
     ): Promise<boolean>;
+    /**
+     * `transition` plus an attention milestone, in one transaction. The outbox
+     * row is inserted ONLY when the guarded update actually changed a row, so a
+     * lost CAS (someone else already advanced the run) can never notify about a
+     * transition it didn't perform. Idempotent via the outbox's deterministic id.
+     */
+    transitionWithOutbox(
+      id: string,
+      from: WorkflowRunStatus,
+      to: WorkflowRunStatus,
+      patch: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">> | undefined,
+      outbox: Omit<NotificationOutboxEvent, "seq">,
+    ): Promise<boolean>;
   };
   turnSnapshots: {
     create(opts: {

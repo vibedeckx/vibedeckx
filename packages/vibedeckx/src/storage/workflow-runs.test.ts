@@ -103,6 +103,63 @@ describe("workflowRuns repository", () => {
     expect((await storage.workflowRuns.getAllActive()).map((r) => r.id)).toEqual(["r1"]);
   });
 
+  /**
+   * A workflow attention milestone has to be tied to the state transition that
+   * proves it. Writing the outbox row next to the CAS instead of inside it
+   * would let a lost CAS still notify ("review ready" for a run someone else
+   * already advanced), or a won CAS notify nothing.
+   */
+  describe("transitionWithOutbox", () => {
+    const outbox = {
+      id: "workflow:r1:review-ready",
+      kind: "review_ready" as const,
+      project_id: "p1",
+      branch: "dev",
+      session_id: "s-rev",
+      workflow_run_id: "r1",
+      created_at: 500,
+    };
+
+    it("inserts the outbox row when the guarded update applies", async () => {
+      await storage.workflowRuns.create(baseRun);
+      const ok = await storage.workflowRuns.transitionWithOutbox(
+        "r1", "waiting_reviewer", "waiting_feedback", { feedback_snapshot: "looks wrong" }, outbox,
+      );
+      expect(ok).toBe(true);
+      expect((await storage.workflowRuns.getById("r1"))?.status).toBe("waiting_feedback");
+      expect((await storage.workflowRuns.getById("r1"))?.feedback_snapshot).toBe("looks wrong");
+      const rows = await storage.notificationOutbox.listAfter(0, 100);
+      expect(rows.map((r) => r.id)).toEqual(["workflow:r1:review-ready"]);
+      expect(rows[0].session_id).toBe("s-rev");
+      expect(rows[0].workflow_run_id).toBe("r1");
+    });
+
+    it("a lost compare-and-set writes no outbox row", async () => {
+      await storage.workflowRuns.create(baseRun);
+      // Someone else already advanced the run.
+      await storage.workflowRuns.transition("r1", "waiting_reviewer", "waiting_feedback");
+
+      const ok = await storage.workflowRuns.transitionWithOutbox(
+        "r1", "waiting_reviewer", "waiting_feedback", undefined, outbox,
+      );
+      expect(ok).toBe(false);
+      expect(await storage.notificationOutbox.listAfter(0, 100)).toEqual([]);
+    });
+
+    it("a retried transition cannot produce a second notification", async () => {
+      await storage.workflowRuns.create(baseRun);
+      await storage.workflowRuns.transitionWithOutbox(
+        "r1", "waiting_reviewer", "waiting_feedback", undefined, outbox,
+      );
+      // Force the same id through a second winning CAS (round-trip the status).
+      await storage.workflowRuns.transition("r1", "waiting_feedback", "waiting_reviewer");
+      await storage.workflowRuns.transitionWithOutbox(
+        "r1", "waiting_reviewer", "waiting_feedback", undefined, outbox,
+      );
+      expect(await storage.notificationOutbox.listAfter(0, 100)).toHaveLength(1);
+    });
+  });
+
   it("defaults review_span to this_turn and round-trips an explicit span", async () => {
     const run = await storage.workflowRuns.create(baseRun);
     expect(run.review_span).toBe("this_turn");
