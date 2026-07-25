@@ -1,7 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { Bot, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
 import { PageHeader } from "@/components/layout";
+import { useAppConfig } from "@/hooks/use-app-config";
+import { getPersistedConfig } from "@/lib/api";
 import { AppearanceSettings } from "./appearance-settings";
 import { ChatProviderSettings } from "./chat-provider-settings";
 import { ProxySettings } from "./proxy-settings";
@@ -22,6 +25,24 @@ const NAV: SettingsNavItem[] = [
 ];
 
 export function SettingsView() {
+  // In hosted/SaaS mode (--auth) the outbound proxy knob is inert: sessions run
+  // on reverse-connected workers, so this front server never dials out through
+  // it. Hide the whole Proxy surface there so tenants aren't offered a setting
+  // that does nothing — and never even briefly mount ProxySettings (which would
+  // fire its own config request) on a null first frame.
+  //
+  // useAppConfig() starts every fresh hook instance at `config: null` (it reads
+  // the cache in an effect, not the initializer). SettingsView only ever mounts
+  // after AuthWrapper has already resolved AND persisted the config, so seed the
+  // first frame synchronously from that shared, already-resolved value instead
+  // of trusting this component's own null first frame. Default to hidden until
+  // we positively know auth is OFF, so SaaS is never revealed for a frame; local
+  // mode resolves to `authEnabled === false` and shows Proxy without a flash.
+  const { config } = useAppConfig();
+  const [seededConfig] = useState(getPersistedConfig);
+  const proxyHidden = (config ?? seededConfig)?.authEnabled !== false;
+  const nav = proxyHidden ? NAV.filter((item) => item.id !== "proxy") : NAV;
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <PageHeader
@@ -29,7 +50,7 @@ export function SettingsView() {
         description="Theme, intelligence, terminal, and network preferences."
       />
 
-      <SettingsLayout nav={NAV}>
+      <SettingsLayout nav={nav}>
         <SettingsSection
           id="appearance"
           label="Appearance"
@@ -62,13 +83,15 @@ export function SettingsView() {
           <TerminalSettingsSection />
         </SettingsSection>
 
-        <SettingsSection
-          id="proxy"
-          label="Proxy"
-          description="Outbound network routing for AI providers and remote servers."
-        >
-          <ProxySettings />
-        </SettingsSection>
+        {!proxyHidden && (
+          <SettingsSection
+            id="proxy"
+            label="Proxy"
+            description="Outbound network routing for AI providers and remote servers."
+          >
+            <ProxySettings />
+          </SettingsSection>
+        )}
       </SettingsLayout>
     </div>
   );
