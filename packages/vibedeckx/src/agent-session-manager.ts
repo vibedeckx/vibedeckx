@@ -166,6 +166,18 @@ export class AgentSessionManager {
   /** Grace window before committing a held completion (injectable for tests). */
   private readonly completionGraceMs: number;
   private workflowSuppressionCheck: ((sessionId: string) => boolean) | null = null;
+  /**
+   * Local ids of *remote* reviewer sessions whose branch:activity the front
+   * must reconcile from replayed session status. A reviewer spawned worker-side
+   * emits its `working`/`completed` transitions only on the worker's own event
+   * bus — they never cross the worker→front session-WS as `branchActivity`
+   * frames, and are not part of the replayed patch history. The front seeds
+   * `working` at registration; membership here lets it also derive the terminal
+   * `completed` from the reviewer's `/status` patch (the one signal that IS
+   * replayed on (re)connect), so a review that finished before the front's
+   * stream synced still notifies instead of leaving the dot stuck at `working`.
+   */
+  private remoteReviewerReconcile = new Set<string>();
 
   constructor(storage: Storage, opts?: { completionGraceMs?: number }) {
     this.storage = storage;
@@ -244,6 +256,53 @@ export class AgentSessionManager {
       sessionId: state.sessionId,
     });
     return state;
+  }
+
+  /**
+   * Mark a remote reviewer session (local id) so the front reconciles its
+   * completion from the replayed `/status` patch — see `remoteReviewerReconcile`.
+   * Called by the front's workflow-run registration path after it seeds
+   * `working`; the local review path doesn't need it (same-bus emits).
+   */
+  markRemoteReviewerForReconcile(sessionId: string): void {
+    this.remoteReviewerReconcile.add(sessionId);
+  }
+
+  /** Drop a reviewer from completion reconciliation (session gone / unregistered). */
+  clearRemoteReviewerReconcile(sessionId: string): void {
+    this.remoteReviewerReconcile.delete(sessionId);
+  }
+
+  /**
+   * Fallback branch:activity bridge for the front+worker review path, keyed on
+   * the reviewer's `turn_end` stop-point entry (which IS part of the replayed
+   * patch stream, unlike the transient `taskCompleted` frame). Called for every
+   * terminal turn_end of a marked reviewer:
+   *   - `outcome === "completed"` → emit `completed` (the notification signal).
+   *     Needed because a review finishing before/around the front's stream sync
+   *     (or during a reconnect gap) would otherwise leave the dot stuck at the
+   *     seeded `working` — the `taskCompleted`-derived `completed` isn't replayed.
+   *   - any other outcome (failed / stopped / process_exit) → NO emit; a failed
+   *     or interrupted review must not ding (see the `endActiveTurn("failed")`
+   *     path). Bare session status can't tell these apart — the turn_end outcome
+   *     can, which is why this keys off it rather than the `/status` patch.
+   * Either way the marker is cleared (the review attempt is over; a re-review
+   * re-marks at registration), so the set can't grow unbounded. No-op for
+   * unmarked sessions. Dedupe keeps it idempotent vs the live `taskCompleted`.
+   */
+  reconcileRemoteReviewerTurnEnd(
+    projectId: string,
+    branch: string | null,
+    sessionId: string,
+    outcome: string,
+  ): BranchActivityState | null {
+    if (!this.remoteReviewerReconcile.delete(sessionId)) return null;
+    if (outcome !== "completed") return null;
+    return this.emitBranchActivityIfChanged(projectId, branch, {
+      activity: "completed",
+      since: Date.now(),
+      sessionId,
+    });
   }
 
   /**

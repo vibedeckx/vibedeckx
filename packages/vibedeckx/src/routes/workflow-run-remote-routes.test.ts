@@ -37,6 +37,8 @@ function makeApp() {
   const upsert = vi.fn(async () => undefined);
   const markTitleResolvedDb = vi.fn(async () => undefined);
   const markTitleResolvedMem = vi.fn(() => true);
+  const emitBranchActivityIfChanged = vi.fn();
+  const markRemoteReviewerForReconcile = vi.fn();
   const emit = vi.fn();
   app = Fastify();
   app.decorate("authEnabled", false);
@@ -57,8 +59,15 @@ function makeApp() {
   app.decorate("remotePatchCache", {} as never);
   app.decorate("reverseConnectManager", null);
   app.decorate("eventBus", { emit } as never);
-  app.decorate("agentSessionManager", { markTitleResolved: markTitleResolvedMem } as never);
-  return { remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem };
+  app.decorate("agentSessionManager", {
+    markTitleResolved: markTitleResolvedMem,
+    emitBranchActivityIfChanged,
+    markRemoteReviewerForReconcile,
+  } as never);
+  return {
+    remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem,
+    emitBranchActivityIfChanged, markRemoteReviewerForReconcile,
+  };
 }
 
 describe("workflow-run remote proxying (front server)", () => {
@@ -147,7 +156,10 @@ describe("workflow-run remote proxying (front server)", () => {
   });
 
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
-    const { remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem } = makeApp();
+    const {
+      remoteSessionMap, upsert, emit, markTitleResolvedDb, markTitleResolvedMem,
+      emitBranchActivityIfChanged, markRemoteReviewerForReconcile,
+    } = makeApp();
     await app.register(workflowRunRoutes);
     // Fresh review → the front first pulls the source history (intent brief
     // input) over the session proxy, then POSTs to the worker mirror.
@@ -173,6 +185,14 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(remoteSessionMap.get("remote-srv1-p1-rev1")).toMatchObject({ remoteSessionId: "rev1", remoteServerId: "srv1" });
     expect(upsert).toHaveBeenCalledWith("remote-srv1-p1-rev1", "p1", "srv1", "rev1", "dev");
     expect(ensureStreamMock).toHaveBeenCalledWith("remote-srv1-p1-rev1", expect.anything());
+    // Seed branch:activity `working` for the reviewer (its worker-side `working`
+    // never bridges to the front, and the branch is stuck at the source's
+    // `completed`) + mark it for status-patch completion reconcile. Without the
+    // seed the reviewer's terminal `completed` is deduped and never notifies.
+    expect(emitBranchActivityIfChanged).toHaveBeenCalledWith("p1", "dev", expect.objectContaining({
+      activity: "working", sessionId: "remote-srv1-p1-rev1",
+    }));
+    expect(markRemoteReviewerForReconcile).toHaveBeenCalledWith("remote-srv1-p1-rev1");
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated", projectId: "p1" }));
     // Sidebar/window surfacing for the worker-spawned reviewer: the worker's
     // own announcements fire before the front subscribes, so the route must

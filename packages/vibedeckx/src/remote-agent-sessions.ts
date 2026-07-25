@@ -10,7 +10,7 @@ import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import { WebSocket } from "ws";
 import { randomUUID } from "crypto";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
-import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame, runUpdatedEventFromRemoteFrame } from "./routes/remote-status-bridge.js";
+import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame, runUpdatedEventFromRemoteFrame, reviewerTurnEndOutcomeFromRemotePatch } from "./routes/remote-status-bridge.js";
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 
@@ -214,6 +214,25 @@ export function connectPersistentRemoteWs(
   cache.setReconnecting(sessionId, false);
   cache.clearReconnectTimer(sessionId);
 
+  // Reviewer completion reconcile, shared by the live handler AND the
+  // reconnect-sync replay scan. A marked worker-spawned reviewer's completion
+  // arrives as a `turn_end` entry (part of the replayed patch stream), not the
+  // transient `taskCompleted` frame — so this also fires when a review finishes
+  // during a disconnect and is only seen on reconnect. Success-gated by the
+  // turn_end outcome (failed/interrupted reviews don't ding) and idempotent
+  // (the marker is consumed on first terminal turn_end).
+  const reconcileReviewerFromPatch = (parsed: Record<string, unknown>): void => {
+    if (!agentSessionManager) return;
+    const outcome = reviewerTurnEndOutcomeFromRemotePatch(parsed);
+    if (outcome === null) return;
+    agentSessionManager.reconcileRemoteReviewerTurnEnd(
+      projectIdFromRemoteSessionId(sessionId, remoteInfo),
+      remoteInfo.branch ?? null,
+      sessionId,
+      outcome,
+    );
+  };
+
   /** Live-mode message handler — shared by both first-connect and post-sync paths. */
   const handleLiveMessage = (data: import("ws").RawData) => {
     const raw = data.toString();
@@ -252,6 +271,8 @@ export function connectPersistentRemoteWs(
           eventBus.emit(statusEvent);
         }
       }
+      // Reviewer completion signal rides on a turn_end entry patch, not /status.
+      reconcileReviewerFromPatch(parsed);
     } else if ("finished" in parsed) {
       cache.setFinished(sessionId);
       cache.broadcast(sessionId, raw);
@@ -267,6 +288,10 @@ export function connectPersistentRemoteWs(
             since: Date.now(),
             sessionId,
           });
+          // A real completion arrived — drop any reviewer reconcile marker so it
+          // can't grow unbounded (the turn_end reconcile normally consumes it
+          // first; this covers the frame ordering where taskCompleted wins).
+          agentSessionManager?.clearRemoteReviewerReconcile(sessionId);
         }
       }
     } else if ("workflowRunUpdated" in parsed) {
@@ -406,6 +431,16 @@ export function connectPersistentRemoteWs(
           cache.broadcast(sessionId, JSON.stringify({ Ready: true }));
         }
         // else equal — cache is current, nothing to send
+
+        // Reconcile a reviewer that completed during the disconnect: its
+        // completion turn_end is in the replayed history but never went through
+        // the live handler (the delta/replace loops above only touch the cache
+        // + frontends). Scan the full replay — idempotent (marker consumed on
+        // first terminal turn_end), so it's safe regardless of delta/stale/equal.
+        for (const msg of replayBuffer) {
+          const p = tryParseWsMessage(msg);
+          if (p) reconcileReviewerFromPatch(p);
+        }
 
         // Switch to live-mode handler
         remoteWs.removeAllListeners("message");
