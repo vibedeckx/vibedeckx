@@ -86,7 +86,8 @@ export function ExecutorLogsProvider({
       : m.type === "init" ? `isPty=${m.isPty}`
       : m.type === "history_end" ? ""
       : `${m.data.length}b`;
-    console.log("[diag:mux] recv", m.type, processId, detail);
+    // console.log("[diag:mux] recv", m.type, processId, detail);
+    void detail;
     if (m.type === "init") {
       update(processId, { isPty: m.isPty, replayingHistory: true, logs: [], status: "connected" });
     } else if (m.type === "history_end") {
