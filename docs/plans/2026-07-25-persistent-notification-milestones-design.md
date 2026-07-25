@@ -107,7 +107,7 @@ interface NotificationOutboxEvent {
     | "workflow_failed";
   projectId: string;
   branch: string | null;
-  sessionId: string | null;
+  sessionId: string;
   workflowRunId: string | null;
   title: string;
   body: string | null;
@@ -115,8 +115,10 @@ interface NotificationOutboxEvent {
 }
 ```
 
-`seq` is a monotonically increasing cursor local to one server. `id` is stable
-for the underlying milestone:
+`seq` is a monotonically increasing cursor local to one execution server.
+Every event has a target session, including workflow failures (which target the
+participant the user should inspect). `id` is stable for the underlying
+milestone:
 
 ```text
 session:{sessionId}:turn:{turnEndEntryIndex}:result-ready
@@ -156,11 +158,13 @@ trust a worker-supplied tenant identifier.
 
 ### Remote sync cursor
 
-The front stores the last fully imported sequence for each remote server:
+The front stores the last fully imported sequence for each mapped remote
+session:
 
 ```ts
 interface NotificationSyncCursor {
   remoteServerId: string;
+  remoteSessionId: string;
   lastSeq: number;
   updatedAt: number;
 }
@@ -169,6 +173,9 @@ interface NotificationSyncCursor {
 The cursor advances only after the corresponding notifications are committed.
 If the front crashes after insertion but before cursor advancement, the same
 events are fetched again and ignored by the notification ID unique constraint.
+Per-session cursors avoid importing worker-local sessions that do not belong to
+this front, and allow a newly created mapping to recover that session's older
+events from sequence zero.
 
 ## Per-turn Notification Intent
 
@@ -221,34 +228,47 @@ does not depend on an in-memory marker.
 
 ## Remote Outbox Synchronization
 
-Workers expose an authenticated cursor endpoint:
+Workers expose an authenticated batched cursor endpoint:
 
 ```text
-GET /api/notification-outbox?after=<seq>&limit=<n>
+POST /api/notification-outbox/query
+
+{
+  "sessions": [
+    { "sessionId": "remote-session-1", "after": 42 },
+    { "sessionId": "remote-session-2", "after": 8 }
+  ],
+  "limitPerSession": 100
+}
 ```
 
-The response includes ordered events and `nextCursor`. The endpoint is
+The response includes ordered events and `nextCursor` per requested session.
+It never returns events for unrequested sessions. The endpoint is
 machine-facing and uses the existing API-key/reverse-connect trust boundary.
 
 The front's notification sync service:
 
-1. reads the saved cursor for a remote server;
-2. requests the next page through `proxyToRemoteAuto`;
-3. maps remote project, session, and workflow IDs to local IDs;
-4. verifies that the local project belongs to a user;
-5. inserts notifications idempotently;
-6. commits the new cursor;
-7. emits `notification:created` only for newly inserted rows;
-8. continues until the page is not full.
+1. groups persisted remote-session mappings by remote server;
+2. reads the saved cursor for each mapped remote session;
+3. requests bounded batches through `proxyToRemoteAuto`;
+4. maps remote project, session, and workflow IDs to local IDs;
+5. verifies that the local project belongs to a user;
+6. inserts notifications idempotently;
+7. commits the new cursor;
+8. emits `notification:created` only for newly inserted rows;
+9. continues until the page is not full.
 
 Sync runs immediately when a remote server becomes available and periodically
-while configured remotes exist. Workflow reviewer registration also requests
-an immediate sync. This makes recovery independent of whether a particular
-session WebSocket or browser tab is open.
+while configured mappings exist. Requests are chunked so a server with many
+historical mappings cannot create an unbounded payload. Workflow reviewer
+registration also requests an immediate sync. This makes recovery independent
+of whether a particular session WebSocket or browser tab is open.
 
-An outbox event whose remote session cannot yet be mapped is not skipped and
-does not advance the cursor. The front retries after the workflow/session
-mapping has been persisted.
+Because the front only requests persisted mappings, every returned event has a
+known local target. A newly persisted mapping begins at cursor zero. Deleting a
+mapping also deletes its cursor; the worker's immutable outbox rows may later
+be removed by an age-based retention policy after the supported recovery
+window.
 
 ## Local Notification Flow
 
@@ -327,8 +347,8 @@ successful server hydration.
 - An inbox insertion followed by a crash before cursor update is replayed and
   deduplicated.
 - A transient remote error leaves the cursor unchanged and retries later.
-- A missing mapping blocks that cursor page rather than silently losing an
-  event.
+- An event with a response session ID that does not match the requested mapping
+  fails that session batch and leaves its cursor unchanged.
 - A failed read mutation remains unread on the server and is reconciled on the
   next fetch.
 - A user Stop creates no notification.
