@@ -17,6 +17,8 @@ import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
 import { Plus, Search } from 'lucide-react';
+import { useAppConfig } from '@/hooks/use-app-config';
+import { DiscordButton } from '@/components/layout/discord-button';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
 import { SettingsView } from '@/components/settings/settings-view';
 import { RemoteServersSettings } from '@/components/settings/remote-servers-settings';
@@ -63,6 +65,7 @@ export type { WorkspaceStatus } from '@/lib/workspace-status';
 
 export default function Home() {
   const { projectId: urlProject, tab: urlTab, branch: urlBranch } = useUrlState();
+  const { config } = useAppConfig();
 
   // ?session=<id> param is orthogonal to the path-based URL state (projectId/tab/branch).
   // We keep it here as reactive state so changes via setSessionUrlParam propagate to children.
@@ -728,6 +731,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               <Search className="h-4 w-4" />
             </Button>
             <KeyboardShortcutsOverlay />
+            <DiscordButton inviteUrl={config?.discordInviteUrl} />
             <ConnectionStatusIndicator />
             <CompletionNotificationsMenu
               notifications={notifications}
