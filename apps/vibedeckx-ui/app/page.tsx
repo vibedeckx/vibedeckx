@@ -237,18 +237,18 @@ export default function Home() {
   // visible-tab backstop poll (30s active / 60s idle).
   useMergeStatusAutoRefresh(refetchMergeStatus, workspaceStatuses, currentProject?.id ?? null);
 
-  // Completion notification center. Listens to the global SSE stream directly
-  // (one connection for all projects), plays the completion sound — sound1 for
-  // Agent completion (lime dot), sound2 for chat completion (emerald dot) — and
-  // feeds the top-right bell with a read/unread list so background-project
-  // completions are discoverable and one click away. `activeKey` lets a
-  // completion for the workspace already on screen be listed but pre-read (no
-  // unread badge for something you can see). See
-  // `hooks/use-completion-notifications.ts`.
-  const activeKey =
-    currentProject && activeView === 'workspace'
-      ? `${currentProject.id}:${selectedBranch ?? ''}`
-      : null;
+  // Attention-milestone notification center, hydrated from the server inbox and
+  // kept fresh by `notification:created` SSE. Feeds the top-right bell with a
+  // read/unread list so background-project results are discoverable and one
+  // click away.
+  //
+  // The hook takes the EXACT session on screen, not a `project:branch` key: a
+  // milestone is auto-read only when the user is looking at its own session, so
+  // a sibling session finishing on the same branch still raises the badge. When
+  // no session is explicitly selected (or the user is on another tab) this is
+  // null, and nothing is auto-read — the safe direction to fail.
+  const activeNotificationSessionId =
+    activeView === 'workspace' ? urlSessionId : null;
   const {
     notifications,
     unreadCount,
@@ -256,7 +256,7 @@ export default function Home() {
     markAllRead: markAllNotificationsRead,
     remove: removeNotification,
     clear: clearNotifications,
-  } = useCompletionNotifications(activeKey);
+  } = useCompletionNotifications(activeNotificationSessionId);
 
   // User just hit send → seed "working" into the activity map ahead of the
   // backend's branch:activity event (sub-50ms latency hide). The backend's

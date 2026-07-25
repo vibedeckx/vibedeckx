@@ -727,6 +727,54 @@ export async function getAgentProviders(): Promise<AgentProviderInfo[]> {
   return data.providers;
 }
 
+// ---- Notification inbox ----
+// The server database is authoritative for both the list and the read state;
+// `notification:created` SSE is only a low-latency hint that a new row exists.
+
+export type NotificationKind =
+  | "review_ready"
+  | "session_result_ready"
+  | "session_failed"
+  | "workflow_failed";
+
+/** Server row shape — snake_case, exactly as `/api/notifications` returns it. */
+export interface ServerNotification {
+  id: string;
+  kind: NotificationKind;
+  project_id: string;
+  branch: string | null;
+  session_id: string | null;
+  workflow_run_id: string | null;
+  title: string;
+  body: string | null;
+  created_at: number;
+  read_at: number | null;
+}
+
+export async function getNotifications(
+  opts?: { unread?: boolean; limit?: number },
+): Promise<ServerNotification[]> {
+  const params = new URLSearchParams();
+  if (opts?.unread) params.set("unread", "true");
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+  const query = params.toString();
+  const res = await authFetch(`${getApiBase()}/api/notifications${query ? `?${query}` : ""}`);
+  if (!res.ok) throw new Error(`Failed to fetch notifications: ${res.status}`);
+  return (await res.json()).notifications;
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  const res = await authFetch(`${getApiBase()}/api/notifications/${encodeURIComponent(id)}/read`, {
+    method: "PATCH",
+  });
+  if (!res.ok) throw new Error(`Failed to mark notification read: ${res.status}`);
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  const res = await authFetch(`${getApiBase()}/api/notifications/read-all`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to mark notifications read: ${res.status}`);
+}
+
 export async function sendApprovalResponse(sessionId: string, requestId: string, decision: string): Promise<void> {
   const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/approve`, {
     method: "POST",

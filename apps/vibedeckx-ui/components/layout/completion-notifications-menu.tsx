@@ -10,17 +10,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { Project } from "@/lib/api";
-import type { CompletionNotification } from "@/hooks/use-completion-notifications";
+import type { NotificationKind, Project, ServerNotification } from "@/lib/api";
 
 interface CompletionNotificationsMenuProps {
-  notifications: CompletionNotification[];
+  notifications: ServerNotification[];
   unreadCount: number;
   projects: Project[];
   /**
-   * Switch to the workspace the notification points at. `sessionId` is the
-   * completed agent session for the `?session=` deep link — null falls back
-   * to the branch's latest session (chat completions, legacy entries).
+   * Switch to the workspace the notification points at. `sessionId` is the exact
+   * target session for the `?session=` deep link — null falls back to the
+   * branch's latest session.
    */
   onNavigate: (projectId: string, branch: string | null, sessionId: string | null) => void;
   markRead: (id: string) => void;
@@ -29,14 +28,16 @@ interface CompletionNotificationsMenuProps {
   clear: () => void;
 }
 
-// Completion-type → label + dot color. Colors match the sidebar's `StatusDot`:
-// agent completion is lime, chat/main completion is emerald.
-const TYPE_META: Record<
-  CompletionNotification["type"],
-  { label: string; dot: string }
-> = {
-  completed: { label: "Agent finished", dot: "bg-lime-400" },
-  "main-completed": { label: "Chat finished", dot: "bg-emerald-500" },
+/**
+ * Kind → label + dot color. Labels mirror the server's semantic titles; the two
+ * success colors match the sidebar's `StatusDot`, and both failure kinds use the
+ * destructive color so "needs attention" is visually distinct at a glance.
+ */
+export const KIND_META: Record<NotificationKind, { label: string; dot: string }> = {
+  session_result_ready: { label: "Session result is ready", dot: "bg-lime-400" },
+  review_ready: { label: "Review feedback is ready", dot: "bg-emerald-500" },
+  session_failed: { label: "Session failed", dot: "bg-destructive" },
+  workflow_failed: { label: "Workflow needs attention", dot: "bg-destructive" },
 };
 
 function formatRelativeTime(at: number): string {
@@ -87,9 +88,7 @@ export function CompletionNotificationsMenu({
           className="relative"
           title="Notifications (⌘J)"
           aria-label={
-            unreadCount > 0
-              ? `${unreadCount} unread completion notifications`
-              : "Completion notifications"
+            unreadCount > 0 ? `${unreadCount} unread notifications` : "Notifications"
           }
         >
           <Bell className="h-4 w-4" />
@@ -119,7 +118,7 @@ export function CompletionNotificationsMenu({
               <button
                 onClick={clear}
                 className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title="Clear all"
+                title="Dismiss all (marks them read)"
               >
                 Clear
               </button>
@@ -130,35 +129,39 @@ export function CompletionNotificationsMenu({
         <div className="max-h-[60vh] overflow-y-auto border-t border-border">
           {notifications.length === 0 ? (
             <div className="px-3 py-8 text-center text-[12px] text-muted-foreground/70">
-              No completions yet.
+              Nothing needs your attention.
             </div>
           ) : (
             notifications.map((n) => {
-              const meta = TYPE_META[n.type];
+              const meta = KIND_META[n.kind];
+              const unread = n.read_at === null;
               return (
                 <DropdownMenuItem
                   key={n.id}
                   onSelect={() => {
                     markRead(n.id);
-                    onNavigate(n.projectId, n.branch, n.sessionId);
+                    onNavigate(n.project_id, n.branch, n.session_id);
                   }}
                   className={cn(
                     "group flex flex-col items-start gap-0.5 rounded-none px-3 py-2",
-                    !n.read && "bg-primary/[0.08]",
+                    unread && "bg-primary/[0.08]",
                   )}
                 >
                   <div className="flex w-full items-center gap-2">
-                    <span className={cn("h-[7px] w-[7px] shrink-0 rounded-full", meta.dot)} />
+                    <span className={cn("h-[7px] w-[7px] shrink-0 rounded-full", meta?.dot)} />
                     <span
                       className={cn(
                         "min-w-0 flex-1 truncate text-[12.5px]",
-                        n.read ? "text-foreground/70" : "font-medium text-foreground",
+                        unread ? "font-medium text-foreground" : "text-foreground/70",
                       )}
                     >
-                      {projectName(n.projectId)}
+                      {/* The server's `body` is the most specific label it knows
+                          (session title → branch → project); fall back to the
+                          project name when it produced none. */}
+                      {n.body ?? projectName(n.project_id)}
                     </span>
                     <span className="shrink-0 text-[10.5px] text-muted-foreground/70">
-                      {formatRelativeTime(n.at)}
+                      {formatRelativeTime(n.created_at)}
                     </span>
                     <button
                       onClick={(e) => {
@@ -166,7 +169,7 @@ export function CompletionNotificationsMenu({
                         remove(n.id);
                       }}
                       className="shrink-0 rounded p-0.5 text-muted-foreground/60 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
-                      title="Dismiss"
+                      title="Dismiss (marks it read)"
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -174,7 +177,7 @@ export function CompletionNotificationsMenu({
                   <div className="flex w-full items-center gap-1.5 pl-[15px] text-[11px] text-muted-foreground">
                     <span className="font-mono truncate">{n.branch ?? "main"}</span>
                     <span className="text-muted-foreground/50">·</span>
-                    <span className="shrink-0">{meta.label}</span>
+                    <span className="shrink-0">{meta?.label ?? n.title}</span>
                   </div>
                 </DropdownMenuItem>
               );

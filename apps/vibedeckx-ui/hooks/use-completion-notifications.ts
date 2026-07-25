@@ -1,170 +1,87 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useGlobalEventStream } from '@/hooks/global-event-stream';
+import {
+  getNotifications,
+  markAllNotificationsRead as markAllReadApi,
+  markNotificationRead as markReadApi,
+  type NotificationKind,
+  type ServerNotification,
+} from '@/lib/api';
 
-type BranchActivity =
-  | 'idle'
-  | 'working'
-  | 'completed'
-  | 'stopped'
-  | 'main-running'
-  | 'main-completed';
+export type { NotificationKind, ServerNotification } from '@/lib/api';
 
-// The two terminal "completed" states we surface — both as a sound cue and as
-// a notification entry. They mirror the two completion dot colors in the
-// sidebar (`StatusDot` in app-sidebar.tsx):
-//   - `completed`      — Agent session done  (lime dot)    → sound1
-//   - `main-completed` — chat session done   (emerald dot) → sound2
-type CompletionActivity = 'completed' | 'main-completed';
+/**
+ * Notification center backed by the server inbox.
+ *
+ * The server database is the source of truth for both the list and the read
+ * state, so a closed browser, an SSE drop, or a front-server restart can no
+ * longer lose a completion. `notification:created` is consumed purely for
+ * latency; refreshing the page rebuilds the same state from
+ * `GET /api/notifications`.
+ *
+ * Deliberately does NOT consume `branch:activity`. That event describes the
+ * aggregate state of a `projectId + branch`, which cannot express "two sessions
+ * on this branch both finished" or "this reviewer's result deserves attention
+ * but that helper turn does not". See
+ * docs/plans/2026-07-25-persistent-notification-milestones-design.md.
+ */
 
-const SOUND_FOR_ACTIVITY: Record<CompletionActivity, string> = {
-  completed: '/sounds/sound1.mp3',
-  'main-completed': '/sounds/sound2.mp3',
+/**
+ * Per-kind cue. Exported as a pure map so tests can assert the three distinct
+ * paths without playing audio.
+ *
+ * Success and review-ready keep their established sounds; both failure kinds
+ * share one distinct, non-startling failure cue — success vs. review vs.
+ * something-went-wrong is the distinction that carries information.
+ */
+export const SOUND_FOR_KIND: Record<NotificationKind, string> = {
+  session_result_ready: '/sounds/sound1.mp3',
+  review_ready: '/sounds/sound2.mp3',
+  session_failed: '/sounds/failure.mp3',
+  workflow_failed: '/sounds/failure.mp3',
 };
 
-function isCompletion(activity: BranchActivity): activity is CompletionActivity {
-  return activity === 'completed' || activity === 'main-completed';
-}
-
-interface BranchActivityEvent {
-  type: 'branch:activity';
-  projectId: string;
-  branch: string | null;
-  activity: BranchActivity;
-  since: number;
-  /** Agent session that produced this state — absent on `main-*` (chat) events. */
-  sessionId?: string;
-}
-
-export interface CompletionNotification {
-  /** `${projectId}:${branch ?? ''}` — one entry per workspace. */
-  id: string;
-  projectId: string;
-  branch: string | null;
-  /**
-   * The completed agent session, for the click-through deep link
-   * (`?session=<id>`). Null for chat completions and entries persisted before
-   * this field existed — those fall back to branch-level navigation.
-   */
-  sessionId: string | null;
-  type: CompletionActivity;
-  /** Backend emit time (`since`), epoch ms. */
-  at: number;
-  read: boolean;
-}
-
-function notificationKey(projectId: string, branch: string | null): string {
-  return `${projectId}:${branch ?? ''}`;
-}
+/**
+ * The pre-milestone, browser-only store: branch-keyed entries with no stable
+ * milestone identity and no user identity. Not uploaded — it cannot be mapped
+ * onto server rows — just discarded after the first successful hydration.
+ */
+export const LEGACY_STORAGE_KEY = 'vibedeckx:completion-notifications';
 
 /**
- * Build the notification entry for a completion event. Pure — exported for
- * tests.
+ * Insert or replace by notification id, newest first.
+ *
+ * Keying on the full milestone id (not `projectId:branch`) is the whole point:
+ * two sessions completing on one branch produce two ids and therefore two
+ * entries, where the old branch-keyed store collapsed them into one.
  */
-export function notificationFromEvent(
-  evt: {
-    projectId: string;
-    branch: string | null;
-    activity: CompletionActivity;
-    since: number;
-    sessionId?: string;
-  },
-  read: boolean,
-): CompletionNotification {
-  return {
-    id: notificationKey(evt.projectId, evt.branch),
-    projectId: evt.projectId,
-    branch: evt.branch,
-    sessionId: evt.sessionId ?? null,
-    type: evt.activity,
-    at: evt.since,
-    read,
-  };
+export function upsertNotification(
+  list: ServerNotification[],
+  incoming: ServerNotification,
+): ServerNotification[] {
+  const rest = list.filter((n) => n.id !== incoming.id);
+  const merged = [...rest, incoming];
+  merged.sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
+  return merged;
 }
 
-const STORAGE_KEY = 'vibedeckx:completion-notifications';
-// Cap the persisted list. Per-workspace de-dup already bounds it by workspace
-// count, but persistence means it accumulates across sessions, so trim the
-// oldest beyond this to keep localStorage small.
-const MAX_NOTIFICATIONS = 50;
-
-function isStoredNotification(v: unknown): v is CompletionNotification {
-  if (typeof v !== 'object' || v === null) return false;
-  const n = v as Record<string, unknown>;
-  return (
-    typeof n.id === 'string' &&
-    typeof n.projectId === 'string' &&
-    (typeof n.branch === 'string' || n.branch === null) &&
-    // sessionId may be missing on entries persisted before the field existed.
-    (typeof n.sessionId === 'string' || n.sessionId === null || n.sessionId === undefined) &&
-    (n.type === 'completed' || n.type === 'main-completed') &&
-    typeof n.at === 'number' &&
-    typeof n.read === 'boolean'
-  );
-}
-
-/**
- * Parse the persisted notification list, dropping malformed entries and
- * normalizing pre-sessionId entries to `sessionId: null`. Pure — exported for
- * tests.
- */
-export function parseStoredNotifications(raw: string | null): CompletionNotification[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter(isStoredNotification)
-      .map((n) => ({ ...n, sessionId: n.sessionId ?? null }))
-      .slice(0, MAX_NOTIFICATIONS);
-  } catch {
-    return [];
-  }
-}
-
-function loadStored(): CompletionNotification[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    return parseStoredNotifications(window.localStorage.getItem(STORAGE_KEY));
-  } catch {
-    return [];
-  }
-}
-
-function persist(list: CompletionNotification[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    // quota exceeded or private-mode disable — accept loss; the notification
-    // list is best-effort UX, not a correctness requirement.
-  }
-}
-
-// Module-level so the warmed <audio> elements outlive any mount/unmount of the
-// hook's host and are shared app-wide. Switching projects keeps page.tsx
-// mounted so this already wouldn't reload — but hoisting it out of the
-// component guarantees the sounds are fetched+decoded exactly once per page
-// load regardless of remounts (HMR, Strict Mode, future refactors).
+// Module-level so warmed <audio> elements outlive any mount/unmount of the
+// hook's host and are shared app-wide.
 const audioCache = new Map<string, HTMLAudioElement>();
-
-// Tracks srcs whose warm fetch is in flight so a re-entrant call (or React
-// Strict Mode double-invoke) doesn't kick off a duplicate download.
 const warming = new Set<string>();
 
-// Preload the completion sounds by fetching the bytes ourselves and holding
-// them as in-memory object URLs, so the first play is purely local.
+// Preload by fetching the bytes ourselves and holding them as in-memory object
+// URLs, so the first play is purely local.
 //
-// Why not just `new Audio(src)` + preload="auto" + load(): browsers treat
-// preload as a *hint* and deliberately defer/suspend media downloads for
-// detached <audio> elements before a user gesture (we observed `suspend` and
-// readyState 0 at play time even after load()). So that approach never
-// buffered the file — the completion play still did a cold, stall-prone fetch.
-// A plain fetch() runs immediately and is exempt from those media heuristics;
-// the object URL then makes play() read from RAM with no network involved.
+// Why not `new Audio(src)` + preload="auto" + load(): browsers treat preload as
+// a *hint* and deliberately defer media downloads for detached <audio> elements
+// before a user gesture (observed `suspend` and readyState 0 at play time even
+// after load()). A plain fetch() runs immediately and is exempt from those
+// heuristics; the object URL then makes play() read from RAM.
 function warmCompletionSounds(): void {
   if (typeof window === 'undefined') return;
-  for (const src of Object.values(SOUND_FOR_ACTIVITY)) {
+  for (const src of new Set(Object.values(SOUND_FOR_KIND))) {
     if (audioCache.has(src) || warming.has(src)) continue;
     warming.add(src);
     void (async () => {
@@ -175,12 +92,8 @@ function warmCompletionSounds(): void {
         audio.preload = 'auto';
         audio.load();
         audioCache.set(src, audio);
-        // [sound-preload-debug] Confirms the bytes landed in memory ahead of
-        // any completion. Remove once verified.
-        console.log(`[sound-preload-debug] warmed ${src} bytes=${blob.size}`);
-      } catch (err) {
-        // Network hiccup at startup — leave it to playSound's lazy fallback.
-        console.log(`[sound-preload-debug] warm failed ${src}`, err);
+      } catch {
+        // Network hiccup at startup — playSound's lazy fallback covers it.
       } finally {
         warming.delete(src);
       }
@@ -189,155 +102,188 @@ function warmCompletionSounds(): void {
 }
 
 export interface CompletionNotificationsResult {
-  notifications: CompletionNotification[];
+  notifications: ServerNotification[];
   unreadCount: number;
   markRead: (id: string) => void;
   markAllRead: () => void;
+  /** Hide locally and mark read on the server (there is no delete endpoint). */
   remove: (id: string) => void;
+  /** Hide all locally and mark all read on the server. */
   clear: () => void;
 }
 
 /**
- * Completion notification center, fed by the single global `/api/events` SSE
- * stream. Detects every workspace's transition into a completed state (across
- * *all* projects, not just the one on screen), plays the completion sound, and
- * maintains a newest-first notification list with per-entry read/unread state,
- * persisted to localStorage (capped at MAX_NOTIFICATIONS) so the list and its
- * read flags survive page reloads.
- *
- * This is the sole owner of the global completion signal — it absorbs what was
- * `useStatusSound`, so the app opens one global SSE connection for both sound
- * and notifications rather than two. (The per-project `useBranchActivity`
- * connection is a separate concern: it drives the live sidebar dots and does
- * REST reconciliation.)
- *
- * Why subscribe to the raw stream rather than diff a status map: the backend
- * broadcasts every project's events to every client with no project scoping
- * and no history replay (see routes/event-routes.ts + the server-side
- * `BranchActivityDedupe` gate). So a background project's completion arrives
- * live, and a workspace that was *already* completed on load/switch stays
- * silent. The per-(project, branch) `changed` guard is belt-and-suspenders
- * against a redundant re-emit slipping past the backend dedupe.
- *
- * `activeKey` is the workspace the user is currently viewing
- * (`${projectId}:${branch ?? ''}`, or null). A completion for the active
- * workspace is still listed but kept read — both when it arrives while you're
- * viewing the workspace and when you navigate into a workspace that already has
- * an unread entry (e.g. via the sidebar) — so it never inflates the unread
- * badge for something on screen.
+ * `activeSessionId` is the session the user is currently looking at. A
+ * notification targeting exactly that session is auto-read — being on screen is
+ * the user having seen it. A notification for a *different* session stays
+ * unread even when it shares a branch with the one on screen.
  */
 export function useCompletionNotifications(
-  activeKey: string | null,
+  activeSessionId: string | null,
 ): CompletionNotificationsResult {
-  const [notifications, setNotifications] = useState<CompletionNotification[]>([]);
-  const lastActivity = useRef<Map<string, BranchActivity>>(new Map());
+  const [notifications, setNotifications] = useState<ServerNotification[]>([]);
+  /**
+   * Ids already surfaced to this browser. Guards the *sound* only: an SSE frame
+   * for a row we hydrated (or already heard) must be silent, while the row
+   * itself is still upserted so read-state changes land.
+   */
+  const heard = useRef<Set<string>>(new Set());
+  /** Ids whose read call is in flight, so navigation churn can't re-fire it. */
+  const readInFlight = useRef<Set<string>>(new Set());
 
-  // Warm the shared, module-level audio cache once. Switching projects keeps
-  // this hook mounted, so no reload happens on navigation; the module-level
-  // cache also makes it a no-op should the host ever remount.
   useEffect(() => {
     warmCompletionSounds();
   }, []);
 
-  // The SSE handler closes over this ref so it always reads the *current*
-  // active workspace without re-subscribing on every navigation.
-  const activeKeyRef = useRef(activeKey);
+  // The SSE handler reads the *current* active session through a ref so it
+  // never has to re-subscribe on navigation.
+  const activeSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
-    activeKeyRef.current = activeKey;
-  }, [activeKey]);
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
-  // Viewing a workspace clears its completion notification's unread state.
-  // The SSE handler pre-reads a completion that *arrives* while you're on the
-  // workspace, but this also covers navigating *into* a workspace that already
-  // has an unread entry (e.g. clicking it in the sidebar) and a stored unread
-  // entry for the workspace you're already viewing on reload. `notifications`
-  // is a dep so hydration/new arrivals are caught; the same-reference guard
-  // (returning `prev` unchanged) prevents a re-render loop.
-  useEffect(() => {
-    if (!activeKey) return;
+  /**
+   * Optimistic read: flip locally, then persist. On failure the local flip is
+   * rolled back, leaving the row unread on both sides — the next hydration
+   * reconciles rather than silently swallowing the milestone.
+   */
+  const persistRead = useCallback((id: string) => {
+    if (readInFlight.current.has(id)) return;
+    readInFlight.current.add(id);
+    const readAt = Date.now();
     setNotifications((prev) =>
-      prev.some((n) => n.id === activeKey && !n.read)
-        ? prev.map((n) => (n.id === activeKey ? { ...n, read: true } : n))
-        : prev,
+      prev.map((n) => (n.id === id && n.read_at === null ? { ...n, read_at: readAt } : n)),
     );
-  }, [activeKey, notifications]);
+    void markReadApi(id)
+      .catch(() => {
+        setNotifications((prev) =>
+          prev.map((n) => (n.id === id && n.read_at === readAt ? { ...n, read_at: null } : n)),
+        );
+      })
+      .finally(() => {
+        readInFlight.current.delete(id);
+      });
+  }, []);
+
+  // Hydrate from the server. This — not localStorage — is what restores unread
+  // state across a reload.
+  useEffect(() => {
+    let cancelled = false;
+    void getNotifications({ limit: 100 })
+      .then((rows) => {
+        if (cancelled) return;
+        for (const row of rows) heard.current.add(row.id);
+        setNotifications((prev) => {
+          // Merge rather than replace: a frame that arrived before hydration
+          // resolved must not be dropped. Everything goes through
+          // upsertNotification so display order is ours, not a dependency on the
+          // server's ORDER BY.
+          let merged: ServerNotification[] = [];
+          for (const row of rows) merged = upsertNotification(merged, row);
+          for (const pending of prev) {
+            if (!rows.some((r) => r.id === pending.id)) merged = upsertNotification(merged, pending);
+          }
+          return merged;
+        });
+        if (typeof window !== 'undefined') {
+          // Legacy entries are branch-keyed and carry no user identity, so they
+          // cannot be mapped onto server rows. Discard rather than upload.
+          try {
+            window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+          } catch {
+            /* private mode — nothing to clean up */
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('[notifications] hydration failed:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useGlobalEventStream((data) => {
-    if (data.type !== 'branch:activity') return;
-    const evt = data as unknown as BranchActivityEvent;
+    if (data.type !== 'notification:created') return;
+    const notification = (data as { notification?: ServerNotification }).notification;
+    if (!notification?.id) return;
 
-    const key = notificationKey(evt.projectId, evt.branch);
-    const changed = lastActivity.current.get(key) !== evt.activity;
-    lastActivity.current.set(key, evt.activity);
+    const isNew = !heard.current.has(notification.id);
+    heard.current.add(notification.id);
 
-    if (!changed || !isCompletion(evt.activity)) return;
-    // Capture the narrowed type before the closure — TS widens
-    // `evt.activity` back to BranchActivity across the callback boundary.
-    const type = evt.activity;
+    const active = activeSessionIdRef.current;
+    const onScreen = notification.session_id !== null && notification.session_id === active;
 
-    playSound(SOUND_FOR_ACTIVITY[type]);
+    if (isNew && !onScreen) playSound(SOUND_FOR_KIND[notification.kind]);
 
-    const read = activeKeyRef.current === key;
-    setNotifications((prev) => {
-      const entry = notificationFromEvent({ ...evt, activity: type }, read);
-      // De-dup: one entry per workspace. A repeat completion replaces the
-      // old entry (updated time/type/session, re-marked unread unless active)
-      // and floats to the top. Trim to MAX_NOTIFICATIONS now that the list
-      // persists across sessions.
-      const rest = prev.filter((n) => n.id !== key);
-      return [entry, ...rest].slice(0, MAX_NOTIFICATIONS);
-    });
+    setNotifications((prev) =>
+      upsertNotification(prev, onScreen ? { ...notification, read_at: notification.read_at ?? Date.now() } : notification),
+    );
+    if (onScreen && notification.read_at === null) {
+      void markReadApi(notification.id).catch(() => {
+        // Leave it read locally but unread on the server; the next hydration
+        // will show it unread again rather than losing it.
+      });
+    }
   });
 
-  // Hydrate from localStorage after mount (not via a lazy initializer) so the
-  // server/build render and the first client render agree — otherwise a stored
-  // unread badge would trip a hydration mismatch. Merges rather than replaces
-  // so a completion that somehow arrived before this runs isn't clobbered.
+  // Navigating *into* a session clears its pending notifications — covers the
+  // sidebar/deep-link case where the row was already unread before arrival.
+  //
+  // Unlike the user-initiated `markRead` below, this deliberately updates state
+  // only in the network callback rather than optimistically: a synchronous
+  // setState here would cascade renders (this effect depends on `notifications`,
+  // which it also writes). Navigation is not a click waiting on feedback, so
+  // clearing the badge one round-trip later is the better trade.
   useEffect(() => {
-    const stored = loadStored();
-    if (stored.length === 0) return;
-    setNotifications((prev) => {
-      if (prev.length === 0) return stored;
-      const seen = new Set(prev.map((n) => n.id));
-      return [...prev, ...stored.filter((n) => !seen.has(n.id))].slice(
-        0,
-        MAX_NOTIFICATIONS,
-      );
-    });
-  }, []);
-
-  // Persist on every change. Skip the initial mount pass so we don't overwrite
-  // stored data with the empty initial state before hydration has loaded it.
-  const hydratedRef = useRef(false);
-  useEffect(() => {
-    if (!hydratedRef.current) {
-      hydratedRef.current = true;
-      return;
+    if (!activeSessionId) return;
+    for (const notification of notifications) {
+      if (notification.session_id !== activeSessionId || notification.read_at !== null) continue;
+      if (readInFlight.current.has(notification.id)) continue;
+      const { id } = notification;
+      readInFlight.current.add(id);
+      void markReadApi(id)
+        .then(() => {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === id && n.read_at === null ? { ...n, read_at: Date.now() } : n)),
+          );
+        })
+        .catch(() => {
+          // Stays unread on both sides; the next hydration reconciles.
+        })
+        .finally(() => {
+          readInFlight.current.delete(id);
+        });
     }
-    persist(notifications);
-  }, [notifications]);
+  }, [activeSessionId, notifications]);
 
-  const markRead = useCallback((id: string) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n)),
-    );
-  }, []);
+  const markRead = useCallback((id: string) => persistRead(id), [persistRead]);
 
   const markAllRead = useCallback(() => {
+    const readAt = Date.now();
+    const previous = notifications;
     setNotifications((prev) =>
-      prev.some((n) => !n.read) ? prev.map((n) => ({ ...n, read: true })) : prev,
+      prev.some((n) => n.read_at === null)
+        ? prev.map((n) => (n.read_at === null ? { ...n, read_at: readAt } : n))
+        : prev,
     );
-  }, []);
+    void markAllReadApi().catch(() => setNotifications(previous));
+  }, [notifications]);
 
+  // No delete endpoint by design (see the API surface in the design doc):
+  // dismissing hides the row for this view and marks it read, so it can never
+  // come back as unread. Server-side retention prunes read history.
   const remove = useCallback((id: string) => {
+    persistRead(id);
     setNotifications((prev) => prev.filter((n) => n.id !== id));
-  }, []);
+  }, [persistRead]);
 
   const clear = useCallback(() => {
+    void markAllReadApi().catch((err) => console.warn('[notifications] read-all failed:', err));
     setNotifications((prev) => (prev.length ? [] : prev));
   }, []);
 
-  const unreadCount = notifications.reduce((acc, n) => acc + (n.read ? 0 : 1), 0);
+  const unreadCount = notifications.reduce((acc, n) => acc + (n.read_at === null ? 1 : 0), 0);
 
   return { notifications, unreadCount, markRead, markAllRead, remove, clear };
 }
@@ -345,18 +291,14 @@ export function useCompletionNotifications(
 function playSound(src: string) {
   let audio = audioCache.get(src);
   if (!audio) {
-    // Normally already warmed by warmCompletionSounds(); this is the fallback
-    // if a completion somehow beats the preload.
+    // Normally already warmed; this is the fallback if a milestone beats the preload.
     audio = new Audio(src);
     audio.preload = 'auto';
     audioCache.set(src, audio);
   }
   audio.currentTime = 0;
-  // [sound-preload-debug] readyState here tells the story: 4 = warmed (should
-  // be instant), 0/1 = still cold (would stall). Remove once verified.
-  console.log(`[sound-preload-debug] play ${src} readyState=${audio.readyState}`);
   // Browser autoplay policy rejects play() until the user has interacted with
-  // the page. By the time a completion fires the user has invariably clicked
-  // into the workspace, so this resolves; swallow the rejection regardless.
+  // the page. By the time a milestone fires the user has invariably clicked
+  // into the workspace; swallow the rejection regardless.
   void audio.play().catch(() => {});
 }

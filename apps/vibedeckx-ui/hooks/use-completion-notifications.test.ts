@@ -1,71 +1,261 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { act, createElement, useEffect } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const api = vi.hoisted(() => ({
+  getNotifications: vi.fn(),
+  markNotificationRead: vi.fn(),
+  markAllNotificationsRead: vi.fn(),
+}));
+vi.mock('@/lib/api', () => api);
+
+// The hook subscribes through this context in the real app; here we capture the
+// listener so tests can push SSE frames synchronously.
+const stream = vi.hoisted(() => ({ listener: null as ((data: unknown) => void) | null }));
+vi.mock('@/hooks/global-event-stream', () => ({
+  useGlobalEventStream: (listener: (data: unknown) => void) => {
+    stream.listener = listener;
+  },
+}));
+
+const played = vi.hoisted(() => ({ srcs: [] as string[] }));
+
 import {
-  notificationFromEvent,
-  parseStoredNotifications,
-  type CompletionNotification,
+  LEGACY_STORAGE_KEY,
+  SOUND_FOR_KIND,
+  upsertNotification,
+  useCompletionNotifications,
+  type ServerNotification,
 } from './use-completion-notifications';
 
-describe('notificationFromEvent', () => {
-  it('stores the event sessionId so the click can deep-link ?session=<id>', () => {
-    const n = notificationFromEvent(
-      {
-        projectId: 'proj-1',
-        branch: 'feat-a',
-        activity: 'completed',
-        since: 1000,
-        sessionId: 'sess-9',
-      },
-      false,
-    );
-    expect(n).toEqual({
-      id: 'proj-1:feat-a',
-      projectId: 'proj-1',
-      branch: 'feat-a',
-      sessionId: 'sess-9',
-      type: 'completed',
-      at: 1000,
-      read: false,
-    });
-  });
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-  it('sessionId is null when the event carries none (main-completed / legacy backend)', () => {
-    const n = notificationFromEvent(
-      { projectId: 'proj-1', branch: null, activity: 'main-completed', since: 2000 },
-      true,
-    );
-    expect(n.sessionId).toBeNull();
-    expect(n.id).toBe('proj-1:');
-    expect(n.read).toBe(true);
+const row = (overrides: Partial<ServerNotification> = {}): ServerNotification => ({
+  id: 'n1',
+  kind: 'session_result_ready',
+  project_id: 'p1',
+  branch: 'dev',
+  session_id: 's1',
+  workflow_run_id: null,
+  title: 'Session result is ready',
+  body: 'Fix login',
+  created_at: 10,
+  read_at: null,
+  ...overrides,
+});
+
+describe('SOUND_FOR_KIND', () => {
+  it('gives success, review-ready, and failure three distinct cues', () => {
+    expect(SOUND_FOR_KIND.session_result_ready).toBe('/sounds/sound1.mp3');
+    expect(SOUND_FOR_KIND.review_ready).toBe('/sounds/sound2.mp3');
+    expect(SOUND_FOR_KIND.session_failed).toBe('/sounds/failure.mp3');
+    // Both failure kinds share the failure cue — the distinction the user needs
+    // is success vs. review vs. something-went-wrong.
+    expect(SOUND_FOR_KIND.workflow_failed).toBe('/sounds/failure.mp3');
+    expect(new Set(Object.values(SOUND_FOR_KIND)).size).toBe(3);
   });
 });
 
-describe('parseStoredNotifications', () => {
-  const valid: CompletionNotification = {
-    id: 'proj-1:feat-a',
-    projectId: 'proj-1',
-    branch: 'feat-a',
-    sessionId: 'sess-9',
-    type: 'completed',
-    at: 1000,
-    read: false,
-  };
-
-  it('round-trips an entry with sessionId', () => {
-    expect(parseStoredNotifications(JSON.stringify([valid]))).toEqual([valid]);
+describe('upsertNotification', () => {
+  it('inserts newest-first by created_at', () => {
+    const older = row({ id: 'a', created_at: 1 });
+    const newer = row({ id: 'b', created_at: 9 });
+    expect(upsertNotification([older], newer).map((n) => n.id)).toEqual(['b', 'a']);
   });
 
-  it('normalizes legacy entries without sessionId to null', () => {
-    const legacy = { ...valid } as Record<string, unknown>;
-    delete legacy.sessionId;
-    const parsed = parseStoredNotifications(JSON.stringify([legacy]));
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].sessionId).toBeNull();
+  it('replaces by notification id rather than appending a duplicate', () => {
+    const first = row({ id: 'a', read_at: null });
+    const replayed = row({ id: 'a', read_at: 55 });
+    const result = upsertNotification([first], replayed);
+    expect(result).toHaveLength(1);
+    expect(result[0].read_at).toBe(55);
   });
 
-  it('drops malformed entries and non-array payloads', () => {
-    expect(parseStoredNotifications(JSON.stringify([{ id: 42 }]))).toEqual([]);
-    expect(parseStoredNotifications('{"not":"array"}')).toEqual([]);
-    expect(parseStoredNotifications('not json')).toEqual([]);
-    expect(parseStoredNotifications(null)).toEqual([]);
+  it('keys on the full notification id, so two sessions on one branch stay separate', () => {
+    const a = row({ id: 'session:sA:turn:2:result-ready', session_id: 'sA' });
+    const b = row({ id: 'session:sB:turn:2:result-ready', session_id: 'sB' });
+    expect(upsertNotification([a], b)).toHaveLength(2);
+  });
+});
+
+describe('useCompletionNotifications', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let latest: ReturnType<typeof useCompletionNotifications>;
+
+  // Published from an effect, not during render: assigning to an outer variable
+  // mid-render is a side effect React (and eslint) rightly rejects. act() flushes
+  // effects, so `latest` is current by the time assertions run.
+  function Harness({ activeSessionId }: { activeSessionId: string | null }) {
+    const result = useCompletionNotifications(activeSessionId);
+    useEffect(() => {
+      latest = result;
+    });
+    return null;
+  }
+
+  // createElement rather than JSX so this stays a .ts file alongside the hook.
+  async function render(activeSessionId: string | null = null) {
+    await act(async () => {
+      root.render(createElement(Harness, { activeSessionId }));
+    });
+  }
+
+  const rerender = render;
+
+  async function pushSse(notification: ServerNotification) {
+    await act(async () => {
+      stream.listener?.({ type: 'notification:created', projectId: notification.project_id, notification });
+    });
+  }
+
+  beforeEach(() => {
+    played.srcs = [];
+    api.getNotifications.mockResolvedValue([]);
+    api.markNotificationRead.mockResolvedValue(undefined);
+    api.markAllNotificationsRead.mockResolvedValue(undefined);
+    window.localStorage.clear();
+    // Audio is unimplemented in jsdom; record play() calls instead.
+    vi.stubGlobal('Audio', class {
+      currentTime = 0;
+      preload = '';
+      readyState = 4;
+      constructor(public src: string) {}
+      load() {}
+      play() { played.srcs.push(this.src); return Promise.resolve(); }
+    });
+    // Reject the warm fetch so playSound takes its lazy fallback and constructs
+    // Audio with the LOGICAL path — which is what these tests assert. (Warming
+    // otherwise replaces the src with an opaque blob: URL.)
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    stream.listener = null;
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('hydrates from the server inbox on mount', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a' }), row({ id: 'b', created_at: 20 })]);
+    await render();
+    expect(api.getNotifications).toHaveBeenCalled();
+    expect(latest.notifications.map((n) => n.id)).toEqual(['b', 'a']);
+  });
+
+  it('drops the legacy branch-keyed localStorage entry after hydration, without uploading it', async () => {
+    window.localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify([{ id: 'p1:dev', read: false }]));
+    await render();
+    expect(window.localStorage.getItem(LEGACY_STORAGE_KEY)).toBeNull();
+    expect(latest.notifications).toEqual([]);
+  });
+
+  it('counts unread from the server read state, surviving a refresh', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a', read_at: null }), row({ id: 'b', read_at: 5 })]);
+    await render();
+    expect(latest.unreadCount).toBe(1);
+  });
+
+  it('inserts a notification:created frame and plays its kind sound', async () => {
+    await render();
+    await pushSse(row({ id: 'a', kind: 'session_result_ready' }));
+    expect(latest.notifications.map((n) => n.id)).toEqual(['a']);
+    expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+  });
+
+  it.each([
+    ['review_ready', '/sounds/sound2.mp3'],
+    ['session_failed', '/sounds/failure.mp3'],
+    ['workflow_failed', '/sounds/failure.mp3'],
+  ] as const)('plays the %s cue', async (kind, src) => {
+    await render();
+    await pushSse(row({ id: `n-${kind}`, kind }));
+    expect(played.srcs).toEqual([src]);
+  });
+
+  it('an SSE replay of an existing row neither duplicates nor re-plays the sound', async () => {
+    await render();
+    await pushSse(row({ id: 'a' }));
+    await pushSse(row({ id: 'a' }));
+    expect(latest.notifications).toHaveLength(1);
+    expect(played.srcs).toHaveLength(1);
+  });
+
+  it('a row already present from hydration is not re-sounded by its SSE frame', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a' })]);
+    await render();
+    await pushSse(row({ id: 'a' }));
+    expect(played.srcs).toEqual([]);
+  });
+
+  it('auto-reads a notification targeting the exact active session', async () => {
+    await render('s1');
+    await pushSse(row({ id: 'a', session_id: 's1' }));
+    expect(latest.notifications[0].read_at).not.toBeNull();
+    expect(latest.unreadCount).toBe(0);
+    expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+  });
+
+  it('leaves another session on the SAME BRANCH unread', async () => {
+    await render('s1');
+    // Same project + branch, different session — the exact bug the milestone
+    // redesign exists to fix.
+    await pushSse(row({ id: 'b', session_id: 's2', branch: 'dev', project_id: 'p1' }));
+    expect(latest.notifications[0].read_at).toBeNull();
+    expect(latest.unreadCount).toBe(1);
+    expect(api.markNotificationRead).not.toHaveBeenCalled();
+  });
+
+  it('navigating into a target session marks its pending notifications read', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a', session_id: 's9', read_at: null })]);
+    await render(null);
+    expect(latest.unreadCount).toBe(1);
+
+    await rerender('s9');
+    expect(latest.unreadCount).toBe(0);
+    expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+  });
+
+  it('markRead updates the server and local state', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a' })]);
+    await render();
+    await act(async () => { latest.markRead('a'); });
+    expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+    expect(latest.notifications[0].read_at).not.toBeNull();
+  });
+
+  it('markAllRead updates the server and local state', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a' }), row({ id: 'b', created_at: 2 })]);
+    await render();
+    await act(async () => { latest.markAllRead(); });
+    expect(api.markAllNotificationsRead).toHaveBeenCalled();
+    expect(latest.unreadCount).toBe(0);
+  });
+
+  it('a failed read mutation leaves the row unread so the next fetch reconciles it', async () => {
+    api.getNotifications.mockResolvedValue([row({ id: 'a' })]);
+    api.markNotificationRead.mockRejectedValue(new Error('offline'));
+    await render();
+    await act(async () => { latest.markRead('a'); });
+    expect(latest.notifications[0].read_at).toBeNull();
+    expect(latest.unreadCount).toBe(1);
+  });
+
+  it('ignores branch:activity entirely — no bell entry, no sound', async () => {
+    await render();
+    await act(async () => {
+      stream.listener?.({
+        type: 'branch:activity', projectId: 'p1', branch: 'dev',
+        activity: 'completed', since: Date.now(), sessionId: 's1',
+      });
+    });
+    expect(latest.notifications).toEqual([]);
+    expect(played.srcs).toEqual([]);
   });
 });
