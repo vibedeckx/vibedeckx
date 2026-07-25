@@ -18,6 +18,7 @@ import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
 import { createTurnSnapshotRepos } from "./repositories/turn-snapshots.js";
+import { createNotificationRepos } from "./repositories/notifications.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -845,7 +846,72 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       PRIMARY KEY (session_id, turn_end_index),
       FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
     );
+
+    -- Durable attention-milestone outbox of THIS server. Written in the same
+    -- transaction as the state that proves the milestone (a turn_end entry, a
+    -- workflow status transition), so a crash can never leave a completed turn
+    -- without its notification. Deliberately carries no title/body: the
+    -- user-facing server generates copy at import time from its own session
+    -- mapping, so a stale worker-side title never enters the wire protocol.
+    -- No FK to agent_sessions: an outbox row must outlive deletion of the
+    -- session it describes (deleting a session mid-sync must not silently drop
+    -- an already-produced milestone). seq is the cursor, not created_at.
+    CREATE TABLE IF NOT EXISTS notification_outbox (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      kind TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      branch TEXT,
+      session_id TEXT NOT NULL,
+      workflow_run_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notification_outbox_session_seq
+      ON notification_outbox(session_id, seq);
+
+    -- User-scoped notification inbox of the user-facing server. The id is the
+    -- deterministic milestone id (remote rows namespaced
+    -- remote:{serverId}:{outboxEventId}), which is what makes replay after a
+    -- crash-before-cursor-advance a no-op instead of a duplicate ding.
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      branch TEXT,
+      session_id TEXT,
+      workflow_run_id TEXT,
+      title TEXT NOT NULL,
+      body TEXT,
+      created_at INTEGER NOT NULL,
+      read_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+      ON notifications(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS notification_sync_cursors (
+      remote_server_id TEXT NOT NULL,
+      remote_session_id TEXT NOT NULL,
+      last_seq INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (remote_server_id, remote_session_id)
+    );
   `);
+
+  // Migration: per-mapping notification sync provenance + watch window.
+  // Existing mappings default to 'from_now' ON PURPOSE — an upgrade (or a
+  // rebuilt front database attached to a long-lived worker) must not backfill
+  // months of historical worker milestones as new unread notifications and a
+  // sound storm. Only sessions this front newly creates get 'from_start'.
+  const remoteMappingNotifyInfo = db.prepare("PRAGMA table_info(remote_session_mappings)").all() as { name: string }[];
+  if (!remoteMappingNotifyInfo.some((col) => col.name === "notification_sync_start")) {
+    db.exec("ALTER TABLE remote_session_mappings ADD COLUMN notification_sync_start TEXT NOT NULL DEFAULT 'from_now'");
+  }
+  if (!remoteMappingNotifyInfo.some((col) => col.name === "notification_watch_until")) {
+    db.exec("ALTER TABLE remote_session_mappings ADD COLUMN notification_watch_until INTEGER");
+  }
 
   // Migration: add written_at to session_search_cache — the timestamp of the
   // last out-of-band write-through (session create/delete/title transiting the
@@ -921,6 +987,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createSearchCacheRepos(kdb, h),
     ...createWorkflowRunRepos(kdb),
     ...createTurnSnapshotRepos(kdb),
+    ...createNotificationRepos(kdb),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect

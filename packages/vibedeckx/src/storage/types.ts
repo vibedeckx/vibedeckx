@@ -259,6 +259,78 @@ export interface WorkflowRun {
   updated_at: string;
 }
 
+/**
+ * Attention milestones the notification bell surfaces. Deliberately narrower
+ * than "something changed": see
+ * docs/plans/2026-07-25-persistent-notification-milestones-design.md
+ * §Product Semantics for what does and does not earn a notification.
+ */
+export type NotificationKind =
+  | "review_ready"
+  | "session_result_ready"
+  | "session_failed"
+  | "workflow_failed";
+
+/**
+ * An immutable milestone row in an *execution* server's outbox. Stores semantic
+ * identity and routing only — never presentation text: the user-facing server
+ * owns `title`/`body` (it has the local session mapping and the freshest title),
+ * so a stale worker-side title can never be baked into the wire protocol.
+ *
+ * `seq` is a monotonically increasing cursor local to one execution server;
+ * `id` is deterministic for the underlying milestone (UNIQUE), which is what
+ * makes transaction retry and page replay safe.
+ */
+export interface NotificationOutboxEvent {
+  seq: number;
+  id: string;
+  kind: NotificationKind;
+  project_id: string;
+  branch: string | null;
+  /** Always set — the session the user should open, including for workflow failures. */
+  session_id: string;
+  workflow_run_id: string | null;
+  created_at: number;
+}
+
+/** A user-scoped inbox row on the user-facing server. */
+export interface Notification {
+  id: string;
+  user_id: string;
+  kind: NotificationKind;
+  project_id: string;
+  branch: string | null;
+  session_id: string | null;
+  workflow_run_id: string | null;
+  title: string;
+  body: string | null;
+  created_at: number;
+  read_at: number | null;
+}
+
+/**
+ * Where a newly mapped remote session starts importing milestones.
+ * `from_start` (sequence zero) is for sessions this front just created — they
+ * have no unrelated history, and starting at zero closes the race where the
+ * session completes before its mapping row lands. `from_now` is for sessions
+ * *discovered* (search, listing, opening an existing worker session): their
+ * first sync records the worker's current head without importing anything, so
+ * a fresh front database attached to a long-lived worker can't turn months of
+ * history into unread notifications and a sound storm.
+ */
+export type NotificationSyncStart = "from_start" | "from_now";
+
+export interface RemoteSessionMapping {
+  local_session_id: string;
+  project_id: string;
+  remote_server_id: string;
+  remote_session_id: string;
+  branch: string | null;
+  notification_sync_start: NotificationSyncStart;
+  /** Epoch ms through which periodic notification sync polls this mapping. */
+  notification_watch_until: number | null;
+}
+
 export type AgentSessionStatus = 'running' | 'stopped' | 'error';
 
 export interface AgentSession {
@@ -363,6 +435,15 @@ export interface Storage {
       sync_down_config?: SyncButtonConfig | null;
     }, userId?: string) => Promise<Project | undefined>;
     delete: (id: string, userId?: string) => Promise<void>;
+    /**
+     * Owner user_id of a project, unscoped. Notification ownership is derived
+     * from the *mapped local project* — never from a worker-supplied tenant id —
+     * so the importer needs this lookup without a request context.
+     * `remoteServers.getOwnerId` is not a substitute: a project can be owned by
+     * a different user than the remote server it executes on.
+     * Returns the `""` sentinel for solo-mode rows, undefined if absent.
+     */
+    getOwnerId: (projectId: string) => Promise<string | undefined>;
   };
   mergeTargets: {
     getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
@@ -568,11 +649,92 @@ export interface Storage {
     countEntries: () => Promise<Array<{ session_id: string; cnt: number }>>;
   };
   remoteSessionMappings: {
-    upsert: (localSessionId: string, projectId: string, remoteServerId: string, remoteSessionId: string, branch: string | null) => Promise<void>;
-    getAll: () => Promise<Array<{ local_session_id: string; project_id: string; remote_server_id: string; remote_session_id: string; branch: string | null }>>;
+    /**
+     * `notificationSyncStart` is applied ON INSERT ONLY (default `from_now`).
+     * A re-upsert — reconnect re-mapping, or reusing a reviewer session for a
+     * second review — must never reset the policy, the watch boundary, or the
+     * import cursor, or the reused session would replay its whole history.
+     */
+    upsert: (
+      localSessionId: string,
+      projectId: string,
+      remoteServerId: string,
+      remoteSessionId: string,
+      branch: string | null,
+      notificationSyncStart?: NotificationSyncStart,
+    ) => Promise<void>;
+    getAll: () => Promise<RemoteSessionMapping[]>;
+    getByLocal: (localSessionId: string) => Promise<RemoteSessionMapping | undefined>;
+    /** Resolve the local target of a milestone the worker reported. */
+    getByRemote: (remoteServerId: string, remoteSessionId: string) => Promise<RemoteSessionMapping | undefined>;
+    /** Move `notification_watch_until` forward (never backward). */
+    extendNotificationWatch: (localSessionId: string, until: number) => Promise<void>;
+    /**
+     * Mappings periodic notification sync should poll. `includeExpired: false`
+     * (ordinary polling) returns only mappings whose watch window is still
+     * open, so a server with years of historical mappings doesn't poll them
+     * forever. `includeExpired: true` is the bounded startup / remote-online
+     * sweep, which must still recover durable events produced during downtime.
+     */
+    getNotificationSyncCandidates: (opts: { now: number; includeExpired: boolean }) => Promise<RemoteSessionMapping[]>;
+    /** Also deletes the mapping's notification sync cursor. */
     delete: (localSessionId: string) => Promise<void>;
     isTitleResolved: (localSessionId: string) => Promise<boolean>;
     markTitleResolved: (localSessionId: string) => Promise<void>;
+  };
+  /**
+   * Durable milestone outbox of *this* server, written in the same transaction
+   * as the state that proves the milestone (turn_end / workflow transition).
+   * Present on every server that executes work — a worker's outbox is pulled by
+   * the front through /api/notification-outbox/query; a front's own outbox is
+   * drained locally by NotificationService.
+   */
+  notificationOutbox: {
+    /**
+     * Insert with ON CONFLICT(id) DO NOTHING. Returns the assigned `seq` and
+     * whether this call was the one that inserted (false = deterministic retry
+     * or replay of an already-recorded milestone).
+     */
+    insert: (event: Omit<NotificationOutboxEvent, "seq">) => Promise<{ inserted: boolean; seq: number | null }>;
+    /** Ordered page across all sessions — the local drain path. */
+    listAfter: (afterSeq: number, limit: number) => Promise<NotificationOutboxEvent[]>;
+    /** Ordered page for exactly one session — the remote query path. */
+    listBySessionAfter: (sessionId: string, afterSeq: number, limit: number) => Promise<NotificationOutboxEvent[]>;
+    /** Highest seq for a session, or 0 when it has no events. */
+    headBySession: (sessionId: string) => Promise<number>;
+    /** Highest seq in the whole outbox, or 0 when empty. */
+    head: () => Promise<number>;
+    /** Retention: drop rows created before `cutoffMs`. */
+    pruneOlderThan: (cutoffMs: number) => Promise<void>;
+  };
+  /** User-scoped notification inbox of the user-facing server. */
+  notifications: {
+    /** Idempotent on `id`. Returns true only when this call inserted the row. */
+    insert: (notification: Notification) => Promise<boolean>;
+    /**
+     * Insert an imported remote milestone and advance its per-session cursor in
+     * ONE transaction. A crash between the two would otherwise either lose the
+     * notification (cursor first) or need a separate reconciliation pass.
+     */
+    importRemote: (opts: {
+      notification: Notification;
+      remoteServerId: string;
+      remoteSessionId: string;
+      seq: number;
+    }) => Promise<{ inserted: boolean }>;
+    listForUser: (userId: string, opts: { limit: number; unreadOnly?: boolean }) => Promise<Notification[]>;
+    /** False when the id doesn't exist OR isn't owned by `userId` — callers must not distinguish the two. */
+    markRead: (id: string, userId: string) => Promise<boolean>;
+    markAllRead: (userId: string) => Promise<void>;
+    /** Keep every unread row and the newest `keepRead` read rows per user; delete the rest. */
+    cleanup: (keepRead: number) => Promise<void>;
+  };
+  /** Last fully imported worker sequence per mapped remote session. */
+  notificationSyncCursors: {
+    get: (remoteServerId: string, remoteSessionId: string) => Promise<number | undefined>;
+    getMany: (remoteServerId: string, remoteSessionIds: string[]) => Promise<Map<string, number>>;
+    /** Monotonic: never moves a cursor backward. */
+    set: (remoteServerId: string, remoteSessionId: string, lastSeq: number) => Promise<void>;
   };
   searchCache: {
     /**

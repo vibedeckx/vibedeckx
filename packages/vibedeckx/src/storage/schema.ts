@@ -204,6 +204,40 @@ export interface RemoteSessionMappingsTable {
   remote_session_id: string;
   branch: string | null;
   title_resolved: GeneratedDbBool;
+  notification_sync_start: Generated<string>;
+  notification_watch_until: number | null;
+}
+
+export interface NotificationOutboxTable {
+  seq: Generated<number>;
+  id: string;
+  kind: string;
+  project_id: string;
+  branch: string | null;
+  session_id: string;
+  workflow_run_id: string | null;
+  created_at: number;
+}
+
+export interface NotificationsTable {
+  id: string;
+  user_id: string;
+  kind: string;
+  project_id: string;
+  branch: string | null;
+  session_id: string | null;
+  workflow_run_id: string | null;
+  title: string;
+  body: string | null;
+  created_at: number;
+  read_at: number | null;
+}
+
+export interface NotificationSyncCursorsTable {
+  remote_server_id: string;
+  remote_session_id: string;
+  last_seq: number;
+  updated_at: number;
 }
 
 export interface SessionSearchCacheTable {
@@ -326,6 +360,9 @@ export interface DB {
   remote_servers: RemoteServersTable;
   project_remotes: ProjectRemotesTable;
   remote_session_mappings: RemoteSessionMappingsTable;
+  notification_outbox: NotificationOutboxTable;
+  notifications: NotificationsTable;
+  notification_sync_cursors: NotificationSyncCursorsTable;
   session_search_cache: SessionSearchCacheTable;
   workspace_search_cache: WorkspaceSearchCacheTable;
   search_catalog_sync_state: SearchCatalogSyncStateTable;

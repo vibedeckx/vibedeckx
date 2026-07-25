@@ -1,7 +1,25 @@
-import { type Kysely, type Selectable } from "kysely";
-import type { DB, AgentSessionsTable } from "../schema.js";
+import { sql, type Kysely, type Selectable } from "kysely";
+import type { DB, AgentSessionsTable, RemoteSessionMappingsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
-import type { Storage, AgentSession, AgentSessionStatus } from "../types.js";
+import type {
+  Storage,
+  AgentSession,
+  AgentSessionStatus,
+  NotificationSyncStart,
+  RemoteSessionMapping,
+} from "../types.js";
+
+const mapRemoteSessionMapping = (
+  row: Selectable<RemoteSessionMappingsTable>,
+): RemoteSessionMapping => ({
+  local_session_id: row.local_session_id,
+  project_id: row.project_id,
+  remote_server_id: row.remote_server_id,
+  remote_session_id: row.remote_session_id,
+  branch: row.branch,
+  notification_sync_start: row.notification_sync_start as NotificationSyncStart,
+  notification_watch_until: row.notification_watch_until,
+});
 
 const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => ({
   id: row.id,
@@ -192,8 +210,14 @@ export const createAgentSessionRepos = (
   remoteSessionMappings: {
     // ON CONFLICT SET deliberately omits title_resolved — a re-upsert (e.g.
     // the remote session getting re-mapped after a reconnect) must not reset
-    // the "AI title already generated" flag back to false.
-    upsert: async (localSessionId, projectId, remoteServerId, remoteSessionId, branch) => {
+    // the "AI title already generated" flag back to false. It omits
+    // notification_sync_start and notification_watch_until for the same reason:
+    // re-mapping a session (reconnect) or reusing a reviewer for a second
+    // review must not downgrade an established from_start policy, and must not
+    // rewind the watch window mid-flight. The sync cursor lives in its own
+    // table and is likewise untouched — a reused reviewer continues from the
+    // boundary it already imported instead of replaying its whole history.
+    upsert: async (localSessionId, projectId, remoteServerId, remoteSessionId, branch, notificationSyncStart) => {
       await kdb.insertInto("remote_session_mappings")
         .values({
           local_session_id: localSessionId,
@@ -201,6 +225,7 @@ export const createAgentSessionRepos = (
           remote_server_id: remoteServerId,
           remote_session_id: remoteSessionId,
           branch,
+          notification_sync_start: notificationSyncStart ?? "from_now",
         })
         .onConflict((oc) => oc.column("local_session_id").doUpdateSet({
           project_id: projectId,
@@ -212,13 +237,63 @@ export const createAgentSessionRepos = (
     },
 
     getAll: async () => {
-      return kdb.selectFrom("remote_session_mappings")
-        .select(["local_session_id", "project_id", "remote_server_id", "remote_session_id", "branch"])
+      const rows = await kdb.selectFrom("remote_session_mappings").selectAll().execute();
+      return rows.map(mapRemoteSessionMapping);
+    },
+
+    getByLocal: async (localSessionId) => {
+      const row = await kdb.selectFrom("remote_session_mappings").selectAll()
+        .where("local_session_id", "=", localSessionId)
+        .executeTakeFirst();
+      return row ? mapRemoteSessionMapping(row) : undefined;
+    },
+
+    getByRemote: async (remoteServerId, remoteSessionId) => {
+      const row = await kdb.selectFrom("remote_session_mappings").selectAll()
+        .where("remote_server_id", "=", remoteServerId)
+        .where("remote_session_id", "=", remoteSessionId)
+        .executeTakeFirst();
+      return row ? mapRemoteSessionMapping(row) : undefined;
+    },
+
+    // MAX(existing, incoming): concurrent extenders (a new turn plus live
+    // stream activity) must not shorten a longer window one of them already set.
+    extendNotificationWatch: async (localSessionId, until) => {
+      await kdb.updateTable("remote_session_mappings")
+        .set({
+          notification_watch_until:
+            sql<number>`MAX(COALESCE(notification_watch_until, 0), ${until})`,
+        })
+        .where("local_session_id", "=", localSessionId)
         .execute();
     },
 
+    getNotificationSyncCandidates: async ({ now, includeExpired }) => {
+      let query = kdb.selectFrom("remote_session_mappings").selectAll();
+      if (!includeExpired) {
+        query = query.where("notification_watch_until", ">", now);
+      }
+      const rows = await query.orderBy("local_session_id", "asc").execute();
+      return rows.map(mapRemoteSessionMapping);
+    },
+
+    // The cursor is deleted with the mapping: without a mapping the front has
+    // no local target for the worker's events, so a stale cursor would only
+    // suppress a legitimate re-mapping's from_start replay.
     delete: async (localSessionId) => {
-      await kdb.deleteFrom("remote_session_mappings").where("local_session_id", "=", localSessionId).execute();
+      await kdb.transaction().execute(async (trx) => {
+        const row = await trx.selectFrom("remote_session_mappings")
+          .select(["remote_server_id", "remote_session_id"])
+          .where("local_session_id", "=", localSessionId)
+          .executeTakeFirst();
+        await trx.deleteFrom("remote_session_mappings").where("local_session_id", "=", localSessionId).execute();
+        if (row) {
+          await trx.deleteFrom("notification_sync_cursors")
+            .where("remote_server_id", "=", row.remote_server_id)
+            .where("remote_session_id", "=", row.remote_session_id)
+            .execute();
+        }
+      });
     },
 
     isTitleResolved: async (localSessionId) => {

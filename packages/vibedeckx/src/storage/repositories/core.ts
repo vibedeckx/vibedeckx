@@ -109,6 +109,15 @@ export const createCoreRepos = (
       if (userId) query = query.where("user_id", "=", userId);
       await query.execute();
     },
+
+    // Deliberately unscoped: the notification importer runs without a request
+    // context and must DERIVE ownership from the mapped local project rather
+    // than trust any worker-supplied tenant id. Returns "" for solo-mode rows
+    // (the column's default), which callers map to the "local" sentinel.
+    getOwnerId: async (projectId) => {
+      const row = await kdb.selectFrom("projects").select("user_id").where("id", "=", projectId).executeTakeFirst();
+      return row?.user_id;
+    },
   },
 
   settings: {

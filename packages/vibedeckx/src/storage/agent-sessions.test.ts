@@ -332,11 +332,19 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       expect(all[0].branch).toBeNull();
     });
 
-    it("getAll returns entries without a title_resolved field", async () => {
+    it("getAll returns routing + notification-sync fields but never title_resolved", async () => {
       await storage.remoteSessionMappings.upsert("l1", "p1", "rs1", "r1", "dev");
       const all = await storage.remoteSessionMappings.getAll();
       expect(Object.keys(all[0]).sort()).toEqual(
-        ["branch", "local_session_id", "project_id", "remote_server_id", "remote_session_id"].sort()
+        [
+          "branch",
+          "local_session_id",
+          "notification_sync_start",
+          "notification_watch_until",
+          "project_id",
+          "remote_server_id",
+          "remote_session_id",
+        ].sort()
       );
     });
 
