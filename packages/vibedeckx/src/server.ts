@@ -282,6 +282,7 @@ export const createServer = async (opts: {
     authEnabled,
     clerkPublishableKey: authEnabled ? process.env.CLERK_PUBLISHABLE_KEY : undefined,
     localProjectsEnabled: !noLocalProjects,
+    discordInviteUrl: process.env.VIBEDECKX_DISCORD_URL || undefined,
     // Capability flag for the reverse-connect identity preflight. Workers
     // check this before calling /api/reverse-connect/identity so an auth
     // middleware 401 from an older hub (which lacks the endpoint AND its
