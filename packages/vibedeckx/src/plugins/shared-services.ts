@@ -14,6 +14,7 @@ import { ReverseConnectManager } from "../reverse-connect-manager.js";
 import { BrowserManager } from "../browser-manager.js";
 import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
+import { NotificationService } from "../notification-service.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -210,8 +211,16 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("scheduler", scheduler);
   agentSessionManager.setEventBus(eventBus);
 
+  // Durable notification inbox. Milestone producers (agent sessions, workflow
+  // runs) only nudge it; the periodic + startup drains are what make delivery
+  // survive a crash between the milestone commit and its import.
+  const notificationService = new NotificationService(opts.storage, eventBus);
+  fastify.decorate("notificationService", notificationService);
+  agentSessionManager.setMilestoneListener(() => notificationService.requestDrain());
+
   const workflowEngine = new WorkflowEngine(opts.storage, agentSessionManager);
   workflowEngine.setEventBus(eventBus);   // subscribe BEFORE chatSessionManager so ordering is explicit
+  workflowEngine.setMilestoneListener(() => notificationService.requestDrain());
   await workflowEngine.init();
   fastify.decorate("workflowEngine", workflowEngine);
   chatSessionManager.setWorkflowEngine(workflowEngine);
@@ -222,6 +231,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   processManager.setEventBus(eventBus);
   scheduler.setEventBus(eventBus);
   await scheduler.start();
+
+  // Startup drain closes the crash window: a milestone committed just before the
+  // previous process died has no live nudge to ride, so it is recovered here.
+  notificationService.start();
+  notificationService.requestDrain();
 
   // Restore remote executor processes from DB in the background.
   // Only processes direct-URL servers here; reverse-connect servers are
@@ -248,6 +262,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {
     scheduler.shutdown();
+    notificationService.shutdown();
     agentSessionManager.shutdown();
     processManager.shutdown();
     remotePatchCache.shutdown();

@@ -16,7 +16,13 @@ export type GlobalEvent =
   | { type: "merge-target:updated"; projectId: string; branch: string }
   | { type: "schedule:run-started"; projectId: string; scheduleId: string; runId: string }
   | { type: "schedule:run-finished"; projectId: string; scheduleId: string; runId: string; status: string; exitCode: number | null }
-  | { type: "workflow:run-updated"; projectId: string; branch: string | null; run: import("./storage/types.js").WorkflowRun };
+  | { type: "workflow:run-updated"; projectId: string; branch: string | null; run: import("./storage/types.js").WorkflowRun }
+  // A durable attention milestone just landed in the inbox. Low-latency signal
+  // only — the browser's source of truth is GET /api/notifications, so a missed
+  // SSE frame costs freshness, not the notification. `projectId` stays at the
+  // top level so the existing per-tenant SSE project filter applies unchanged
+  // (a second authorization layer over the row's own user_id).
+  | { type: "notification:created"; projectId: string; notification: import("./storage/types.js").Notification };
 
 export class EventBus {
   private emitter = new EventEmitter();

@@ -9,6 +9,7 @@ import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { SchedulerService } from "./scheduler.js";
+import type { NotificationService } from "./notification-service.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -47,6 +48,7 @@ declare module "fastify" {
     noLocalProjects: boolean;
     browserManager: BrowserManager;
     scheduler: SchedulerService;
+    notificationService: NotificationService;
     workflowEngine: import("./workflow-engine.js").WorkflowEngine;
   }
 }
