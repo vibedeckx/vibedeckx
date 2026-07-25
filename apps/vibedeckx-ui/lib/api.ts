@@ -91,6 +91,9 @@ export interface AppConfig {
   clerkPublishableKey?: string;
   // Absent on older servers / persisted configs — treat missing as enabled.
   localProjectsEnabled?: boolean;
+  // Ephemeral / network-only — NEVER persisted (see persistConfig). Drives the
+  // header Discord button; unsetting the server env var must reliably hide it.
+  discordInviteUrl?: string;
 }
 
 let _cachedConfig: AppConfig | null = null;
@@ -105,7 +108,10 @@ const CONFIG_STORAGE_KEY = "vibedeckx:app-config";
 function persistConfig(config: AppConfig): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+    // discordInviteUrl is intentionally omitted: it must never survive in the
+    // synchronously-read cache, so a removed env var can't leave a stale button.
+    const { discordInviteUrl: _drop, ...persistable } = config;
+    window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(persistable));
   } catch {
     // ignore storage failures (private mode / quota) — we still have it in memory
   }
