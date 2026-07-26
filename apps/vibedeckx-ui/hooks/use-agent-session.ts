@@ -1046,12 +1046,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // the second overwriting the first's resolver and stranding that caller.
   // Concurrent callers of the same workspace generation *and* model share one
   // promise; a different model must not be collapsed into an in-flight call
-  // for another model, so it's part of the key too.
-  const ensureSessionInFlightRef = useRef<{
-    generation: number;
-    model: string | null;
-    promise: Promise<AgentSession | null>;
-  } | null>(null);
+  // for another model. Keyed by `${generation}:${modelKey}` in a Map (not a
+  // single-slot ref) so two different-model calls racing in the same
+  // generation each get their own in-flight entry instead of the second's
+  // assignment clobbering the first's — which would otherwise let a third,
+  // same-model-as-first call slip past the guard and fire a duplicate create.
+  const ensureSessionInFlightRef = useRef<Map<string, Promise<AgentSession | null>>>(new Map());
 
   // Create a real session on demand (called by submitMessage on first send).
   // POSTs to /api/projects/:projectId/agent-sessions/new and wires up WS.
@@ -1067,8 +1067,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // under any of the awaits below (same pattern as startSession).
     const generation = sessionGenerationRef.current;
     const modelKey = model ?? null;
-    const inFlight = ensureSessionInFlightRef.current;
-    if (inFlight && inFlight.generation === generation && inFlight.model === modelKey) return inFlight.promise;
+    const inFlightKey = `${generation}:${modelKey}`;
+    const inFlight = ensureSessionInFlightRef.current.get(inFlightKey);
+    if (inFlight) return inFlight;
 
     const run = async (): Promise<AgentSession | null> => {
       setIsLoading(true);
@@ -1140,13 +1141,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         return null;
       } finally {
         // Clear only our own entry — a newer-generation call, or a
-        // different-model call for the same generation, may have already
-        // replaced it.
-        if (
-          ensureSessionInFlightRef.current?.generation === generation &&
-          ensureSessionInFlightRef.current?.model === modelKey
-        ) {
-          ensureSessionInFlightRef.current = null;
+        // different-model call for the same generation, has its own map key
+        // and is never touched by this. The identity check guards against
+        // deleting a later call's entry for the same key (defense in depth;
+        // shouldn't be reachable since a second call for the same key would
+        // have joined via `inFlight` above instead of reaching this point).
+        if (ensureSessionInFlightRef.current.get(inFlightKey) === promise) {
+          ensureSessionInFlightRef.current.delete(inFlightKey);
         }
         // Only clear loading if this is still the current generation
         if (sessionGenerationRef.current === generation) {
@@ -1156,7 +1157,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     const promise = run();
-    ensureSessionInFlightRef.current = { generation, model: modelKey, promise };
+    ensureSessionInFlightRef.current.set(inFlightKey, promise);
     return promise;
   }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket]);
 

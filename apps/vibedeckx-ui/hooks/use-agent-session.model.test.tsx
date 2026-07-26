@@ -103,4 +103,67 @@ describe("useAgentSession model", () => {
 
     expect(created!.model).toBe("sonnet");
   });
+
+  it("does not collapse concurrent different-model calls into one create", async () => {
+    await render();
+    // Hold each create call open (never resolve within this act) so both
+    // calls are genuinely in flight at once, not serialized by a microtask.
+    const deferred: Array<(value: Awaited<ReturnType<typeof createNewAgentSession>>) => void> = [];
+    createSession.mockImplementation(
+      () => new Promise((resolve) => { deferred.push(resolve); }),
+    );
+
+    let opusPromise: Promise<unknown> = Promise.resolve();
+    let sonnetPromise: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      opusPromise = latest!.ensureSession("edit", "opus");
+      sonnetPromise = latest!.ensureSession("edit", "sonnet");
+    });
+
+    // Two distinct models in flight at once must produce two create calls,
+    // not one collapsed via the single-flight guard.
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(createSession).toHaveBeenNthCalledWith(1, "p1", "main", "edit", undefined, undefined, "opus");
+    expect(createSession).toHaveBeenNthCalledWith(2, "p1", "main", "edit", undefined, undefined, "sonnet");
+    expect(opusPromise).not.toBe(sonnetPromise);
+
+    // Drain both so nothing leaks into the next test.
+    await act(async () => {
+      deferred[0]({ session: { id: "s-opus", projectId: "p1", branch: "main", status: "running", model: "opus" }, messages: [] });
+      deferred[1]({ session: { id: "s-sonnet", projectId: "p1", branch: "main", status: "running", model: "sonnet" }, messages: [] });
+      await Promise.all([opusPromise, sonnetPromise]);
+    });
+  });
+
+  it("routes a third same-model call to the already in-flight entry instead of firing a duplicate create", async () => {
+    await render();
+    // Regression for the single-slot ref bug: A (opus) sets the guard, B
+    // (sonnet) races in and must not clobber A's entry, then C (opus again)
+    // must join A rather than seeing B's entry and firing its own create.
+    const deferred: Array<(value: Awaited<ReturnType<typeof createNewAgentSession>>) => void> = [];
+    createSession.mockImplementation(
+      () => new Promise((resolve) => { deferred.push(resolve); }),
+    );
+
+    let opusPromiseA: Promise<unknown> = Promise.resolve();
+    let sonnetPromise: Promise<unknown> = Promise.resolve();
+    let opusPromiseC: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      opusPromiseA = latest!.ensureSession("edit", "opus");
+      sonnetPromise = latest!.ensureSession("edit", "sonnet");
+      opusPromiseC = latest!.ensureSession("edit", "opus");
+    });
+
+    // Only two physical create calls: one for opus (A), one for sonnet (B).
+    // C must have joined A's in-flight promise rather than firing a third.
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(opusPromiseC).toBe(opusPromiseA);
+    expect(sonnetPromise).not.toBe(opusPromiseA);
+
+    await act(async () => {
+      deferred[0]({ session: { id: "s-opus", projectId: "p1", branch: "main", status: "running", model: "opus" }, messages: [] });
+      deferred[1]({ session: { id: "s-sonnet", projectId: "p1", branch: "main", status: "running", model: "sonnet" }, messages: [] });
+      await Promise.all([opusPromiseA, sonnetPromise, opusPromiseC]);
+    });
+  });
 });
