@@ -102,6 +102,7 @@ export interface AgentSessionsTable {
   permission_mode: string | null;
   agent_type: string | null;
   title: string | null;
+  model: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
   last_user_message_at: number | null;

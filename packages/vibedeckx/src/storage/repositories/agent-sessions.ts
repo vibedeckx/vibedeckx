@@ -35,6 +35,7 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   permission_mode: row.permission_mode ?? undefined,
   agent_type: row.agent_type ?? undefined,
   title: row.title,
+  model: row.model ?? null,
   created_at: row.created_at,
   updated_at: row.updated_at,
   last_user_message_at: row.last_user_message_at,
@@ -53,7 +54,7 @@ export const createAgentSessionRepos = (
     // writes — this is what lets getLatestByBranch break ties
     // deterministically (see the schema.ts / sqlite.ts DDL comment on
     // agent_sessions).
-    create: async ({ id, project_id, branch, permission_mode, agent_type }) => {
+    create: async ({ id, project_id, branch, permission_mode, agent_type, model }) => {
       await kdb.insertInto("agent_sessions").values({
         id,
         project_id,
@@ -61,6 +62,7 @@ export const createAgentSessionRepos = (
         status: "running",
         permission_mode: permission_mode ?? "edit",
         agent_type: agent_type ?? "claude-code",
+        model: model ?? null,
         created_at: h.nowMs(),
         updated_at: h.nowMs(),
       }).execute();

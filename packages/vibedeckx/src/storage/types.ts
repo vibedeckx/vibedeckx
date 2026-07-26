@@ -341,6 +341,8 @@ export interface AgentSession {
   permission_mode?: string;
   agent_type?: string;
   title?: string | null;
+  /** Per-session agent model, or null/undefined to use the CLI's default. */
+  model?: string | null;
   created_at: string;
   updated_at?: string;
   /** Epoch ms of the most recent user-typed message, or null if none yet. */
@@ -617,7 +619,7 @@ export interface Storage {
     claimOrVerify(machineId: string, publicKey: string, userId: string): Promise<{ owned: boolean; ownerId: string; created: boolean }>;
   };
   agentSessions: {
-    create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string }) => Promise<AgentSession>;
+    create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string; model?: string | null }) => Promise<AgentSession>;
     getAll: () => Promise<AgentSession[]>;
     getById: (id: string) => Promise<AgentSession | undefined>;
     getByProjectId: (projectId: string) => Promise<AgentSession[]>;

@@ -104,6 +104,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       branch TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'running',
       title TEXT DEFAULT NULL,
+      -- Per-session agent model, e.g. 'opus' or 'gpt-5.6-sol'. NULL = use the
+      -- CLI's own default (no flag is passed). Never validated: an unknown
+      -- name is passed to the CLI and fails there.
+      model TEXT DEFAULT NULL,
       -- Millisecond-precision timestamps. CURRENT_TIMESTAMP is seconds-only,
       -- which lets two sessions tie on updated_at within the same second and
       -- corrupts the ordering used by getLatestByBranch. The 'YYYY-MM-DD
@@ -424,6 +428,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const sessionInfoV6 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   if (!sessionInfoV6.some(col => col.name === "favorited_at")) {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN favorited_at INTEGER DEFAULT NULL");
+  }
+
+  // Migration: add model column to agent_sessions (per-session agent model;
+  // NULL = CLI default).
+  const sessionInfoV7 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionInfoV7.some(col => col.name === "model")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN model TEXT DEFAULT NULL");
   }
 
   // Ensure agent_sessions indexes exist. Safe to run here because either:
