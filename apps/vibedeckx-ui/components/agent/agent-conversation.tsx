@@ -43,6 +43,7 @@ import {
   DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import { TurnEndDivider } from "./turn-end-divider";
+import { ModelPicker } from "./model-picker";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { useInputHistory } from "@/hooks/use-input-history";
@@ -155,6 +156,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [agentType, setAgentType] = useState<AgentType>("claude-code");
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
+  // Pre-session model choice. Mirrors how agentType is pre-selected before a
+  // session exists (see the agent dropdown's `if (!session)` branch). Reset to
+  // null on New Conversation so a choice never leaks into the next session —
+  // the last pick is deliberately not remembered.
+  const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [titleRefreshKey, setTitleRefreshKey] = useState(0);
   // Tracks the session whose AI title is currently being generated. When set,
   // the SessionHistoryDropdown renders a "Generating title…" loader instead of
@@ -407,6 +413,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // disabled attribute to stop it.
     if (isLoading || !session) return;
     await startNewConversation();
+    setPendingModel(null);
     onNewConversation?.();
     // Drop ?session=<id> from the URL — the new conversation has no
     // sessionId yet (one is created on first user message). Without
@@ -425,7 +432,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       // "idle" overlay set by New Conversation so the dot turns blue immediately.
       if (!session) {
         // No persisted session yet (placeholder). Create one via /new on first send.
-        const newSession = await ensureSession(permissionMode);
+        const newSession = await ensureSession(permissionMode, pendingModel);
         if (newSession) {
           // Arm the title-pending loader before sendMessage so the dropdown
           // never flashes the snippet/timestamp the server writes synchronously.
@@ -436,7 +443,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         sendMessage(content);
       }
     }
-  }), [handleNewConversation, session, ensureSession, sendMessage, permissionMode, onStatusChange]);
+  }), [handleNewConversation, session, ensureSession, sendMessage, permissionMode, pendingModel, onStatusChange]);
 
   const handlePasteText = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => {
@@ -516,7 +523,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     let targetSessionId: string | undefined = session?.id;
     let startedSession: AgentSession | null = null;
     if (!session) {
-      startedSession = await ensureSession(permissionMode);
+      startedSession = await ensureSession(permissionMode, pendingModel);
       if (!startedSession) {
         // Restore input on failure so the user doesn't lose their pastes.
         setInput(rawText);
@@ -712,6 +719,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               </span>
             </>
           )}
+          <ModelPicker
+            agentType={agentType}
+            models={providers.find((p) => p.type === agentType)?.models ?? []}
+            value={session ? (session.model ?? null) : pendingModel}
+            onChange={setPendingModel}
+            locked={session != null}
+          />
           <PermissionModeToggle
             mode={permissionMode}
             onModeChange={handlePermissionModeChange}
