@@ -989,7 +989,15 @@ git commit -m "feat(sessions): carry a per-session model from creation through s
 - Consumes: nothing from earlier tasks.
 - Produces: `buildStartupFailureMessage(agentType: AgentType, stderrTail: string, stdoutTail: string): string`
 
-**Why this is blocking, not cosmetic:** verified on 2026-07-26, `claude --model bogus -p hi` exits 1 and prints `There's an issue with the selected model (bogus). It may not exist or you may not have access to it.` on **stdout**, with stderr empty. That line is not stream-json, so `parseStdoutLine` returns zero events, `producedOutput` stays false, and the close handler's startup-failure branch fires — but `stderrTail` is empty, so the user is shown "Couldn't start Claude Code" plus an *install* hint while Claude Code is installed and working. A free-text model field makes mistyped model names the most common startup failure, so this misleading message would become the feature's default failure experience.
+**Why this is defense-in-depth, not a live bug fix — corrected 2026-07-26 after measurement.**
+
+The original justification for this task was wrong, and the correction is worth recording because it changes how the change should be judged.
+
+The premise came from `claude --model bogus -p hi`, which exits 1 and prints `There's an issue with the selected model (bogus). It may not exist or you may not have access to it.` on **stdout** with stderr empty. Reasoning from there: the text is not stream-json, so `parseStdoutLine` returns no events, `producedOutput` stays false, the close handler's startup-failure branch fires, and with an empty `stderrTail` the user is told to install a CLI that is already installed.
+
+**That path is not what the app runs.** Session spawns always carry `--output-format=stream-json --input-format=stream-json`. Driven through `AgentSessionManager` with those args against claude 2.1.220, a bad `--model` is delivered as a **valid JSON `assistant` message** followed by a `result` line, and the process stays alive. `producedOutput` becomes true, the startup-failure branch is never reached, and the user already sees the CLI's own explanation as a normal message. Print mode (`-p`) and session mode disagree, and only print mode produces the plain-text failure.
+
+So this task does not fix a reachable bug on the current CLI. Keep it as defense-in-depth for cases where a process really does die with plain text before reaching JSON-output mode — argv-parse failures, licensing errors, or an older CLI that doesn't wrap model errors in stream-json. It strictly widens what gets surfaced and weakens nothing. **Judge it on that basis; do not expect an end-to-end reproduction of the install-hint bug via a mistyped model.**
 
 - [ ] **Step 1: Write the failing test**
 
