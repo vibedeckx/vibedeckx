@@ -16,7 +16,7 @@
 - **The model is never validated.** No whitelist, no availability probe, no pre-flight check on any layer. A model string the CLI rejects must reach the CLI and fail there. This is the project's established stance for agent binaries and is a deliberate decision, not an oversight.
 - **The model must never be stored on a provider instance.** `ClaudeCodeProvider` and `CodexProvider` are module-scope singletons shared by every session (`packages/vibedeckx/src/providers/index.ts:8-9`). `CodexProvider.lastPermissionMode` (`codex-provider.ts:46`) is an existing instance field written per-spawn — do not copy that pattern. The model travels as a function parameter into `argv` and is never retained.
 - `model` is nullable everywhere. `null` / `undefined` means "pass no flag; let the CLI use its default". The UI label for that state is the literal string `Default`.
-- The DB column is updatable (a plain `TEXT` column with an `updateModel` method), even though nothing calls it for a mid-session change yet. This is deliberate headroom so a future mid-session switch needs no migration.
+- The model column is a plain nullable `TEXT` column, deliberately not modelled as create-time-immutable, so a future mid-session switch needs no migration. Do **not** add an `updateModel` repository method: nothing calls it, and the column is already updatable by virtue of being a column. Whoever builds mid-session switching adds the method then.
 - Existing exact-match assertions in `packages/vibedeckx/src/protocol/claude-code/cli.test.ts` and `packages/vibedeckx/src/protocol/codex/cli.test.ts` use `toEqual` on full arg arrays. New optional parameters must leave those arrays byte-identical when no model is given.
 
 ---
@@ -35,8 +35,8 @@
 **Backend — storage**
 - `packages/vibedeckx/src/storage/sqlite.ts` — `model` column migration + fresh-DDL column
 - `packages/vibedeckx/src/storage/schema.ts` — `AgentSessionsTable.model`
-- `packages/vibedeckx/src/storage/types.ts` — `AgentSession.model`, `agentSessions.create` opts, `agentSessions.updateModel`
-- `packages/vibedeckx/src/storage/repositories/agent-sessions.ts` — row mapping, create, updateModel
+- `packages/vibedeckx/src/storage/types.ts` — `AgentSession.model`, `agentSessions.create` opts
+- `packages/vibedeckx/src/storage/repositories/agent-sessions.ts` — row mapping, create
 
 **Backend — session manager**
 - `packages/vibedeckx/src/agent-session-manager.ts` — `RunningSession.model`, `createNewSession` param, `spawnAgent` wiring, respawn paths (`restoreSessionsFromDb`, `branchSession`), and the stdout-tail startup-failure fix
@@ -450,13 +450,13 @@ git commit -m "feat(providers): thread an optional per-spawn model through build
 
 ---
 
-### Task 3: Storage — `model` column, type, and repository methods
+### Task 3: Storage — `model` column and type
 
 **Files:**
 - Modify: `packages/vibedeckx/src/storage/sqlite.ts:101-119` (fresh DDL) and `:423-427` (migration block)
 - Modify: `packages/vibedeckx/src/storage/schema.ts:97-110`
 - Modify: `packages/vibedeckx/src/storage/types.ts:336-352` and `:619-620`
-- Modify: `packages/vibedeckx/src/storage/repositories/agent-sessions.ts:31-36, 56-64, 138-142`
+- Modify: `packages/vibedeckx/src/storage/repositories/agent-sessions.ts:31-36, 56-64`
 - Test: `packages/vibedeckx/src/storage/agent-session-model.test.ts` (create)
 
 **Interfaces:**
@@ -464,7 +464,6 @@ git commit -m "feat(providers): thread an optional per-spawn model through build
 - Produces:
   - `AgentSession.model?: string | null`
   - `storage.agentSessions.create({ id, project_id, branch, permission_mode?, agent_type?, model? })`
-  - `storage.agentSessions.updateModel(id: string, model: string | null): Promise<void>`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -507,19 +506,9 @@ describe("agent_sessions.model", () => {
     expect((await storage.agentSessions.getById("s1"))?.model).toBe("not-a-real-model");
   });
 
-  it("updateModel overwrites and can clear back to null", async () => {
-    await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "", model: "opus" });
-
-    await storage.agentSessions.updateModel("s1", "sonnet");
-    expect((await storage.agentSessions.getById("s1"))?.model).toBe("sonnet");
-
-    await storage.agentSessions.updateModel("s1", null);
-    expect((await storage.agentSessions.getById("s1"))?.model ?? null).toBeNull();
-  });
-
   it("listByBranch carries the model through to session summaries", async () => {
     // The two list routes serialize DB rows with `...s`, so this mapping is
-    // what makes the model appear in the session-history dropdown (Task 10).
+    // what makes the model appear in the session-history dropdown (Task 9).
     await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev", model: "opus" });
     const rows = await storage.agentSessions.listByBranch("p1", "dev");
     expect(rows.find((r) => r.id === "s1")?.model).toBe("opus");
@@ -532,7 +521,7 @@ If `listByBranch`'s parameter order differs, adjust that last case to match the 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm --filter vibedeckx test -- src/storage/agent-session-model.test.ts`
-Expected: FAIL — `model` is not a known property / `updateModel` is not a function.
+Expected: FAIL — `model` is not a known property on the create options or the returned row.
 
 - [ ] **Step 3: Add the column to the fresh-DDL table**
 
@@ -575,18 +564,13 @@ In `packages/vibedeckx/src/storage/types.ts`, add to `interface AgentSession` (a
   model?: string | null;
 ```
 
-and in the `agentSessions` repository interface, replace the `create` signature on line 620 and add `updateModel` next to it:
+and in the `agentSessions` repository interface, replace the `create` signature on line 620:
 
 ```typescript
     create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string; model?: string | null }) => Promise<AgentSession>;
-    /**
-     * Set (or clear, with null) the session's model. Nothing calls this for a
-     * mid-session change today — the model is fixed at creation — but the
-     * column is deliberately updatable so a future mid-session switch needs no
-     * migration.
-     */
-    updateModel: (id: string, model: string | null) => Promise<void>;
 ```
+
+Do not add an update method — see Global Constraints.
 
 - [ ] **Step 7: Wire the repository**
 
@@ -610,21 +594,10 @@ and add to the `.values({ ... })` object, alongside `permission_mode` and `agent
         model: model ?? null,
 ```
 
-Add `updateModel` immediately after the existing `updateAgentType` method (which ends around line 142):
-
-```typescript
-    updateModel: async (id, model) => {
-      await kdb.updateTable("agent_sessions")
-        .set({ model, updated_at: h.nowMs() })
-        .where("id", "=", id)
-        .execute();
-    },
-```
-
 - [ ] **Step 8: Run test to verify it passes**
 
 Run: `pnpm --filter vibedeckx test -- src/storage/agent-session-model.test.ts`
-Expected: PASS (5 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 9: Verify the migration works on a pre-existing database**
 
@@ -679,10 +652,10 @@ git commit -m "feat(storage): add a nullable per-session model column to agent_s
 
 ---
 
-### Task 4: Session manager — carry the model from creation to spawn
+### Task 4: Session manager — carry the model from creation through spawn and every respawn
 
 **Files:**
-- Modify: `packages/vibedeckx/src/agent-session-manager.ts:88-140` (`RunningSession`), `:516-590` (`createNewSession`), `:708` (`spawnAgent`)
+- Modify: `packages/vibedeckx/src/agent-session-manager.ts:88-140` (`RunningSession`), `:516-590` (`createNewSession`), `:708` (`spawnAgent`), `:2449-2510` (`restoreSessionsFromDb`), `:2530-2620` (`branchSession`)
 - Test: `packages/vibedeckx/src/agent-session-manager.model.test.ts` (create)
 
 **Interfaces:**
@@ -690,10 +663,14 @@ git commit -m "feat(storage): add a nullable per-session model column to agent_s
 - Produces:
   - `RunningSession.model: string | null`
   - `createNewSession(projectId, branch, projectPath, skipDb?, permissionMode?, agentType?, announceRunning?, force?, opts?)` where `opts` gains `model?: string | null`
+  - Behavioural guarantee: a session's model survives server restart and dormancy/wake, is untouched by an agent switch, and is inherited by branches.
 
-**Design note:** `createNewSession` already takes eight positional parameters. Do **not** add a ninth — put `model` on the existing trailing `opts` object, which already carries `sessionId` and `crossRemoteMcp`.
+**Design notes:**
 
-- [ ] **Step 1: Write the failing test**
+- `createNewSession` already takes eight positional parameters. Do **not** add a ninth — put `model` on the existing trailing `opts` object, which already carries `sessionId` and `crossRemoteMcp`.
+- A single session respawns through several paths, and `RunningSession.model` is a required field, so **all** of its construction sites must land in this one task or the file will not compile. `wakeDormantSession` and `switchAgentType` mutate the existing `RunningSession` and then call `spawnAgent`, so they inherit `session.model` for free — no edit needed, but the tests below lock that in. `restoreSessionsFromDb` and `branchSession` build **new** `RunningSession` objects and must read the model explicitly. Missing one produces a session that silently drops to the default model partway through its life, with no UI signal.
+
+- [ ] **Step 1: Write the failing tests**
 
 Create `packages/vibedeckx/src/agent-session-manager.model.test.ts`, following the fake-storage harness style of `packages/vibedeckx/src/agent-session-manager.branch.test.ts:27-52`.
 
@@ -727,7 +704,6 @@ function makeStorage() {
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       updateAgentType: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
-      updateModel: vi.fn(async () => undefined),
       listByBranch: async () => [...rows.values()],
     },
   } as unknown as Storage;
@@ -791,94 +767,7 @@ describe("session manager model wiring", () => {
 
 If `AgentSessionManager`'s constructor needs more than `storage` in this repo's current shape, copy the exact construction from `agent-session-manager.branch.test.ts` rather than guessing.
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm --filter vibedeckx test -- src/agent-session-manager.model.test.ts`
-Expected: FAIL — `opts.model` is not accepted / `buildSpawnConfig` is called with 3 arguments.
-
-- [ ] **Step 3: Add the field to `RunningSession`**
-
-In `packages/vibedeckx/src/agent-session-manager.ts`, add to the `RunningSession` interface right after `agentType` (line 99):
-
-```typescript
-  /**
-   * Per-session agent model, or null for the CLI default. Fixed for the life
-   * of the session (a different model means branching a new session) and
-   * re-read from the DB on every respawn path.
-   */
-  model: string | null;
-```
-
-- [ ] **Step 4: Accept and persist the model in `createNewSession`**
-
-In `packages/vibedeckx/src/agent-session-manager.ts`, change the `opts` parameter of `createNewSession` (line 524) to:
-
-```typescript
-    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null } = {},
-```
-
-Immediately after `const branchKey = branch ?? "";` (line 531), add:
-
-```typescript
-    const model = opts.model?.trim() ? opts.model.trim() : null;
-```
-
-Add `model,` to the `storage.agentSessions.create({ ... })` call (after `agent_type: agentType,`), and add `model,` to the `RunningSession` object literal (after `agentType,`).
-
-- [ ] **Step 5: Forward the model at spawn time**
-
-In `packages/vibedeckx/src/agent-session-manager.ts`, replace line 708:
-
-```typescript
-    const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp, session.model);
-```
-
-- [ ] **Step 6: Fix the remaining `RunningSession` construction sites**
-
-`RunningSession` now has a required `model` field, so the compiler will point at every literal that lacks it. Run:
-
-Run: `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json`
-Expected: errors naming each remaining construction site — `restoreSessionsFromDb` (~line 2471) and `branchSession` (~line 2612).
-
-Add `model: null,` to both literals so this task compiles and commits cleanly. These two are deliberately left as `null` here and given their real values in Task 5, which is where their behaviour gets test coverage — a session restored from the DB must recover its stored model, and a branch must inherit its source's.
-
-Re-run the typecheck; it must now be clean.
-
-- [ ] **Step 7: Run test to verify it passes**
-
-Run: `pnpm --filter vibedeckx test -- src/agent-session-manager.model.test.ts`
-Expected: PASS.
-
-- [ ] **Step 8: Typecheck and full suite**
-
-Run: `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json && pnpm --filter vibedeckx test`
-Expected: no type errors; all tests pass.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add packages/vibedeckx/src/agent-session-manager.ts \
-        packages/vibedeckx/src/agent-session-manager.model.test.ts
-git commit -m "feat(sessions): carry a per-session model from creation through to spawn"
-```
-
----
-
-### Task 5: Session manager — every respawn path keeps the model
-
-**Files:**
-- Modify: `packages/vibedeckx/src/agent-session-manager.ts:2449-2510` (`restoreSessionsFromDb`), `:2530-2620` (`branchSession`)
-- Test: `packages/vibedeckx/src/agent-session-manager.model.test.ts` (extend)
-
-**Interfaces:**
-- Consumes: `RunningSession.model` and `createNewSession(..., { model })` from Task 4; `storage.agentSessions` from Task 3.
-- Produces: no new exports. Behavioural guarantee — a session's model survives server restart, dormancy/wake, agent switch, and is inherited by branches.
-
-**Why this task exists separately:** a single session respawns through several paths. `wakeDormantSession` and `switchAgentType` mutate the existing in-memory `RunningSession` and then call `spawnAgent`, so they already inherit `session.model` for free — no change needed, but the tests below lock that in. `restoreSessionsFromDb` and `branchSession` build **new** `RunningSession` objects and must read the model explicitly. Missing one produces a session that silently drops to the default model partway through its life, with no UI signal.
-
-- [ ] **Step 1: Write the failing tests**
-
-Append to `packages/vibedeckx/src/agent-session-manager.model.test.ts`. These paths never spawn (restore and branch both produce dormant sessions), so no spawn stub is needed:
+Append the respawn-path cases to the same file. These paths never spawn (restore and branch both produce dormant sessions), so no spawn stub is needed:
 
 ```typescript
 const HISTORY = [
@@ -913,7 +802,6 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
       updateAgentType: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
-      updateModel: vi.fn(async () => undefined),
       listByBranch: async () => created,
     },
   } as unknown as Storage;
@@ -987,19 +875,56 @@ The `BranchResult` success shape is asserted as `{ ok: true, sessionId }` — co
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm --filter vibedeckx test -- src/agent-session-manager.model.test.ts`
-Expected: FAIL on the restore and branch cases — both return `null` because Task 4 left `model: null` placeholders there.
+Expected: FAIL — `opts.model` is not accepted, `buildSpawnConfig` is called with 3 arguments, and `session.model` is undefined on restored and branched sessions.
 
-- [ ] **Step 3: Rehydrate the model in `restoreSessionsFromDb`**
+- [ ] **Step 3: Add the field to `RunningSession`**
 
-In `packages/vibedeckx/src/agent-session-manager.ts`, in `restoreSessionsFromDb`, replace the placeholder `model: null,` in the `runningSession` literal (added in Task 4, next to `agentType`) with:
+In `packages/vibedeckx/src/agent-session-manager.ts`, add to the `RunningSession` interface right after `agentType` (line 99):
+
+```typescript
+  /**
+   * Per-session agent model, or null for the CLI default. Fixed for the life
+   * of the session (a different model means branching a new session) and
+   * re-read from the DB on every respawn path.
+   */
+  model: string | null;
+```
+
+- [ ] **Step 4: Accept and persist the model in `createNewSession`**
+
+In `packages/vibedeckx/src/agent-session-manager.ts`, change the `opts` parameter of `createNewSession` (line 524) to:
+
+```typescript
+    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null } = {},
+```
+
+Immediately after `const branchKey = branch ?? "";` (line 531), add:
+
+```typescript
+    const model = opts.model?.trim() ? opts.model.trim() : null;
+```
+
+Add `model,` to the `storage.agentSessions.create({ ... })` call (after `agent_type: agentType,`), and add `model,` to the `RunningSession` object literal (after `agentType,`).
+
+- [ ] **Step 5: Forward the model at spawn time**
+
+In `packages/vibedeckx/src/agent-session-manager.ts`, replace line 708:
+
+```typescript
+    const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp, session.model);
+```
+
+- [ ] **Step 6: Rehydrate the model in `restoreSessionsFromDb`**
+
+In `packages/vibedeckx/src/agent-session-manager.ts`, add to the `runningSession` literal in `restoreSessionsFromDb` (~line 2471), next to `agentType`:
 
 ```typescript
         model: dbSession.model ?? null,
 ```
 
-- [ ] **Step 4: Inherit the model in `branchSession`**
+- [ ] **Step 7: Inherit the model in `branchSession`**
 
-In `branchSession`, add a resolution line next to the existing `permissionMode` / `agentType` resolutions (after line 2560):
+Add a resolution line next to the existing `permissionMode` / `agentType` resolutions in `branchSession` (after line 2560):
 
 ```typescript
     // A branch continues the same conversation, so it continues on the same
@@ -1008,34 +933,36 @@ In `branchSession`, add a resolution line next to the existing `permissionMode` 
     const model = source?.model ?? sourceRow?.model ?? null;
 ```
 
-Add `model,` to the `storage.agentSessions.create({ ... })` call in `branchSession`, and replace the placeholder `model: null,` in the `branched` `RunningSession` literal with `model,`.
+Add `model,` to the `storage.agentSessions.create({ ... })` call in `branchSession`, and `model,` to the `branched` `RunningSession` literal (~line 2612).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 8: Confirm no `RunningSession` literal was missed**
+
+`RunningSession.model` is required, so any literal still lacking it is a compile error.
+
+Run: `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json`
+Expected: clean. If it names another construction site, give it the model value appropriate to that path — never `null` just to silence the compiler.
+
+- [ ] **Step 9: Run tests to verify they pass**
 
 Run: `pnpm --filter vibedeckx test -- src/agent-session-manager.model.test.ts`
-Expected: PASS (all cases, including the two from Task 4).
+Expected: PASS (8 tests — 3 creation, 5 respawn).
 
-- [ ] **Step 6: Confirm no `RunningSession` literal was missed**
+- [ ] **Step 10: Full suite**
 
-Run: `grep -n "agentType," packages/vibedeckx/src/agent-session-manager.ts`
-Expected: every hit that is part of a `RunningSession` object literal has a `model` line adjacent to it. If a literal lacks one, `tsc` will already have failed — re-run `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json` to confirm.
+Run: `pnpm --filter vibedeckx test`
+Expected: all tests pass.
 
-- [ ] **Step 7: Full suite and typecheck**
-
-Run: `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json && pnpm --filter vibedeckx test`
-Expected: no type errors; all tests pass.
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add packages/vibedeckx/src/agent-session-manager.ts \
         packages/vibedeckx/src/agent-session-manager.model.test.ts
-git commit -m "feat(sessions): keep the model across restore, wake, agent switch, and branch"
+git commit -m "feat(sessions): carry a per-session model from creation through spawn and respawn"
 ```
 
 ---
 
-### Task 6: Surface CLI startup errors that arrive on stdout
+### Task 5: Surface CLI startup errors that arrive on stdout
 
 **Files:**
 - Modify: `packages/vibedeckx/src/agent-session-manager.ts:726` (tail state), `:1000-1018` (`handleStdout`), `:798-812` (close handler), `:1370-1379` (`buildStartupFailureMessage`)
@@ -1198,7 +1125,7 @@ Expected: PASS (4 tests).
 
 Start the server, create a session with model `definitely-not-a-real-model`, and send one message. Expected: the conversation shows an error entry containing `There's an issue with the selected model` and **no** install hint.
 
-If the frontend is not wired yet (it isn't until Task 9), drive it over the API instead:
+If the frontend is not wired yet (it isn't until Task 8), drive it over the API instead:
 
 ```bash
 curl -s -X POST localhost:5173/api/path/agent-sessions/new \
@@ -1206,7 +1133,7 @@ curl -s -X POST localhost:5173/api/path/agent-sessions/new \
   -d '{"path":"/tmp/p1","branch":null,"permissionMode":"edit","agentType":"claude-code","model":"definitely-not-a-real-model"}'
 ```
 
-(This route gains its `model` field in Task 7 — if running Task 6 standalone, temporarily hardcode a model in `createNewSession` to reproduce.)
+(This route gains its `model` field in Task 6 — if running Task 5 standalone, temporarily hardcode a model in `createNewSession` to reproduce.)
 
 - [ ] **Step 8: Full suite and typecheck**
 
@@ -1223,7 +1150,7 @@ git commit -m "fix(sessions): surface plain-stdout CLI startup errors instead of
 
 ---
 
-### Task 7: Routes — accept, return, and forward the model
+### Task 6: Routes — accept, return, and forward the model
 
 **Files:**
 - Modify: `packages/vibedeckx/src/routes/agent-session-routes.ts:161-168` (providers), `:172-174`, `:297-299`, `:320-326`, `:458-467`, `:622-631`, `:685-691`, and the session-response builders at `:135`, `:235`, `:338`, `:607`, `:703`, `:768`
@@ -1468,7 +1395,7 @@ git commit -m "feat(api): accept, return, and proxy a per-session model"
 
 ---
 
-### Task 8: Frontend data layer — types, create call, and hook
+### Task 7: Frontend data layer — types, create call, and hook
 
 **Files:**
 - Modify: `apps/vibedeckx-ui/lib/api.ts:718-722` (`AgentProviderInfo`), `:837-850` (`BranchSessionSummary`), `:866-891` (`createNewAgentSession`)
@@ -1476,7 +1403,7 @@ git commit -m "feat(api): accept, return, and proxy a per-session model"
 - Test: `apps/vibedeckx-ui/hooks/use-agent-session.model.test.tsx` (create)
 
 **Interfaces:**
-- Consumes: the API shapes from Task 7.
+- Consumes: the API shapes from Task 6.
 - Produces:
   - `AgentProviderInfo { type, displayName, available, models: string[] }`
   - `createNewAgentSession(projectId, branch, permissionMode?, agentType?, force?, model?)`
@@ -1714,7 +1641,7 @@ git commit -m "feat(ui): thread a per-session model through the agent session AP
 
 ---
 
-### Task 9: Model picker component and header integration
+### Task 8: Model picker component and header integration
 
 **Files:**
 - Create: `apps/vibedeckx-ui/components/ui/popover.tsx`
@@ -1723,7 +1650,7 @@ git commit -m "feat(ui): thread a per-session model through the agent session AP
 - Test: `apps/vibedeckx-ui/components/agent/model-picker.test.tsx` (create)
 
 **Interfaces:**
-- Consumes: `AgentProviderInfo.models` and `ensureSession(permissionMode, model)` (Task 8).
+- Consumes: `AgentProviderInfo.models` and `ensureSession(permissionMode, model)` (Task 7).
 - Produces: `<ModelPicker agentType models value onChange locked />`
 
 **Design constraints (settled in the design discussion):**
@@ -2049,7 +1976,7 @@ Run the app (`pnpm dev:all`), then:
 1. Open a workspace with no session — the header shows `[Claude Code ▾] [Default ▾]`.
 2. Click the model chip, pick `opus`, send a message. The chip becomes static `opus` text with no border or chevron; hovering shows "Fixed for this session — branch to change".
 3. Click New Conversation — the chip returns to an editable `Default`, confirming the choice is not remembered.
-4. Type a nonsense model, send a message: the conversation shows an error entry containing the CLI's own message (this exercises Task 6).
+4. Type a nonsense model, send a message: the conversation shows an error entry containing the CLI's own message (this exercises Task 5).
 
 - [ ] **Step 8: Typecheck, lint, and full frontend suite**
 
@@ -2068,17 +1995,17 @@ git commit -m "feat(ui): add a per-session model picker to the conversation head
 
 ---
 
-### Task 10: Header space reclamation and model in the session list
+### Task 9: Header space reclamation and model in the session list
 
 **Files:**
 - Modify: `apps/vibedeckx-ui/components/agent/agent-conversation.tsx:726-770` (connection status)
 - Modify: `apps/vibedeckx-ui/components/agent/session-history-dropdown.tsx:387-395` (row tooltip)
 
 **Interfaces:**
-- Consumes: `BranchSessionSummary.model` (Task 8); the header layout from Task 9.
+- Consumes: `BranchSessionSummary.model` (Task 7); the header layout from Task 8.
 - Produces: no new exports.
 
-**Why:** Task 9 added a fifth control to a `h-10` header. The connection status currently renders an icon *and* a word, and the word is least informative in the expected state. Collapsing it to an icon reclaims the space. The catch: the five status states map to only three icon appearances — `Connecting` and `Reconnecting` are both amber pulsing `Wifi`, and `Disconnected` vs `Remote disconnected` differ only in color. Dropping the text without a tooltip would destroy real information, so `statusText` (already computed) moves into `title`.
+**Why:** Task 8 added a fifth control to a `h-10` header. The connection status currently renders an icon *and* a word, and the word is least informative in the expected state. Collapsing it to an icon reclaims the space. The catch: the five status states map to only three icon appearances — `Connecting` and `Reconnecting` are both amber pulsing `Wifi`, and `Disconnected` vs `Remote disconnected` differ only in color. Dropping the text without a tooltip would destroy real information, so `statusText` (already computed) moves into `title`.
 
 - [ ] **Step 1: Collapse the connection status to an icon with a tooltip**
 
@@ -2155,7 +2082,7 @@ git commit -m "feat(ui): collapse connection status to an icon and show session 
 
 ## Known Follow-Ups (explicitly out of scope)
 
-- **Mid-session model switching.** The DB column is updatable and `updateModel` exists, but nothing calls it. Codex could support this without a respawn via `thread/settings/update` (the params include `model` and `effort`), but that method's wire format was never verified — only its TypeScript binding names were read out of the codex binary. Claude would need a full process restart either way.
+- **Mid-session model switching.** The column is a plain updatable `TEXT` column, so this needs no migration — only a repository update method and a route. Codex could support it without a respawn via `thread/settings/update` (the params include `model` and `effort`), but that method's wire format was never verified — only its TypeScript binding names were read out of the codex binary. Claude would need a full process restart either way.
 - **Nested JSON in codex error messages.** `turn.error.message` arrives as a JSON string wrapped inside the message field, so the user sees a raw blob rather than the readable sentence inside it. This is a pre-existing issue affecting all codex server errors, not just model errors.
 - **`CodexProvider.lastPermissionMode`.** A module-scope singleton holding per-session state written on every spawn (`codex-provider.ts:46, 72`) and read later (`:397`). This plan deliberately avoids the pattern for `model`, but the existing `permissionMode` leak remains.
 - **`/api/agent-providers` scoping.** Its `available` field is computed from the front server's local `detectBinary()`, which is wrong under SaaS deployments where a reverse-connect worker does the spawning. The "no validation" stance makes this harmless for model selection, but the field is still misleading (`review-dialog.tsx:20` already hardcodes a `available: true` fallback around it).
