@@ -118,6 +118,12 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
   } as AgentSession;
 
   const created: AgentSession[] = [];
+  // Records every persisted model write so a "cleared in memory only" bug —
+  // which would silently come back on the next server restart, since
+  // restoreSessionsFromDb re-reads the row — can't pass.
+  const updateModel = vi.fn(async (id: string, model: string | null) => {
+    if (id === "s-src") source.model = model;
+  });
   const storage = {
     agentSessions: {
       getAll: async () => [source],
@@ -127,6 +133,7 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       updateStatus: vi.fn(async () => undefined),
       updateAgentType: vi.fn(async () => undefined),
+      updateModel,
       upsertEntry: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
       listByBranch: async () => created,
@@ -137,7 +144,7 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
     },
   } as unknown as Storage;
 
-  return { storage, created };
+  return { storage, created, source, updateModel };
 }
 
 describe("model survives every respawn path", () => {
@@ -174,7 +181,12 @@ describe("model survives every respawn path", () => {
     expect(manager.getSession(newId)?.model).toBe("opus");
   });
 
-  it("branchSession keeps the model when the agent type is overridden", async () => {
+  it("branchSession clears the model when the agent type is overridden", async () => {
+    // A model name is agent-specific: "opus" is meaningless to Codex, so
+    // inheriting it would produce a branch that fails every turn with a locked
+    // chip and no way to clear it. Falling back to the Codex default is the
+    // only usable outcome. (This is not validation — nothing inspects the
+    // string; only the fact that the agent changed matters.)
     const { storage, created } = makeSeededStorage({ model: "opus" });
     const manager = new AgentSessionManager(storage);
     await manager.restoreSessionsFromDb();
@@ -182,20 +194,66 @@ describe("model survives every respawn path", () => {
     const result = await manager.branchSession("s-src", "codex", { upToEntryIndex: 1 });
     const newId = (result as { ok: true; sessionId: string }).sessionId;
 
-    // The model is copied verbatim even across agents — it is never validated,
-    // so a claude alias landing on a codex session simply fails at the CLI.
-    expect(created.find((r) => r.id === newId)?.model).toBe("opus");
+    expect(created.find((r) => r.id === newId)?.model ?? null).toBeNull();
+    expect(manager.getSession(newId)?.model ?? null).toBeNull();
   });
 
-  it("switchAgentType leaves the model untouched", async () => {
-    // switchAgentType mutates the existing RunningSession rather than building
-    // a new one, so it inherits session.model for free — this locks that in
-    // against a future refactor that rebuilds the object.
-    const { storage } = makeSeededStorage({ model: "opus" });
+  it("branchSession still inherits the model when the override names the same agent", async () => {
+    // The override is only a signal that the agent *changed*; naming the agent
+    // the session already uses is a no-op and must not cost the user's model.
+    const { storage, created } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    const result = await manager.branchSession("s-src", "claude-code", { upToEntryIndex: 1 });
+    const newId = (result as { ok: true; sessionId: string }).sessionId;
+
+    expect(created.find((r) => r.id === newId)?.model).toBe("opus");
+    expect(manager.getSession(newId)?.model).toBe("opus");
+  });
+
+  it("switchAgentType clears the model, in memory and in the DB", async () => {
+    // Same reason as the branch override: the session keeps its identity but
+    // changes CLI, so the inherited name can only spawn a broken process.
+    // Persisting matters — restoreSessionsFromDb re-reads the row, so a
+    // memory-only clear would resurrect "opus" on the next server restart.
+    const { storage, updateModel, source } = makeSeededStorage({ model: "opus" });
     const manager = new AgentSessionManager(storage);
     await manager.restoreSessionsFromDb();
 
     expect(await manager.switchAgentType("s-src", "codex")).toBe("ok");
-    expect(manager.getSession("s-src")?.model).toBe("opus");
+    expect(manager.getSession("s-src")?.model ?? null).toBeNull();
+    expect(updateModel).toHaveBeenCalledWith("s-src", null);
+    expect(source.model ?? null).toBeNull();
+  });
+
+  it("switchAgentType says so in the conversation when it clears a model", async () => {
+    const { storage } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    await manager.switchAgentType("s-src", "codex");
+
+    const systemEntry = manager
+      .getMessages("s-src")
+      .filter(Boolean)
+      .find((m) => m?.type === "system" && m.content?.includes("Coding agent switched"));
+    expect(systemEntry?.content).toContain("Model reset to the default");
+    expect(systemEntry?.content).toContain("opus");
+  });
+
+  it("switchAgentType leaves the announcement plain when there was no model", async () => {
+    const { storage, updateModel } = makeSeededStorage({});
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    await manager.switchAgentType("s-src", "codex");
+
+    const systemEntry = manager
+      .getMessages("s-src")
+      .filter(Boolean)
+      .find((m) => m?.type === "system" && m.content?.includes("Coding agent switched"));
+    expect(systemEntry?.content).not.toContain("Model reset");
+    expect(updateModel).not.toHaveBeenCalled();
   });
 });

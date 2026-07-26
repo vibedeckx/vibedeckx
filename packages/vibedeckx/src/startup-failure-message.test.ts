@@ -23,6 +23,17 @@ describe("buildStartupFailureMessage", () => {
     expect(msg).toContain("doesn't seem to be installed");
   });
 
+  it("keeps the install hint when only stderr spoke — npx failed to fetch the CLI", () => {
+    // Regression: suppressing the hint on ANY output dropped it in the case it
+    // was written for. With no native binary the spawn falls back to npx; with
+    // no network npm writes `npm ERR! …` to STDERR and exits non-zero, which is
+    // the primary "not installed" path after ENOENT. The user needs the hint
+    // (which names the npx-needs-network caveat) alongside the npm noise.
+    const msg = buildStartupFailureMessage("claude-code", "npm ERR! network", "");
+    expect(msg).toContain("doesn't seem to be installed");
+    expect(msg).toContain("npm ERR! network");
+  });
+
   it("includes both streams when both produced output", () => {
     const msg = buildStartupFailureMessage("claude-code", "stderr line", "stdout line");
     expect(msg).toContain("stderr line");

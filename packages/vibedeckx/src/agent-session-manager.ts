@@ -55,9 +55,18 @@ import {
  * stdout tail the user would see only a "did you install it?" hint for a CLI
  * that is plainly installed.
  *
- * The install hint is suppressed whenever the process produced any output at
- * all: a process that printed a diagnosis clearly launched, so the problem is
- * its arguments, not its absence.
+ * The install hint is suppressed only when the agent spoke on STDOUT: that is
+ * the stream a launched CLI diagnoses itself on, so output there means the
+ * binary plainly exists and the problem is its arguments. STDERR is NOT
+ * evidence of that — the primary "not installed" path after ENOENT is the npx
+ * fallback failing to fetch the package, which writes `npm ERR! …` to stderr
+ * and exits non-zero. Keying off stderr would drop the hint in exactly the
+ * case it was written for. Codex is a second instance: its JSON-RPC `response`
+ * frames parse to zero events, so a codex process that dies after `initialize`
+ * has an unparsed stdout tail full of protocol noise and no hint would be
+ * lost — but that noise is on stdout, which is the correct signal.
+ *
+ * Hint and details are independent: both can appear in one message.
  */
 export function buildStartupFailureMessage(
   agentType: AgentType,
@@ -67,14 +76,12 @@ export function buildStartupFailureMessage(
   const provider = getProvider(agentType);
   const name = provider.getDisplayName();
   const details = [stdoutTail.trim(), stderrTail.trim()].filter(Boolean).join("\n");
+  const hint = stdoutTail.trim() ? undefined : provider.getInstallHint?.();
 
   let msg = `Couldn't start ${name}.`;
-  if (!details) {
-    const hint = provider.getInstallHint?.();
-    if (hint) msg += `\n\n${hint}`;
-    return msg;
-  }
-  return `${msg}\n\nDetails:\n${details}`;
+  if (hint) msg += `\n\n${hint}`;
+  if (details) msg += `\n\nDetails:\n${details}`;
+  return msg;
 }
 
 // ============ Session Store Types ============
@@ -2085,11 +2092,24 @@ export class AgentSessionManager {
     session.agentType = agentType;
     if (!session.skipDb) await this.storage.agentSessions.updateAgentType(sessionId, agentType);
 
+    // A model name is agent-specific by definition: "opus" is meaningless to
+    // Codex, and carrying it across would spawn `codex -c model="opus"` and
+    // fail every turn with no UI to clear it (the chip is locked once the
+    // session exists). Drop back to the new CLI's own default instead.
+    const clearedModel = session.model;
+    if (clearedModel !== null) {
+      session.model = null;
+      if (!session.skipDb) await this.storage.agentSessions.updateModel(sessionId, null);
+    }
+
     // Visible confirmation in the conversation; replayed to the new agent as
     // part of the context like other system entries ("Session stopped by user.")
     await this.pushEntry(sessionId, {
       type: "system",
-      content: `Coding agent switched to ${agentType === "codex" ? "Codex" : "Claude Code"}.`,
+      content: `Coding agent switched to ${agentType === "codex" ? "Codex" : "Claude Code"}.`
+        + (clearedModel !== null
+          ? ` Model reset to the default (${clearedModel} is not a ${agentType === "codex" ? "Codex" : "Claude Code"} model).`
+          : ""),
       timestamp: Date.now(),
     });
 
@@ -2603,7 +2623,15 @@ export class AgentSessionManager {
     // A branch continues the same conversation, so it continues on the same
     // model. This is also how a user "changes model mid-session": branch from
     // a stop point and pick a new model on the branch.
-    const model = source?.model ?? sourceRow?.model ?? null;
+    //
+    // Except when the branch switches agent: a model name is agent-specific,
+    // so inheriting "opus" onto a Codex branch would spawn a session that
+    // fails every turn and can't be fixed (a branch is locked on arrival).
+    // Fall back to the new CLI's own default instead.
+    const sourceAgentType = source?.agentType ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
+    const model = agentType === sourceAgentType
+      ? (source?.model ?? sourceRow?.model ?? null)
+      : null;
 
     const newId = opts.sessionId ?? randomUUID();
     await this.storage.agentSessions.create({

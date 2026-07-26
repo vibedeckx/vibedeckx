@@ -58,7 +58,12 @@ describe("ModelPicker rendering", () => {
     // change. The locked form must not be a control at all.
     expect(container.querySelector("button")).toBeNull();
     expect(container.textContent).toContain("opus");
-    expect(container.querySelector("[title]")?.getAttribute("title")).toContain("branch to change");
+    // The tooltip must name an action that actually works. Branching copies
+    // the parent's model and accepts no override, so it cannot change it;
+    // starting a new conversation is the only path to a live picker.
+    const tooltip = container.querySelector("[title]")?.getAttribute("title");
+    expect(tooltip).toContain("start a new conversation to change");
+    expect(tooltip).not.toContain("branch");
   });
 
   it("shows Default rather than nothing when locked with no model", async () => {

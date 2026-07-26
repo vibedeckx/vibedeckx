@@ -58,7 +58,11 @@ export function ModelPicker({ agentType, models, value, onChange, locked }: Mode
     return (
       <span
         className="text-xs text-muted-foreground px-1"
-        title="Fixed for this session — branch to change"
+        // Not "branch to change": branching is the one action that cannot
+        // change the model. branchSession copies the parent's model and takes
+        // no override, and the branch is locked the moment it exists. A new
+        // conversation is the only place the picker is live.
+        title="Fixed for this session — start a new conversation to change"
       >
         {label}
       </span>

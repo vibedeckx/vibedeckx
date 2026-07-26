@@ -636,6 +636,16 @@ export interface Storage {
     updateStatusPreservingTimestamp: (id: string, status: AgentSessionStatus) => Promise<void>;
     updatePermissionMode: (id: string, mode: string) => Promise<void>;
     updateAgentType: (id: string, agent_type: string) => Promise<void>;
+    /**
+     * Set (or clear, with null) the per-session model.
+     *
+     * The model is otherwise fixed at creation; this exists for the one path
+     * that must change it after the fact — switching a session's agent type,
+     * where the inherited name is definitionally wrong (`opus` means nothing
+     * to Codex) and must be cleared back to the new CLI's default. Never
+     * validated, like every other model write.
+     */
+    updateModel: (id: string, model: string | null) => Promise<void>;
     updateTitle: (id: string, title: string | null) => Promise<void>;
     /** Mark or unmark the session as favorited. Does not touch updated_at. */
     setFavorited: (id: string, favorited: boolean) => Promise<void>;

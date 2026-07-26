@@ -144,6 +144,13 @@ export const createAgentSessionRepos = (
         .execute();
     },
 
+    updateModel: async (id, model) => {
+      await kdb.updateTable("agent_sessions")
+        .set({ model, updated_at: h.nowMs() })
+        .where("id", "=", id)
+        .execute();
+    },
+
     updateTitle: async (id, title) => {
       await kdb.updateTable("agent_sessions")
         .set({ title, updated_at: h.nowMs() })

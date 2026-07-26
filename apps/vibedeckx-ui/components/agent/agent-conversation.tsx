@@ -261,10 +261,17 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
   }, [session?.agentType]);
 
-  // Reset paste state when workspace changes — pastes are scoped to a single draft.
+  // Reset per-workspace draft state when the workspace changes.
+  //
+  // AgentConversation renders without a `key` (app/page.tsx), so it does NOT
+  // remount on a project/branch switch — anything scoped to one workspace has
+  // to be cleared here by hand. pendingModel is such state: picking "opus" in
+  // workspace A without sending, then switching to B and sending, would
+  // otherwise spawn B's session on A's model.
   useEffect(() => {
     setPastes([]);
     setNextPasteId(1);
+    setPendingModel(null);
   }, [projectId, branch]);
 
   // Arm the "title pending" state the moment the user's first message becomes
@@ -683,7 +690,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   onValueChange={async (v) => {
                     const newType = v as AgentType;
                     if (!session) {
-                      // No session yet — just pick the agent for the upcoming one
+                      // No session yet — just pick the agent for the upcoming one.
+                      // A model name belongs to one agent ("opus" means nothing
+                      // to Codex), so a pending pick from the previous agent has
+                      // to go with it, or the first message would spawn a
+                      // session that fails every turn with a locked chip.
+                      // Mirrors the backend's switchAgentType / branch-override
+                      // clears.
+                      if (newType !== agentType) setPendingModel(null);
                       setAgentType(newType);
                       return;
                     }

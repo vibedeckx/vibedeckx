@@ -76,6 +76,51 @@ describe("getFreshToken", () => {
 });
 
 describe("createNewAgentSession", () => {
+  // The only seam the model crosses that neither side covers: the hook test
+  // mocks this function out, the route test injects a payload directly.
+  // Deleting `model` from the JSON.stringify below would leave every other
+  // test green and typecheck clean while the whole feature went inert.
+  it("puts the chosen model in the request body", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ session: { id: "s1" }, messages: [] }),
+    } as Response);
+    global.fetch = fetchMock;
+
+    await createNewAgentSession("p1", "dev1", "edit", "claude-code", false, "opus");
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({
+      branch: "dev1",
+      permissionMode: "edit",
+      agentType: "claude-code",
+      model: "opus",
+    });
+
+    global.fetch = originalFetch;
+  });
+
+  it("sends an unvalidated model string verbatim", async () => {
+    // No whitelist anywhere: a name the CLI will reject must still reach it.
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ session: { id: "s1" }, messages: [] }),
+    } as Response);
+    global.fetch = fetchMock;
+
+    await createNewAgentSession("p1", null, "edit", "codex", false, "totally-made-up");
+
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string).model).toBe(
+      "totally-made-up",
+    );
+
+    global.fetch = originalFetch;
+  });
+
   it("throws ResidentLimitError with running session details when backend returns resident_limit_reached", async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue({
