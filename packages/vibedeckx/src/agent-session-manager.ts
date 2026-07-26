@@ -96,6 +96,12 @@ interface RunningSession {
   skipDb: boolean; // Skip DB operations for remote path-based sessions
   permissionMode: "plan" | "edit"; // Claude Code permission mode
   agentType: AgentType; // Which agent provider to use
+  /**
+   * Per-session agent model, or null for the CLI default. Fixed for the life
+   * of the session (a different model means branching a new session) and
+   * re-read from the DB on every respawn path.
+   */
+  model: string | null;
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
   /**
    * Turn-completion state machine (see turn-completion.ts): tracks live
@@ -522,13 +528,14 @@ export class AgentSessionManager {
     agentType: AgentType = "claude-code",
     announceRunning: boolean = false,
     force: boolean = false,
-    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig } = {},
+    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null } = {},
   ): Promise<string> {
     await this.ensureResidentCapacity({ projectId, branch }, { force });
 
     // The caller may supply the id so it can mint a session-scoped token before spawn.
     const sessionId = opts.sessionId ?? randomUUID();
     const branchKey = branch ?? "";
+    const model = opts.model?.trim() ? opts.model.trim() : null;
 
     // Calculate absolute worktree path
     const absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
@@ -540,6 +547,7 @@ export class AgentSessionManager {
         branch: branchKey,
         permission_mode: permissionMode,
         agent_type: agentType,
+        model,
       });
     }
 
@@ -573,6 +581,7 @@ export class AgentSessionManager {
       permissionMode,
       crossRemoteMcp: opts.crossRemoteMcp,
       agentType,
+      model,
       completion: new TurnCompletionLedger(),
       graceTimer: null,
       eventChain: Promise.resolve(),
@@ -705,7 +714,7 @@ export class AgentSessionManager {
       return;
     }
 
-    const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp);
+    const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp, session.model);
 
     // Log the agent CLI version once per binary so protocol failures can be
     // attributed to an agent version. npx runs are logged as such (probing
@@ -2483,6 +2492,7 @@ export class AgentSessionManager {
         skipDb: false,
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
+        model: dbSession.model ?? null,
         completion: new TurnCompletionLedger(),
       graceTimer: null,
       eventChain: Promise.resolve(),
@@ -2567,6 +2577,10 @@ export class AgentSessionManager {
     const agentType = agentTypeOverride
       ?? source?.agentType
       ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
+    // A branch continues the same conversation, so it continues on the same
+    // model. This is also how a user "changes model mid-session": branch from
+    // a stop point and pick a new model on the branch.
+    const model = source?.model ?? sourceRow?.model ?? null;
 
     const newId = opts.sessionId ?? randomUUID();
     await this.storage.agentSessions.create({
@@ -2575,6 +2589,7 @@ export class AgentSessionManager {
       branch: branch ?? "",
       permission_mode: permissionMode,
       agent_type: agentType,
+      model,
     });
     // create() writes status='running' (it exists for the spawn path); a
     // branched session is dormant until the first user message wakes it.
@@ -2618,6 +2633,7 @@ export class AgentSessionManager {
       skipDb: false,
       permissionMode,
       agentType,
+      model,
       completion: new TurnCompletionLedger(),
       graceTimer: null,
       eventChain: Promise.resolve(),
