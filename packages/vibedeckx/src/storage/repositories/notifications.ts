@@ -234,5 +234,20 @@ export const createNotificationRepos = (
         }))
         .execute();
     },
+
+    // DO NOTHING, not DO UPDATE: see the contract note in types.ts for why a
+    // baseline must never overwrite an existing cursor.
+    initializeIfAbsent: async (remoteServerId, remoteSessionId, lastSeq) => {
+      const result = await kdb.insertInto("notification_sync_cursors")
+        .values({
+          remote_server_id: remoteServerId,
+          remote_session_id: remoteSessionId,
+          last_seq: lastSeq,
+          updated_at: Date.now(),
+        })
+        .onConflict((oc) => oc.columns(["remote_server_id", "remote_session_id"]).doNothing())
+        .executeTakeFirst();
+      return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
+    },
   },
 });

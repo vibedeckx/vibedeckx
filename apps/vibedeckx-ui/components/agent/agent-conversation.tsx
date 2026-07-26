@@ -102,6 +102,15 @@ interface AgentConversationProps {
   onAgentModeChange?: (mode: ExecutionMode) => void;
   onTaskCompleted?: () => void;
   onSessionStarted?: (session: AgentSession) => void;
+  /**
+   * The session this window is actually DISPLAYING, whenever it changes.
+   *
+   * Distinct from `sessionId`, which is only the explicit `?session=` selection:
+   * with no URL param this component still resolves and renders the branch's
+   * most recent session. Consumers that need "what the user is looking at"
+   * (notification auto-read) must use this, not the URL.
+   */
+  onActiveSessionChange?: (sessionId: string | null) => void;
   onSessionTitleUpdated?: (sessionId: string, title: string) => void;
   onStatusChange?: () => void;
   onNewConversation?: () => void;
@@ -136,7 +145,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onStatusChange, onNewConversation }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -211,6 +220,21 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     session?.id ?? null,
     (id) => setSessionUrlParam?.(id),
   );
+
+  // Report what this window is actually showing. `session` is the RESOLVED
+  // session — which is non-null for a branch's auto-restored conversation even
+  // when no `?session=` was ever set — so consumers get real visibility rather
+  // than "did the URL name a session".
+  const activeSessionId = session?.id ?? null;
+  useEffect(() => {
+    onActiveSessionChange?.(activeSessionId);
+  }, [activeSessionId, onActiveSessionChange]);
+
+  // On unmount (tab/workspace switch) nothing is on screen any more. Reported
+  // through a ref so this fires ONLY on unmount, not on every id change.
+  const onActiveSessionChangeRef = useRef(onActiveSessionChange);
+  onActiveSessionChangeRef.current = onActiveSessionChange;
+  useEffect(() => () => onActiveSessionChangeRef.current?.(null), []);
 
   // Fetch available agent providers on mount
   useEffect(() => {

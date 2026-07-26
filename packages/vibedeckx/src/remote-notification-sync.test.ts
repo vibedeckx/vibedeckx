@@ -42,15 +42,22 @@ describe("RemoteNotificationSync", () => {
 
   const ok = (sessions: unknown[]): ProxyResult => ({ ok: true, status: 200, data: { sessions } });
 
-  const proxy = vi.fn(
-    async (
-      serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
-      body?: unknown, opts?: unknown,
-    ): Promise<ProxyResult> => {
-      calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
-      return respond(body as QueryBody);
-    },
-  );
+  /**
+   * Default transport: record the call, answer via the per-test `respond`.
+   * Re-installed in beforeEach — a test that swaps in its own
+   * `mockImplementation` (the concurrency tests do) would otherwise leak it
+   * into every later test, since `mockClear` clears calls but NOT the
+   * implementation.
+   */
+  const defaultProxyImpl = async (
+    serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
+    body?: unknown, opts?: unknown,
+  ): Promise<ProxyResult> => {
+    calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+    return respond(body as QueryBody);
+  };
+
+  const proxy = vi.fn(defaultProxyImpl);
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-remote-sync-"));
@@ -63,7 +70,8 @@ describe("RemoteNotificationSync", () => {
     bus.subscribe((e) => seen.push(e));
     notifications = new NotificationService(storage, bus);
     calls = [];
-    proxy.mockClear();
+    proxy.mockReset();
+    proxy.mockImplementation(defaultProxyImpl);
     respond = () => ok([]);
     sync = new RemoteNotificationSync({
       storage,
@@ -369,6 +377,92 @@ describe("RemoteNotificationSync", () => {
       expect(proxy).not.toHaveBeenCalled();
     });
 
+    /**
+     * The race: a sweep reads "cursor unset", issues its headOnly query, and the
+     * response is computed by the worker only AFTER the user's new turn has
+     * already started AND completed. That stale head therefore sits *past* the
+     * new milestone. Because event-import cursor advancement is MAX-guarded, a
+     * cursor pushed forward here can never be walked back — the notification
+     * would be swallowed permanently.
+     *
+     * A baseline is a ONE-TIME INITIALIZATION, so whichever caller establishes it
+     * first wins and every later baseline write is discarded.
+     */
+    it("a slow sweep baseline cannot clobber a baseline prepareForNewTurn already recorded", async () => {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_now");
+      await sync.extendWatch("remote-srv-p1-r1");
+
+      // Hold the sweep's headOnly response open.
+      let releaseSweep!: () => void;
+      const sweepGate = new Promise<void>((resolve) => { releaseSweep = resolve; });
+      let sweepQueryStarted!: () => void;
+      const sweepStarted = new Promise<void>((resolve) => { sweepQueryStarted = resolve; });
+
+      let firstCall = true;
+      respond = () => ok([]); // replaced below
+      proxy.mockImplementation(async (
+        serverId: string, url: string, _k: string, method: string, apiPath: string,
+        body?: unknown, opts?: unknown,
+      ) => {
+        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        if (firstCall) {
+          firstCall = false;
+          sweepQueryStarted();
+          await sweepGate;
+          // By the time the worker answers, the user's new turn has finished and
+          // written seq 6 — so this head is already PAST the new milestone.
+          return ok([{ sessionId: "r1", events: [], headCursor: 6, nextCursor: 6, hasMore: false }]);
+        }
+        // prepareForNewTurn's own baseline: the head before the new turn ran.
+        return ok([{ sessionId: "r1", events: [], headCursor: 5, nextCursor: 5, hasMore: false }]);
+      });
+
+      const sweep = sync.syncAll({ includeExpired: false });
+      await sweepStarted;
+
+      // User starts a turn while the sweep is still in flight.
+      expect(await sync.prepareForNewTurn("remote-srv-p1-r1")).toBe(true);
+      expect(await storage.notificationSyncCursors.get(srv, "r1")).toBe(5);
+
+      releaseSweep();
+      await sweep;
+
+      // The stale head is discarded — the cursor still sits before the new turn.
+      expect(await storage.notificationSyncCursors.get(srv, "r1")).toBe(5);
+
+      // ...so the new turn's milestone is still delivered.
+      proxy.mockImplementation(async (
+        serverId: string, url: string, _k: string, method: string, apiPath: string,
+        body?: unknown, opts?: unknown,
+      ) => {
+        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        return ok([{
+          sessionId: "r1",
+          events: [workerEvent(6, { id: "session:r1:turn:6:result-ready" })],
+          headCursor: 6, nextCursor: 6, hasMore: false,
+        }]);
+      });
+      await sync.syncAll({ includeExpired: false });
+      expect((await inbox()).map((n) => n.id)).toEqual([
+        `remote:${srv}:session:r1:turn:6:result-ready`,
+      ]);
+    });
+
+    it("the reverse order is equally safe: a sweep baseline blocks a later stale one", async () => {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_now");
+
+      respond = () => ok([{ sessionId: "r1", events: [], headCursor: 3, nextCursor: 3, hasMore: false }]);
+      await sync.syncAll({ includeExpired: true });
+      expect(await storage.notificationSyncCursors.get(srv, "r1")).toBe(3);
+
+      // A late baseline attempt carrying a further-advanced head must not apply.
+      respond = () => ok([{ sessionId: "r1", events: [], headCursor: 99, nextCursor: 99, hasMore: false }]);
+      await sync.prepareForNewTurn("remote-srv-p1-r1");
+      expect(await storage.notificationSyncCursors.get(srv, "r1")).toBe(3);
+    });
+
     it("extends the watch window so the new turn's completion is polled for", async () => {
       const srv = await linkRemote();
       await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_start");
@@ -411,6 +505,139 @@ describe("RemoteNotificationSync", () => {
 
       expect(calls).toHaveLength(1);
       expect(calls[0].serverId).toBe(srvA);
+    });
+
+    /**
+     * The 30-minute watch window is an idle timeout, not a work deadline. An
+     * agent turn routinely outlives it while the bus sees nothing between
+     * "running" and "completed", so a mapping that lapsed mid-turn would stop
+     * being polled exactly when its milestone is about to appear.
+     */
+    /**
+     * Only `Date` is faked: promises and the storage layer keep working, but
+     * both the persisted watch window and the candidate query see the advanced
+     * clock — which is what lets a turn genuinely outlive its window with no
+     * intervening bus traffic to re-extend it.
+     */
+    async function startLongRunningTurn() {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_start");
+      sync.setEventBus(bus);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const t0 = Date.now();
+      // The remote stream bridges the turn's start onto the bus.
+      bus.emit({
+        type: "session:status", projectId: "p1", branch: "dev",
+        sessionId: "remote-srv-p1-r1", status: "running",
+      });
+      await vi.waitFor(async () => {
+        const m = await storage.remoteSessionMappings.getByRemote(srv, "r1");
+        expect(m!.notification_watch_until).not.toBeNull();
+      });
+
+      // The turn runs for hours, silently: no frames, so nothing re-extends.
+      vi.setSystemTime(t0 + WATCH_WINDOW_MS + 60 * 60 * 1000);
+
+      // Precondition: the persisted window really has lapsed.
+      const lapsed = await storage.remoteSessionMappings.getNotificationSyncCandidates({
+        now: Date.now(), includeExpired: false,
+      });
+      expect(lapsed).toEqual([]);
+      return srv;
+    }
+
+    it("keeps polling a session whose turn outlives the watch window", async () => {
+      await startLongRunningTurn();
+      try {
+        await sync.syncAll({ includeExpired: false });
+        // Reached ONLY through the liveness union — the persisted window is gone.
+        expect(calls).toHaveLength(1);
+        expect(calls[0].body.sessions.map((s) => s.sessionId)).toEqual(["r1"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("delivers the milestone of a long turn that finishes after the window lapsed", async () => {
+      const srv = await startLongRunningTurn();
+      try {
+        respond = () => ok([{ sessionId: "r1", events: [workerEvent(1)], headCursor: 1, nextCursor: 1, hasMore: false }]);
+        await sync.syncAll({ includeExpired: false });
+        expect((await inbox()).map((n) => n.id)).toEqual([
+          `remote:${srv}:session:r1:turn:1:result-ready`,
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("releases liveness when the session stops, falling back to the watch window", async () => {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_start");
+      sync.setEventBus(bus);
+
+      const running = {
+        type: "session:status" as const, projectId: "p1", branch: "dev",
+        sessionId: "remote-srv-p1-r1",
+      };
+      bus.emit({ ...running, status: "running" });
+      bus.emit({ ...running, status: "stopped" });
+
+      // The stop's own activity extended the window, so it IS still polled —
+      // but via the persisted window, not the liveness set.
+      const mapping = await storage.remoteSessionMappings.getByRemote(srv, "r1");
+      expect(mapping!.notification_watch_until!).toBeGreaterThan(Date.now());
+
+      // Prove the liveness set released it: with the window forced expired the
+      // session is no longer a candidate.
+      await storage.notificationSyncCursors.set(srv, "r1", 0);
+      const expiredOnly = await storage.remoteSessionMappings.getNotificationSyncCandidates({
+        now: mapping!.notification_watch_until! + 1,
+        includeExpired: false,
+      });
+      expect(expiredOnly).toEqual([]);
+    });
+
+    it("extends the watch window on observed remote activity, throttled", async () => {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_start");
+      sync.setEventBus(bus);
+
+      const before = Date.now();
+      bus.emit({
+        type: "session:taskCompleted", projectId: "p1", branch: "dev",
+        sessionId: "remote-srv-p1-r1",
+      });
+      await vi.waitFor(async () => {
+        const m = await storage.remoteSessionMappings.getByRemote(srv, "r1");
+        expect(m!.notification_watch_until!).toBeGreaterThanOrEqual(before + WATCH_WINDOW_MS - 5_000);
+      });
+
+      // A burst of further frames must not become a DB write each.
+      const spy = vi.spyOn(storage.remoteSessionMappings, "extendNotificationWatch");
+      for (let i = 0; i < 25; i++) {
+        bus.emit({
+          type: "session:process", projectId: "p1", branch: "dev",
+          sessionId: "remote-srv-p1-r1", alive: true,
+        });
+      }
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it("ignores bus activity for local (non-remote) sessions", async () => {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_start");
+      sync.setEventBus(bus);
+
+      bus.emit({
+        type: "session:status", projectId: "p1", branch: "dev",
+        sessionId: "plain-local-session", status: "running",
+      });
+      await sync.syncAll({ includeExpired: false });
+      // The local session has no mapping, and the remote one is unwatched.
+      expect(proxy).not.toHaveBeenCalled();
     });
 
     it("does nothing (and makes no request) when there are no mappings", async () => {

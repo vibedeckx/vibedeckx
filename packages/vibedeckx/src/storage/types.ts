@@ -751,8 +751,22 @@ export interface Storage {
   notificationSyncCursors: {
     get: (remoteServerId: string, remoteSessionId: string) => Promise<number | undefined>;
     getMany: (remoteServerId: string, remoteSessionIds: string[]) => Promise<Map<string, number>>;
-    /** Monotonic: never moves a cursor backward. */
+    /** Monotonic: never moves a cursor backward. Use for IMPORT advancement. */
     set: (remoteServerId: string, remoteSessionId: string, lastSeq: number) => Promise<void>;
+    /**
+     * Record a `from_now` baseline exactly once. Returns true only when this
+     * call created the cursor; an existing cursor is left completely untouched.
+     *
+     * NOT `set`: a baseline is a one-time initialization, and its value is a
+     * head read at some earlier instant. Two callers can legitimately race to
+     * establish it (a background sweep and `prepareForNewTurn`), and the slower
+     * one's head may have been computed AFTER a new turn's milestone landed.
+     * Applying that stale head would push the cursor past the milestone — and
+     * because import advancement is MAX-guarded, it could never be walked back,
+     * silently losing the notification forever. First writer wins; the DB
+     * arbitrates, so this holds across processes too.
+     */
+    initializeIfAbsent: (remoteServerId: string, remoteSessionId: string, lastSeq: number) => Promise<boolean>;
   };
   searchCache: {
     /**

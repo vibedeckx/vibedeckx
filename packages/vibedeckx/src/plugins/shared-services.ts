@@ -228,6 +228,9 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     reverseConnectManager,
   });
   fastify.decorate("remoteNotificationSync", remoteNotificationSync);
+  // Observe live remote activity: keeps a running session's mapping pollable
+  // even when its turn outlives the watch window without emitting anything.
+  remoteNotificationSync.setEventBus(eventBus);
 
   // A worker that just reconnected may hold milestones produced while it was
   // unreachable — sweep it immediately instead of waiting for the periodic tick,

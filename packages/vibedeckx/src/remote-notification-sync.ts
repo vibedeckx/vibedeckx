@@ -1,3 +1,4 @@
+import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { NotificationService } from "./notification-service.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type {
@@ -31,6 +32,17 @@ const QUERY_TIMEOUT_MS = 15_000;
  * pass `includeExpired` to still recover events produced during downtime.
  */
 export const WATCH_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * Minimum spacing between watch extensions driven by observed activity. Remote
+ * streams can emit many frames per turn; without this every one would become a
+ * DB write. Far below WATCH_WINDOW_MS, so a steadily-active session never lets
+ * its window lapse.
+ */
+export const WATCH_EXTEND_THROTTLE_MS = 5 * 60 * 1000;
+
+/** Cap on the throttle bookkeeping map so a long-lived server can't leak. */
+const MAX_TRACKED_SESSIONS = 5_000;
 
 const SYNC_INTERVAL_MS = 60_000;
 
@@ -82,6 +94,16 @@ export class RemoteNotificationSync {
   private stopped = false;
   /** Serializes sweeps so a came-online sweep can't interleave with the tick. */
   private chain: Promise<void> = Promise.resolve();
+  /**
+   * Remote sessions this front currently believes are RUNNING. They are polled
+   * regardless of their persisted watch window: an agent turn can easily run
+   * longer than WATCH_WINDOW_MS while emitting nothing the bus can see, and a
+   * mapping that lapsed mid-turn would not be polled when the turn finally
+   * produces its milestone.
+   */
+  private activeRemoteSessions = new Set<string>();
+  /** sessionId → last activity-driven watch extension (see WATCH_EXTEND_THROTTLE_MS). */
+  private lastWatchExtend = new Map<string, number>();
 
   constructor(deps: RemoteNotificationSyncDeps) {
     this.storage = deps.storage;
@@ -102,6 +124,49 @@ export class RemoteNotificationSync {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.activeRemoteSessions.clear();
+    this.lastWatchExtend.clear();
+  }
+
+  /**
+   * Watch live remote activity (design §Mapping initialization and polling).
+   *
+   * The bus carries the remote stream's bridged `session:status` /
+   * `session:taskCompleted` frames plus this front's own emits for remote
+   * sessions, so it is the one place that sees a remote session start and stop
+   * without threading a callback through the WebSocket plumbing.
+   */
+  setEventBus(bus: EventBus): void {
+    bus.subscribe((event) => this.observeActivity(event));
+  }
+
+  private observeActivity(event: GlobalEvent): void {
+    const sessionId = (event as { sessionId?: string }).sessionId;
+    // Only remote-prefixed ids can have a mapping; local sessions drain locally.
+    if (!sessionId || !sessionId.startsWith("remote-")) return;
+
+    if (event.type === "session:status") {
+      if (event.status === "running") this.activeRemoteSessions.add(sessionId);
+      else this.activeRemoteSessions.delete(sessionId);
+    } else if (event.type === "session:taskCompleted" || event.type === "session:finished") {
+      // The turn produced its milestone; the watch window extended below is
+      // enough to carry the import, so liveness tracking can release it.
+      this.activeRemoteSessions.delete(sessionId);
+    }
+
+    const now = Date.now();
+    const last = this.lastWatchExtend.get(sessionId) ?? 0;
+    if (now - last < WATCH_EXTEND_THROTTLE_MS) return;
+    if (this.lastWatchExtend.size >= MAX_TRACKED_SESSIONS) this.pruneWatchBookkeeping(now);
+    this.lastWatchExtend.set(sessionId, now);
+    void this.extendWatch(sessionId);
+  }
+
+  /** Drop throttle entries older than a full window — they can only re-extend. */
+  private pruneWatchBookkeeping(now: number): void {
+    for (const [sessionId, at] of this.lastWatchExtend) {
+      if (now - at > WATCH_WINDOW_MS) this.lastWatchExtend.delete(sessionId);
+    }
   }
 
   /** Fire-and-forget sweep, queued behind any in-flight one. */
@@ -163,7 +228,11 @@ export class RemoteNotificationSync {
       console.warn(`[RemoteNotifications] baseline response for ${localSessionId} omitted the session`);
       return false;
     }
-    await this.storage.notificationSyncCursors.set(
+    // initializeIfAbsent, not set: a concurrent sweep may have been holding an
+    // older (or newer) head for this same session. First writer wins — see the
+    // storage contract. Either way a baseline now exists, so the turn is safe to
+    // start: the milestone it produces will be strictly after it.
+    await this.storage.notificationSyncCursors.initializeIfAbsent(
       mapping.remote_server_id, mapping.remote_session_id, head,
     );
     return true;
@@ -171,10 +240,7 @@ export class RemoteNotificationSync {
 
   /** Sweep every mapped remote server. */
   async syncAll(opts: { includeExpired: boolean }): Promise<void> {
-    const mappings = await this.storage.remoteSessionMappings.getNotificationSyncCandidates({
-      now: Date.now(),
-      includeExpired: opts.includeExpired,
-    });
+    const mappings = await this.candidates(opts);
     for (const [serverId, group] of groupByServer(mappings)) {
       await this.syncMappings(serverId, group);
     }
@@ -182,11 +248,34 @@ export class RemoteNotificationSync {
 
   /** Sweep one server — used when a reverse connection comes online. */
   async syncServer(remoteServerId: string, opts: { includeExpired: boolean }): Promise<void> {
-    const mappings = (await this.storage.remoteSessionMappings.getNotificationSyncCandidates({
+    const mappings = (await this.candidates(opts)).filter((m) => m.remote_server_id === remoteServerId);
+    if (mappings.length > 0) await this.syncMappings(remoteServerId, mappings);
+  }
+
+  /**
+   * Mappings this sweep should poll: the persisted watch set, plus any session
+   * currently believed to be running.
+   *
+   * The union is what keeps a turn longer than WATCH_WINDOW_MS covered. Its
+   * window is extended when the turn starts, but a long turn can go silent for
+   * hours; without this the mapping would lapse out of the periodic set and its
+   * eventual milestone would wait for a server restart or a remote reconnect.
+   */
+  private async candidates(opts: { includeExpired: boolean }): Promise<RemoteSessionMapping[]> {
+    const mappings = await this.storage.remoteSessionMappings.getNotificationSyncCandidates({
       now: Date.now(),
       includeExpired: opts.includeExpired,
-    })).filter((m) => m.remote_server_id === remoteServerId);
-    if (mappings.length > 0) await this.syncMappings(remoteServerId, mappings);
+    });
+    // A full sweep already covers everything.
+    if (opts.includeExpired || this.activeRemoteSessions.size === 0) return mappings;
+
+    const present = new Set(mappings.map((m) => m.local_session_id));
+    for (const localSessionId of this.activeRemoteSessions) {
+      if (present.has(localSessionId)) continue;
+      const mapping = await this.storage.remoteSessionMappings.getByLocal(localSessionId);
+      if (mapping) mappings.push(mapping);
+    }
+    return mappings;
   }
 
   private async syncMappings(remoteServerId: string, mappings: RemoteSessionMapping[]): Promise<void> {
@@ -245,7 +334,11 @@ export class RemoteNotificationSync {
         if (!session) continue;
 
         if ("headOnly" in request && request.headOnly) {
-          await this.storage.notificationSyncCursors.set(
+          // One-time initialization only. This head was read before the await
+          // above resolved; if a `prepareForNewTurn` established a baseline in
+          // the meantime, this value may already sit past a milestone that turn
+          // produced, and applying it would lose that notification permanently.
+          await this.storage.notificationSyncCursors.initializeIfAbsent(
             remoteServerId, mapping.remote_session_id, session.headCursor,
           );
           // Fall through to the next sweep for actual events: this page

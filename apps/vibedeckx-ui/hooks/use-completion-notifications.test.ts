@@ -79,6 +79,38 @@ describe('upsertNotification', () => {
   });
 });
 
+/**
+ * The hook can only be as correct as what it is handed. The original defect was
+ * purely a wiring one — `urlSessionId` (an explicit `?session=` selection) was
+ * passed as though it meant "visible" — so it lived entirely outside the hook's
+ * own tests. These guard the composition instead.
+ */
+describe('page wiring: visibility source', () => {
+  const read = async (rel: string) => {
+    const fs = await import('node:fs');
+    return fs.readFileSync(new URL(rel, import.meta.url), 'utf-8');
+  };
+
+  it('feeds the notification hook the rendered session, never the URL param', async () => {
+    const page = await read('../app/page.tsx');
+    expect(page).toMatch(/useCompletionNotifications\(activeNotificationSessionId\)/);
+    // Derived from what the conversation reports it is showing...
+    expect(page).toMatch(/activeNotificationSessionId\s*=\s*\n?\s*activeView === 'workspace' \? renderedSessionId : null/);
+    // ...and explicitly NOT from the URL selection.
+    expect(page).not.toMatch(/activeNotificationSessionId\s*=\s*\n?\s*activeView === 'workspace' \? urlSessionId : null/);
+  });
+
+  it('subscribes to AgentConversation.onActiveSessionChange', async () => {
+    const page = await read('../app/page.tsx');
+    expect(page).toMatch(/onActiveSessionChange=\{setRenderedSessionId\}/);
+
+    const conversation = await read('../components/agent/agent-conversation.tsx');
+    // Reports the RESOLVED session (auto-restored included), not the prop.
+    expect(conversation).toMatch(/const activeSessionId = session\?\.id \?\? null;/);
+    expect(conversation).toMatch(/onActiveSessionChange\?\.\(activeSessionId\)/);
+  });
+});
+
 describe('useCompletionNotifications', () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -210,6 +242,34 @@ describe('useCompletionNotifications', () => {
     expect(latest.notifications[0].read_at).toBeNull();
     expect(latest.unreadCount).toBe(1);
     expect(api.markNotificationRead).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Visibility must come from the session the conversation actually RENDERS.
+   * Opening a workspace with no `?session=` still shows the branch's
+   * auto-restored session; treating that as "nothing visible" would leave its
+   * own results stuck unread while the user stares at them.
+   */
+  it('auto-reads an auto-restored session that was never named in the URL', async () => {
+    // Mount with nothing selected (as a bare workspace URL would).
+    await render(null);
+    await pushSse(row({ id: 'a', session_id: 's-restored' }));
+    expect(latest.notifications[0].read_at).toBeNull();
+
+    // AgentConversation resolves and renders the branch's latest session and
+    // reports it upward — no URL change involved.
+    await rerender('s-restored');
+    expect(latest.unreadCount).toBe(0);
+    expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+  });
+
+  it('stops auto-reading once the conversation reports nothing is rendered', async () => {
+    await render('s1');
+    // Leaving the workspace: the component unmounts and reports null.
+    await rerender(null);
+    await pushSse(row({ id: 'a', session_id: 's1' }));
+    expect(latest.notifications[0].read_at).toBeNull();
+    expect(latest.unreadCount).toBe(1);
   });
 
   it('navigating into a target session marks its pending notifications read', async () => {

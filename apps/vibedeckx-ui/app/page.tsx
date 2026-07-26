@@ -244,11 +244,15 @@ export default function Home() {
   //
   // The hook takes the EXACT session on screen, not a `project:branch` key: a
   // milestone is auto-read only when the user is looking at its own session, so
-  // a sibling session finishing on the same branch still raises the badge. When
-  // no session is explicitly selected (or the user is on another tab) this is
-  // null, and nothing is auto-read — the safe direction to fail.
+  // a sibling session finishing on the same branch still raises the badge.
+  //
+  // Sourced from what AgentConversation actually RENDERS, not from
+  // `urlSessionId`: opening a workspace without `?session=` still shows the
+  // branch's auto-restored conversation, and treating that as "nothing visible"
+  // would leave its own notifications stuck unread.
+  const [renderedSessionId, setRenderedSessionId] = useState<string | null>(null);
   const activeNotificationSessionId =
-    activeView === 'workspace' ? urlSessionId : null;
+    activeView === 'workspace' ? renderedSessionId : null;
   const {
     notifications,
     unreadCount,
@@ -874,6 +878,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         branch={selectedBranch}
                         sessionId={urlSessionId}
                         setSessionUrlParam={setSessionUrlParam}
+                        onActiveSessionChange={setRenderedSessionId}
                         project={currentProject}
                         onAgentModeChange={handleAgentModeChange}
                         onTaskCompleted={handleTaskCompleted}

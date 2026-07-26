@@ -210,6 +210,36 @@ describe("notification storage", () => {
       expect(await storage.notificationSyncCursors.get("srv1", "unknown")).toBeUndefined();
     });
 
+    it("initializeIfAbsent creates a baseline once and never overwrites it", async () => {
+      expect(await storage.notificationSyncCursors.initializeIfAbsent("srv1", "r1", 5)).toBe(true);
+      expect(await storage.notificationSyncCursors.get("srv1", "r1")).toBe(5);
+
+      // A racing baseline holding a LATER head must be discarded — applying it
+      // would skip past any milestone produced between the two reads, and the
+      // MAX-guarded import path could never walk it back.
+      expect(await storage.notificationSyncCursors.initializeIfAbsent("srv1", "r1", 99)).toBe(false);
+      expect(await storage.notificationSyncCursors.get("srv1", "r1")).toBe(5);
+
+      // An earlier head is equally ignored — first writer wins, full stop.
+      expect(await storage.notificationSyncCursors.initializeIfAbsent("srv1", "r1", 1)).toBe(false);
+      expect(await storage.notificationSyncCursors.get("srv1", "r1")).toBe(5);
+    });
+
+    it("initializeIfAbsent does not interfere with import advancement", async () => {
+      await storage.notificationSyncCursors.initializeIfAbsent("srv1", "r1", 5);
+      // Imports still advance normally past the baseline.
+      await storage.notificationSyncCursors.set("srv1", "r1", 7);
+      expect(await storage.notificationSyncCursors.get("srv1", "r1")).toBe(7);
+    });
+
+    it("initializeIfAbsent is scoped per (server, session)", async () => {
+      expect(await storage.notificationSyncCursors.initializeIfAbsent("srv1", "r1", 5)).toBe(true);
+      expect(await storage.notificationSyncCursors.initializeIfAbsent("srv2", "r1", 8)).toBe(true);
+      expect(await storage.notificationSyncCursors.initializeIfAbsent("srv1", "r2", 9)).toBe(true);
+      expect(await storage.notificationSyncCursors.get("srv1", "r1")).toBe(5);
+      expect(await storage.notificationSyncCursors.get("srv2", "r1")).toBe(8);
+    });
+
     it("getMany returns cursors for the requested sessions of one server", async () => {
       await storage.notificationSyncCursors.set("srv1", "r1", 5);
       await storage.notificationSyncCursors.set("srv1", "r2", 6);
