@@ -44,11 +44,12 @@ export async function createRemoteAgentSession(
     branch: string | null;
     permissionMode: "plan" | "edit";
     agentType?: string;
+    model?: string | null;
     force?: boolean;
     userId: string | undefined;
   },
 ): Promise<CreateRemoteAgentSessionResult> {
-  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, force, userId } = params;
+  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, model, force, userId } = params;
 
   // The server picks the session id so it can mint a token bound to it before the
   // remote spawns claude. The remote honours the supplied id.
@@ -83,7 +84,7 @@ export async function createRemoteAgentSession(
       remoteConfig.server_api_key || "",
       "POST",
       `/api/path/agent-sessions/new`,
-      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp },
+      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp, model },
       { reverseConnectManager: deps.reverseConnectManager ?? undefined },
     );
     if (!result.ok) {
