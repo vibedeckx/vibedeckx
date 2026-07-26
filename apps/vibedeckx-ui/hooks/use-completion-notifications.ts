@@ -214,7 +214,11 @@ export function useCompletionNotifications(
     const active = activeSessionIdRef.current;
     const onScreen = notification.session_id !== null && notification.session_id === active;
 
-    if (isNew && !onScreen) playSound(SOUND_FOR_KIND[notification.kind]);
+    // Sound fires for every first-time milestone, including the session on
+    // screen: `onScreen` suppresses the bell entry (the user can see the
+    // result), but not the cue that tells them to look. Only `isNew` gates it,
+    // so a hydrated or replayed row stays silent.
+    if (isNew) playSound(SOUND_FOR_KIND[notification.kind]);
 
     setNotifications((prev) =>
       upsertNotification(prev, onScreen ? { ...notification, read_at: notification.read_at ?? Date.now() } : notification),

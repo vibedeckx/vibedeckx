@@ -234,6 +234,19 @@ describe('useCompletionNotifications', () => {
     expect(api.markNotificationRead).toHaveBeenCalledWith('a');
   });
 
+  /**
+   * Auto-read suppresses the *bell entry*, not the audible cue. The user is
+   * looking at the page but not necessarily at the screen — the sound is how a
+   * finished turn reaches them while they're elsewhere.
+   */
+  it('still plays the sound for the session on screen, even though it auto-reads', async () => {
+    await render('s1');
+    await pushSse(row({ id: 'a', session_id: 's1', kind: 'session_result_ready' }));
+    expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+    expect(latest.notifications[0].read_at).not.toBeNull();
+    expect(latest.unreadCount).toBe(0);
+  });
+
   it('leaves another session on the SAME BRANCH unread', async () => {
     await render('s1');
     // Same project + branch, different session — the exact bug the milestone
