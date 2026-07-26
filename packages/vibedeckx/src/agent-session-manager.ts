@@ -46,6 +46,37 @@ import {
   type CompletionPayload,
 } from "./turn-completion.js";
 
+/**
+ * Build a user-facing message for when an agent process fails to start.
+ *
+ * Both streams are folded in: claude reports an unusable --model on STDOUT
+ * (verified 2026-07-26 against claude 2.1.220 — exit 1, stderr empty), and
+ * that line is not stream-json so it never becomes a parsed event. Without the
+ * stdout tail the user would see only a "did you install it?" hint for a CLI
+ * that is plainly installed.
+ *
+ * The install hint is suppressed whenever the process produced any output at
+ * all: a process that printed a diagnosis clearly launched, so the problem is
+ * its arguments, not its absence.
+ */
+export function buildStartupFailureMessage(
+  agentType: AgentType,
+  stderrTail: string,
+  stdoutTail: string,
+): string {
+  const provider = getProvider(agentType);
+  const name = provider.getDisplayName();
+  const details = [stdoutTail.trim(), stderrTail.trim()].filter(Boolean).join("\n");
+
+  let msg = `Couldn't start ${name}.`;
+  if (!details) {
+    const hint = provider.getInstallHint?.();
+    if (hint) msg += `\n\n${hint}`;
+    return msg;
+  }
+  return `${msg}\n\nDetails:\n${details}`;
+}
+
 // ============ Session Store Types ============
 
 /** Max chars of the agent's final message carried in the taskCompleted event. */
@@ -103,6 +134,8 @@ interface RunningSession {
    */
   model: string | null;
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
+  /** Tail of stdout lines that produced no parsed events (reset per spawn). */
+  unparsedStdoutTail?: string;
   /**
    * Turn-completion state machine (see turn-completion.ts): tracks live
    * background tasks and decides whether a `result` commits completion side
@@ -728,6 +761,7 @@ export class AgentSessionManager {
 
     // Per-spawn state for diagnosing startup failures (e.g. agent not installed).
     session.producedOutput = false;
+    session.unparsedStdoutTail = "";
     // A fresh process has no background tasks and no held completion — stale
     // ledger state from a previous process would wedge completion detection
     // in "intermediate turn" forever (or commit a dead process's candidate).
@@ -812,7 +846,7 @@ export class AgentSessionManager {
         try {
           await this.pushEntry(session.id, {
             type: "error",
-            message: this.buildStartupFailureMessage(session.agentType, stderrTail),
+            message: buildStartupFailureMessage(session.agentType, stderrTail, session.unparsedStdoutTail ?? ""),
             timestamp: Date.now(),
           }, true);
         } catch (err) {
@@ -864,7 +898,7 @@ export class AgentSessionManager {
       this.pushEntry(session.id, {
         type: "error",
         message: isNotFound
-          ? this.buildStartupFailureMessage(session.agentType, stderrTail)
+          ? buildStartupFailureMessage(session.agentType, stderrTail, session.unparsedStdoutTail ?? "")
           : error.message,
         timestamp: Date.now(),
       }, true).catch((err) => {
@@ -1020,6 +1054,10 @@ export class AgentSessionManager {
         // The process produced real agent output, so it started successfully —
         // a later non-zero exit is a runtime error, not a "not installed" case.
         session.producedOutput = true;
+      } else {
+        // Keep a capped tail so a plain-text startup diagnosis (claude prints
+        // model errors here) can be surfaced if the process fails to start.
+        session.unparsedStdoutTail = ((session.unparsedStdoutTail ?? "") + line + "\n").slice(-4000);
       }
       for (const event of events) {
         await this.processAgentEvent(session.id, event);
@@ -1372,21 +1410,6 @@ export class AgentSessionManager {
   /**
    * Push a new entry with ADD patch
    */
-  /**
-   * Build a user-facing message for when an agent process fails to start.
-   * Includes the provider's install hint plus any captured stderr tail.
-   */
-  private buildStartupFailureMessage(agentType: AgentType, stderrTail: string): string {
-    const provider = getProvider(agentType);
-    const name = provider.getDisplayName();
-    const hint = provider.getInstallHint?.();
-    let msg = `Couldn't start ${name}.`;
-    if (hint) msg += `\n\n${hint}`;
-    const details = stderrTail.trim();
-    if (details) msg += `\n\nDetails:\n${details}`;
-    return msg;
-  }
-
   /**
    * Allocate the next entry index, record the message in the in-memory store,
    * and build its ADD replay patch. Shared by `pushEntry` and `pushTurnEnd` so
