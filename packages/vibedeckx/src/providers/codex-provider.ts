@@ -67,10 +67,13 @@ export class CodexProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
+  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig, model?: string | null): SpawnConfig {
     // Store permissionMode for use in formatUserInput's turn/start params
     this.lastPermissionMode = permissionMode;
-    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp);
+    // NOTE: `model` is deliberately NOT stored on `this`. It only affects the
+    // process being spawned right now; this provider instance is shared by
+    // every session in the server.
+    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp, model);
   }
 
   // ============ Task 5.5: parseStdoutLine — JSON-RPC message routing ============

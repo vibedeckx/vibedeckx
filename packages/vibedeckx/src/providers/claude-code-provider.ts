@@ -38,11 +38,12 @@ export class ClaudeCodeProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig {
+  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig, model?: string | null): SpawnConfig {
     return buildClaudeSessionSpawnConfig(
       this.detectBinary(),
       permissionMode,
       crossRemoteMcp ? buildMcpConfigArg(crossRemoteMcp) : undefined,
+      model,
     );
   }
 

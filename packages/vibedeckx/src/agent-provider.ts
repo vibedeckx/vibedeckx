@@ -62,8 +62,20 @@ export interface AgentProvider {
    */
   isAvailable?(): boolean;
 
-  /** Build the spawn configuration for launching the agent process. */
-  buildSpawnConfig(cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig): SpawnConfig;
+  /**
+   * Build the spawn configuration for launching the agent process.
+   *
+   * `model` is an optional, UNVALIDATED model name for this session only.
+   * Implementations must pass it straight into the spawn arguments and must
+   * NOT store it on the provider instance — providers are singletons shared
+   * by every session.
+   */
+  buildSpawnConfig(
+    cwd: string,
+    permissionMode: "plan" | "edit",
+    crossRemoteMcp?: CrossRemoteMcpConfig,
+    model?: string | null,
+  ): SpawnConfig;
 
   /** Parse a single stdout line into zero or more agent events. */
   parseStdoutLine(line: string, sessionId: string): ParsedAgentEvent[];
