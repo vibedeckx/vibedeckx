@@ -2088,6 +2088,7 @@ export class AgentSessionManager {
     session.buffer = "";
     this.resetCompletion(session);
 
+    const previousAgentType = session.agentType;
     getProvider(session.agentType).onSessionDestroyed?.(sessionId);
     session.agentType = agentType;
     if (!session.skipDb) await this.storage.agentSessions.updateAgentType(sessionId, agentType);
@@ -2102,13 +2103,18 @@ export class AgentSessionManager {
       if (!session.skipDb) await this.storage.agentSessions.updateModel(sessionId, null);
     }
 
+    const agentDisplayName = (t: AgentType) => (t === "codex" ? "Codex" : "Claude Code");
+
     // Visible confirmation in the conversation; replayed to the new agent as
     // part of the context like other system entries ("Session stopped by user.")
+    // Models are free text, so we can't claim the cleared name was invalid for
+    // the new agent (the user may have typed a name that's actually valid
+    // there) — only state what's known: it was set for the previous agent.
     await this.pushEntry(sessionId, {
       type: "system",
-      content: `Coding agent switched to ${agentType === "codex" ? "Codex" : "Claude Code"}.`
+      content: `Coding agent switched to ${agentDisplayName(agentType)}.`
         + (clearedModel !== null
-          ? ` Model reset to the default (${clearedModel} is not a ${agentType === "codex" ? "Codex" : "Claude Code"} model).`
+          ? ` Model reset to the default (\`${clearedModel}\` was set for ${agentDisplayName(previousAgentType)}).`
           : ""),
       timestamp: Date.now(),
     });

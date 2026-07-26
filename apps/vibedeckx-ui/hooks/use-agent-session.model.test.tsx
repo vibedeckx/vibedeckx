@@ -166,4 +166,26 @@ describe("useAgentSession model", () => {
       await Promise.all([opusPromiseA, sonnetPromise, opusPromiseC]);
     });
   });
+
+  it("clears the cached model after switching agent type", async () => {
+    await render();
+    createSession.mockResolvedValue({
+      session: { id: "s1", projectId: "p1", branch: "main", status: "running", agentType: "claude-code", model: "opus" },
+      messages: [],
+    });
+
+    await act(async () => { await latest!.ensureSession("edit", "opus"); });
+    expect(latest!.session?.model).toBe("opus");
+
+    // switchAgentType posts to /agent-type; the default authFetch mock
+    // already resolves { ok: true }, which is all switchAgentTypeApi checks.
+    let switchError: string | null = null;
+    await act(async () => { switchError = await latest!.switchAgentType("codex"); });
+
+    expect(switchError).toBeNull();
+    // The server clears the model on an agent switch (a model name is
+    // agent-specific — "opus" is meaningless to Codex). The cached session
+    // exposed by the hook must reflect that, not keep echoing the old model.
+    expect(latest!.session?.model).toBeNull();
+  });
 });

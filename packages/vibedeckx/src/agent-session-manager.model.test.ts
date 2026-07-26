@@ -228,6 +228,9 @@ describe("model survives every respawn path", () => {
   });
 
   it("switchAgentType says so in the conversation when it clears a model", async () => {
+    // Models are free text, so the announcement must not claim the cleared
+    // name was invalid for the new agent (it may well be valid there) — it
+    // can only state what's known: the name was set for the previous agent.
     const { storage } = makeSeededStorage({ model: "opus" });
     const manager = new AgentSessionManager(storage);
     await manager.restoreSessionsFromDb();
@@ -238,8 +241,10 @@ describe("model survives every respawn path", () => {
       .getMessages("s-src")
       .filter(Boolean)
       .find((m) => m?.type === "system" && m.content?.includes("Coding agent switched"));
-    expect(systemEntry?.content).toContain("Model reset to the default");
-    expect(systemEntry?.content).toContain("opus");
+    expect(systemEntry?.content).toBe(
+      "Coding agent switched to Codex. Model reset to the default (`opus` was set for Claude Code)."
+    );
+    expect(systemEntry?.content).not.toContain("is not a");
   });
 
   it("switchAgentType leaves the announcement plain when there was no model", async () => {

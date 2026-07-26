@@ -904,10 +904,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     try {
       await switchAgentTypeApi(session.id, agentType);
-      // Update session locally and cache — history is preserved
+      // Update session locally and cache — history is preserved. The server
+      // clears the model on an agent switch (a model name is agent-specific,
+      // e.g. "opus" is meaningless to Codex), so mirror that here too.
       setSession((prev) => {
         if (!prev) return prev;
-        const updated = { ...prev, agentType };
+        const updated = { ...prev, agentType, model: null };
         if (projectId) {
           sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
           sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
