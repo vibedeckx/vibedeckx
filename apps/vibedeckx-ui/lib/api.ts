@@ -719,6 +719,11 @@ export interface AgentProviderInfo {
   type: AgentType;
   displayName: string;
   available: boolean;
+  /**
+   * Suggested model names for this agent. NOT a whitelist — the picker also
+   * accepts free text, and nothing validates against this list.
+   */
+  models?: string[];
 }
 
 export async function getAgentProviders(): Promise<AgentProviderInfo[]> {
@@ -842,6 +847,7 @@ export interface BranchSessionSummary {
   updated_at?: string;
   permission_mode?: string;
   agent_type?: string;
+  model?: string | null;
   entry_count?: number;
   favorited_at?: number | null;
   branch?: string | null;
@@ -870,14 +876,15 @@ export async function createNewAgentSession(
   permissionMode?: "plan" | "edit",
   agentType?: string,
   force?: boolean,
+  model?: string | null,
 ): Promise<{
-  session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string; processAlive?: boolean };
+  session: { id: string; projectId: string; branch: string | null; status: string; permissionMode?: string; agentType?: string; model?: string | null; processAlive?: boolean };
   messages: unknown[];
 }> {
   const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions/new`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ branch, permissionMode, agentType, force }),
+    body: JSON.stringify({ branch, permissionMode, agentType, force, model }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

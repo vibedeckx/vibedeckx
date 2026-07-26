@@ -117,7 +117,7 @@ describe("ensureSession resident-limit flow", () => {
       latest!.residentLimitPrompt!.resolve(true);
     });
     expect(createSession).toHaveBeenCalledTimes(2);
-    expect(createSession).toHaveBeenLastCalledWith("p1", "main", undefined, undefined, true);
+    expect(createSession).toHaveBeenLastCalledWith("p1", "main", undefined, undefined, true, undefined);
     expect(latest!.residentLimitPrompt).toBeNull();
     await expect(p1).resolves.toMatchObject({ id: "s-new" });
   });

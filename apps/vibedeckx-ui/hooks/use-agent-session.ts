@@ -42,6 +42,7 @@ export interface AgentSession {
   status: AgentSessionStatus;
   permissionMode?: "plan" | "edit";
   agentType?: AgentType;
+  model?: string | null;
   processAlive?: boolean;
 }
 
@@ -1043,9 +1044,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // submitMessage from page.tsx vs the form submit), and two concurrent
   // creates hitting the resident limit would each open an eviction prompt —
   // the second overwriting the first's resolver and stranding that caller.
-  // Concurrent callers of the same workspace generation share one promise.
+  // Concurrent callers of the same workspace generation *and* model share one
+  // promise; a different model must not be collapsed into an in-flight call
+  // for another model, so it's part of the key too.
   const ensureSessionInFlightRef = useRef<{
     generation: number;
+    model: string | null;
     promise: Promise<AgentSession | null>;
   } | null>(null);
 
@@ -1053,7 +1057,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // POSTs to /api/projects/:projectId/agent-sessions/new and wires up WS.
   // If a session already exists, returns it unchanged.
   const ensureSession = useCallback((
-    permissionMode?: "plan" | "edit"
+    permissionMode?: "plan" | "edit",
+    model?: string | null,
   ): Promise<AgentSession | null> => {
     if (!projectId) return Promise.resolve(null);
     if (session) return Promise.resolve(session);
@@ -1061,8 +1066,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Capture generation at call time to detect a workspace switch happening
     // under any of the awaits below (same pattern as startSession).
     const generation = sessionGenerationRef.current;
+    const modelKey = model ?? null;
     const inFlight = ensureSessionInFlightRef.current;
-    if (inFlight && inFlight.generation === generation) return inFlight.promise;
+    if (inFlight && inFlight.generation === generation && inFlight.model === modelKey) return inFlight.promise;
 
     const run = async (): Promise<AgentSession | null> => {
       setIsLoading(true);
@@ -1070,7 +1076,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       try {
         let data: Awaited<ReturnType<typeof createNewAgentSession>>;
         try {
-          data = await createNewAgentSession(projectId, branch, permissionMode, agentType);
+          data = await createNewAgentSession(projectId, branch, permissionMode, agentType, undefined, model);
         } catch (error) {
           if (!(error instanceof ResidentLimitError)) throw error;
           // Suspend until the user answers the eviction dialog rendered by
@@ -1097,7 +1103,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           // cancels it) — abort silently, don't force-create for the old one.
           if (sessionGenerationRef.current !== generation) return null;
           if (!confirmed) throw error;
-          data = await createNewAgentSession(projectId, branch, permissionMode, agentType, true);
+          data = await createNewAgentSession(projectId, branch, permissionMode, agentType, true, model);
         }
         // If workspace changed while a create call was in flight, discard the
         // result rather than writing the old workspace's session into the new
@@ -1113,6 +1119,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           status: data.session.status as AgentSessionStatus,
           permissionMode: (data.session.permissionMode ?? "edit") as "plan" | "edit",
           agentType: (data.session.agentType ?? "claude-code") as AgentType,
+          model: data.session.model ?? null,
           processAlive: data.session.processAlive ?? true,
         };
         sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), newSession);
@@ -1132,9 +1139,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         setError(e instanceof Error ? e.message : "Failed to create session");
         return null;
       } finally {
-        // Clear only our own entry — a newer-generation call may have already
-        // replaced it after a workspace switch.
-        if (ensureSessionInFlightRef.current?.generation === generation) {
+        // Clear only our own entry — a newer-generation call, or a
+        // different-model call for the same generation, may have already
+        // replaced it.
+        if (
+          ensureSessionInFlightRef.current?.generation === generation &&
+          ensureSessionInFlightRef.current?.model === modelKey
+        ) {
           ensureSessionInFlightRef.current = null;
         }
         // Only clear loading if this is still the current generation
@@ -1145,7 +1156,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     const promise = run();
-    ensureSessionInFlightRef.current = { generation, promise };
+    ensureSessionInFlightRef.current = { generation, model: modelKey, promise };
     return promise;
   }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket]);
 
