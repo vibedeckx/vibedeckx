@@ -601,38 +601,55 @@ Expected: PASS (4 tests).
 
 - [ ] **Step 9: Verify the migration works on a pre-existing database**
 
-Run:
+⚠️ **This machine may be a live worker.** Always pass `--data-dir` so you touch a throwaway database, never `~/.vibedeckx/data.sqlite`. Use port 5199 (3000 and 5173 are in use). Never run a daemon-stopping command.
+
+The seed must be a schema that has been through **every prior migration but not this one** — `--data-dir <dir>` resolves to `<dir>/data.sqlite`, so seed exactly that path. A minimal 4-column table is not a realistic historical shape: no shipped version had `branch` without `created_at`, and seeding one trips an unrelated pre-existing failure in the drop-UNIQUE rebuild block (`sqlite.ts:386-409` does `SELECT ..., created_at, created_at FROM agent_sessions`) before the `model` migration is ever reached.
 
 ```bash
+mkdir -p /tmp/model-migration-check-dir
 node -e "
 const Database = require('better-sqlite3');
-const db = new Database('/tmp/model-migration-check.sqlite');
-db.exec(\"CREATE TABLE agent_sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'running')\");
+const db = new Database('/tmp/model-migration-check-dir/data.sqlite');
+db.exec(\`
+  CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL);
+  CREATE TABLE agent_sessions (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running', permission_mode TEXT DEFAULT 'edit',
+    agent_type TEXT DEFAULT 'claude-code', title TEXT DEFAULT NULL,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+    last_user_message_at INTEGER DEFAULT NULL, last_completed_at INTEGER DEFAULT NULL,
+    favorited_at INTEGER DEFAULT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+  );
+\`);
+db.prepare('INSERT INTO projects (id, name, path) VALUES (?, ?, ?)').run('p1', 'p', '/tmp/p');
 db.prepare('INSERT INTO agent_sessions (id, project_id) VALUES (?, ?)').run('legacy-1', 'p1');
 db.close();
-console.log('legacy db seeded');
 "
 ```
 
-Then point the server's data dir at it and boot once so migrations run:
+Boot once so migrations run (run `pnpm build:main` first if `dist/` is stale):
 
 ```bash
 node packages/vibedeckx/dist/bin.js --data-dir /tmp/model-migration-check-dir --no-ui --port 5199 &
 sleep 5 && kill %1
 ```
 
-(If `dist/` is stale, run `pnpm build:main` first.) Then confirm the column exists and legacy rows are NULL:
+Confirm the column exists and the legacy row is NULL:
 
 ```bash
 node -e "
 const Database = require('better-sqlite3');
 const db = new Database('/tmp/model-migration-check-dir/data.sqlite');
 console.log(db.prepare('PRAGMA table_info(agent_sessions)').all().map(c => c.name));
+console.log(db.prepare('SELECT id, model FROM agent_sessions WHERE id = ?').get('legacy-1'));
 db.close();
 "
+rm -rf /tmp/model-migration-check-dir
 ```
 
-Expected: the printed column list contains `model`.
+Expected: the column list contains `model`, and the legacy row reads `{ id: 'legacy-1', model: null }`.
 
 - [ ] **Step 10: Run the full backend suite and typecheck**
 
