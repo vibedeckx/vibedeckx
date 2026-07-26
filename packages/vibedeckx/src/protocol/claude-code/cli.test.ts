@@ -68,4 +68,57 @@ describe("claude CLI builders", () => {
       `npx -y @anthropic-ai/claude-code -p 'hi' --dangerously-skip-permissions --verbose`,
     );
   });
+
+  it("appends --model after the permission flag when a model is given", () => {
+    expect(buildClaudeSessionSpawnConfig("/usr/local/bin/claude", "edit", undefined, "opus")).toEqual({
+      command: "/usr/local/bin/claude",
+      args: [
+        "--output-format=stream-json",
+        "--input-format=stream-json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus",
+        "--disallowedTools",
+        "AskUserQuestion",
+        "--verbose",
+      ],
+    });
+  });
+
+  it("omits --model for null, undefined, and blank model strings", () => {
+    const base = [
+      "--output-format=stream-json",
+      "--input-format=stream-json",
+      "--dangerously-skip-permissions",
+      "--disallowedTools",
+      "AskUserQuestion",
+      "--verbose",
+    ];
+    expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit", undefined, null).args).toEqual(base);
+    expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit", undefined, undefined).args).toEqual(base);
+    expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit", undefined, "   ").args).toEqual(base);
+  });
+
+  it("passes an unknown model name through verbatim (no validation)", () => {
+    expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit", undefined, "totally-made-up").args).toContain(
+      "totally-made-up",
+    );
+  });
+
+  it("combines --model with --mcp-config", () => {
+    expect(buildClaudeSessionSpawnConfig(null, "plan", '{"mcpServers":{}}', "sonnet").args).toEqual([
+      "-y",
+      "@anthropic-ai/claude-code",
+      "--output-format=stream-json",
+      "--input-format=stream-json",
+      "--permission-mode=plan",
+      "--model",
+      "sonnet",
+      "--disallowedTools",
+      "AskUserQuestion",
+      "--verbose",
+      "--mcp-config",
+      '{"mcpServers":{}}',
+    ]);
+  });
 });

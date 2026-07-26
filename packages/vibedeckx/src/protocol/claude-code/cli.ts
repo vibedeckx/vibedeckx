@@ -19,6 +19,7 @@ export function buildClaudeSessionSpawnConfig(
   nativeBinary: string | null,
   permissionMode: "plan" | "edit",
   mcpConfigArg?: string,
+  model?: string | null,
 ): SpawnConfig {
   const permissionFlag = permissionMode === "plan"
     ? "--permission-mode=plan"
@@ -27,6 +28,17 @@ export function buildClaudeSessionSpawnConfig(
   const args = [
     ...STREAM_JSON_ARGS,
     permissionFlag,
+  ];
+
+  // Unvalidated by design: an alias ("opus"), a full id, or a typo all get
+  // passed straight through. claude exits 1 with its own message on stdout if
+  // it doesn't recognize the name — see the startup-failure path in
+  // agent-session-manager.
+  if (model && model.trim()) {
+    args.push("--model", model.trim());
+  }
+
+  args.push(
     // AskUserQuestion can't work over piped (non-TTY) stdin: claude resolves it
     // internally as "dismissed" before we can present a picker and wait for the
     // user. Disable it so the agent falls back to asking in plain text, which the
@@ -34,7 +46,7 @@ export function buildClaudeSessionSpawnConfig(
     "--disallowedTools",
     "AskUserQuestion",
     "--verbose",
-  ];
+  );
 
   if (mcpConfigArg) {
     args.push("--mcp-config", mcpConfigArg);

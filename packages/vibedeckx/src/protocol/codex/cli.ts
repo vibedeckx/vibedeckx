@@ -12,8 +12,20 @@ const CROSS_REMOTE_MCP_TOKEN_ENV = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN";
 export function buildCodexAppServerSpawnConfig(
   nativeBinary: string | null,
   crossRemoteMcp?: CrossRemoteMcpConfig,
+  model?: string | null,
 ): SpawnConfig {
   const args = ["app-server"];
+
+  // codex app-server has no --model flag; the model is set through the same
+  // generic `-c <toml-assignment>` override used for MCP servers below.
+  // JSON.stringify produces a valid TOML basic string (double-quoted, with
+  // inner quotes and backslashes escaped). One app-server process serves
+  // exactly one session, so a process-wide override cannot leak across
+  // sessions.
+  if (model && model.trim()) {
+    args.push("-c", `model=${JSON.stringify(model.trim())}`);
+  }
+
   if (crossRemoteMcp) {
     args.push(
       "-c",

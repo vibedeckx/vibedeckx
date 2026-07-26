@@ -70,4 +70,42 @@ describe("codex CLI builders", () => {
       `/bin/codex --dangerously-bypass-approvals-and-sandbox exec 'it'\\''s fine'`,
     );
   });
+
+  it("injects the model as a TOML-quoted -c override", () => {
+    expect(buildCodexAppServerSpawnConfig("/usr/local/bin/codex", undefined, "gpt-5.6-sol")).toEqual({
+      command: "/usr/local/bin/codex",
+      args: ["app-server", "-c", 'model="gpt-5.6-sol"'],
+      shell: false,
+    });
+  });
+
+  it("omits the model override for null, undefined, and blank model strings", () => {
+    expect(buildCodexAppServerSpawnConfig("/bin/codex", undefined, null).args).toEqual(["app-server"]);
+    expect(buildCodexAppServerSpawnConfig("/bin/codex", undefined, undefined).args).toEqual(["app-server"]);
+    expect(buildCodexAppServerSpawnConfig("/bin/codex", undefined, "  ").args).toEqual(["app-server"]);
+  });
+
+  it("puts the model override before the cross-remote MCP override", () => {
+    const config = buildCodexAppServerSpawnConfig(
+      "/bin/codex",
+      { url: "https://app.example.com/api/cross-remote-mcp", token: "secret-token" },
+      "opus",
+    );
+    expect(config.args).toEqual([
+      "app-server",
+      "-c",
+      'model="opus"',
+      "-c",
+      'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN" }',
+    ]);
+    expect(config.env).toEqual({ VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" });
+  });
+
+  it("quotes a model name containing a double quote so the TOML value stays well-formed", () => {
+    expect(buildCodexAppServerSpawnConfig("/bin/codex", undefined, 'we"ird').args).toEqual([
+      "app-server",
+      "-c",
+      'model="we\\"ird"',
+    ]);
+  });
 });
