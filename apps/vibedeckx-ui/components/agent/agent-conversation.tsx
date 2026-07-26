@@ -773,9 +773,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             }
 
             return (
-              <span className={`flex items-center gap-1 text-xs ${statusColor}`}>
+              // Icon-only to leave header room for the model chip. statusText
+              // moves to the tooltip rather than being dropped: Connecting and
+              // Reconnecting share an icon, as do the two disconnected states,
+              // so the text is the only thing that tells them apart.
+              <span className={`flex items-center ${statusColor}`} title={statusText}>
                 {statusIcon}
-                {statusText}
               </span>
             );
           })()}

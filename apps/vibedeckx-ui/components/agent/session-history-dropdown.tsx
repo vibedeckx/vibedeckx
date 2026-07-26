@@ -390,7 +390,7 @@ export function SessionHistoryDropdown({
                       s.updated_at
                         ? new Date(s.updated_at).toLocaleString()
                         : new Date(s.created_at).toLocaleString()
-                    } • ${s.entry_count ?? 0} messages • status: ${s.status}`}
+                    } • ${s.entry_count ?? 0} messages • status: ${s.status} • model: ${s.model ?? "Default"}`}
                   >
                     {label(s)}
                   </div>
