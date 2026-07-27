@@ -41,7 +41,7 @@ expect(providers.find((p) => p.type === "codex")?.models).toEqual([
 Run:
 
 ```bash
-pnpm --filter vibedeckx test -- src/routes/agent-session-model-routes.test.ts
+pnpm --filter vibedeckx exec vitest run src/routes/agent-session-model-routes.test.ts
 ```
 
 Expected: FAIL because Claude Code lacks `fable`, while Codex still contains
@@ -66,7 +66,7 @@ accept free-form model names.
 Run:
 
 ```bash
-pnpm --filter vibedeckx test -- src/routes/agent-session-model-routes.test.ts
+pnpm --filter vibedeckx exec vitest run src/routes/agent-session-model-routes.test.ts
 ```
 
 Expected: all tests in the file PASS.
@@ -77,7 +77,7 @@ Run:
 
 ```bash
 npx tsc --noEmit -p packages/vibedeckx/tsconfig.json
-pnpm --filter vibedeckx test -- src/routes/agent-session-model-routes.test.ts
+pnpm --filter vibedeckx test
 git diff --check
 ```
 
