@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import {
   Command,
@@ -57,6 +57,33 @@ export function modelLabel(value: string | null): string {
 }
 
 /**
+ * The panel opens at the collapsed chip's width so it reads as that chip
+ * expanding, and widens only once the typed name no longer fits the search
+ * field. A suggestion never triggers it: the chip already reserves room for the
+ * longest one.
+ *
+ * Both measurements are independent of the panel's current width — the mirrored
+ * text width and the field width recorded while narrow — so the decision cannot
+ * oscillate the way `input.scrollWidth > input.clientWidth` would once widening
+ * has removed the overflow it was reacting to.
+ *
+ * A CSS `w-fit` cannot express this: an `<input>` carries an intrinsic width of
+ * about twenty characters, so fit-content would always resolve wide and the
+ * default would never match the chip.
+ */
+export function shouldWidenPanel(m: {
+  /** Rendered width of the query in the field's own font. */
+  textWidth: number;
+  /** Field width while the panel sits at chip width; 0 until measured. */
+  narrowFieldWidth: number;
+  /** Current state, kept when there is nothing to measure yet. */
+  wide: boolean;
+}): boolean {
+  if (m.narrowFieldWidth <= 0) return m.wide;
+  return m.textWidth > m.narrowFieldWidth;
+}
+
+/**
  * Suggestions are not a whitelist, so any string the user types is offerable —
  * except one that is blank or already in the list.
  */
@@ -75,6 +102,33 @@ export function ModelPicker({
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [wide, setWide] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const mirrorRef = useRef<HTMLSpanElement>(null);
+  /**
+   * The search field's width while the panel is at chip width. Read from the DOM
+   * rather than derived from a character count: the chip's own width comes from
+   * whatever `widthCandidates` holds at runtime, in whatever font the header is
+   * rendering, and "iiiiiiiiii" is not "WWWWWWWWWW".
+   */
+  const narrowFieldWidth = useRef(0);
+
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    const mirror = mirrorRef.current;
+    if (!input || !mirror) return;
+    // Only meaningful while narrow — re-read on every pass so a resize or a
+    // font-size change is picked up instead of cached from first open.
+    if (!wide) narrowFieldWidth.current = input.clientWidth;
+    setWide(
+      shouldWidenPanel({
+        textWidth: mirror.offsetWidth,
+        narrowFieldWidth: narrowFieldWidth.current,
+        wide,
+      }),
+    );
+  }, [open, query, wide]);
+
   const label = modelLabel(value);
   // A hand-typed name can be arbitrarily long, so the reserved slot is capped
   // and clips rather than letting one chip stretch the whole header row. The
@@ -126,15 +180,39 @@ export function ModelPicker({
           <ChevronDown className="h-3 w-3 text-muted-foreground" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-56">
+      {/* Same width as the collapsed chip, so the panel reads as that chip
+          opening rather than as a separate surface. The reserved label slot makes
+          that width constant, so it does not move with the choice — it only
+          widens when a typed name needs the room. */}
+      {/* No width transition: the measurement below reads the field's width, and
+          an animating width would be caught mid-flight. */}
+      <PopoverContent className={wide ? "w-56" : "w-[var(--radix-popover-trigger-width)]"}>
+        {/* Renders the query in the field's own font, out of flow, so its width
+            can be compared against the field's without the panel's current width
+            feeding back into the comparison. */}
+        <span
+          ref={mirrorRef}
+          aria-hidden
+          className="pointer-events-none invisible absolute whitespace-pre text-sm"
+        >
+          {query}
+        </span>
         <Command shouldFilter>
           <CommandInput
-            placeholder={`Model for ${agentType === "codex" ? "Codex" : "Claude Code"}…`}
+            ref={inputRef}
+            // The panel is chip-width, which leaves the search field roughly
+            // nine characters — hence the bare agent name rather than
+            // "Model for <agent>…", which would clip mid-word.
+            placeholder={`${agentType === "codex" ? "Codex" : "Claude"}…`}
+            // An <input> is intrinsically ~20 characters wide; without this it
+            // would push the fixed-width panel wider from the inside.
+            className="min-w-0"
             value={query}
             onValueChange={setQuery}
           />
           <CommandList>
-            <CommandEmpty>No suggestion matches.</CommandEmpty>
+            {/* Short enough not to wrap at this width. */}
+            <CommandEmpty>No match.</CommandEmpty>
             <CommandGroup>
               <CommandItem value={DEFAULT_LABEL} onSelect={() => pick(null)} className="text-xs">
                 {DEFAULT_LABEL}
@@ -150,8 +228,15 @@ export function ModelPicker({
               // on the CLI version and account tier of the machine that spawns
               // the session, so any string is allowed through.
               <CommandGroup heading="Custom">
-                <CommandItem value={trimmed} onSelect={() => pick(trimmed)} className="text-xs">
-                  Use &quot;{trimmed}&quot;
+                {/* Truncated rather than wrapped: the full string is in the
+                    search field directly above, where the user just typed it. */}
+                <CommandItem
+                  value={trimmed}
+                  onSelect={() => pick(trimmed)}
+                  className="text-xs [&>span]:truncate"
+                  title={trimmed}
+                >
+                  <span>Use &quot;{trimmed}&quot;</span>
                 </CommandItem>
               </CommandGroup>
             )}
