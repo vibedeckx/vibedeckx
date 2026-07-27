@@ -78,6 +78,9 @@ describe("RemoteNotificationSync", () => {
       notificationService: notifications,
       reverseConnectManager: { marker: "rcm" } as never,
       proxy: proxy as never,
+      // Real debounce is a few hundred ms; tests only need the coalescing
+      // behavior, not the wall time.
+      nudgeDebounceMs: 1,
     });
   });
 
@@ -649,6 +652,149 @@ describe("RemoteNotificationSync", () => {
       await storage.remoteSessionMappings.upsert("orphan", "p1", "srv-unlinked", "r1", "dev", "from_start");
       await expect(sync.syncAll({ includeExpired: true })).resolves.toBeUndefined();
       expect(proxy).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * A worker milestone used to sit in the outbox until the next periodic tick —
+   * measured at 23.7s end-to-end on a live front server, with the tick's phase
+   * (not the work) deciding the number. These cover the completion-triggered
+   * pull that replaces that wait; the tick remains the recovery backstop.
+   */
+  describe("completion-triggered sync", () => {
+    const milestone = () =>
+      ok([{ sessionId: "r1", events: [workerEvent(1)], headCursor: 1, nextCursor: 1, hasMore: false }]);
+
+    const terminal = { projectId: "p1", branch: "dev", sessionId: "remote-srv-p1-r1" } as const;
+
+    /** Mapped but NOT watched: only an explicit signal can reach it. */
+    async function mappedSession() {
+      const srv = await linkRemote();
+      await storage.remoteSessionMappings.upsert("remote-srv-p1-r1", "p1", srv, "r1", "dev", "from_start");
+      sync.setEventBus(bus);
+      return srv;
+    }
+
+    it("imports a finished turn's milestone without waiting for the periodic tick", async () => {
+      const srv = await mappedSession();
+      respond = milestone;
+      // `start()` is deliberately never called: the completion event is the
+      // only thing that can produce this import.
+      bus.emit({ type: "session:taskCompleted", ...terminal });
+
+      await vi.waitFor(async () => {
+        expect((await inbox()).map((n) => n.id)).toEqual([`remote:${srv}:session:r1:turn:1:result-ready`]);
+      });
+    });
+
+    /**
+     * The turn's own `running` frame arrives minutes earlier and consumes the
+     * 5-minute watch-extension throttle. A nudge sharing that throttle's state
+     * would therefore be dropped for essentially every real completion.
+     */
+    it("fires even though the turn's own `running` frame already consumed the watch throttle", async () => {
+      const srv = await mappedSession();
+      bus.emit({ type: "session:status", ...terminal, status: "running" });
+      await vi.waitFor(async () => {
+        const m = await storage.remoteSessionMappings.getByRemote(srv, "r1");
+        expect(m!.notification_watch_until).not.toBeNull();
+      });
+
+      respond = milestone;
+      bus.emit({ type: "session:taskCompleted", ...terminal });
+      await vi.waitFor(async () => {
+        expect(await inbox()).toHaveLength(1);
+      });
+    });
+
+    /**
+     * A failed turn writes `session_failed` to the outbox but never emits
+     * `taskCompleted`, and the remote `finished` frame is not bridged onto the
+     * bus at all — the terminal status patch is the only signal there is.
+     */
+    it("accelerates a FAILED turn, whose only bridged signal is the terminal status", async () => {
+      await mappedSession();
+      respond = () => ok([{
+        sessionId: "r1",
+        events: [workerEvent(1, { kind: "session_failed", id: "session:r1:turn:1:failed" })],
+        headCursor: 1, nextCursor: 1, hasMore: false,
+      }]);
+
+      bus.emit({ type: "session:status", ...terminal, status: "error" });
+      await vi.waitFor(async () => {
+        expect((await inbox()).map((n) => n.kind)).toEqual(["session_failed"]);
+      });
+    });
+
+    it("coalesces a burst of terminal frames for one session into a single query", async () => {
+      await mappedSession();
+      respond = milestone;
+      bus.emit({ type: "session:taskCompleted", ...terminal });
+      bus.emit({ type: "session:status", ...terminal, status: "stopped" });
+      bus.emit({ type: "session:taskCompleted", ...terminal });
+
+      await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(calls).toHaveLength(1);
+    });
+
+    it("is not blocked by an in-flight sweep stuck on a different server", async () => {
+      const srvA = await linkRemote("a", "https://a.example", "ka");
+      const srvB = await linkRemote("b", "https://b.example", "kb");
+      await storage.remoteSessionMappings.upsert("remote-a-p1-r1", "p1", srvA, "r1", "dev", "from_start");
+      await storage.remoteSessionMappings.upsert("remote-b-p1-rb", "p1", srvB, "rb", "dev", "from_start");
+      await sync.extendWatch("remote-b-p1-rb");   // only B is in the periodic set
+      sync.setEventBus(bus);
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      proxy.mockImplementation(async (
+        serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
+        body?: unknown, opts?: unknown,
+      ): Promise<ProxyResult> => {
+        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        if (serverId === srvB) await gate;   // B hangs, as an unreachable worker does
+        return respond(body as QueryBody);
+      });
+
+      const sweep = sync.syncAll({ includeExpired: false });
+      await vi.waitFor(() => expect(calls.some((c) => c.serverId === srvB)).toBe(true));
+
+      respond = milestone;
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "remote-a-p1-r1" });
+      await vi.waitFor(async () => {
+        expect((await inbox()).map((n) => n.id)).toEqual([`remote:${srvA}:session:r1:turn:1:result-ready`]);
+      });
+
+      release();
+      await sweep;
+    });
+
+    it("sweeps servers concurrently instead of head-of-line serially", async () => {
+      const srvA = await linkRemote("a", "https://a.example", "ka");
+      const srvB = await linkRemote("b", "https://b.example", "kb");
+      await storage.remoteSessionMappings.upsert("la", "p1", srvA, "ra", "dev", "from_start");
+      await storage.remoteSessionMappings.upsert("lb", "p1", srvB, "rb", "dev", "from_start");
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      proxy.mockImplementation(async (
+        serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
+        body?: unknown, opts?: unknown,
+      ): Promise<ProxyResult> => {
+        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        await gate;
+        return respond(body as QueryBody);
+      });
+
+      const sweep = sync.syncAll({ includeExpired: true });
+      // Serial sweeping can only ever hold ONE query open behind the gate.
+      await vi.waitFor(() => {
+        expect(new Set(calls.map((c) => c.serverId))).toEqual(new Set([srvA, srvB]));
+      });
+
+      release();
+      await sweep;
     });
   });
 });

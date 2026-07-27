@@ -44,7 +44,27 @@ export const WATCH_EXTEND_THROTTLE_MS = 5 * 60 * 1000;
 /** Cap on the throttle bookkeeping map so a long-lived server can't leak. */
 const MAX_TRACKED_SESSIONS = 5_000;
 
+/**
+ * Backstop cadence. Recovery only — a turn's milestone rides the completion
+ * nudge below, so this tick exists for what the bus never saw (front offline,
+ * dropped stream, crash between milestone and import).
+ */
 const SYNC_INTERVAL_MS = 60_000;
+
+/**
+ * Coalescing window for completion-triggered pulls. Long enough that the
+ * several terminal frames one finished turn produces (`taskCompleted`, then
+ * the `stopped` status patch) become one query, short enough to stay
+ * imperceptible next to the round-trip that follows it.
+ */
+export const COMPLETION_NUDGE_DEBOUNCE_MS = 250;
+
+/**
+ * Servers swept at once. Bounded so a front with many workers can't open an
+ * unbounded fan of proxy requests, but never 1 — serial sweeping is what let
+ * one unreachable worker delay every other worker's import.
+ */
+const MAX_CONCURRENT_SERVERS = 4;
 
 /** Bound on hasMore-following so a misbehaving worker can't spin us forever. */
 const MAX_PAGES_PER_SYNC = 50;
@@ -65,6 +85,8 @@ export interface RemoteNotificationSyncDeps {
   reverseConnectManager?: ReverseConnectManager;
   /** Injectable for tests; defaults to the real direct/reverse-connect proxy. */
   proxy?: ProxyFn;
+  /** Injectable for tests; defaults to COMPLETION_NUDGE_DEBOUNCE_MS. */
+  nudgeDebounceMs?: number;
 }
 
 /** Front-local id for a remote workflow run — mirrors mapRemoteRun's scheme. */
@@ -90,10 +112,19 @@ export class RemoteNotificationSync {
   private readonly notificationService: NotificationService;
   private readonly reverseConnectManager?: ReverseConnectManager;
   private readonly proxy: ProxyFn;
+  private readonly nudgeDebounceMs: number;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
-  /** Serializes sweeps so a came-online sweep can't interleave with the tick. */
-  private chain: Promise<void> = Promise.resolve();
+  /**
+   * Per-server work queues. Two syncs of the SAME server must not interleave
+   * (they share its cursors), but two different servers have nothing in
+   * common — serializing them globally only meant an unreachable worker's
+   * retry budget delayed every healthy worker's import behind it.
+   */
+  private serverChains = new Map<string, Promise<void>>();
+  /** Local session ids whose completion is waiting for the debounce to fire. */
+  private nudgeSessions = new Set<string>();
+  private nudgeTimer: NodeJS.Timeout | null = null;
   /**
    * Remote sessions this front currently believes are RUNNING. They are polled
    * regardless of their persisted watch window: an agent turn can easily run
@@ -110,6 +141,7 @@ export class RemoteNotificationSync {
     this.notificationService = deps.notificationService;
     this.reverseConnectManager = deps.reverseConnectManager;
     this.proxy = deps.proxy ?? proxyToRemoteAuto;
+    this.nudgeDebounceMs = deps.nudgeDebounceMs ?? COMPLETION_NUDGE_DEBOUNCE_MS;
   }
 
   start(): void {
@@ -124,6 +156,9 @@ export class RemoteNotificationSync {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.nudgeTimer) clearTimeout(this.nudgeTimer);
+    this.nudgeTimer = null;
+    this.nudgeSessions.clear();
     this.activeRemoteSessions.clear();
     this.lastWatchExtend.clear();
   }
@@ -154,6 +189,12 @@ export class RemoteNotificationSync {
       this.activeRemoteSessions.delete(sessionId);
     }
 
+    // A turn just ended: pull its milestone NOW rather than at the next tick.
+    // Deliberately BEFORE the watch-extension throttle below — that throttle
+    // is a write-rate limiter for a 30-minute window, and every real
+    // completion follows recent `running` activity that already consumed it.
+    if (isTurnTerminalEvent(event)) this.scheduleCompletionSync(sessionId);
+
     const now = Date.now();
     const last = this.lastWatchExtend.get(sessionId) ?? 0;
     if (now - last < WATCH_EXTEND_THROTTLE_MS) return;
@@ -169,12 +210,75 @@ export class RemoteNotificationSync {
     }
   }
 
-  /** Fire-and-forget sweep, queued behind any in-flight one. */
+  /**
+   * Fire-and-forget sweep. No longer a global queue: the per-server chains
+   * inside syncAll/syncServer own the mutual exclusion that actually matters
+   * (one server's cursors), so callers here don't wait on unrelated servers.
+   */
   enqueue(work: () => Promise<void>): void {
     if (this.stopped) return;
-    this.chain = this.chain
+    void work().catch((err) => console.warn("[RemoteNotifications] sync failed:", err));
+  }
+
+  /**
+   * Queue `work` behind whatever is already running for this server, and
+   * nothing else. Errors are contained so one server's failure can't reject
+   * an unrelated caller awaiting the same chain.
+   */
+  private runOnServer(remoteServerId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.serverChains.get(remoteServerId) ?? Promise.resolve();
+    const next = previous
       .then(work)
-      .catch((err) => console.warn("[RemoteNotifications] sync failed:", err));
+      .catch((err) => console.warn(`[RemoteNotifications] sync for ${remoteServerId} failed:`, err))
+      .finally(() => {
+        // Only the tail entry may drop the chain, or a queued follow-up would
+        // lose its predecessor and run concurrently with it.
+        if (this.serverChains.get(remoteServerId) === next) this.serverChains.delete(remoteServerId);
+      });
+    this.serverChains.set(remoteServerId, next);
+    return next;
+  }
+
+  /**
+   * Debounced, per-server pull for sessions whose turn just ended.
+   *
+   * Coalescing state is intentionally separate from `lastWatchExtend`: that
+   * map throttles DB writes on a 5-minute scale, which would swallow nearly
+   * every completion.
+   */
+  private scheduleCompletionSync(localSessionId: string): void {
+    if (this.stopped) return;
+    this.nudgeSessions.add(localSessionId);
+    if (this.nudgeTimer) return;   // window already open — this id joins it
+    this.nudgeTimer = setTimeout(() => {
+      this.nudgeTimer = null;
+      const batch = [...this.nudgeSessions];
+      this.nudgeSessions.clear();
+      void this.syncSessions(batch).catch((err) =>
+        console.warn("[RemoteNotifications] completion sync failed:", err),
+      );
+    }, this.nudgeDebounceMs);
+    this.nudgeTimer.unref?.();
+  }
+
+  /**
+   * Pull exactly the mappings named, grouped per server. Deliberately does NOT
+   * go through `candidates()`: an explicit completion signal outranks the
+   * watch window, which may well have lapsed during a long turn.
+   */
+  private async syncSessions(localSessionIds: string[]): Promise<void> {
+    const byServer = new Map<string, RemoteSessionMapping[]>();
+    for (const localSessionId of localSessionIds) {
+      const mapping = await this.storage.remoteSessionMappings
+        .getByLocal(localSessionId)
+        .catch(() => undefined);
+      if (!mapping) continue;   // local session, or the mapping is gone
+      const group = byServer.get(mapping.remote_server_id);
+      if (group) group.push(mapping);
+      else byServer.set(mapping.remote_server_id, [mapping]);
+    }
+    if (byServer.size === 0) return;
+    await this.dispatchByServer([...byServer]);
   }
 
   /** Extend a mapping's periodic-poll window (create / send / workflow start / live activity). */
@@ -238,18 +342,35 @@ export class RemoteNotificationSync {
     return true;
   }
 
-  /** Sweep every mapped remote server. */
+  /** Sweep every mapped remote server, up to MAX_CONCURRENT_SERVERS at a time. */
   async syncAll(opts: { includeExpired: boolean }): Promise<void> {
     const mappings = await this.candidates(opts);
-    for (const [serverId, group] of groupByServer(mappings)) {
-      await this.syncMappings(serverId, group);
-    }
+    await this.dispatchByServer([...groupByServer(mappings)]);
   }
 
   /** Sweep one server — used when a reverse connection comes online. */
   async syncServer(remoteServerId: string, opts: { includeExpired: boolean }): Promise<void> {
     const mappings = (await this.candidates(opts)).filter((m) => m.remote_server_id === remoteServerId);
-    if (mappings.length > 0) await this.syncMappings(remoteServerId, mappings);
+    if (mappings.length > 0) await this.dispatchByServer([[remoteServerId, mappings]]);
+  }
+
+  /**
+   * Run one group per server, bounded. Each group still queues on its own
+   * server chain, so this composes with a nudge that arrives mid-sweep: same
+   * server → it waits its turn; different server → it runs immediately.
+   */
+  private async dispatchByServer(groups: Array<[string, RemoteSessionMapping[]]>): Promise<void> {
+    let next = 0;
+    const workers = Array.from(
+      { length: Math.min(MAX_CONCURRENT_SERVERS, groups.length) },
+      async () => {
+        for (let i = next++; i < groups.length; i = next++) {
+          const [serverId, group] = groups[i];
+          await this.runOnServer(serverId, () => this.syncMappings(serverId, group));
+        }
+      },
+    );
+    await Promise.all(workers);
   }
 
   /**
@@ -442,6 +563,20 @@ export class RemoteNotificationSync {
       apiKey: remote.server_api_key || "",
     };
   }
+}
+
+/**
+ * Bus events meaning "a turn on this remote session just ended".
+ *
+ * `taskCompleted` is the success half. Failure is the subtle one: a failed
+ * turn writes a `session_failed` milestone but emits no taskCompleted, and the
+ * remote `finished` frame is not bridged onto the front bus at all (see
+ * remote-agent-sessions.ts) — its terminal status patch is the only signal
+ * that crosses. `session:finished` is matched too, for paths that do emit it.
+ */
+function isTurnTerminalEvent(event: GlobalEvent): boolean {
+  if (event.type === "session:taskCompleted" || event.type === "session:finished") return true;
+  return event.type === "session:status" && (event.status === "stopped" || event.status === "error");
 }
 
 function groupByServer(mappings: RemoteSessionMapping[]): Map<string, RemoteSessionMapping[]> {
