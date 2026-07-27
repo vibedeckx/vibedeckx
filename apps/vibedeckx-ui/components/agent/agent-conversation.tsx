@@ -47,6 +47,7 @@ import { ModelPicker } from "./model-picker";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
+import { AgentTypeIcon } from "./agent-type-icon";
 import { useInputHistory } from "@/hooks/use-input-history";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
@@ -685,14 +686,24 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       pins the chevron, so switching between a long name
                       ("Claude Code") and a short one ("Codex") no longer shifts
                       this chip or everything after it in the header row. */}
-                  <Bot className={`h-3 w-3 ${agentType === "codex" ? "text-green-500" : "text-violet-500"}`} />
+                  <AgentTypeIcon type={agentType} />
                   <ReservedWidthLabel candidates={providers.map((p) => p.displayName)}>
                     {currentAgentName}
                   </ReservedWidthLabel>
                   <ChevronDown className="h-3 w-3 text-muted-foreground" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
+              {/* Anchored to the trigger's own width so the menu reads as the chip
+                  expanding, not as a separate panel. min-w, not w: the items are
+                  ~12px narrower than the trigger (no chevron, hidden radio dot),
+                  so this lands on exactly the trigger width today while still
+                  letting a future wider item grow instead of truncating. It also
+                  overrides shadcn's default 8rem floor, which today is wider than
+                  the chip. */}
+              <DropdownMenuContent
+                align="start"
+                className="min-w-[var(--radix-dropdown-menu-trigger-width)]"
+              >
                 <DropdownMenuRadioGroup
                   value={agentType}
                   onValueChange={async (v) => {
@@ -727,6 +738,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       disabled={!p.available}
                       className="text-xs pl-2 [&>span:first-child]:hidden data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground"
                     >
+                      {/* Same accent as the collapsed chip — the colour is only a
+                          useful cue if it is visible where the choice is made,
+                          not just after the menu closes. */}
+                      <AgentTypeIcon type={p.type} />
                       {p.displayName}
                     </DropdownMenuRadioItem>
                   ))}
@@ -735,10 +750,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             </DropdownMenu>
           ) : (
             <>
-              <Bot className={`h-4 w-4 ${agentType === "codex" ? "text-green-500" : "text-violet-500"}`} />
-              <span className="text-sm font-medium">
-                {agentType === "codex" ? "Codex" : "Claude Code"}
-              </span>
+              <AgentTypeIcon type={agentType} className="h-4 w-4" />
+              <span className="text-sm font-medium">{currentAgentName}</span>
             </>
           )}
           <ModelPicker

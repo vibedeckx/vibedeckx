@@ -206,6 +206,17 @@ describe("AgentConversation pendingModel", () => {
     });
   };
 
+  it("gives every agent option the same accent icon the collapsed chip uses", async () => {
+    await render("pA", "featA");
+
+    // The accent colour is the fastest cue for which agent is active. Showing it
+    // only after the menu closes makes the user pick by name and confirm by
+    // colour; the two have to agree at the point of choice.
+    const icon = (testid: string) => q(container, testid)!.querySelector("svg")?.getAttribute("class");
+    expect(icon("agent-claude-code")).toContain("text-violet-500");
+    expect(icon("agent-codex")).toContain("text-green-500");
+  });
+
   it("holds the picked model while the workspace is unchanged", async () => {
     await render("pA", "featA");
     await act(async () => {
