@@ -2,13 +2,22 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentMessage } from "../agent-types.js";
 
 vi.mock("ai", () => ({ generateText: vi.fn() }));
-vi.mock("./chat-model.js", () => ({ resolveFastChatModel: vi.fn(async () => ({})) }));
-vi.mock("./session-title.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./session-title.js")>()),
-  isChatModelConfigured: vi.fn(async () => true),
-}));
+vi.mock("./chat-model.js", () => {
+  const config = {
+    apiKeys: { deepseek: "k", openrouter: "" },
+    main: { provider: "deepseek", model: "main-model" },
+    fast: { provider: "deepseek", model: "fast-model" },
+  };
+  return {
+    resolveChatModel: vi.fn(async () => ({ id: "main-model" })),
+    resolveFastChatModel: vi.fn(async () => ({ id: "fast-model" })),
+    getChatProviderConfig: vi.fn(async () => config),
+    isModelConfigured: vi.fn(() => true),
+  };
+});
 
 import { generateText } from "ai";
+import { isModelConfigured } from "./chat-model.js";
 import {
   serializeConversationForBrief,
   generateIntentBrief,
@@ -27,6 +36,7 @@ import {
 } from "./review-brief.js";
 
 const mockGenerateText = vi.mocked(generateText);
+const mockIsModelConfigured = vi.mocked(isModelConfigured);
 const storage = {} as never;
 
 /** One capped-size agent turn — 6k chars, the per-message ceiling. */
@@ -186,7 +196,7 @@ describe("compactConversation", () => {
     const messages: AgentMessage[] = [];
     for (let i = 0; i < 10; i++) messages.push(bigTurn(`turn-${i}`));
     await compactConversation({}, messages);
-    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 1_500 }));
+    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 3_000 }));
   });
 
   // A slice summary feeds the distiller. Cutting its tail would drop whatever
@@ -198,6 +208,17 @@ describe("compactConversation", () => {
     mockGenerateText.mockResolvedValue({
       text: "filler ".repeat(1_000) + "\nCORRECTION: the earlier plan was dropped",
     } as never);
+
+    expect(await compactConversation({}, messages)).toBeNull();
+  });
+
+  // A token-capped slice summary is under the char limit but still lost its
+  // tail — where the compactor was told to put lower-priority material, and
+  // where a mid-list correction can vanish silently.
+  it("discards a slice summary cut by the token cap", async () => {
+    const messages: AgentMessage[] = [];
+    for (let i = 0; i < 10; i++) messages.push(bigTurn(`turn-${i}`));
+    mockGenerateText.mockResolvedValue({ text: "SLICE SUMMARY", finishReason: "length" } as never);
 
     expect(await compactConversation({}, messages)).toBeNull();
   });
@@ -263,6 +284,12 @@ describe("extractReversalsWithModel", () => {
     mockGenerateText.mockResolvedValue({ text: "SUPERSEDED: a -> b (why). ".repeat(200) } as never);
     expect(await extractReversalsWithModel({}, longConvo)).toBeNull();
   });
+
+  // Same rule when the cut came from maxOutputTokens instead of length.
+  it("discards a reversal list cut by the token cap", async () => {
+    mockGenerateText.mockResolvedValue({ text: "SUPERSEDED: a -> b (why)", finishReason: "length" } as never);
+    expect(await extractReversalsWithModel({}, longConvo)).toBeNull();
+  });
 });
 
 describe("generateIntentBriefWithModel", () => {
@@ -293,10 +320,15 @@ describe("generateIntentBriefWithModel", () => {
     expect(await generateIntentBriefWithModel({}, "User: build it")).toBeNull();
   });
 
-  it("passes the SDK-native timeout (which aborts the request) and treats an abort as null", async () => {
+  // 90s, not the input-scaled 15s: judgment calls run on the MAIN model,
+  // where reasoning time dominates and barely scales with input — live,
+  // deepseek-v4-pro took ~30s on a 2.5k-char input and blew a 45s budget on a
+  // compacted one. An abort masquerades as a size failure and triggers a
+  // pointless compaction retry, so the ceiling must clear normal completions.
+  it("passes the SDK-native timeout with the judgment-call budget and treats an abort as null", async () => {
     mockGenerateText.mockResolvedValue({ text: "brief" } as never);
     await generateIntentBriefWithModel({}, "User: build it");
-    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({ timeout: 15_000 }));
+    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({ timeout: 90_000 }));
 
     const abortErr = new Error("The operation was aborted");
     abortErr.name = "AbortError";
@@ -330,16 +362,42 @@ describe("generateIntentBriefWithModel", () => {
     expect(brief).toBe("y".repeat(4_000) + BRIEF_TRUNCATION_NOTE);
   });
 
-  it("bounds output with maxOutputTokens", async () => {
+  // A maxOutputTokens cut can land under the char cap: the brief looks
+  // complete but lost its tail (live eval: generation stopped mid-heading,
+  // before the [settled] items). finishReason is the only signal.
+  it("marks a brief cut by the token cap even when under the char cap", async () => {
+    mockGenerateText.mockResolvedValue({ text: "short but token-capped brief", finishReason: "length" } as never);
+    const brief = await generateIntentBriefWithModel({}, "User: build it");
+    expect(brief).toBe("short but token-capped brief" + BRIEF_TRUNCATION_NOTE);
+  });
+
+  // 3k, not 1k: reasoning-capable models spend thinking tokens inside
+  // maxOutputTokens. Live eval on deepseek-v4-flash showed a 1k budget either
+  // cutting the brief mid-heading or returning empty text (all tokens burned
+  // on reasoning). Acceptance size is still governed by the char cap.
+  it("bounds output with maxOutputTokens sized for reasoning overhead", async () => {
     mockGenerateText.mockResolvedValue({ text: "brief" } as never);
     await generateIntentBriefWithModel({}, "User: build it");
-    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 1_000 }));
+    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 3_000 }));
+  });
+
+  it("warns with the finish reason when the model returns empty text", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockGenerateText.mockResolvedValue({ text: "", finishReason: "length" } as never);
+      expect(await generateIntentBriefWithModel({}, "User: build it")).toBeNull();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("finishReason: length"));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
 describe("generateIntentBrief", () => {
   beforeEach(() => {
     mockGenerateText.mockReset();
+    mockIsModelConfigured.mockReset();
+    mockIsModelConfigured.mockReturnValue(true);
   });
 
   /** Route each call by its system prompt; `briefBehaviour` drives the distill step. */
@@ -438,6 +496,52 @@ describe("generateIntentBrief", () => {
     expect(await generateIntentBrief(storage, "u1", messages)).toBeNull();
   });
 
+  // Judgment (reversal + brief) runs on the strongest configured lane —
+  // weighing importance is exactly where the fast lane is weakest. Mechanical
+  // slice compression stays on the fast lane: up to 8 parallel calls, and
+  // compression needs recall, not judgment.
+  it("runs judgment calls on the main model and compaction on the fast model", async () => {
+    const messages: AgentMessage[] = [];
+    for (let i = 0; i < 25; i++) messages.push(bigTurn(`turn-${i}`));
+    let briefCalls = 0;
+    mockGenerateText.mockImplementation((async (opts: { system: string }) => {
+      if (opts.system === COMPACT_SYSTEM_PROMPT) return { text: "SLICE SUMMARY" };
+      if (opts.system === REVERSAL_SYSTEM_PROMPT) return { text: "NONE" };
+      if (briefCalls++ === 0) throw sizeError(); // force the compaction path
+      return { text: "the brief" };
+    }) as never);
+
+    await generateIntentBrief(storage, "u1", messages);
+
+    for (const [opts] of mockGenerateText.mock.calls) {
+      const { system, model } = opts as { system: string; model: { id: string } };
+      expect(model.id).toBe(system === COMPACT_SYSTEM_PROMPT ? "fast-model" : "main-model");
+    }
+  });
+
+  it("falls back to the fast model for judgment when the main lane has no key", async () => {
+    mockIsModelConfigured.mockImplementation((config, choice) => choice === config.fast);
+    wire(() => ({ text: "the brief" }));
+
+    await generateIntentBrief(storage, "u1", [
+      { type: "user", content: "build it", timestamp: 1 },
+      { type: "assistant", content: "done", timestamp: 2 },
+    ]);
+
+    const briefCall = mockGenerateText.mock.calls.find((c) => (c[0] as { system: string }).system === SYSTEM_PROMPT);
+    expect((briefCall![0] as { model: { id: string } }).model.id).toBe("fast-model");
+  });
+
+  it("returns null without a model call when neither lane has a key", async () => {
+    mockIsModelConfigured.mockReturnValue(false);
+    wire(() => ({ text: "the brief" }));
+
+    expect(
+      await generateIntentBrief(storage, "u1", [{ type: "user", content: "build it", timestamp: 1 }]),
+    ).toBeNull();
+    expect(mockGenerateText).not.toHaveBeenCalled();
+  });
+
   it("stops after a fatal reversal-pass failure instead of firing the brief request", async () => {
     const messages: AgentMessage[] = [];
     for (let i = 0; i < 15; i++) messages.push(bigTurn(`turn-${i}`));
@@ -481,5 +585,63 @@ describe("prompts", () => {
     expect(COMPACT_SYSTEM_PROMPT).toMatch(/1\. Reversals and corrections/);
     expect(COMPACT_SYSTEM_PROMPT).toMatch(/verbatim/i);
     expect(COMPACT_SYSTEM_PROMPT).toMatch(/a later slice may overturn it/i);
+  });
+
+  // The dominant question is the brief's zeroth-order statement: the one thing
+  // the reviewer must judge. It has to come from the conversation's own
+  // emphasis — a distiller inventing priorities hands the reviewer a wrong map,
+  // which is worse than no map.
+  it("opens with a dominant question derived from the conversation's own emphasis", () => {
+    expect(SYSTEM_PROMPT).toMatch(/dominant question/i);
+    expect(SYSTEM_PROMPT).toMatch(/repeated|reversed course|finally decided/i);
+    expect(SYSTEM_PROMPT).toMatch(/never from your own/i);
+    expect(SYSTEM_PROMPT).toMatch(/unclear/i); // permission to punt beats inventing one
+  });
+
+  it("separates hard constraints (violation = failure regardless) from ordinary decisions", () => {
+    expect(SYSTEM_PROMPT).toMatch(/hard constraints/i);
+    expect(SYSTEM_PROMPT).toMatch(/security|data loss/i);
+  });
+
+  // Settled status suppresses review findings downstream, so it needs explicit
+  // user evidence. Silence keeps its reporting value but must never escalate
+  // into "do not relitigate".
+  it("grants settled status only on explicit user evidence — silence stays tentative", () => {
+    expect(SYSTEM_PROMPT).toMatch(/\[settled\]/);
+    expect(SYSTEM_PROMPT).toMatch(/\[tentative\]/);
+    expect(SYSTEM_PROMPT).toMatch(/silence is never settled/i);
+    expect(SYSTEM_PROMPT).not.toMatch(/silence is agreement/i);
+  });
+
+  // Live eval showed the model writing "[settled – reason]" — informative but
+  // inconsistent with the exact tags the reviewer prompt refers to.
+  it("demands the bare tags with any justification outside the brackets", () => {
+    expect(SYSTEM_PROMPT).toMatch(/exactly \[settled\] or \[tentative\]/);
+    expect(SYSTEM_PROMPT).toMatch(/justification|reason.*after the tag|outside the bracket/i);
+  });
+
+  // Second live run: after compaction the model filed "no IE11" under heading
+  // 3 as a rejection instead of heading 4 — legitimate classification freedom,
+  // but the evidence tier vanished with it because tags were defined only for
+  // heading 4. The tag must follow the item, not the heading.
+  it("requires the evidence tag on every item under headings 3 and 4", () => {
+    expect(SYSTEM_PROMPT).toMatch(/every item under headings 3 and 4/i);
+  });
+
+  // "any justification after the tag" invited paragraph-length parentheticals
+  // on every item (live eval run 3), inflating the brief into the token cap.
+  it("keeps per-item justifications short or absent", () => {
+    expect(SYSTEM_PROMPT).toMatch(/a few words or omit/i);
+  });
+
+  it("orders items by weight toward the dominant question, not chronology", () => {
+    expect(SYSTEM_PROMPT).toMatch(/order items by how much they matter/i);
+  });
+
+  // Compaction must not launder an agent proposal into a user decision — the
+  // settled/tentative distinction downstream depends on who decided.
+  it("compactor preserves who made each decision so settled status survives compression", () => {
+    expect(COMPACT_SYSTEM_PROMPT).toMatch(/who made each decision/i);
+    expect(COMPACT_SYSTEM_PROMPT).toMatch(/user confirmation|user confirmed/i);
   });
 });

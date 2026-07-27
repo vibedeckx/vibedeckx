@@ -174,12 +174,26 @@ function selfReportSection(report: string | null): string | null {
   if (!report) return null;
   return [
     "\n## Author's self-report (unverified)",
-    "The implementing agent described its own work as follows. Treat every claim as unverified — check each one against the actual code, and look for problems the self-report does not mention.",
+    "The implementing agent described its own work as follows. Treat every claim as unverified — verify first the claims that bear on whether the work achieves its goal, and look for problems the self-report does not mention.",
     "<author-self-report>",
     report,
     "</author-self-report>",
   ].join("\n");
 }
+
+/**
+ * Shared ending for first review and re-review. Three-way verdict rather than
+ * ship/no-ship: "cannot-verify" gives a reviewer with thin evidence an honest
+ * exit instead of an overconfident ship. Blocking and non-blocking findings are
+ * separated so polish notes cannot dilute blockers. Nothing downstream parses
+ * this wording — the review loop relays through a human approval gate.
+ */
+const VERDICT_INSTRUCTIONS = [
+  "\nEnd your final message with:",
+  "1. Verdict — exactly one of: ship / needs-changes / cannot-verify. Use cannot-verify when you could not gather enough evidence to judge, rather than guessing.",
+  "2. Blocking findings — what must change before shipping, each specific and actionable (say explicitly when there are none).",
+  "3. Non-blocking notes — style and polish, briefly, clearly separated from the blocking list.",
+] as const;
 
 export function buildReviewerPrompt(opts: {
   taskContext: string | null;
@@ -243,7 +257,16 @@ export function buildReviewerPrompt(opts: {
     noDiffWithAnalysis
       ? "- Judge correctness and completeness against the task. For this analysis/plan turn the work under review is the reasoning and the proposal, not code quality of a diff. Be specific: reference files and lines."
       : "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
-    "\nEnd your final message with a clear, actionable list of feedback items — or state explicitly that the work looks good.",
+    // These two only make sense against a distilled brief: tier 2 has no
+    // [settled]/[tentative] marks and no stated scope, and implying it does
+    // would suppress findings on the strength of data that doesn't exist.
+    brief
+      ? "- Where the brief marks a decision, non-goal, or accepted limitation as [settled], do not re-raise the choice itself as a finding; DO report concrete consequences it causes — failure of the core goal, or a correctness, security, or data loss problem. Items marked [tentative] (or unmarked) get normal review. A violated hard constraint is always blocking."
+      : null,
+    brief
+      ? "- Do not propose enhancements beyond the brief's stated scope — scope expansion is a product decision, not a review finding."
+      : null,
+    ...VERDICT_INSTRUCTIONS,
     brief
       ? opts.authorSelfReport
         ? "\n(review context: distilled intent brief + author self-report + live workspace)"
@@ -280,7 +303,7 @@ export function buildRereviewerPrompt(opts: {
     "- Check for regressions and remaining correctness or test gaps.",
     "- Do NOT modify files — remain in read-only review mode.",
     reviewTargetPromptLine(opts.target),
-    "- End with actionable feedback, or explicitly state that it looks good.",
+    ...VERDICT_INSTRUCTIONS,
   ]
     .filter((line): line is string => line !== null)
     .join("\n");

@@ -205,6 +205,67 @@ describe("pure helpers", () => {
   });
 });
 
+describe("buildReviewerPrompt verdict & settled semantics", () => {
+  const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
+  const base = {
+    taskContext: "fix login",
+    originalIntent: "build a login page",
+    authorSelfReport: null,
+    reviewFocus: null,
+    target,
+  };
+
+  // A binary ship/no-ship forces overconfidence when evidence is thin; the
+  // three-way verdict gives "cannot-verify" an honest exit. Layered findings
+  // stop cosmetic notes from diluting blockers.
+  it("ends with a three-way verdict and layered findings instead of a flat list", () => {
+    const prompt = buildReviewerPrompt(base);
+    expect(prompt).toContain("ship / needs-changes / cannot-verify");
+    expect(prompt).toMatch(/blocking/i);
+    expect(prompt).toMatch(/non-blocking/i);
+    expect(prompt).not.toContain("looks good");
+  });
+
+  it("rereviewer prompt carries the same verdict structure", () => {
+    const prompt = buildRereviewerPrompt({
+      taskContext: null,
+      authorSelfReport: null,
+      reviewFocus: null,
+      target,
+    });
+    expect(prompt).toContain("ship / needs-changes / cannot-verify");
+    expect(prompt).not.toContain("looks good");
+  });
+
+  // The suppression is scoped to the *choice itself*: a settled "no retries"
+  // must not silence a data-loss consequence that choice turns out to cause.
+  it("with a brief: settled choices are not re-raised, but their consequences must be reported", () => {
+    const prompt = buildReviewerPrompt({ ...base, intentBrief: "0. Dominant question: does X work" });
+    expect(prompt).toMatch(/do not re-raise the choice itself/i);
+    expect(prompt).toMatch(/core goal|correctness, security, or data loss/i);
+    expect(prompt).toMatch(/scope expansion is a product decision/i);
+  });
+
+  // Tier 2 has no distiller and therefore no settled/dominant-question data;
+  // the prompt must not imply the reviewer holds equally reliable versions.
+  it("without a brief (tier 2): no settled/dominant-question semantics are implied", () => {
+    const prompt = buildReviewerPrompt(base);
+    expect(prompt).not.toMatch(/settled/i);
+    expect(prompt).not.toMatch(/dominant question/i);
+    expect(prompt).not.toMatch(/re-raise/i);
+  });
+
+  it("self-report verification is prioritized by bearing on the core goal, not exhaustive", () => {
+    const prompt = buildReviewerPrompt({
+      ...base,
+      authorSelfReport: "I added a token-bucket limiter in middleware and covered it with tests.",
+    });
+    expect(prompt).toContain("Treat every claim as unverified");
+    expect(prompt).toMatch(/claims that bear on/i);
+    expect(prompt).not.toContain("check each one against the actual code");
+  });
+});
+
 describe("buildReviewerPrompt scope", () => {
   const target = { baseHead: "abc123", diffDigest: "d", diffStat: "1 file changed", capturedAt: 1 };
 

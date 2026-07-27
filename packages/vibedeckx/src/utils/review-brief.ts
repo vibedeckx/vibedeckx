@@ -1,14 +1,24 @@
 import { generateText } from "ai";
 import type { Storage } from "../storage/types.js";
 import type { AgentMessage } from "../agent-types.js";
-import { extractUserText, isChatModelConfigured } from "./session-title.js";
-import { resolveFastChatModel } from "./chat-model.js";
+import { extractUserText } from "./session-title.js";
+import { getChatProviderConfig, isModelConfigured, resolveChatModel, resolveFastChatModel } from "./chat-model.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
 
 /** Floor for every model call; short inputs get exactly this. */
 const BASE_TIMEOUT_MS = 15_000;
+/**
+ * Flat budget for the two judgment calls (reversal + brief), replacing the
+ * input-scaled timeout: they run on the configured MAIN model, where
+ * reasoning time dominates and barely scales with input size. Live,
+ * deepseek-v4-pro took ~30s on a 2.5k-char input and blew a 45s budget on a
+ * compacted conversation. An early abort is doubly bad here: it masquerades
+ * as a size failure and triggers a pointless compaction retry, so the
+ * ceiling must comfortably clear a normal slow completion (~2x observed).
+ */
+const JUDGMENT_TIMEOUT_MS = 90_000;
 /** Added per 1k chars of input — a 120k-char prompt gets ~29s, not 15s. */
 const TIMEOUT_MS_PER_1K_CHARS = 120;
 const MAX_TIMEOUT_MS = 60_000;
@@ -29,12 +39,17 @@ const MIN_RECENT_VERBATIM_CHARS = 2_000;
 /** Cost ceiling: beyond this many slices we degrade to tier 2 instead. */
 const MAX_FOLD_CALLS = 8;
 
+// Token caps budget for reasoning-capable models, which spend thinking tokens
+// inside maxOutputTokens before any visible text: live eval on deepseek-v4
+// showed a tight cap either cutting output mid-heading or burning the whole
+// budget on reasoning and returning empty text. The *_MAX_CHARS guards, not
+// these, bound what we accept downstream.
 const COMPACT_SUMMARY_MAX_CHARS = 6_000;
-const COMPACT_SUMMARY_MAX_TOKENS = 1_500;
+const COMPACT_SUMMARY_MAX_TOKENS = 3_000;
 const REVERSALS_MAX_CHARS = 2_000;
-const REVERSALS_MAX_TOKENS = 500;
+const REVERSALS_MAX_TOKENS = 2_000;
 const BRIEF_MAX_CHARS = 4_000;
-const BRIEF_MAX_TOKENS = 1_000;
+const BRIEF_MAX_TOKENS = 3_000;
 /**
  * Below this the whole conversation sits comfortably inside one prompt with no
  * middle to get lost in, so the reversal pre-pass buys nothing — skip the
@@ -59,13 +74,17 @@ export const BRIEF_TRUNCATION_NOTE =
 export const SYSTEM_PROMPT = [
   "You distill a coding-agent conversation into an intent brief for an independent code reviewer.",
   "The reviewer will NOT see the conversation — only your brief plus the actual code, so capture what the code alone cannot show:",
+  "0. Dominant question — 1 or 2 sentences: the single question the reviewer must answer to judge this work (what must actually work, toward what goal). Derive it from the conversation's own emphasis — what the user repeated, finally decided, or reversed course over — never from your own engineering judgment. If the conversation does not clearly support one, write 'unclear' instead of inventing one.",
   "1. The original request and its goal.",
-  "2. Constraints and decisions, including approaches that were rejected and why. A rejection counts whether the user made it or the agent made it under a principle the user set.",
-  "3. Trade-offs or limitations that were acknowledged and accepted.",
-  "4. Behaviour established by actually running something — observed output, exit codes, error text, which stream an error arrived on. Report what was observed; that is evidence the reviewer cannot recover by reading code.",
+  "2. Hard constraints — requirements whose violation the user would treat as failure regardless of everything else (security, data loss, an explicit compatibility or behaviour promise). Only list ones the user actually stated; an empty section is fine.",
+  "3. Constraints and decisions, including approaches that were rejected and why. A rejection counts whether the user made it or the agent made it under a principle the user set.",
+  "4. Non-goals, trade-offs and limitations that were acknowledged and accepted.",
+  "5. Behaviour established by actually running something — observed output, exit codes, error text, which stream an error arrived on. Report what was observed; that is evidence the reviewer cannot recover by reading code.",
+  "Tag every item under headings 3 and 4 with exactly [settled] or [tentative] — the bare tag; keep any justification to a few words or omit it, always after the tag, never inside the brackets. Settled ONLY when the user explicitly confirmed it, instructed it, or reversed course to it; an agent proposal the user never answered is tentative — silence is never settled.",
+  "Within each heading, order items by how much they matter to the dominant question, not by when they were said.",
   "Later statements supersede earlier ones on the same topic. An option explored at length early is often rejected later in a single sentence, and the rejection wins. Where the conversation ends in a decision table or summary, that is authoritative wherever it conflicts with earlier prose.",
   "The input may arrive as numbered compressed slices followed by verbatim recent turns. Slice numbers are chronological: a later slice overrules an earlier one.",
-  "Decisions the agent made that the user did not contradict are binding — silence is agreement.",
+  "Decisions the agent made that the user did not contradict are worth reporting, but user silence only ever yields tentative status.",
   "Do NOT include the agent's self-assessment or any claim that the work is correct or complete — the reviewer must judge that independently.",
   "Every statement must trace to something in the conversation. If a heading has nothing real to report, say so rather than inventing plausible-sounding content.",
   "Write concise markdown bullets under those numbered headings, under 500 words total, in the same language as the conversation. Reply with the brief only.",
@@ -85,7 +104,7 @@ export const COMPACT_SYSTEM_PROMPT = [
   "You are told which slice of how many this is. Other slices are compressed separately and you cannot see them, so never present a conclusion here as final — a later slice may overturn it.",
   "Preserve, in this order of priority:",
   "1. Reversals and corrections — any conclusion that was dropped, replaced, or corrected. Quote the deciding sentence verbatim.",
-  "2. Constraints and decisions the user stated, and approaches that were rejected, with the reason.",
+  "2. Constraints and decisions the user stated, and approaches that were rejected, with the reason. Preserve who made each decision — an explicit user confirmation must stay distinguishable from an agent proposal the user never answered; quote the user's deciding sentence when there is one.",
   "3. Behaviour established by actually running something: observed output, exit codes, error text, which stream an error arrived on.",
   "4. Trade-offs that were acknowledged and accepted.",
   "Drop: exploration narrative, restated background, tool mechanics, and anything a reviewer could recover by reading the code.",
@@ -239,8 +258,18 @@ async function compactChunk(
       maxOutputTokens: COMPACT_SUMMARY_MAX_TOKENS,
       experimental_telemetry: telemetryFor("review-intent-brief-compact", userId),
     });
-    const text = ((result as { text?: string }).text ?? "").trim();
-    if (text.length === 0) return null;
+    const { text: rawText, finishReason } = result as { text?: string; finishReason?: string };
+    // A token-capped summary lost its tail while staying under the char cap —
+    // the same silent-cut failure withinLimit guards against.
+    if (finishReason === "length") {
+      console.warn(`[ReviewBrief] slice ${part}/${total} summary hit the token cap — discarding`);
+      return null;
+    }
+    const text = (rawText ?? "").trim();
+    if (text.length === 0) {
+      console.warn(`[ReviewBrief] slice ${part}/${total} came back empty (finishReason: ${finishReason ?? "unknown"})`);
+      return null;
+    }
     return withinLimit(text, COMPACT_SUMMARY_MAX_CHARS, `slice ${part}/${total} summary`) ? text : null;
   } catch (error) {
     if (isSizeRelatedFailure(error)) throw error;
@@ -339,12 +368,19 @@ export async function extractReversalsWithModel(
       model,
       system: REVERSAL_SYSTEM_PROMPT,
       prompt: `Report the reversals in this conversation:\n\n${conversation}`,
-      timeout: timeoutForInput(conversation.length),
+      timeout: JUDGMENT_TIMEOUT_MS,
       maxOutputTokens: REVERSALS_MAX_TOKENS,
       experimental_telemetry: telemetryFor("review-intent-brief-reversals", options.userId),
     });
 
-    const text = ((result as { text?: string }).text ?? "").trim();
+    const { text: rawText, finishReason } = result as { text?: string; finishReason?: string };
+    // A token-capped list looks authoritative while missing whichever reversal
+    // came last — same rule as the char-cap guard below: discard, never cut.
+    if (finishReason === "length") {
+      console.warn("[ReviewBrief] reversal list hit the token cap — discarding");
+      return null;
+    }
+    const text = (rawText ?? "").trim();
     if (text.length === 0 || /^none\b/i.test(text)) return null;
     return withinLimit(text, REVERSALS_MAX_CHARS, "reversal list") ? text : null;
   } catch (error) {
@@ -378,13 +414,24 @@ export async function generateIntentBriefWithModel(
       model,
       system: SYSTEM_PROMPT,
       prompt: buildBriefPrompt(conversation, options.reversals ?? null),
-      timeout: timeoutForInput(conversation.length),
+      timeout: JUDGMENT_TIMEOUT_MS,
       maxOutputTokens: BRIEF_MAX_TOKENS,
       experimental_telemetry: telemetryFor("review-intent-brief", options.userId),
     });
 
-    const text = ((result as { text?: string }).text ?? "").trim();
-    if (text.length === 0) return null;
+    const { text: rawText, finishReason } = result as { text?: string; finishReason?: string };
+    const text = (rawText ?? "").trim();
+    if (text.length === 0) {
+      // Seen live: a reasoning model can burn the whole token budget thinking
+      // and emit no text at all. Name the finish reason — a warn-less null
+      // here cost a full eval round to diagnose.
+      console.warn(`[ReviewBrief] model returned empty text (finishReason: ${finishReason ?? "unknown"})`);
+      return null;
+    }
+    // A maxOutputTokens cut can land under the char cap: the brief reads as
+    // complete but lost its tail. The brief is terminal output, so mark the
+    // cut visibly (mid-pipeline stages discard instead).
+    if (finishReason === "length") return text.slice(0, BRIEF_MAX_CHARS) + BRIEF_TRUNCATION_NOTE;
     return text.length <= BRIEF_MAX_CHARS ? text : text.slice(0, BRIEF_MAX_CHARS) + BRIEF_TRUNCATION_NOTE;
   } catch (error) {
     if (options.rethrowSizeFailures && isSizeRelatedFailure(error)) throw error;
@@ -404,8 +451,9 @@ async function distill(
 }
 
 /**
- * Distill a source session's conversation into an intent brief using the
- * configured fast chat model.
+ * Distill a source session's conversation into an intent brief. Judgment calls
+ * use the configured MAIN chat model (falling back to the fast lane when main
+ * has no key); slice compression uses the fast model.
  *
  * Optimistic-first: send the whole conversation and let the model tell us it
  * is too big, rather than guessing a budget for a model the user configured
@@ -422,15 +470,24 @@ export async function generateIntentBrief(
   messages: AgentMessage[],
 ): Promise<string | null> {
   try {
-    if (!(await isChatModelConfigured(storage, userId))) return null;
+    const config = await getChatProviderConfig(storage, userId);
+    const mainOk = isModelConfigured(config, config.main);
+    const fastOk = isModelConfigured(config, config.fast);
+    if (!mainOk && !fastOk) return null;
     const conversation = serializeConversationForBrief(messages);
     if (!conversation) return null;
 
-    const model = await resolveFastChatModel(storage, userId);
+    // Judgment (reversal + brief) runs on the strongest configured lane —
+    // weighing importance (dominant question, settled vs tentative) is exactly
+    // where the fast lane is weakest, and it is one call per review start.
+    // Mechanical slice compression stays on the fast lane: up to MAX_FOLD_CALLS
+    // parallel calls, and compression needs recall, not judgment.
+    const distillModel = mainOk ? await resolveChatModel(storage, userId) : await resolveFastChatModel(storage, userId);
+    const compactModel = fastOk ? await resolveFastChatModel(storage, userId) : distillModel;
 
     if (conversation.length <= COMPACT_TRIGGER_CHARS) {
       try {
-        const brief = await distill(model, conversation, userId, true);
+        const brief = await distill(distillModel, conversation, userId, true);
         return brief === null ? null : appendCompactionNote(brief, false);
       } catch (error) {
         if (!isSizeRelatedFailure(error)) throw error;
@@ -440,9 +497,9 @@ export async function generateIntentBrief(
 
     for (const sliceChars of COMPACT_SLICE_BUDGETS) {
       try {
-        const compacted = await compactConversation(model, messages, { userId, sliceChars });
+        const compacted = await compactConversation(compactModel, messages, { userId, sliceChars });
         if (compacted === null) return null;
-        const brief = await distill(model, compacted, userId, true);
+        const brief = await distill(distillModel, compacted, userId, true);
         return brief === null ? null : appendCompactionNote(brief, true);
       } catch (error) {
         if (!isSizeRelatedFailure(error)) throw error;
