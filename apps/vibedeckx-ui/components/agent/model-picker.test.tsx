@@ -271,6 +271,35 @@ describe("ModelPicker panel width wiring", () => {
     delete HTMLSpanElement.prototype.offsetWidth;
   });
 
+  it("explains that Default means the CLI's current model, not its built-in one", async () => {
+    stubGeometry(78, 8);
+    await openPicker(["gpt-5.6-codex"]);
+
+    const row = Array.from(document.querySelectorAll("[data-slot='command-item']")).find((el) =>
+      el.textContent?.startsWith("Default"),
+    )!;
+    // The icon is the hover affordance; the sentence has to reach a reader who
+    // is not hovering, so it also lives in the row as sr-only copy.
+    expect(row.querySelector("[data-slot='tooltip-trigger']")).not.toBeNull();
+    expect(row.querySelector("svg")).not.toBeNull();
+    const hint = row.querySelector(".sr-only")!.textContent!;
+    expect(hint).toContain("currently set to");
+    expect(hint).toContain("built-in default");
+  });
+
+  it("does not choose Default when the info icon is clicked", async () => {
+    stubGeometry(78, 8);
+    await openPicker(["gpt-5.6-codex"]);
+
+    const trigger = document.querySelector<HTMLElement>("[data-slot='tooltip-trigger']")!;
+    await act(async () => {
+      trigger.click();
+    });
+
+    // Reading the note is not picking the row: the panel stays open.
+    expect(document.querySelector("[data-slot='popover-content']")).not.toBeNull();
+  });
+
   it("opens at the chip's width", async () => {
     stubGeometry(78, 8);
     await openPicker(["gpt-5.6-codex"]);

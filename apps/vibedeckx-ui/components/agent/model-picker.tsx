@@ -1,7 +1,7 @@
 "use client";
 
 import { useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Info } from "lucide-react";
 import {
   Command,
   CommandEmpty,
@@ -11,6 +11,12 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { cn } from "@/lib/utils";
 import type { AgentType } from "@/lib/api";
@@ -26,7 +32,7 @@ interface ModelPickerProps {
    * the shift that actually shows up in the header row.
    */
   widthCandidates?: string[];
-  /** null = use the agent CLI's own default. */
+  /** null = no choice here; the CLI keeps its own. See DEFAULT_HINT. */
   value: string | null;
   onChange: (model: string | null) => void;
   /**
@@ -38,6 +44,16 @@ interface ModelPickerProps {
 }
 
 const DEFAULT_LABEL = "Default";
+
+/**
+ * "Default" is the easiest entry to misread: it looks like it names a model the
+ * CLI falls back to, when in fact it names the absence of a choice here — the
+ * CLI keeps whatever model it is already set to, which may be one the user
+ * picked there and not the CLI's built-in one. The hint says what happens, not
+ * how: the reader is choosing a model, not reading about the spawn arguments.
+ */
+const DEFAULT_HINT =
+  "Runs whatever model the CLI is currently set to, which may not be its built-in default.";
 
 /**
  * Shared by the live and locked forms so their geometry cannot drift. Locking is
@@ -216,6 +232,34 @@ export function ModelPicker({
             <CommandGroup>
               <CommandItem value={DEFAULT_LABEL} onSelect={() => pick(null)} className="text-xs">
                 {DEFAULT_LABEL}
+                {/* Mouse-only by design: cmdk keeps focus in the search field,
+                    so the icon can never be tabbed to. The sr-only copy below
+                    carries the same sentence for anyone not hovering. It does
+                    not disturb filtering — this item matches on its `value`,
+                    not on its text. */}
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        // A <span>, since a nested <button> inside the row would
+                        // be a second focus stop cmdk cannot reach anyway.
+                        // Stopping the click keeps "read the note" from also
+                        // meaning "choose this and close the panel".
+                        onClick={(e) => e.stopPropagation()}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        className="ml-auto flex cursor-help items-center text-muted-foreground"
+                      >
+                        {/* `size-3`, not `h-3 w-3`: CommandItem force-sizes
+                            any icon whose class list has no `size-` in it. */}
+                        <Info aria-hidden className="size-3" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="right" className="max-w-56">
+                      {DEFAULT_HINT}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <span className="sr-only">{DEFAULT_HINT}</span>
               </CommandItem>
               {models.map((m) => (
                 <CommandItem key={m} value={m} onSelect={() => pick(m)} className="text-xs">
