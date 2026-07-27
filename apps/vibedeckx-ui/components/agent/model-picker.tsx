@@ -11,6 +11,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { cn } from "@/lib/utils";
 import type { AgentType } from "@/lib/api";
 
@@ -18,6 +19,13 @@ interface ModelPickerProps {
   agentType: AgentType;
   /** Suggestions only — free text is always allowed. */
   models: string[];
+  /**
+   * Labels to hold the chip open for — every agent's suggestions, not just this
+   * agent's. Reserving only the active agent's names would keep the chip steady
+   * while picking a model but still resize it on every agent switch, which is
+   * the shift that actually shows up in the header row.
+   */
+  widthCandidates?: string[];
   /** null = use the agent CLI's own default. */
   value: string | null;
   onChange: (model: string | null) => void;
@@ -30,6 +38,14 @@ interface ModelPickerProps {
 }
 
 const DEFAULT_LABEL = "Default";
+
+/**
+ * Shared by the live and locked forms so their geometry cannot drift. Locking is
+ * a change of state, not of control: the box, padding and reserved label width
+ * stay put, and only the colour and the click behaviour differ.
+ */
+const CHIP_CLASS =
+  "inline-flex items-center gap-1 rounded-md border bg-muted/50 px-2 py-0.5 text-xs font-medium";
 
 /**
  * The chip always shows something, even with no model chosen — a blank slot
@@ -49,22 +65,40 @@ export function shouldOfferCustom(query: string, models: string[]): boolean {
   return trimmed.length > 0 && !models.includes(trimmed);
 }
 
-export function ModelPicker({ agentType, models, value, onChange, locked }: ModelPickerProps) {
+export function ModelPicker({
+  agentType,
+  models,
+  widthCandidates,
+  value,
+  onChange,
+  locked,
+}: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const label = modelLabel(value);
+  // A hand-typed name can be arbitrarily long, so the reserved slot is capped
+  // and clips rather than letting one chip stretch the whole header row. The
+  // tooltip carries the full value in that case.
+  const slot = [DEFAULT_LABEL, ...(widthCandidates ?? models)];
 
   if (locked) {
     return (
+      // A <span>, not a disabled <button>: disabled controls do not dispatch
+      // mouse events in most browsers, which would swallow the tooltip — the
+      // only place the "start a new conversation" explanation lives. Greying it
+      // out is the affordance; there is nothing to click.
       <span
-        className="text-xs text-muted-foreground px-1"
+        className={cn(CHIP_CLASS, "text-muted-foreground cursor-default")}
         // Not "branch to change": branching is the one action that cannot
         // change the model. branchSession copies the parent's model and takes
         // no override, and the branch is locked the moment it exists. A new
         // conversation is the only place the picker is live.
-        title="Fixed for this session — start a new conversation to change"
+        title={`${label} — fixed for this session, start a new conversation to change`}
       >
-        {label}
+        <ReservedWidthLabel candidates={slot} className="max-w-40">
+          {label}
+        </ReservedWidthLabel>
+        <ChevronDown className="h-3 w-3" />
       </span>
     );
   }
@@ -82,12 +116,13 @@ export function ModelPicker({ agentType, models, value, onChange, locked }: Mode
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
-          className={cn(
-            "inline-flex items-center gap-1 rounded-md border bg-muted/50 px-2 py-0.5",
-            "text-xs font-medium transition-colors hover:bg-muted",
-          )}
+          className={cn(CHIP_CLASS, "transition-colors hover:bg-muted")}
+          // Only useful once the label clips; harmless otherwise.
+          title={label}
         >
-          {label}
+          <ReservedWidthLabel candidates={slot} className="max-w-40">
+            {label}
+          </ReservedWidthLabel>
           <ChevronDown className="h-3 w-3 text-muted-foreground" />
         </button>
       </PopoverTrigger>

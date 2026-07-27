@@ -46,6 +46,7 @@ import { TurnEndDivider } from "./turn-end-divider";
 import { ModelPicker } from "./model-picker";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
+import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { useInputHistory } from "@/hooks/use-input-history";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
@@ -680,7 +681,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     (isLoading || (status === "running" && messages.length > 0)) && "opacity-50 cursor-not-allowed"
                   )}
                 >
-                  {providers.find(p => p.type === agentType)?.displayName ?? (agentType === "codex" ? "Codex" : "Claude Code")}
+                  {/* The icon anchors the left edge and the reserved label slot
+                      pins the chevron, so switching between a long name
+                      ("Claude Code") and a short one ("Codex") no longer shifts
+                      this chip or everything after it in the header row. */}
+                  <Bot className={`h-3 w-3 ${agentType === "codex" ? "text-green-500" : "text-violet-500"}`} />
+                  <ReservedWidthLabel candidates={providers.map((p) => p.displayName)}>
+                    {currentAgentName}
+                  </ReservedWidthLabel>
                   <ChevronDown className="h-3 w-3 text-muted-foreground" />
                 </button>
               </DropdownMenuTrigger>
@@ -736,6 +744,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           <ModelPicker
             agentType={agentType}
             models={providers.find((p) => p.type === agentType)?.models ?? []}
+            widthCandidates={providers.flatMap((p) => p.models ?? [])}
             value={session ? (session.model ?? null) : pendingModel}
             onChange={setPendingModel}
             locked={session != null}
