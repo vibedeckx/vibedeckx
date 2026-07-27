@@ -56,8 +56,18 @@ describe("agent session model routes", () => {
 
     expect(res.statusCode).toBe(200);
     const providers = res.json().providers as Array<{ type: string; models: string[] }>;
-    expect(providers.find((p) => p.type === "claude-code")?.models).toEqual(["opus", "sonnet", "haiku"]);
-    expect(providers.find((p) => p.type === "codex")?.models.length).toBeGreaterThan(0);
+    expect(providers.find((p) => p.type === "claude-code")?.models).toEqual([
+      "opus",
+      "sonnet",
+      "haiku",
+      "fable",
+    ]);
+    expect(providers.find((p) => p.type === "codex")?.models).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ]);
   });
 
   it("passes the model into createNewSession and echoes it back", async () => {

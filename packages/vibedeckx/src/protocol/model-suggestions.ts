@@ -12,6 +12,6 @@
  * like "claude-opus-4-5-20251101" would be stale within months.
  */
 export const MODEL_SUGGESTIONS: Record<"claude-code" | "codex", readonly string[]> = {
-  "claude-code": ["opus", "sonnet", "haiku"],
-  codex: ["gpt-5.6-sol", "gpt-5.6-codex", "o3"],
+  "claude-code": ["opus", "sonnet", "haiku", "fable"],
+  codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 } as const;
