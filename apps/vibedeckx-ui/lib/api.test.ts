@@ -20,13 +20,17 @@ describe("getFreshToken", () => {
     // Clerk JWT; reconnects re-sent it and the server rejected with "Invalid
     // token". getFreshToken must force a refresh instead of trusting the cache.
     setAuthToken(makeJwt(-15)); // expired 15s ago
-    const getter = vi.fn().mockResolvedValue(makeJwt(60));
+    // Minted once and compared to itself: makeJwt stamps `exp` from Date.now(),
+    // so calling it again for the assertion fails whenever the two calls land on
+    // either side of a second boundary.
+    const minted = makeJwt(60);
+    const getter = vi.fn().mockResolvedValue(minted);
     setTokenGetter(getter);
 
     const token = await getFreshToken();
 
     expect(getter).toHaveBeenCalledWith({ skipCache: true });
-    expect(token).toBe(makeJwt(60));
+    expect(token).toBe(minted);
   });
 
   it("forces a refresh when the cached token is near expiry", async () => {
