@@ -49,11 +49,12 @@ import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { AgentTypeIcon } from "./agent-type-icon";
 import { useInputHistory } from "@/hooks/use-input-history";
+import { useReviewerRun } from "@/hooks/use-reviewer-run";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
-import type { Project, ExecutionMode, AgentType, AgentProviderInfo, WorkflowRun } from "@/lib/api";
+import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText, branchAgentSession, api } from "@/lib/api";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
@@ -146,10 +147,6 @@ function formatPasteSize(bytes: number): string {
 function pasteTokenFor(id: number, bytes: number): string {
   return `[📎 paste #${id} (${formatPasteSize(bytes)})]`;
 }
-
-// Statuses for which a workflow run is still "in flight" for the reviewer
-// (discussion state → finalize button shows). Terminal statuses clear it.
-const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
   function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
@@ -403,35 +400,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   }, [messages]);
 
   // 本 session 是否为某活跃 review run 的 reviewer(讨论态才显示终稿按钮)。
-  // 初始状态靠 REST 查询(刷新页面时 WS 帧还没来),此后由 workflowRunUpdated
-  // 帧驱动;终态帧清空。远程会话两侧 id 均已按 remote- 前缀映射,直接比对。
-  const [reviewerRun, setReviewerRun] = useState<WorkflowRun | null>(null);
+  // frame-wins:WS 帧驱动为主,REST 只在种子期间没有任何帧到达时落地——见
+  // useReviewerRun 里的详细说明。远程会话两侧 id 均已按 remote- 前缀映射,
+  // 直接比对。
+  const reviewerRun = useReviewerRun(projectId, branch, activeSessionId, workflowRunUpdate);
   const [isFinalizing, setIsFinalizing] = useState(false);
-  // 复用组件既有的 `activeSessionId`(agent-conversation.tsx:236 已声明,
-  // 勿重复声明)——本段代码放在其声明之后。
-
-  useEffect(() => {
-    if (!projectId || !activeSessionId) { setReviewerRun(null); return; }
-    let stale = false;
-    void api.getActiveWorkflowRuns(projectId, branch)
-      .then((runs) => {
-        if (!stale) setReviewerRun(runs.find((r) => r.reviewer_session_id === activeSessionId) ?? null);
-      })
-      .catch(() => { /* transient — WS 帧仍会驱动 */ });
-    return () => { stale = true; };
-  }, [projectId, branch, activeSessionId]);
-
-  useEffect(() => {
-    if (!workflowRunUpdate || workflowRunUpdate.reviewer_session_id !== activeSessionId) return;
-    setReviewerRun(RUN_ACTIVE.has(workflowRunUpdate.status) ? workflowRunUpdate : null);
-  }, [workflowRunUpdate, activeSessionId]);
 
   const handleFinalize = useCallback(async () => {
     if (!reviewerRun) return;
     setIsFinalizing(true);
     try {
-      const run = await api.workflowRunGate(reviewerRun.id, "finalize");
-      setReviewerRun(run);
+      // reviewerRun now comes from useReviewerRun (frame-driven); the gate
+      // response itself is a discardable side-effect trigger — the backend
+      // always emits a workflowRunUpdated frame right after this transition
+      // (workflow-engine.ts requestFinalVerdict → emitRunUpdated), so the
+      // hook picks up the new status from that frame.
+      await api.workflowRunGate(reviewerRun.id, "finalize");
     } catch (e) {
       // 失败(如 reviewer 正在回复中)保持 discussing,按钮可重试;错误通过 toast 展示。
       toast.error(e instanceof Error ? e.message : "生成终稿失败");
