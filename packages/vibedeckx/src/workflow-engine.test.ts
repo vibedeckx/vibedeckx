@@ -876,6 +876,16 @@ describe("WorkflowEngine", () => {
     await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "bad-state" });
   });
 
+  it("requestFinalVerdict rejects with session-busy while the reviewer is mid-turn", async () => {
+    await createReviewer({ agentType: "claude-code" }); // s-rev row, stopped
+    const run = await startDiscussion();
+    await storage.agentSessions.updateStatus("s-rev", "running");
+    await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "session-busy" });
+    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing"); // claim never happened
+    await storage.agentSessions.updateStatus("s-rev", "stopped");
+    await expect(engine.requestFinalVerdict(run.id)).resolves.toMatchObject({ status: "waiting_reviewer" });
+  });
+
   it("handleExternalUserMessage never throws when storage rejects during the reviewer transition", async () => {
     // 本方法在 /message 路由投递前内联调用:异常冒出会阻断用户消息的投递,
     // 所以 reviewer 分支的 storage 失败也必须吞掉(同 source 分支的契约)。

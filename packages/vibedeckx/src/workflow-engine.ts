@@ -823,6 +823,20 @@ export class WorkflowEngine {
     if (!run || run.status !== "discussing" || !run.reviewer_session_id) {
       throw new WorkflowError("bad-state", "run 不在讨论状态");
     }
+    // Closes the realistic race: finalize clicked while the reviewer still has
+    // an in-flight discussion turn. Without this, the CAS below would open the
+    // gate immediately, and that stale turn's session:taskCompleted would
+    // satisfy handleTaskCompleted's waiting_reviewer check with old content —
+    // the real verdict turn's completion would then no-op silently against an
+    // already-advanced run. Lenient on a missing row (e.g. the adhoc-start
+    // mock path in tests never inserts one): only a positively "running"
+    // session blocks. The residual micro-window — a completion event already
+    // in flight the instant this check runs — is accepted; it self-heals via
+    // re-discussing + re-finalizing.
+    const reviewerSession = await this.storage.agentSessions.getById(run.reviewer_session_id);
+    if (reviewerSession && reviewerSession.status === "running") {
+      throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再生成终稿");
+    }
     const claimed = await this.storage.workflowRuns.transition(runId, "discussing", "waiting_reviewer", { error: null });
     if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
 
@@ -831,9 +845,14 @@ export class WorkflowEngine {
       .sendUserMessage(run.reviewer_session_id, FINAL_VERDICT_PROMPT, project?.path ?? undefined, undefined, REVIEWER_TURN)
       .catch(() => false);
     if (!sent) {
-      await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "discussing", {
+      const rolledBack = await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "discussing", {
         error: "发送失败：reviewer session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。",
       });
+      if (!rolledBack) {
+        console.warn(
+          `requestFinalVerdict: rollback CAS lost for run ${runId} — run moved concurrently (e.g. cancelled) while the send was in flight; rollback skipped`,
+        );
+      }
       const rolled = await this.storage.workflowRuns.getById(runId);
       if (rolled) this.emitRunUpdated(rolled);
       throw new WorkflowError("send-failed", "向 reviewer 发送终稿请求失败");
