@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, type WorkflowRun } from "@/lib/api";
 
 const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
@@ -39,8 +39,9 @@ export function useReviewerRun(
   }
 
   // 帧序号只在这里递增——不掺杂 setState,单纯读写 ref，供下面 REST 种子的
-  // frame-wins 判断使用。
-  useEffect(() => {
+  // frame-wins 判断使用。Layout effect 确保同步在 commit 任务内执行,
+  // 避免 REST .then 在 ref bump 前读取到陈旧值。
+  useLayoutEffect(() => {
     if (runUpdate && runUpdate.reviewer_session_id === sessionId) {
       frameSeqRef.current++;
     }
