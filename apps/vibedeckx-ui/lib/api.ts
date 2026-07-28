@@ -1008,7 +1008,7 @@ export interface WorkflowRun {
   review_focus: string | null;
   review_target: string | null;
   feedback_snapshot: string | null;
-  status: "waiting_reviewer" | "waiting_feedback" | "sending_feedback" | "completed" | "cancelled" | "failed";
+  status: "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "completed" | "cancelled" | "failed";
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -2474,7 +2474,7 @@ export const api = {
     return (await res.json()).runs;
   },
 
-  async workflowRunGate(runId: string, action: "approve" | "cancel", editedPayload?: string): Promise<WorkflowRun> {
+  async workflowRunGate(runId: string, action: "approve" | "cancel" | "finalize", editedPayload?: string): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/gate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
