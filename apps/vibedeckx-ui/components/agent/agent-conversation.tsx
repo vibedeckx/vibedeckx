@@ -432,8 +432,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     try {
       const run = await api.workflowRunGate(reviewerRun.id, "finalize");
       setReviewerRun(run);
-    } catch {
-      // 失败(如 reviewer 未唤醒)保持 discussing,按钮可重试;错误详情在 gate 面板。
+    } catch (e) {
+      // 失败(如 reviewer 正在回复中)保持 discussing,按钮可重试;错误通过 toast 展示。
+      toast.error(e instanceof Error ? e.message : "生成终稿失败");
     } finally {
       setIsFinalizing(false);
     }
