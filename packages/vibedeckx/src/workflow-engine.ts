@@ -805,11 +805,12 @@ export class WorkflowEngine {
     // CAS instead of an unconditional status write: `sending_feedback` is the
     // narrow window where approveFeedback is mid-`await` on
     // agentOps.sendUserMessage. A concurrent cancel must not stomp that —
-    // only the two states below are safe for cancel to interrupt.
+    // only the three states below are safe for cancel to interrupt.
     const patch = reason ? { error: reason } : undefined;
     const cancelled =
       (await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "cancelled", patch)) ||
-      (await this.storage.workflowRuns.transition(runId, "waiting_feedback", "cancelled", patch));
+      (await this.storage.workflowRuns.transition(runId, "waiting_feedback", "cancelled", patch)) ||
+      (await this.storage.workflowRuns.transition(runId, "discussing", "cancelled", patch));
 
     if (!cancelled) {
       const current = await this.storage.workflowRuns.getById(runId);
@@ -832,6 +833,10 @@ export class WorkflowEngine {
   /**
    * Human takeover (spec §3.4): user sent a message directly to a run session.
    *
+   * Reviewer 分流:向 reviewer 发消息不再是接管——它开启一轮讨论,把 run
+   * 移入 `discussing`(gate 收起),等待显式的 requestFinalVerdict 重新出稿。
+   * 只有向 source session 发消息才算接管,结束 run。
+   *
    * Never-throws contract: this is called inline from the agent-session
    * `/message` route BEFORE the user's message is delivered
    * (agentOps.sendUserMessage). A throw here would abort delivery of that
@@ -846,8 +851,31 @@ export class WorkflowEngine {
   async handleExternalUserMessage(sessionId: string): Promise<void> {
     const p = this.participants.get(sessionId);
     if (!p) return;
+    if (p.role === "reviewer") {
+      // 讨论不是接管:用户给 reviewer 发消息 → run 进入 discussing,gate 收起,
+      // 等待显式的 requestFinalVerdict 重新出稿。两个 from 状态各试一次(同
+      // cancelRun 的写法);都失败说明 run 处于 sending_feedback 或已终态——
+      // 静默不动。清掉 error:上一轮的 drift/发送警告对讨论态是陈旧信息,
+      // 下一轮终稿会重新计算。整段包 try/catch:never-throws 契约覆盖 storage
+      // 异常本身,不止 CAS 落败——异常冒出会阻断 /message 路由的消息投递。
+      try {
+        const moved =
+          (await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null })) ||
+          (await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null }));
+        if (moved) {
+          const updated = await this.storage.workflowRuns.getById(p.runId);
+          if (updated) this.emitRunUpdated(updated);
+        }
+      } catch (err) {
+        console.error(
+          `[WorkflowEngine] handleExternalUserMessage: failed moving run ${p.runId} to discussing; swallowed to honor never-throws contract`,
+          err,
+        );
+      }
+      return;
+    }
     try {
-      await this.cancelRun(p.runId, "用户接管：直接向 run 内的 session 发送了消息，review 已结束。");
+      await this.cancelRun(p.runId, "用户接管：直接向 source session 发送了消息，review 已结束。");
     } catch (err) {
       if (err instanceof WorkflowError && err.code === "bad-state") {
         console.warn(

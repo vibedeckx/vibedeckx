@@ -783,11 +783,55 @@ describe("WorkflowEngine", () => {
     expect(after?.status).toBe("sending_feedback"); // untouched by the failed cancel
   });
 
-  it("handleExternalUserMessage ends the run (human takeover)", async () => {
+  it("handleExternalUserMessage on the SOURCE ends the run (human takeover)", async () => {
     const run = await start();
-    await engine.handleExternalUserMessage("s-rev");
+    await engine.handleExternalUserMessage("s-src");
     expect((await storage.workflowRuns.getById(run.id))?.status).toBe("cancelled");
     expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(false);
+  });
+
+  it("a user message to the reviewer moves waiting_feedback → discussing instead of cancelling", async () => {
+    const run = await start();
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+    await engine.handleExternalUserMessage("s-rev");
+    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing");
+    // Run 仍活跃:参与者保留,后续 finalize/cancel 都要用。
+    expect(engine.isSessionInActiveRun("s-rev")).toBe(true);
+  });
+
+  it("interrupting the reviewer mid-review (waiting_reviewer) also moves the run to discussing", async () => {
+    const run = await start();
+    await engine.handleExternalUserMessage("s-rev");
+    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing");
+  });
+
+  it("reviewer taskCompleted during discussing neither reopens the gate nor creates a milestone", async () => {
+    const run = await start();
+    await engine.handleExternalUserMessage("s-rev"); // → discussing
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing");
+    expect(await storage.notificationOutbox.listAfter(0, 10)).toHaveLength(0);
+  });
+
+  it("cancelRun cancels a discussing run", async () => {
+    const run = await start();
+    await engine.handleExternalUserMessage("s-rev"); // → discussing
+    const cancelled = await engine.cancelRun(run.id, "user cancelled");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+  });
+
+  it("handleExternalUserMessage never throws when storage rejects during the reviewer transition", async () => {
+    // 本方法在 /message 路由投递前内联调用:异常冒出会阻断用户消息的投递,
+    // 所以 reviewer 分支的 storage 失败也必须吞掉(同 source 分支的契约)。
+    const run = await start();
+    vi.spyOn(storage.workflowRuns, "transition").mockRejectedValueOnce(new Error("db locked"));
+    await expect(engine.handleExternalUserMessage("s-rev")).resolves.toBeUndefined();
+    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_reviewer"); // 原状态未动
   });
 
   it("handleExternalUserMessage never throws when the run is mid-send (sending_feedback bad-state race)", async () => {
