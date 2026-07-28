@@ -321,6 +321,24 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(proxyMock.mock.calls[1][5]).toMatchObject({ action: "approve", editedPayload: "edited" });
   });
 
+  it("gate forwards a finalize action to the worker verbatim", async () => {
+    makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { runs: [bareRun] } });
+    const list = await app.inject({ method: "GET", url: "/api/workflow-runs?projectId=p1&branch=dev" });
+    expect(list.statusCode).toBe(200);
+
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { run: { ...bareRun, status: "completed" } } });
+    const gate = await app.inject({
+      method: "POST", url: "/api/workflow-runs/remote-srv1-p1-run1/gate",
+      payload: { action: "finalize" },
+    });
+    expect(gate.statusCode).toBe(200);
+    expect(gate.json().run.status).toBe("completed");
+    expect(proxyMock.mock.calls[1][4]).toBe("/api/workflow-runs/run1/gate");
+    expect(proxyMock.mock.calls[1][5]).toMatchObject({ action: "finalize" });
+  });
+
   it("gate 404s an unknown remote run id (empty remoteRunMap)", async () => {
     makeApp();
     await app.register(workflowRunRoutes);
