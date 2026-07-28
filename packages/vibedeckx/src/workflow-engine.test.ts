@@ -841,7 +841,7 @@ describe("WorkflowEngine", () => {
 
       const rows = await outboxRows();
       expect(rows).toHaveLength(1);
-      expect(rows[0].id).toBe(`workflow:${run.id}:review-ready`);
+      expect(rows[0].id).toBe(`workflow:${run.id}:turn:1:review-ready`);
       expect(rows[0].kind).toBe("review_ready");
       // The reviewer session is where the review controls live.
       expect(rows[0].session_id).toBe("s-rev");
@@ -938,8 +938,8 @@ describe("WorkflowEngine", () => {
       const reviewReady = (await outboxRows()).filter((r) => r.kind === "review_ready");
       expect(reviewReady).toHaveLength(2);
       expect(reviewReady.map((r) => r.id)).toEqual([
-        `workflow:${first.id}:review-ready`,
-        `workflow:${second.id}:review-ready`,
+        `workflow:${first.id}:turn:1:review-ready`,
+        `workflow:${second.id}:turn:1:review-ready`,
       ]);
       expect(second.id).not.toBe(first.id);
     });

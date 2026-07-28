@@ -14,8 +14,14 @@ export const sessionResultReadyId = (sessionId: string, turnEndEntryIndex: numbe
 export const sessionFailedId = (sessionId: string, turnEndEntryIndex: number): string =>
   `session:${sessionId}:turn:${turnEndEntryIndex}:failed`;
 
-export const reviewReadyId = (workflowRunId: string): string =>
-  `workflow:${workflowRunId}:review-ready`;
+/**
+ * Per-round: one review run can open the gate multiple times (initial review,
+ * then each "final verdict" after a discussion round). The turn boundary index
+ * of the reviewer turn that produced the verdict distinguishes rounds; a
+ * replayed taskCompleted for the same turn must still collapse onto one id.
+ */
+export const reviewReadyId = (workflowRunId: string, turnEndEntryIndex: number): string =>
+  `workflow:${workflowRunId}:turn:${turnEndEntryIndex}:review-ready`;
 
 /**
  * `stateVersion` is the state the run failed OUT OF. Two distinct failures of

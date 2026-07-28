@@ -743,7 +743,7 @@ export class WorkflowEngine {
         ...(driftNote ? { error: driftNote } : {}),
       },
       {
-        id: reviewReadyId(run.id),
+        id: reviewReadyId(run.id, boundary),
         kind: "review_ready",
         project_id: run.project_id,
         branch: run.branch,
