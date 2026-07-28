@@ -338,6 +338,20 @@ export function buildFeedbackMessage(feedback: string): string {
   ].join("\n");
 }
 
+/**
+ * Injected when the user finishes a discussion round and asks for a clean
+ * final verdict. The reviewer's discussion replies are conversational and
+ * unsuitable as feedback payloads; this prompt forces one turn whose output
+ * IS the payload, which handleTaskCompleted then snapshots verbatim.
+ */
+export const FINAL_VERDICT_PROMPT = [
+  "[Final verdict request]",
+  "请把讨论后的最终 review 意见完整输出为面向作者的定稿。这段输出将原样发送给作者——不要包含对话性内容：不要引用讨论过程本身，不要向我提问。",
+  "- 吸收讨论中达成一致的修正：撤回的条目不再出现，修订过的条目以修订后的形式给出。",
+  "- 保持具体：每条指明文件/位置与问题，以及期望的修复方向。",
+  ...VERDICT_INSTRUCTIONS,
+].join("\n");
+
 // ---------- engine ----------
 
 interface Participant {
@@ -795,6 +809,38 @@ export class WorkflowEngine {
     this.untrackRun(done);
     this.emitRunUpdated(done);
     return done;
+  }
+
+  /**
+   * Discussion → verdict: CAS the run back onto the reviewer track and inject
+   * the final-verdict prompt. From waiting_reviewer the existing
+   * handleTaskCompleted path reopens the gate with the new turn's output.
+   * Send failure rolls the claim back so the finalize button stays actionable —
+   * mirror of approveFeedback's no-auto-retry contract.
+   */
+  async requestFinalVerdict(runId: string): Promise<WorkflowRun> {
+    const run = await this.storage.workflowRuns.getById(runId);
+    if (!run || run.status !== "discussing" || !run.reviewer_session_id) {
+      throw new WorkflowError("bad-state", "run 不在讨论状态");
+    }
+    const claimed = await this.storage.workflowRuns.transition(runId, "discussing", "waiting_reviewer", { error: null });
+    if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
+
+    const project = await this.storage.projects.getById(run.project_id);
+    const sent = await this.agentOps
+      .sendUserMessage(run.reviewer_session_id, FINAL_VERDICT_PROMPT, project?.path ?? undefined, undefined, REVIEWER_TURN)
+      .catch(() => false);
+    if (!sent) {
+      await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "discussing", {
+        error: "发送失败：reviewer session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。",
+      });
+      const rolled = await this.storage.workflowRuns.getById(runId);
+      if (rolled) this.emitRunUpdated(rolled);
+      throw new WorkflowError("send-failed", "向 reviewer 发送终稿请求失败");
+    }
+    const updated = (await this.storage.workflowRuns.getById(runId))!;
+    this.emitRunUpdated(updated);
+    return updated;
   }
 
   async cancelRun(runId: string, reason?: string): Promise<WorkflowRun | undefined> {

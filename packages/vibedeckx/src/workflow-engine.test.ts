@@ -17,6 +17,7 @@ import {
   extractTaskContextBefore,
   extractFirstUserMessage,
   extractAuthorSelfReport,
+  FINAL_VERDICT_PROMPT,
 } from "./workflow-engine.js";
 import type { AgentMessage } from "./agent-types.js";
 
@@ -823,6 +824,56 @@ describe("WorkflowEngine", () => {
     const cancelled = await engine.cancelRun(run.id, "user cancelled");
     expect(cancelled?.status).toBe("cancelled");
     expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+  });
+
+  async function startDiscussion() {
+    const run = await start();
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+    await engine.handleExternalUserMessage("s-rev");
+    return run;
+  }
+
+  it("requestFinalVerdict sends the verdict prompt to the reviewer and returns to waiting_reviewer", async () => {
+    const run = await startDiscussion();
+    const updated = await engine.requestFinalVerdict(run.id);
+    expect(updated.status).toBe("waiting_reviewer");
+    const sent = agentOps.sendUserMessage.mock.calls.at(-1)!;
+    expect(sent[0]).toBe("s-rev");
+    expect(sent[1]).toBe(FINAL_VERDICT_PROMPT);
+    // 终稿 turn 与初审/复审同处置:run 拥有注意力事件,不另发通用会话通知。
+    expect(sent[4]).toEqual({ origin: "workflow", notificationDisposition: "milestone-managed" });
+  });
+
+  it("full loop: v1 gate → discussion → final verdict → v2 gate, distinct milestone ids", async () => {
+    const run = await startDiscussion();
+    await engine.requestFinalVerdict(run.id);
+    reviewerEntries[2] = { type: "assistant", content: "Final: only rename X", timestamp: 3 };
+    reviewerEntries[3] = { type: "turn_end", timestamp: 4 };
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 3 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+    expect((await storage.workflowRuns.getById(run.id))?.feedback_snapshot).toBe("Final: only rename X");
+    const ids = (await storage.notificationOutbox.listAfter(0, 100)).map((r) => r.id);
+    expect(ids).toContain(`workflow:${run.id}:turn:1:review-ready`);
+    expect(ids).toContain(`workflow:${run.id}:turn:3:review-ready`);
+  });
+
+  it("requestFinalVerdict send failure rolls back to discussing with an error", async () => {
+    const run = await startDiscussion();
+    agentOps.sendUserMessage.mockResolvedValueOnce(false);
+    await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "send-failed" });
+    const after = await storage.workflowRuns.getById(run.id);
+    expect(after?.status).toBe("discussing");
+    expect(after?.error).toContain("发送失败");
+  });
+
+  it("requestFinalVerdict outside discussing rejects with bad-state", async () => {
+    const run = await start(); // waiting_reviewer
+    await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "bad-state" });
   });
 
   it("handleExternalUserMessage never throws when storage rejects during the reviewer transition", async () => {
