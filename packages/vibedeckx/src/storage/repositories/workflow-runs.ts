@@ -4,7 +4,7 @@ import type { Storage, WorkflowRun, WorkflowRunStatus } from "../types.js";
 // NotificationOutboxEvent flows in through Storage["workflowRuns"] signatures,
 // which this factory's return type pins.
 
-const ACTIVE: WorkflowRunStatus[] = ["waiting_reviewer", "waiting_feedback", "sending_feedback"];
+const ACTIVE: WorkflowRunStatus[] = ["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"];
 
 const asRun = (row: unknown): WorkflowRun => row as WorkflowRun;
 

@@ -235,6 +235,7 @@ export interface Command {
 export type WorkflowRunStatus =
   | "waiting_reviewer"
   | "waiting_feedback"
+  | "discussing"
   | "sending_feedback"
   | "completed"
   | "cancelled"

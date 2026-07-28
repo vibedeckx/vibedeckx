@@ -37,6 +37,14 @@ describe("workflowRuns repository", () => {
     expect(run.reviewer_session_id).toBeNull();
   });
 
+  it("discussing runs count as active in all three active queries", async () => {
+    await storage.workflowRuns.create(baseRun);
+    await storage.workflowRuns.update("r1", { reviewer_session_id: "s-rev", status: "discussing" });
+    expect((await storage.workflowRuns.getActive("p1", "dev")).map((r) => r.id)).toEqual(["r1"]);
+    expect((await storage.workflowRuns.getAllActive()).map((r) => r.id)).toEqual(["r1"]);
+    expect((await storage.workflowRuns.getActiveBySession("s-rev"))?.id).toBe("r1");
+  });
+
   it("getActive filters by workspace and non-terminal status", async () => {
     await storage.workflowRuns.create(baseRun);
     await storage.workflowRuns.create({ ...baseRun, id: "r2", branch: "other" });
