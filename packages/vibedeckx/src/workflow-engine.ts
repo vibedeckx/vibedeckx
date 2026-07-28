@@ -309,10 +309,30 @@ export function buildRereviewerPrompt(opts: {
     .join("\n");
 }
 
+/**
+ * The source side of the review loop. Symmetric to `buildReviewerPrompt`: that
+ * one labels the author's self-report as unverified, this one labels the
+ * reviewer's findings the same way, and for the same reason — the reviewer is
+ * read-only and saw only this turn's diff plus a distilled brief, so it can be
+ * wrong on the facts while sounding authoritative.
+ *
+ * The escape hatch is deliberately paired with a per-item accounting duty: an
+ * unqualified "use your judgment" makes "I looked, it's fine" the cheapest path
+ * and the loop spins. Disagreeing has to cost more than complying. That
+ * accounting is also what the next `buildRereviewerPrompt` turn reads as the
+ * author self-report — otherwise a re-review can only infer what was done from
+ * the workspace.
+ */
 export function buildFeedbackMessage(feedback: string): string {
   return [
     "[Review Feedback]",
-    "A reviewer agent examined your last completed work. Please address the following feedback:",
+    "A reviewer agent examined your last completed work. It was in read-only mode and saw only this turn's diff plus a distilled brief of the conversation, so it may be working from wrong premises. Treat its findings as input to verify, not as conclusions.",
+    "",
+    "- Verify each item against the code before changing anything.",
+    "- Push back when you have grounds: say what the item gets wrong and leave the code as it is. Do not change code to be agreeable.",
+    "- Address blocking findings first; non-blocking notes need not be done this turn.",
+    "- Do not widen the scope: no fixes the reviewer did not raise, no abstractions for hypothetical cases.",
+    "- Close with a per-item account: fixed, or not fixed and why.",
     "",
     feedback,
   ].join("\n");

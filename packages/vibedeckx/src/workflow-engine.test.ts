@@ -10,6 +10,7 @@ import {
   WorkflowError,
   buildReviewerPrompt,
   buildRereviewerPrompt,
+  buildFeedbackMessage,
   extractLatestTurnEndIndex,
   extractLastAssistantBefore,
   extractLastAssistantInTurn,
@@ -263,6 +264,38 @@ describe("buildReviewerPrompt verdict & settled semantics", () => {
     expect(prompt).toContain("Treat every claim as unverified");
     expect(prompt).toMatch(/claims that bear on/i);
     expect(prompt).not.toContain("check each one against the actual code");
+  });
+});
+
+describe("buildFeedbackMessage", () => {
+  const msg = buildFeedbackMessage("blocking: the retry loop never terminates");
+
+  it("keeps the feedback body and the marker the source session sees", () => {
+    expect(msg).toContain("[Review Feedback]");
+    expect(msg).toContain("blocking: the retry loop never terminates");
+  });
+
+  // Mirror of the reviewer prompt's "self-report is unverified" framing: the
+  // reviewer's information disadvantage is named so the source calibrates on
+  // it, instead of a bare "don't blindly comply".
+  it("frames the findings as unverified input from a read-only, partial-context reviewer", () => {
+    expect(msg).toMatch(/read-only/i);
+    expect(msg).toMatch(/wrong premises/i);
+    expect(msg).toMatch(/input to verify, not as conclusions/i);
+    expect(msg).not.toMatch(/please address the following feedback/i);
+  });
+
+  // The escape hatch must not become the cheap path: pushing back is allowed
+  // only with grounds, and every item has to be accounted for either way.
+  it("pairs the right to push back with a per-item accounting duty", () => {
+    expect(msg).toMatch(/push back when you have grounds/i);
+    expect(msg).toMatch(/per-item account.*fixed, or not fixed and why/i);
+  });
+
+  it("separates blocking from non-blocking and forbids widening the scope", () => {
+    expect(msg).toMatch(/blocking findings first/i);
+    expect(msg).toMatch(/non-blocking notes need not be done this turn/i);
+    expect(msg).toMatch(/do not widen the scope/i);
   });
 });
 
