@@ -5,9 +5,9 @@ import { api, type WorkflowRun } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { Eye, Loader2, Pencil, X } from "lucide-react";
+import { Eye, FileCheck, Loader2, Pencil, X } from "lucide-react";
 
-const ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "sending_feedback"]);
+const ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 
 export function ReviewRunPanel({
   projectId,
@@ -70,6 +70,7 @@ export function ReviewRunPanel({
               <span className="ml-2 text-muted-foreground">
                 {run.status === "waiting_reviewer" && "reviewer 审查中…"}
                 {run.status === "waiting_feedback" && "等你确认反馈"}
+                {run.status === "discussing" && "讨论中"}
                 {run.status === "sending_feedback" && "发送中…"}
               </span>
             </span>
@@ -82,6 +83,17 @@ export function ReviewRunPanel({
           {run.status === "waiting_reviewer" && (
             <div className="flex items-center text-muted-foreground text-xs">
               <Loader2 className="h-3 w-3 mr-1 animate-spin" /> reviewer session 正在工作
+            </div>
+          )}
+          {run.status === "discussing" && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">
+                与 reviewer 讨论后，生成终稿再发送
+              </span>
+              <Button size="sm" variant="outline" disabled={busy === run.id}
+                onClick={() => act(() => api.workflowRunGate(run.id, "finalize"), run.id)}>
+                <FileCheck className="h-3 w-3 mr-1" />生成 review 终稿
+              </Button>
             </div>
           )}
           {run.status === "waiting_feedback" && (
