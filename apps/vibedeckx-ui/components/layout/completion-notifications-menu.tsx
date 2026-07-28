@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { NotificationKind, Project, ServerNotification } from "@/lib/api";
+import { groupNotifications } from "@/hooks/use-completion-notifications";
 
 interface CompletionNotificationsMenuProps {
   notifications: ServerNotification[];
@@ -132,14 +133,17 @@ export function CompletionNotificationsMenu({
               Nothing needs your attention.
             </div>
           ) : (
-            notifications.map((n) => {
+            // One entry per attention target: repeated completions of a session
+            // collapse onto the newest milestone, with the rest counted in ×N.
+            groupNotifications(notifications).map((group) => {
+              const n = group.latest;
               const meta = KIND_META[n.kind];
-              const unread = n.read_at === null;
+              const unread = group.unread;
               return (
                 <DropdownMenuItem
                   key={n.id}
                   onSelect={() => {
-                    markRead(n.id);
+                    for (const id of group.ids) markRead(id);
                     onNavigate(n.project_id, n.branch, n.session_id);
                   }}
                   className={cn(
@@ -160,13 +164,26 @@ export function CompletionNotificationsMenu({
                           project name when it produced none. */}
                       {n.body ?? projectName(n.project_id)}
                     </span>
+                    {/* The badge answers "how many since you last looked", so it
+                        counts UNREAD members only — read rows stay in the inbox
+                        forever, and totalling them would just count history. A
+                        single new item needs no number: the unread highlight
+                        already says "something new here". */}
+                    {group.unreadCount > 1 && (
+                      <span
+                        className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] font-medium leading-4 text-muted-foreground"
+                        title={`${group.unreadCount} new notifications, showing the latest`}
+                      >
+                        ×{group.unreadCount}
+                      </span>
+                    )}
                     <span className="shrink-0 text-[10.5px] text-muted-foreground/70">
                       {formatRelativeTime(n.created_at)}
                     </span>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        remove(n.id);
+                        for (const id of group.ids) remove(id);
                       }}
                       className="shrink-0 rounded p-0.5 text-muted-foreground/60 opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
                       title="Dismiss (marks it read)"

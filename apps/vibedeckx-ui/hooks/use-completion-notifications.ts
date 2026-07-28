@@ -66,6 +66,74 @@ export function upsertNotification(
   return merged;
 }
 
+export interface NotificationGroup {
+  /** Newest member — supplies the copy, timestamp, and navigation target. */
+  latest: ServerNotification;
+  /** Every member id, newest first — read/dismiss must cover all of them. */
+  ids: string[];
+  /** All members, including retained read history. Collapsing scope, not a UI number. */
+  count: number;
+  /**
+   * Members not yet seen — "how many happened since you last looked". Read
+   * history collapses into the group but must never inflate this: marking read
+   * keeps rows in the inbox, so total count grows without bound.
+   */
+  unreadCount: number;
+  /** True when ANY member is unread. */
+  unread: boolean;
+}
+
+/**
+ * Session milestones collapse per session: a newer "result ready" strictly
+ * supersedes an older one for the same session — by the time the user looks,
+ * the session shows its latest state. Everything else stays one entry per
+ * milestone: `review_ready` is already one-per-run by id, and two
+ * `workflow_failed` rows are deliberately distinct attention states (see
+ * workflowFailedId in notification-milestones.ts).
+ */
+const SESSION_COLLAPSED_KINDS: ReadonlySet<NotificationKind> = new Set([
+  'session_result_ready',
+  'session_failed',
+]);
+
+function groupKey(n: ServerNotification): string {
+  return SESSION_COLLAPSED_KINDS.has(n.kind) && n.session_id
+    ? `${n.kind}:${n.session_id}`
+    : n.id;
+}
+
+/**
+ * Collapse a newest-first milestone list into display groups. Milestones are
+ * kept per-turn in storage (idempotency and history need them); grouping is
+ * purely a presentation concern, shared by the bell badge and the menu list.
+ */
+export function groupNotifications(list: ServerNotification[]): NotificationGroup[] {
+  const groups = new Map<string, NotificationGroup>();
+  for (const n of list) {
+    const unread = n.read_at === null;
+    const existing = groups.get(groupKey(n));
+    if (existing) {
+      existing.ids.push(n.id);
+      existing.count += 1;
+      if (unread) {
+        existing.unreadCount += 1;
+        existing.unread = true;
+      }
+    } else {
+      // First member seen is the newest — input order is newest-first, and Map
+      // insertion order keeps groups sorted by their newest member.
+      groups.set(groupKey(n), {
+        latest: n,
+        ids: [n.id],
+        count: 1,
+        unreadCount: unread ? 1 : 0,
+        unread,
+      });
+    }
+  }
+  return [...groups.values()];
+}
+
 // Module-level so warmed <audio> elements outlive any mount/unmount of the
 // hook's host and are shared app-wide.
 const audioCache = new Map<string, HTMLAudioElement>();
@@ -287,7 +355,12 @@ export function useCompletionNotifications(
     setNotifications((prev) => (prev.length ? [] : prev));
   }, []);
 
-  const unreadCount = notifications.reduce((acc, n) => acc + (n.read_at === null ? 1 : 0), 0);
+  // The badge answers "how many places need my attention", so it counts unread
+  // GROUPS — three completions of one session are one place to look, not three.
+  const unreadCount = groupNotifications(notifications).reduce(
+    (acc, g) => acc + (g.unread ? 1 : 0),
+    0,
+  );
 
   return { notifications, unreadCount, markRead, markAllRead, remove, clear };
 }

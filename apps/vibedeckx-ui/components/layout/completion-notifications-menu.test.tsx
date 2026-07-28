@@ -170,4 +170,80 @@ describe("CompletionNotificationsMenu rendering", () => {
     renderWith([]);
     expect(menuContent()?.textContent).toContain("Nothing needs your attention");
   });
+
+  it("collapses repeated completions of one session into a single entry with a count", () => {
+    renderWith([
+      row({ id: "session:s1:turn:9:result-ready", session_id: "s1", created_at: 9, body: "Fix login" }),
+      row({ id: "session:s1:turn:5:result-ready", session_id: "s1", created_at: 5, body: "Fix login" }),
+      row({ id: "session:s1:turn:2:result-ready", session_id: "s1", created_at: 2, body: "Fix login" }),
+    ]);
+    const items = Array.from(menuContent()?.querySelectorAll("[role='menuitem']") ?? []);
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain("×3");
+  });
+
+  it("clicking a collapsed entry reads every member milestone and navigates once to the newest", () => {
+    const { onNavigate, markRead } = renderWith([
+      row({ id: "s1:t9", session_id: "s1", branch: "dev", created_at: 9 }),
+      row({ id: "s1:t5", session_id: "s1", branch: "dev", created_at: 5 }),
+    ]);
+    const item = menuContent()?.querySelector("[role='menuitem']") as HTMLElement;
+    act(() => {
+      item.click();
+    });
+    expect(markRead).toHaveBeenCalledWith("s1:t9");
+    expect(markRead).toHaveBeenCalledWith("s1:t5");
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenCalledWith("p1", "dev", "s1");
+  });
+
+  it("dismissing a collapsed entry removes every member milestone", () => {
+    const { remove } = renderWith([
+      row({ id: "s1:t9", session_id: "s1", created_at: 9 }),
+      row({ id: "s1:t5", session_id: "s1", created_at: 5 }),
+    ]);
+    const dismiss = menuContent()?.querySelector("button[title^='Dismiss (']") as HTMLElement;
+    act(() => {
+      dismiss.click();
+    });
+    expect(remove).toHaveBeenCalledWith("s1:t9");
+    expect(remove).toHaveBeenCalledWith("s1:t5");
+  });
+
+  it("a single completion shows no count badge", () => {
+    renderWith([row({ id: "only", session_id: "s1" })]);
+    expect(menuContent()?.textContent).not.toContain("×");
+  });
+
+  it("read history never inflates the badge — one new completion after two seen ones shows no ×3", () => {
+    renderWith([
+      row({ id: "s1:t9", session_id: "s1", created_at: 9, read_at: null }),
+      row({ id: "s1:t5", session_id: "s1", created_at: 5, read_at: 100 }),
+      row({ id: "s1:t2", session_id: "s1", created_at: 2, read_at: 100 }),
+    ]);
+    const items = Array.from(menuContent()?.querySelectorAll("[role='menuitem']") ?? []);
+    expect(items).toHaveLength(1);
+    // Only 1 unread: the unread highlight already says "something new here".
+    expect(items[0].textContent).not.toContain("×");
+  });
+
+  it("a fully read group is history — no count badge", () => {
+    renderWith([
+      row({ id: "s1:t9", session_id: "s1", created_at: 9, read_at: 100 }),
+      row({ id: "s1:t5", session_id: "s1", created_at: 5, read_at: 100 }),
+    ]);
+    expect(menuContent()?.textContent).not.toContain("×");
+  });
+
+  it("the count tooltip stays kind-neutral — failures are not described as completions", () => {
+    renderWith([
+      row({ id: "f2", kind: "session_failed", session_id: "s1", created_at: 9 }),
+      row({ id: "f1", kind: "session_failed", session_id: "s1", created_at: 5 }),
+    ]);
+    const badge = Array.from(menuContent()?.querySelectorAll("[title]") ?? []).find((el) =>
+      el.textContent?.includes("×2"),
+    );
+    expect(badge).toBeDefined();
+    expect(badge?.getAttribute("title")).not.toContain("completion");
+  });
 });

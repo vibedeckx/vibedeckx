@@ -24,6 +24,7 @@ const played = vi.hoisted(() => ({ srcs: [] as string[] }));
 import {
   LEGACY_STORAGE_KEY,
   SOUND_FOR_KIND,
+  groupNotifications,
   upsertNotification,
   useCompletionNotifications,
   type ServerNotification,
@@ -76,6 +77,78 @@ describe('upsertNotification', () => {
     const a = row({ id: 'session:sA:turn:2:result-ready', session_id: 'sA' });
     const b = row({ id: 'session:sB:turn:2:result-ready', session_id: 'sB' });
     expect(upsertNotification([a], b)).toHaveLength(2);
+  });
+});
+
+describe('groupNotifications', () => {
+  it('collapses repeated completions of one session into one group led by the newest', () => {
+    let list: ServerNotification[] = [];
+    for (const [id, at] of [['s1:t2', 2], ['s1:t5', 5], ['s1:t9', 9]] as const) {
+      list = upsertNotification(list, row({ id, created_at: at }));
+    }
+    const groups = groupNotifications(list);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].latest.id).toBe('s1:t9');
+    expect(groups[0].count).toBe(3);
+    expect(groups[0].unreadCount).toBe(3);
+    expect(groups[0].ids).toEqual(['s1:t9', 's1:t5', 's1:t2']);
+  });
+
+  it('unreadCount excludes retained read history — it means "new since you last looked"', () => {
+    // Two completions already seen (read, but still in the retained inbox) plus
+    // one fresh one: the batch the user has yet to look at is 1, not 3.
+    const list = [
+      row({ id: 's1:t9', created_at: 9, read_at: null }),
+      row({ id: 's1:t5', created_at: 5, read_at: 100 }),
+      row({ id: 's1:t2', created_at: 2, read_at: 100 }),
+    ];
+    const [group] = groupNotifications(list);
+    expect(group.count).toBe(3);
+    expect(group.unreadCount).toBe(1);
+    expect(group.unread).toBe(true);
+  });
+
+  it('a group is unread if ANY member is unread, even when the newest is read', () => {
+    const list = [
+      row({ id: 'new', created_at: 9, read_at: 100 }),
+      row({ id: 'old', created_at: 2, read_at: null }),
+    ];
+    expect(groupNotifications(list)[0].unread).toBe(true);
+    const allRead = list.map((n) => ({ ...n, read_at: 100 }));
+    expect(groupNotifications(allRead)[0].unread).toBe(false);
+  });
+
+  it('keeps different sessions on one branch separate', () => {
+    const list = [
+      row({ id: 'a', session_id: 'sA', created_at: 9 }),
+      row({ id: 'b', session_id: 'sB', created_at: 2 }),
+    ];
+    expect(groupNotifications(list)).toHaveLength(2);
+  });
+
+  it('keeps a failure separate from a success of the same session', () => {
+    const list = [
+      row({ id: 'ok', kind: 'session_result_ready', created_at: 9 }),
+      row({ id: 'boom', kind: 'session_failed', created_at: 2 }),
+    ];
+    expect(groupNotifications(list)).toHaveLength(2);
+  });
+
+  it('never collapses workflow_failed milestones — distinct failures are distinct attention states', () => {
+    const list = [
+      row({ id: 'wf:r1:failed:v2', kind: 'workflow_failed', session_id: null, workflow_run_id: 'r1', created_at: 9 }),
+      row({ id: 'wf:r1:failed:v1', kind: 'workflow_failed', session_id: null, workflow_run_id: 'r1', created_at: 2 }),
+    ];
+    expect(groupNotifications(list)).toHaveLength(2);
+  });
+
+  it('preserves newest-first ordering across groups', () => {
+    const list = [
+      row({ id: 'a2', session_id: 'sA', created_at: 9 }),
+      row({ id: 'b1', session_id: 'sB', created_at: 5 }),
+      row({ id: 'a1', session_id: 'sA', created_at: 2 }),
+    ];
+    expect(groupNotifications(list).map((g) => g.latest.id)).toEqual(['a2', 'b1']);
   });
 });
 
@@ -192,6 +265,19 @@ describe('useCompletionNotifications', () => {
     api.getNotifications.mockResolvedValue([row({ id: 'a', read_at: null }), row({ id: 'b', read_at: 5 })]);
     await render();
     expect(latest.unreadCount).toBe(1);
+  });
+
+  it('counts sessions needing attention, not individual turn milestones', async () => {
+    // Three unread completions of one session + one of another: the badge should
+    // say 2 (two sessions to look at), not 4.
+    api.getNotifications.mockResolvedValue([
+      row({ id: 's1:t9', session_id: 's1', created_at: 9 }),
+      row({ id: 's1:t5', session_id: 's1', created_at: 5 }),
+      row({ id: 's1:t2', session_id: 's1', created_at: 2 }),
+      row({ id: 's2:t3', session_id: 's2', created_at: 3 }),
+    ]);
+    await render();
+    expect(latest.unreadCount).toBe(2);
   });
 
   it('inserts a notification:created frame and plays its kind sound', async () => {
