@@ -297,6 +297,19 @@ describe("workflow-run-routes", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("gate finalize calls requestFinalVerdict and returns the run", async () => {
+    const requestFinalVerdict = vi.fn(async () => ({ ...run, status: "waiting_reviewer" }));
+    const app = makeApp({ engine: { requestFinalVerdict } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs/r1/gate",
+      payload: { action: "finalize" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(requestFinalVerdict).toHaveBeenCalledWith("r1");
+    expect(res.json().run.status).toBe("waiting_reviewer");
+  });
+
   it("cancel maps bad-state (run mid-send) to 409 with the error message", async () => {
     const app = makeApp({
       engine: { cancelRun: vi.fn(async () => { throw new WorkflowError("bad-state", "反馈正在发送，无法取消"); }) },

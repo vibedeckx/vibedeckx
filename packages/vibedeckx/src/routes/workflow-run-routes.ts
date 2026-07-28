@@ -493,7 +493,7 @@ async function routes(fastify: FastifyInstance) {
     return reply.send({ run });
   });
 
-  fastify.post<{ Params: { id: string }; Body: { action: "approve" | "cancel"; editedPayload?: string } }>(
+  fastify.post<{ Params: { id: string }; Body: { action: "approve" | "cancel" | "finalize"; editedPayload?: string } }>(
     "/api/workflow-runs/:id/gate", async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
@@ -521,7 +521,11 @@ async function routes(fastify: FastifyInstance) {
           const run = await fastify.workflowEngine.cancelRun(req.params.id);
           return reply.send({ run });
         }
-        return reply.code(400).send({ error: "action must be approve or cancel" });
+        if (action === "finalize") {
+          const run = await fastify.workflowEngine.requestFinalVerdict(req.params.id);
+          return reply.send({ run });
+        }
+        return reply.code(400).send({ error: "action must be approve, cancel or finalize" });
       } catch (err) {
         const status = errStatus(err);
         if (status) return reply.code(status).send({ error: (err as Error).message });
