@@ -10,7 +10,7 @@ import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import { WebSocket } from "ws";
 import { randomUUID } from "crypto";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
-import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame, runUpdatedEventFromRemoteFrame } from "./routes/remote-status-bridge.js";
+import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame, runUpdatedEventFromRemoteFrame, runUpdatedFrameForSubscribers } from "./routes/remote-status-bridge.js";
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
@@ -282,13 +282,14 @@ export function connectPersistentRemoteWs(
     } else if ("workflowRunUpdated" in parsed) {
       // Worker-side WorkflowEngine mirrors run transitions onto participant
       // session streams. Re-emit on the front bus (ChatSessionManager pushes
-      // it to the Main Chat WS). Both participant streams may deliver the
-      // same update — duplicate emits are harmless, the panel refresh is
-      // idempotent. Not broadcast to agent-stream subscribers: the frame is
-      // not part of the agent conversation protocol.
-      if (eventBus) {
-        const evt = runUpdatedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
-        if (evt) eventBus.emit(evt);
+      // it to the Main Chat WS) AND mirror the mapped frame to this session's
+      // agent-stream subscribers — the reviewer-side finalize button consumes
+      // it live (local sessions get the same frame via broadcastRawToSession).
+      // Duplicate delivery across both participant streams is harmless.
+      const evt = runUpdatedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
+      if (evt) {
+        eventBus?.emit(evt);
+        cache.broadcast(sessionId, runUpdatedFrameForSubscribers(evt));
       }
     } else if ("processAlive" in parsed) {
       cache.broadcast(sessionId, raw);

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
 import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError, type RunningResidentSession } from "@/lib/api";
-import type { AgentType } from "@/lib/api";
+import type { AgentType, WorkflowRun } from "@/lib/api";
 import {
   workspaceKey,
   hasPlaceholder,
@@ -75,7 +75,8 @@ type AgentWsMessage =
   | { taskCompleted: { duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number } }
   | { processAlive: { alive: boolean } }
   | { remoteStatus: RemoteConnectionStatus; attempt?: number }
-  | { titleUpdated: { title: string } };
+  | { titleUpdated: { title: string } }
+  | { workflowRunUpdated: WorkflowRun };
 
 // Container for patch target
 interface PatchContainer {
@@ -365,6 +366,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteConnectionStatus | null>(null);
+  const [workflowRunUpdate, setWorkflowRunUpdate] = useState<WorkflowRun | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
@@ -574,6 +576,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         if ("titleUpdated" in msg) {
           onTitleUpdatedRef.current?.(msg.titleUpdated.title, wsSessionIdRef.current);
           return;
+        }
+
+        if ("workflowRunUpdated" in msg) {
+          setWorkflowRunUpdate(msg.workflowRunUpdated);
         }
 
         // Handle error
@@ -1303,6 +1309,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     isLoading,
     error,
     remoteStatus,
+    workflowRunUpdate,
     startSession,
     sendMessage,
     uploadPaste,

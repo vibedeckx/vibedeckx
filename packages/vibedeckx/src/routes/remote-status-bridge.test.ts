@@ -4,6 +4,7 @@ import {
   mapRemoteReviewerCandidate,
   mapRemoteRun,
   runUpdatedEventFromRemoteFrame,
+  runUpdatedFrameForSubscribers,
 } from "./remote-status-bridge.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 
@@ -109,6 +110,14 @@ describe("runUpdatedEventFromRemoteFrame", () => {
 
   it("returns null for other frames", () => {
     expect(runUpdatedEventFromRemoteFrame({ taskCompleted: {} }, localId, remoteInfo)).toBeNull();
+  });
+
+  it("runUpdatedFrameForSubscribers serializes the MAPPED run for agent-stream broadcast", () => {
+    const evt = runUpdatedEventFromRemoteFrame({ workflowRunUpdated: bare }, localId, remoteInfo)!;
+    const frame = JSON.parse(runUpdatedFrameForSubscribers(evt)) as { workflowRunUpdated: typeof evt.run };
+    // 广播的必须是映射后的 run:裸 id 会让前端 reviewer_session_id 比对静默失败。
+    expect(frame.workflowRunUpdated.id).toBe("remote-srv1-p1-run1");
+    expect(frame.workflowRunUpdated.reviewer_session_id).toBe("remote-srv1-p1-rev1");
   });
 });
 

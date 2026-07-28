@@ -3,6 +3,8 @@
 import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/format-duration";
 import { BranchMenu } from "./branch-menu";
+import { Button } from "@/components/ui/button";
+import { FileCheck, Loader2 } from "lucide-react";
 import type { AgentType } from "@/lib/api";
 
 interface TurnEndDividerProps {
@@ -15,6 +17,10 @@ interface TurnEndDividerProps {
   alternateProviders: Array<{ type: AgentType; displayName: string }>;
   onBranch: (agentType?: AgentType) => void;
   disabled?: boolean;
+  /** Reviewer-of-an-active-run affordance: "生成 review 终稿" (spec: review discussion rounds). */
+  showFinalize?: boolean;
+  finalizeBusy?: boolean;
+  onFinalize?: () => void;
 }
 
 /**
@@ -27,6 +33,7 @@ interface TurnEndDividerProps {
 export function TurnEndDivider({
   durationMs, outcome, emphasis,
   agentType, currentAgentName, alternateProviders, onBranch, disabled,
+  showFinalize, finalizeBusy, onFinalize,
 }: TurnEndDividerProps) {
   const label = durationMs !== undefined ? formatDuration(durationMs) : outcome === "server_restart" ? "interrupted" : null;
   return (
@@ -43,6 +50,20 @@ export function TurnEndDivider({
         >
           {label}
         </span>
+      )}
+      {showFinalize && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 px-2 text-xs shrink-0"
+          onClick={onFinalize}
+          disabled={disabled || finalizeBusy}
+        >
+          {finalizeBusy
+            ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+            : <FileCheck className="h-3 w-3 mr-1" />}
+          生成 review 终稿
+        </Button>
       )}
       <BranchMenu
         agentType={agentType}

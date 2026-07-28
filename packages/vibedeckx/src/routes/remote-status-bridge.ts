@@ -144,3 +144,15 @@ export function runUpdatedEventFromRemoteFrame(
   const run = mapRemoteRun(bare, remoteInfo.remoteServerId, projectId);
   return { type: "workflow:run-updated", projectId, branch: run.branch, run };
 }
+
+/**
+ * The same mapped run, re-serialized as the agent-stream frame. Local sessions
+ * get `{ workflowRunUpdated }` on their stream via broadcastRawToSession; this
+ * is the remote-side mirror of that contract — the frame must carry MAPPED
+ * (remote- prefixed) ids or the frontend reviewer matcher silently fails.
+ */
+export function runUpdatedFrameForSubscribers(
+  evt: Extract<GlobalEvent, { type: "workflow:run-updated" }>,
+): string {
+  return JSON.stringify({ workflowRunUpdated: evt.run });
+}
