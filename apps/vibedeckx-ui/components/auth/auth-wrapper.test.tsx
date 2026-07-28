@@ -118,9 +118,22 @@ describe("AuthWrapper sign-in navigation", () => {
 
     const alert = alertCopy!.parentElement!;
     const signIn = container.querySelector('[data-testid="clerk-sign-in"]')!;
+
+    // Alert and Clerk card must take their width from one shared wrapper,
+    // otherwise the alert can drift wider than the card it labels.
+    expect(alert.parentElement).toBe(signIn.parentElement);
+    const widthOwner = alert.parentElement!;
     for (const element of [alert, signIn]) {
       expect(element.classList.contains("w-full")).toBe(true);
-      expect(element.classList.contains("max-w-[400px]")).toBe(true);
+    }
+    // Clerk sizes its card in rem (25rem, capped at calc(100vw - 2.5rem)) and
+    // this app pins the root font-size to 14px, so a px max-width renders
+    // ~50px wider than the card. The wrapper must restate Clerk's own rule.
+    expect(widthOwner.className).toMatch(
+      /max-w-\[min\(25rem,calc\(100vw_-_2\.5rem\)\)\]/,
+    );
+    for (const element of [alert, signIn, widthOwner]) {
+      expect(element.className).not.toMatch(/max-w-\[\d+px\]/);
     }
     expect(
       Array.from(container.querySelectorAll("button")).some((button) =>

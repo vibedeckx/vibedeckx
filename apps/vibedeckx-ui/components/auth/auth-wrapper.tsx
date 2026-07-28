@@ -44,6 +44,12 @@ function AuthTokenSync({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Clerk's card is sized `width: 25rem; max-width: calc(100vw - 2.5rem)`. Those
+// are rem units and this app pins the root font-size to 14px (globals.css), so
+// the card renders 350px wide — a px-based width on sibling chrome (the expiry
+// alert) would overhang it by 50px. Restate Clerk's rule so both stay in sync.
+const CLERK_CARD_WIDTH = "w-full max-w-[min(25rem,calc(100vw_-_2.5rem))]";
+
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { isSignedIn, isLoaded } = useAuth();
   const clerk = useClerk();
@@ -99,9 +105,9 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 
     return (
       <div className="h-screen flex flex-col items-center justify-center bg-background">
-        <div className="w-full max-w-md">
+        <div className={CLERK_CARD_WIDTH}>
           {sessionExpired && (
-            <div className="mx-auto mb-4 flex w-full max-w-[400px] items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-600 dark:text-amber-400">
+            <div className="mb-4 flex w-full items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-600 dark:text-amber-400">
               <Clock className="mt-0.5 h-4 w-4 shrink-0" />
               <span>Session expired. Sign in again to continue.</span>
             </div>
@@ -110,7 +116,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
             routing="hash"
             appearance={{
               elements: {
-                rootBox: "mx-auto w-full max-w-[400px]",
+                rootBox: "w-full",
                 card: "shadow-lg",
               },
             }}
