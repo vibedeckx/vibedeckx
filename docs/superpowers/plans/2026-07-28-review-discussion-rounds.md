@@ -201,6 +201,15 @@ it("cancelRun cancels a discussing run", async () => {
   expect(cancelled?.status).toBe("cancelled");
   expect(engine.isSessionInActiveRun("s-src")).toBe(false);
 });
+
+it("handleExternalUserMessage never throws when storage rejects during the reviewer transition", async () => {
+  // 本方法在 /message 路由投递前内联调用:异常冒出会阻断用户消息的投递,
+  // 所以 reviewer 分支的 storage 失败也必须吞掉(同 source 分支的契约)。
+  const run = await start();
+  vi.spyOn(storage.workflowRuns, "transition").mockRejectedValueOnce(new Error("db locked"));
+  await expect(engine.handleExternalUserMessage("s-rev")).resolves.toBeUndefined();
+  expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_reviewer"); // 原状态未动
+});
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -230,14 +239,22 @@ async handleExternalUserMessage(sessionId: string): Promise<void> {
     // 讨论不是接管:用户给 reviewer 发消息 → run 进入 discussing,gate 收起,
     // 等待显式的 requestFinalVerdict 重新出稿。两个 from 状态各试一次(同
     // cancelRun 的写法);都失败说明 run 处于 sending_feedback 或已终态——
-    // 保持 never-throws,静默不动。清掉 error:上一轮的 drift/发送警告对
-    // 讨论态是陈旧信息,下一轮终稿会重新计算。
-    const moved =
-      (await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null })) ||
-      (await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null }));
-    if (moved) {
-      const updated = await this.storage.workflowRuns.getById(p.runId);
-      if (updated) this.emitRunUpdated(updated);
+    // 静默不动。清掉 error:上一轮的 drift/发送警告对讨论态是陈旧信息,
+    // 下一轮终稿会重新计算。整段包 try/catch:never-throws 契约覆盖 storage
+    // 异常本身,不止 CAS 落败——异常冒出会阻断 /message 路由的消息投递。
+    try {
+      const moved =
+        (await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null })) ||
+        (await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null }));
+      if (moved) {
+        const updated = await this.storage.workflowRuns.getById(p.runId);
+        if (updated) this.emitRunUpdated(updated);
+      }
+    } catch (err) {
+      console.error(
+        `[WorkflowEngine] handleExternalUserMessage: failed moving run ${p.runId} to discussing; swallowed to honor never-throws contract`,
+        err,
+      );
     }
     return;
   }
@@ -649,10 +666,13 @@ git commit -m "feat(review): gate panel discussing state with mirrored finalize 
 - Modify: `apps/vibedeckx-ui/components/agent/turn-end-divider.tsx`
 - Modify: `apps/vibedeckx-ui/components/agent/agent-conversation.tsx`(:209 hook 解构、:393 lastTurnEndIndex 附近加状态、:911 divider props)
 - Create: `apps/vibedeckx-ui/components/agent/turn-end-divider.test.tsx`
+- Modify: `packages/vibedeckx/src/routes/remote-status-bridge.ts`(新导出 `runUpdatedFrameForSubscribers`)
+- Modify: `packages/vibedeckx/src/remote-agent-sessions.ts:282-291`(`workflowRunUpdated` 分支补 agent-stream 广播)
+- Test: `packages/vibedeckx/src/routes/remote-status-bridge.test.ts`
 
 **Interfaces:**
-- Consumes: Task 6 的 `WorkflowRun` 类型与 `workflowRunGate(…, "finalize")`;后端既有 `{ workflowRunUpdated: run }` 会话流帧(`conversation-patch.ts:49`,本地由 `broadcastRawToSession` 推送、remote 由 `remote-agent-sessions.ts:282` 镜像,前端此前忽略该帧)。
-- Produces: `useAgentSession` 返回值新增 `workflowRunUpdate: WorkflowRun | null`;`TurnEndDivider` 新增可选 props `showFinalize?: boolean; finalizeBusy?: boolean; onFinalize?: () => void`。
+- Consumes: Task 6 的 `WorkflowRun` 类型与 `workflowRunGate(…, "finalize")`;后端既有 `{ workflowRunUpdated: run }` 会话流帧(`conversation-patch.ts:49`)。注意:该帧目前**只有本地会话**收得到(`broadcastRawToSession` 推流);remote 路径在 `remote-agent-sessions.ts:282-291` 明确只转发 EventBus、不广播给 agent-stream subscribers——本任务补上这条广播,否则远程 reviewer 的终稿按钮不会实时出现(要刷新靠 REST 兜底)。
+- Produces: `useAgentSession` 返回值新增 `workflowRunUpdate: WorkflowRun | null`;`TurnEndDivider` 新增可选 props `showFinalize?: boolean; finalizeBusy?: boolean; onFinalize?: () => void`;`runUpdatedFrameForSubscribers(evt): string`(映射后 id 的帧序列化)。
 
 - [ ] **Step 1: 写失败测试**(新文件 `turn-end-divider.test.tsx`,harness 同 Task 7 风格)
 
@@ -792,7 +812,8 @@ hook 返回对象加 `workflowRunUpdate`。
 const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 const [reviewerRun, setReviewerRun] = useState<WorkflowRun | null>(null);
 const [isFinalizing, setIsFinalizing] = useState(false);
-const activeSessionId = session?.id ?? null;
+// 复用组件既有的 `activeSessionId`(agent-conversation.tsx:236 已声明,
+// 勿重复声明)——本段代码放在其声明之后。
 
 useEffect(() => {
   if (!projectId || !activeSessionId) { setReviewerRun(null); return; }
@@ -834,16 +855,73 @@ finalizeBusy={isFinalizing}
 onFinalize={handleFinalize}
 ```
 
-- [ ] **Step 7: 类型检查 + 全量前端测试**
+- [ ] **Step 7: remote 帧广播 —— 先写失败测试**
 
-Run: `cd apps/vibedeckx-ui && npx tsc --noEmit && cd ../.. && pnpm --filter vibedeckx-ui test`
+`remote-status-bridge.test.ts` 的 `runUpdatedEventFromRemoteFrame` describe 内加(沿用其 `bare`/`localId`/`remoteInfo` fixture;import 行加 `runUpdatedFrameForSubscribers`):
+
+```ts
+it("runUpdatedFrameForSubscribers serializes the MAPPED run for agent-stream broadcast", () => {
+  const evt = runUpdatedEventFromRemoteFrame({ workflowRunUpdated: bare }, localId, remoteInfo)!;
+  const frame = JSON.parse(runUpdatedFrameForSubscribers(evt)) as { workflowRunUpdated: typeof evt.run };
+  // 广播的必须是映射后的 run:裸 id 会让前端 reviewer_session_id 比对静默失败。
+  expect(frame.workflowRunUpdated.id).toBe("remote-srv1-p1-run1");
+  expect(frame.workflowRunUpdated.reviewer_session_id).toBe("remote-srv1-p1-rev1");
+});
+```
+
+Run: `pnpm --filter vibedeckx test -- src/routes/remote-status-bridge.test.ts`
+Expected: FAIL(`runUpdatedFrameForSubscribers` 不存在)。
+
+- [ ] **Step 8: remote 帧广播 —— 实现**
+
+`remote-status-bridge.ts`(`runUpdatedEventFromRemoteFrame` 之后):
+
+```ts
+/**
+ * The same mapped run, re-serialized as the agent-stream frame. Local sessions
+ * get `{ workflowRunUpdated }` on their stream via broadcastRawToSession; this
+ * is the remote-side mirror of that contract — the frame must carry MAPPED
+ * (remote- prefixed) ids or the frontend reviewer matcher silently fails.
+ */
+export function runUpdatedFrameForSubscribers(
+  evt: Extract<GlobalEvent, { type: "workflow:run-updated" }>,
+): string {
+  return JSON.stringify({ workflowRunUpdated: evt.run });
+}
+```
+
+`remote-agent-sessions.ts` 的 `workflowRunUpdated` 分支改为(原注释"Not broadcast to agent-stream subscribers"随之删除,替换为新语义;`runUpdatedFrameForSubscribers` 并入既有的 remote-status-bridge import 行):
+
+```ts
+} else if ("workflowRunUpdated" in parsed) {
+  // Worker-side WorkflowEngine mirrors run transitions onto participant
+  // session streams. Re-emit on the front bus (ChatSessionManager pushes
+  // it to the Main Chat WS) AND mirror the mapped frame to this session's
+  // agent-stream subscribers — the reviewer-side finalize button consumes
+  // it live (local sessions get the same frame via broadcastRawToSession).
+  // Duplicate delivery across both participant streams is harmless.
+  const evt = runUpdatedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
+  if (evt) {
+    eventBus?.emit(evt);
+    cache.broadcast(sessionId, runUpdatedFrameForSubscribers(evt));
+  }
+}
+```
+
+Run: `pnpm --filter vibedeckx test -- src/routes/remote-status-bridge.test.ts src/remote-agent-sessions.test.ts`
+Expected: PASS。
+(说明:`handleLiveMessage` 是连接闭包、无测试缝,`cache.broadcast` 这一行的接线不做单测——帧内容(映射 id)已被上面的单测钉住,接线本身由 Task 9 的远程冒烟覆盖。)
+
+- [ ] **Step 9: 类型检查 + 全量测试(双端)**
+
+Run: `npx tsc --noEmit -p packages/vibedeckx/tsconfig.json && pnpm --filter vibedeckx test && cd apps/vibedeckx-ui && npx tsc --noEmit && cd ../.. && pnpm --filter vibedeckx-ui test`
 Expected: 0 type errors;测试 PASS。
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add apps/vibedeckx-ui/hooks/use-agent-session.ts apps/vibedeckx-ui/components/agent/turn-end-divider.tsx apps/vibedeckx-ui/components/agent/turn-end-divider.test.tsx apps/vibedeckx-ui/components/agent/agent-conversation.tsx
-git commit -m "feat(review): finalize-verdict button at reviewer turn ends"
+git add apps/vibedeckx-ui/hooks/use-agent-session.ts apps/vibedeckx-ui/components/agent/turn-end-divider.tsx apps/vibedeckx-ui/components/agent/turn-end-divider.test.tsx apps/vibedeckx-ui/components/agent/agent-conversation.tsx packages/vibedeckx/src/routes/remote-status-bridge.ts packages/vibedeckx/src/routes/remote-status-bridge.test.ts packages/vibedeckx/src/remote-agent-sessions.ts
+git commit -m "feat(review): finalize-verdict button at reviewer turn ends (local + remote streams)"
 ```
 
 ---
