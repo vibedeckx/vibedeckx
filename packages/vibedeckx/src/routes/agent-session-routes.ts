@@ -1075,6 +1075,74 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Set the model of an existing session. The model is a spawn argument, so
+  // it applies to the next process the session spawns — which is why this is
+  // allowed at all: a branched (or stopped) session has none yet. Refused with
+  // 409 while a turn is running on a session that already has history, the
+  // same rule the agent-type switch uses.
+  fastify.post<{ Params: { sessionId: string }; Body: { model?: string | null } }>(
+    "/api/agent-sessions/:sessionId/model",
+    async (req, reply) => {
+      const body = (req.body || {}) as { model?: string | null };
+      // `undefined` is a malformed body, not a request for the CLI default —
+      // clearing the model is spelled with an explicit null.
+      if (body.model === undefined) {
+        return reply.code(400).send({ error: "model is required (null for the CLI default)" });
+      }
+      const { model } = body;
+      if (model !== null && typeof model !== "string") {
+        return reply.code(400).send({ error: "model must be a string or null" });
+      }
+
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      if (req.params.sessionId.startsWith("remote-")) {
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          remoteInfo.remoteUrl,
+          remoteInfo.remoteApiKey,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/model`,
+          { model }
+        );
+        return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      // Ownership gate for the local path, the same shape performLocalBranch
+      // uses: a session id is a bearer token otherwise. `userId` stays the raw
+      // requireAuth result so solo mode (undefined) reads unscoped.
+      const row = await fastify.storage.agentSessions.getById(req.params.sessionId);
+      if (!row || !(await fastify.storage.projects.getById(row.project_id, userId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      const outcome = await fastify.agentSessionManager.setModel(req.params.sessionId, model);
+      if (outcome === "not_found") {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+      if (outcome === "busy") {
+        return reply.code(409).send({ error: "Agent is currently running — stop it before changing the model" });
+      }
+      if (outcome === "error") {
+        // The manager rolled back, so the session still runs on the model the
+        // caller is already showing. Say so rather than leaving the UI to
+        // guess whether the change half-landed.
+        return reply.code(500).send({ error: "Couldn't save the model — the session kept its current one" });
+      }
+      // Echo what was stored, not what was sent: the manager trims and folds a
+      // blank name to null, and the caller renders whatever comes back.
+      return reply.code(200).send({
+        success: true,
+        model: fastify.agentSessionManager.getSession(req.params.sessionId)?.model ?? null,
+      });
+    }
+  );
+
   // Branch an Agent Session: create a new dormant session that copies the
   // source session's conversation history. The user continues in the copy
   // (optionally with a different agent type) while the original stays intact.

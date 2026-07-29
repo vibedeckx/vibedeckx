@@ -203,6 +203,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     uploadPaste,
     stopSession,
     switchAgentType,
+    setModel,
     startNewConversation,
     ensureSession,
     switchMode,
@@ -359,6 +360,17 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       await switchMode(newMode);
     }
     // If no session yet, the mode will be used when startSession is called
+  };
+
+  // Model change on a session that already exists. The chip renders
+  // `session.model`, so nothing moves until the server has stored the new
+  // name — an optimistic swap here would show a model the next turn wouldn't
+  // actually run on if the write were refused.
+  const handleSessionModelChange = async (model: string | null) => {
+    const errMsg = await setModel(model);
+    if (errMsg) {
+      toast.error("Failed to change model", { description: errMsg });
+    }
   };
 
   const handleAcceptPlan = async (planContent: string) => {
@@ -786,8 +798,15 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             models={providers.find((p) => p.type === agentType)?.models ?? []}
             widthCandidates={providers.flatMap((p) => p.models ?? [])}
             value={session ? (session.model ?? null) : pendingModel}
-            onChange={setPendingModel}
-            locked={session != null}
+            // Before a session exists the pick is held locally and spent on
+            // creation; afterwards the session owns the model and the server
+            // applies the change to its next process (a branch has none yet —
+            // that is the case this exists for).
+            onChange={session ? handleSessionModelChange : setPendingModel}
+            // Same rule as the agent dropdown above, which is the other
+            // respawn-shaped change in this row: only a turn in flight on a
+            // session that already has history is too late to change.
+            locked={session != null && status === "running" && messages.length > 0}
           />
           <PermissionModeToggle
             mode={permissionMode}

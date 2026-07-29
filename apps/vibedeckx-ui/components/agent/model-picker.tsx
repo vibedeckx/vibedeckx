@@ -36,9 +36,11 @@ interface ModelPickerProps {
   value: string | null;
   onChange: (model: string | null) => void;
   /**
-   * true once the session exists. The model is a spawn argument, so it cannot
-   * change for a live session — the chip becomes static text rather than a
-   * disabled control, which would still look clickable.
+   * true while a turn is in flight on a session that has history. The model is
+   * a spawn argument, so it cannot reach a process that is already running —
+   * the chip becomes static text rather than a disabled control, which would
+   * still look clickable. Everywhere else (no session yet, a branch, a stopped
+   * session) the next turn spawns a fresh process, so the pick is live.
    */
   locked: boolean;
 }
@@ -159,11 +161,11 @@ export function ModelPicker({
       // out is the affordance; there is nothing to click.
       <span
         className={cn(CHIP_CLASS, "text-muted-foreground cursor-default")}
-        // Not "branch to change": branching is the one action that cannot
-        // change the model. branchSession copies the parent's model and takes
-        // no override, and the branch is locked the moment it exists. A new
-        // conversation is the only place the picker is live.
-        title={`${label} — fixed for this session, start a new conversation to change`}
+        // Names the one condition that has to clear, not an action to take:
+        // the turn ending is enough, and telling the user to stop the agent
+        // would trade their in-flight work for a change they can make a moment
+        // later for free.
+        title={`${label} — fixed while the agent is running, changeable once the turn ends`}
       >
         <ReservedWidthLabel candidates={slot} className="max-w-40">
           {label}

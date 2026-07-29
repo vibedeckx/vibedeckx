@@ -25,6 +25,18 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ensureSession = vi.fn(async () => null);
+const setModel = vi.fn(async (): Promise<string | null> => null);
+
+/**
+ * What the hook reports, so a test can put the component in front of a session
+ * that already exists (a branch, a running turn) instead of the empty
+ * pre-session state the pendingModel cases need.
+ */
+const hookState: {
+  session: { id: string; model?: string | null } | null;
+  status: string;
+  messages: unknown[];
+} = { session: null, status: "idle", messages: [] };
 
 vi.mock("./model-picker", () => ({
   ModelPicker: ({
@@ -42,15 +54,18 @@ vi.mock("./model-picker", () => ({
       <button data-testid="pick-opus" onClick={() => onChange("opus")}>
         pick
       </button>
+      <button data-testid="pick-sonnet" onClick={() => onChange("sonnet")}>
+        pick other
+      </button>
     </div>
   ),
 }));
 
 vi.mock("@/hooks/use-agent-session", () => ({
   useAgentSession: () => ({
-    session: null,
-    messages: [],
-    status: "idle",
+    session: hookState.session,
+    messages: hookState.messages,
+    status: hookState.status,
     isConnected: true,
     isInitialized: true,
     isLoading: false,
@@ -60,6 +75,7 @@ vi.mock("@/hooks/use-agent-session", () => ({
     uploadPaste: vi.fn(),
     stopSession: vi.fn(),
     switchAgentType: vi.fn(),
+    setModel,
     startNewConversation: vi.fn(),
     ensureSession,
     switchMode: vi.fn(),
@@ -101,6 +117,9 @@ vi.mock("@/lib/api", () => ({
   ]),
   translateText: vi.fn(),
   branchAgentSession: vi.fn(),
+  // Only reached once a session exists: the reviewer-run hook polls for the
+  // session's workflow runs on mount. Nothing here reads the result.
+  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue([]) },
 }));
 
 // Radix's DropdownMenu opens on pointerdown and portals its content; jsdom has
@@ -183,6 +202,10 @@ describe("AgentConversation pendingModel", () => {
       disconnect() {}
     };
     ensureSession.mockClear();
+    setModel.mockClear();
+    hookState.session = null;
+    hookState.status = "idle";
+    hookState.messages = [];
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -267,6 +290,65 @@ describe("AgentConversation pendingModel", () => {
     });
 
     expect(q(container, "model-value")!.textContent).toBe("Default");
+  });
+
+  // Once a session exists the model belongs to it, not to `pendingModel` — but
+  // the session may still have no process (a branch arrives dormant, with its
+  // history already copied in). The chip has to stay live there, or the model
+  // a branch inherited is the only one it can ever run.
+  describe("once a session exists", () => {
+    it("stays live on a branch that has history but has not run", async () => {
+      hookState.session = { id: "s1", model: "opus" };
+      hookState.status = "stopped";
+      hookState.messages = [{ type: "user" }];
+
+      await render("pA", "featA");
+
+      expect(q(container, "model-locked")!.textContent).toBe("false");
+      expect(q(container, "model-value")!.textContent).toBe("opus");
+    });
+
+    it("locks while a turn is in flight on a session that has history", async () => {
+      // The running process was spawned with a model and cannot be told about
+      // another — the same moment the agent dropdown above it goes disabled.
+      hookState.session = { id: "s1", model: "opus" };
+      hookState.status = "running";
+      hookState.messages = [{ type: "user" }];
+
+      await render("pA", "featA");
+
+      expect(q(container, "model-locked")!.textContent).toBe("true");
+    });
+
+    it("stays live on a session that is running but still empty", async () => {
+      // A session created by New Conversation holds an idle process and no
+      // history. The server retires that process on the change, so locking the
+      // chip here would only strand a session nothing has been said to.
+      hookState.session = { id: "s1", model: null };
+      hookState.status = "running";
+      hookState.messages = [];
+
+      await render("pA", "featA");
+
+      expect(q(container, "model-locked")!.textContent).toBe("false");
+    });
+
+    it("sends the pick to the server instead of holding it locally", async () => {
+      hookState.session = { id: "s1", model: "opus" };
+      hookState.status = "stopped";
+      hookState.messages = [{ type: "user" }];
+      await render("pA", "featA");
+
+      await act(async () => {
+        q(container, "pick-sonnet")!.click();
+      });
+
+      expect(setModel).toHaveBeenCalledWith("sonnet");
+      // The chip renders the session's stored model, so it does not move on
+      // the click alone: an optimistic swap would show a model the next turn
+      // wouldn't run on if the write were refused.
+      expect(q(container, "model-value")!.textContent).toBe("opus");
+    });
   });
 
   it("keeps the pending model when the agent dropdown re-picks the same agent", async () => {

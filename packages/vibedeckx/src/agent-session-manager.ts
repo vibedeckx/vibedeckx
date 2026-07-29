@@ -135,9 +135,9 @@ interface RunningSession {
   permissionMode: "plan" | "edit"; // Claude Code permission mode
   agentType: AgentType; // Which agent provider to use
   /**
-   * Per-session agent model, or null for the CLI default. Fixed for the life
-   * of the session (a different model means branching a new session) and
-   * re-read from the DB on every respawn path.
+   * Per-session agent model, or null for the CLI default. Read at spawn time
+   * and re-read from the DB on every respawn path, so it can be changed
+   * whenever no turn is in flight (see `setModel`) — never while one is.
    */
   model: string | null;
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
@@ -923,6 +923,20 @@ export class AgentSessionManager {
     session.eventChain = session.eventChain.then(work).catch((err) => {
       console.error(`[AgentSession] Error in ${label} handler for ${session.id}:`, err);
     });
+  }
+
+  /**
+   * Same serial chain as `enqueueSessionWork`, for a caller that needs the
+   * result back. The chain itself absorbs the outcome (success or failure) so
+   * one queued step can never break the next; the caller gets the real promise.
+   */
+  private runSerialForResult<T>(session: RunningSession, work: () => Promise<T>): Promise<T> {
+    const result = session.eventChain.then(work);
+    session.eventChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private clearGraceTimer(session: RunningSession): void {
@@ -2095,8 +2109,9 @@ export class AgentSessionManager {
 
     // A model name is agent-specific by definition: "opus" is meaningless to
     // Codex, and carrying it across would spawn `codex -c model="opus"` and
-    // fail every turn with no UI to clear it (the chip is locked once the
-    // session exists). Drop back to the new CLI's own default instead.
+    // fail every turn until the user noticed and cleared it by hand. Drop back
+    // to the new CLI's own default instead — the picker is live on the dormant
+    // session this leaves behind, so naming a Codex model stays one click away.
     const clearedModel = session.model;
     if (clearedModel !== null) {
       session.model = null;
@@ -2128,6 +2143,120 @@ export class AgentSessionManager {
     }
 
     return "ok";
+  }
+
+  /**
+   * Set (or clear, with null) a session's model. The model is a spawn
+   * argument, so it takes effect on the next process the session spawns —
+   * immediately for a dormant session (a branch, or one that was stopped),
+   * and after retiring the idle process for a session that has one.
+   *
+   * Refused ("busy") under exactly the rule switchAgentType uses: a turn in
+   * flight on a session that has history. Both are respawn-shaped changes, so
+   * a divergent rule here would only mean the model chip and the agent chip
+   * lock at different moments in the same header row.
+   *
+   * The name is never validated — an unknown one is passed to the CLI and
+   * fails there, same as at creation.
+   *
+   * The whole transition runs on the session's serial event chain and writes
+   * the row BEFORE touching memory, so the three places a model lives — the
+   * row, `session.model`, and the process spawned from it — can never disagree:
+   * a failed write ("error") leaves all three exactly as they were.
+   */
+  async setModel(sessionId: string, model: string | null): Promise<"ok" | "not_found" | "busy" | "error"> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return "not_found";
+    const normalized = model?.trim() ? model.trim() : null;
+
+    // Queued behind whatever else is mutating this session (stdout parsing, a
+    // turn ending, an earlier model change), so two changes cannot interleave
+    // at an await and leave the row holding one name and memory the other.
+    return this.runSerialForResult(session, async () => {
+      // Re-read every precondition here, not before the queue: what was true
+      // when the request arrived may not be true when it reaches the front.
+      //
+      // Re-picking the model already in force is a no-op, not a change — it
+      // must not cost the session its idle process (nor be refused mid-turn).
+      if (session.model === normalized) return "ok";
+      if (this.isModelChangeTooLate(session)) return "busy";
+
+      console.log(`[AgentSession] Setting session ${sessionId} model ${session.model ?? "default"} → ${normalized ?? "default"}`);
+
+      // Persist first. Memory is what the next spawn reads and the row is what
+      // survives a restart; writing the row first means a failure here has
+      // changed nothing at all, rather than leaving the two to disagree until
+      // the next restart silently reverts the user's choice.
+      const previous = session.model;
+      if (!session.skipDb) {
+        try {
+          await this.storage.agentSessions.updateModel(sessionId, normalized);
+        } catch (err) {
+          console.error(`[AgentSession] Failed to persist model for ${sessionId}:`, err);
+          return "error";
+        }
+        // sendUserMessage does not run on the event chain, so a message could
+        // have woken this session across the write above — and that process is
+        // already running on `previous`. Undo the row rather than kill a turn
+        // the user just started.
+        if (this.isModelChangeTooLate(session)) {
+          try {
+            await this.storage.agentSessions.updateModel(sessionId, previous);
+          } catch (err) {
+            console.error(`[AgentSession] Failed to roll back model for ${sessionId}:`, err);
+          }
+          return "busy";
+        }
+      }
+
+      session.model = normalized;
+
+      // An idle process was spawned with the old model and cannot be told
+      // about the new one, so it is retired here exactly as switchAgentType
+      // retires it: the next user message goes through wakeDormantSession,
+      // which spawns with the new model and replays the full context. No
+      // process at all (dormant) is the common case and skips this entirely.
+      if (session.process) {
+        const proc = session.process;
+        session.process = null;
+        this.killProcess(proc);
+        this.emitProcessAlive(session, false);
+
+        await this.finalizeStreamingEntry(session);
+        session.store.currentAssistantIndex = null;
+        session.buffer = "";
+        this.resetCompletion(session);
+
+        session.dormant = true;
+        if (session.status !== "stopped") {
+          session.status = "stopped";
+          // Best-effort: the model change is already committed, and a restart
+          // resets every restored row to "stopped" anyway, so a failure here
+          // must not report the model change as failed.
+          if (!session.skipDb) {
+            try {
+              await this.storage.agentSessions.updateStatus(sessionId, "stopped");
+            } catch (err) {
+              console.error(`[AgentSession] Failed to persist stopped status for ${sessionId}:`, err);
+            }
+          }
+          this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
+          this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
+        }
+      }
+
+      return "ok";
+    });
+  }
+
+  /**
+   * True once the model can no longer reach the CLI: a turn is in flight on a
+   * session that has history. Same rule switchAgentType refuses on — both are
+   * respawn-shaped changes, and a divergent rule would only mean the model
+   * chip and the agent chip lock at different moments in the same header row.
+   */
+  private isModelChangeTooLate(session: RunningSession): boolean {
+    return session.status === "running" && session.store.entries.some(Boolean);
   }
 
   /**
@@ -2627,13 +2756,13 @@ export class AgentSessionManager {
       ?? source?.agentType
       ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
     // A branch continues the same conversation, so it continues on the same
-    // model. This is also how a user "changes model mid-session": branch from
-    // a stop point and pick a new model on the branch.
+    // model. Inheriting is only the starting point: the branch arrives dormant,
+    // so the picker is live on it and a different model is one click away —
+    // that is how a user "changes model mid-session".
     //
     // Except when the branch switches agent: a model name is agent-specific,
     // so inheriting "opus" onto a Codex branch would spawn a session that
-    // fails every turn and can't be fixed (a branch is locked on arrival).
-    // Fall back to the new CLI's own default instead.
+    // fails every turn. Fall back to the new CLI's own default instead.
     const sourceAgentType = source?.agentType ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
     const model = agentType === sourceAgentType
       ? (source?.model ?? sourceRow?.model ?? null)

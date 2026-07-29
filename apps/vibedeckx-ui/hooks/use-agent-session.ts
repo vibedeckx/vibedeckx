@@ -212,6 +212,30 @@ async function switchAgentTypeApi(sessionId: string, agentType: AgentType): Prom
   }
 }
 
+async function setModelApi(sessionId: string, model: string | null): Promise<string | null> {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/model`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (body.error) detail = body.error;
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail || `Failed to set model [${response.status}]`);
+  }
+
+  // The server normalizes (a blank name is the CLI default), so the stored
+  // value is what the chip must show — not the string that was sent.
+  const body = (await response.json().catch(() => ({}))) as { model?: string | null };
+  return body.model ?? null;
+}
+
 async function stopSessionApi(sessionId: string): Promise<void> {
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/stop`, {
     method: "POST",
@@ -383,6 +407,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const sessionGenerationRef = useRef(0); // Incremented on branch/project change to discard stale API responses
   const lastStartFailedRef = useRef(false); // Prevents auto-restart loop after session creation failure
   const startingRef = useRef(false); // Reentrancy guard for startSession
+  // Serializes model changes so they reach the server in the order picked and
+  // the last reply to land is the last pick (see setModel).
+  const modelChangeChain = useRef<Promise<void>>(Promise.resolve());
   // Placeholder mode ("user clicked New Conversation, no session in DB yet")
   // is module-level state in `lib/placeholder-workspaces.ts`. Mirrored to
   // localStorage so the intent survives reloads and project switches; cleared
@@ -930,6 +957,50 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     }
   }, [session?.id, projectId, branch, explicitSessionId]);
 
+  // Change the model of the existing session. The server applies it to the
+  // next process the session spawns (retiring an idle one if there is any), so
+  // history is preserved. Returns null on success, an error message on failure
+  // (e.g. 409 while a turn is running).
+  const setModel = useCallback(async (model: string | null): Promise<string | null> => {
+    const targetSessionId = session?.id;
+    if (!targetSessionId) return "No active session";
+
+    setError(null);
+
+    // One request at a time, in the order the user picked. Firing them
+    // concurrently would let the server apply them in either order and let an
+    // older reply land last, so the chip could settle on a model the user
+    // replaced. A failed change still releases the queue.
+    const run = modelChangeChain.current.then(() => setModelApi(targetSessionId, model));
+    modelChangeChain.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    try {
+      const stored = await run;
+      setSession((prev) => {
+        // The reply belongs to the session it was sent for. While it was in
+        // flight the user may have switched workspace or conversation, and
+        // writing here would stamp one session's model onto another — and
+        // cache it under the keys this closure captured, which by then name a
+        // different workspace.
+        if (!prev || prev.id !== targetSessionId) return prev;
+        const updated = { ...prev, model: stored };
+        if (projectId) {
+          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
+          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+        }
+        return updated;
+      });
+      return null;
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : "Failed to set model";
+      console.error("[AgentSession] Failed to set model:", e);
+      return errorMsg;
+    }
+  }, [session?.id, projectId, branch, explicitSessionId]);
+
   // Switch permission mode (preserves conversation history)
   const switchMode = useCallback(async (mode: "plan" | "edit") => {
     if (!session?.id) return;
@@ -1316,6 +1387,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     stopSession,
     restartSession,
     switchAgentType,
+    setModel,
     startNewConversation,
     ensureSession,
     switchMode,

@@ -13,6 +13,10 @@ function makeStorage() {
   const rows = new Map<string, AgentSession>();
   const storage = {
     agentSessions: {
+      updateModel: vi.fn(async (id: string, model: string | null) => {
+        const row = rows.get(id);
+        if (row) row.model = model;
+      }),
       create: async (row: Partial<AgentSession> & { id: string }) => {
         const full = {
           status: "running",
@@ -32,6 +36,7 @@ function makeStorage() {
       updateAgentType: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
       listByBranch: async () => [...rows.values()],
+      touchUpdatedAt: vi.fn(async () => undefined),
     },
     // createNewSession consults settings.agentProcesses for resident-capacity
     // enforcement before it ever touches the model — not in the brief's
@@ -40,7 +45,10 @@ function makeStorage() {
       get: async () => undefined,
     },
   } as unknown as Storage;
-  return { storage, rows };
+  const updateModel = (storage as unknown as {
+    agentSessions: { updateModel: ReturnType<typeof vi.fn> };
+  }).agentSessions.updateModel;
+  return { storage, rows, updateModel };
 }
 
 /** Capture buildSpawnConfig args while spawning a process that exits at once. */
@@ -123,6 +131,8 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
   // restoreSessionsFromDb re-reads the row — can't pass.
   const updateModel = vi.fn(async (id: string, model: string | null) => {
     if (id === "s-src") source.model = model;
+    const row = created.find((r) => r.id === id);
+    if (row) row.model = model;
   });
   const storage = {
     agentSessions: {
@@ -141,7 +151,15 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
       // persistEntry, which touches updated_at — not in the brief's harness,
       // but required or that path throws mid-test.
       touchUpdatedAt: vi.fn(async () => undefined),
+      updateLastUserMessageAt: vi.fn(async () => undefined),
+      // The woken process exits at once (stubSpawn runs `true`), which closes
+      // the turn — these two are that path's writes, stubbed only to keep the
+      // test output clean.
+      upsertTurnEndWithOutbox: vi.fn(async () => undefined),
     },
+    turnSnapshots: { getById: async () => null },
+    // Waking a dormant session first checks the resident-process cap.
+    settings: { get: async () => undefined },
   } as unknown as Storage;
 
   return { storage, created, source, updateModel };
@@ -260,5 +278,209 @@ describe("model survives every respawn path", () => {
       .find((m) => m?.type === "system" && m.content?.includes("Coding agent switched"));
     expect(systemEntry?.content).not.toContain("Model reset");
     expect(updateModel).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Changing the model of a session that already exists. The model is a spawn
+ * argument, so this is bounded by when the next process starts, not by
+ * whether the session is new: a branch, or any stopped session, has no
+ * process to argue with.
+ */
+describe("setModel", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a branch can still change its model — the whole point of arriving dormant", async () => {
+    // The branch inherits "opus", but nothing has run on it yet: the model is
+    // still only an argument for a process that hasn't been spawned, so the
+    // user must be able to name a different one before the first message.
+    const { storage, created, updateModel } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+    const branchResult = await manager.branchSession("s-src", undefined, { upToEntryIndex: 1 });
+    const newId = (branchResult as { ok: true; sessionId: string }).sessionId;
+
+    expect(await manager.setModel(newId, "sonnet")).toBe("ok");
+
+    expect(manager.getSession(newId)?.model).toBe("sonnet");
+    // Persisted, or a server restart would resurrect the inherited "opus"
+    // through restoreSessionsFromDb.
+    expect(updateModel).toHaveBeenCalledWith(newId, "sonnet");
+    expect(created.find((r) => r.id === newId)?.model).toBe("sonnet");
+  });
+
+  it("hands the new model to the spawn builder when the session next wakes", async () => {
+    // The change is only real if it reaches the CLI: a dormant session spawns
+    // on its next user message, and that spawn must carry the new name.
+    const { storage } = makeSeededStorage({ model: "opus", branch: "" });
+    const { calls } = stubSpawn();
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    expect(await manager.setModel("s-src", "sonnet")).toBe("ok");
+    await manager.sendUserMessage("s-src", "carry on", "/tmp/p1");
+
+    expect(calls[0]?.[3]).toBe("sonnet");
+  });
+
+  it("clears back to the CLI default when the model is set to null", async () => {
+    const { storage, updateModel, source } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    expect(await manager.setModel("s-src", null)).toBe("ok");
+
+    expect(manager.getSession("s-src")?.model ?? null).toBeNull();
+    expect(source.model ?? null).toBeNull();
+    expect(updateModel).toHaveBeenCalledWith("s-src", null);
+  });
+
+  it("normalizes a whitespace-only name to the default, like creation does", async () => {
+    const { storage } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    expect(await manager.setModel("s-src", "   ")).toBe("ok");
+
+    expect(manager.getSession("s-src")?.model ?? null).toBeNull();
+  });
+
+  it("trims the name, so a stray space can't spawn a model nobody named", async () => {
+    const { storage, updateModel } = makeSeededStorage({});
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    await manager.setModel("s-src", "  sonnet  ");
+
+    expect(manager.getSession("s-src")?.model).toBe("sonnet");
+    expect(updateModel).toHaveBeenCalledWith("s-src", "sonnet");
+  });
+
+  it("refuses while a turn is in flight on a session that has history", async () => {
+    // The model is a spawn argument: the running process already has one and
+    // cannot be told about another. Same rule as switchAgentType.
+    const { storage, updateModel } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+    manager.getSession("s-src")!.status = "running";
+
+    expect(await manager.setModel("s-src", "sonnet")).toBe("busy");
+
+    expect(manager.getSession("s-src")?.model).toBe("opus");
+    expect(updateModel).not.toHaveBeenCalled();
+  });
+
+  it("re-picking the model already in force is a no-op, not a refusal", async () => {
+    // Nothing changes, so there is nothing to refuse — and nothing to write.
+    const { storage, updateModel } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+    manager.getSession("s-src")!.status = "running";
+
+    expect(await manager.setModel("s-src", "opus")).toBe("ok");
+    expect(updateModel).not.toHaveBeenCalled();
+  });
+
+  it("retires the idle process of a fresh session so the next spawn uses the new model", async () => {
+    // A session created but not yet talked to holds a process spawned with the
+    // old model. Keeping it would silently run the first turn on the model the
+    // user just replaced, so it is retired and the session goes dormant —
+    // exactly what switchAgentType does in the same situation.
+    const { storage, rows } = makeStorage();
+    stubSpawn();
+    const manager = new AgentSessionManager(storage);
+    const sessionId = await manager.createNewSession(
+      "p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { model: "opus" },
+    );
+
+    expect(await manager.setModel(sessionId, "sonnet")).toBe("ok");
+
+    expect(manager.getSession(sessionId)?.model).toBe("sonnet");
+    expect(rows.get(sessionId)?.model).toBe("sonnet");
+    expect(manager.getSession(sessionId)?.process).toBeNull();
+    expect(manager.getSession(sessionId)?.dormant).toBe(true);
+    expect(manager.getSession(sessionId)?.status).toBe("stopped");
+  });
+
+  it("changes nothing at all when the row can't be written", async () => {
+    // The row is what survives a restart and `session.model` is what the next
+    // spawn reads. A half-applied change would run the next turn on a model
+    // the UI never confirmed, then silently revert on the next restart — so a
+    // failed write has to leave the session exactly as it was, process and all.
+    const { storage, rows, updateModel } = makeStorage();
+    stubSpawn();
+    const manager = new AgentSessionManager(storage);
+    const sessionId = await manager.createNewSession(
+      "p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { model: "opus" },
+    );
+    updateModel.mockRejectedValueOnce(new Error("disk full"));
+
+    expect(await manager.setModel(sessionId, "sonnet")).toBe("error");
+
+    expect(manager.getSession(sessionId)?.model).toBe("opus");
+    expect(rows.get(sessionId)?.model).toBe("opus");
+    // The process is only retired once the change is committed — a failed
+    // write must not cost the session its live agent either.
+    expect(manager.getSession(sessionId)?.process).not.toBeNull();
+    expect(manager.getSession(sessionId)?.dormant).toBe(false);
+    expect(manager.getSession(sessionId)?.status).toBe("running");
+  });
+
+  it("rolls the row back if a turn starts while the write is in flight", async () => {
+    // sendUserMessage doesn't run on the session's event chain, so a message
+    // can wake the session across the await — and that process is already
+    // running on the old model. Undo the write rather than kill a live turn.
+    const { storage, source, updateModel } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+    updateModel.mockImplementationOnce(async (_id: string, model: string | null) => {
+      source.model = model;
+      manager.getSession("s-src")!.status = "running"; // a message woke it meanwhile
+    });
+
+    expect(await manager.setModel("s-src", "sonnet")).toBe("busy");
+
+    expect(source.model).toBe("opus");
+    expect(manager.getSession("s-src")?.model).toBe("opus");
+  });
+
+  it("serializes concurrent changes, so the row and memory land on the same last pick", async () => {
+    // Two picks in quick succession must not interleave at the write: the
+    // second one starts only once the first has finished, so whichever the
+    // user chose last is what both the row and the next spawn hold.
+    const { storage, source, updateModel } = makeSeededStorage({ model: "opus" });
+    const manager = new AgentSessionManager(storage);
+    await manager.restoreSessionsFromDb();
+
+    let releaseFirstWrite: () => void = () => {};
+    const firstWriteStarted = new Promise<void>((started) => {
+      updateModel.mockImplementationOnce(async (_id: string, model: string | null) => {
+        started();
+        await new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+        source.model = model;
+      });
+    });
+
+    const first = manager.setModel("s-src", "sonnet");
+    const second = manager.setModel("s-src", "haiku");
+    await firstWriteStarted;
+
+    // The second change is queued behind the first, not racing it.
+    expect(updateModel).toHaveBeenCalledTimes(1);
+
+    releaseFirstWrite();
+    expect(await first).toBe("ok");
+    expect(await second).toBe("ok");
+
+    expect(updateModel.mock.calls.map((c) => c[1])).toEqual(["sonnet", "haiku"]);
+    expect(source.model).toBe("haiku");
+    expect(manager.getSession("s-src")?.model).toBe("haiku");
+  });
+
+  it("reports an unknown session rather than inventing one", async () => {
+    const { storage } = makeSeededStorage({});
+    const manager = new AgentSessionManager(storage);
+
+    expect(await manager.setModel("nope", "opus")).toBe("not_found");
   });
 });

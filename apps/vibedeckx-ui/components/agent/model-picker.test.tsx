@@ -113,12 +113,15 @@ describe("ModelPicker rendering", () => {
     expect(chip.className).toContain("text-muted-foreground");
     expect(chip.className).toContain("cursor-default");
     expect(chip.className).not.toContain("hover:");
-    // The tooltip must name an action that actually works. Branching copies
-    // the parent's model and accepts no override, so it cannot change it;
-    // starting a new conversation is the only path to a live picker.
+    // The tooltip must name the condition that actually holds the chip shut.
+    // Locking is now temporary — the turn ending is enough — so it must not
+    // send the user off to start a new conversation, and must not suggest
+    // stopping the agent, which would spend in-flight work for nothing.
     const tooltip = container.querySelector("[title]")?.getAttribute("title");
-    expect(tooltip).toContain("start a new conversation to change");
-    expect(tooltip).not.toContain("branch");
+    expect(tooltip).toContain("fixed while the agent is running");
+    expect(tooltip).toContain("once the turn ends");
+    expect(tooltip).not.toContain("new conversation");
+    expect(tooltip).not.toContain("stop");
   });
 
   it("names the full model in the trigger tooltip, since a long name clips", async () => {
