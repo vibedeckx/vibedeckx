@@ -46,16 +46,20 @@ describe("ReviewRunPanel discussing state", () => {
     vi.clearAllMocks();
   });
 
-  it("shows the discussing hint and a mirrored finalize button", async () => {
+  it("shows the discussing hint and an icon-only finalize button", async () => {
     expect(container.textContent).toContain("讨论中");
-    expect(container.textContent).toContain("生成 review 终稿");
+    const btn = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="生成 review 终稿"]',
+    );
+    expect(btn).not.toBeNull();
+    expect(btn!.textContent).toBe("");
     // 讨论态不显示发送/编辑(那是 waiting_feedback 的控件)。
     expect(container.textContent).not.toContain("发送反馈给原 session");
   });
 
   it("clicking finalize calls the gate with the finalize action", async () => {
-    const btn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("生成 review 终稿"),
+    const btn = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="生成 review 终稿"]',
     )!;
     await act(async () => { btn.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "finalize");

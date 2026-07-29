@@ -63,30 +63,33 @@ describe("TurnEndDivider finalize affordance", () => {
     root = createRoot(container);
   });
 
-  it("renders the finalize button only when showFinalize is set, and clicking calls onFinalize", () => {
+  it("renders an icon-only finalize button with a tooltip, and clicking calls onFinalize", () => {
     const onFinalize = vi.fn();
     act(() => {
       root!.render(<TurnEndDivider {...finalizeBaseProps} showFinalize onFinalize={onFinalize} />);
     });
-    const btn = Array.from(container!.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("生成 review 终稿"),
+    const btn = container!.querySelector<HTMLButtonElement>(
+      '[data-slot="tooltip-trigger"][aria-label="生成 review 终稿"]',
     )!;
     expect(btn).toBeTruthy();
+    expect(btn.textContent).toBe("");
     act(() => { btn.click(); });
     expect(onFinalize).toHaveBeenCalledTimes(1);
 
     act(() => {
       root!.render(<TurnEndDivider {...finalizeBaseProps} />);
     });
-    expect(container!.textContent).not.toContain("生成 review 终稿");
+    expect(
+      container!.querySelector('button[aria-label="生成 review 终稿"]'),
+    ).toBeNull();
   });
 
   it("disables the button while finalizeBusy", () => {
     act(() => {
       root!.render(<TurnEndDivider {...finalizeBaseProps} showFinalize finalizeBusy onFinalize={vi.fn()} />);
     });
-    const btn = Array.from(container!.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("生成 review 终稿"),
+    const btn = container!.querySelector<HTMLButtonElement>(
+      'button[aria-label="生成 review 终稿"]',
     )!;
     expect(btn.disabled).toBe(true);
   });

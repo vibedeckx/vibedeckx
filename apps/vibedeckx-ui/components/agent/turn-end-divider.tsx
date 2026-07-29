@@ -4,6 +4,12 @@ import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/format-duration";
 import { BranchMenu } from "./branch-menu";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { FileCheck, Loader2 } from "lucide-react";
 import type { AgentType } from "@/lib/api";
 
@@ -52,18 +58,25 @@ export function TurnEndDivider({
         </span>
       )}
       {showFinalize && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-6 px-2 text-xs shrink-0"
-          onClick={onFinalize}
-          disabled={disabled || finalizeBusy}
-        >
-          {finalizeBusy
-            ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-            : <FileCheck className="h-3 w-3 mr-1" />}
-          生成 review 终稿
-        </Button>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon-xs"
+                className="shrink-0"
+                aria-label="生成 review 终稿"
+                onClick={onFinalize}
+                disabled={disabled || finalizeBusy}
+              >
+                {finalizeBusy
+                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                  : <FileCheck className="h-3 w-3" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>生成 review 终稿</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       )}
       <BranchMenu
         agentType={agentType}

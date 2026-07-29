@@ -90,9 +90,13 @@ export function ReviewRunPanel({
               <span className="text-xs text-muted-foreground">
                 与 reviewer 讨论后，生成终稿再发送
               </span>
-              <Button size="sm" variant="outline" disabled={busy === run.id}
+              <Button
+                size="icon-sm"
+                variant="outline"
+                aria-label="生成 review 终稿"
+                disabled={busy === run.id}
                 onClick={() => act(() => api.workflowRunGate(run.id, "finalize"), run.id)}>
-                <FileCheck className="h-3 w-3 mr-1" />生成 review 终稿
+                <FileCheck className="h-3 w-3" />
               </Button>
             </div>
           )}
