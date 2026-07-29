@@ -75,7 +75,16 @@ interface OutboxSessionResult {
   headCursor: number;
   nextCursor: number;
   hasMore: boolean;
+  /** Worker's query-time session title; absent on pre-title workers. */
+  sessionTitle?: string | null;
 }
+
+/**
+ * Cap on worker-supplied display text. The trust level matches the session
+ * titles the UI already renders from this worker's proxied streams; the cap
+ * just keeps a misbehaving worker from persisting megabytes into inbox rows.
+ */
+const MAX_SESSION_TITLE_LENGTH = 200;
 
 type ProxyFn = typeof proxyToRemoteAuto;
 
@@ -503,6 +512,12 @@ export class RemoteNotificationSync {
       return false;
     }
 
+    // The front has no agent_sessions row for a remote session, so the worker's
+    // query-time title is the only source for a session-named body.
+    const sessionTitle = typeof session.sessionTitle === "string"
+      ? session.sessionTitle.slice(0, MAX_SESSION_TITLE_LENGTH)
+      : null;
+
     for (const event of session.events) {
       const notification: Notification = await this.notificationService.buildNotification(event, {
         id: localNotificationId(remoteServerId, event.id),
@@ -512,7 +527,7 @@ export class RemoteNotificationSync {
         workflowRunId: event.workflow_run_id
           ? localWorkflowRunId(remoteServerId, mapping.project_id, event.workflow_run_id)
           : null,
-      });
+      }, { sessionTitle });
 
       const { inserted } = await this.storage.notifications.importRemote({
         notification,

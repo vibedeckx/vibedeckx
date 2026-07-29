@@ -167,6 +167,10 @@ export class NotificationService {
    * Assemble the persisted row. `ids` is separate from the event because remote
    * imports substitute front-local identities (see RemoteNotificationSync) while
    * reusing this exact copy generation.
+   *
+   * `opts.sessionTitle` covers the remote-import case: the front has a mapping
+   * but no local session row, so the worker's query-time title is the only way
+   * to label the notification with the session's name.
    */
   async buildNotification(
     event: Pick<NotificationOutboxEvent, "kind" | "branch" | "created_at">,
@@ -177,6 +181,7 @@ export class NotificationService {
       sessionId: string | null;
       workflowRunId: string | null;
     },
+    opts?: { sessionTitle?: string | null },
   ): Promise<Notification> {
     const session = ids.sessionId ? await this.storage.agentSessions.getById(ids.sessionId) : undefined;
     const project = await this.storage.projects.getById(ids.projectId);
@@ -190,7 +195,7 @@ export class NotificationService {
       workflow_run_id: ids.workflowRunId,
       title: notificationTitle(event.kind),
       body: notificationBody({
-        sessionTitle: session?.title,
+        sessionTitle: session?.title ?? opts?.sessionTitle,
         branch: event.branch,
         projectName: project?.name,
       }),

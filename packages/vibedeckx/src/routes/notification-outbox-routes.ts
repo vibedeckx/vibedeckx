@@ -94,6 +94,14 @@ interface SessionResult {
   /** Resume point: the last RETURNED row, or `after` when nothing was returned. */
   nextCursor: number;
   hasMore: boolean;
+  /**
+   * The session's CURRENT title, resolved at query time — a front importing
+   * these events has no local session row to label them with. Query-time
+   * resolution (not baked into the stored event) is what keeps the "no stale
+   * worker-side title frozen into a milestone" property. Null when the session
+   * is unknown, untitled, or when no events were returned (nothing to label).
+   */
+  sessionTitle: string | null;
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -116,6 +124,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           headCursor,
           nextCursor: headCursor,
           hasMore: false,
+          sessionTitle: null,
         });
         continue;
       }
@@ -126,12 +135,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
         validated.limit,
       );
       const nextCursor = events.length > 0 ? events[events.length - 1].seq : request.after;
+      const session = events.length > 0
+        ? await fastify.storage.agentSessions.getById(request.sessionId)
+        : undefined;
       sessions.push({
         sessionId: request.sessionId,
         events,
         headCursor,
         nextCursor,
         hasMore: nextCursor < headCursor,
+        sessionTitle: session?.title ?? null,
       });
     }
 

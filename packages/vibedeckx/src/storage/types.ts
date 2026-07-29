@@ -275,8 +275,10 @@ export type NotificationKind =
 /**
  * An immutable milestone row in an *execution* server's outbox. Stores semantic
  * identity and routing only — never presentation text: the user-facing server
- * owns `title`/`body` (it has the local session mapping and the freshest title),
- * so a stale worker-side title can never be baked into the wire protocol.
+ * owns `title`/`body`, so a stale worker-side title can never be baked into a
+ * milestone. (The outbox *query response* may carry the session's current title,
+ * resolved at query time, for fronts that have no local session row to label
+ * a remote import with — see notification-outbox-routes.ts.)
  *
  * `seq` is a monotonically increasing cursor local to one execution server;
  * `id` is deterministic for the underlying milestone (UNIQUE), which is what

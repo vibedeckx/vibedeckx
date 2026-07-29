@@ -27,6 +27,7 @@ interface SessionResult {
   headCursor: number;
   nextCursor: number;
   hasMore: boolean;
+  sessionTitle: string | null;
 }
 
 describe("POST /api/notification-outbox/query", () => {
@@ -113,6 +114,32 @@ describe("POST /api/notification-outbox/query", () => {
     expect(only).toMatchObject({ sessionId: "never-ran", events: [], headCursor: 0, nextCursor: 0, hasMore: false });
   });
 
+  it("resolves the session's current title at query time when events are returned", async () => {
+    await storage.projects.create({ id: "p1", name: "Proj", path: null });
+    await storage.agentSessions.create({ id: "r1", project_id: "p1", branch: "dev" });
+    await storage.agentSessions.updateTitle("r1", "Fix checkout flow");
+    await insert("a1", "r1");
+
+    const res = await query(app, { sessions: [{ sessionId: "r1", after: 0 }] });
+    const [only]: SessionResult[] = res.json().sessions;
+    expect(only.sessionTitle).toBe("Fix checkout flow");
+  });
+
+  it("returns a null title for an unknown session and for pages with no events", async () => {
+    const a1 = await insert("a1", "r1");
+
+    // Events but no local session row (deleted, or never persisted).
+    const withEvents = await query(app, { sessions: [{ sessionId: "r1", after: 0 }] });
+    expect((withEvents.json().sessions as SessionResult[])[0].sessionTitle).toBeNull();
+
+    // Cursor at head: no events, so there is nothing the title would label.
+    await storage.projects.create({ id: "p1", name: "Proj", path: null });
+    await storage.agentSessions.create({ id: "r1", project_id: "p1", branch: "dev" });
+    await storage.agentSessions.updateTitle("r1", "Fix checkout flow");
+    const empty = await query(app, { sessions: [{ sessionId: "r1", after: a1.seq }] });
+    expect((empty.json().sessions as SessionResult[])[0].sessionTitle).toBeNull();
+  });
+
   it("headOnly returns the head cursor without event payloads", async () => {
     await insert("a1", "r1");
     const a2 = await insert("a2", "r1");
@@ -125,6 +152,7 @@ describe("POST /api/notification-outbox/query", () => {
     expect(only.headCursor).toBe(a2.seq);
     expect(only.nextCursor).toBe(a2.seq);
     expect(only.hasMore).toBe(false);
+    expect(only.sessionTitle).toBeNull();
   });
 
   it("limits events per session and flags hasMore", async () => {

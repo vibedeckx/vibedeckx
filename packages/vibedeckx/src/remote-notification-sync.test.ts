@@ -189,6 +189,52 @@ describe("RemoteNotificationSync", () => {
       expect(rows[0].title).toBe("Session result is ready");
     });
 
+    it("labels the notification body with the worker's query-time session title", async () => {
+      respond = () => ok([{
+        sessionId: "r1",
+        events: [workerEvent(1)],
+        headCursor: 1, nextCursor: 1, hasMore: false,
+        sessionTitle: "Fix checkout flow",
+      }]);
+
+      await sync.syncAll({ includeExpired: true });
+
+      const rows = await inbox();
+      // The front has no agent_sessions row for "remote-srv-p1-r1", so without
+      // the worker-supplied title the body would fall back to the branch.
+      expect(rows[0].body).toBe("Fix checkout flow");
+    });
+
+    it("falls back to the branch when a pre-title worker omits sessionTitle", async () => {
+      respond = () => ok([{ sessionId: "r1", events: [workerEvent(1)], headCursor: 1, nextCursor: 1, hasMore: false }]);
+      await sync.syncAll({ includeExpired: true });
+      expect((await inbox())[0].body).toBe("dev");
+    });
+
+    it("treats a placeholder title as absent and caps an oversized one", async () => {
+      respond = () => ok([
+        {
+          sessionId: "r1",
+          events: [workerEvent(1)],
+          headCursor: 1, nextCursor: 1, hasMore: false,
+          // Placeholder titles carry no information — branch is the better label.
+          sessionTitle: "New Session",
+        },
+      ]);
+      await sync.syncAll({ includeExpired: true });
+      expect((await inbox())[0].body).toBe("dev");
+
+      respond = () => ok([{
+        sessionId: "r1",
+        events: [workerEvent(2)],
+        headCursor: 2, nextCursor: 2, hasMore: false,
+        sessionTitle: "x".repeat(10_000),
+      }]);
+      await sync.syncAll({ includeExpired: true });
+      const long = (await inbox()).find((n) => n.id.endsWith("turn:2:result-ready"))!;
+      expect(long.body).toBe("x".repeat(200));
+    });
+
     it("derives userId from the local project owner, not from the worker", async () => {
       // A second tenant owns nothing here; the row must land on p1's owner.
       respond = () => ok([{ sessionId: "r1", events: [workerEvent(1)], headCursor: 1, nextCursor: 1, hasMore: false }]);
