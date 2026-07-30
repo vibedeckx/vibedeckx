@@ -26,11 +26,7 @@ describe("identity preflight through an API-key-protected server", () => {
 
     dir = mkdtempSync(path.join(tmpdir(), "vdx-ipf-"));
     const storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
-    const inbound = await storage.remoteServers.create({
-      name: "worker-a",
-      url: null,
-      connection_mode: "inbound",
-    });
+    const inbound = await storage.remoteServers.create({ name: "worker-a" });
     inboundId = inbound.id;
     inboundToken = (await storage.remoteServers.generateToken(inbound.id))!;
 
@@ -81,5 +77,33 @@ describe("identity preflight through an API-key-protected server", () => {
     const res = await fetch(`${baseUrl}/api/projects`);
     expect(res.status).toBe(401);
     expect(((await res.json()) as { error: string }).error).toBe("Unauthorized");
+  });
+
+  it("lets a token-only reverse-connect WS upgrade through to the route (bad token → 4001, not HTTP 401)", async () => {
+    // If the API-key middleware intercepted the upgrade, the handshake would
+    // fail with "Unexpected server response: 401" before the route ever saw
+    // the token. A route-level 4001 close proves the exemption worked and
+    // that invalid tokens are still rejected.
+    const { default: WebSocket } = await import("ws");
+    const wsUrl = baseUrl.replace(/^http/, "ws") + "/api/reverse-connect?token=wrong";
+    const closeCode = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      ws.on("close", (code) => resolve(code));
+      ws.on("error", (err) => reject(err));
+    });
+    expect(closeCode).toBe(4001);
+  });
+
+  it("accepts the WS upgrade for a valid connect token", async () => {
+    const { default: WebSocket } = await import("ws");
+    const wsUrl = baseUrl.replace(/^http/, "ws") + `/api/reverse-connect?token=${encodeURIComponent(inboundToken)}`;
+    const opened = await new Promise<boolean>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      const timer = setTimeout(() => { ws.terminate(); resolve(false); }, 5000);
+      ws.on("open", () => { clearTimeout(timer); ws.close(); resolve(true); });
+      // A 401 handshake rejection surfaces as an error event.
+      ws.on("error", (err) => { clearTimeout(timer); reject(err); });
+    });
+    expect(opened).toBe(true);
   });
 });

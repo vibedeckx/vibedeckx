@@ -8,7 +8,7 @@ import { WorkflowEngine } from "../workflow-engine.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
-import { setGlobalProxyManager, proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { RemotePatchCache } from "../remote-patch-cache.js";
 import { ReverseConnectManager } from "../reverse-connect-manager.js";
 import { BrowserManager } from "../browser-manager.js";
@@ -47,8 +47,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     }
     remoteSessionMap.set(row.local_session_id, {
       remoteServerId: row.remote_server_id,
-      remoteUrl: remote.server_url ?? "",
-      remoteApiKey: remote.server_api_key || "",
       remoteSessionId: row.remote_session_id,
       branch: row.branch ?? null,
     });
@@ -82,7 +80,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
       console.warn("[ProxyManager] Failed to parse saved proxy config, using direct connection");
     }
   }
-  setGlobalProxyManager(proxyManager);
 
   const reverseConnectManager = new ReverseConnectManager();
   const browserManager = new BrowserManager();
@@ -98,9 +95,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
   // Restore persisted remote executors by verifying against a connected
   // server's running process list and repopulating remoteExecutorMap.
-  // For direct-URL servers: only checks rows matching the exact server ID.
-  // For reverse-connect: checks ALL unrestored rows (handles server ID changes).
-  async function restoreRemoteExecutorsForServer(connectedServerId: string, machineId?: string, directUrl?: string): Promise<void> {
+  async function restoreRemoteExecutorsForServer(connectedServerId: string, machineId?: string): Promise<void> {
     // Only inspect rows still flagged 'running'. Finished rows are kept for
     // "Last run" lookup but should not be re-validated against the remote.
     const runningRows = await opts.storage.remoteExecutorProcesses.getRunning();
@@ -109,26 +104,21 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
 
     // Candidate selection determines which persisted rows this connection may
     // re-claim:
-    //  - direct-URL servers: exact server-ID match.
-    //  - reverse-connect with a VERIFIED machine identity: rows anchored to that
-    //    machine (may carry a stale server ID after record recreation). The
-    //    remote's self-reported process list below is then used only to prune
-    //    dead processes — never to claim a row it doesn't already own.
-    //  - reverse-connect without a verified machine (legacy/no-key remote):
-    //    exact server-ID match only, and no aliasing. This denies the
-    //    cross-tenant hijack that trusting self-reported process IDs allowed.
-    const candidateRows = directUrl
-      ? unrestoredRows.filter(r => r.remote_server_id === connectedServerId)
-      : machineId
-        ? unrestoredRows.filter(r => r.machine_id === machineId)
-        : unrestoredRows.filter(r => r.remote_server_id === connectedServerId);
+    //  - a VERIFIED machine identity: rows anchored to that machine (may carry
+    //    a stale server ID after record recreation). The remote's self-reported
+    //    process list below is then used only to prune dead processes — never
+    //    to claim a row it doesn't already own.
+    //  - without a verified machine (legacy/no-key remote): exact server-ID
+    //    match only, and no aliasing. This denies the cross-tenant hijack that
+    //    trusting self-reported process IDs allowed.
+    const candidateRows = machineId
+      ? unrestoredRows.filter(r => r.machine_id === machineId)
+      : unrestoredRows.filter(r => r.remote_server_id === connectedServerId);
     if (candidateRows.length === 0) return;
 
     try {
       const result = await proxyToRemoteAuto(
         connectedServerId,
-        directUrl ?? "",
-        candidateRows[0].remote_api_key,
         "GET", "/api/executor-processes/running",
         undefined, { timeoutMs: 5000, reverseConnectManager },
       );
@@ -150,8 +140,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             // Restore with original server ID (frontend matches against project.executor_mode)
             const restoredInfo = {
               remoteServerId: row.remote_server_id,
-              remoteUrl: row.remote_url,
-              remoteApiKey: row.remote_api_key,
               remoteProcessId: row.remote_process_id,
               executorId: row.executor_id,
               projectId: row.project_id ?? undefined,
@@ -270,28 +258,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // historical mappings aren't re-queried forever.
   remoteNotificationSync.start();
   remoteNotificationSync.enqueue(() => remoteNotificationSync.syncAll({ includeExpired: true }));
-
-  // Restore remote executor processes from DB in the background.
-  // Only processes direct-URL servers here; reverse-connect servers are
-  // restored when they reconnect (via the status change handler above).
-  void (async () => {
-    const savedRows = await opts.storage.remoteExecutorProcesses.getRunning();
-    // Only process rows with a direct URL — reverse-connect rows (empty URL)
-    // will be restored when their connection comes online
-    const directUrlRows = savedRows.filter(r => r.remote_url);
-    if (directUrlRows.length === 0) return;
-
-    const byServer = new Map<string, string>();
-    for (const r of directUrlRows) byServer.set(r.remote_server_id, r.remote_url);
-
-    console.log(`[SharedServices] Found ${directUrlRows.length} persisted direct-URL remote executor(s), verifying...`);
-
-    for (const [serverId, url] of byServer) {
-      await restoreRemoteExecutorsForServer(serverId, undefined, url);
-    }
-  })().catch(err => {
-    console.error(`[SharedServices] Unexpected error in remote executor restore:`, err);
-  });
 
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {

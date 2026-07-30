@@ -302,87 +302,60 @@ npx vibedeckx
 - **Folder Selection**: Native OS folder picker (macOS, Windows, Linux)
 - **SQLite Storage**: Project data stored in `~/.vibedeckx/data.sqlite`
 - **Static UI**: Frontend bundled with CLI for easy distribution
-- **Remote Projects**: Connect to remote vibedeckx servers to manage projects on remote machines
+- **Remote Projects**: Connect remote worker machines (via `vibedeckx connect`) to manage their projects from one UI
 
 ## Remote Project Support
 
-Vibedeckx supports connecting to remote vibedeckx servers, allowing you to manage projects on remote machines through a local UI.
+Vibedeckx supports connecting remote worker machines to a central server, allowing you to manage projects on remote machines through one UI. Workers connect **outward** to the server (reverse-connect) — the worker machine never needs a public URL or an open port.
 
 ### Architecture
 
 ```
 ┌──────────────┐     ┌─────────────────────┐     ┌──────────────────┐
-│  Browser UI  │◄───►│  Local vibedeckx    │◄───►│ Remote vibedeckx │
-│  (Next.js)   │     │  (Management)       │     │  (Execution)     │
-└──────────────┘     └─────────────────────┘     └──────────────────┘
-                            │                           │
-                            ▼                           ▼
-                      Local SQLite                Remote Agent
-                    (all project data)           (execution only)
+│  Browser UI  │◄───►│  vibedeckx Server   │◄────│ Remote worker    │
+│  (Next.js)   │     │  (Management)       │  ▲  │ (vibedeckx       │
+└──────────────┘     └─────────────────────┘  │  │  connect)        │
+                            │                 │  └──────────────────┘
+                            ▼                 │        │
+                      Server SQLite    reverse-connect ▼
+                    (all project data)   WebSocket   Agent execution
 ```
 
-**Data Storage** (managed locally, executed remotely):
-- **Local SQLite**: stores all project configuration (the local database is the source of truth)
-  - Project info (name, path, remote connection config)
+**Data Storage** (managed on the server, executed on the worker):
+- **Server SQLite**: stores all project configuration (the server database is the source of truth)
+  - Project info (name, path, linked remote servers)
   - Executor config (command, working directory)
-  - Remote connection info (URL, API key)
-- **Remote Server**: handles execution only
-  - Runs agent sessions (accessing the remote filesystem)
+- **Remote worker**: handles execution only
+  - Runs agent sessions (accessing its local filesystem)
   - Executes Executor commands
-  - Browses remote directories
+  - Serves directory browsing over the tunnel
 
-### Setting Up a Remote Server
+### Connecting a Remote Worker
 
-1. Start vibedeckx on the remote machine with an API key:
+1. In the UI, open **Settings → Remote Servers** and click **Add Server** (a name is all that's needed).
+
+2. Click the key icon to **generate a connect token**. Copy the printed command, e.g.:
 
 ```bash
-# On the remote server (--host 0.0.0.0 so the LAN can reach it; the API key gates all /api/)
-VIBEDECKX_API_KEY=your-secret-key vibedeckx start --host 0.0.0.0 --port 5174
+npx vibedeckx@latest connect --connect-to https://your-server.example.com --token <token>
 ```
 
-The `VIBEDECKX_API_KEY` environment variable enables API authentication. All API requests must include the `X-Vibedeckx-Api-Key` header.
+3. Run that command on the remote machine. It establishes a persistent reverse WebSocket connection to the server; the server row flips to **Connected**.
 
-2. Ensure the port is accessible from your local machine (firewall rules, SSH tunneling, etc.)
-
-### Connecting to a Remote Server
-
-1. In the UI, click "Create Project" and select the **Remote** tab
-
-2. Enter the remote server details:
-   - **Remote Server URL**: e.g., `http://192.168.1.100:5174`
-   - **API Key**: The key set via `VIBEDECKX_API_KEY` on the remote server
-
-3. Click **Test** to verify the connection
-
-4. Once connected, browse the remote filesystem and select a project directory
-
-5. Enter a project name and click **Create Project**
+4. When creating or editing a project, click **Add Remote**, pick the server, and browse to the project directory on the worker.
 
 ### How It Works
 
-- **Connection Config**: Remote project connection details (URL, API key) are stored locally
-- **Request Proxying**: All API requests for remote projects are proxied through your local vibedeckx server
-- **WebSocket Proxying**: Agent session WebSocket connections are transparently proxied to the remote server
-- **Data Locality**: Project files and agent processes run on the remote server; only the UI runs locally
+- **Reverse connect**: the worker dials out to the server and keeps a WebSocket tunnel open; all API and streaming traffic to the worker rides this tunnel. No inbound connectivity to the worker is required.
+- **Request proxying**: API requests for remote projects are proxied by the server through the tunnel.
+- **WebSocket proxying**: agent session and executor log streams are carried over virtual channels multiplexed on the same tunnel.
+- **Machine identity**: on first connect the worker's Ed25519 machine identity is pinned to the token's owner, so a leaked token cannot be silently replayed from another machine.
+- **Data locality**: project files and agent processes stay on the worker; only management state lives on the server.
 
 ### Security Considerations
 
-- API keys are stored in plain text in the local SQLite database
-- Use HTTPS in production environments
-- Consider SSH tunneling for secure connections over untrusted networks:
-
-```bash
-# Create an SSH tunnel to the remote server
-ssh -L 5174:localhost:5174 user@remote-server
-
-# Then connect to http://localhost:5174 in the UI
-```
-
-### Remote Project Indicators
-
-Remote projects are visually distinguished in the UI:
-- A **Remote** badge appears next to the project name
-- The path shows the remote URL prefix (e.g., `http://server:5174:/path/to/project`)
+- Connect tokens are shown once at generation time; revoke a token to immediately disconnect and invalidate it.
+- Use HTTPS on the server in production — the token and all tunneled traffic ride the WebSocket connection.
 
 ## Release
 

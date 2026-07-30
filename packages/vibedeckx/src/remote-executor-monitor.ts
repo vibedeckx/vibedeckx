@@ -1,5 +1,4 @@
 import { randomUUID } from "crypto";
-import WsWebSocket from "ws";
 import type { Storage } from "./storage/types.js";
 import type { EventBus } from "./event-bus.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
@@ -42,33 +41,22 @@ export class RemoteExecutorMonitor {
     // is already attached.
     if (this.monitors.has(localProcessId)) return;
 
-    let remoteWs: WsWebSocket | VirtualWsAdapter;
     const rcm = this.reverseConnectManager;
-    const useVirtual = rcm.isConnected(remoteInfo.remoteServerId);
-
-    if (useVirtual) {
-      const channelId = randomUUID();
-      const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
-      const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-      const adapter = new VirtualWsAdapter(
-        (data) => rcm.sendChannelData(remoteInfo.remoteServerId, channelId, data),
-        () => rcm.closeChannel(remoteInfo.remoteServerId, channelId),
-      );
-      rcm.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
-      rcm.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
-      remoteWs = adapter;
-      setTimeout(() => adapter.emit("open"), 0);
-    } else {
-      if (!remoteInfo.remoteUrl) {
-        console.log(`[RemoteExecutorMonitor] no direct URL for ${localProcessId}, skipping`);
-        return;
-      }
-      const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
-      const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-      const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-      const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-      remoteWs = new WsWebSocket(remoteWsUrl);
+    if (!rcm.isConnected(remoteInfo.remoteServerId)) {
+      console.log(`[RemoteExecutorMonitor] remote ${remoteInfo.remoteServerId} not connected for ${localProcessId}, skipping`);
+      return;
     }
+
+    const channelId = randomUUID();
+    const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
+    const adapter = new VirtualWsAdapter(
+      (data) => rcm.sendChannelData(remoteInfo.remoteServerId, channelId, data),
+      () => rcm.closeChannel(remoteInfo.remoteServerId, channelId),
+    );
+    rcm.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
+    rcm.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath);
+    const remoteWs: VirtualWsAdapter = adapter;
+    setTimeout(() => adapter.emit("open"), 0);
 
     const cleanup = () => {
       this.monitors.delete(localProcessId);

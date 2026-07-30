@@ -5,8 +5,7 @@ import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 function sanitizeProjectRemote(pr: ProjectRemoteWithServer) {
-  const { server_api_key: _, ...safe } = pr;
-  return safe;
+  return pr;
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {

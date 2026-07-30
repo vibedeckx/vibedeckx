@@ -226,8 +226,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       try {
         result = await proxyToRemoteAuto(
           resolved.server.id,
-          resolved.server.url ?? "",
-          resolved.server.api_key ?? "",
           "POST",
           target.path,
           target.body,

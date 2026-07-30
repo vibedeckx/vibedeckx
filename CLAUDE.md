@@ -54,7 +54,7 @@ pnpm --filter vibedeckx test
 
 **Process Manager** (`process-manager.ts`): Spawns executor processes with PTY support (`node-pty`), manages stdout/stderr streaming.
 
-**Remote Proxy** (`routes/remote-routes.ts`, `utils/remote-proxy.ts`): Proxies requests/WebSocket connections to remote servers. Remote sessions/executors use `remote-` prefix in IDs. Project config stored locally, execution happens remotely.
+**Remote Proxy** (`utils/remote-proxy.ts`, `reverse-connect-manager.ts`): All remote traffic rides the reverse-connect tunnel — workers dial out via `vibedeckx connect` with a connect token; there is no direct-URL (outbound) mode. `proxyToRemoteAuto(serverId, method, path, body, opts)` sends HTTP over the tunnel (network_error result when the worker is disconnected); WebSocket streams use virtual channels on the same tunnel. Remote sessions/executors use `remote-` prefix in IDs. Project config stored on the server, execution happens on the worker.
 
 **Plugin** (`plugins/shared-services.ts`): Fastify plugin that decorates the instance with `storage`, `processManager`, `agentSessionManager`, `remoteExecutorMap`, `remoteSessionMap`.
 

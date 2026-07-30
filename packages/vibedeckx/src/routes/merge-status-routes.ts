@@ -138,36 +138,15 @@ function parseRemoteEntries(
     : null;
 }
 
-function legacyRemoteLabel(remoteUrl: string): string {
-  try {
-    return new URL(remoteUrl).hostname;
-  } catch {
-    return "Remote";
-  }
-}
-
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
-  if (remotes.length > 0) {
-    const primary = remotes[0]; // sorted by sort_order
-    return {
-      serverId: primary.remote_server_id,
-      url: primary.server_url ?? "",
-      apiKey: primary.server_api_key ?? "",
-      remotePath: primary.remote_path,
-      serverName: primary.server_name,
-    };
-  }
-  if (project.remote_url && project.remote_api_key && project.remote_path) {
-    return {
-      serverId: "",
-      url: project.remote_url,
-      apiKey: project.remote_api_key,
-      remotePath: project.remote_path,
-      serverName: legacyRemoteLabel(project.remote_url),
-    };
-  }
-  return null;
+  if (remotes.length === 0) return null;
+  const primary = remotes[0]; // sorted by sort_order
+  return {
+    serverId: primary.remote_server_id,
+    remotePath: primary.remote_path,
+    serverName: primary.server_name,
+  };
 }
 
 const MAX_COMPARISONS = 50;
@@ -259,8 +238,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyToRemoteAuto(
           remoteConfig.serverId,
-          remoteConfig.url,
-          remoteConfig.apiKey,
           "POST",
           "/api/path/branches/merge-status",
           { path: remoteConfig.remotePath, comparisons: resolved.comparisons },

@@ -31,7 +31,7 @@ afterEach(async () => { if (app) await app.close(); vi.clearAllMocks(); });
 function makeApp() {
   const remoteSessionMap = new Map<string, unknown>();
   remoteSessionMap.set(SRC, {
-    remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+    remoteServerId: "srv1",
     remoteSessionId: "src1", branch: "dev",
   });
   const upsert = vi.fn(async () => undefined);
@@ -52,7 +52,7 @@ function makeApp() {
     projectRemotes: {
       getByProjectAndServer: async (pid: string, sid: string) =>
         pid === "p1" && sid === "srv1"
-          ? { remote_path: "/w/repo", server_url: "http://r", server_api_key: "k", remote_server_id: "srv1" }
+          ? { remote_path: "/w/repo", remote_server_id: "srv1" }
           : undefined,
     },
     remoteSessionMappings: { upsert, markTitleResolved: markTitleResolvedDb },
@@ -97,7 +97,7 @@ describe("workflow-run remote proxying (front server)", () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json().candidate.sessionId).toBe("remote-srv1-p1-rev1");
-    expect(proxyMock.mock.calls[0][4]).toBe(
+    expect(proxyMock.mock.calls[0][2]).toBe(
       "/api/path/workflow-runs/reviewer-candidate?sourceSessionId=src1",
     );
     expect(remoteSessionMap.get("remote-srv1-p1-rev1")).toMatchObject({
@@ -112,7 +112,7 @@ describe("workflow-run remote proxying (front server)", () => {
   it("POST reuse forwards the bare reviewer id and rejects an unmapped reviewer", async () => {
     const { remoteSessionMap } = makeApp();
     remoteSessionMap.set("remote-srv1-p1-rev1", {
-      remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+      remoteServerId: "srv1",
       remoteSessionId: "rev1", branch: "dev",
     });
     await app.register(workflowRunRoutes);
@@ -123,7 +123,7 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-rev1" },
     });
     expect(ok.statusCode).toBe(201);
-    expect(proxyMock.mock.calls[0][5]).toMatchObject({
+    expect(proxyMock.mock.calls[0][3]).toMatchObject({
       sourceSessionId: "src1", reviewerSessionId: "rev1",
     });
 
@@ -137,7 +137,7 @@ describe("workflow-run remote proxying (front server)", () => {
   it("POST reuse baselines the reused reviewer's notification cursor before dispatching", async () => {
     const { remoteSessionMap, prepareForNewTurn } = makeApp();
     remoteSessionMap.set("remote-srv1-p1-rev1", {
-      remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+      remoteServerId: "srv1",
       remoteSessionId: "rev1", branch: "dev",
     });
     await app.register(workflowRunRoutes);
@@ -158,7 +158,7 @@ describe("workflow-run remote proxying (front server)", () => {
   it("POST reuse does not start the review when the notification baseline fails", async () => {
     const { remoteSessionMap, prepareForNewTurn } = makeApp();
     remoteSessionMap.set("remote-srv1-p1-rev1", {
-      remoteServerId: "srv1", remoteUrl: "http://r", remoteApiKey: "k",
+      remoteServerId: "srv1",
       remoteSessionId: "rev1", branch: "dev",
     });
     await app.register(workflowRunRoutes);
@@ -199,7 +199,7 @@ describe("workflow-run remote proxying (front server)", () => {
     });
     expect(res.statusCode).toBe(201);
     expect(proxyMock).toHaveBeenCalledTimes(1); // no history pull, straight to the worker
-    const [, , , method, apiPath, body] = proxyMock.mock.calls[0];
+    const [, method, apiPath, body] = proxyMock.mock.calls[0];
     expect([method, apiPath]).toEqual(["POST", "/api/path/workflow-runs"]);
     expect(body).toMatchObject({ sourceSessionId: "src1", intentBrief: "client brief" });
   });
@@ -215,8 +215,8 @@ describe("workflow-run remote proxying (front server)", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().brief).toBe("distilled brief");
-    expect(proxyMock.mock.calls[0][3]).toBe("GET");
-    expect(proxyMock.mock.calls[0][4]).toBe("/api/agent-sessions/src1");
+    expect(proxyMock.mock.calls[0][1]).toBe("GET");
+    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/src1");
   });
 
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
@@ -235,9 +235,9 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { projectId: "p1", sourceSessionId: SRC, reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" },
     });
     expect(res.statusCode).toBe(201);
-    expect(proxyMock.mock.calls[0][4]).toBe("/api/agent-sessions/src1");
-    const [serverId, url, key, method, apiPath, body] = proxyMock.mock.calls[1];
-    expect([serverId, url, key, method, apiPath]).toEqual(["srv1", "http://r", "k", "POST", "/api/path/workflow-runs"]);
+    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/src1");
+    const [serverId, method, apiPath, body] = proxyMock.mock.calls[1];
+    expect([serverId, method, apiPath]).toEqual(["srv1", "POST", "/api/path/workflow-runs"]);
     expect(body).toMatchObject({ sourceSessionId: "src1", reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" });
 
     const run = res.json().run;
@@ -306,7 +306,7 @@ describe("workflow-run remote proxying (front server)", () => {
     const list = await app.inject({ method: "GET", url: "/api/workflow-runs?projectId=p1&branch=dev" });
     expect(list.statusCode).toBe(200);
     expect(list.json().runs[0].id).toBe("remote-srv1-p1-run1");
-    const listPath = proxyMock.mock.calls[0][4] as string;
+    const listPath = proxyMock.mock.calls[0][2] as string;
     expect(listPath).toContain("/api/path/workflow-runs?");
     expect(listPath).toContain("branch=dev");
 
@@ -317,8 +317,8 @@ describe("workflow-run remote proxying (front server)", () => {
     });
     expect(gate.statusCode).toBe(200);
     expect(gate.json().run.status).toBe("completed");
-    expect(proxyMock.mock.calls[1][4]).toBe("/api/workflow-runs/run1/gate");
-    expect(proxyMock.mock.calls[1][5]).toMatchObject({ action: "approve", editedPayload: "edited" });
+    expect(proxyMock.mock.calls[1][2]).toBe("/api/workflow-runs/run1/gate");
+    expect(proxyMock.mock.calls[1][3]).toMatchObject({ action: "approve", editedPayload: "edited" });
   });
 
   it("gate forwards a finalize action to the worker verbatim", async () => {
@@ -335,8 +335,8 @@ describe("workflow-run remote proxying (front server)", () => {
     });
     expect(gate.statusCode).toBe(200);
     expect(gate.json().run.status).toBe("completed");
-    expect(proxyMock.mock.calls[1][4]).toBe("/api/workflow-runs/run1/gate");
-    expect(proxyMock.mock.calls[1][5]).toMatchObject({ action: "finalize" });
+    expect(proxyMock.mock.calls[1][2]).toBe("/api/workflow-runs/run1/gate");
+    expect(proxyMock.mock.calls[1][3]).toMatchObject({ action: "finalize" });
   });
 
   it("gate 404s an unknown remote run id (empty remoteRunMap)", async () => {

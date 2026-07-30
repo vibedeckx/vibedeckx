@@ -22,17 +22,16 @@ describe("projects + settings storage", () => {
   it("create/getById round-trips including JSON sync configs and is_remote coercion", async () => {
     const p = await storage.projects.create({
       id: "p1", name: "proj", path: "/tmp/x",
-      remote_url: "http://r:3000",
       sync_up_config: { actionType: "command", executionMode: "local", content: "make up" },
     });
-    expect(p.is_remote).toBe(true);                      // boolean, not 0/1
+    expect(p.is_remote).toBe(false);                     // boolean, not 0/1
     expect(p.sync_up_config?.content).toBe("make up");   // parsed object, not JSON string
     const got = await storage.projects.getById("p1");
-    expect(got?.is_remote).toBe(true);
+    expect(got?.is_remote).toBe(false);
     expect(got?.sync_up_config?.actionType).toBe("command");
   });
 
-  it("create defaults agent_mode/executor_mode to 'local' and is_remote to false without remote_url", async () => {
+  it("create defaults agent_mode/executor_mode to 'local' and is_remote to false", async () => {
     const p = await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
     expect(p.agent_mode).toBe("local");
     expect(p.executor_mode).toBe("local");
@@ -72,21 +71,12 @@ describe("projects + settings storage", () => {
   });
 
   it("update: null clears a field, undefined leaves it untouched", async () => {
-    await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x", remote_url: "http://r" });
+    await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x", remote_path: "/remote/x" });
     const u1 = await storage.projects.update("p1", { name: "renamed" });
-    expect(u1?.remote_url).toBe("http://r");
+    expect(u1?.remote_path).toBe("/remote/x");
     expect(u1?.name).toBe("renamed");
-    const u2 = await storage.projects.update("p1", { remote_url: null });
-    expect(u2?.remote_url).toBeUndefined();
-    // is_remote auto-derives from remote_url on update.
-    expect(u2?.is_remote).toBe(false);
-  });
-
-  it("update: setting remote_url flips is_remote back to true", async () => {
-    await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
-    const updated = await storage.projects.update("p1", { remote_url: "http://r2" });
-    expect(updated?.is_remote).toBe(true);
-    expect(updated?.remote_url).toBe("http://r2");
+    const u2 = await storage.projects.update("p1", { remote_path: null });
+    expect(u2?.remote_path).toBeUndefined();
   });
 
   it("update: no-op opts still returns current row (respecting userId scoping)", async () => {
@@ -186,38 +176,35 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("remoteServers create/getById defaults connection_mode to outbound and status to unknown", async () => {
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote:5173" }, "user-a");
-    expect(server.connection_mode).toBe("outbound");
+  it("remoteServers create/getById defaults status to unknown and cross_remote_access to off", async () => {
+    const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
     expect(server.status).toBe("unknown");
-    expect(server.api_key).toBeUndefined();
+    expect(server.cross_remote_access).toBe("off");
     const got = await storage.remoteServers.getById(server.id, "user-a");
     expect(got?.name).toBe("srv");
     expect(await storage.remoteServers.getById(server.id, "user-b")).toBeUndefined();
   });
 
   it("remoteServers getAll scopes by userId", async () => {
-    await storage.remoteServers.create({ name: "a", url: "http://a" }, "user-a");
-    await storage.remoteServers.create({ name: "b", url: "http://b" }, "user-b");
+    await storage.remoteServers.create({ name: "a" }, "user-a");
+    await storage.remoteServers.create({ name: "b" }, "user-b");
     const forA = await storage.remoteServers.getAll("user-a");
     expect(forA.map((s) => s.name)).toEqual(["a"]);
     const allUnscoped = await storage.remoteServers.getAll();
     expect(allUnscoped.length).toBe(2);
   });
 
-  it("remoteServers getByUrl and getOwnerId are unscoped lookups", async () => {
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" }, "user-a");
-    const byUrl = await storage.remoteServers.getByUrl("http://remote");
-    expect(byUrl?.id).toBe(server.id);
+  it("remoteServers getOwnerId is an unscoped lookup", async () => {
+    const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
     expect(await storage.remoteServers.getOwnerId(server.id)).toBe("user-a");
     expect(await storage.remoteServers.getOwnerId("nonexistent")).toBeUndefined();
   });
 
   it("remoteServers update: partial updates and ownership scoping", async () => {
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" }, "user-a");
+    const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
     const renamed = await storage.remoteServers.update(server.id, { name: "renamed" }, "user-a");
     expect(renamed?.name).toBe("renamed");
-    expect(renamed?.url).toBe("http://remote"); // untouched
+    expect(renamed?.cross_remote_access).toBe("off"); // untouched
     const wrongUser = await storage.remoteServers.update(server.id, { name: "hacked" }, "user-b");
     expect(wrongUser).toBeUndefined();
     // No-op update (no fields) still returns current row.
@@ -226,7 +213,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
   });
 
   it("remoteServers updateStatus sets last_connected_at only when going online", async () => {
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" });
+    const server = await storage.remoteServers.create({ name: "srv" });
     await storage.remoteServers.updateStatus(server.id, "online");
     const online = await storage.remoteServers.getById(server.id);
     expect(online?.status).toBe("online");
@@ -238,7 +225,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
   });
 
   it("remoteServers generateToken/getByToken/revokeToken lifecycle", async () => {
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" }, "user-a");
+    const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
     const token = await storage.remoteServers.generateToken(server.id, "user-a");
     expect(token).toBeDefined();
     expect(token).toMatch(/^[0-9a-f]{64}$/);
@@ -267,7 +254,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
   });
 
   it("remoteServers delete respects ownership and reports whether a row was removed", async () => {
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" }, "user-a");
+    const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
     const deniedDelete = await storage.remoteServers.delete(server.id, "user-b");
     expect(deniedDelete).toBe(false);
     expect(await storage.remoteServers.getById(server.id)).toBeDefined();
@@ -278,7 +265,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes add/getByProject/getByProjectAndServer join in server fields and parse JSON configs", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote", api_key: "secret" });
+    const server = await storage.remoteServers.create({ name: "srv" });
 
     const pr = await storage.projectRemotes.add({
       project_id: "p1",
@@ -293,8 +280,6 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     const list = await storage.projectRemotes.getByProject("p1");
     expect(list).toHaveLength(1);
     expect(list[0].server_name).toBe("srv");
-    expect(list[0].server_url).toBe("http://remote");
-    expect(list[0].server_api_key).toBe("secret");
     expect(list[0].sync_up_config?.content).toBe("up");
 
     const single = await storage.projectRemotes.getByProjectAndServer("p1", server.id);
@@ -305,8 +290,8 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes getByProject orders by sort_order ascending", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
-    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
-    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+    const s1 = await storage.remoteServers.create({ name: "s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a", sort_order: 1 });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b", sort_order: 0 });
     const list = await storage.projectRemotes.getByProject("p1");
@@ -315,8 +300,8 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes appends remotes by default without replacing the primary", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: null });
-    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
-    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+    const s1 = await storage.remoteServers.create({ name: "s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2" });
 
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b" });
@@ -330,9 +315,9 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes promotes a remote and preserves the relative order of the others", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: null });
-    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
-    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
-    const s3 = await storage.remoteServers.create({ name: "s3", url: "http://s3" });
+    const s1 = await storage.remoteServers.create({ name: "s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2" });
+    const s3 = await storage.remoteServers.create({ name: "s3" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b" });
     const r3 = await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s3.id, remote_path: "/c" });
@@ -349,8 +334,8 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
   it("projectRemotes refuses to promote an association from another project", async () => {
     await storage.projects.create({ id: "p1", name: "one", path: null });
     await storage.projects.create({ id: "p2", name: "two", path: null });
-    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
-    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
+    const s1 = await storage.remoteServers.create({ name: "s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
     const other = await storage.projectRemotes.add({ project_id: "p2", remote_server_id: s2.id, remote_path: "/b" });
 
@@ -360,9 +345,9 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes removing the primary promotes and renumbers the remaining remotes", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: null });
-    const s1 = await storage.remoteServers.create({ name: "s1", url: "http://s1" });
-    const s2 = await storage.remoteServers.create({ name: "s2", url: "http://s2" });
-    const s3 = await storage.remoteServers.create({ name: "s3", url: "http://s3" });
+    const s1 = await storage.remoteServers.create({ name: "s1" });
+    const s2 = await storage.remoteServers.create({ name: "s2" });
+    const s3 = await storage.remoteServers.create({ name: "s3" });
     const primary = await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s1.id, remote_path: "/a" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s2.id, remote_path: "/b" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: s3.id, remote_path: "/c" });
@@ -379,8 +364,8 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     const dbPath = path.join(dir, "legacy-order.sqlite");
     let legacyStorage = await createSqliteStorage(dbPath);
     await legacyStorage.projects.create({ id: "legacy", name: "legacy", path: null });
-    const s1 = await legacyStorage.remoteServers.create({ name: "s1", url: "http://legacy-s1" });
-    const s2 = await legacyStorage.remoteServers.create({ name: "s2", url: "http://legacy-s2" });
+    const s1 = await legacyStorage.remoteServers.create({ name: "s1" });
+    const s2 = await legacyStorage.remoteServers.create({ name: "s2" });
     await legacyStorage.projectRemotes.add({ project_id: "legacy", remote_server_id: s1.id, remote_path: "/a" });
     await legacyStorage.projectRemotes.add({ project_id: "legacy", remote_server_id: s2.id, remote_path: "/b" });
     await legacyStorage.close();
@@ -398,7 +383,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes update: partial update and null clears sync configs", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" });
+    const server = await storage.remoteServers.create({ name: "srv" });
     const pr = await storage.projectRemotes.add({
       project_id: "p1",
       remote_server_id: server.id,
@@ -421,7 +406,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
 
   it("projectRemotes remove reports whether a row was deleted", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
-    const server = await storage.remoteServers.create({ name: "srv", url: "http://remote" });
+    const server = await storage.remoteServers.create({ name: "srv" });
     const pr = await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/x" });
     expect(await storage.projectRemotes.remove(pr.id)).toBe(true);
     expect(await storage.projectRemotes.remove(pr.id)).toBe(false);

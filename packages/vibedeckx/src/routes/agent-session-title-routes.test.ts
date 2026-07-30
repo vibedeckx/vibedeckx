@@ -91,8 +91,6 @@ describe("PATCH /api/agent-sessions/:sessionId/title — live sidebar broadcast"
     const wrappedId = "remote-srvA-p1-rs1";
     remoteSessionMap.set(wrappedId, {
       remoteServerId: "srvA",
-      remoteUrl: "http://a",
-      remoteApiKey: "k",
       remoteSessionId: "rs1",
       branch: "feature",
     });
@@ -107,8 +105,6 @@ describe("PATCH /api/agent-sessions/:sessionId/title — live sidebar broadcast"
     // The remote node is written via the proxy with the normalized title...
     expect(proxyToRemoteAuto).toHaveBeenCalledWith(
       "srvA",
-      "http://a",
-      "k",
       "PATCH",
       "/api/agent-sessions/rs1/title",
       { title: "Remote Name" },

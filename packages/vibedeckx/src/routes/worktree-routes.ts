@@ -9,32 +9,15 @@ import type { Project } from "../storage/types.js";
 
 interface RemoteConfig {
   serverId: string;
-  url: string;
-  apiKey: string;
   remotePath: string;
 }
 
 async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): Promise<RemoteConfig[]> {
-  // Check project_remotes table first (new approach)
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
-  if (remotes.length > 0) {
-    return remotes.map((r) => ({
-      serverId: r.remote_server_id,
-      url: r.server_url ?? "",
-      apiKey: r.server_api_key ?? "",
-      remotePath: r.remote_path,
-    }));
-  }
-  // Fallback to legacy project fields
-  if (project.remote_url && project.remote_api_key && project.remote_path) {
-    return [{
-      serverId: "",
-      url: project.remote_url,
-      apiKey: project.remote_api_key,
-      remotePath: project.remote_path,
-    }];
-  }
-  return [];
+  return remotes.map((r) => ({
+    serverId: r.remote_server_id,
+    remotePath: r.remote_path,
+  }));
 }
 
 /** Returns the primary (first) remote config, or null. Used by endpoints that operate on a single remote. */
@@ -238,8 +221,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!targetRemote) return reply.code(400).send({ error: "Unknown remote target" });
       const result = await proxyToRemoteAuto(
         targetRemote.remote_server_id,
-        targetRemote.server_url ?? "",
-        targetRemote.server_api_key ?? "",
         "GET",
         `/api/path/worktrees?path=${encodeURIComponent(targetRemote.remote_path)}`,
         undefined,
@@ -253,8 +234,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!project.path && remoteConfig) {
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/worktrees?path=${encodeURIComponent(remoteConfig.remotePath)}`,
         undefined,
@@ -298,8 +277,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const proxyBranchesToRemote = async () => {
       const result = await proxyToRemoteAuto(
         remoteConfig!.serverId,
-        remoteConfig!.url,
-        remoteConfig!.apiKey,
         "GET",
         `/api/path/branches?path=${encodeURIComponent(remoteConfig!.remotePath)}`,
         undefined,
@@ -374,8 +351,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const deleteOnRemote = async (rc: RemoteConfig) => {
       return proxyToRemoteAuto(
         rc.serverId,
-        rc.url,
-        rc.apiKey,
         "DELETE",
         `/api/path/worktrees`,
         { path: rc.remotePath, branch },
@@ -395,7 +370,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const results: Record<string, { success: boolean; error?: string }> = {};
       await Promise.allSettled(
         remoteConfigs.map(async (rc) => {
-          const key = rc.serverId || rc.url;
+          const key = rc.serverId;
           try {
             const result = await deleteOnRemote(rc);
             if (result.ok) {
@@ -501,7 +476,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Delete from all remotes in parallel
     await Promise.allSettled(
       remoteConfigs.map(async (rc) => {
-        const key = remoteConfigs.length === 1 ? "remote" : (rc.serverId || rc.url);
+        const key = remoteConfigs.length === 1 ? "remote" : rc.serverId;
         try {
           const remoteResult = await deleteOnRemote(rc);
           if (remoteResult.ok) {
@@ -584,8 +559,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const createOnRemote = async (rc: RemoteConfig) => {
       return proxyToRemoteAuto(
         rc.serverId,
-        rc.url,
-        rc.apiKey,
         "POST",
         `/api/path/worktrees`,
         { path: rc.remotePath, branchName: trimmedBranch, baseBranch: remoteStartPoint },
@@ -605,8 +578,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const results: Record<string, { success: boolean; worktree?: { branch: string }; error?: string; errorCode?: string; requestId?: string }> = {};
       const settled = await Promise.allSettled(
         remoteConfigs.map(async (rc) => {
-          const key = rc.serverId || rc.url;
-          console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}, url=${rc.url}`);
+          const key = rc.serverId;
+          console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}`);
           try {
             const result = await createOnRemote(rc);
             if (result.ok) {
@@ -697,8 +670,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // All remotes in parallel
     await Promise.allSettled(
       remoteConfigs.map(async (rc) => {
-        const key = remoteConfigs.length === 1 ? "remote" : (rc.serverId || rc.url);
-        console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}, url=${rc.url}`);
+        const key = remoteConfigs.length === 1 ? "remote" : rc.serverId;
+        console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}`);
         try {
           const remoteResult = await createOnRemote(rc);
           if (remoteResult.ok) {

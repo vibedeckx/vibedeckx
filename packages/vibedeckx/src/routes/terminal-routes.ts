@@ -10,29 +10,14 @@ import type { Project } from "../storage/types.js";
 async function getRemoteConfig(fastify: FastifyInstance, project: Project, remoteServerId?: string) {
   // Check project_remotes table first (new approach)
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
-  if (remotes.length > 0) {
-    const target = remoteServerId
-      ? remotes.find((r) => r.remote_server_id === remoteServerId)
-      : remotes[0]; // sorted by sort_order
-    if (target) {
-      return {
-        serverId: target.remote_server_id,
-        url: target.server_url ?? "",
-        apiKey: target.server_api_key ?? "",
-        remotePath: target.remote_path,
-      };
-    }
-  }
-  // Fallback to legacy project fields
-  if (project.remote_url && project.remote_api_key && project.remote_path) {
-    return {
-      serverId: "",
-      url: project.remote_url,
-      apiKey: project.remote_api_key,
-      remotePath: project.remote_path,
-    };
-  }
-  return null;
+  const target = remoteServerId
+    ? remotes.find((r) => r.remote_server_id === remoteServerId)
+    : remotes[0]; // sorted by sort_order
+  if (!target) return null;
+  return {
+    serverId: target.remote_server_id,
+    remotePath: target.remote_path,
+  };
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -156,8 +141,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "POST",
         "/api/path/terminals",
         {
@@ -181,8 +164,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         fastify.remoteExecutorMap.set(localId, {
           remoteServerId: remoteConfig.serverId,
-          remoteUrl: remoteConfig.url,
-          remoteApiKey: remoteConfig.apiKey,
           remoteProcessId: remoteId,
           executorId: "",
           projectId: req.params.projectId,
@@ -190,8 +171,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
         await fastify.storage.remoteExecutorProcesses.insert(localId, {
           remoteServerId: remoteConfig.serverId,
-          remoteUrl: remoteConfig.url,
-          remoteApiKey: remoteConfig.apiKey,
           remoteProcessId: remoteId,
           executorId: "",
           projectId: req.params.projectId,
@@ -264,8 +243,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         const result = await proxyToRemoteAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/executor-processes/${remoteInfo.remoteProcessId}/stop`,
           undefined,

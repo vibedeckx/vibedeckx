@@ -34,9 +34,7 @@ export function useProjectRemotes(
         setRemotes(
           data.map((r) => {
             const server = byId.get(r.remote_server_id);
-            return server
-              ? { ...r, status: server.status, connection_mode: server.connection_mode }
-              : r;
+            return server ? { ...r, status: server.status } : r;
           }),
         );
       } else {
@@ -69,11 +67,7 @@ export function useProjectRemotes(
 }
 
 // Cloud icon for a remote target: a slashed cloud when the remote is known to be
-// disconnected. Only inbound (reverse-connect) remotes track a live connection
-// status; outbound remotes connect on demand, so they always show a plain cloud.
+// disconnected (remotes connect via reverse-connect and track a live status).
 export function remoteConnectionIcon(remote: ProjectRemote) {
-  if (remote.connection_mode === "inbound" && remote.status !== "online") {
-    return CloudOff;
-  }
-  return Cloud;
+  return remote.status !== "online" ? CloudOff : Cloud;
 }

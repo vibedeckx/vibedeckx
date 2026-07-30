@@ -93,11 +93,6 @@ const startCommand = buildCommand({
         brief: "Path to a .env file loaded at startup (default: <data-dir or ~/.vibedeckx>/.env). Shell-set variables take precedence.",
         optional: true,
       },
-      "accept-remote": {
-        kind: "boolean",
-        brief: "Allow other vibedeckx servers to use this instance as a remote provider (exposes /api/path/*, /api/browse, /api/execute-one-shot)",
-        optional: true,
-      },
       "no-local-projects": {
         kind: "boolean",
         brief: "Disable creation of local-folder projects (for SaaS/hosted deployments). Remote projects are unaffected.",
@@ -148,7 +143,6 @@ const startCommand = buildCommand({
     // Consumed by load-env.ts before the CLI parses flags; declared here so the
     // flag is recognized and documented.
     "env-file": string | undefined;
-    "accept-remote": boolean | undefined;
     "no-local-projects": boolean | undefined;
     cert: string | undefined;
     key: string | undefined;
@@ -163,7 +157,6 @@ const startCommand = buildCommand({
     const port = flags.port ?? DEFAULT_PORT;
     const host = flags.host ?? "127.0.0.1";
     const authEnabled = flags.auth ?? false;
-    const acceptRemote = flags["accept-remote"] ?? false;
     const noLocalProjects = flags["no-local-projects"] ?? false;
     const tls = loadTLSOptions(flags);
 
@@ -181,34 +174,13 @@ const startCommand = buildCommand({
       );
     }
 
-    // --accept-remote exposes the path-based provider surface (/api/path/*,
-    // /api/browse, /api/mkdir, /api/execute-one-shot). Those routes do privileged
-    // work — including writing commands into a PTY via /api/path/terminals — and
-    // are NOT individually authenticated; they rely entirely on the global API-key
-    // hook, which is a no-op when VIBEDECKX_API_KEY is unset. Clerk (--auth) does
-    // not cover them either, since they never call requireAuth. Accepting remotes
-    // only makes sense when reachable over the network (typically paired with
-    // --host 0.0.0.0), so without an API key it's unauthenticated RCE — and even on
-    // loopback, other local users shouldn't get an unauthenticated provider surface.
-    // Refuse to boot in that configuration. (Reverse-connect mode is unaffected: it
-    // binds 127.0.0.1 behind a token-authenticated tunnel and never enters this command.)
-    if (acceptRemote && !process.env.VIBEDECKX_API_KEY) {
-      console.error(
-        "Error: --accept-remote requires VIBEDECKX_API_KEY to be set.\n" +
-        "It exposes privileged path-based endpoints (/api/path/*, /api/browse, /api/execute-one-shot)\n" +
-        "to the network without per-route authentication. Set VIBEDECKX_API_KEY so callers must\n" +
-        "present a matching x-vibedeckx-api-key header."
-      );
-      process.exit(1);
-    }
-
-    console.log(`Starting vibedeckx${acceptRemote ? " (accepting remote clients)" : ""}${tls ? " (HTTPS)" : ""}...`);
+    console.log(`Starting vibedeckx${tls ? " (HTTPS)" : ""}...`);
 
     const uiRoot = await resolveUiRoot({ uiDir: flags["ui-dir"], noUi: flags["no-ui"] });
 
     const dbPath = path.join(dataDir, "data.sqlite");
     const storage = await createSqliteStorage(dbPath);
-    const server = await createServer({ storage, authEnabled, acceptRemote, noLocalProjects, tls, uiRoot });
+    const server = await createServer({ storage, authEnabled, noLocalProjects, tls, uiRoot });
 
     const url = await server.start(port, host);
     console.log(`Server running at ${url}`);

@@ -308,8 +308,10 @@ export const createExecutorRepos = (
         .values({
           local_process_id: localProcessId,
           remote_server_id: info.remoteServerId,
-          remote_url: info.remoteUrl,
-          remote_api_key: info.remoteApiKey,
+          // Legacy NOT NULL columns from the removed direct-URL (outbound)
+          // transport; all traffic now rides reverse-connect.
+          remote_url: "",
+          remote_api_key: "",
           remote_process_id: info.remoteProcessId,
           executor_id: info.executorId,
           project_id: info.projectId ?? null,

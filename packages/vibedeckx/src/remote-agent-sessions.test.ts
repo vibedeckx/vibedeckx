@@ -41,7 +41,7 @@ describe("createRemoteAgentSession", () => {
   const params = () => ({
     projectId,
     agentMode,
-    remoteConfig: { server_url: "http://b:5173", server_api_key: "key", remote_path: "/remote/path" },
+    remoteConfig: { remote_path: "/remote/path" },
     branch: "main" as string | null,
     permissionMode: "edit" as const,
     agentType: "claude-code",
@@ -61,7 +61,7 @@ describe("createRemoteAgentSession", () => {
     // Enable cross-remote MCP minting: a public URL plus an opted-in remote that
     // is not the source (agentMode). Then the happy path forwards a crossRemoteMcp.
     process.env.VIBEDECKX_PUBLIC_URL = "https://app.example.com";
-    const target = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+    const target = await storage.remoteServers.create({ name: "b" }, "user-1");
     await storage.remoteServers.update(target.id, { cross_remote_access: "exec" }, "user-1");
   });
 
@@ -73,7 +73,7 @@ describe("createRemoteAgentSession", () => {
 
   it("happy path: pre-registers, forwards sessionId + crossRemoteMcp, upserts, keeps the map entry", async () => {
     proxyToRemoteAuto.mockImplementation(async (..._args: unknown[]) => {
-      const body = _args[5] as { sessionId: string };
+      const body = _args[3] as { sessionId: string };
       return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [] } };
     });
     const deps = makeDeps();
@@ -88,8 +88,8 @@ describe("createRemoteAgentSession", () => {
     // Forwarded body carries the server-generated sessionId and a crossRemoteMcp config.
     expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
     const call = proxyToRemoteAuto.mock.calls[0];
-    expect(call[4]).toBe("/api/path/agent-sessions/new");
-    const body = call[5] as { sessionId: string; crossRemoteMcp?: { url: string; token: string } };
+    expect(call[2]).toBe("/api/path/agent-sessions/new");
+    const body = call[3] as { sessionId: string; crossRemoteMcp?: { url: string; token: string } };
     expect(body.sessionId).toBe(remoteSessionId);
     expect(body.crossRemoteMcp?.url).toContain("/api/cross-remote-mcp");
     expect(body.crossRemoteMcp?.token).toBeTruthy();
@@ -109,7 +109,7 @@ describe("createRemoteAgentSession", () => {
   it("pre-registration ordering: the map entry exists at the moment proxyToRemoteAuto is invoked", async () => {
     let hadEntryAtCallTime = false;
     proxyToRemoteAuto.mockImplementation(async (..._args: unknown[]) => {
-      const body = _args[5] as { sessionId: string };
+      const body = _args[3] as { sessionId: string };
       const localSessionId = `remote-${agentMode}-${projectId}-${body.sessionId}`;
       // The race the design exists to prevent: the entry must be present *now*,
       // not merely after proxyToRemoteAuto resolves.
@@ -142,7 +142,7 @@ describe("createRemoteAgentSession", () => {
 
   it("failure cleanup — upsert throws: deletes the entry and propagates", async () => {
     proxyToRemoteAuto.mockImplementation(async (..._args: unknown[]) => {
-      const body = _args[5] as { sessionId: string };
+      const body = _args[3] as { sessionId: string };
       return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [] } };
     });
     upsert.mockRejectedValue(new Error("db write failed"));

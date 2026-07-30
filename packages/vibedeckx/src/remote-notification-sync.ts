@@ -544,11 +544,11 @@ export class RemoteNotificationSync {
   }
 
   private async query(
-    target: { serverId: string; url: string; apiKey: string },
+    target: { serverId: string },
     sessions: Array<{ sessionId: string; after: number; headOnly?: boolean }>,
   ): Promise<ProxyResult> {
     return this.proxy(
-      target.serverId, target.url, target.apiKey,
+      target.serverId,
       "POST", OUTBOX_QUERY_PATH,
       { sessions, limitPerSession: MAX_EVENTS_PER_SESSION },
       { timeoutMs: QUERY_TIMEOUT_MS, reverseConnectManager: this.reverseConnectManager },
@@ -561,22 +561,18 @@ export class RemoteNotificationSync {
   }
 
   /**
-   * URL/apiKey come from project_remotes — the authoritative source, same as the
-   * remoteSessionMap hydration in shared-services. Reverse-connect rows have an
-   * empty URL and are routed by server id instead.
+   * The mapping is only queryable while its project_remotes row still exists —
+   * same authoritative source as the remoteSessionMap hydration in
+   * shared-services. Routing is by server id over reverse-connect.
    */
   private async resolveTarget(
     mapping: RemoteSessionMapping,
-  ): Promise<{ serverId: string; url: string; apiKey: string } | null> {
+  ): Promise<{ serverId: string } | null> {
     const remote = await this.storage.projectRemotes.getByProjectAndServer(
       mapping.project_id, mapping.remote_server_id,
     );
     if (!remote) return null;
-    return {
-      serverId: mapping.remote_server_id,
-      url: remote.server_url ?? "",
-      apiKey: remote.server_api_key || "",
-    };
+    return { serverId: mapping.remote_server_id };
   }
 }
 

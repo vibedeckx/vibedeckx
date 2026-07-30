@@ -211,7 +211,7 @@ export function ScheduleFormDialog({
                 <SelectItem value="local">Local</SelectItem>
                 {remotes.map((r) => (
                   <SelectItem key={r.remote_server_id} value={r.remote_server_id}>
-                    {r.server_name ?? r.server_url ?? r.remote_server_id}
+                    {r.server_name ?? r.remote_server_id}
                   </SelectItem>
                 ))}
               </SelectContent>

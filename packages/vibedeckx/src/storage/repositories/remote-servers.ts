@@ -5,7 +5,6 @@ import type { DialectHelpers } from "../dialect.js";
 import type {
   Storage,
   RemoteServer,
-  RemoteServerConnectionMode,
   RemoteServerStatus,
   CrossRemoteAccess,
   ProjectRemote,
@@ -16,9 +15,6 @@ import type {
 const mapRemoteServer = (row: Selectable<RemoteServersTable>): RemoteServer => ({
   id: row.id,
   name: row.name,
-  url: row.url,
-  api_key: row.api_key ?? undefined,
-  connection_mode: (row.connection_mode as RemoteServerConnectionMode) ?? "outbound",
   connect_token: row.connect_token ?? undefined,
   connect_token_created_at: row.connect_token_created_at ?? undefined,
   status: (row.status as RemoteServerStatus) ?? "unknown",
@@ -40,15 +36,11 @@ const mapProjectRemote = (row: Selectable<ProjectRemotesTable>): ProjectRemote =
 
 type ProjectRemoteJoinedRow = Selectable<ProjectRemotesTable> & {
   server_name: string;
-  server_url: string | null;
-  server_api_key: string | null;
 };
 
 const mapProjectRemoteWithServer = (row: ProjectRemoteJoinedRow): ProjectRemoteWithServer => ({
   ...mapProjectRemote(row),
   server_name: row.server_name,
-  server_url: row.server_url,
-  server_api_key: row.server_api_key ?? undefined,
 });
 
 async function orderedProjectRemoteIds(
@@ -85,13 +77,12 @@ export const createRemoteServerRepos = (
   remoteServers: {
     create: async (server, userId) => {
       const id = crypto.randomUUID();
-      const connectionMode = server.connection_mode ?? "outbound";
       await kdb.insertInto("remote_servers").values({
         id,
         name: server.name,
-        url: server.url,
-        api_key: server.api_key ?? null,
-        connection_mode: connectionMode,
+        url: null,
+        api_key: null,
+        connection_mode: "inbound",
         connect_token: null,
         connect_token_created_at: null,
         last_connected_at: null,
@@ -116,11 +107,6 @@ export const createRemoteServerRepos = (
       return row ? mapRemoteServer(row) : undefined;
     },
 
-    getByUrl: async (url) => {
-      const row = await kdb.selectFrom("remote_servers").selectAll().where("url", "=", url).executeTakeFirst();
-      return row ? mapRemoteServer(row) : undefined;
-    },
-
     getByToken: async (token) => {
       const row = await kdb.selectFrom("remote_servers").selectAll().where("connect_token", "=", token).executeTakeFirst();
       return row ? mapRemoteServer(row) : undefined;
@@ -134,9 +120,6 @@ export const createRemoteServerRepos = (
     update: async (id, opts, userId) => {
       const sets: Record<string, unknown> = {};
       if (opts.name !== undefined) sets.name = opts.name;
-      if (opts.url !== undefined) sets.url = opts.url;
-      if (opts.api_key !== undefined) sets.api_key = opts.api_key;
-      if (opts.connection_mode !== undefined) sets.connection_mode = opts.connection_mode;
       if (opts.cross_remote_access !== undefined) sets.cross_remote_access = opts.cross_remote_access;
 
       if (Object.keys(sets).length > 0) {
@@ -207,8 +190,6 @@ export const createRemoteServerRepos = (
           "project_remotes.sync_up_config",
           "project_remotes.sync_down_config",
           "remote_servers.name as server_name",
-          "remote_servers.url as server_url",
-          "remote_servers.api_key as server_api_key",
         ])
         .where("project_remotes.project_id", "=", projectId)
         .orderBy("project_remotes.sort_order", "asc")
@@ -229,8 +210,6 @@ export const createRemoteServerRepos = (
           "project_remotes.sync_up_config",
           "project_remotes.sync_down_config",
           "remote_servers.name as server_name",
-          "remote_servers.url as server_url",
-          "remote_servers.api_key as server_api_key",
         ])
         .where("project_remotes.project_id", "=", projectId)
         .where("project_remotes.remote_server_id", "=", remoteServerId)

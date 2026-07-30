@@ -32,9 +32,7 @@ const tierSatisfies = (granted: CrossRemoteAccess, required: CrossRemoteTier): b
   granted === "exec" || (granted === "read" && required === "read");
 
 const isOnline = (deps: AccessDeps, server: RemoteServer): boolean =>
-  server.connection_mode === "inbound"
-    ? deps.reverseConnectManager.isConnected(server.id)
-    : !!server.url;
+  deps.reverseConnectManager.isConnected(server.id);
 
 /**
  * True when the session that minted this token still exists.

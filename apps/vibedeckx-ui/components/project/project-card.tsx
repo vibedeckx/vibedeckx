@@ -147,19 +147,11 @@ export function ProjectCard({ project, selectedBranch, onSyncPrompt, assignedTas
       );
     }
     // Legacy fallback: check old project.remote_path
-    if (hasLocal && project.remote_path) {
+    if (project.remote_path) {
       return (
-        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500" title={`Local + Remote: ${project.remote_url}`}>
+        <span className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${hasLocal ? "bg-purple-500/10 text-purple-500" : "bg-blue-500/10 text-blue-500"}`}>
           <Globe className="h-3 w-3" />
-          Local + Remote
-        </span>
-      );
-    }
-    if (!hasLocal && project.remote_path) {
-      return (
-        <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500" title={`Remote: ${project.remote_url}`}>
-          <Globe className="h-3 w-3" />
-          Remote
+          {hasLocal ? "Local + Remote" : "Remote"}
         </span>
       );
     }
@@ -263,10 +255,10 @@ export function ProjectCard({ project, selectedBranch, onSyncPrompt, assignedTas
           </div>
         ))}
         {/* Legacy remote path fallback (for projects not yet migrated) */}
-        {remotes.length === 0 && project.remote_path && project.remote_url && (
+        {remotes.length === 0 && project.remote_path && (
           <div className="group/remote flex items-center gap-2 text-sm text-muted-foreground">
             <Globe className="h-4 w-4 shrink-0" />
-            <span className="truncate flex-1" title={`${project.remote_url}:${project.remote_path}`}>{project.remote_url}:{project.remote_path}</span>
+            <span className="truncate flex-1" title={project.remote_path}>{project.remote_path}</span>
             <button
               onClick={() => copyToClipboard(project.remote_path!)}
               className="shrink-0 p-0.5 rounded hover:bg-muted opacity-0 group-hover/remote:opacity-100 transition-opacity"

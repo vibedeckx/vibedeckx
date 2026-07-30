@@ -340,13 +340,11 @@ export class SchedulerService {
     }
 
     const proxy = this.remote.proxy ?? proxyToRemoteAuto;
-    const serverUrl = remoteConfig.server_url ?? "";
-    const serverKey = remoteConfig.server_api_key || "";
 
     let result;
     try {
       result = await proxy(
-        task.target, serverUrl, serverKey, "POST", "/api/path/execute",
+        task.target, "POST", "/api/path/execute",
         {
           path: remotePath,
           command: buildRunContent(task),
@@ -372,8 +370,6 @@ export class SchedulerService {
 
     const remoteInfo: RemoteExecutorInfo = {
       remoteServerId: task.target,
-      remoteUrl: serverUrl,
-      remoteApiKey: serverKey,
       remoteProcessId,
       executorId: `schedule-${task.id}`,
       projectId: task.project_id,
@@ -417,7 +413,7 @@ export class SchedulerService {
 
     timer = setTimeout(() => {
       void proxy(
-        task.target, serverUrl, serverKey, "POST",
+        task.target, "POST",
         `/api/executor-processes/${remoteProcessId}/stop`, undefined,
         { reverseConnectManager: this.remote!.reverseConnectManager },
       ).catch(() => {});

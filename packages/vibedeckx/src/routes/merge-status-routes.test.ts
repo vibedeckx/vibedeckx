@@ -46,8 +46,8 @@ describe("merge-status repository descriptor", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "local", name: "Local project", path: repo });
     await storage.projects.create({ id: "remote", name: "Remote project", path: null });
-    const serverA = await storage.remoteServers.create({ name: "Remote A", url: "http://a" });
-    const serverB = await storage.remoteServers.create({ name: "Remote B", url: "http://b" });
+    const serverA = await storage.remoteServers.create({ name: "Remote A" });
+    const serverB = await storage.remoteServers.create({ name: "Remote B" });
     remoteA = await storage.projectRemotes.add({
       project_id: "remote",
       remote_server_id: serverA.id,
@@ -232,7 +232,7 @@ describe("merge-status repository descriptor", () => {
       const response = await postComparisons("remote", [{ branch: "feature" }]);
 
       expect(response.statusCode).toBe(200);
-      expect(proxyToRemoteAuto.mock.calls[0]?.[5]).toEqual({
+      expect(proxyToRemoteAuto.mock.calls[0]?.[3]).toEqual({
         path: "/repo-a",
         comparisons: [{ branch: "feature", target: "release" }],
       });

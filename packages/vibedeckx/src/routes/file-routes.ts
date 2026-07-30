@@ -3,37 +3,22 @@ import fp from "fastify-plugin";
 import path from "path";
 import fs from "fs/promises";
 import { createReadStream, constants as fsConstants } from "fs";
-import { Readable } from "stream";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { proxyStatus, proxyToRemoteAuto, proxyToRemoteRaw } from "../utils/remote-proxy.js";
+import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
-  // Check project_remotes table first (new approach)
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
-  if (remotes.length > 0) {
-    const primary = remotes[0]; // sorted by sort_order
-    return {
-      serverId: primary.remote_server_id,
-      url: primary.server_url ?? "",
-      apiKey: primary.server_api_key ?? "",
-      remotePath: primary.remote_path,
-    };
-  }
-  // Fallback to legacy project fields
-  if (project.remote_url && project.remote_api_key && project.remote_path) {
-    return {
-      serverId: "",
-      url: project.remote_url,
-      apiKey: project.remote_api_key,
-      remotePath: project.remote_path,
-    };
-  }
-  return null;
+  if (remotes.length === 0) return null;
+  const primary = remotes[0]; // sorted by sort_order
+  return {
+    serverId: primary.remote_server_id,
+    remotePath: primary.remote_path,
+  };
 }
 
 interface BrowseEntry {
@@ -622,8 +607,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (showHidden) params.push("hidden=1");
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/browse?${params.join("&")}`,
         undefined,
@@ -691,8 +674,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/list-files?${params.join("&")}`,
         undefined,
@@ -752,8 +733,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/file-content?${params.join("&")}`,
         undefined,
@@ -833,8 +812,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/symbol-search?${params.join("&")}`,
         undefined,
@@ -891,52 +868,24 @@ const routes: FastifyPluginAsync = async (fastify) => {
         `filePath=${encodeURIComponent(filePath)}`,
       ];
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
-      const rcm = fastify.reverseConnectManager;
-      if (rcm && rcm.isConnected(remoteConfig.serverId)) {
-        // Reverse-connect: proxy through WebSocket tunnel (returns JSON)
-        const result = await proxyToRemoteAuto(
-          remoteConfig.serverId,
-          remoteConfig.url,
-          remoteConfig.apiKey,
-          "GET",
-          `/api/path/file-download?${params.join("&")}`,
-          undefined,
-          { reverseConnectManager: rcm }
-        );
-        // Binary responses (e.g. images) arrive as a Buffer over the tunnel —
-        // stream the raw bytes instead of JSON-serializing them.
-        if (Buffer.isBuffer(result.data)) {
-          const fileName = path.basename(filePath);
-          return reply
-            .code(proxyStatus(result))
-            .header("Content-Disposition", `attachment; filename="${fileName}"`)
-            .type("application/octet-stream")
-            .send(result.data);
-        }
-        return reply.code(proxyStatus(result)).send(result.data);
-      }
-
-      // Outbound: direct HTTP fetch for raw streaming response
-      const result = await proxyToRemoteRaw(
-        remoteConfig.url,
-        remoteConfig.apiKey,
-        `/api/path/file-download?${params.join("&")}`
+      const result = await proxyToRemoteAuto(
+        remoteConfig.serverId,
+        "GET",
+        `/api/path/file-download?${params.join("&")}`,
+        undefined,
+        { reverseConnectManager: fastify.reverseConnectManager }
       );
-
-      if (!result.ok) {
-        return reply.code(proxyStatus(result, 500)).send({ error: "Failed to download file from remote" });
+      // Binary responses (e.g. images) arrive as a Buffer over the tunnel —
+      // stream the raw bytes instead of JSON-serializing them.
+      if (Buffer.isBuffer(result.data)) {
+        const fileName = path.basename(filePath);
+        return reply
+          .code(proxyStatus(result))
+          .header("Content-Disposition", `attachment; filename="${fileName}"`)
+          .type("application/octet-stream")
+          .send(result.data);
       }
-
-      const fileName = path.basename(filePath);
-      reply.header("Content-Disposition", `attachment; filename="${fileName}"`);
-      reply.type("application/octet-stream");
-
-      if (result.body) {
-        // Convert web ReadableStream to Node.js Readable for Fastify
-        const nodeStream = Readable.fromWeb(result.body as import("stream/web").ReadableStream);
-        return reply.send(nodeStream);
-      }
-      return reply.code(500).send({ error: "No response body from remote" });
+      return reply.code(proxyStatus(result)).send(result.data);
     }
 
     if (!project.path) {
@@ -1018,8 +967,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "POST",
         "/api/path/upload",
         {
@@ -1091,8 +1038,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "DELETE",
         `/api/path/delete?${params.join("&")}`,
         undefined,

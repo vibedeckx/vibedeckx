@@ -32,8 +32,6 @@ export function useProjects(initialProjectId?: string | null) {
     name: string;
     path?: string;
     remotePath?: string;
-    remoteUrl?: string;
-    remoteApiKey?: string;
   }) => {
     const project = await api.createProject(opts);
     setProjects((prev) => [project, ...prev]);
@@ -45,8 +43,6 @@ export function useProjects(initialProjectId?: string | null) {
     name?: string;
     path?: string | null;
     remotePath?: string | null;
-    remoteUrl?: string | null;
-    remoteApiKey?: string | null;
     agentMode?: ExecutionMode;
     executorMode?: ExecutionMode;
     syncUpConfig?: SyncButtonConfig | null;

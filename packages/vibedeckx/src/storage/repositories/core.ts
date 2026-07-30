@@ -29,10 +29,9 @@ export const createCoreRepos = (
         name: opts.name,
         path: opts.path ?? null,
         remote_path: opts.remote_path ?? null,
-        // is_remote is derived from remote_url, same as the legacy inline code.
-        is_remote: h.toDbBool(!!opts.remote_url),
-        remote_url: opts.remote_url ?? null,
-        remote_api_key: opts.remote_api_key ?? null,
+        is_remote: h.toDbBool(false),
+        remote_url: null,
+        remote_api_key: null,
         // Dead column: never populated by any current caller (kept only so
         // legacy DDL/back-compat readers relying on its presence don't break).
         remote_project_id: null,
@@ -77,8 +76,6 @@ export const createCoreRepos = (
       if (opts.name !== undefined) sets.name = opts.name;
       if (opts.path !== undefined) sets.path = opts.path;
       if (opts.remote_path !== undefined) sets.remote_path = opts.remote_path;
-      if (opts.remote_url !== undefined) sets.remote_url = opts.remote_url;
-      if (opts.remote_api_key !== undefined) sets.remote_api_key = opts.remote_api_key;
       if (opts.agent_mode !== undefined) sets.agent_mode = opts.agent_mode;
       if (opts.executor_mode !== undefined) sets.executor_mode = opts.executor_mode;
       if (opts.sync_up_config !== undefined) {
@@ -87,11 +84,6 @@ export const createCoreRepos = (
       if (opts.sync_down_config !== undefined) {
         sets.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
       }
-      // Auto-derive is_remote from remote_url, same condition as the legacy code.
-      if (opts.remote_url !== undefined) {
-        sets.is_remote = h.toDbBool(!!opts.remote_url);
-      }
-
       if (Object.keys(sets).length > 0) {
         let query = kdb.updateTable("projects").set(sets).where("id", "=", id);
         if (userId) query = query.where("user_id", "=", userId);

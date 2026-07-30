@@ -8,7 +8,6 @@ export interface SyncButtonConfig {
   content: string;
 }
 
-export type RemoteServerConnectionMode = 'outbound' | 'inbound';
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
 export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
@@ -34,9 +33,6 @@ export interface CrossRemoteAuditRow extends CrossRemoteAuditEntry {
 export interface RemoteServer {
   id: string;
   name: string;
-  url: string | null;
-  api_key?: string;
-  connection_mode: RemoteServerConnectionMode;
   connect_token?: string;
   connect_token_created_at?: string;
   status: RemoteServerStatus;
@@ -58,8 +54,6 @@ export interface ProjectRemote {
 
 export interface ProjectRemoteWithServer extends ProjectRemote {
   server_name: string;
-  server_url: string | null;
-  server_api_key?: string;
 }
 
 export interface Project {
@@ -418,8 +412,6 @@ export interface Storage {
       name: string;
       path?: string | null;
       remote_path?: string;
-      remote_url?: string;
-      remote_api_key?: string;
       agent_mode?: ExecutionMode;
       executor_mode?: ExecutionMode;
       sync_up_config?: SyncButtonConfig;
@@ -432,8 +424,6 @@ export interface Storage {
       name?: string;
       path?: string | null;
       remote_path?: string | null;
-      remote_url?: string | null;
-      remote_api_key?: string | null;
       agent_mode?: ExecutionMode;
       executor_mode?: ExecutionMode;
       sync_up_config?: SyncButtonConfig | null;
@@ -457,14 +447,13 @@ export interface Storage {
     delete: (projectId: string, branch: string) => Promise<boolean>;
   };
   remoteServers: {
-    create(server: { name: string; url: string | null; api_key?: string; connection_mode?: RemoteServerConnectionMode }, userId?: string): Promise<RemoteServer>;
+    create(server: { name: string }, userId?: string): Promise<RemoteServer>;
     getAll(userId?: string): Promise<RemoteServer[]>;
     getById(id: string, userId?: string): Promise<RemoteServer | undefined>;
-    getByUrl(url: string): Promise<RemoteServer | undefined>;
     getByToken(token: string): Promise<RemoteServer | undefined>;
     /** Owner user_id of a server, unscoped — for ownership checks without a request context. */
     getOwnerId(id: string): Promise<string | undefined>;
-    update(id: string, opts: { name?: string; url?: string; api_key?: string; connection_mode?: RemoteServerConnectionMode; cross_remote_access?: CrossRemoteAccess }, userId?: string): Promise<RemoteServer | undefined>;
+    update(id: string, opts: { name?: string; cross_remote_access?: CrossRemoteAccess }, userId?: string): Promise<RemoteServer | undefined>;
     updateStatus(id: string, status: RemoteServerStatus): Promise<void>;
     generateToken(id: string, userId?: string): Promise<string | undefined>;
     revokeToken(id: string, userId?: string): Promise<boolean>;
@@ -569,7 +558,7 @@ export interface Storage {
     prune: (scheduleId: string, keep: number) => Promise<void>;
   };
   remoteExecutorProcesses: {
-    insert(localProcessId: string, info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null; machineId?: string | null }): Promise<void>;
+    insert(localProcessId: string, info: { remoteServerId: string; remoteProcessId: string; executorId: string; projectId?: string; branch?: string | null; machineId?: string | null }): Promise<void>;
     /**
      * Hard-delete a row. Use only for stale-row cleanup or transient sessions
      * (e.g. terminals). Use markFinished() when an executor process exits so

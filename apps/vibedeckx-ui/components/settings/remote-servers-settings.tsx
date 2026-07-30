@@ -26,7 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { api, type RemoteServer, type RemoteServerConnectionMode, type CrossRemoteAccess } from '@/lib/api';
+import { api, type RemoteServer, type CrossRemoteAccess } from '@/lib/api';
 import {
   Globe,
   Plus,
@@ -44,12 +44,9 @@ type TestStatus = 'idle' | 'testing' | 'success' | 'error';
 
 interface ServerFormState {
   name: string;
-  url: string;
-  apiKey: string;
-  connectionMode: RemoteServerConnectionMode;
 }
 
-const emptyForm: ServerFormState = { name: '', url: '', apiKey: '', connectionMode: 'outbound' };
+const emptyForm: ServerFormState = { name: '' };
 
 export function RemoteServersSettings() {
   const [servers, setServers] = useState<RemoteServer[]>([]);
@@ -116,7 +113,7 @@ export function RemoteServersSettings() {
 
   const openEditDialog = (server: RemoteServer) => {
     setEditingServer(server);
-    setForm({ name: server.name, url: server.url || '', apiKey: '', connectionMode: server.connection_mode });
+    setForm({ name: server.name });
     setFormError('');
     setIsFormOpen(true);
   };
@@ -126,27 +123,16 @@ export function RemoteServersSettings() {
       setFormError('Name is required');
       return;
     }
-    if (form.connectionMode === 'outbound' && !form.url.trim()) {
-      setFormError('URL is required for outbound servers');
-      return;
-    }
 
     setSaving(true);
     setFormError('');
     try {
       if (editingServer) {
-        const opts: { name?: string; url?: string; apiKey?: string } = {};
-        if (form.name.trim() !== editingServer.name) opts.name = form.name.trim();
-        if (form.url.trim() !== (editingServer.url || '')) opts.url = form.url.trim();
-        if (form.apiKey.trim()) opts.apiKey = form.apiKey.trim();
-        await api.updateRemoteServer(editingServer.id, opts);
+        if (form.name.trim() !== editingServer.name) {
+          await api.updateRemoteServer(editingServer.id, { name: form.name.trim() });
+        }
       } else {
-        await api.createRemoteServer({
-          name: form.name.trim(),
-          url: form.url.trim(),
-          ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
-          connectionMode: form.connectionMode,
-        });
+        await api.createRemoteServer({ name: form.name.trim() });
       }
       setIsFormOpen(false);
       await loadServers();
@@ -247,7 +233,6 @@ export function RemoteServersSettings() {
   };
 
   const renderStatusDot = (server: RemoteServer) => {
-    if (server.connection_mode !== 'inbound') return null;
     const isOnline = server.status === 'online';
     return (
       <span
@@ -322,8 +307,7 @@ export function RemoteServersSettings() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Mode</TableHead>
-              <TableHead>URL / Status</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Cross-remote access</TableHead>
               <TableHead className="w-[180px] text-right">Actions</TableHead>
             </TableRow>
@@ -337,19 +321,8 @@ export function RemoteServersSettings() {
                     {server.name}
                   </div>
                 </TableCell>
-                <TableCell>
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                    server.connection_mode === 'inbound'
-                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400'
-                      : 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400'
-                  }`}>
-                    {server.connection_mode === 'inbound' ? 'Inbound' : 'Outbound'}
-                  </span>
-                </TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
-                  {server.connection_mode === 'inbound'
-                    ? (server.status === 'online' ? 'Connected' : 'Waiting for connection...')
-                    : server.url}
+                  {server.status === 'online' ? 'Connected' : 'Waiting for connection...'}
                 </TableCell>
                 <TableCell>
                   <Select
@@ -368,17 +341,15 @@ export function RemoteServersSettings() {
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    {server.connection_mode === 'inbound' && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleGenerateToken(server)}
-                        title="Generate connect token"
-                        className="h-8 w-8"
-                      >
-                        <KeyRound className="h-4 w-4" />
-                      </Button>
-                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleGenerateToken(server)}
+                      title="Generate connect token"
+                      className="h-8 w-8"
+                    >
+                      <KeyRound className="h-4 w-4" />
+                    </Button>
                     {renderTestButton(server)}
                     <Button
                       variant="ghost"
@@ -428,41 +399,12 @@ export function RemoteServersSettings() {
             </DialogTitle>
             <DialogDescription>
               {editingServer
-                ? 'Update the server connection details.'
-                : 'Add a new remote server to the global registry.'}
+                ? 'Update the server name.'
+                : 'Add a new remote server, then generate a connect token and run the connect command on the remote machine.'}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
-            {!editingServer && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Connection Mode</label>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant={form.connectionMode === 'outbound' ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => setForm((f) => ({ ...f, connectionMode: 'outbound' }))}
-                  >
-                    Outbound
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={form.connectionMode === 'inbound' ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => setForm((f) => ({ ...f, connectionMode: 'inbound' }))}
-                  >
-                    Inbound
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {form.connectionMode === 'outbound'
-                    ? 'Server connects outbound to the remote node (remote must have a public URL).'
-                    : 'Remote node connects inbound to this server (no public URL needed on remote).'}
-                </p>
-              </div>
-            )}
-
             <div className="space-y-2">
               <label className="text-sm font-medium">Name</label>
               <Input
@@ -474,37 +416,6 @@ export function RemoteServersSettings() {
                 placeholder="My Remote Server"
               />
             </div>
-
-            {(form.connectionMode === 'outbound' || editingServer) && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">
-                  URL{form.connectionMode === 'inbound' && !editingServer ? ' (optional)' : ''}
-                </label>
-                <Input
-                  value={form.url}
-                  onChange={(e) => {
-                    setForm((f) => ({ ...f, url: e.target.value }));
-                    setFormError('');
-                  }}
-                  placeholder="http://remote-server:5173"
-                />
-              </div>
-            )}
-
-            {form.connectionMode === 'outbound' && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">API Key</label>
-                <Input
-                  type="password"
-                  value={form.apiKey}
-                  onChange={(e) => {
-                    setForm((f) => ({ ...f, apiKey: e.target.value }));
-                    setFormError('');
-                  }}
-                  placeholder={editingServer ? '(unchanged)' : 'Optional'}
-                />
-              </div>
-            )}
 
             {formError && (
               <p className="text-sm text-red-500">{formError}</p>

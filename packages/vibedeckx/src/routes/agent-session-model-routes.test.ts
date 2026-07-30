@@ -277,8 +277,6 @@ describe("POST /api/agent-sessions/:sessionId/model", () => {
     // Wrapped id layout: remote-{serverId}-{projectId}-{remoteSessionId}
     h.remoteSessionMap.set("remote-srvA-p1-rs1", {
       remoteServerId: "srvA",
-      remoteUrl: "http://a",
-      remoteApiKey: "k",
       remoteSessionId: "rs1",
       branch: "feature",
     });
@@ -290,8 +288,6 @@ describe("POST /api/agent-sessions/:sessionId/model", () => {
     expect(res.json()).toEqual({ success: true, model: "gpt-5.6-sol" });
     expect(proxyToRemoteAuto).toHaveBeenCalledWith(
       "srvA",
-      "http://a",
-      "k",
       "POST",
       "/api/agent-sessions/rs1/model",
       { model: "gpt-5.6-sol" },

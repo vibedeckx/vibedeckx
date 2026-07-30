@@ -23,7 +23,7 @@ const clampTimeoutMs = (timeoutSec: unknown): number => {
 
 /**
  * Routes invoked on a *target* machine by the SaaS server's cross-remote MCP gateway.
- * The /api/path/ prefix puts them behind the --accept-remote gate and the global
+ * The /api/path/ prefix puts them behind the remote-provider gate and the global
  * x-vibedeckx-api-key hook, exactly like the other server-invoked remote routes.
  */
 const routes: FastifyPluginAsync = async (fastify) => {

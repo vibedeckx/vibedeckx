@@ -110,8 +110,6 @@ interface ProjectInfoViewProps {
     name?: string;
     path?: string | null;
     remotePath?: string | null;
-    remoteUrl?: string | null;
-    remoteApiKey?: string | null;
     syncUpConfig?: SyncButtonConfig | null;
     syncDownConfig?: SyncButtonConfig | null;
   }) => Promise<void> | Promise<unknown>;
@@ -173,9 +171,6 @@ export function ProjectInfoView({
                   <Globe className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
                   <div className="min-w-0">
                     <span className="text-muted-foreground break-all">{r.server_name}</span>
-                    {r.server_url && (
-                      <span className="block text-xs text-muted-foreground/70 break-all">{r.server_url}</span>
-                    )}
                   </div>
                 </div>
               ))}

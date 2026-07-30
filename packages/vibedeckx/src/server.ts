@@ -9,7 +9,6 @@ import { fileURLToPath } from "url";
 import type { Storage } from "./storage/types.js";
 import sharedServices from "./plugins/shared-services.js";
 import projectRoutes from "./routes/project-routes.js";
-import remoteRoutes from "./routes/remote-routes.js";
 import remoteServerRoutes from "./routes/remote-server-routes.js";
 import projectRemoteRoutes from "./routes/project-remote-routes.js";
 import executorGroupRoutes from "./routes/executor-group-routes.js";
@@ -78,9 +77,11 @@ export function requireAuth(req: FastifyRequest, reply: FastifyReply): string | 
 }
 
 // Path prefixes / exact paths that exist solely to serve another vibedeckx
-// Server proxying into this instance as its remote provider. Hitting these
-// without --accept-remote means the caller is treating us as a remote we never
-// opted into being — return 404 to make Server-mode invisible as a remote.
+// Server proxying into this instance as its remote provider. Only the
+// reverse-connect worker (`vibedeckx connect`) enables acceptRemote — its
+// tunnel injects these routes. On a regular server the caller is treating us
+// as a remote we never opted into being — return 404 to make Server-mode
+// invisible as a remote.
 const REMOTE_PROVIDER_PREFIXES = ["/api/path/"];
 const REMOTE_PROVIDER_EXACT = new Set(["/api/browse", "/api/mkdir", "/api/execute-one-shot"]);
 
@@ -115,6 +116,9 @@ export interface TLSOptions {
 export const createServer = async (opts: {
   storage: Storage;
   authEnabled?: boolean;
+  // Internal: expose the remote-provider surface (/api/path/*, /api/browse,
+  // /api/mkdir, /api/execute-one-shot). Set only by `vibedeckx connect`, whose
+  // reverse-connect tunnel serves these routes to the upstream server.
   acceptRemote?: boolean;
   noLocalProjects?: boolean;
   tls?: TLSOptions;
@@ -216,10 +220,15 @@ export const createServer = async (opts: {
     // Self-authenticating / public endpoints: /api/config is the public
     // bootstrap endpoint (its authEnabled-only escape below never fires on
     // API-key-only deployments, so it needs an explicit exemption), and the
-    // reverse-connect identity preflight authenticates itself with the
-    // connect token — same trust level as the token-authenticated WS upgrade.
+    // reverse-connect control WS + identity preflight authenticate themselves
+    // with the connect token (an invalid token is rejected by the route), so
+    // an API-key-only hub can still accept inbound workers.
     const pathname = req.url.split("?")[0];
-    if (pathname === "/api/config" || pathname === "/api/reverse-connect/identity") {
+    if (
+      pathname === "/api/config" ||
+      pathname === "/api/reverse-connect" ||
+      pathname === "/api/reverse-connect/identity"
+    ) {
       return done();
     }
 
@@ -240,7 +249,7 @@ export const createServer = async (opts: {
     done();
   });
 
-  // Gate remote-provider endpoints behind --accept-remote. In Server mode
+  // Gate remote-provider endpoints behind acceptRemote (connect mode). In Server mode
   // these endpoints are not exposed at all (404), preventing other Servers
   // from treating us as their remote and inserting bookkeeping rows
   // (e.g. path:* pseudo-projects) into our database.
@@ -248,7 +257,7 @@ export const createServer = async (opts: {
     server.addHook("onRequest", (req, reply, done) => {
       if (req.method === "OPTIONS") return done();
       if (isRemoteProviderPath(req.url)) {
-        return reply.code(404).send({ error: "Not found. This server is not configured to accept remote clients (start with --accept-remote to enable)." });
+        return reply.code(404).send({ error: "Not found. This server does not expose the remote-provider API (only reverse-connect workers do)." });
       }
       done();
     });
@@ -342,7 +351,6 @@ export const createServer = async (opts: {
   server.register(websocketRoutes);
   server.register(reverseConnectRoutes);
   server.register(projectRoutes);
-  server.register(remoteRoutes);
   server.register(remoteServerRoutes);
   server.register(projectRemoteRoutes);
   server.register(searchRoutes);

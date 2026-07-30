@@ -11,7 +11,6 @@ import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import {
   FolderOpen,
   Loader2,
-  Check,
   X,
   Terminal,
   Bot,
@@ -33,8 +32,6 @@ import {
 } from "@/lib/api";
 import { RemoteDirectoryBrowser } from "./remote-directory-browser";
 import { cn } from "@/lib/utils";
-
-type ConnectionStatus = "idle" | "testing" | "success" | "error";
 
 interface SyncConfigState {
   actionType: SyncActionType;
@@ -165,7 +162,7 @@ function SyncConfigForm({
   );
 }
 
-type AddRemoteStep = "closed" | "pick-server" | "new-server" | "pick-path";
+type AddRemoteStep = "closed" | "pick-server" | "pick-path";
 
 export interface ProjectSettingsFormProps {
   project: Project;
@@ -175,8 +172,6 @@ export interface ProjectSettingsFormProps {
       name?: string;
       path?: string | null;
       remotePath?: string | null;
-      remoteUrl?: string | null;
-      remoteApiKey?: string | null;
       syncUpConfig?: SyncButtonConfig | null;
       syncDownConfig?: SyncButtonConfig | null;
     }
@@ -214,21 +209,10 @@ export function ProjectSettingsForm({
   const [selectedServer, setSelectedServer] = useState<RemoteServer | null>(null);
   const [selectedRemotePath, setSelectedRemotePath] = useState("");
 
-  const [newServerName, setNewServerName] = useState("");
-  const [newServerUrl, setNewServerUrl] = useState("");
-  const [newServerApiKey, setNewServerApiKey] = useState("");
-  const [newServerStatus, setNewServerStatus] = useState<ConnectionStatus>("idle");
-  const [newServerError, setNewServerError] = useState("");
-
   const resetAddRemoteFlow = () => {
     setAddRemoteStep("closed");
     setSelectedServer(null);
     setSelectedRemotePath("");
-    setNewServerName("");
-    setNewServerUrl("");
-    setNewServerApiKey("");
-    setNewServerStatus("idle");
-    setNewServerError("");
   };
 
   useEffect(() => {
@@ -261,49 +245,6 @@ export function ProjectSettingsForm({
     setSelectedServer(server);
     setSelectedRemotePath("");
     setAddRemoteStep("pick-path");
-  };
-
-  const handleStartNewServer = () => {
-    setAddRemoteStep("new-server");
-    setNewServerName("");
-    setNewServerUrl("");
-    setNewServerApiKey("");
-    setNewServerStatus("idle");
-    setNewServerError("");
-  };
-
-  const handleTestNewServer = async () => {
-    if (!newServerUrl || !newServerApiKey) {
-      setNewServerError("URL and API key are required");
-      return;
-    }
-    setNewServerStatus("testing");
-    setNewServerError("");
-    try {
-      await api.testRemoteConnection(newServerUrl, newServerApiKey);
-      setNewServerStatus("success");
-    } catch (e) {
-      setNewServerStatus("error");
-      setNewServerError(e instanceof Error ? e.message : "Connection failed");
-    }
-  };
-
-  const handleCreateAndSelectServer = async () => {
-    if (!newServerName.trim() || !newServerUrl.trim()) return;
-    try {
-      const server = await api.createRemoteServer({
-        name: newServerName.trim(),
-        url: newServerUrl.trim(),
-        apiKey: newServerApiKey.trim() || undefined,
-      });
-      setSelectedServer(server);
-      setSelectedRemotePath("");
-      setAddRemoteStep("pick-path");
-    } catch (e) {
-      setNewServerError(
-        e instanceof Error ? e.message : "Failed to create server"
-      );
-    }
   };
 
   const handleRemotePathSelect = (remPath: string) => {
@@ -367,8 +308,6 @@ export function ProjectSettingsForm({
         name?: string;
         path?: string | null;
         remotePath?: string | null;
-        remoteUrl?: string | null;
-        remoteApiKey?: string | null;
         syncUpConfig?: SyncButtonConfig | null;
         syncDownConfig?: SyncButtonConfig | null;
       } = {};
@@ -537,101 +476,19 @@ export function ProjectSettingsForm({
                           <div className="flex-1 min-w-0">
                             <p className="truncate">{server.name}</p>
                             <p className="text-xs text-muted-foreground truncate">
-                              {server.url}
+                              {server.status === "online"
+                                ? "Connected"
+                                : "Not connected"}
                             </p>
                           </div>
                         </button>
                       ))}
                     </div>
                   )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleStartNewServer}
-                    className="w-full"
-                  >
-                    <Plus className="h-4 w-4 mr-1" />
-                    New Server
-                  </Button>
-                </div>
-              )}
-
-              {addRemoteStep === "new-server" && (
-                <div className="rounded-md border p-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-medium">
-                      Create New Server
-                    </label>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={resetAddRemoteFlow}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  <Input
-                    value={newServerName}
-                    onChange={(e) => setNewServerName(e.target.value)}
-                    placeholder="Server name"
-                  />
-                  <Input
-                    value={newServerUrl}
-                    onChange={(e) => {
-                      setNewServerUrl(e.target.value);
-                      setNewServerStatus("idle");
-                    }}
-                    placeholder="http://remote-server:5173"
-                  />
-                  <div className="flex gap-2">
-                    <Input
-                      type="password"
-                      value={newServerApiKey}
-                      onChange={(e) => {
-                        setNewServerApiKey(e.target.value);
-                        setNewServerStatus("idle");
-                      }}
-                      placeholder="API key"
-                      className="flex-1"
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleTestNewServer}
-                      disabled={
-                        newServerStatus === "testing" ||
-                        !newServerUrl ||
-                        !newServerApiKey
-                      }
-                    >
-                      {newServerStatus === "testing" ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : newServerStatus === "success" ? (
-                        <Check className="h-4 w-4 text-green-500" />
-                      ) : newServerStatus === "error" ? (
-                        <X className="h-4 w-4 text-red-500" />
-                      ) : (
-                        "Test"
-                      )}
-                    </Button>
-                  </div>
-                  {newServerError && (
-                    <p className="text-xs text-red-500">{newServerError}</p>
-                  )}
-                  {newServerStatus === "success" && (
-                    <>
-                      <p className="text-xs text-green-500">
-                        Connection successful
-                      </p>
-                      <Button
-                        size="sm"
-                        onClick={handleCreateAndSelectServer}
-                        disabled={!newServerName.trim()}
-                      >
-                        Create &amp; Continue
-                      </Button>
-                    </>
-                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Add new servers in Settings → Remote Servers, then connect
+                    the remote machine with a connect token.
+                  </p>
                 </div>
               )}
 

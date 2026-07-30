@@ -1,12 +1,12 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { RemoteServer, CrossRemoteAccess } from "../storage/types.js";
-import { proxyToRemote, proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
+import { proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 function sanitizeServer(server: RemoteServer) {
-  const { api_key: _, connect_token: _t, ...safe } = server;
+  const { connect_token: _t, ...safe } = server;
   return safe;
 }
 
@@ -24,34 +24,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reply.send(servers.map(sanitizeServer));
   });
 
-  // POST /api/remote-servers — create
+  // POST /api/remote-servers — create (all servers connect inbound via reverse-connect)
   fastify.post("/api/remote-servers", async (request, reply) => {
     const userId = requireAuth(request, reply);
     if (userId === null) return;
-    const { name, url, apiKey, connectionMode } = request.body as {
-      name: string;
-      url: string;
-      apiKey?: string;
-      connectionMode?: "outbound" | "inbound";
-    };
+    const { name } = request.body as { name: string };
     if (!name)
       return reply.code(400).send({ error: "name is required" });
-    if (connectionMode !== "inbound" && !url)
-      return reply.code(400).send({ error: "url is required for outbound servers" });
-    try {
-      const server = await fastify.storage.remoteServers.create({
-        name,
-        url: url || null,
-        api_key: apiKey,
-        connection_mode: connectionMode,
-      }, userId);
-      return reply.code(201).send(sanitizeServer(server));
-    } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes("UNIQUE constraint failed")) {
-        return reply.code(409).send({ error: "A server with this URL already exists" });
-      }
-      throw err;
-    }
+    const server = await fastify.storage.remoteServers.create({ name }, userId);
+    return reply.code(201).send(sanitizeServer(server));
   });
 
   // PUT /api/remote-servers/:id — update
@@ -61,10 +42,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
-      const { name, url, apiKey, crossRemoteAccess } = request.body as {
+      const { name, crossRemoteAccess } = request.body as {
         name?: string;
-        url?: string;
-        apiKey?: string;
         crossRemoteAccess?: string;
       };
 
@@ -74,8 +53,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const server = await fastify.storage.remoteServers.update(id, {
         name,
-        url,
-        api_key: apiKey,
         cross_remote_access: crossRemoteAccess,
       }, userId);
       if (!server)
@@ -98,7 +75,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // POST /api/remote-servers/:id/test — test connection
+  // POST /api/remote-servers/:id/test — report reverse-connect status
   fastify.post<{ Params: { id: string } }>(
     "/api/remote-servers/:id/test",
     async (request, reply) => {
@@ -109,27 +86,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
 
-      // For inbound servers, check if reverse-connected
-      if (server.connection_mode === "inbound") {
-        const connected = fastify.reverseConnectManager.isConnected(id);
-        return reply.send({ success: connected, status: connected ? "online" : "offline" });
-      }
-
-      try {
-        const result = await proxyToRemote(
-          server.url!,
-          server.api_key ?? "",
-          "GET",
-          "/api/projects"
-        );
-        if (result.ok)
-          return reply.send({ success: true });
-        return reply
-          .code(502)
-          .send({ error: "Connection failed", details: result.data });
-      } catch (err) {
-        return reply.code(502).send({ error: "Connection failed" });
-      }
+      const connected = fastify.reverseConnectManager.isConnected(id);
+      return reply.send({ success: connected, status: connected ? "online" : "offline" });
     }
   );
 
@@ -143,8 +101,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const server = await fastify.storage.remoteServers.getById(id, userId);
       if (!server)
         return reply.code(404).send({ error: "Server not found" });
-      if (server.connection_mode !== "inbound")
-        return reply.code(400).send({ error: "Token generation is only available for inbound servers" });
 
       const token = await fastify.storage.remoteServers.generateToken(id, userId);
       if (!token)
@@ -175,8 +131,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const queryPath = browsePath ? `?path=${encodeURIComponent(browsePath)}` : "";
         const result = await proxyToRemoteAuto(
           id,
-          server.url ?? "",
-          server.api_key ?? "",
           "GET",
           `/api/browse${queryPath}`,
           undefined,
@@ -207,8 +161,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       try {
         const result = await proxyToRemoteAuto(
           id,
-          server.url ?? "",
-          server.api_key ?? "",
           "POST",
           "/api/mkdir",
           { parentPath, name },

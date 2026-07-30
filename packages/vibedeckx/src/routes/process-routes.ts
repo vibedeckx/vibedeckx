@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { randomUUID } from "crypto";
-import { proxyStatus, proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { requireAuth } from "../server.js";
@@ -102,7 +102,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     console.log(`[API] POST executors/${req.params.id}/start: ` +
       `executor_mode=${executorMode}, useRemoteExecutor=${useRemoteExecutor}, ` +
-      `remoteConfig=${remoteConfig ? `url=${remoteConfig.server_url}, path=${remoteConfig.remote_path}` : 'none'}`);
+      `remoteConfig=${remoteConfig ? `path=${remoteConfig.remote_path}` : 'none'}`);
 
     if (useRemoteExecutor) {
       if (!remoteConfig) {
@@ -111,8 +111,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const result = await proxyToRemoteAuto(
         executorMode,
-        remoteConfig.server_url ?? "",
-        remoteConfig.server_api_key || "",
         "POST",
         `/api/path/execute`,
         {
@@ -131,8 +129,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const localProcessId = `remote-${executor.id}-${remoteData.processId}`;
         const remoteInfo = {
           remoteServerId: executorMode,
-          remoteUrl: remoteConfig.server_url ?? "",
-          remoteApiKey: remoteConfig.server_api_key || "",
           remoteProcessId: remoteData.processId,
           executorId: executor.id,
           projectId: project.id,
@@ -144,8 +140,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         fastify.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
         await fastify.storage.remoteExecutorProcesses.insert(localProcessId, {
           remoteServerId: executorMode,
-          remoteUrl: remoteConfig.server_url ?? "",
-          remoteApiKey: remoteConfig.server_api_key || "",
           remoteProcessId: remoteData.processId,
           executorId: executor.id,
           projectId: project.id,
@@ -192,8 +186,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyToRemoteAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/executor-processes/${remoteInfo.remoteProcessId}/stop`,
           undefined,

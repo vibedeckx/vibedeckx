@@ -238,8 +238,6 @@ export interface Project {
   path?: string | null;
   remote_path?: string;
   is_remote: boolean;
-  remote_url?: string;
-  has_remote_api_key?: boolean;
   agent_mode: ExecutionMode;
   executor_mode: ExecutionMode;
   sync_up_config?: SyncButtonConfig;
@@ -247,15 +245,12 @@ export interface Project {
   created_at: string;
 }
 
-export type RemoteServerConnectionMode = 'outbound' | 'inbound';
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
 export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
 export interface RemoteServer {
   id: string;
   name: string;
-  url: string | null;
-  connection_mode: RemoteServerConnectionMode;
   status: RemoteServerStatus;
   last_connected_at?: string;
   created_at: string;
@@ -272,10 +267,8 @@ export interface ProjectRemote {
   sync_up_config?: SyncButtonConfig;
   sync_down_config?: SyncButtonConfig;
   server_name: string;
-  server_url: string;
   // Optionally joined from the remote server (see useProjectRemotes withStatus)
   status?: RemoteServerStatus;
-  connection_mode?: RemoteServerConnectionMode;
 }
 
 export interface RemoteBrowseItem {
@@ -1080,8 +1073,6 @@ export const api = {
     name: string;
     path?: string;
     remotePath?: string;
-    remoteUrl?: string;
-    remoteApiKey?: string;
     agentMode?: ExecutionMode;
   }): Promise<Project> {
     const res = await authFetch(`${getApiBase()}/api/projects`, {
@@ -1103,8 +1094,6 @@ export const api = {
       name?: string;
       path?: string | null;
       remotePath?: string | null;
-      remoteUrl?: string | null;
-      remoteApiKey?: string | null;
       agentMode?: ExecutionMode;
       executorMode?: ExecutionMode;
       syncUpConfig?: SyncButtonConfig | null;
@@ -1468,33 +1457,6 @@ export const api = {
     return Array.isArray(data?.commits) ? data.commits : [];
   },
 
-  // Remote Project API
-  async testRemoteConnection(url: string, apiKey: string): Promise<{ success: boolean; message?: string }> {
-    const res = await authFetch(`${getApiBase()}/api/remote/test-connection`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, apiKey }),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || "Connection failed");
-    }
-    return res.json();
-  },
-
-  async browseRemoteDirectory(url: string, apiKey: string, path?: string): Promise<RemoteBrowseResponse> {
-    const res = await authFetch(`${getApiBase()}/api/remote/browse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, apiKey, path }),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || "Failed to browse directory");
-    }
-    return res.json();
-  },
-
   async browseRemoteServerDirectory(serverId: string, path?: string): Promise<RemoteBrowseResponse> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${serverId}/browse`, {
       method: "POST",
@@ -1523,15 +1485,6 @@ export const api = {
       throw new Error(error.error || "Failed to create directory");
     }
     return res.json();
-  },
-
-  async createRemoteProject(
-    name: string,
-    remotePath: string,
-    remoteUrl: string,
-    remoteApiKey: string
-  ): Promise<Project> {
-    return this.createProject({ name, remotePath, remoteUrl, remoteApiKey });
   },
 
   async updateProjectMode(
@@ -2199,7 +2152,7 @@ export const api = {
     return data;
   },
 
-  async createRemoteServer(opts: { name: string; url?: string; apiKey?: string; connectionMode?: RemoteServerConnectionMode }): Promise<RemoteServer> {
+  async createRemoteServer(opts: { name: string }): Promise<RemoteServer> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2209,11 +2162,11 @@ export const api = {
       const error = await res.json();
       throw new Error(error.error);
     }
-    const data = await res.json();
-    return data.server;
+    // The POST handler replies with the sanitized server object directly, not { server }.
+    return (await res.json()) as RemoteServer;
   },
 
-  async updateRemoteServer(id: string, opts: { name?: string; url?: string; apiKey?: string; crossRemoteAccess?: CrossRemoteAccess }): Promise<RemoteServer> {
+  async updateRemoteServer(id: string, opts: { name?: string; crossRemoteAccess?: CrossRemoteAccess }): Promise<RemoteServer> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

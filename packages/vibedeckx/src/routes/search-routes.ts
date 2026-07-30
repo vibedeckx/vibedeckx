@@ -52,7 +52,7 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
       if (!r) throw new Error("remote target without remote config");
       const params = new URLSearchParams({ path: r.remotePath });
       const result = await proxyToRemoteAuto(
-        r.serverId, r.url, r.apiKey,
+        r.serverId,
         "GET", `/api/path/search-catalog?${params.toString()}`, undefined,
         { reverseConnectManager: fastify.reverseConnectManager, timeoutMs: 2000 },
       );
@@ -75,8 +75,6 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
         if (!fastify.remoteSessionMap.has(localSessionId)) {
           fastify.remoteSessionMap.set(localSessionId, {
             remoteServerId: target.targetId,
-            remoteUrl: r.url,
-            remoteApiKey: r.apiKey,
             remoteSessionId: s.id,
             branch: mapBranch,
           });

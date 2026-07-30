@@ -12,27 +12,13 @@ import type { Project } from "../storage/types.js";
 import { validateBranchExists } from "../merge-status.js";
 
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
-  // Check project_remotes table first (new approach)
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
-  if (remotes.length > 0) {
-    const primary = remotes[0]; // sorted by sort_order
-    return {
-      serverId: primary.remote_server_id,
-      url: primary.server_url ?? "",
-      apiKey: primary.server_api_key ?? "",
-      remotePath: primary.remote_path,
-    };
-  }
-  // Fallback to legacy project fields
-  if (project.remote_url && project.remote_api_key && project.remote_path) {
-    return {
-      serverId: "",
-      url: project.remote_url,
-      apiKey: project.remote_api_key,
-      remotePath: project.remote_path,
-    };
-  }
-  return null;
+  if (remotes.length === 0) return null;
+  const primary = remotes[0]; // sorted by sort_order
+  return {
+    serverId: primary.remote_server_id,
+    remotePath: primary.remote_path,
+  };
 }
 
 interface CommitEntry {
@@ -273,8 +259,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (compareTo) params.push(`compareTo=${encodeURIComponent(compareTo)}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/diff?${params.join("&")}`,
         undefined,
@@ -357,8 +341,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       params.push(`limit=${limit}`);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
-        remoteConfig.url,
-        remoteConfig.apiKey,
         "GET",
         `/api/path/commits?${params.join("&")}`,
         undefined,

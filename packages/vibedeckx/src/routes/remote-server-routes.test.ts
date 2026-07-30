@@ -16,7 +16,7 @@ describe("PUT /api/remote-servers/:id cross-remote access", () => {
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-rsr-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
-    const created = await storage.remoteServers.create({ name: "b", url: "http://b:5173" });
+    const created = await storage.remoteServers.create({ name: "b" });
     serverId = created.id;
 
     app = Fastify();
@@ -61,5 +61,70 @@ describe("PUT /api/remote-servers/:id cross-remote access", () => {
   it("never returns the api key", async () => {
     const res = await put({ crossRemoteAccess: "read" });
     expect(res.json().api_key).toBeUndefined();
+  });
+});
+
+describe("inbound server lifecycle (create → id → connect token)", () => {
+  let app: FastifyInstance;
+  let storage: Storage;
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "vdx-rsr-"));
+    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    app = Fastify();
+    app.decorate("storage", storage);
+    app.decorate("reverseConnectManager", { isConnected: () => false } as never);
+    await app.register(remoteServerRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    await storage.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates a server from a bare name and returns the server object directly", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-1" } });
+    expect(res.statusCode).toBe(201);
+    const server = res.json();
+    // Contract: the handler replies with the sanitized server itself, not { server } —
+    // the UI reads .id off this response to drive the token flow.
+    expect(server.id).toBeTypeOf("string");
+    expect(server.name).toBe("worker-1");
+    expect(server.api_key).toBeUndefined();
+    expect(server.connect_token).toBeUndefined();
+  });
+
+  it("rejects a missing name", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/remote-servers", payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("generates a connect token + command for the created server", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-2" } });
+    const id = created.json().id as string;
+
+    const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/generate-token` });
+    expect(res.statusCode).toBe(200);
+    const { token, connectCommand } = res.json();
+    expect(token).toBeTypeOf("string");
+    expect(token.length).toBeGreaterThan(0);
+    expect(connectCommand).toContain("connect --connect-to");
+    expect(connectCommand).toContain(`--token ${token}`);
+
+    // Token is persisted and resolvable — the worker will authenticate with it.
+    const byToken = await storage.remoteServers.getByToken(token);
+    expect(byToken?.id).toBe(id);
+  });
+
+  it("reports reverse-connect status on /test", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-3" } });
+    const id = created.json().id as string;
+
+    const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/test` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ success: false, status: "offline" });
   });
 });

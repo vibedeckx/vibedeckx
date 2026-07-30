@@ -77,16 +77,17 @@ describe("cross-remote access", () => {
   });
 
   describe("resolveTarget", () => {
-    it("resolves an online outbound target at the read tier", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+    it("resolves a connected target at the read tier", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
+      connected.add(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "read");
       expect(result.ok).toBe(true);
     });
 
     it("denies a read-tier target for an exec-tier tool", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
 
       const result = await resolveTarget(deps, payload(), b.id, "exec");
@@ -94,28 +95,29 @@ describe("cross-remote access", () => {
     });
 
     it("allows an exec-tier target for a read-tier tool", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      connected.add(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "read");
       expect(result.ok).toBe(true);
     });
 
     it("denies a target left at the default 'off' tier", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       const result = await resolveTarget(deps, payload(), b.id, "read");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
     });
 
     it("denies a target left at the default 'off' tier for an exec-tier tool", async () => {
       // The read-tier variant above never exercises tierSatisfies('off', 'exec').
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       const result = await resolveTarget(deps, payload(), b.id, "exec");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
     });
 
     it("denies a target owned by another user", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-2");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-2");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-2");
 
       const result = await resolveTarget(deps, payload({ userId: "user-1" }), b.id, "read");
@@ -123,7 +125,7 @@ describe("cross-remote access", () => {
     });
 
     it("denies the source remote targeting itself", async () => {
-      const a = await storage.remoteServers.create({ name: "a", url: "http://a:5173" }, "user-1");
+      const a = await storage.remoteServers.create({ name: "a" }, "user-1");
       await storage.remoteServers.update(a.id, { cross_remote_access: "exec" }, "user-1");
 
       const result = await resolveTarget(deps, payload({ sourceRemoteServerId: a.id }), a.id, "read");
@@ -134,8 +136,9 @@ describe("cross-remote access", () => {
       // Every other test uses a truthy sourceRemoteServerId, so the
       // `payload.sourceRemoteServerId &&` short-circuit in the self-target guard is
       // otherwise never exercised with a null source.
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
+      connected.add(b.id);
 
       const result = await resolveTarget(deps, payload({ sourceRemoteServerId: null }), b.id, "read");
       expect(result.ok).toBe(true);
@@ -146,16 +149,16 @@ describe("cross-remote access", () => {
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
     });
 
-    it("reports an inbound target that is not connected as offline", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: null, connection_mode: "inbound" }, "user-1");
+    it("reports a target that is not connected as offline", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
 
       const result = await resolveTarget(deps, payload(), b.id, "exec");
       expect(result).toEqual({ ok: false, reason: "offline" });
     });
 
-    it("resolves an inbound target once it is connected", async () => {
-      const b = await storage.remoteServers.create({ name: "b", url: null, connection_mode: "inbound" }, "user-1");
+    it("resolves a target once it is connected", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
       connected.add(b.id);
 
@@ -166,12 +169,13 @@ describe("cross-remote access", () => {
 
   describe("listAccessibleRemotes", () => {
     it("returns opted-in remotes, excluding the source and 'off' remotes", async () => {
-      const a = await storage.remoteServers.create({ name: "a", url: "http://a:5173" }, "user-1");
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
-      const c = await storage.remoteServers.create({ name: "c", url: "http://c:5173" }, "user-1");
+      const a = await storage.remoteServers.create({ name: "a" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      const c = await storage.remoteServers.create({ name: "c" }, "user-1");
       await storage.remoteServers.update(a.id, { cross_remote_access: "exec" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
       // c stays 'off'
+      connected.add(b.id);
 
       const list = await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: a.id }));
       expect(list).toEqual([{ id: b.id, name: "b", access: "read", online: true }]);
@@ -179,7 +183,7 @@ describe("cross-remote access", () => {
     });
 
     it("returns nothing for a user with no opted-in remotes", async () => {
-      await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      await storage.remoteServers.create({ name: "b" }, "user-1");
       expect(await listAccessibleRemotes(deps, payload())).toEqual([]);
     });
 
@@ -187,8 +191,8 @@ describe("cross-remote access", () => {
       // With a truthy source, `s.id !== payload.sourceRemoteServerId` excludes exactly the
       // source. A regression that treated a null source as matching every remote's id
       // (or vice versa) would silently drop entries here.
-      const a = await storage.remoteServers.create({ name: "a", url: "http://a:5173" }, "user-1");
-      const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+      const a = await storage.remoteServers.create({ name: "a" }, "user-1");
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(a.id, { cross_remote_access: "exec" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
 

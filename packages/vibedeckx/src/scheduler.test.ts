@@ -271,7 +271,7 @@ describe("SchedulerService remote runs", () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-sched-remote-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "proj-1", name: "p", path: dir });
-    const server = await storage.remoteServers.create({ name: "r", url: "http://remote.test", api_key: "K" });
+    const server = await storage.remoteServers.create({ name: "r" });
     await storage.projectRemotes.add({ project_id: "proj-1", remote_server_id: server.id, remote_path: "/srv/app" });
     await storage.scheduledTasks.create({
       id: "s1", project_id: "proj-1", name: "remote scan", cron_expr: "0 9 * * *",
@@ -282,7 +282,7 @@ describe("SchedulerService remote runs", () => {
     pm = makeFakeProcessManager();
     eventBus = new EventBus();
     proxyCalls = [];
-    const fakeProxy = async (serverId: string, _url: string, _key: string, _method: string, apiPath: string, body?: unknown) => {
+    const fakeProxy = async (serverId: string, _method: string, apiPath: string, body?: unknown) => {
       proxyCalls.push({ path: apiPath, body, serverId });
       if (apiPath === "/api/path/execute") return { ok: true, status: 200, data: { processId: "rp-1" } };
       return { ok: true, status: 200, data: {} };

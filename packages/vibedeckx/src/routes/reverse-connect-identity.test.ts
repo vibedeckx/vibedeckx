@@ -15,26 +15,14 @@ describe("GET /api/reverse-connect/identity", () => {
   let dir: string;
   let inboundId: string;
   let inboundToken: string;
-  let outboundToken: string;
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-rci-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
 
-    const inbound = await storage.remoteServers.create({
-      name: "worker-a",
-      url: null,
-      connection_mode: "inbound",
-    });
+    const inbound = await storage.remoteServers.create({ name: "worker-a" });
     inboundId = inbound.id;
     inboundToken = (await storage.remoteServers.generateToken(inbound.id))!;
-
-    const outbound = await storage.remoteServers.create({
-      name: "direct-b",
-      url: "http://b:5173",
-      connection_mode: "outbound",
-    });
-    outboundToken = (await storage.remoteServers.generateToken(outbound.id))!;
 
     app = Fastify();
     app.decorate("storage", storage);
@@ -66,12 +54,6 @@ describe("GET /api/reverse-connect/identity", () => {
     const res = await get("no-such-token");
     expect(res.statusCode).toBe(401);
     expect(res.json().error).toMatch(/invalid/i);
-  });
-
-  it("403s when the token's record is not inbound", async () => {
-    const res = await get(outboundToken);
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error).toMatch(/inbound/i);
   });
 
   it("returns the record's id and name for a valid inbound token", async () => {

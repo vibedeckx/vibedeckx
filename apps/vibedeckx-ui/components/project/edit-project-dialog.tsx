@@ -17,8 +17,6 @@ interface EditProjectDialogProps {
     name?: string;
     path?: string | null;
     remotePath?: string | null;
-    remoteUrl?: string | null;
-    remoteApiKey?: string | null;
     syncUpConfig?: SyncButtonConfig | null;
     syncDownConfig?: SyncButtonConfig | null;
   }) => Promise<void> | Promise<unknown>;

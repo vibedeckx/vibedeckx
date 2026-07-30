@@ -77,7 +77,7 @@ describe("notification recovery (front + worker, real storage)", () => {
     const sync = new RemoteNotificationSync({
       storage: front,
       notificationService: notifications,
-      proxy: (async (_serverId, _url, _key, _method, _path, body) => {
+      proxy: (async (_serverId, _method, _path, body) => {
         if (offline.value) return { ok: false, status: 0, data: null, errorCode: "network_error" };
         return serveOutboxQuery(worker, body);
       }) as never,
@@ -96,7 +96,7 @@ describe("notification recovery (front + worker, real storage)", () => {
 
     const { front, bus, events, notifications, sync } = await openFront(dir, worker, offline);
     await front.projects.create({ id: FRONT_PROJECT, name: "Checkout", path: null }, OWNER);
-    const server = await front.remoteServers.create({ name: "w1", url: "http://w1", api_key: "k1" }, OWNER);
+    const server = await front.remoteServers.create({ name: "w1" }, OWNER);
     await front.projectRemotes.add({
       project_id: FRONT_PROJECT, remote_server_id: server.id, remote_path: "/srv/app",
     });

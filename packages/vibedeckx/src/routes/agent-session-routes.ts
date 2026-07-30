@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
 import { getAllProviders } from "../providers/index.js";
-import { proxyStatus, proxyToRemote, proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
@@ -47,16 +47,14 @@ function messageTextLength(content: string | ContentPart[]): number {
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
-  // Helper: proxy to remote via reverse-connect if available, else outbound
+  // Helper: proxy to a remote over its reverse-connect tunnel
   function proxyAuto(
     remoteServerId: string,
-    remoteUrl: string,
-    remoteApiKey: string,
     method: string,
     apiPath: string,
     body?: unknown
   ) {
-    return proxyToRemoteAuto(remoteServerId, remoteUrl, remoteApiKey, method, apiPath, body, {
+    return proxyToRemoteAuto(remoteServerId, method, apiPath, body, {
       reverseConnectManager: fastify.reverseConnectManager,
     });
   }
@@ -392,8 +390,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         params.set("branch", typeof req.query.branch === "string" ? req.query.branch : "");
         const result = await proxyAuto(
           project.agent_mode,
-          remoteConfig.server_url ?? "",
-          remoteConfig.server_api_key || "",
           "GET",
           `/api/path/agent-sessions?${params.toString()}`
         );
@@ -411,8 +407,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
           if (!fastify.remoteSessionMap.has(localSessionId)) {
             fastify.remoteSessionMap.set(localSessionId, {
               remoteServerId: project.agent_mode,
-              remoteUrl: remoteConfig.server_url ?? "",
-              remoteApiKey: remoteConfig.server_api_key || "",
               remoteSessionId: s.id,
               branch: s.branch ?? null,
             });
@@ -512,7 +506,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     console.log(`[API] POST agent-sessions: projectId=${req.params.projectId}, ` +
       `path=${project.path}, agent_mode=${agentMode}, ` +
-      `useRemoteAgent=${useRemoteAgent}, remoteConfig=${remoteConfig ? `url=${remoteConfig.server_url}, path=${remoteConfig.remote_path}` : 'none'}`);
+      `useRemoteAgent=${useRemoteAgent}, remoteConfig=${remoteConfig ? `path=${remoteConfig.remote_path}` : 'none'}`);
 
     if (useRemoteAgent) {
       if (!remoteConfig) {
@@ -522,8 +516,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       try {
         const result = await proxyAuto(
           agentMode,
-          remoteConfig.server_url ?? "",
-          remoteConfig.server_api_key || "",
           "POST",
           `/api/path/agent-sessions`,
           { path: remoteConfig.remote_path, branch, permissionMode, agentType, model }
@@ -541,8 +533,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const localSessionId = `remote-${agentMode}-${project.id}-${remoteData.session.id}`;
           fastify.remoteSessionMap.set(localSessionId, {
             remoteServerId: agentMode,
-            remoteUrl: remoteConfig.server_url ?? "",
-            remoteApiKey: remoteConfig.server_api_key || "",
             remoteSessionId: remoteData.session.id,
             branch: branch ?? null,
           });
@@ -748,8 +738,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "GET",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
@@ -837,8 +825,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
-        remoteInfo.remoteUrl,
-        remoteInfo.remoteApiKey,
         "POST",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/message`,
         { content }
@@ -931,8 +917,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
-        remoteInfo.remoteUrl,
-        remoteInfo.remoteApiKey,
         "POST",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/paste`,
         { content }
@@ -973,8 +957,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/stop`
         );
@@ -1002,8 +984,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/restart`,
           req.body
@@ -1052,8 +1032,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/agent-type`,
           { agentType }
@@ -1104,8 +1082,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/model`,
           { model }
@@ -1178,8 +1154,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         );
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/path/agent-sessions/${remoteInfo.remoteSessionId}/branch`,
           { agentType, sessionId: newRemoteSessionId, crossRemoteMcp, upToEntryIndex }
@@ -1213,8 +1187,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // mirroring createRemoteAgentSession's rollback.
         fastify.remoteSessionMap.set(localSessionId, {
           remoteServerId: remoteInfo.remoteServerId,
-          remoteUrl: remoteInfo.remoteUrl,
-          remoteApiKey: remoteInfo.remoteApiKey,
           remoteSessionId: newRemoteSessionId,
           branch: remoteInfo.branch ?? null,
         });
@@ -1281,7 +1253,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   );
 
   // Path-based branch: the remote-provider target the center proxies to when a
-  // user branches a remote session. Gated to --accept-remote servers by the
+  // user branches a remote session. Gated to remote-provider (connect) servers by the
   // /api/path/ prefix hook, so only an api-key-authenticated center reaches it.
   // The center pre-generates the branch id and mints a token bound to it, then
   // passes both here — the remote must honour the supplied id (the center 409s
@@ -1330,8 +1302,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/switch-mode`,
           { mode }
@@ -1382,8 +1352,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/accept-plan`,
           { planContent }
@@ -1441,8 +1409,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/approve`,
           { requestId, decision }
@@ -1480,8 +1446,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
-          remoteInfo.remoteUrl,
-          remoteInfo.remoteApiKey,
           "DELETE",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
@@ -1525,8 +1489,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
-        remoteInfo.remoteUrl,
-        remoteInfo.remoteApiKey,
         "PATCH",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/title`,
         { title: normalizedTitle }
@@ -1587,8 +1549,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
-        remoteInfo.remoteUrl,
-        remoteInfo.remoteApiKey,
         "PATCH",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/favorite`,
         { favorited }

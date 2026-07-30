@@ -11,7 +11,6 @@ import { streamText, tool, stepCountIs } from "ai";
 import type { ModelMessage, ToolApprovalResponse } from "ai";
 import { z } from "zod";
 import { resolveChatModel } from "./utils/chat-model.js";
-import WsWebSocket from "ws";
 import type WebSocket from "ws";
 import type { AgentMessage, AgentSessionStatus, AgentType } from "./agent-types.js";
 import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
@@ -22,7 +21,7 @@ import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
-import { proxyToRemote, proxyToRemoteAuto } from "./utils/remote-proxy.js";
+import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "./remote-agent-sessions.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
@@ -550,7 +549,7 @@ export class ChatSessionManager {
     if (existing) {
       try {
         const statusRes = await proxyToRemoteAuto(
-          existing.info.remoteServerId, existing.info.remoteUrl, existing.info.remoteApiKey,
+          existing.info.remoteServerId,
           "GET", `/api/agent-sessions/${existing.info.remoteSessionId}`, undefined,
           { reverseConnectManager: this.reverseConnectManager ?? undefined },
         );
@@ -593,7 +592,7 @@ export class ChatSessionManager {
     // Deliver the first task.
     try {
       const msgRes = await proxyToRemoteAuto(
-        agentMode, remoteConfig.server_url ?? "", remoteConfig.server_api_key || "",
+        agentMode,
         "POST", `/api/agent-sessions/${created.remoteSession.id}/message`, { content: prompt },
         { reverseConnectManager: this.reverseConnectManager ?? undefined },
       );
@@ -676,7 +675,7 @@ export class ChatSessionManager {
     // Busy check: if the remote session is actively running a turn, don't send.
     try {
       const statusRes = await proxyToRemoteAuto(
-        target.info.remoteServerId, target.info.remoteUrl, target.info.remoteApiKey,
+        target.info.remoteServerId,
         "GET", `/api/agent-sessions/${target.info.remoteSessionId}`, undefined,
         { reverseConnectManager: this.reverseConnectManager ?? undefined },
       );
@@ -690,7 +689,7 @@ export class ChatSessionManager {
 
     try {
       const msgRes = await proxyToRemoteAuto(
-        target.info.remoteServerId, target.info.remoteUrl, target.info.remoteApiKey,
+        target.info.remoteServerId,
         "POST", `/api/agent-sessions/${target.info.remoteSessionId}/message`, { content: message },
         { reverseConnectManager: this.reverseConnectManager ?? undefined },
       );
@@ -965,7 +964,7 @@ export class ChatSessionManager {
 
   /**
    * Start a watcher for a remote terminal by opening a virtual channel over
-   * the existing reverse-connect WebSocket (or a direct WebSocket as fallback).
+   * the existing reverse-connect WebSocket.
    * Mirrors the local startTerminalWatcher() — accumulates output with
    * debounce, flushes on "finished" or idle timeout, and feeds the result
    * into enqueueOrSend().
@@ -1033,33 +1032,24 @@ export class ChatSessionManager {
       this.enqueueOrSend(sessionId, message);
     };
 
-    // Open a virtual channel over the existing reverse-connect WebSocket,
-    // or fall back to a direct WebSocket connection.
-    let remoteWs: WsWebSocket | VirtualWsAdapter;
-
-    const useVirtual = this.reverseConnectManager?.isConnected(remoteInfo.remoteServerId);
-
-    if (useVirtual && this.reverseConnectManager) {
-      const channelId = randomUUID();
-      const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
-      const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-      const adapter = new VirtualWsAdapter(
-        (data) => this.reverseConnectManager!.sendChannelData(remoteInfo.remoteServerId, channelId, data),
-        () => this.reverseConnectManager!.closeChannel(remoteInfo.remoteServerId, channelId),
-      );
-      this.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
-      this.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
-      remoteWs = adapter;
-      console.log(`[ChatSession] Remote terminal watcher: virtual channel opened for ${remoteInfo.remoteProcessId}`);
-      setTimeout(() => adapter.emit("open"), 0);
-    } else {
-      const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
-      const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-      const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-      const remoteWsUrl = `${wsUrl}/api/executor-processes/${remoteInfo.remoteProcessId}/logs?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-      console.log(`[ChatSession] Remote terminal watcher: connecting to ${remoteWsUrl.replace(remoteInfo.remoteApiKey, "***")}`);
-      remoteWs = new WsWebSocket(remoteWsUrl);
+    // Open a virtual channel over the existing reverse-connect WebSocket.
+    if (!this.reverseConnectManager?.isConnected(remoteInfo.remoteServerId)) {
+      console.log(`[ChatSession] Remote terminal watcher: remote ${remoteInfo.remoteServerId} not connected, skipping`);
+      this.stopTerminalWatcher(terminalId);
+      return;
     }
+
+    const channelId = randomUUID();
+    const wsPath = `/api/executor-processes/${remoteInfo.remoteProcessId}/logs`;
+    const adapter = new VirtualWsAdapter(
+      (data) => this.reverseConnectManager!.sendChannelData(remoteInfo.remoteServerId, channelId, data),
+      () => this.reverseConnectManager!.closeChannel(remoteInfo.remoteServerId, channelId),
+    );
+    this.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
+    this.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath);
+    const remoteWs: VirtualWsAdapter = adapter;
+    console.log(`[ChatSession] Remote terminal watcher: virtual channel opened for ${remoteInfo.remoteProcessId}`);
+    setTimeout(() => adapter.emit("open"), 0);
 
     const closeWs = () => {
       try {
@@ -1511,11 +1501,12 @@ export class ChatSessionManager {
           console.log(`[ChatSession] getAgentConversation: projectId=${projectId}, branch=${branch ?? "null"}, tracked=${trackedId ?? "null"}, remote=${remote ? remote.localSessionId : "null"}, remoteBranch=${remote?.info.branch ?? "null"}`);
           if (remote) {
             try {
-              const result = await proxyToRemote(
-                remote.info.remoteUrl,
-                remote.info.remoteApiKey,
+              const result = await proxyToRemoteAuto(
+                remote.info.remoteServerId,
                 "GET",
                 `/api/agent-sessions/${remote.info.remoteSessionId}`,
+                undefined,
+                { reverseConnectManager: this.reverseConnectManager ?? undefined },
               );
               console.log(`[ChatSession] getAgentConversation: remote proxy result ok=${result.ok}, status=${result.status}`);
               if (result.ok) {
@@ -1873,8 +1864,6 @@ export class ChatSessionManager {
 
             const result = await proxyToRemoteAuto(
               resolvedRemote,
-              remoteConfig.server_url ?? "",
-              remoteConfig.server_api_key || "",
               "POST",
               `/api/path/execute`,
               {
@@ -1897,8 +1886,6 @@ export class ChatSessionManager {
             const localProcessId = `remote-${executor.id}-${remoteData.processId}`;
             remoteExecutorMap.set(localProcessId, {
               remoteServerId: resolvedRemote,
-              remoteUrl: remoteConfig.server_url ?? "",
-              remoteApiKey: remoteConfig.server_api_key || "",
               remoteProcessId: remoteData.processId,
               executorId: executor.id,
               projectId,
@@ -1906,8 +1893,6 @@ export class ChatSessionManager {
             });
             await this.storage.remoteExecutorProcesses.insert(localProcessId, {
               remoteServerId: resolvedRemote,
-              remoteUrl: remoteConfig.server_url ?? "",
-              remoteApiKey: remoteConfig.server_api_key || "",
               remoteProcessId: remoteData.processId,
               executorId: executor.id,
               projectId,
@@ -1934,8 +1919,6 @@ export class ChatSessionManager {
             // frontend client connects the log WebSocket proxy.
             this.remoteExecutorMonitor?.watch(localProcessId, {
               remoteServerId: resolvedRemote,
-              remoteUrl: remoteConfig.server_url ?? "",
-              remoteApiKey: remoteConfig.server_api_key || "",
               remoteProcessId: remoteData.processId,
               executorId: executor.id,
               projectId,
@@ -2083,8 +2066,6 @@ export class ChatSessionManager {
             } else {
               const result = await proxyToRemoteAuto(
                 remoteEntry.info.remoteServerId,
-                remoteEntry.info.remoteUrl,
-                remoteEntry.info.remoteApiKey,
                 "POST",
                 `/api/executor-processes/${remoteEntry.info.remoteProcessId}/stop`,
                 undefined,
@@ -2198,8 +2179,6 @@ export class ChatSessionManager {
               }
               const result = await proxyToRemoteAuto(
                 remoteInfo.remoteServerId,
-                remoteInfo.remoteUrl,
-                remoteInfo.remoteApiKey,
                 "POST",
                 `/api/path/terminals/${remoteInfo.remoteProcessId}/send`,
                 { command },

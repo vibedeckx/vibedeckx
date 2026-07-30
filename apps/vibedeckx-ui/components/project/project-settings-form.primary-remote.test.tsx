@@ -35,7 +35,6 @@ const remotes: ProjectRemote[] = [
     remote_path: "/repo-a",
     sort_order: 0,
     server_name: "Remote A",
-    server_url: "http://a",
   },
   {
     id: "remote-link-2",
@@ -44,7 +43,6 @@ const remotes: ProjectRemote[] = [
     remote_path: "/repo-b",
     sort_order: 1,
     server_name: "Remote B",
-    server_url: "http://b",
   },
 ];
 

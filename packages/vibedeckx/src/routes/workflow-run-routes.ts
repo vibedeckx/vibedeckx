@@ -55,8 +55,6 @@ async function routes(fastify: FastifyInstance) {
    */
   interface RemoteRunInfo {
     remoteServerId: string;
-    remoteUrl: string;
-    remoteApiKey: string;
     bareRunId: string;
     projectId: string;
   }
@@ -74,12 +72,12 @@ async function routes(fastify: FastifyInstance) {
   };
 
   const proxyAuto = (
-    info: { remoteServerId: string; remoteUrl: string; remoteApiKey: string },
+    info: { remoteServerId: string },
     method: string,
     apiPath: string,
     body?: unknown,
   ) =>
-    proxyToRemoteAuto(info.remoteServerId, info.remoteUrl, info.remoteApiKey, method, apiPath, body, {
+    proxyToRemoteAuto(info.remoteServerId, method, apiPath, body, {
       reverseConnectManager: fastify.reverseConnectManager,
     });
 
@@ -223,8 +221,6 @@ async function routes(fastify: FastifyInstance) {
       const localRun = mapRemoteRun(bareRun, remoteInfo.remoteServerId, projectId);
       trackRemoteRun(localRun, {
         remoteServerId: remoteInfo.remoteServerId,
-        remoteUrl: remoteInfo.remoteUrl,
-        remoteApiKey: remoteInfo.remoteApiKey,
         bareRunId: bareRun.id,
         projectId,
       });
@@ -235,8 +231,6 @@ async function routes(fastify: FastifyInstance) {
       if (bareRun.reviewer_session_id && localRun.reviewer_session_id) {
         const reviewerInfo = {
           remoteServerId: remoteInfo.remoteServerId,
-          remoteUrl: remoteInfo.remoteUrl,
-          remoteApiKey: remoteInfo.remoteApiKey,
           remoteSessionId: bareRun.reviewer_session_id,
           branch: bareRun.branch,
         };
@@ -414,8 +408,6 @@ async function routes(fastify: FastifyInstance) {
       if (bareCandidate?.sessionId && candidate?.sessionId) {
         const reviewerInfo = {
           remoteServerId: remoteInfo.remoteServerId,
-          remoteUrl: remoteInfo.remoteUrl,
-          remoteApiKey: remoteInfo.remoteApiKey,
           remoteSessionId: bareCandidate.sessionId,
           branch: remoteInfo.branch,
         };
@@ -456,8 +448,6 @@ async function routes(fastify: FastifyInstance) {
           if (branch) q.set("branch", branch);
           const info = {
             remoteServerId: project.agent_mode,
-            remoteUrl: remoteConfig.server_url ?? "",
-            remoteApiKey: remoteConfig.server_api_key || "",
           };
           const result = await proxyAuto(info, "GET", `/api/path/workflow-runs?${q}`);
           if (!result.ok) return sendProxyFailure(reply, result);
@@ -561,7 +551,7 @@ async function routes(fastify: FastifyInstance) {
   });
 
   // ---- Remote-provider (path-based) mirrors --------------------------------
-  // Served under /api/path/* so the --accept-remote gate in server.ts applies.
+  // Served under /api/path/* so the remote-provider gate in server.ts applies.
   // A front server proxies here for remote workspaces: it knows the worker's
   // bare session id and the workspace's remote_path, but not the worker-local
   // project id — so these mirrors derive the project themselves. Gate/cancel/

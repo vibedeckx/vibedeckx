@@ -37,7 +37,7 @@ describe("RemoteNotificationSync", () => {
   let notifications: NotificationService;
   let sync: RemoteNotificationSync;
   /** Recorded (serverId, method, path, body) tuples. */
-  let calls: Array<{ serverId: string; url: string; method: string; path: string; body: QueryBody; opts: unknown }>;
+  let calls: Array<{ serverId: string; method: string; path: string; body: QueryBody; opts: unknown }>;
   let respond: (body: QueryBody) => ProxyResult;
 
   const ok = (sessions: unknown[]): ProxyResult => ({ ok: true, status: 200, data: { sessions } });
@@ -50,10 +50,10 @@ describe("RemoteNotificationSync", () => {
    * implementation.
    */
   const defaultProxyImpl = async (
-    serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
+    serverId: string, method: string, apiPath: string,
     body?: unknown, opts?: unknown,
   ): Promise<ProxyResult> => {
-    calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+    calls.push({ serverId, method, path: apiPath, body: body as QueryBody, opts });
     return respond(body as QueryBody);
   };
 
@@ -63,8 +63,6 @@ describe("RemoteNotificationSync", () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-remote-sync-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "p1", name: "Checkout", path: null }, "u1");
-    await storage.remoteServers.create({ id: "srv1", name: "worker", url: "https://w1.example" } as never)
-      .catch(() => undefined);
     bus = new EventBus();
     seen = [];
     bus.subscribe((e) => seen.push(e));
@@ -91,12 +89,9 @@ describe("RemoteNotificationSync", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Register a project_remotes row so URL/apiKey resolution succeeds. */
-  async function linkRemote(serverId = "srv1", url = "https://w1.example", apiKey = "k1") {
-    const server = await storage.remoteServers.create(
-      { name: serverId, url, api_key: apiKey },
-      "u1",
-    );
+  /** Register a project_remotes row so server resolution succeeds. */
+  async function linkRemote(name = "srv1") {
+    const server = await storage.remoteServers.create({ name }, "u1");
     await storage.projectRemotes.add({
       project_id: "p1", remote_server_id: server.id, remote_path: "/srv/app",
     });
@@ -146,12 +141,6 @@ describe("RemoteNotificationSync", () => {
       expect(calls.flatMap((c) => c.body.sessions).length).toBe(total);
     });
 
-    it("uses a direct URL for direct servers and the same logic either way", async () => {
-      const srv = await linkRemote("srv-direct", "https://direct.example", "kd");
-      await storage.remoteSessionMappings.upsert("local-1", "p1", srv, "r1", "dev", "from_start");
-      await sync.syncAll({ includeExpired: true });
-      expect(calls[0].url).toBe("https://direct.example");
-    });
   });
 
   describe("import and ID mapping", () => {
@@ -451,10 +440,10 @@ describe("RemoteNotificationSync", () => {
       let firstCall = true;
       respond = () => ok([]); // replaced below
       proxy.mockImplementation(async (
-        serverId: string, url: string, _k: string, method: string, apiPath: string,
+        serverId: string, method: string, apiPath: string,
         body?: unknown, opts?: unknown,
       ) => {
-        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        calls.push({ serverId, method, path: apiPath, body: body as QueryBody, opts });
         if (firstCall) {
           firstCall = false;
           sweepQueryStarted();
@@ -482,10 +471,10 @@ describe("RemoteNotificationSync", () => {
 
       // ...so the new turn's milestone is still delivered.
       proxy.mockImplementation(async (
-        serverId: string, url: string, _k: string, method: string, apiPath: string,
+        serverId: string, method: string, apiPath: string,
         body?: unknown, opts?: unknown,
       ) => {
-        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        calls.push({ serverId, method, path: apiPath, body: body as QueryBody, opts });
         return ok([{
           sessionId: "r1",
           events: [workerEvent(6, { id: "session:r1:turn:6:result-ready" })],
@@ -545,8 +534,8 @@ describe("RemoteNotificationSync", () => {
     });
 
     it("syncServer scopes a remote-came-online sweep to that server", async () => {
-      const srvA = await linkRemote("a", "https://a.example", "ka");
-      const srvB = await linkRemote("b", "https://b.example", "kb");
+      const srvA = await linkRemote("a");
+      const srvB = await linkRemote("b");
       await storage.remoteSessionMappings.upsert("la", "p1", srvA, "ra", "dev", "from_start");
       await storage.remoteSessionMappings.upsert("lb", "p1", srvB, "rb", "dev", "from_start");
 
@@ -785,8 +774,8 @@ describe("RemoteNotificationSync", () => {
     });
 
     it("is not blocked by an in-flight sweep stuck on a different server", async () => {
-      const srvA = await linkRemote("a", "https://a.example", "ka");
-      const srvB = await linkRemote("b", "https://b.example", "kb");
+      const srvA = await linkRemote("a");
+      const srvB = await linkRemote("b");
       await storage.remoteSessionMappings.upsert("remote-a-p1-r1", "p1", srvA, "r1", "dev", "from_start");
       await storage.remoteSessionMappings.upsert("remote-b-p1-rb", "p1", srvB, "rb", "dev", "from_start");
       await sync.extendWatch("remote-b-p1-rb");   // only B is in the periodic set
@@ -795,10 +784,10 @@ describe("RemoteNotificationSync", () => {
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
       proxy.mockImplementation(async (
-        serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
+        serverId: string, method: string, apiPath: string,
         body?: unknown, opts?: unknown,
       ): Promise<ProxyResult> => {
-        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        calls.push({ serverId, method, path: apiPath, body: body as QueryBody, opts });
         if (serverId === srvB) await gate;   // B hangs, as an unreachable worker does
         return respond(body as QueryBody);
       });
@@ -817,18 +806,18 @@ describe("RemoteNotificationSync", () => {
     });
 
     it("sweeps servers concurrently instead of head-of-line serially", async () => {
-      const srvA = await linkRemote("a", "https://a.example", "ka");
-      const srvB = await linkRemote("b", "https://b.example", "kb");
+      const srvA = await linkRemote("a");
+      const srvB = await linkRemote("b");
       await storage.remoteSessionMappings.upsert("la", "p1", srvA, "ra", "dev", "from_start");
       await storage.remoteSessionMappings.upsert("lb", "p1", srvB, "rb", "dev", "from_start");
 
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
       proxy.mockImplementation(async (
-        serverId: string, url: string, _apiKey: string, method: string, apiPath: string,
+        serverId: string, method: string, apiPath: string,
         body?: unknown, opts?: unknown,
       ): Promise<ProxyResult> => {
-        calls.push({ serverId, url, method, path: apiPath, body: body as QueryBody, opts });
+        calls.push({ serverId, method, path: apiPath, body: body as QueryBody, opts });
         await gate;
         return respond(body as QueryBody);
       });

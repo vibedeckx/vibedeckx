@@ -330,7 +330,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
   describe("remoteExecutorProcesses", () => {
     it("insert defaults: status running, exit_code/finished_at/machine_id/project_id/branch null unless given", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp1", executorId: "e-x",
       });
       const row = await storage.remoteExecutorProcesses.getById("lp1");
@@ -344,7 +344,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("insert accepts optional projectId/branch/machineId", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp1", executorId: "e-x",
         projectId: "p1", branch: "main", machineId: "m1",
       });
@@ -356,7 +356,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("insert is INSERT OR REPLACE: re-inserting the same local_process_id resets status/exit_code/finished_at", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp1", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.markFinished("lp1", 3);
@@ -369,20 +369,20 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
       // re-created, so status/exit_code/finished_at fall back to their
       // fresh-row values (running/null/null) rather than being preserved.
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r2", remoteApiKey: "k2",
+        remoteServerId: "rs1",
         remoteProcessId: "rp2", executorId: "e-x",
       });
       const replaced = await storage.remoteExecutorProcesses.getById("lp1");
       expect(replaced?.status).toBe("running");
       expect(replaced?.exit_code).toBeNull();
       expect(replaced?.finished_at).toBeNull();
-      expect(replaced?.remote_url).toBe("http://r2");
+      expect(replaced?.remote_url).toBe("");
       expect(replaced?.remote_process_id).toBe("rp2");
     });
 
     it("delete hard-removes the row", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp1", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.delete("lp1");
@@ -391,7 +391,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("markFinished: default finalStatus is 'completed' for exitCode undefined/0, 'failed' otherwise; explicit status overrides; getRunning excludes it", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp1", executorId: "e-x",
       });
       expect(await storage.remoteExecutorProcesses.getRunning()).toHaveLength(1);
@@ -400,14 +400,14 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
       expect(await storage.remoteExecutorProcesses.getRunning()).toHaveLength(0);
 
       await storage.remoteExecutorProcesses.insert("lp2", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp2", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.markFinished("lp2", 1);
       expect((await storage.remoteExecutorProcesses.getById("lp2"))?.status).toBe("failed");
 
       await storage.remoteExecutorProcesses.insert("lp3", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp3", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.markFinished("lp3", undefined, "killed");
@@ -416,7 +416,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("markFinished is guarded by status='running' — a no-op on an already-finished row", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k",
+        remoteServerId: "rs1",
         remoteProcessId: "rp1", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.markFinished("lp1", 0);
@@ -437,13 +437,13 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("getLastByExecutorIdsGroupedByServer returns one row per (executor, server) pair across the given executors", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r1", remoteApiKey: "k", remoteProcessId: "rp1", executorId: "e-x",
+        remoteServerId: "rs1", remoteProcessId: "rp1", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.insert("lp2", {
-        remoteServerId: "rs2", remoteUrl: "http://r2", remoteApiKey: "k", remoteProcessId: "rp2", executorId: "e-x",
+        remoteServerId: "rs2", remoteProcessId: "rp2", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.insert("lp3", {
-        remoteServerId: "rs1", remoteUrl: "http://r1", remoteApiKey: "k", remoteProcessId: "rp3", executorId: "e-y",
+        remoteServerId: "rs1", remoteProcessId: "rp3", executorId: "e-y",
       });
 
       const grouped = await storage.remoteExecutorProcesses.getLastByExecutorIdsGroupedByServer(["e-x", "e-y", "no-such"]);
@@ -454,10 +454,10 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("getRunningByMachine filters by status='running' AND machine_id", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k", remoteProcessId: "rp1", executorId: "e-x", machineId: "m1",
+        remoteServerId: "rs1", remoteProcessId: "rp1", executorId: "e-x", machineId: "m1",
       });
       await storage.remoteExecutorProcesses.insert("lp2", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k", remoteProcessId: "rp2", executorId: "e-x", machineId: "m2",
+        remoteServerId: "rs1", remoteProcessId: "rp2", executorId: "e-x", machineId: "m2",
       });
       await storage.remoteExecutorProcesses.markFinished("lp2", 0);
 
@@ -468,10 +468,10 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("getAll returns every row regardless of status", async () => {
       await storage.remoteExecutorProcesses.insert("lp1", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k", remoteProcessId: "rp1", executorId: "e-x",
+        remoteServerId: "rs1", remoteProcessId: "rp1", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.insert("lp2", {
-        remoteServerId: "rs1", remoteUrl: "http://r", remoteApiKey: "k", remoteProcessId: "rp2", executorId: "e-x",
+        remoteServerId: "rs1", remoteProcessId: "rp2", executorId: "e-x",
       });
       await storage.remoteExecutorProcesses.markFinished("lp2", 0);
       const all = await storage.remoteExecutorProcesses.getAll();

@@ -9,7 +9,7 @@ export interface SearchTarget {
   projectId: string;
   targetId: string;
   projectPath?: string | null;
-  remote?: { serverId: string; url: string; apiKey: string; remotePath: string };
+  remote?: { serverId: string; remotePath: string };
 }
 
 export async function listSearchTargets(storage: Storage, userId?: string): Promise<SearchTarget[]> {
@@ -24,8 +24,6 @@ export async function listSearchTargets(storage: Storage, userId?: string): Prom
         targetId: r.remote_server_id,
         remote: {
           serverId: r.remote_server_id,
-          url: r.server_url ?? "",
-          apiKey: r.server_api_key ?? "",
           remotePath: r.remote_path,
         },
       });

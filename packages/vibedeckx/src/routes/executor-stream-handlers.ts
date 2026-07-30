@@ -112,8 +112,6 @@ export function attachRemoteProcessStream(
       if (row) {
         remoteInfo = {
           remoteServerId: row.remote_server_id,
-          remoteUrl: row.remote_url,
-          remoteApiKey: row.remote_api_key,
           remoteProcessId: row.remote_process_id,
           executorId: row.executor_id,
           projectId: row.project_id ?? undefined,
@@ -130,34 +128,23 @@ export function attachRemoteProcessStream(
     if (cleanupRequested) return; // caller already tore down before this resolved
     const info = remoteInfo;
 
-    const useVirtualExec = fastify.reverseConnectManager.isConnected(info.remoteServerId);
-    console.log(`[diag:remote-stop] ${new Date().toISOString()} attach processId=${processId} executorId=${info.executorId} server=${info.remoteServerId} transport=${useVirtualExec ? "reverse-connect" : "direct-ws"} remoteProcessId=${info.remoteProcessId}`);
-    let remoteWs: WebSocket | VirtualWsAdapter;
-
-    if (useVirtualExec) {
-      const channelId = randomUUID();
-      const wsPath = `/api/executor-processes/${info.remoteProcessId}/logs`;
-      const wsQuery = `apiKey=${encodeURIComponent(info.remoteApiKey)}`;
-      const adapter = new VirtualWsAdapter(
-        (data) => fastify.reverseConnectManager.sendChannelData(info.remoteServerId, channelId, data),
-        () => fastify.reverseConnectManager.closeChannel(info.remoteServerId, channelId),
-      );
-      fastify.reverseConnectManager.setChannelAdapter(info.remoteServerId, channelId, adapter);
-      fastify.reverseConnectManager.openVirtualChannel(info.remoteServerId, channelId, wsPath, wsQuery);
-      remoteWs = adapter;
-      setTimeout(() => adapter.emit("open"), 0);
-    } else {
-      if (!info.remoteUrl) {
-        send({ type: "error", message: "Remote server not reachable (reverse-connect offline)" });
-        onTerminal();
-        return;
-      }
-      const cleanRemoteUrl = info.remoteUrl.replace(/\/+$/, "");
-      const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-      const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-      const remoteWsUrl = `${wsUrl}/api/executor-processes/${info.remoteProcessId}/logs?apiKey=${encodeURIComponent(info.remoteApiKey)}`;
-      remoteWs = new WebSocket(remoteWsUrl, undefined, fastify.proxyManager.getWsOptions());
+    if (!fastify.reverseConnectManager.isConnected(info.remoteServerId)) {
+      send({ type: "error", message: "Remote server not reachable (reverse-connect offline)" });
+      onTerminal();
+      return;
     }
+    console.log(`[diag:remote-stop] ${new Date().toISOString()} attach processId=${processId} executorId=${info.executorId} server=${info.remoteServerId} transport=reverse-connect remoteProcessId=${info.remoteProcessId}`);
+
+    const channelId = randomUUID();
+    const wsPath = `/api/executor-processes/${info.remoteProcessId}/logs`;
+    const adapter = new VirtualWsAdapter(
+      (data) => fastify.reverseConnectManager.sendChannelData(info.remoteServerId, channelId, data),
+      () => fastify.reverseConnectManager.closeChannel(info.remoteServerId, channelId),
+    );
+    fastify.reverseConnectManager.setChannelAdapter(info.remoteServerId, channelId, adapter);
+    fastify.reverseConnectManager.openVirtualChannel(info.remoteServerId, channelId, wsPath);
+    const remoteWs: VirtualWsAdapter = adapter;
+    setTimeout(() => adapter.emit("open"), 0);
 
     const pingInterval = setInterval(() => {
       if (remoteWs.readyState === WebSocket.OPEN) remoteWs.ping();
@@ -231,7 +218,7 @@ export function attachRemoteProcessStream(
       if (!terminalSignalSent) {
         try {
           const row = await fastify.storage.remoteExecutorProcesses.getById(processId);
-          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished → FABRICATING finished processId=${processId} executorId=${info.executorId} transport=${useVirtualExec ? "reverse-connect" : "direct-ws"} dbStatus=${row?.status} dbExitCode=${row?.exit_code ?? "null"} sentExitCode=${row?.exit_code ?? 0} — THIS flips UI to Stopped while remote process may still be running`);
+          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished → FABRICATING finished processId=${processId} executorId=${info.executorId} transport=reverse-connect dbStatus=${row?.status} dbExitCode=${row?.exit_code ?? "null"} sentExitCode=${row?.exit_code ?? 0} — THIS flips UI to Stopped while remote process may still be running`);
           send({ type: "finished", exitCode: row?.exit_code ?? 0 });
         } catch (error) {
           console.error(`[ExecutorStream] Failed to fetch process row on close:`, error);

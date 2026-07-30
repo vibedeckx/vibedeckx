@@ -40,7 +40,7 @@ export async function createRemoteAgentSession(
   params: {
     projectId: string;
     agentMode: string;
-    remoteConfig: { server_url: string | null; server_api_key?: string; remote_path?: string | null };
+    remoteConfig: { remote_path?: string | null };
     branch: string | null;
     permissionMode: "plan" | "edit";
     agentType?: string;
@@ -66,8 +66,6 @@ export async function createRemoteAgentSession(
   // registration would make isSessionUsable reject the agent's first tool call.
   deps.remoteSessionMap.set(localSessionId, {
     remoteServerId: agentMode,
-    remoteUrl: remoteConfig.server_url ?? "",
-    remoteApiKey: remoteConfig.server_api_key || "",
     remoteSessionId,
     branch: branch ?? null,
   });
@@ -80,8 +78,6 @@ export async function createRemoteAgentSession(
   try {
     const result = await proxyToRemoteAuto(
       agentMode,
-      remoteConfig.server_url ?? "",
-      remoteConfig.server_api_key || "",
       "POST",
       `/api/path/agent-sessions/new`,
       { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp, model },
@@ -146,14 +142,6 @@ const REMOTE_RECONNECT_MAX_DELAY_MS = 30000;
 /** How long a connection must stay open before we consider it "stable" and reset the attempt counter. */
 const REMOTE_RECONNECT_STABILITY_MS = 10000;
 
-/** Build a WebSocket URL for a remote agent session. */
-function buildRemoteWsUrl(remoteInfo: RemoteSessionInfo): string {
-  const cleanRemoteUrl = remoteInfo.remoteUrl.replace(/\/+$/, "");
-  const wsProtocol = cleanRemoteUrl.startsWith("https") ? "wss" : "ws";
-  const wsUrl = cleanRemoteUrl.replace(/^https?/, wsProtocol);
-  return `${wsUrl}/api/agent-sessions/${remoteInfo.remoteSessionId}/stream?apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-}
-
 /** Try to parse a raw WS message string, returning undefined on failure. */
 export function tryParseWsMessage(raw: string): Record<string, unknown> | undefined {
   try {
@@ -173,54 +161,37 @@ export function connectPersistentRemoteWs(
   sessionId: string,
   remoteInfo: RemoteSessionInfo,
   cache: RemotePatchCache,
-  wsOptions: Record<string, unknown>,
   reverseConnectManager?: ReverseConnectManager,
   eventBus?: EventBus,
   agentSessionManager?: AgentSessionManager,
 ): void {
   const hasCachedData = cache.hasData(sessionId);
-  const useVirtual = reverseConnectManager && reverseConnectManager.isConnected(remoteInfo.remoteServerId);
-  console.log(`[AgentWS] Opening persistent remote WS for ${sessionId} (cached=${hasCachedData}, virtual=${!!useVirtual})`);
+  console.log(`[AgentWS] Opening persistent remote WS for ${sessionId} (cached=${hasCachedData})`);
 
-  let remoteWs: WebSocket | VirtualWsAdapter;
-
-  if (useVirtual) {
-    const channelId = randomUUID();
-    const wsPath = `/api/agent-sessions/${remoteInfo.remoteSessionId}/stream`;
-    const wsQuery = `apiKey=${encodeURIComponent(remoteInfo.remoteApiKey)}`;
-
-    const adapter = new VirtualWsAdapter(
-      (data) => reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),
-      () => reverseConnectManager.closeChannel(remoteInfo.remoteServerId, channelId),
-    );
-
-    reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
-    reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath, wsQuery);
-
-    remoteWs = adapter;
-    // Simulate open event on next tick
-    setTimeout(() => adapter.emit("open"), 0);
-  } else {
-    if (!remoteInfo.remoteUrl) {
-      // No direct URL available (reverse-connect only) — cannot fall back to direct WS
-      console.log(`[AgentWS] No direct URL for ${sessionId}, skipping reconnect (reverse-connect only)`);
-      cache.setReconnecting(sessionId, false);
-      cache.broadcast(sessionId, JSON.stringify({ remoteStatus: "disconnected" }));
-      return;
-    }
-    let remoteWsUrl: string;
-    try {
-      remoteWsUrl = buildRemoteWsUrl(remoteInfo);
-      remoteWs = new WebSocket(remoteWsUrl, undefined, wsOptions);
-    } catch (err) {
-      console.error(`[AgentWS] Failed to open remote WS for ${sessionId}:`, err);
-      cache.setReconnecting(sessionId, false);
-      cache.broadcast(sessionId, JSON.stringify({ remoteStatus: "disconnected" }));
-      return;
-    }
+  if (!reverseConnectManager || !reverseConnectManager.isConnected(remoteInfo.remoteServerId)) {
+    // Remote worker not connected — nothing to attach to until it reconnects.
+    console.log(`[AgentWS] Remote ${remoteInfo.remoteServerId} not connected for ${sessionId}, skipping reconnect`);
+    cache.setReconnecting(sessionId, false);
+    cache.broadcast(sessionId, JSON.stringify({ remoteStatus: "disconnected" }));
+    return;
   }
 
-  cache.setRemoteWs(sessionId, remoteWs as WebSocket);
+  const channelId = randomUUID();
+  const wsPath = `/api/agent-sessions/${remoteInfo.remoteSessionId}/stream`;
+
+  const adapter = new VirtualWsAdapter(
+    (data) => reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),
+    () => reverseConnectManager.closeChannel(remoteInfo.remoteServerId, channelId),
+  );
+
+  reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
+  reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath);
+
+  const remoteWs: VirtualWsAdapter = adapter;
+  // Simulate open event on next tick
+  setTimeout(() => adapter.emit("open"), 0);
+
+  cache.setRemoteWs(sessionId, remoteWs as unknown as WebSocket);
   cache.setReconnecting(sessionId, false);
   cache.clearReconnectTimer(sessionId);
 
@@ -456,7 +427,7 @@ export function connectPersistentRemoteWs(
     const entry = cache.get(sessionId);
     if (!entry || entry.finished) return;
 
-    scheduleRemoteReconnect(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager, eventBus, agentSessionManager);
+    scheduleRemoteReconnect(sessionId, remoteInfo, cache, reverseConnectManager, eventBus, agentSessionManager);
   });
 }
 
@@ -468,7 +439,6 @@ function scheduleRemoteReconnect(
   sessionId: string,
   remoteInfo: RemoteSessionInfo,
   cache: RemotePatchCache,
-  wsOptions: Record<string, unknown>,
   reverseConnectManager?: ReverseConnectManager,
   eventBus?: EventBus,
   agentSessionManager?: AgentSessionManager,
@@ -500,7 +470,7 @@ function scheduleRemoteReconnect(
       cache.setReconnecting(sessionId, false);
       return;
     }
-    connectPersistentRemoteWs(sessionId, remoteInfo, cache, wsOptions, reverseConnectManager, eventBus, agentSessionManager);
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, reverseConnectManager, eventBus, agentSessionManager);
   }, totalDelay);
 
   cache.setReconnectTimer(sessionId, timer);
@@ -512,14 +482,13 @@ export interface EnsureStreamDeps {
   reverseConnectManager: ReverseConnectManager | null;
   eventBus: EventBus | null;
   agentSessionManager: AgentSessionManager;
-  wsOptions?: Record<string, unknown>;
 }
 
 /**
  * Idempotently ensure a persistent remote stream is connected for this session,
  * so its remote `taskCompleted` bridges to the local EventBus (which wakes the
  * commander) even when no frontend window is open. No-op if a connection is
- * already live or reconnecting. Reverse-connect deployments don't use wsOptions.
+ * already live or reconnecting.
  */
 export function ensureRemoteAgentStream(localSessionId: string, deps: EnsureStreamDeps): void {
   const remoteInfo = deps.remoteSessionMap.get(localSessionId);
@@ -529,7 +498,6 @@ export function ensureRemoteAgentStream(localSessionId: string, deps: EnsureStre
     localSessionId,
     remoteInfo,
     deps.remotePatchCache,
-    deps.wsOptions ?? {},
     deps.reverseConnectManager ?? undefined,
     deps.eventBus ?? undefined,
     deps.agentSessionManager,
@@ -585,8 +553,6 @@ export async function generateAndPushRemoteSessionTitle(
 
   const result = await proxyToRemoteAuto(
     remoteInfo.remoteServerId,
-    remoteInfo.remoteUrl,
-    remoteInfo.remoteApiKey,
     "PATCH",
     `/api/agent-sessions/${remoteInfo.remoteSessionId}/title`,
     { title: finalTitle },

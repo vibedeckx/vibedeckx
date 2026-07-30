@@ -10,8 +10,6 @@ import type { RemoteSessionInfo } from "../server-types.js";
 
 const remoteInfo: RemoteSessionInfo = {
   remoteServerId: "srv1",
-  remoteUrl: "http://r",
-  remoteApiKey: "k",
   remoteSessionId: "bare1",
   branch: "dev",
 };

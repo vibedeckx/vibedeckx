@@ -26,9 +26,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!server) {
       return reply.code(401).send({ error: "Invalid token" });
     }
-    if (server.connection_mode !== "inbound") {
-      return reply.code(403).send({ error: "Server is not configured for inbound connections" });
-    }
     return { serverId: server.id, name: server.name };
   });
 
@@ -50,12 +47,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!server) {
           socket.send(JSON.stringify({ error: "Invalid token" }));
           socket.close(4001, "Invalid token");
-          return;
-        }
-
-        if (server.connection_mode !== "inbound") {
-          socket.send(JSON.stringify({ error: "Server is not configured for inbound connections" }));
-          socket.close(4001, "Not inbound");
           return;
         }
 

@@ -31,8 +31,6 @@ function makeApp() {
   const remoteSessionMap = new Map<string, unknown>();
   remoteSessionMap.set(SRC_SESSION_ID, {
     remoteServerId: "srv1",
-    remoteUrl: "https://remote.example",
-    remoteApiKey: "k",
     remoteSessionId: "srcsess",
     branch: null,
   });
@@ -64,7 +62,7 @@ function makeApp() {
 /** Echo the center-supplied branch id back, as an upgraded remote would. */
 function echoOk(): (...args: unknown[]) => Promise<ProxyResult> {
   return async (..._args: unknown[]) => {
-    const body = _args[5] as { sessionId: string };
+    const body = _args[3] as { sessionId: string };
     return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [] } };
   };
 }
@@ -97,7 +95,7 @@ describe("center-side remote branch protocol", () => {
     const res = await branch();
     expect(res.statusCode).toBe(200);
 
-    const [, , , , apiPath, body] = proxyMock.mock.calls[0] as [unknown, unknown, unknown, unknown, string, { sessionId: string; crossRemoteMcp: { token: string } }];
+    const [, , apiPath, body] = proxyMock.mock.calls[0] as [unknown, unknown, string, { sessionId: string; crossRemoteMcp: { token: string } }];
     // Proxied to the remote-provider path route (not the shared UI route), keyed
     // by the SOURCE remote session id.
     expect(apiPath).toBe("/api/path/agent-sessions/srcsess/branch");
@@ -167,7 +165,7 @@ describe("center-side remote branch protocol", () => {
 
   it("threads upToEntryIndex to the remote and accepts a compliant reply", async () => {
     proxyMock.mockImplementation(async (...args: unknown[]) => {
-      const body = args[5] as { sessionId: string; upToEntryIndex?: number };
+      const body = args[3] as { sessionId: string; upToEntryIndex?: number };
       expect(body.upToEntryIndex).toBe(2);
       return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [{}, {}, {}] } }; // 3 ≤ 2+1
     });
@@ -177,7 +175,7 @@ describe("center-side remote branch protocol", () => {
 
   it("fails closed with 409 and no registration when the remote ignored the cutoff", async () => {
     proxyMock.mockImplementation(async (...args: unknown[]) => {
-      const body = args[5] as { sessionId: string };
+      const body = args[3] as { sessionId: string };
       return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [{}, {}, {}, {}, {}] } }; // 5 > 2+1
     });
     const res = await app.inject({ method: "POST", url: `/api/agent-sessions/${SRC_SESSION_ID}/branch`, payload: { upToEntryIndex: 2 } });

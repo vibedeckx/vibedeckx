@@ -41,13 +41,11 @@ function fromResponse(resp: BranchActivityResponse): Map<string, BranchActivityS
 const routes: FastifyPluginAsync = async (fastify) => {
   function proxyAuto(
     remoteServerId: string,
-    remoteUrl: string,
-    remoteApiKey: string,
     method: string,
     apiPath: string,
     body?: unknown,
   ) {
-    return proxyToRemoteAuto(remoteServerId, remoteUrl, remoteApiKey, method, apiPath, body, {
+    return proxyToRemoteAuto(remoteServerId, method, apiPath, body, {
       reverseConnectManager: fastify.reverseConnectManager,
     });
   }
@@ -105,8 +103,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const params = new URLSearchParams({ path: remoteConfig.remote_path });
         const result = await proxyAuto(
           project.agent_mode,
-          remoteConfig.server_url ?? "",
-          remoteConfig.server_api_key || "",
           "GET",
           `/api/path/branches/activity?${params.toString()}`,
         );

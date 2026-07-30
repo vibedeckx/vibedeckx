@@ -22,6 +22,7 @@ describe("cross-remote MCP gateway", () => {
   let dir: string;
   let secret: string;
   let targetId: string;
+  let connected: Set<string>;
 
   const rpc = (token: string | null, body: unknown) =>
     app.inject({
@@ -47,13 +48,14 @@ describe("cross-remote MCP gateway", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     secret = await getCrossRemoteSecret(storage);
 
-    const target = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
+    const target = await storage.remoteServers.create({ name: "b" }, "user-1");
     targetId = target.id;
     await storage.remoteServers.update(targetId, { cross_remote_access: "exec" }, "user-1");
+    connected = new Set([targetId]);
 
     app = Fastify();
     app.decorate("storage", storage);
-    app.decorate("reverseConnectManager", { isConnected: () => false } as never);
+    app.decorate("reverseConnectManager", { isConnected: (id: string) => connected.has(id) } as never);
     app.decorate("remoteSessionMap", new Map());
     app.decorate("agentSessionManager", { getSessionProcessAlive: () => true } as never);
     await app.register(crossRemoteMcpRoutes);
@@ -115,7 +117,7 @@ describe("cross-remote MCP gateway", () => {
   });
 
   it("list_accessible_remotes excludes the source remote", async () => {
-    const source = await storage.remoteServers.create({ name: "a", url: "http://a:5173" }, "user-1");
+    const source = await storage.remoteServers.create({ name: "a" }, "user-1");
     await storage.remoteServers.update(source.id, { cross_remote_access: "exec" }, "user-1");
 
     const res = await call(tokenFor({ sourceRemoteServerId: source.id }), "list_accessible_remotes", {});
@@ -137,8 +139,6 @@ describe("cross-remote MCP gateway", () => {
 
     expect(proxyToRemoteAuto).toHaveBeenCalledWith(
       targetId,
-      "http://b:5173",
-      "",
       "POST",
       "/api/path/cross-remote/exec",
       { command: "uname", cwd: undefined, timeoutSec: undefined },
@@ -209,7 +209,7 @@ describe("cross-remote MCP gateway", () => {
   });
 
   it("denies a target owned by another user without leaking existence", async () => {
-    const other = await storage.remoteServers.create({ name: "other", url: "http://o:5173" }, "user-2");
+    const other = await storage.remoteServers.create({ name: "other" }, "user-2");
     await storage.remoteServers.update(other.id, { cross_remote_access: "exec" }, "user-2");
 
     const res = await call(tokenFor(), "remote_bash", { remoteId: other.id, command: "id" });
@@ -217,15 +217,15 @@ describe("cross-remote MCP gateway", () => {
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
 
-  it("reports an offline target and audits it", async () => {
-    const inbound = await storage.remoteServers.create({ name: "c", url: null, connection_mode: "inbound" }, "user-1");
-    await storage.remoteServers.update(inbound.id, { cross_remote_access: "exec" }, "user-1");
+  it("reports an unconnected target as offline and audits it", async () => {
+    const unconnected = await storage.remoteServers.create({ name: "c" }, "user-1");
+    await storage.remoteServers.update(unconnected.id, { cross_remote_access: "exec" }, "user-1");
 
-    const res = await call(tokenFor(), "remote_bash", { remoteId: inbound.id, command: "uptime" });
+    const res = await call(tokenFor(), "remote_bash", { remoteId: unconnected.id, command: "uptime" });
     expect(res.json().result.isError).toBe(true);
     expect(res.json().result.content[0].text).toContain("offline");
 
-    const rows = await storage.crossRemoteAudit.listByTarget(inbound.id);
+    const rows = await storage.crossRemoteAudit.listByTarget(unconnected.id);
     expect(rows[0].status).toBe("offline");
   });
 

@@ -14,8 +14,6 @@ import type { RemoteNotificationSync } from "./remote-notification-sync.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
-  remoteUrl: string;
-  remoteApiKey: string;
   remoteProcessId: string;
   executorId: string;
   projectId?: string;
@@ -26,8 +24,6 @@ export interface RemoteExecutorInfo {
 
 export interface RemoteSessionInfo {
   remoteServerId: string;
-  remoteUrl: string;
-  remoteApiKey: string;
   remoteSessionId: string;
   branch?: string | null;
 }
