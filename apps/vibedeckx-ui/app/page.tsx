@@ -34,7 +34,7 @@ import { MainConversation, type MainConversationHandle } from '@/components/conv
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
-import type { ExecutionMode, Task, Worktree, SearchResultWorkspace, SearchResultSession } from '@/lib/api';
+import { api, type ExecutionMode, type Task, type Worktree, type SearchResultWorkspace, type SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
 import { touchRecentSessionOpen, touchSessionStarted, updateCachedSessionTitle } from '@/lib/quick-switcher-cache';
 import { toast } from 'sonner';
@@ -47,7 +47,6 @@ import { ConnectionStatusIndicator } from '@/components/layout/connection-status
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
 import {
-  type WorkspaceStatus,
   toBranchKey,
   computeWorkspaceStatuses,
 } from '@/lib/workspace-status';
@@ -172,6 +171,7 @@ export default function Home() {
     runNow: runScheduleNow,
   } = useSchedules(currentProject?.id ?? null);
   const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
+  const [selectedScheduleRunId, setSelectedScheduleRunId] = useState<string | null>(null);
   const [scheduleCreateOpen, setScheduleCreateOpen] = useState(false);
 
   const {
@@ -514,6 +514,60 @@ export default function Home() {
     }
     return project;
   }, [projects, updateProject]);
+
+  const handleProjectActivitySession = useCallback(async (
+    sessionId: string,
+    targetId: string,
+    branch: string | null,
+  ) => {
+    const projectId = currentProject?.id;
+    if (!projectId) return;
+    try {
+      const project = await resolveProjectForTarget(projectId, targetId);
+      if (!project || project.id !== currentProject?.id) return;
+      setActiveView("workspace");
+      selectBranchSession(branch, sessionId, project.id);
+    } catch (error) {
+      console.error("Project activity session navigation failed:", error);
+      toast.error("Failed to open agent session");
+    }
+  }, [currentProject?.id, resolveProjectForTarget, selectBranchSession]);
+
+  const handleProjectActivityScheduleRun = useCallback(async (
+    runId: string,
+    knownScheduleId?: string,
+  ) => {
+    const projectId = currentProject?.id;
+    if (!projectId) return;
+    try {
+      const scheduleId = knownScheduleId ?? (await api.getScheduleRun(runId)).schedule_id;
+      if (currentProject?.id !== projectId) return;
+      setSelectedScheduleId(scheduleId);
+      setSelectedScheduleRunId(runId);
+      setActiveView("schedules");
+    } catch (error) {
+      console.error("Project activity schedule navigation failed:", error);
+      toast.error("Failed to open schedule run");
+    }
+  }, [currentProject?.id]);
+
+  const handleRunScheduleAgain = useCallback(async (runId: string) => {
+    const projectId = currentProject?.id;
+    if (!projectId) return;
+    try {
+      const run = await api.getScheduleRun(runId);
+      if (currentProject?.id !== projectId) return;
+      await runScheduleNow(run.schedule_id);
+      toast.success("Schedule run started");
+    } catch (error) {
+      console.error("Failed to rerun schedule from project activity:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to start schedule run");
+    }
+  }, [currentProject?.id, runScheduleNow]);
+
+  const handleScheduleRunOpened = useCallback((runId: string) => {
+    setSelectedScheduleRunId((current) => current === runId ? null : current);
+  }, []);
 
   const handleSwitcherProject = useCallback((projectId: string) => {
     if (switcherNavigationInFlightRef.current) return;
@@ -916,14 +970,14 @@ Please proceed step by step and let me know if there are any issues or conflicts
             <div className="flex-1 overflow-hidden">
               <ProjectInfoView
                 project={currentProject}
-                tasks={tasks}
-                worktrees={worktrees}
-                selectedBranch={selectedBranch}
-                workspaceStatuses={workspaceStatuses}
-                onSelectBranch={(branch) => {
-                  setSelectedBranch(branch);
-                  setActiveView('workspace');
+                onOpenAgentSession={(sessionId, target, branch) => {
+                  void handleProjectActivitySession(sessionId, target, branch);
                 }}
+                onOpenScheduleRun={(runId, scheduleId) => {
+                  void handleProjectActivityScheduleRun(runId, scheduleId);
+                }}
+                onRunScheduleAgain={handleRunScheduleAgain}
+                onViewAllTasks={() => setActiveView("tasks")}
                 onProjectUpdated={updateProject}
               />
             </div>
@@ -948,6 +1002,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 onRunNow={runScheduleNow}
                 createOpen={scheduleCreateOpen}
                 onCreateOpenChange={setScheduleCreateOpen}
+                openRunId={selectedScheduleRunId}
+                onOpenRunHandled={handleScheduleRunOpened}
               />
             </div>
           )}

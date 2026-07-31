@@ -1,30 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import {
-  FolderOpen,
-  Globe,
-  Calendar,
-  GitBranch,
-  Circle,
-  CheckCircle2,
-  XCircle,
-  Loader2,
-} from "lucide-react";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { useProjectRemotes } from "@/hooks/use-project-remotes";
-import type {
-  Project,
-  SyncButtonConfig,
-  Task,
-  TaskPriority,
-  TaskStatus,
-  Worktree,
-} from "@/lib/api";
-import { toBranchKey, type WorkspaceStatus } from "@/lib/workspace-status";
-import { ProjectSettingsForm } from "./project-settings-form";
+import { useState } from "react";
+import { Calendar, FolderOpen, Globe } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TaskDetailDialog } from "@/components/task/task-detail-dialog";
+import { useProjectChat } from "@/hooks/use-project-chat";
+import { useProjectRemotes } from "@/hooks/use-project-remotes";
+import type { Project, SyncButtonConfig, Task } from "@/lib/api";
+import { ProjectActivityView } from "./project-activity-view";
+import { ProjectSettingsForm } from "./project-settings-form";
 
 function StatusBadge({ project }: { project: Project }) {
   const hasLocal = !!project.path;
@@ -51,61 +36,13 @@ function StatusBadge({ project }: { project: Project }) {
   );
 }
 
-function TaskStatusIcon({ status }: { status: TaskStatus }) {
-  switch (status) {
-    case "done":
-      return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-green-600" />;
-    case "in_progress":
-      return <Loader2 className="h-3.5 w-3.5 shrink-0 text-blue-600" />;
-    case "cancelled":
-      return <XCircle className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />;
-    default:
-      return <Circle className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />;
-  }
-}
-
-function PriorityDot({ priority }: { priority: TaskPriority }) {
-  if (priority === "urgent") {
-    return <span className="h-1.5 w-1.5 rounded-full bg-red-500 shrink-0" />;
-  }
-  if (priority === "high") {
-    return <span className="h-1.5 w-1.5 rounded-full bg-orange-500 shrink-0" />;
-  }
-  return null;
-}
-
-function WorkspaceStatusDot({ status }: { status: WorkspaceStatus | undefined }) {
-  const color =
-    status === "working"
-      ? "bg-blue-500"
-      : status === "completed"
-        ? "bg-green-500"
-        : status === "stopped"
-          ? "bg-amber-500"
-          : "bg-muted-foreground/40";
-  return <span className={`inline-block h-2 w-2 rounded-full shrink-0 ${color}`} />;
-}
-
-const STATUS_ORDER: Record<TaskStatus, number> = {
-  in_progress: 0,
-  todo: 1,
-  done: 2,
-  cancelled: 3,
-};
-const PRIORITY_ORDER: Record<TaskPriority, number> = {
-  urgent: 0,
-  high: 1,
-  medium: 2,
-  low: 3,
-};
-
 interface ProjectInfoViewProps {
   project: Project;
-  tasks: Task[];
-  worktrees: Worktree[];
-  selectedBranch: string | null;
-  workspaceStatuses: Map<string, WorkspaceStatus>;
-  onSelectBranch: (branch: string | null) => void;
+  onOpenProjectChatThread?: (threadId: string) => void;
+  onOpenAgentSession: (sessionId: string, target: string, branch: string | null) => void;
+  onOpenScheduleRun: (runId: string, scheduleId?: string) => void;
+  onRunScheduleAgain: (runId: string) => Promise<void> | void;
+  onViewAllTasks: () => void;
   onProjectUpdated: (id: string, opts: {
     name?: string;
     path?: string | null;
@@ -117,66 +54,56 @@ interface ProjectInfoViewProps {
 
 export function ProjectInfoView({
   project,
-  tasks,
-  worktrees,
-  selectedBranch,
-  workspaceStatuses,
-  onSelectBranch,
+  onOpenProjectChatThread,
+  onOpenAgentSession,
+  onOpenScheduleRun,
+  onRunScheduleAgain,
+  onViewAllTasks,
   onProjectUpdated,
 }: ProjectInfoViewProps) {
   const { remotes } = useProjectRemotes(project.id);
+  const { createThread } = useProjectChat(project.id, null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
 
-  const activeTasks = useMemo(() => tasks.filter((t) => t.archived_at === null), [tasks]);
-
-  const sortedTasks = useMemo(() => {
-    return [...activeTasks].sort((a, b) => {
-      const s = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
-      if (s !== 0) return s;
-      const p = PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
-      if (p !== 0) return p;
-      return b.updated_at.localeCompare(a.updated_at);
-    });
-  }, [activeTasks]);
-
-  const visibleTasks = sortedTasks.slice(0, 5);
+  const openTask = (task: Task) => {
+    setSelectedTask(task);
+    setTaskDetailOpen(true);
+  };
 
   return (
-    <div className="h-full flex flex-col p-6 overflow-hidden">
-      <Tabs defaultValue="home" className="w-full max-w-4xl mx-auto flex flex-col flex-1 min-h-0">
+    <div className="flex h-full flex-col overflow-hidden p-4 sm:p-6">
+      <Tabs defaultValue="home" className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col">
         <TabsList>
           <TabsTrigger value="home">Home</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="home" className="flex-1 overflow-auto mt-4 space-y-4">
+        <TabsContent value="home" className="mt-4 flex-1 space-y-4 overflow-auto pr-1">
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-lg">{project.name}</CardTitle>
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="truncate text-lg">{project.name}</CardTitle>
                 <StatusBadge project={project} />
               </div>
             </CardHeader>
-            <CardContent className="space-y-3">
-              {project.path && (
+            <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {project.path ? (
                 <div className="flex items-start gap-3 text-sm">
-                  <FolderOpen className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-                  <span className="text-muted-foreground break-all">{project.path}</span>
+                  <FolderOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="break-all text-muted-foreground">{project.path}</span>
                 </div>
-              )}
+              ) : null}
 
-              {remotes.map((r) => (
-                <div key={r.id} className="flex items-start gap-3 text-sm">
-                  <Globe className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0">
-                    <span className="text-muted-foreground break-all">{r.server_name}</span>
-                  </div>
+              {remotes.map((remote) => (
+                <div key={remote.id} className="flex items-start gap-3 text-sm">
+                  <Globe className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="break-all text-muted-foreground">{remote.server_name}</span>
                 </div>
               ))}
 
               <div className="flex items-center gap-3 text-sm">
-                <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <Calendar className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <span className="text-muted-foreground">
                   Created {new Date(project.created_at).toLocaleDateString()}
                 </span>
@@ -184,109 +111,24 @@ export function ProjectInfoView({
             </CardContent>
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm flex items-center justify-between">
-                  <span>Tasks</span>
-                  <span className="text-xs font-normal text-muted-foreground">{activeTasks.length}</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {visibleTasks.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No tasks yet</p>
-                ) : (
-                  <ul className="space-y-2">
-                    {visibleTasks.map((t) => {
-                      const dim = t.status === "done" || t.status === "cancelled";
-                      return (
-                        <li key={t.id}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedTask(t);
-                              setTaskDetailOpen(true);
-                            }}
-                            className="flex w-full items-center gap-2 text-sm rounded-md px-2 py-1 -mx-2 hover:bg-muted/60 transition-colors text-left"
-                          >
-                            <TaskStatusIcon status={t.status} />
-                            <span
-                              className={`flex-1 truncate ${
-                                dim ? "text-muted-foreground line-through" : ""
-                              }`}
-                            >
-                              {t.title}
-                            </span>
-                            <PriorityDot priority={t.priority} />
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-                {activeTasks.length > visibleTasks.length && (
-                  <p className="text-xs text-muted-foreground mt-3">
-                    +{activeTasks.length - visibleTasks.length} more
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm flex items-center justify-between">
-                  <span>Workspaces</span>
-                  <span className="text-xs font-normal text-muted-foreground">{worktrees.length}</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {worktrees.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No workspaces</p>
-                ) : (
-                  <ul className="space-y-2">
-                    {worktrees.map((wt) => {
-                      const branchKey = toBranchKey(wt.branch);
-                      const isSelected = selectedBranch === wt.branch;
-                      return (
-                        <li key={branchKey}>
-                          <button
-                            type="button"
-                            onClick={() => onSelectBranch(wt.branch)}
-                            className="flex w-full items-center gap-2 text-sm rounded-md px-2 py-1 -mx-2 hover:bg-muted/60 transition-colors text-left"
-                          >
-                            <WorkspaceStatusDot status={workspaceStatuses.get(branchKey)} />
-                            <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                            <span
-                              className={`flex-1 truncate ${
-                                isSelected ? "font-medium text-foreground" : "text-muted-foreground"
-                              }`}
-                            >
-                              {wt.branch ?? "(main)"}
-                            </span>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+          <ProjectActivityView
+            projectId={project.id}
+            onCreateThread={createThread}
+            onOpenThread={(threadId) => onOpenProjectChatThread?.(threadId)}
+            onOpenAgentSession={onOpenAgentSession}
+            onOpenScheduleRun={onOpenScheduleRun}
+            onRunScheduleAgain={onRunScheduleAgain}
+            onOpenTask={openTask}
+            onViewAllTasks={onViewAllTasks}
+          />
         </TabsContent>
 
         <TabsContent value="settings" className="flex-1 overflow-auto">
-          <ProjectSettingsForm
-            project={project}
-            onSave={onProjectUpdated}
-          />
+          <ProjectSettingsForm project={project} onSave={onProjectUpdated} />
         </TabsContent>
       </Tabs>
 
-      <TaskDetailDialog
-        task={selectedTask}
-        open={taskDetailOpen}
-        onOpenChange={setTaskDetailOpen}
-      />
+      <TaskDetailDialog task={selectedTask} open={taskDetailOpen} onOpenChange={setTaskDetailOpen} />
     </div>
   );
 }

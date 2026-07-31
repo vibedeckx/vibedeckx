@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScheduleFormDialog } from "./schedule-form-dialog";
 
@@ -62,6 +62,8 @@ export function SchedulesView({
   onRunNow,
   createOpen,
   onCreateOpenChange,
+  openRunId,
+  onOpenRunHandled,
 }: {
   projectId: string;
   schedules: Schedule[];
@@ -75,6 +77,8 @@ export function SchedulesView({
   onRunNow: (id: string) => Promise<{ runId: string }>;
   createOpen: boolean;
   onCreateOpenChange: (open: boolean) => void;
+  openRunId?: string | null;
+  onOpenRunHandled?: (runId: string) => void;
 }) {
   const selected = schedules.find((s) => s.id === selectedId) ?? schedules[0] ?? null;
 
@@ -134,6 +138,26 @@ export function SchedulesView({
       console.error("Failed to fetch run output:", err);
     }
   };
+
+  // Project Overview can deep-open a run from the project-wide activity list.
+  // Keep the report/output treatment here so dashboard cards remain pure
+  // navigation controls and never fetch or render raw output themselves.
+  useEffect(() => {
+    if (!openRunId) return;
+    let stale = false;
+    const requestedRunId = openRunId;
+    void api.getScheduleRun(requestedRunId).then((run) => {
+      if (stale) return;
+      setViewRun(run);
+      setActionError(null);
+      onOpenRunHandled?.(requestedRunId);
+    }).catch((err) => {
+      if (stale) return;
+      setActionError(err instanceof Error ? err.message : "Failed to load run output");
+      onOpenRunHandled?.(requestedRunId);
+    });
+    return () => { stale = true; };
+  }, [openRunId, onOpenRunHandled]);
 
   if (!loading && schedules.length === 0) {
     return (
@@ -307,6 +331,9 @@ export function SchedulesView({
               {viewRun?.report ? "Run report" : "Run output"} — {viewRun ? fmtTs(viewRun.started_at) : ""}{" "}
               {viewRun && <span className={cn("ml-2 px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[viewRun.status])}>{viewRun.status}</span>}
             </DialogTitle>
+            <DialogDescription>
+              Full report and captured output for this schedule run.
+            </DialogDescription>
           </DialogHeader>
           {viewRun?.report ? (
             <>
