@@ -149,6 +149,7 @@ describe("ProjectChatManager", () => {
     const messages = await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1");
     expect(messages.filter((message) => message.type === "user").map((message) => message.content))
       .toEqual(["first", "second"]);
+    expect(messages.some((message) => message.type === "operation")).toBe(false);
   });
 
   it("stops only the requested thread while another thread continues", async () => {
@@ -256,22 +257,18 @@ describe("ProjectChatManager", () => {
     expect((await manager.openThread("thread-1", "user-1")).status).toBe("idle");
   });
 
-  it("durably recovers an accepted queued message after shutdown and restart", async () => {
+  it("recovers a first idle turn after acceptance and a crash before terminal persistence", async () => {
     await createThread("thread-1");
-    const gate = deferred();
     const firstManager = new ProjectChatManager(storage, {
-      async *run(input) {
-        if (input.messages.at(-1)?.content === "first") await gate.promise;
-        yield { type: "assistant", content: "reply" };
+      async *run() {
+        await new Promise<void>(() => undefined);
       },
     });
-    await firstManager.sendMessage("thread-1", "user-1", "first");
-    await waitFor(async () => (await firstManager.openThread("thread-1", "user-1")).status === "running");
-    await firstManager.sendMessage("thread-1", "user-1", "second");
+    await firstManager.sendMessage("thread-1", "user-1", "recover first");
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    )).some((work) => work.status === "running"));
 
-    const shutdown = firstManager.shutdown();
-    gate.resolve();
-    await shutdown;
     const restoredStarts: string[] = [];
     const secondManager = new ProjectChatManager(storage, {
       async *run(input) {
@@ -280,42 +277,29 @@ describe("ProjectChatManager", () => {
       },
     });
     await secondManager.openThread("thread-1", "user-1");
-    await waitFor(() => restoredStarts.includes("second"));
+    await waitFor(() => restoredStarts.includes("recover first"));
     await waitFor(async () => (await secondManager.openThread("thread-1", "user-1")).status === "idle");
 
     expect((await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .filter((message) => message.type === "user").map((message) => message.content))
-      .toEqual(["first", "second"]);
+      .toEqual(["recover first"]);
+    expect(await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    )).toEqual([]);
   });
 
-  it.each([
-    { name: "after the queue marker", extra: [] },
-    { name: "after the user message", extra: [{ type: "user" as const, content: "recover me" }] },
-    {
-      name: "after the start marker",
-      extra: [
-        { type: "user" as const, content: "recover me" },
-        {
-          type: "operation" as const,
-          content: JSON.stringify({ kind: "queued_user_started", queueId: "queue-crash" }),
-        },
-      ],
-    },
-  ])("resumes unfinished durable work $name without duplicating its user message", async ({ extra }) => {
+  it.each(["accepted", "running"] as const)(
+    "resumes %s journal work without duplicating its user message",
+    async (status) => {
     await createThread("thread-1");
-    const persisted = [
-      {
-        type: "operation" as const,
-        content: JSON.stringify({ kind: "queued_user", queueId: "queue-crash", content: "recover me" }),
-      },
-      ...extra,
-    ];
-    for (const [index, message] of persisted.entries()) {
-      await storage.projectChatMessages.append({
-        id: `crash-${index}`,
-        thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
-        sequence: index + 1, type: message.type, content: message.content,
-      });
+    await storage.projectChatWorkItems.accept({
+      id: "work-crash", user_message_id: "user-crash", thread_id: "thread-1",
+      project_id: "project-1", user_id: "user-1", content: "recover me",
+    });
+    if (status === "running") {
+      await storage.projectChatWorkItems.markRunning(
+        "work-crash", "thread-1", "project-1", "user-1",
+      );
     }
     const starts: string[] = [];
     const manager = new ProjectChatManager(storage, {
@@ -335,26 +319,22 @@ describe("ProjectChatManager", () => {
     expect(messages).toContainEqual(expect.objectContaining({ type: "assistant", content: "recovered reply" }));
     expect(messages).toContainEqual(expect.objectContaining({
       type: "turn_end",
-      content: JSON.stringify({ status: "completed", queueId: "queue-crash" }),
+      content: JSON.stringify({ status: "completed", workId: "work-crash" }),
     }));
+    expect(messages.some((message) => message.type === "operation")).toBe(false);
   });
 
-  it("does not rerun durable work that has a terminal turn end", async () => {
+  it("does not rerun journal work after its atomic terminal transition", async () => {
     await createThread("thread-1");
-    const persisted = [
-      { type: "operation" as const, content: JSON.stringify({ kind: "queued_user", queueId: "queue-done", content: "done" }) },
-      { type: "user" as const, content: "done" },
-      { type: "operation" as const, content: JSON.stringify({ kind: "queued_user_started", queueId: "queue-done" }) },
-      { type: "assistant" as const, content: "finished" },
-      { type: "turn_end" as const, content: JSON.stringify({ status: "completed", queueId: "queue-done" }) },
-    ];
-    for (const [index, message] of persisted.entries()) {
-      await storage.projectChatMessages.append({
-        id: `done-${index}`,
-        thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
-        sequence: index + 1, type: message.type, content: message.content,
-      });
-    }
+    await storage.projectChatWorkItems.accept({
+      id: "work-done", user_message_id: "user-done", thread_id: "thread-1",
+      project_id: "project-1", user_id: "user-1", content: "done",
+    });
+    await storage.projectChatWorkItems.finish({
+      id: "work-done", thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+      status: "completed", error: null, turn_end_id: "end-done",
+      turn_end_content: JSON.stringify({ status: "completed", workId: "work-done" }),
+    });
     const run = vi.fn(async function* () { yield { type: "assistant" as const, content: "duplicate" }; });
     const manager = new ProjectChatManager(storage, { run });
 
@@ -362,7 +342,7 @@ describe("ProjectChatManager", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(run).not.toHaveBeenCalled();
-    expect(snapshot.messages).toHaveLength(5);
+    expect(snapshot.messages).toHaveLength(2);
   });
 
   it("delivers an approval decision back to the pending model turn", async () => {
@@ -712,15 +692,15 @@ describe("ProjectChatManager", () => {
     });
     await manager.sendMessage("thread-1", "user-1", "first");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
-    const markerStarted = deferred();
-    const allowMarker = deferred();
-    const originalAppend = storage.projectChatMessages.append.bind(storage.projectChatMessages);
-    vi.spyOn(storage.projectChatMessages, "append").mockImplementation(async (opts) => {
-      if (opts.type === "operation" && opts.content.includes("queued_user")) {
-        markerStarted.resolve();
-        await allowMarker.promise;
+    const acceptanceStarted = deferred();
+    const allowAcceptance = deferred();
+    const originalAccept = storage.projectChatWorkItems.accept.bind(storage.projectChatWorkItems);
+    vi.spyOn(storage.projectChatWorkItems, "accept").mockImplementation(async (opts) => {
+      if (opts.content === "second") {
+        acceptanceStarted.resolve();
+        await allowAcceptance.promise;
       }
-      return originalAppend(opts);
+      return originalAccept(opts);
     });
     const deleteStarted = deferred();
     const allowDelete = deferred();
@@ -732,10 +712,10 @@ describe("ProjectChatManager", () => {
     });
 
     const racingSend = manager.sendMessage("thread-1", "user-1", "second");
-    await markerStarted.promise;
+    await acceptanceStarted.promise;
     const deleting = manager.deleteThread("thread-1", "user-1");
     await waitFor(() => activeAborted);
-    allowMarker.resolve();
+    allowAcceptance.resolve();
     await expect(racingSend).rejects.toMatchObject({ code: "PROJECT_CHAT_NOT_FOUND" });
     await deleteStarted.promise;
     allowDelete.resolve();

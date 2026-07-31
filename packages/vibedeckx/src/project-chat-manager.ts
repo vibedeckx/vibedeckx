@@ -5,6 +5,7 @@ import type {
   ProjectChatMessage,
   ProjectChatMessageType,
   ProjectChatThread,
+  ProjectChatWorkItem,
   Storage,
 } from "./storage/types.js";
 import { resolveChatModel } from "./utils/chat-model.js";
@@ -55,12 +56,9 @@ export type ProjectChatWsMessage =
   };
 
 interface QueuedTurn {
+  workId: string;
+  userMessageId: string;
   content: string;
-  queueId: string | null;
-  userPersisted: boolean;
-  startPersisted: boolean;
-  resolve: () => void;
-  reject: (error: unknown) => void;
 }
 
 interface LiveThread {
@@ -151,26 +149,15 @@ export class ProjectChatManager {
     const live = await this.loadLiveThread(thread);
     if (this.closingThreads.has(threadId)) throw new ProjectChatNotFoundError();
 
-    const queuedBehindActiveTurn = live.activeWork !== null || live.queue.length > 0;
-    const queueId = queuedBehindActiveTurn ? randomUUID() : null;
-    if (queueId) {
-      await this.append(live, "operation", JSON.stringify({ kind: "queued_user", queueId, content: trimmed }));
-      if (this.closingThreads.has(threadId)) throw new ProjectChatNotFoundError();
-    }
-
-    return new Promise<void>((resolve, reject) => {
-      live.queue.push({
-        content: trimmed,
-        queueId,
-        userPersisted: false,
-        startPersisted: false,
-        resolve,
-        reject,
-      });
-      this.broadcastStatus(live);
-      this.pump(live);
-      if (queueId) resolve();
+    const accepted = await this.acceptWork(live, {
+      id: randomUUID(),
+      userMessageId: randomUUID(),
+      content: trimmed,
     });
+    if (this.closingThreads.has(threadId)) throw new ProjectChatNotFoundError();
+    live.queue.push(accepted);
+    this.broadcastStatus(live);
+    this.pump(live);
   }
 
   /** Authorization requires storage I/O, so stopping is deliberately async. */
@@ -221,7 +208,7 @@ export class ProjectChatManager {
       if (live) {
         this.settlePendingApprovals(live, live.activeTurnId, false);
         live.abortController?.abort();
-        for (const queued of live.queue.splice(0)) queued.resolve();
+        live.queue.splice(0);
         if (live.activeWork) await Promise.allSettled([live.activeWork]);
         for (const socket of live.subscribers) {
           try { socket.close(); } catch { /* disconnected */ }
@@ -243,7 +230,7 @@ export class ProjectChatManager {
     for (const live of this.liveThreads.values()) {
       this.settlePendingApprovals(live, live.activeTurnId, false);
       live.abortController?.abort();
-      for (const queued of live.queue.splice(0)) queued.resolve();
+      live.queue.splice(0);
       if (live.activeWork) active.push(live.activeWork);
     }
     await Promise.allSettled(active);
@@ -273,15 +260,17 @@ export class ProjectChatManager {
     const loading = this.loadingThreads.get(thread.id);
     if (loading) return loading;
 
-    const promise = this.storage.projectChatMessages
-      .listByThread(thread.id, thread.project_id, thread.user_id)
-      .then((messages): LiveThread => {
+    const promise = Promise.all([
+      this.storage.projectChatMessages.listByThread(thread.id, thread.project_id, thread.user_id),
+      this.storage.projectChatWorkItems.listNonterminal(thread.id, thread.project_id, thread.user_id),
+    ])
+      .then(([messages, workItems]): LiveThread => {
         const live: LiveThread = {
           thread,
           messages,
           nextSequence: (messages.at(-1)?.sequence ?? 0) + 1,
           status: "idle",
-          queue: this.recoverQueuedTurns(messages, thread.id),
+          queue: workItems.map((work) => this.queueFromWorkItem(work)),
           subscribers: new Set(),
           abortController: null,
           activeWork: null,
@@ -319,21 +308,25 @@ export class ProjectChatManager {
     live.abortController = abortController;
     live.activeTurnId = turnId;
     try {
-      if (!queued.userPersisted) await this.append(live, "user", queued.content);
-      if (queued.queueId && !queued.startPersisted) {
-        await this.append(live, "operation", JSON.stringify({
-          kind: "queued_user_started",
-          queueId: queued.queueId,
-        }));
-      }
-      queued.resolve();
+      const running = await this.storage.projectChatWorkItems.markRunning(
+        queued.workId,
+        live.thread.id,
+        live.thread.project_id,
+        live.thread.user_id,
+      );
+      if (!running) return;
       live.status = "running";
       this.broadcastStatus(live);
+      const futureUserMessages = new Set(live.queue.map((item) => item.userMessageId));
+      const currentUserMessage = live.messages.find((message) => message.id === queued.userMessageId);
+      const history = live.messages.filter((message) =>
+        message.type !== "operation" && message.type !== "turn_end" &&
+        message.id !== queued.userMessageId && !futureUserMessages.has(message.id));
       const input: ProjectChatRunInput = {
         projectId: live.thread.project_id,
         threadId: live.thread.id,
         userId: live.thread.user_id,
-        messages: live.messages.filter((message) => message.type !== "operation" && message.type !== "turn_end"),
+        messages: currentUserMessage ? [...history, currentUserMessage] : history,
         signal: abortController.signal,
       };
       for await (const event of this.runner.run(input)) {
@@ -373,32 +366,82 @@ export class ProjectChatManager {
           await this.append(live, event.type, event.content);
         }
       }
-      await this.append(live, "turn_end", JSON.stringify({
-        status: abortController.signal.aborted ? "stopped" : "completed",
-        ...(queued.queueId ? { queueId: queued.queueId } : {}),
-      }));
+      const status = abortController.signal.aborted ? "stopped" : "completed";
+      await this.finishWork(live, queued, status, null);
     } catch (error) {
       if (abortController.signal.aborted) {
-        await this.append(live, "turn_end", JSON.stringify({
-          status: "stopped",
-          ...(queued.queueId ? { queueId: queued.queueId } : {}),
-        }));
-        queued.resolve();
+        await this.finishWork(live, queued, "stopped", null);
         return;
       }
       try {
         await this.append(live, "error", error instanceof Error ? error.message : String(error));
-        await this.append(live, "turn_end", JSON.stringify({
-          status: "error",
-          ...(queued.queueId ? { queueId: queued.queueId } : {}),
-        }));
+        await this.finishWork(
+          live,
+          queued,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        );
       } catch {
         // Preserve the original failure when persistence is also unavailable.
       }
-      queued.reject(error);
     } finally {
       this.settlePendingApprovals(live, turnId, false);
       if (live.activeTurnId === turnId) live.activeTurnId = null;
+    }
+  }
+
+  private async acceptWork(
+    live: LiveThread,
+    input: { id: string; userMessageId: string; content: string },
+  ): Promise<QueuedTurn> {
+    const previousWrite = live.writeTail;
+    let release!: () => void;
+    live.writeTail = new Promise<void>((resolve) => { release = resolve; });
+    await previousWrite;
+    try {
+      const accepted = await this.storage.projectChatWorkItems.accept({
+        id: input.id,
+        user_message_id: input.userMessageId,
+        thread_id: live.thread.id,
+        project_id: live.thread.project_id,
+        user_id: live.thread.user_id,
+        content: input.content,
+      });
+      this.publishMessage(live, accepted.userMessage);
+      return this.queueFromWorkItem(accepted.workItem);
+    } finally {
+      release();
+    }
+  }
+
+  private async finishWork(
+    live: LiveThread,
+    queued: QueuedTurn,
+    status: "completed" | "stopped" | "failed",
+    error: string | null,
+  ): Promise<ProjectChatMessage> {
+    const previousWrite = live.writeTail;
+    let release!: () => void;
+    live.writeTail = new Promise<void>((resolve) => { release = resolve; });
+    await previousWrite;
+    try {
+      const result = await this.storage.projectChatWorkItems.finish({
+        id: queued.workId,
+        thread_id: live.thread.id,
+        project_id: live.thread.project_id,
+        user_id: live.thread.user_id,
+        status,
+        error,
+        turn_end_id: randomUUID(),
+        turn_end_content: JSON.stringify({
+          status: status === "failed" ? "error" : status,
+          workId: queued.workId,
+        }),
+      });
+      this.publishMessage(live, result.turnEnd);
+      return result.turnEnd;
+    } finally {
+      release();
     }
   }
 
@@ -423,25 +466,32 @@ export class ProjectChatManager {
         content,
       });
       if (!message) throw new ProjectChatNotFoundError();
-      live.nextSequence++;
-      live.messages.push(message);
       await this.storage.projectChatThreads.touchUpdatedAt(
         live.thread.id,
         live.thread.project_id,
         live.thread.user_id,
       );
       beforeBroadcast?.(message);
-      this.broadcast(live, {
-        JsonPatch: [{
-          op: "add",
-          path: `/messages/${live.messages.length - 1}`,
-          value: { type: "ENTRY", content: message },
-        }],
-      });
+      this.publishMessage(live, message);
       return message;
     } finally {
       release();
     }
+  }
+
+  private publishMessage(live: LiveThread, message: ProjectChatMessage): void {
+    if (live.messages.some((existing) => existing.id === message.id)) return;
+    live.messages.push(message);
+    live.messages.sort((left, right) => left.sequence - right.sequence);
+    live.nextSequence = Math.max(live.nextSequence, message.sequence + 1);
+    const index = live.messages.findIndex((existing) => existing.id === message.id);
+    this.broadcast(live, {
+      JsonPatch: [{
+        op: "add",
+        path: `/messages/${index}`,
+        value: { type: "ENTRY", content: message },
+      }],
+    });
   }
 
   private snapshot(live: LiveThread): ProjectChatSnapshot {
@@ -506,60 +556,11 @@ export class ProjectChatManager {
     }
   }
 
-  private recoverQueuedTurns(messages: ProjectChatMessage[], threadId: string): QueuedTurn[] {
-    const queued = new Map<string, {
-      content: string;
-      sequence: number;
-      startPersisted: boolean;
-      userPersisted: boolean;
-    }>();
-    const terminal = new Set<string>();
-    for (const message of messages) {
-      try {
-        const value = JSON.parse(message.content) as {
-          kind?: unknown;
-          queueId?: unknown;
-          content?: unknown;
-        };
-        if (message.type === "operation" && value.kind === "queued_user" &&
-          typeof value.queueId === "string" && typeof value.content === "string") {
-          queued.set(value.queueId, {
-            content: value.content,
-            sequence: message.sequence,
-            startPersisted: false,
-            userPersisted: false,
-          });
-        } else if (message.type === "operation" && value.kind === "queued_user_started" &&
-          typeof value.queueId === "string") {
-          const item = queued.get(value.queueId);
-          if (item) item.startPersisted = true;
-        } else if (message.type === "turn_end" && typeof value.queueId === "string") {
-          terminal.add(value.queueId);
-        }
-      } catch { /* unrelated operation */ }
-    }
-
-    const claimedUserSequences = new Set<number>();
-    for (const item of queued.values()) {
-      const user = messages.find((message) =>
-        message.sequence > item.sequence &&
-        message.type === "user" &&
-        message.content === item.content &&
-        !claimedUserSequences.has(message.sequence));
-      if (user) {
-        item.userPersisted = true;
-        claimedUserSequences.add(user.sequence);
-      }
-    }
-    return [...queued]
-      .filter(([queueId]) => !terminal.has(queueId))
-      .map(([queueId, item]) => ({
-        content: item.content,
-        queueId,
-        userPersisted: item.userPersisted,
-        startPersisted: item.startPersisted,
-        resolve: () => undefined,
-        reject: (error) => console.error(`[ProjectChatManager] Failed recovering queued turn for ${threadId}:`, error),
-      }));
+  private queueFromWorkItem(work: ProjectChatWorkItem): QueuedTurn {
+    return {
+      workId: work.id,
+      userMessageId: work.user_message_id,
+      content: work.content,
+    };
   }
 }
