@@ -623,7 +623,8 @@ export class ProjectChatManager {
       }
       try {
         const created = await service.createAgentSession({
-          sessionId, idempotencyKey: operation.idempotency_key,
+          sessionId, workerSessionId: payload.workerSessionId ?? sessionId,
+          idempotencyKey: operation.idempotency_key,
           projectId: operation.project_id, userId: operation.user_id,
           target: payload.target, branch: payload.branch ?? null,
           instruction: payload.instruction,

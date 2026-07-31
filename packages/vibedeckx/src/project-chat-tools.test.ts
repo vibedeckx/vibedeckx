@@ -319,8 +319,11 @@ describe("createProjectChatTools", () => {
 
     expect(result).toMatchObject({ ok: true, status: "running", sessionId: expect.stringMatching(/^remote-/) });
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: result.sessionId, target: serverId, branch: "dev",
+      sessionId: result.sessionId,
+      workerSessionId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+      target: serverId, branch: "dev",
     }));
+    expect(createAgentSession.mock.calls.at(-1)?.[0].workerSessionId).not.toBe(result.sessionId);
   });
 
   it("uses explicit session and schedule identities and returns bounded structured failures", async () => {

@@ -198,7 +198,8 @@ describe("createRemoteAgentSession", () => {
     upsert.mockRejectedValueOnce(new Error("frontend crashed before mapping"));
     const input = {
       projectId, userId: "user-1", remoteServerId: agentMode,
-      remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
+      remoteConfig: { remote_path: "/remote/path" }, sessionId: "front-preallocated",
+      workerSessionId: "550e8400-e29b-41d4-a716-446655440000",
       branch: "main", permissionMode: "edit" as const, agentType: "claude-code", model: null,
       instruction: "Implement", idempotencyKey: "stable-delivery-key",
     };
@@ -206,15 +207,16 @@ describe("createRemoteAgentSession", () => {
     await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), input))
       .rejects.toThrow("frontend crashed before mapping");
     await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), input))
-      .resolves.toEqual({ sessionId: "preallocated" });
+      .resolves.toEqual({ sessionId: "front-preallocated" });
 
     expect(upsert).toHaveBeenLastCalledWith(
-      "preallocated", projectId, agentMode, "preallocated", "main", "from_start",
+      "front-preallocated", projectId, agentMode,
+      "550e8400-e29b-41d4-a716-446655440000", "main", "from_start",
     );
     expect(proxyToRemoteAuto.mock.calls.filter((call) => call[2] === "/api/path/agent-sessions/new"))
       .toHaveLength(2);
     expect(proxyToRemoteAuto).toHaveBeenLastCalledWith(
-      agentMode, "POST", "/api/agent-sessions/preallocated/message",
+      agentMode, "POST", "/api/agent-sessions/550e8400-e29b-41d4-a716-446655440000/message",
       { content: "Implement", idempotencyKey: "stable-delivery-key" },
       expect.objectContaining({ reverseConnectManager: undefined }),
     );
@@ -229,6 +231,7 @@ describe("createRemoteAgentSession", () => {
     await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), {
       projectId, userId: "user-1", remoteServerId: agentMode,
       remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
+      workerSessionId: "worker-preallocated",
       branch: "main", permissionMode: "edit", agentType: "claude-code", model: null,
       instruction: "No", idempotencyKey: "key",
     })).rejects.toThrow("Session identity is already in use");

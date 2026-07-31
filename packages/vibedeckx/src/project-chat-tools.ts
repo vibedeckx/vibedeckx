@@ -191,7 +191,7 @@ export type ProjectChatTools = {
 
 export interface ProjectChatMutationServices {
   createAgentSession(input: {
-    sessionId: string; idempotencyKey: string; projectId: string; userId: string;
+    sessionId: string; workerSessionId: string; idempotencyKey: string; projectId: string; userId: string;
     target: string; branch: string | null; instruction: string;
     permissionMode: "plan" | "edit"; agentType: "claude-code" | "codex"; model: string | null;
   }): Promise<{ sessionId: string }>;
@@ -258,6 +258,7 @@ const pendingSessionOperationSchema = z.object({
   phase: z.literal("workspace_selection"),
   requestId: selectorSchema,
   sessionId: selectorSchema,
+  workerSessionId: selectorSchema,
   instruction: instructionSchema,
   permissionMode: z.enum(["plan", "edit"]),
   agentType: z.enum(["claude-code", "codex"]),
@@ -703,7 +704,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const candidates = await workspaceCandidates();
         if (!workspaceId) {
           const operation = await beginOperation("agent_session_create", null, null, {
-            phase: "workspace_selection", requestId: operationId, sessionId: sessionSeed, instruction,
+            phase: "workspace_selection", requestId: operationId, sessionId: sessionSeed,
+            workerSessionId: sessionSeed, instruction,
             permissionMode, agentType, model,
             initialInstructionDelivery: "pending",
             candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
@@ -726,7 +728,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const workspace = await resolveWorkspace(workspaceId);
         const sessionId = canonicalSessionId(workspace, sessionSeed);
         const operation = await beginOperation("agent_session_create", "agent_session", sessionId, {
-          sessionId, workspaceId, target: workspace.target, branch: workspace.branch,
+          sessionId, workerSessionId: sessionSeed, workspaceId, target: workspace.target, branch: workspace.branch,
           instruction, permissionMode, agentType, model,
           initialInstructionDelivery: "pending",
         }, { operationId, idempotencyKey: `session:${sessionId}` });
@@ -734,7 +736,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           await revalidateScope();
           await resolveWorkspace(workspaceId);
           const created = await service.createAgentSession({
-            sessionId, idempotencyKey: operation.idempotency_key, projectId, userId,
+            sessionId, workerSessionId: sessionSeed,
+            idempotencyKey: operation.idempotency_key, projectId, userId,
             target: workspace.target, branch: workspace.branch, instruction,
             permissionMode, agentType, model,
           });
@@ -819,7 +822,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           workspace_id: workspaceId, session_id: sessionId, claim_token: claimToken,
           payload: {
             ...pending.data, version: 1, kind: "agent_session_create", operationId: operation.id,
-            status: "resolving", sessionId, workspaceId, selectedWorkspaceId: workspaceId,
+            status: "resolving", sessionId, workerSessionId: pending.data.workerSessionId,
+            workspaceId, selectedWorkspaceId: workspaceId,
             claimToken, target: workspace.target, branch: workspace.branch,
             initialInstructionDelivery: "pending",
           },
@@ -851,7 +855,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           await revalidateScope();
           await resolveWorkspace(workspaceId);
           const result = await service.createAgentSession({
-            sessionId, idempotencyKey: operation.idempotency_key, projectId, userId,
+            sessionId, workerSessionId: pending.data.workerSessionId,
+            idempotencyKey: operation.idempotency_key, projectId, userId,
             target: workspace.target, branch: workspace.branch,
             instruction: pending.data.instruction,
             permissionMode: pending.data.permissionMode,

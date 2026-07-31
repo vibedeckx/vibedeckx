@@ -103,6 +103,28 @@ describe("session manager model wiring", () => {
     expect(rows.get(sessionId)?.model ?? null).toBeNull();
     expect(calls[0]?.[3] ?? null).toBeNull();
   });
+
+  it("rehydrates and spawns a matching stored-only preallocated session without reinserting it", async () => {
+    const { storage, rows } = makeStorage();
+    const create = vi.spyOn(storage.agentSessions, "create");
+    rows.set("worker-id", {
+      id: "worker-id", project_id: "p1", branch: "", status: "running",
+      permission_mode: "edit", agent_type: "claude-code", model: "opus",
+      title: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+    });
+    const { calls } = stubSpawn();
+    const manager = new AgentSessionManager(storage);
+
+    const sessionId = await manager.createNewSession(
+      "p1", null, "/tmp/p1", false, "edit", "claude-code", false, false,
+      { sessionId: "worker-id", model: "opus" },
+    );
+
+    expect(sessionId).toBe("worker-id");
+    expect(create).not.toHaveBeenCalled();
+    expect(manager.getSession("worker-id")).toMatchObject({ projectId: "p1", model: "opus" });
+    expect(calls).toHaveLength(1);
+  });
 });
 
 const HISTORY = [

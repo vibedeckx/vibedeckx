@@ -577,10 +577,25 @@ export class AgentSessionManager {
     const branchKey = branch ?? "";
     const model = opts.model?.trim() ? opts.model.trim() : null;
 
+    if (this.sessions.has(sessionId)) {
+      throw new Error("Session identity is already active");
+    }
+    const stored = !skipDb && opts.sessionId
+      ? await this.storage.agentSessions.getById(sessionId)
+      : undefined;
+    if (stored && (stored.status !== "running"
+      || stored.project_id !== projectId
+      || stored.branch !== branchKey
+      || stored.permission_mode !== permissionMode
+      || stored.agent_type !== agentType
+      || (stored.model ?? null) !== model)) {
+      throw new Error("Session identity is already in use");
+    }
+
     // Calculate absolute worktree path
     const absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
 
-    if (!skipDb) {
+    if (!skipDb && !stored) {
       await this.storage.agentSessions.create({
         id: sessionId,
         project_id: projectId,
@@ -591,7 +606,7 @@ export class AgentSessionManager {
       });
     }
 
-    if (!skipDb) {
+    if (!skipDb && !stored) {
       await recordTurnSnapshot(this.storage, sessionId, -1, absoluteWorktreePath);
     }
 

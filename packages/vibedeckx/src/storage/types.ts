@@ -280,7 +280,7 @@ export type ProjectChatOperationPayload = {
 } & (
   | { kind: "task_create"; taskId: string; title?: string }
   | { kind: "task_update"; taskId: string; title?: string }
-  | { kind: "agent_session_create"; sessionId: string; workspaceId?: string; target?: string; branch?: string | null; instruction?: string; permissionMode?: string; agentType?: string; model?: string | null; initialInstructionDelivery?: "pending" | "confirmed"; phase?: "workspace_selection"; requestId?: string; candidates?: Array<{ id: string; target: string; branch: string | null }>; selectedWorkspaceId?: string; claimToken?: string }
+  | { kind: "agent_session_create"; sessionId: string; workerSessionId?: string; workspaceId?: string; target?: string; branch?: string | null; instruction?: string; permissionMode?: string; agentType?: string; model?: string | null; initialInstructionDelivery?: "pending" | "confirmed"; phase?: "workspace_selection"; requestId?: string; candidates?: Array<{ id: string; target: string; branch: string | null }>; selectedWorkspaceId?: string; claimToken?: string }
   | { kind: "agent_instruction"; sessionId: string; instruction?: string; target?: "local" | { remoteServerId: string; remoteSessionId: string }; delivery?: "pending" | "confirmed" }
   | { kind: "schedule_run"; scheduleId: string; runId: string; contextConfirmed?: boolean; skipped?: boolean }
   | { kind: "workspace_selection"; requestId: string; candidates: Array<{ id: string; target: string; branch: string | null }> }

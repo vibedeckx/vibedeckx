@@ -34,7 +34,8 @@ const operationPayloadSchema = z.discriminatedUnion("kind", [
   z.object({ version: z.literal(1), kind: z.literal("task_update"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional() }).strict(),
   z.object({
     version: z.literal(1), kind: z.literal("agent_session_create"), operationId: z.string().min(1).max(512),
-    status: operationStatusSchema, sessionId: z.string().min(1).max(512), workspaceId: z.string().min(1).max(512).optional(),
+    status: operationStatusSchema, sessionId: z.string().min(1).max(512), workerSessionId: z.string().min(1).max(512).optional(),
+    workspaceId: z.string().min(1).max(512).optional(),
     target: z.string().min(1).max(512).optional(), branch: z.string().max(512).nullable().optional(), instruction: z.string().max(8_000).optional(),
     permissionMode: z.enum(["plan", "edit"]).optional(), agentType: z.enum(["claude-code", "codex"]).optional(), model: z.string().max(512).nullable().optional(),
     initialInstructionDelivery: z.enum(["pending", "confirmed"]).optional(),

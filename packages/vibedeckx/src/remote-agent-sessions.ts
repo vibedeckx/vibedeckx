@@ -141,7 +141,7 @@ export async function createRemoteProjectChatSessionWithInstruction(
   deps: RemoteAgentSessionDeps,
   params: {
     projectId: string; userId: string; remoteServerId: string;
-    remoteConfig: { remote_path?: string | null }; sessionId: string;
+    remoteConfig: { remote_path?: string | null }; sessionId: string; workerSessionId: string;
     branch: string | null; permissionMode: "plan" | "edit"; agentType: string;
     model: string | null; instruction: string; idempotencyKey: string;
   },
@@ -149,7 +149,7 @@ export async function createRemoteProjectChatSessionWithInstruction(
   let mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);
   if (mapping && (mapping.project_id !== params.projectId
     || mapping.remote_server_id !== params.remoteServerId
-    || mapping.remote_session_id !== params.sessionId
+    || mapping.remote_session_id !== params.workerSessionId
     || (mapping.branch ?? null) !== params.branch)) {
     throw new Error("Session identity is already in use");
   }
@@ -159,7 +159,7 @@ export async function createRemoteProjectChatSessionWithInstruction(
       remoteConfig: params.remoteConfig, branch: params.branch,
       permissionMode: params.permissionMode, agentType: params.agentType,
       model: params.model, userId: params.userId,
-      remoteSessionId: params.sessionId, localSessionId: params.sessionId,
+      remoteSessionId: params.workerSessionId, localSessionId: params.sessionId,
     });
     if (!created.ok) throw new Error("Remote agent session creation failed");
     mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);

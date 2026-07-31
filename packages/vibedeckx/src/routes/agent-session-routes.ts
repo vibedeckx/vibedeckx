@@ -303,22 +303,29 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Path-based: always create a new session (for remote `/new` proxy target)
   fastify.post<{
-    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null };
+  Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null };
   }>("/api/path/agent-sessions/new", async (req, reply) => {
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
     const { path: projectPath, branch, permissionMode, agentType, force, sessionId, crossRemoteMcp, model } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
 
     let pseudoProjectId = `path:${projectPath}`;
-    if (!(await fastify.storage.projects.getById(pseudoProjectId))) {
+    if (!(await fastify.storage.projects.getById(pseudoProjectId, authResult))) {
       const existingByPath = await fastify.storage.projects.getByPath(projectPath);
       if (existingByPath) {
+        if (!(await fastify.storage.projects.getById(existingByPath.id, authResult))) {
+          return reply.code(404).send({ error: "Project not found" });
+        }
         pseudoProjectId = existingByPath.id;
       } else {
         const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
         try {
-          await fastify.storage.projects.create({ id: pseudoProjectId, name, path: projectPath });
+          await fastify.storage.projects.create(
+            { id: pseudoProjectId, name, path: projectPath }, authResult,
+          );
         } catch (err: unknown) {
           if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
         }
@@ -336,19 +343,37 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const requestedPermission = permissionMode || "edit";
           const requestedAgentType = (agentType as AgentType) || "claude-code";
           const requestedModel = model?.trim() ? model.trim() : null;
-          const sameScope = Boolean(stored && active)
-            && stored!.project_id === pseudoProjectId
-            && (stored!.branch || null) === requestedBranch
-            && stored!.permission_mode === requestedPermission
-            && stored!.agent_type === requestedAgentType
-            && (stored!.model ?? null) === requestedModel
-            && active!.projectId === pseudoProjectId
-            && active!.branch === requestedBranch
-            && active!.permissionMode === requestedPermission
-            && active!.agentType === requestedAgentType
-            && (active!.model ?? null) === requestedModel;
-          if (!sameScope) {
+          const storedMatches = !stored || (stored.status === "running"
+            && stored.project_id === pseudoProjectId
+            && (stored.branch || null) === requestedBranch
+            && stored.permission_mode === requestedPermission
+            && stored.agent_type === requestedAgentType
+            && (stored.model ?? null) === requestedModel);
+          const activeMatches = !active || (active.projectId === pseudoProjectId
+            && active.branch === requestedBranch
+            && active.permissionMode === requestedPermission
+            && active.agentType === requestedAgentType
+            && (active.model ?? null) === requestedModel);
+          if (!storedMatches || !activeMatches || (active && !stored)) {
             return reply.code(409).send({ error: "Session identity is already in use" });
+          }
+          if (!active) {
+            const recoveredSessionId = await fastify.agentSessionManager.createNewSession(
+              pseudoProjectId, requestedBranch, projectPath, false,
+              requestedPermission, requestedAgentType, false, force === true,
+              { sessionId, crossRemoteMcp, model: requestedModel },
+            );
+            const recovered = fastify.agentSessionManager.getSession(recoveredSessionId);
+            return reply.code(200).send({
+              session: {
+                id: recoveredSessionId, projectId: pseudoProjectId, branch: requestedBranch,
+                status: recovered?.status || "running", permissionMode: requestedPermission,
+                agentType: requestedAgentType, model: requestedModel,
+                processAlive: recovered
+                  ? fastify.agentSessionManager.getSessionProcessAlive(recoveredSessionId) : false,
+              },
+              messages: fastify.agentSessionManager.getMessages(recoveredSessionId),
+            });
           }
           return reply.code(200).send({
             session: {

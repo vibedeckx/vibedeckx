@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+
+const auth = vi.hoisted(() => ({ userId: "user-1" as string | null }));
+vi.mock("@clerk/fastify", () => ({
+  getAuth: () => ({ userId: auth.userId }),
+  clerkClient: {},
+}));
+
 import agentSessionRoutes from "./agent-session-routes.js";
 
 describe("path agent session preallocated identity", () => {
   let app: FastifyInstance;
   afterEach(async () => { await app?.close(); });
 
-  function makeApp() {
+  function makeApp(authEnabled = false) {
     let row: Record<string, unknown> | undefined;
     let running: Record<string, unknown> | undefined;
     const projects = new Map<string, Record<string, unknown>>();
@@ -16,17 +23,24 @@ describe("path agent session preallocated identity", () => {
       opts: { sessionId?: string; model?: string | null },
     ) => {
       const id = opts.sessionId!;
-      row = { id, project_id: projectId, branch: branch ?? "", permission_mode: permissionMode, agent_type: agentType, model: opts.model ?? null };
+      row = { id, project_id: projectId, branch: branch ?? "", status: "running", permission_mode: permissionMode, agent_type: agentType, model: opts.model ?? null };
       running = { id, projectId, branch, permissionMode, agentType, model: opts.model ?? null, status: "running", projectPath };
       return id;
     });
     app = Fastify();
-    app.decorate("authEnabled", false);
+    app.decorate("authEnabled", authEnabled);
     app.decorate("storage", {
       projects: {
-        getById: async (id: string) => projects.get(id),
+        getById: async (id: string, userId?: string) => {
+          const project = projects.get(id);
+          return project && (!userId || project.user_id === userId) ? project : undefined;
+        },
         getByPath: async (path: string) => [...projects.values()].find((project) => project.path === path),
-        create: async (project: Record<string, unknown>) => { projects.set(project.id as string, project); return project; },
+        create: async (project: Record<string, unknown>, userId?: string) => {
+          const stored = { ...project, user_id: userId ?? "" };
+          projects.set(project.id as string, stored);
+          return stored;
+        },
       },
       agentSessions: { getById: async (id: string) => row?.id === id ? row : undefined },
     });
@@ -39,7 +53,14 @@ describe("path agent session preallocated identity", () => {
     app.decorate("remoteSessionMap", new Map());
     app.decorate("remotePatchCache", {});
     app.decorate("reverseConnectManager", null);
-    return { createNewSession, setStored: (nextRow: Record<string, unknown>, nextRunning: Record<string, unknown>) => { row = nextRow; running = nextRunning; } };
+    return {
+      createNewSession,
+      projects,
+      setStored: (nextRow: Record<string, unknown>, nextRunning?: Record<string, unknown>) => {
+        row = nextRow;
+        running = nextRunning;
+      },
+    };
   }
 
   it("reuses an exact preallocated worker session after the frontend lost its mapping", async () => {
@@ -62,7 +83,7 @@ describe("path agent session preallocated identity", () => {
   it("rejects reuse of a preallocated ID from another path or branch", async () => {
     const { createNewSession, setStored } = makeApp();
     setStored(
-      { id: "preallocated", project_id: "path:/other", branch: "main", permission_mode: "edit", agent_type: "claude-code", model: null },
+      { id: "preallocated", project_id: "path:/other", branch: "main", status: "running", permission_mode: "edit", agent_type: "claude-code", model: null },
       { id: "preallocated", projectId: "path:/other", branch: "main", permissionMode: "edit", agentType: "claude-code", model: null, status: "running", projectPath: "/other" },
     );
     await app.register(agentSessionRoutes);
@@ -74,5 +95,68 @@ describe("path agent session preallocated identity", () => {
 
     expect(response.statusCode).toBe(409);
     expect(createNewSession).not.toHaveBeenCalled();
+  });
+
+  it("requires authentication before creating a path project or session", async () => {
+    auth.userId = null;
+    const { createNewSession, projects } = makeApp(true);
+    await app.register(agentSessionRoutes);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(projects.size).toBe(0);
+    expect(createNewSession).not.toHaveBeenCalled();
+  });
+
+  it("creates path projects for the authenticated owner", async () => {
+    auth.userId = "user-1";
+    const { projects } = makeApp(true);
+    await app.register(agentSessionRoutes);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(projects.get("path:/repo")).toMatchObject({ user_id: "user-1" });
+  });
+
+  it("does not reuse another user's project found by path", async () => {
+    auth.userId = "user-1";
+    const { createNewSession, projects } = makeApp(true);
+    projects.set("foreign", { id: "foreign", path: "/repo", user_id: "user-2" });
+    await app.register(agentSessionRoutes);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(createNewSession).not.toHaveBeenCalled();
+  });
+
+  it("rehydrates a matching stored-only preallocated session", async () => {
+    auth.userId = "user-1";
+    const { createNewSession, setStored } = makeApp(true);
+    setStored({
+      id: "worker-id", project_id: "path:/repo", branch: "dev", status: "running",
+      permission_mode: "edit", agent_type: "claude-code", model: "opus",
+    });
+    await app.register(agentSessionRoutes);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", branch: "dev", sessionId: "worker-id", model: "opus" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createNewSession).toHaveBeenCalledTimes(1);
+    expect(createNewSession.mock.calls[0]?.[8]).toMatchObject({ sessionId: "worker-id" });
   });
 });

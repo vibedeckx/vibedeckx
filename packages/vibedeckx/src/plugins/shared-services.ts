@@ -123,7 +123,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             if (!existing) {
               await agentSessionManager.createNewSession(
                 input.projectId, input.branch, project.path, false, input.permissionMode,
-                input.agentType, true, false, { sessionId: input.sessionId, model: input.model },
+                input.agentType, true, false, { sessionId: input.workerSessionId, model: input.model },
               );
             }
             // Local stdin has no acknowledgement protocol. Retrying a durable
@@ -131,7 +131,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             // after write may duplicate, but transcript persistence is never
             // treated as proof that stdin accepted the command.
             if (!(await agentSessionManager.sendUserMessage(
-              input.sessionId, input.instruction, project.path, input.userId,
+              input.workerSessionId, input.instruction, project.path, input.userId,
             ))) throw new Error("Agent session did not accept its initial instruction");
             return { sessionId: input.sessionId };
           }
@@ -145,7 +145,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             remotePatchCache, agentSessionManager, reverseConnectManager, storage: opts.storage,
           }, {
             projectId: input.projectId, userId: input.userId, remoteServerId: input.target,
-            remoteConfig: association, sessionId: input.sessionId, branch: input.branch,
+            remoteConfig: association, sessionId: input.sessionId,
+            workerSessionId: input.workerSessionId, branch: input.branch,
             permissionMode: input.permissionMode, agentType: input.agentType, model: input.model,
             instruction: input.instruction, idempotencyKey: input.idempotencyKey,
           });
