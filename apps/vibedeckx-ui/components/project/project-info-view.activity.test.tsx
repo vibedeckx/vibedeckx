@@ -90,6 +90,31 @@ afterEach(() => {
 });
 
 describe("ProjectInfoView Project Chat composer", () => {
+  it("keeps Project Chat controls non-actionable until the workbench callback is available", async () => {
+    await act(async () => {
+      root.render(
+        <ProjectInfoView
+          project={project}
+          onOpenAgentSession={vi.fn()}
+          onOpenScheduleRun={vi.fn()}
+          onRunScheduleAgain={vi.fn()}
+          onViewAllTasks={vi.fn()}
+          onProjectUpdated={vi.fn()}
+        />,
+      );
+    });
+
+    const composer = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(composer.disabled).toBe(true);
+    expect(startButton().disabled).toBe(true);
+    expect(composer.getAttribute("aria-describedby")).toBe("project-chat-unavailable-project-1");
+    expect(container.textContent).toContain("Project Chat workbench is not available yet");
+
+    act(() => setInput(composer, "Must not create"));
+    await act(async () => startButton().click());
+    expect(apiMocks.createProjectChatThread).not.toHaveBeenCalled();
+  });
+
   it("uses only the activity aggregate for reads and reuses its create id after a recoverable failure", async () => {
     const onOpenProjectChatThread = vi.fn();
     await act(async () => {

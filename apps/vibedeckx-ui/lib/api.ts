@@ -476,6 +476,7 @@ export type ScheduleRunStatus = "starting" | "running" | "completed" | "failed" 
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
+  project_id: string | null;
   status: ScheduleRunStatus;
   exit_code: number | null;
   /** Only populated by getScheduleRun; list endpoints return null. */
@@ -1967,11 +1968,18 @@ export const api = {
     }
   },
 
-  async runScheduleNow(id: string): Promise<{ runId: string }> {
-    const res = await authFetch(`${getApiBase()}/api/schedules/${id}/run`, { method: "POST" });
+  async runScheduleNow(
+    id: string,
+    request: { requestId: string; runId: string; sourceRunId?: string },
+  ): Promise<{ runId: string }> {
+    const res = await authFetch(`${getApiBase()}/api/schedules/${id}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
     if (!res.ok) {
       const error = await res.json();
-      throw new Error(error.error);
+      throw Object.assign(new Error(error.error), { status: res.status });
     }
     return res.json();
   },

@@ -1034,6 +1034,39 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
       FOREIGN KEY (run_id) REFERENCES scheduled_task_runs(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS scheduled_task_run_requests (
+      request_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL UNIQUE,
+      project_id TEXT NOT NULL,
+      schedule_id TEXT NOT NULL,
+      source_run_id TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_task_run_requests_schedule
+      ON scheduled_task_run_requests(schedule_id, created_at DESC);
+  `);
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS trg_scheduled_task_run_requests_validate_scope;
+    DROP TRIGGER IF EXISTS trg_scheduled_task_run_requests_immutable;
+    CREATE TRIGGER trg_scheduled_task_run_requests_validate_scope
+    BEFORE INSERT ON scheduled_task_run_requests
+    WHEN NOT EXISTS (
+      SELECT 1 FROM scheduled_tasks
+      WHERE id = NEW.schedule_id AND project_id = NEW.project_id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'manual run request scope mismatch');
+    END;
+    CREATE TRIGGER trg_scheduled_task_run_requests_immutable
+    BEFORE UPDATE ON scheduled_task_run_requests
+    BEGIN
+      SELECT RAISE(ABORT, 'manual run request is immutable');
+    END;
   `);
 
   const scheduleClaimCols = db.prepare("PRAGMA table_info(scheduled_task_execution_claims)").all() as { name: string }[];

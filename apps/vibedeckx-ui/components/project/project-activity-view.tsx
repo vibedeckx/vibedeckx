@@ -12,8 +12,8 @@ import { AttentionRequiredCard } from "./attention-required-card";
 
 export interface ProjectActivityViewProps {
   projectId: string;
-  onCreateThread: (message: string) => Promise<ProjectChatThread>;
-  onOpenThread: (threadId: string) => void;
+  onCreateThread?: (message: string) => Promise<ProjectChatThread>;
+  onOpenThread?: (threadId: string) => void;
   onOpenAgentSession: (sessionId: string, target: string, branch: string | null) => void;
   onOpenScheduleRun: (runId: string, scheduleId?: string) => void;
   onRunScheduleAgain: (runId: string) => Promise<void> | void;
@@ -97,11 +97,11 @@ export function ProjectActivityView({
       <ProjectChatCard
         scopeKey={projectId}
         threads={activity.recentThreads}
-        onCreateThread={async (message) => {
+        onCreateThread={onCreateThread ? async (message) => {
           const created = await onCreateThread(message);
           void refetch();
           return created;
-        }}
+        } : undefined}
         onOpenThread={onOpenThread}
       />
 

@@ -399,6 +399,15 @@ export interface ScheduledTaskExecutionClaimsTable {
   created_at: Generated<string>;
 }
 
+export interface ScheduledTaskRunRequestsTable {
+  request_id: string;
+  run_id: string;
+  project_id: string;
+  schedule_id: string;
+  source_run_id: string | null;
+  created_at: Generated<string>;
+}
+
 export interface WorkflowRunsTable {
   id: string;
   project_id: string;
@@ -472,6 +481,7 @@ export interface DB {
   scheduled_tasks: ScheduledTasksTable;
   scheduled_task_runs: ScheduledTaskRunsTable;
   scheduled_task_execution_claims: ScheduledTaskExecutionClaimsTable;
+  scheduled_task_run_requests: ScheduledTaskRunRequestsTable;
   cross_remote_audit: CrossRemoteAuditTable;
   workflow_runs: WorkflowRunsTable;
   turn_snapshots: TurnSnapshotsTable;

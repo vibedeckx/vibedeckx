@@ -234,6 +234,14 @@ describe("ProjectActivityView", () => {
     expect(props.onRunScheduleAgain).toHaveBeenCalledWith("run-2");
   });
 
+  it("disables the composer and recent threads when no Project Chat workbench is wired", () => {
+    render({ onCreateThread: undefined, onOpenThread: undefined });
+
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).disabled).toBe(true);
+    expect(button("Start conversation").disabled).toBe(true);
+    expect(button("Open Project Chat thread: Thread 4").disabled).toBe(true);
+  });
+
   it("prevents duplicate schedule reruns from Attention Required", async () => {
     let resolve!: () => void;
     const onRunScheduleAgain = vi.fn(() => new Promise<void>((done) => { resolve = done; }));

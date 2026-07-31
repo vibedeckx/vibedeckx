@@ -113,8 +113,8 @@ export function ProjectInfoView({
 
           <ProjectActivityView
             projectId={project.id}
-            onCreateThread={createThread}
-            onOpenThread={(threadId) => onOpenProjectChatThread?.(threadId)}
+            onCreateThread={onOpenProjectChatThread ? createThread : undefined}
+            onOpenThread={onOpenProjectChatThread}
             onOpenAgentSession={onOpenAgentSession}
             onOpenScheduleRun={onOpenScheduleRun}
             onRunScheduleAgain={onRunScheduleAgain}

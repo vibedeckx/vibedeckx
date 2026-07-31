@@ -38,6 +38,7 @@ const schedule: Schedule = {
 const run: ScheduleRun = {
   id: "run-1",
   schedule_id: schedule.id,
+  project_id: "project-1",
   status: "failed",
   exit_code: 1,
   output: "RAW FAILURE",

@@ -13,6 +13,7 @@ import {
 } from '@/hooks/use-merge-status';
 import { useTasks } from '@/hooks/use-tasks';
 import { useSchedules } from '@/hooks/use-schedules';
+import { useProjectActivityActions } from '@/hooks/use-project-activity-actions';
 import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
@@ -515,55 +516,29 @@ export default function Home() {
     return project;
   }, [projects, updateProject]);
 
-  const handleProjectActivitySession = useCallback(async (
-    sessionId: string,
-    targetId: string,
-    branch: string | null,
-  ) => {
-    const projectId = currentProject?.id;
-    if (!projectId) return;
-    try {
-      const project = await resolveProjectForTarget(projectId, targetId);
-      if (!project || project.id !== currentProject?.id) return;
+  const projectActivityActions = useProjectActivityActions({
+    projectId: currentProject?.id ?? null,
+    resolveProjectForTarget,
+    getScheduleRun: api.getScheduleRun,
+    getSchedules: api.getSchedules,
+    runScheduleNow: runScheduleNow,
+    selectAgentSession: (branch, sessionId, projectId) => {
       setActiveView("workspace");
-      selectBranchSession(branch, sessionId, project.id);
-    } catch (error) {
-      console.error("Project activity session navigation failed:", error);
-      toast.error("Failed to open agent session");
-    }
-  }, [currentProject?.id, resolveProjectForTarget, selectBranchSession]);
-
-  const handleProjectActivityScheduleRun = useCallback(async (
-    runId: string,
-    knownScheduleId?: string,
-  ) => {
-    const projectId = currentProject?.id;
-    if (!projectId) return;
-    try {
-      const scheduleId = knownScheduleId ?? (await api.getScheduleRun(runId)).schedule_id;
-      if (currentProject?.id !== projectId) return;
+      selectBranchSession(branch, sessionId, projectId);
+    },
+    openScheduleRun: (scheduleId, runId) => {
       setSelectedScheduleId(scheduleId);
       setSelectedScheduleRunId(runId);
       setActiveView("schedules");
-    } catch (error) {
-      console.error("Project activity schedule navigation failed:", error);
-      toast.error("Failed to open schedule run");
-    }
-  }, [currentProject?.id]);
-
-  const handleRunScheduleAgain = useCallback(async (runId: string) => {
-    const projectId = currentProject?.id;
-    if (!projectId) return;
-    try {
-      const run = await api.getScheduleRun(runId);
-      if (currentProject?.id !== projectId) return;
-      await runScheduleNow(run.schedule_id);
-      toast.success("Schedule run started");
-    } catch (error) {
-      console.error("Failed to rerun schedule from project activity:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to start schedule run");
-    }
-  }, [currentProject?.id, runScheduleNow]);
+    },
+    onRerunStarted: () => toast.success("Schedule run started"),
+    onError: (kind, error) => {
+      console.error(`Project activity ${kind} failed:`, error);
+      if (kind === "session-navigation") toast.error("Failed to open agent session");
+      else if (kind === "schedule-navigation") toast.error("Failed to open schedule run");
+      else toast.error(error instanceof Error ? error.message : "Failed to start schedule run");
+    },
+  });
 
   const handleScheduleRunOpened = useCallback((runId: string) => {
     setSelectedScheduleRunId((current) => current === runId ? null : current);
@@ -971,12 +946,12 @@ Please proceed step by step and let me know if there are any issues or conflicts
               <ProjectInfoView
                 project={currentProject}
                 onOpenAgentSession={(sessionId, target, branch) => {
-                  void handleProjectActivitySession(sessionId, target, branch);
+                  void projectActivityActions.openAgentSession(sessionId, target, branch);
                 }}
                 onOpenScheduleRun={(runId, scheduleId) => {
-                  void handleProjectActivityScheduleRun(runId, scheduleId);
+                  void projectActivityActions.openScheduleRun(runId, scheduleId);
                 }}
-                onRunScheduleAgain={handleRunScheduleAgain}
+                onRunScheduleAgain={projectActivityActions.runScheduleAgain}
                 onViewAllTasks={() => setActiveView("tasks")}
                 onProjectUpdated={updateProject}
               />

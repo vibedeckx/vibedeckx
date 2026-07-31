@@ -36,6 +36,34 @@ describe("scheduledTasks storage", () => {
       cwd_mode: "branch",
     });
 
+  it("durably claims a manual rerun identity and rejects payload reuse", async () => {
+    await createTask("schedule-a");
+    await createTask("schedule-b");
+
+    const claim = {
+      requestId: "request-1",
+      runId: "manual-run-1",
+      projectId,
+      scheduleId: "schedule-a",
+      sourceRunId: "source-run-1",
+    };
+    await expect(storage.scheduledTaskRuns.claimManualRequest(claim)).resolves.toBe("claimed");
+    await expect(storage.scheduledTaskRuns.claimManualRequest(claim)).resolves.toBe("existing");
+    await expect(Promise.all([
+      storage.scheduledTaskRuns.claimManualRequest({ ...claim, requestId: "request-2", runId: "manual-run-2" }),
+      storage.scheduledTaskRuns.claimManualRequest({ ...claim, requestId: "request-2", runId: "manual-run-2" }),
+    ])).resolves.toEqual(expect.arrayContaining(["claimed", "existing"]));
+    await expect(storage.scheduledTaskRuns.claimManualRequest({ ...claim, scheduleId: "schedule-b" }))
+      .resolves.toBe("conflict");
+    await expect(storage.scheduledTaskRuns.claimManualRequest({ ...claim, sourceRunId: "source-run-2" }))
+      .resolves.toBe("conflict");
+
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    await expect(storage.scheduledTaskRuns.claimManualRequest(claim)).resolves.toBe("existing");
+    await expect(storage.scheduledTaskRuns.getManualRequest("request-1")).resolves.toMatchObject(claim);
+  });
+
   it("binds an empty legacy execution fingerprint exactly once", async () => {
     await createTask("legacy-fingerprint");
     await storage.scheduledTaskRuns.claimStart({ id: "legacy-run", scheduleId: "legacy-fingerprint",

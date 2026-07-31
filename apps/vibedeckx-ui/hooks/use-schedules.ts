@@ -96,8 +96,13 @@ export function useSchedules(projectId: string | null) {
   );
 
   const runNow = useCallback(
-    async (id: string) => {
-      const result = await api.runScheduleNow(id);
+    async (id: string, request?: { requestId: string; runId: string; sourceRunId?: string }) => {
+      let resolvedRequest = request;
+      if (!resolvedRequest) {
+        const generatedId = crypto.randomUUID();
+        resolvedRequest = { requestId: generatedId, runId: generatedId };
+      }
+      const result = await api.runScheduleNow(id, resolvedRequest);
       await refetch();
       return result;
     },

@@ -10,8 +10,8 @@ import { Textarea } from "@/components/ui/textarea";
 interface ProjectChatCardProps {
   scopeKey: string;
   threads: ProjectChatThread[];
-  onCreateThread: (message: string) => Promise<ProjectChatThread>;
-  onOpenThread: (threadId: string) => void;
+  onCreateThread?: (message: string) => Promise<ProjectChatThread>;
+  onOpenThread?: (threadId: string) => void;
 }
 
 function threadTitle(thread: ProjectChatThread): string {
@@ -19,6 +19,8 @@ function threadTitle(thread: ProjectChatThread): string {
 }
 
 export function ProjectChatCard({ scopeKey, threads, onCreateThread, onOpenThread }: ProjectChatCardProps) {
+  const available = Boolean(onCreateThread && onOpenThread);
+  const unavailableDescriptionId = `project-chat-unavailable-${scopeKey}`;
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +44,7 @@ export function ProjectChatCard({ scopeKey, threads, onCreateThread, onOpenThrea
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = message.trim();
-    if (!trimmed || submittingRef.current) return;
+    if (!available || !onCreateThread || !onOpenThread || !trimmed || submittingRef.current) return;
     submittingRef.current = true;
     const scopeGeneration = scopeGenerationRef.current;
     setSubmitting(true);
@@ -83,7 +85,8 @@ export function ProjectChatCard({ scopeKey, threads, onCreateThread, onOpenThrea
               aria-label="Message for a new Project Chat thread"
               rows={2}
               className="min-h-20 resize-none"
-              disabled={submitting}
+              disabled={!available || submitting}
+              aria-describedby={!available ? unavailableDescriptionId : undefined}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
@@ -91,7 +94,7 @@ export function ProjectChatCard({ scopeKey, threads, onCreateThread, onOpenThrea
                 }
               }}
             />
-            <Button type="submit" disabled={submitting || message.trim().length === 0} className="sm:mb-0.5">
+            <Button type="submit" disabled={!available || submitting || message.trim().length === 0} className="sm:mb-0.5">
               <Send className="size-4" aria-hidden="true" />
               {submitting ? "Starting…" : "Start conversation"}
             </Button>
@@ -99,6 +102,11 @@ export function ProjectChatCard({ scopeKey, threads, onCreateThread, onOpenThrea
           {error ? (
             <p role="alert" className="text-sm text-destructive">
               {error}. Your message is still here; try again.
+            </p>
+          ) : null}
+          {!available ? (
+            <p id={unavailableDescriptionId} className="text-sm text-muted-foreground">
+              Project Chat workbench is not available yet.
             </p>
           ) : null}
         </form>
@@ -121,7 +129,9 @@ export function ProjectChatCard({ scopeKey, threads, onCreateThread, onOpenThrea
                     size="sm"
                     data-testid="recent-thread"
                     aria-label={`Open Project Chat thread: ${title}`}
-                    onClick={() => onOpenThread(thread.id)}
+                    aria-disabled={!available}
+                    disabled={!available}
+                    onClick={onOpenThread ? () => onOpenThread(thread.id) : undefined}
                     className="max-w-full"
                   >
                     <span className="max-w-52 truncate">{title}</span>

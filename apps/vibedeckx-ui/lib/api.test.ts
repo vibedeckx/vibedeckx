@@ -181,6 +181,39 @@ describe("Project Chat create", () => {
   });
 });
 
+describe("manual schedule run", () => {
+  it("sends the stable request, run, and source identities", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ runId: "run-1" }),
+    } as Response);
+    global.fetch = fetchMock;
+    try {
+      await api.runScheduleNow("schedule-1", {
+        requestId: "request-1", runId: "run-1", sourceRunId: "source-1",
+      });
+      expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+        requestId: "request-1", runId: "run-1", sourceRunId: "source-1",
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it("preserves a conflict status so the retry identity can be rotated", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 409, json: async () => ({ error: "payload mismatch" }),
+    } as Response);
+    try {
+      await expect(api.runScheduleNow("schedule-1", { requestId: "request-1", runId: "run-1" }))
+        .rejects.toMatchObject({ message: "payload mismatch", status: 409 });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
 describe("setMergeTarget", () => {
   it("PUTs an explicit target and returns true when the response is ok", async () => {
     const originalFetch = global.fetch;

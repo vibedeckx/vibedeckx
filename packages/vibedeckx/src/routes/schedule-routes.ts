@@ -25,6 +25,16 @@ interface ScheduleBody {
   target?: string;
 }
 
+interface ManualRunBody {
+  requestId?: string;
+  runId?: string;
+  sourceRunId?: string;
+}
+
+function validRequestId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 200 && value.trim() === value;
+}
+
 /** Cross-field validation shared by create and update. Returns an error string or null. */
 function validateResolved(b: { cron_expr: string; timezone: string; run_type: string; content: string; cwd_mode: string; directory: string | null; timeout_seconds: number }): string | null {
   if (!RUN_TYPES.includes(b.run_type as ScheduledTaskRunType)) return `run_type must be one of: ${RUN_TYPES.join(", ")}`;
@@ -201,7 +211,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  fastify.post<{ Params: { id: string } }>(
+  fastify.post<{ Params: { id: string }; Body: ManualRunBody }>(
     "/api/schedules/:id/run",
     async (req, reply) => {
       const userId = requireAuth(req, reply);
@@ -209,8 +219,44 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const existing = await getAuthorizedSchedule(req.params.id, userId ?? undefined, reply);
       if (!existing) return;
 
-      const result = await fastify.scheduler.runNow(req.params.id);
-      if ("error" in result) return reply.code(400).send({ error: result.error });
+      const { requestId, runId, sourceRunId } = req.body ?? {};
+      if (!validRequestId(requestId) || !validRequestId(runId)
+        || (sourceRunId !== undefined && !validRequestId(sourceRunId))) {
+        return reply.code(400).send({ error: "requestId and runId are required valid identifiers" });
+      }
+      const priorRequest = await fastify.storage.scheduledTaskRuns.getManualRequest(requestId);
+      if (priorRequest && (priorRequest.runId !== runId
+        || priorRequest.projectId !== existing.project_id
+        || priorRequest.scheduleId !== existing.id
+        || priorRequest.sourceRunId !== (sourceRunId ?? null))) {
+        return reply.code(409).send({ error: "Manual run request identity payload mismatch" });
+      }
+      if (!priorRequest && sourceRunId !== undefined) {
+        const source = await fastify.storage.scheduledTaskRuns.getById(sourceRunId);
+        if (!source || source.schedule_id !== existing.id || source.project_id !== existing.project_id) {
+          return reply.code(409).send({ error: "Source run does not belong to this schedule" });
+        }
+      }
+      const occupiedRun = await fastify.storage.scheduledTaskRuns.getById(runId);
+      if (occupiedRun && occupiedRun.schedule_id !== existing.id) {
+        return reply.code(409).send({ error: "Run identity is already in use" });
+      }
+      const requestClaim = await fastify.storage.scheduledTaskRuns.claimManualRequest({
+        requestId,
+        runId,
+        projectId: existing.project_id,
+        scheduleId: existing.id,
+        sourceRunId: sourceRunId ?? null,
+      });
+      if (requestClaim === "conflict") {
+        return reply.code(409).send({ error: "Manual run request identity payload mismatch" });
+      }
+
+      const result = await fastify.scheduler.runNow(req.params.id, runId);
+      if ("error" in result) {
+        const status = result.error === "Run identity is already in use" ? 409 : 400;
+        return reply.code(status).send({ error: result.error });
+      }
       if (result.skipped) return reply.code(409).send({ error: "A run is already in progress" });
       return reply.code(200).send({ runId: result.runId });
     }

@@ -150,6 +150,39 @@ export const createScheduledRepos = (
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       return mapRun(row);
     },
+    claimManualRequest: async ({ requestId, runId, projectId, scheduleId, sourceRunId = null }) => kdb.transaction().execute(async (trx) => {
+      const inserted = await trx.insertInto("scheduled_task_run_requests").values({
+        request_id: requestId,
+        run_id: runId,
+        project_id: projectId,
+        schedule_id: scheduleId,
+        source_run_id: sourceRunId,
+      }).onConflict((oc) => oc.doNothing()).executeTakeFirst();
+      const row = await trx.selectFrom("scheduled_task_run_requests")
+        .selectAll().where("request_id", "=", requestId).executeTakeFirst();
+      if (!row) return "conflict" as const;
+      const matches = row.run_id === runId
+        && row.project_id === projectId
+        && row.schedule_id === scheduleId
+        && row.source_run_id === sourceRunId;
+      if (!matches) return "conflict" as const;
+      const duplicateRunId = await trx.selectFrom("scheduled_task_run_requests")
+        .select("request_id").where("run_id", "=", runId).executeTakeFirst();
+      if (duplicateRunId?.request_id !== requestId) return "conflict" as const;
+      return (inserted.numInsertedOrUpdatedRows ?? 0n) === 1n ? "claimed" as const : "existing" as const;
+    }),
+    getManualRequest: async (requestId) => {
+      const row = await kdb.selectFrom("scheduled_task_run_requests")
+        .selectAll().where("request_id", "=", requestId).executeTakeFirst();
+      return row ? {
+        requestId: row.request_id,
+        runId: row.run_id,
+        projectId: row.project_id,
+        scheduleId: row.schedule_id,
+        sourceRunId: row.source_run_id,
+        createdAt: row.created_at,
+      } : undefined;
+    },
     claimStart: async ({ id, scheduleId, processId, ownerToken, effectFingerprint, leaseMs = 30_000 }) => kdb.transaction().execute(async (trx) => {
       const nowMs = Date.now();
       const existing = await trx.selectFrom("scheduled_task_runs")

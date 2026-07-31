@@ -157,6 +157,15 @@ export interface ScheduledTaskRun {
   finished_at: string | null;
 }
 
+export interface ScheduledTaskRunRequest {
+  requestId: string;
+  runId: string;
+  projectId: string;
+  scheduleId: string;
+  sourceRunId: string | null;
+  createdAt: string;
+}
+
 /** Bounded Project Overview projection. Full report/output stay on getById(). */
 export interface ScheduledTaskRunActivity {
   id: string;
@@ -715,6 +724,8 @@ export interface Storage {
     claimStart: (opts: { id: string; scheduleId: string; processId: string; ownerToken: string; effectFingerprint: string; leaseMs?: number }) => Promise<
       "claimed" | "retry" | "existing" | "occupied" | "conflict"
     >;
+    claimManualRequest: (opts: { requestId: string; runId: string; projectId: string; scheduleId: string; sourceRunId?: string | null }) => Promise<"claimed" | "existing" | "conflict">;
+    getManualRequest: (requestId: string) => Promise<ScheduledTaskRunRequest | undefined>;
     heartbeat: (id: string, ownerToken: string, leaseMs?: number) => Promise<boolean>;
     markRunning: (id: string, claimedProcessId: string, processId?: string, ownerToken?: string) => Promise<boolean>;
     /** Insert a terminal pre-start failure only if the run identity is still unused. */
