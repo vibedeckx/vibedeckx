@@ -112,6 +112,7 @@ export interface AgentSessionsTable {
   model: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+  activity_at: Generated<number>;
   last_user_message_at: number | null;
   last_completed_at: number | null;
   favorited_at: number | null;
@@ -333,7 +334,7 @@ export interface SessionSearchCacheTable {
   last_completed_at: number | null;
   generation: number;
   deleted_at: number | null;
-  written_at: number | null;  // last out-of-band write-through; null = snapshot-owned
+  written_at: number | null;  // monotonic live-write/snapshot watermark; null = legacy unwatermarked row
 }
 
 export interface WorkspaceSearchCacheTable {

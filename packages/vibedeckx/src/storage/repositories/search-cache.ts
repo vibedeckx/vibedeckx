@@ -302,7 +302,9 @@ export const createSearchCacheRepos = (
     // by both the upsert (a stale snapshot must not resurrect a just-deleted
     // row or clobber a fresh rename) and the deletion sweep (it must not kill
     // a just-created row). The next snapshot — collected after the
-    // write-through — confirms or deletes them normally.
+    // write-through — confirms or deletes them normally. Every applied
+    // snapshot advances written_at too, so an older outbound ACK arriving
+    // after reconciliation cannot overwrite or revive the snapshot result.
     applyCatalogSnapshot: async (projectId, targetId, snapshot, collectedAt) => {
       const now = Date.now();
       const snapshotCollectedAt = collectedAt ?? now;
@@ -331,7 +333,7 @@ export const createSearchCacheRepos = (
               last_user_message_at: s.lastUserMessageAt ?? null,
               last_completed_at: s.lastCompletedAt ?? null,
               generation, deleted_at: null,
-              written_at: null,
+              written_at: snapshotCollectedAt,
             })
             .onConflict((oc) => oc.column("local_session_id").doUpdateSet({
               project_id: projectId, target_id: targetId, branch: toDbBranch(s.branch),
@@ -340,7 +342,7 @@ export const createSearchCacheRepos = (
               agent_type: s.agentType ?? null, model: s.model ?? null,
               last_user_message_at: s.lastUserMessageAt ?? null,
               last_completed_at: s.lastCompletedAt ?? null,
-              generation, deleted_at: null, written_at: null,
+              generation, deleted_at: null, written_at: snapshotCollectedAt,
             }).where((eb) => eb.or([
               eb("session_search_cache.written_at", "is", null),
               eb("session_search_cache.written_at", "<", snapshotCollectedAt),
@@ -353,7 +355,7 @@ export const createSearchCacheRepos = (
           .where("generation", "<", generation).where("deleted_at", "is", null)
           .execute();
         await trx.updateTable("session_search_cache")
-          .set({ deleted_at: now })
+          .set({ deleted_at: now, written_at: snapshotCollectedAt })
           .where("project_id", "=", projectId).where("target_id", "=", targetId)
           .where("generation", "<", generation).where("deleted_at", "is", null)
           .where((eb) => eb.or([

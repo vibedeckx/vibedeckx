@@ -43,12 +43,8 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   favorited_at: row.favorited_at,
 });
 
-const activityAt = (table = "agent_sessions") => sql<number>`max(
-  coalesce(${sql.ref(`${table}.last_user_message_at`)}, 0),
-  coalesce(${sql.ref(`${table}.last_completed_at`)}, 0),
-  coalesce(cast((julianday(${sql.ref(`${table}.updated_at`)}) - 2440587.5) * 86400000 as integer), 0),
-  coalesce(cast((julianday(${sql.ref(`${table}.created_at`)}) - 2440587.5) * 86400000 as integer), 0)
-)`;
+const nowActivityAt = () => sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`;
+const touchActivityAt = () => sql<number>`max(activity_at, ${nowActivityAt()})`;
 
 export const createAgentSessionRepos = (
   kdb: Kysely<DB>,
@@ -72,6 +68,7 @@ export const createAgentSessionRepos = (
         model: model ?? null,
         created_at: h.nowMs(),
         updated_at: h.nowMs(),
+        activity_at: nowActivityAt(),
       }).execute();
       const row = await kdb.selectFrom("agent_sessions").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       return mapAgentSession(row);
@@ -108,8 +105,8 @@ export const createAgentSessionRepos = (
     listRecentByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
-        .orderBy(activityAt(), "desc")
-        .orderBy(h.rowIdDesc())
+        .orderBy("activity_at", "desc")
+        .orderBy("id", "desc")
         .limit(limit)
         .execute();
       return rows.map(mapAgentSession);
@@ -129,8 +126,8 @@ export const createAgentSessionRepos = (
             ]),
           ]),
         ]))
-        .orderBy(activityAt(), "desc")
-        .orderBy(h.rowIdDesc())
+        .orderBy("activity_at", "desc")
+        .orderBy("id", "desc")
         .limit(limit)
         .execute();
       return rows.map(mapAgentSession);
@@ -197,7 +194,7 @@ export const createAgentSessionRepos = (
 
     updateStatus: async (id, status) => {
       await kdb.updateTable("agent_sessions")
-        .set({ status, updated_at: h.nowMs() })
+        .set({ status, updated_at: h.nowMs(), activity_at: touchActivityAt() })
         .where("id", "=", id)
         .execute();
     },
@@ -208,28 +205,28 @@ export const createAgentSessionRepos = (
 
     updatePermissionMode: async (id, mode) => {
       await kdb.updateTable("agent_sessions")
-        .set({ permission_mode: mode, updated_at: h.nowMs() })
+        .set({ permission_mode: mode, updated_at: h.nowMs(), activity_at: touchActivityAt() })
         .where("id", "=", id)
         .execute();
     },
 
     updateAgentType: async (id, agent_type) => {
       await kdb.updateTable("agent_sessions")
-        .set({ agent_type, updated_at: h.nowMs() })
+        .set({ agent_type, updated_at: h.nowMs(), activity_at: touchActivityAt() })
         .where("id", "=", id)
         .execute();
     },
 
     updateModel: async (id, model) => {
       await kdb.updateTable("agent_sessions")
-        .set({ model, updated_at: h.nowMs() })
+        .set({ model, updated_at: h.nowMs(), activity_at: touchActivityAt() })
         .where("id", "=", id)
         .execute();
     },
 
     updateTitle: async (id, title) => {
       await kdb.updateTable("agent_sessions")
-        .set({ title, updated_at: h.nowMs() })
+        .set({ title, updated_at: h.nowMs(), activity_at: touchActivityAt() })
         .where("id", "=", id)
         .execute();
     },
@@ -245,15 +242,21 @@ export const createAgentSessionRepos = (
     },
 
     touchUpdatedAt: async (id) => {
-      await kdb.updateTable("agent_sessions").set({ updated_at: h.nowMs() }).where("id", "=", id).execute();
+      await kdb.updateTable("agent_sessions")
+        .set({ updated_at: h.nowMs(), activity_at: touchActivityAt() })
+        .where("id", "=", id).execute();
     },
 
     markUserMessage: async (id, timestampMs) => {
-      await kdb.updateTable("agent_sessions").set({ last_user_message_at: timestampMs }).where("id", "=", id).execute();
+      await kdb.updateTable("agent_sessions")
+        .set({ last_user_message_at: timestampMs, activity_at: sql<number>`max(activity_at, ${timestampMs})` })
+        .where("id", "=", id).execute();
     },
 
     markCompleted: async (id, timestampMs) => {
-      await kdb.updateTable("agent_sessions").set({ last_completed_at: timestampMs }).where("id", "=", id).execute();
+      await kdb.updateTable("agent_sessions")
+        .set({ last_completed_at: timestampMs, activity_at: sql<number>`max(activity_at, ${timestampMs})` })
+        .where("id", "=", id).execute();
     },
 
     delete: async (id) => {

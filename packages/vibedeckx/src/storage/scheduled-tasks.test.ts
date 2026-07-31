@@ -224,18 +224,18 @@ describe("scheduledTasks storage", () => {
         FROM (
           SELECT run.id, run.schedule_id, run.status, run.exit_code, run.process_id,
                  run.started_at, run.finished_at,
-                 run.rowid AS sortRowId,
                  CASE WHEN run.report IS NULL THEN NULL ELSE substr(run.report, 1, 500) END AS reportPreview
           FROM scheduled_task_runs AS run
           WHERE run.project_id = ?
-          ORDER BY run.started_at DESC, run.rowid DESC
+          ORDER BY run.started_at DESC, run.id DESC
           LIMIT ?
         ) AS candidate
         INNER JOIN scheduled_tasks AS schedule ON schedule.id = candidate.schedule_id
-        ORDER BY candidate.started_at DESC, candidate.sortRowId DESC
+        ORDER BY candidate.started_at DESC, candidate.id DESC
       `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
       expect(recentActivityPlan).toContain("idx_scheduled_task_runs_project_started_id");
       expect(recentActivityPlan).not.toMatch(/\bSCAN schedule\b/);
+      expect(recentActivityPlan).not.toContain("USE TEMP B-TREE FOR ORDER BY");
 
       const attentionPlan = (db.prepare(`
         EXPLAIN QUERY PLAN
@@ -243,18 +243,18 @@ describe("scheduledTasks storage", () => {
         FROM (
           SELECT run.id, run.schedule_id, run.status, run.exit_code, run.process_id,
                  run.started_at, run.finished_at,
-                 run.rowid AS sortRowId,
                  CASE WHEN run.report IS NULL THEN NULL ELSE substr(run.report, 1, 500) END AS reportPreview
           FROM scheduled_task_runs AS run
           WHERE run.project_id = ? AND run.status IN ('failed', 'timeout')
-          ORDER BY coalesce(run.finished_at, run.started_at) DESC, run.rowid DESC
+          ORDER BY coalesce(run.finished_at, run.started_at) DESC, run.id DESC
           LIMIT ?
         ) AS candidate
         INNER JOIN scheduled_tasks AS schedule ON schedule.id = candidate.schedule_id
-        ORDER BY coalesce(candidate.finished_at, candidate.started_at) DESC, candidate.sortRowId DESC
+        ORDER BY coalesce(candidate.finished_at, candidate.started_at) DESC, candidate.id DESC
       `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
       expect(attentionPlan).toContain("idx_scheduled_task_runs_project_attention_finished_id");
       expect(attentionPlan).not.toMatch(/\bSCAN schedule\b/);
+      expect(attentionPlan).not.toContain("USE TEMP B-TREE FOR LAST TERM OF ORDER BY");
 
       const countPlan = (db.prepare(`
         EXPLAIN QUERY PLAN

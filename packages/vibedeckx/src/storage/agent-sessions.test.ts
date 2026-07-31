@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
 
@@ -48,6 +49,71 @@ describe("agentSessions/remoteSessionMappings storage", () => {
   });
 
   describe("agentSessions reads", () => {
+    it("persists semantic activity and uses its project index for bounded recents", async () => {
+      await storage.agentSessions.create({ id: "activity-a", project_id: "p1", branch: "a" });
+      await storage.agentSessions.create({ id: "activity-z", project_id: "p1", branch: "z" });
+      const futureActivity = Date.now() + 60_000;
+      await storage.agentSessions.markUserMessage("activity-a", futureActivity);
+      await storage.agentSessions.markCompleted("activity-a", futureActivity - 1_000);
+
+      const raw = new Database(path.join(dir, "test.sqlite"));
+      try {
+        const rows = raw.prepare(
+          "SELECT id, activity_at FROM agent_sessions WHERE id IN ('activity-a', 'activity-z') ORDER BY id",
+        ).all() as Array<{ id: string; activity_at: number }>;
+        expect(rows[0]).toEqual({ id: "activity-a", activity_at: futureActivity });
+        expect(rows[1].activity_at).toBeGreaterThan(0);
+
+        raw.exec("ANALYZE");
+        const indexes = new Set((raw.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index'",
+        ).all() as Array<{ name: string }>).map((row) => row.name));
+        expect(indexes.has("idx_agent_sessions_project_activity_id")).toBe(true);
+        const plan = (raw.prepare(`
+          EXPLAIN QUERY PLAN
+          SELECT * FROM agent_sessions
+          WHERE project_id = ?
+          ORDER BY activity_at DESC, id DESC
+          LIMIT ?
+        `).all("p1", 8) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+        expect(plan).toContain("idx_agent_sessions_project_activity_id");
+        expect(plan).not.toContain("USE TEMP B-TREE FOR ORDER BY");
+      } finally {
+        raw.close();
+      }
+
+      expect((await storage.agentSessions.listRecentByProject("p1", 2)).map((row) => row.id))
+        .toEqual(["activity-a", "activity-z"]);
+    });
+
+    it("backfills activity_at from the semantic maximum when upgrading a legacy database", async () => {
+      await storage.agentSessions.create({ id: "legacy-activity", project_id: "p1", branch: "legacy" });
+      await storage.close();
+      const dbPath = path.join(dir, "test.sqlite");
+      const legacy = new Database(dbPath);
+      try {
+        legacy.prepare(`UPDATE agent_sessions
+          SET created_at = ?, updated_at = ?, last_user_message_at = ?, last_completed_at = ?
+          WHERE id = ?`).run(
+          "2026-01-01 00:00:00", "2026-01-02 00:00:00", 2_000, 3_000, "legacy-activity",
+        );
+        legacy.exec("DROP INDEX idx_agent_sessions_project_activity_id");
+        legacy.exec("ALTER TABLE agent_sessions DROP COLUMN activity_at");
+      } finally {
+        legacy.close();
+      }
+
+      storage = await createSqliteStorage(dbPath);
+      const check = new Database(dbPath, { readonly: true });
+      try {
+        const row = check.prepare("SELECT activity_at FROM agent_sessions WHERE id = ?")
+          .get("legacy-activity") as { activity_at: number };
+        expect(row.activity_at).toBe(Date.parse("2026-01-02T00:00:00.000Z"));
+      } finally {
+        check.close();
+      }
+    });
+
     it("getById returns undefined for a nonexistent id", async () => {
       expect(await storage.agentSessions.getById("nonexistent")).toBeUndefined();
     });

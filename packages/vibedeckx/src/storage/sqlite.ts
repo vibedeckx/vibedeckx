@@ -213,6 +213,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       -- existing seconds-only rows, which correctly sort earlier).
       created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      activity_at INTEGER DEFAULT (cast((julianday('now') - 2440587.5) * 86400000 as integer)),
       -- Branch activity tracking (epoch ms). NULL = event has not occurred.
       -- Drives the workspace-status derivation; see plans/branch-activity-refactor.md.
       last_user_message_at INTEGER DEFAULT NULL,
@@ -658,6 +659,20 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN model TEXT DEFAULT NULL");
   }
 
+  // Persist the semantic max used by Project Activity so its bounded lists
+  // can use an index instead of sorting every session in a project. Legacy
+  // rows are backfilled from all four historical activity sources.
+  const sessionInfoV8 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionInfoV8.some(col => col.name === "activity_at")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN activity_at INTEGER");
+    db.exec(`UPDATE agent_sessions SET activity_at = max(
+      coalesce(last_user_message_at, 0),
+      coalesce(last_completed_at, 0),
+      coalesce(cast((julianday(updated_at) - 2440587.5) * 86400000 as integer), 0),
+      coalesce(cast((julianday(created_at) - 2440587.5) * 86400000 as integer), 0)
+    )`);
+  }
+
   // Ensure agent_sessions indexes exist. Safe to run here because either:
   //  - the fresh-DDL path created the table with all columns, or
   //  - the Task 1.1 rebuild migration above recreated the table with updated_at.
@@ -668,6 +683,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       ON agent_sessions(project_id, branch);
     CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated_at
       ON agent_sessions(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_activity_id
+      ON agent_sessions(project_id, activity_at DESC, id DESC);
   `);
 
   // Migration: add pid column to executor_processes

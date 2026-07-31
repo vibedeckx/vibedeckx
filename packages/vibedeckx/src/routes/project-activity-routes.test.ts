@@ -120,7 +120,7 @@ describe("project activity route", () => {
     const body = response.json();
     expect(body.recentThreads.map((item: { id: string }) => item.id)).toEqual(["thread-z-new", "thread-a-old"]);
     expect(body.recentAgentSessions.map((item: { id: string }) => item.id)).toEqual(["newest", "older"]);
-    expect(body.recentScheduleRuns.map((item: { id: string }) => item.id)).toEqual(["run-new", "run-old"]);
+    expect(body.recentScheduleRuns.map((item: { id: string }) => item.id)).toEqual(["run-old", "run-new"]);
     expect(body.priorityTasks.map((item: { id: string }) => item.id)).toEqual([
       "task-in-progress", "task-urgent-a", "task-urgent-b", "task-high-a", "task-high-b",
     ]);

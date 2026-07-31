@@ -243,12 +243,11 @@ export const createScheduledRepos = (
         .select([
           "run.id", "run.schedule_id", "run.status", "run.exit_code", "run.process_id",
           "run.started_at", "run.finished_at",
-          sql<number>`run.rowid`.as("sortRowId"),
           sql<string | null>`case when run.report is null then null else substr(run.report, 1, 500) end`.as("reportPreview"),
         ])
         .where("run.project_id", "=", projectId)
         .orderBy("run.started_at", "desc")
-        .orderBy(h.rowIdDesc("run"))
+        .orderBy("run.id", "desc")
         .limit(limit)
         .as("candidate");
       const rows = await kdb.selectFrom(candidates)
@@ -259,7 +258,7 @@ export const createScheduledRepos = (
           "schedule.name as scheduleName", "schedule.branch", "schedule.target",
         ])
         .orderBy("candidate.started_at", "desc")
-        .orderBy("candidate.sortRowId", "desc")
+        .orderBy("candidate.id", "desc")
         .execute();
       return rows.map((row) => ({
         ...row,
@@ -272,14 +271,13 @@ export const createScheduledRepos = (
         .select([
           "run.id", "run.schedule_id", "run.status", "run.exit_code", "run.process_id",
           "run.started_at", "run.finished_at",
-          sql<number>`run.rowid`.as("sortRowId"),
           sql<string | null>`case when run.report is null then null else substr(run.report, 1, 500) end`.as("reportPreview"),
         ])
         .where("run.project_id", "=", projectId)
         // Keep this predicate literal-equivalent to the partial index definition.
         .where(sql<boolean>`run.status IN ('failed', 'timeout')`)
         .orderBy(occurredAt, "desc")
-        .orderBy(h.rowIdDesc("run"))
+        .orderBy("run.id", "desc")
         .limit(limit)
         .as("candidate");
       const rows = await kdb.selectFrom(candidates)
@@ -290,7 +288,7 @@ export const createScheduledRepos = (
           "schedule.name as scheduleName", "schedule.branch", "schedule.target",
         ])
         .orderBy(sql<string>`coalesce(candidate.finished_at, candidate.started_at)`, "desc")
-        .orderBy("candidate.sortRowId", "desc")
+        .orderBy("candidate.id", "desc")
         .execute();
       return rows.map((row) => ({
         ...row,

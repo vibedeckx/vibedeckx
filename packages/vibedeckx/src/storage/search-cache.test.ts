@@ -483,6 +483,54 @@ describe("searchCache", () => {
       })).resolves.toBe(false);
     });
 
+    it("a confirming snapshot watermarks its row against a delayed pre-dispatch running ACK", async () => {
+      const localId = `remote-${serverId}-p1-worker-confirmed`;
+      await storage.remoteSessionMappings.upsert(
+        localId, "p1", serverId, "worker-confirmed", "dev", "from_now",
+      );
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap({ sessions: [{
+        id: localId, branch: "dev", title: "Confirmed terminal", lastActiveAt: 2_000,
+        favoritedAt: null, entryCount: 2, status: "stopped", lastCompletedAt: 2_000,
+      }] }), 2_000);
+
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-confirmed", status: "running", activityAt: 1_000,
+        lastUserMessageAt: 1_000,
+      })).resolves.toBe("stale");
+      expect(rawQuery<{ status: string; deleted_at: number | null; written_at: number }>(
+        `SELECT status, deleted_at, written_at FROM session_search_cache WHERE local_session_id = '${localId}'`,
+      )).toEqual([{ status: "stopped", deleted_at: null, written_at: 2_000 }]);
+    });
+
+    it("an absent-session snapshot watermarks deletion against a delayed ACK but permits newer activity", async () => {
+      const localId = `remote-${serverId}-p1-worker-deleted`;
+      await storage.remoteSessionMappings.upsert(
+        localId, "p1", serverId, "worker-deleted", "dev", "from_now",
+      );
+      await storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-deleted", status: "running", activityAt: 500,
+      });
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap({ sessions: [] }), 2_000);
+
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-deleted", status: "running", activityAt: 1_000,
+      })).resolves.toBe("stale");
+      expect(rawQuery<{ deleted_at: number | null; written_at: number }>(
+        `SELECT deleted_at, written_at FROM session_search_cache WHERE local_session_id = '${localId}'`,
+      )[0]).toMatchObject({ deleted_at: expect.any(Number), written_at: 2_000 });
+
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-deleted", status: "running", activityAt: 3_000,
+      })).resolves.toBe(true);
+      expect(rawQuery<{ deleted_at: number | null; written_at: number }>(
+        `SELECT deleted_at, written_at FROM session_search_cache WHERE local_session_id = '${localId}'`,
+      )).toEqual([{ deleted_at: null, written_at: 3_000 }]);
+    });
+
     it("a snapshot collected BEFORE the creation does not sweep the write-through row", async () => {
       await noteCreated();
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap(), past());
@@ -504,8 +552,8 @@ describe("searchCache", () => {
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, withX, future());
       const confirmed = await storage.searchCache.search({ query: "From worker", limitPerGroup: 10 });
       expect(confirmed.sessions.map((s) => s.sessionId)).toEqual([X]);
-      // Once snapshot-owned, the exemption is gone: the next snapshot without
-      // X (collected later still) deletes it.
+      // The confirming snapshot advances the watermark, so a still-newer
+      // snapshot without X deletes it.
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap(), future() + 1);
       expect(await recents()).not.toContain(X);
     });
