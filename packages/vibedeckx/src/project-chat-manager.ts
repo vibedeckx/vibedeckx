@@ -42,6 +42,11 @@ export interface ProjectChatModelRunner {
   run(input: ProjectChatRunInput): AsyncIterable<ProjectChatStreamEvent>;
 }
 
+export interface ProjectChatManagerOptions {
+  drainTimeoutMs?: number;
+  idleEvictionMs?: number;
+}
+
 export type ProjectChatWsMessage =
   | { type: "project_chat_snapshot"; snapshot: ProjectChatSnapshot }
   | {
@@ -76,6 +81,7 @@ interface LiveThread {
     resolve: (approved: boolean) => void;
   }>;
   writeTail: Promise<void>;
+  evictionTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface ThreadLifecycle {
@@ -134,10 +140,18 @@ export class ProjectChatManager {
   private readonly lifecycles = new Map<string, ThreadLifecycle>();
   private readonly outstandingOperations = new Set<Promise<unknown>>();
   private readonly runner: ProjectChatModelRunner;
+  private readonly drainTimeoutMs: number;
+  private readonly idleEvictionMs: number;
   private shuttingDown = false;
 
-  constructor(private readonly storage: Storage, runner?: ProjectChatModelRunner) {
+  constructor(
+    private readonly storage: Storage,
+    runner?: ProjectChatModelRunner,
+    options: ProjectChatManagerOptions = {},
+  ) {
     this.runner = runner ?? new DefaultProjectChatModelRunner(storage);
+    this.drainTimeoutMs = options.drainTimeoutMs ?? 2_000;
+    this.idleEvictionMs = options.idleEvictionMs ?? 30_000;
   }
 
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
@@ -153,7 +167,9 @@ export class ProjectChatManager {
     const live = await this.loadLiveThread(thread, generation);
     this.assertLifecycle(threadId, generation, existingAtStart);
     live.thread = thread;
-    return this.snapshot(live);
+    const snapshot = this.snapshot(live);
+    this.scheduleEviction(live);
+    return snapshot;
   }
 
   sendMessage(threadId: string, userId: string, content: string): Promise<void> {
@@ -169,6 +185,7 @@ export class ProjectChatManager {
     this.assertLifecycle(threadId, generation);
     const live = await this.loadLiveThread(thread, generation);
     this.assertLifecycle(threadId, generation);
+    this.cancelEviction(live);
 
     const accepted = await this.acceptWork(live, {
       id: randomUUID(),
@@ -199,8 +216,12 @@ export class ProjectChatManager {
     const subscriberUserId = (socket as WebSocket & { projectChatUserId?: string }).projectChatUserId;
     if (subscriberUserId !== live.thread.user_id) return null;
     this.sendFrame(socket, { type: "project_chat_snapshot", snapshot: this.snapshot(live) });
+    this.cancelEviction(live);
     live.subscribers.add(socket);
-    return () => live.subscribers.delete(socket);
+    return () => {
+      live.subscribers.delete(socket);
+      this.scheduleEviction(live);
+    };
   }
 
   /** Authorization requires storage I/O, so approval resolution is async. */
@@ -230,10 +251,11 @@ export class ProjectChatManager {
     try {
       const live = this.liveThreads.get(threadId);
       if (live) {
+        this.cancelEviction(live);
         this.settlePendingApprovals(live, live.activeTurnId, false);
         live.abortController?.abort();
         live.queue.splice(0);
-        if (live.activeWork) await Promise.allSettled([live.activeWork]);
+        await this.drainActiveWork(live);
         for (const socket of live.subscribers) {
           try { socket.close(); } catch { /* disconnected */ }
         }
@@ -250,15 +272,14 @@ export class ProjectChatManager {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const active: Promise<void>[] = [];
     for (const live of this.liveThreads.values()) {
+      this.cancelEviction(live);
       this.settlePendingApprovals(live, live.activeTurnId, false);
       live.abortController?.abort();
       live.queue.splice(0);
-      if (live.activeWork) active.push(live.activeWork);
     }
     await Promise.allSettled([...this.outstandingOperations]);
-    await Promise.allSettled(active);
+    await Promise.all([...this.liveThreads.values()].map((live) => this.drainActiveWork(live)));
     for (const live of this.liveThreads.values()) live.subscribers.clear();
   }
 
@@ -304,6 +325,7 @@ export class ProjectChatManager {
           activeTurnId: null,
           pendingApprovals: new Map(),
           writeTail: Promise.resolve(),
+          evictionTimer: null,
         };
         this.liveThreads.set(thread.id, live);
         if (live.queue.length > 0) queueMicrotask(() => this.pump(live));
@@ -339,17 +361,63 @@ export class ProjectChatManager {
     return tracked;
   }
 
+  private canPersistTurn(live: LiveThread, turnId: string): boolean {
+    return live.activeTurnId === turnId && !this.lifecycle(live.thread.id).deleted;
+  }
+
+  private async drainActiveWork(live: LiveThread): Promise<void> {
+    const work = live.activeWork;
+    if (!work) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const completed = await Promise.race([
+      work.then(() => true),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), this.drainTimeoutMs);
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (completed || live.activeWork !== work) return;
+    live.activeTurnId = null;
+    live.abortController = null;
+    live.activeWork = null;
+    live.status = "idle";
+  }
+
+  private cancelEviction(live: LiveThread): void {
+    if (!live.evictionTimer) return;
+    clearTimeout(live.evictionTimer);
+    live.evictionTimer = null;
+  }
+
+  private scheduleEviction(live: LiveThread): void {
+    this.cancelEviction(live);
+    if (this.shuttingDown || this.lifecycle(live.thread.id).deleted || live.activeWork ||
+      live.status !== "idle" || live.queue.length > 0 || live.subscribers.size > 0) return;
+    live.evictionTimer = setTimeout(() => {
+      live.evictionTimer = null;
+      if (this.liveThreads.get(live.thread.id) !== live || live.activeWork ||
+        live.status !== "idle" || live.queue.length > 0 || live.subscribers.size > 0) return;
+      this.liveThreads.delete(live.thread.id);
+    }, this.idleEvictionMs);
+    live.evictionTimer.unref?.();
+  }
+
   private pump(live: LiveThread): void {
     if (live.activeWork || this.shuttingDown || this.closingThreads.has(live.thread.id)) return;
     const queued = live.queue.shift();
     if (!queued) return;
-    const work = this.runTurn(live, queued)
+    this.cancelEviction(live);
+    let work!: Promise<void>;
+    work = this.runTurn(live, queued)
+      .catch(() => undefined)
       .finally(() => {
+        if (live.activeWork !== work) return;
         live.activeWork = null;
         live.abortController = null;
         live.status = "idle";
         this.broadcastStatus(live);
         this.pump(live);
+        this.scheduleEviction(live);
       });
     live.activeWork = work;
   }
@@ -372,7 +440,7 @@ export class ProjectChatManager {
       const futureUserMessages = new Set(live.queue.map((item) => item.userMessageId));
       const currentUserMessage = live.messages.find((message) => message.id === queued.userMessageId);
       const history = live.messages.filter((message) =>
-        message.type !== "operation" && message.type !== "turn_end" &&
+        message.type !== "turn_end" &&
         message.id !== queued.userMessageId && !futureUserMessages.has(message.id));
       const input: ProjectChatRunInput = {
         projectId: live.thread.project_id,
@@ -418,9 +486,11 @@ export class ProjectChatManager {
           await this.append(live, event.type, event.content);
         }
       }
+      if (!this.canPersistTurn(live, turnId)) return;
       const status = abortController.signal.aborted ? "stopped" : "completed";
       await this.finishWork(live, queued, status, null);
     } catch (error) {
+      if (!this.canPersistTurn(live, turnId)) return;
       if (abortController.signal.aborted) {
         await this.finishWork(live, queued, "stopped", null);
         return;
@@ -487,7 +557,6 @@ export class ProjectChatManager {
         turn_end_id: randomUUID(),
         turn_end_content: JSON.stringify({
           status: status === "failed" ? "error" : status,
-          workId: queued.workId,
         }),
       });
       this.publishMessage(live, result.turnEnd);

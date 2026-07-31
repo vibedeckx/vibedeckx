@@ -119,6 +119,8 @@ describe("Project Chat WebSocket route", () => {
     });
 
     expect(liveFrames.every((frame) => Array.isArray(frame.JsonPatch))).toBe(true);
+    expect(JSON.stringify([initial, ...liveFrames])).not.toContain("workId");
+    expect(JSON.stringify([initial, ...liveFrames])).not.toContain('"type":"operation"');
     const patches = liveFrames.flatMap((frame) => frame.JsonPatch as Array<{
       op: string;
       path: string;

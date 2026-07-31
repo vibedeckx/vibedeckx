@@ -210,7 +210,6 @@ export type ProjectChatMessageType =
   | "tool_use"
   | "tool_result"
   | "tool_approval_request"
-  | "operation"
   | "error"
   | "turn_end";
 

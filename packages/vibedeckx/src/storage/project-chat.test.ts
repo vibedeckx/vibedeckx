@@ -247,6 +247,9 @@ describe("project chat storage", () => {
         "INSERT INTO project_chat_messages (id, thread_id, sequence, type, content) VALUES (?, ?, ?, ?, ?)",
       ).run("bad-message", "t1", 1, "invalid", "bad")).toThrow(/CHECK constraint failed/);
       expect(() => db.prepare(
+        "INSERT INTO project_chat_messages (id, thread_id, sequence, type, content) VALUES (?, ?, ?, ?, ?)",
+      ).run("internal-marker", "t1", 2, "operation", "hidden work")).toThrow(/CHECK constraint failed/);
+      expect(() => db.prepare(
         "INSERT INTO project_chat_context_refs (thread_id, entity_type, entity_id) VALUES (?, ?, ?)",
       ).run("t1", "invalid", "bad")).toThrow(/CHECK constraint failed/);
     } finally {
