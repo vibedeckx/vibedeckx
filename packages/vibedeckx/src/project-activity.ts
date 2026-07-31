@@ -36,10 +36,16 @@ export interface ProjectActivity {
   };
 }
 
-const parseDbTimestamp = (value: string | undefined): number | null => {
+const parseDbTimestamp = (value: string | null | undefined): number | null => {
   if (!value) return null;
-  const parsed = Date.parse(`${value.replace(" ", "T")}Z`);
+  const explicitZone = /(?:Z|[+-]\d\d:\d\d)$/i.test(value);
+  const parsed = Date.parse(explicitZone ? value : `${value.replace(" ", "T")}Z`);
   return Number.isNaN(parsed) ? null : parsed;
+};
+
+const maxTimestamp = (...values: Array<number | null | undefined>): number | null => {
+  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return valid.length > 0 ? Math.max(...valid) : null;
 };
 
 const localActivity = (session: AgentSession): AgentSessionActivity => {
@@ -54,7 +60,12 @@ const localActivity = (session: AgentSession): AgentSessionActivity => {
     workspace: { target: "local", branch },
     agentType: session.agent_type ?? null,
     model: session.model ?? null,
-    lastActiveAt: session.last_user_message_at ?? parseDbTimestamp(session.updated_at ?? session.created_at),
+    lastActiveAt: maxTimestamp(
+      session.last_user_message_at,
+      session.last_completed_at,
+      parseDbTimestamp(session.updated_at),
+      parseDbTimestamp(session.created_at),
+    ),
     lastUserMessageAt: session.last_user_message_at ?? null,
     lastCompletedAt: session.last_completed_at ?? null,
   };
@@ -117,14 +128,14 @@ export async function getProjectActivity(
     ATTENTION_LIMIT,
   );
 
-  const attention: ProjectActivityAttentionItem[] = [
+  const attention = [
     ...attentionSessions
       .map((session) => ({
         type: "agent_session" as const,
         entityId: session.id,
         status: session.status,
         title: session.title ?? (session.branch || "Main workspace"),
-        occurredAt: new Date(session.lastActiveAt ?? 0).toISOString(),
+        occurredAtMs: session.lastActiveAt ?? 0,
         target: session.target,
         workspace: session.workspace,
       })),
@@ -134,11 +145,15 @@ export async function getProjectActivity(
         entityId: run.id,
         status: run.status,
         title: run.scheduleName,
-        occurredAt: run.finished_at ?? run.started_at,
+        occurredAtMs: parseDbTimestamp(run.finished_at ?? run.started_at) ?? 0,
       })),
   ]
-    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt) || right.entityId.localeCompare(left.entityId))
-    .slice(0, ATTENTION_LIMIT);
+    .sort((left, right) => right.occurredAtMs - left.occurredAtMs || right.entityId.localeCompare(left.entityId))
+    .slice(0, ATTENTION_LIMIT)
+    .map(({ occurredAtMs, ...item }): ProjectActivityAttentionItem => ({
+      ...item,
+      occurredAt: new Date(occurredAtMs).toISOString(),
+    }));
 
   return {
     recentThreads,

@@ -918,6 +918,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           errorCode: "notification_baseline_failed",
         });
       }
+      const activityAt = Date.now();
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
         "POST",
@@ -935,7 +936,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
       }
       const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
-      const activityAt = Date.now();
       const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
         localSessionId: req.params.sessionId,
         projectId,
@@ -952,7 +952,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // this event but we don't subscribe to remote SSE; deriving from the
       // proxy success is the cheapest reliable signal. Dedupe handles
       // repeated sends within the same working turn.
-      if (activityReady) {
+      if (activityReady === true) {
         fastify.agentSessionManager.emitBranchActivityIfChanged(
           projectId,
           remoteInfo.branch ?? null,

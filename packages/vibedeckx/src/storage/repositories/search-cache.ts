@@ -181,6 +181,14 @@ export const createSearchCacheRepos = (
           .executeTakeFirst();
         if (!authorized) return false;
 
+        const existing = await trx.selectFrom("session_search_cache")
+          .select(["project_id", "target_id"])
+          .where("local_session_id", "=", entry.localSessionId)
+          .executeTakeFirst();
+        if (existing && (existing.project_id !== entry.projectId || existing.target_id !== entry.targetId)) {
+          return false;
+        }
+
         const sets: Record<string, unknown> = {
           status: entry.status,
           last_active_at: sql`max(coalesce(last_active_at, 0), ${entry.activityAt})`,
@@ -214,9 +222,19 @@ export const createSearchCacheRepos = (
           })
           .onConflict((conflict) => conflict.column("local_session_id").doUpdateSet(sets)
             .where("session_search_cache.project_id", "=", entry.projectId)
-            .where("session_search_cache.target_id", "=", entry.targetId))
+            .where("session_search_cache.target_id", "=", entry.targetId)
+            .where((eb) => eb.or([
+              eb("session_search_cache.written_at", "is", null),
+              eb("session_search_cache.written_at", "<", entry.activityAt),
+              eb.and([
+                eb("session_search_cache.written_at", "=", entry.activityAt),
+                ...(entry.status === "running"
+                  ? [eb("session_search_cache.status", "not in", ["stopped", "error"])]
+                  : []),
+              ]),
+            ])))
           .executeTakeFirst();
-        return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
+        return (result.numInsertedOrUpdatedRows ?? 0n) > 0n ? true : "stale";
       });
     },
 
@@ -247,6 +265,27 @@ export const createSearchCacheRepos = (
         .orderBy(sql`coalesce(sync.last_attempt_at, 0)`, "asc")
         .orderBy("c.project_id", "asc")
         .orderBy("c.target_id", "asc")
+        .limit(Math.max(1, Math.min(limit, 100)));
+      if (userId) query = query.where("project.user_id", "=", userId);
+      return query.execute();
+    },
+
+    listRemoteActivityRefreshTargets: async (userId, limit = 100) => {
+      let query = kdb.selectFrom("project_remotes as association")
+        .innerJoin("projects as project", "project.id", "association.project_id")
+        .leftJoin("search_catalog_sync_state as sync", (join) => join
+          .onRef("sync.project_id", "=", "association.project_id")
+          .onRef("sync.target_id", "=", "association.remote_server_id"))
+        .select([
+          "association.project_id as projectId",
+          "association.remote_server_id as targetId",
+          "association.remote_path as remotePath",
+        ])
+        // Every authorized target is eventually revisited. Ordering by the
+        // oldest attempt makes a bounded page fair across repeated intervals.
+        .orderBy(sql`coalesce(sync.last_attempt_at, 0)`, "asc")
+        .orderBy("association.project_id", "asc")
+        .orderBy("association.remote_server_id", "asc")
         .limit(Math.max(1, Math.min(limit, 100)));
       if (userId) query = query.where("project.user_id", "=", userId);
       return query.execute();

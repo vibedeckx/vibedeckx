@@ -239,18 +239,27 @@ export const createScheduledRepos = (
       return rows.map(mapRun);
     },
     getRecentByProject: async (projectId, limit) => {
-      const rows = await kdb.selectFrom("scheduled_task_runs as run")
-        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+      const candidates = kdb.selectFrom("scheduled_task_runs as run")
         .select([
           "run.id", "run.schedule_id", "run.status", "run.exit_code", "run.process_id",
-          "run.started_at", "run.finished_at", "schedule.name as scheduleName",
-          "schedule.branch", "schedule.target",
+          "run.started_at", "run.finished_at",
+          sql<number>`run.rowid`.as("sortRowId"),
           sql<string | null>`case when run.report is null then null else substr(run.report, 1, 500) end`.as("reportPreview"),
         ])
-        .where("schedule.project_id", "=", projectId)
+        .where("run.project_id", "=", projectId)
         .orderBy("run.started_at", "desc")
         .orderBy(h.rowIdDesc("run"))
         .limit(limit)
+        .as("candidate");
+      const rows = await kdb.selectFrom(candidates)
+        .innerJoin("scheduled_tasks as schedule", "schedule.id", "candidate.schedule_id")
+        .select([
+          "candidate.id", "candidate.schedule_id", "candidate.status", "candidate.exit_code",
+          "candidate.process_id", "candidate.started_at", "candidate.finished_at", "candidate.reportPreview",
+          "schedule.name as scheduleName", "schedule.branch", "schedule.target",
+        ])
+        .orderBy("candidate.started_at", "desc")
+        .orderBy("candidate.sortRowId", "desc")
         .execute();
       return rows.map((row) => ({
         ...row,
@@ -258,19 +267,30 @@ export const createScheduledRepos = (
       }));
     },
     getAttentionByProject: async (projectId, limit) => {
-      const rows = await kdb.selectFrom("scheduled_task_runs as run")
-        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+      const occurredAt = sql<string>`coalesce(run.finished_at, run.started_at)`;
+      const candidates = kdb.selectFrom("scheduled_task_runs as run")
         .select([
           "run.id", "run.schedule_id", "run.status", "run.exit_code", "run.process_id",
-          "run.started_at", "run.finished_at", "schedule.name as scheduleName",
-          "schedule.branch", "schedule.target",
+          "run.started_at", "run.finished_at",
+          sql<number>`run.rowid`.as("sortRowId"),
           sql<string | null>`case when run.report is null then null else substr(run.report, 1, 500) end`.as("reportPreview"),
         ])
-        .where("schedule.project_id", "=", projectId)
-        .where("run.status", "in", ["failed", "timeout"])
-        .orderBy(sql<string>`coalesce(run.finished_at, run.started_at)`, "desc")
+        .where("run.project_id", "=", projectId)
+        // Keep this predicate literal-equivalent to the partial index definition.
+        .where(sql<boolean>`run.status IN ('failed', 'timeout')`)
+        .orderBy(occurredAt, "desc")
         .orderBy(h.rowIdDesc("run"))
         .limit(limit)
+        .as("candidate");
+      const rows = await kdb.selectFrom(candidates)
+        .innerJoin("scheduled_tasks as schedule", "schedule.id", "candidate.schedule_id")
+        .select([
+          "candidate.id", "candidate.schedule_id", "candidate.status", "candidate.exit_code",
+          "candidate.process_id", "candidate.started_at", "candidate.finished_at", "candidate.reportPreview",
+          "schedule.name as scheduleName", "schedule.branch", "schedule.target",
+        ])
+        .orderBy(sql<string>`coalesce(candidate.finished_at, candidate.started_at)`, "desc")
+        .orderBy("candidate.sortRowId", "desc")
         .execute();
       return rows.map((row) => ({
         ...row,
@@ -280,9 +300,8 @@ export const createScheduledRepos = (
     countByProjectStatuses: async (projectId, statuses) => {
       if (statuses.length === 0) return 0;
       const row = await kdb.selectFrom("scheduled_task_runs as run")
-        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
         .select(kdb.fn.countAll<number>().as("count"))
-        .where("schedule.project_id", "=", projectId)
+        .where("run.project_id", "=", projectId)
         .where("run.status", "in", statuses)
         .executeTakeFirstOrThrow();
       return Number(row.count);

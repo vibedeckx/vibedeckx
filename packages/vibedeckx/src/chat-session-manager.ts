@@ -589,6 +589,9 @@ export class ChatSessionManager {
       await this.storage.remoteSessionMappings.delete(staleLocalId);
     }
 
+    // Capture before dispatch: a fast worker can complete before the ACK
+    // reaches us, and that newer terminal transition must win in the cache.
+    const initialActivityAt = Date.now();
     // Deliver the first task.
     try {
       const msgRes = await proxyToRemoteAuto(
@@ -603,7 +606,6 @@ export class ChatSessionManager {
       return { success: false, message: `Remote agent started but the task could not be delivered: ${String(error)}` };
     }
 
-    const initialActivityAt = Date.now();
     const initialActivityReady = await this.storage.searchCache.updateRemoteSessionActivity({
       localSessionId: created.localSessionId,
       projectId,
@@ -659,7 +661,7 @@ export class ChatSessionManager {
     // (the remote's createNewSession doesn't broadcast one, and its
     // sendUserMessage skips the broadcast because status is already "running"),
     // so without this emit the session would only ever land in the dropdown.
-    if (initialActivityReady) {
+    if (initialActivityReady === true) {
       this.eventBus?.emit({
         type: "session:status",
         projectId,
@@ -704,6 +706,7 @@ export class ChatSessionManager {
       // Status unknown — proceed to attempt delivery.
     }
 
+    const activityAt = Date.now();
     try {
       const msgRes = await proxyToRemoteAuto(
         target.info.remoteServerId,
@@ -717,7 +720,6 @@ export class ChatSessionManager {
       return { success: false, message: `Failed to deliver the message to the remote coding agent: ${String(error)}` };
     }
 
-    const activityAt = Date.now();
     await this.storage.searchCache.updateRemoteSessionActivity({
       localSessionId: target.localSessionId,
       projectId,

@@ -2,7 +2,7 @@ import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
 import type { AgentMessage } from "./agent-types.js";
-import type { Storage } from "./storage/types.js";
+import type { RemoteSessionActivityUpdateResult, Storage } from "./storage/types.js";
 import type { RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
@@ -176,6 +176,7 @@ export async function createRemoteProjectChatSessionWithInstruction(
     mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);
   }
   if (!mapping) throw new Error("Remote session mapping was not persisted");
+  const activityAt = Date.now();
   const sent = await proxyToRemoteAuto(
     mapping.remote_server_id, "POST",
     `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
@@ -183,7 +184,6 @@ export async function createRemoteProjectChatSessionWithInstruction(
     { reverseConnectManager: deps.reverseConnectManager ?? undefined },
   );
   if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
-  const activityAt = Date.now();
   const activityReady = await deps.storage.searchCache.updateRemoteSessionActivity({
     localSessionId: params.sessionId,
     projectId: params.projectId,
@@ -193,7 +193,7 @@ export async function createRemoteProjectChatSessionWithInstruction(
     activityAt,
     lastUserMessageAt: activityAt,
   });
-  if (!activityReady) throw new Error("Remote session mapping is no longer authorized");
+  if (activityReady === false) throw new Error("Remote session mapping is no longer authorized");
   return { sessionId: params.sessionId };
 }
 
@@ -224,7 +224,7 @@ export async function persistRemoteSessionActivityFrame(
   remoteInfo: RemoteSessionInfo,
   parsed: Record<string, unknown>,
   activityAt: number = Date.now(),
-): Promise<boolean> {
+): Promise<RemoteSessionActivityUpdateResult> {
   const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
   const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
   if (statusEvent) {
@@ -340,7 +340,7 @@ export function connectPersistentRemoteWs(
       cache.broadcast(sessionId, raw);
       const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
       if (statusEvent) {
-        let activityReady = true;
+        let activityReady: true | "stale" | false = true;
         if (storage) {
           activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
             .catch((error) => {
@@ -348,7 +348,7 @@ export function connectPersistentRemoteWs(
               return false;
             });
         }
-        if (eventBus && activityReady) {
+        if (eventBus && activityReady === true) {
           console.log(`[AgentWS:remote→eventBus] ${sessionId} session:status=${statusEvent.status}`);
           eventBus.emit(statusEvent);
         }
@@ -359,7 +359,7 @@ export function connectPersistentRemoteWs(
     } else if ("taskCompleted" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
-      let activityReady = true;
+      let activityReady: true | "stale" | false = true;
       if (storage) {
         activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
           .catch((error) => {
@@ -367,7 +367,7 @@ export function connectPersistentRemoteWs(
             return false;
           });
       }
-      if (eventBus && activityReady) {
+      if (eventBus && activityReady === true) {
         const evt = taskCompletedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
         if (evt) {
           eventBus.emit(evt);
@@ -430,7 +430,7 @@ export function connectPersistentRemoteWs(
     } else if ("error" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
-      let activityReady = true;
+      let activityReady: true | "stale" | false = true;
       if (storage) {
         activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
           .catch((error) => {
@@ -438,7 +438,7 @@ export function connectPersistentRemoteWs(
             return false;
           });
       }
-      if (eventBus && activityReady) {
+      if (eventBus && activityReady === true) {
         eventBus.emit({
           type: "session:status",
           projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),

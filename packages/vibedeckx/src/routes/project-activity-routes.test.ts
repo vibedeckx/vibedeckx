@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 
 const auth = vi.hoisted(() => ({ currentUserId: "user-1" as string | null }));
 vi.mock("@clerk/fastify", () => ({
@@ -216,6 +217,49 @@ describe("project activity route", () => {
     expect(body.summary).toMatchObject({ running: 10, failed: 1 });
   });
 
+  it("orders a long-running local session by completion rather than its old row update", async () => {
+    await storage.agentSessions.create({ id: "long-task", project_id: "project-1", branch: "long" });
+    await storage.agentSessions.updateStatus("long-task", "stopped");
+    for (let index = 0; index < 8; index += 1) {
+      await storage.agentSessions.create({
+        id: `padding-${index}`, project_id: "project-1", branch: `padding-${index}`,
+      });
+    }
+    const completedAt = Date.parse("2026-08-01T00:00:00.000Z");
+    await storage.agentSessions.markCompleted("long-task", completedAt);
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().recentAgentSessions[0]).toMatchObject({
+      id: "long-task", lastActiveAt: completedAt, lastCompletedAt: completedAt,
+    });
+  });
+
+  it("sorts local and schedule attention by epoch and emits one ISO timestamp format", async () => {
+    await storage.agentSessions.create({ id: "local-error", project_id: "project-1", branch: "broken" });
+    await storage.agentSessions.updateStatus("local-error", "error");
+    await createSchedule("schedule-attention");
+    await createRun("schedule-error", "schedule-attention", "failed", "failed");
+
+    const raw = new Database(path.join(dir, "test.sqlite"));
+    try {
+      raw.prepare("UPDATE agent_sessions SET created_at = ?, updated_at = ? WHERE id = ?")
+        .run("2026-07-31 10:00:00.000", "2026-07-31 10:00:00.000", "local-error");
+      raw.prepare("UPDATE scheduled_task_runs SET started_at = ?, finished_at = ? WHERE id = ?")
+        .run("2026-07-31 10:59:00", "2026-07-31 11:00:00", "schedule-error");
+    } finally {
+      raw.close();
+    }
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    const attention = response.json().attention;
+    expect(attention.slice(0, 2).map((item: { entityId: string }) => item.entityId))
+      .toEqual(["schedule-error", "local-error"]);
+    expect(attention.slice(0, 2).map((item: { occurredAt: string }) => item.occurredAt))
+      .toEqual(["2026-07-31T11:00:00.000Z", "2026-07-31T10:00:00.000Z"]);
+  });
+
   it("globally merges authorized remote cached sessions with target context and summary state", async () => {
     await storage.agentSessions.create({ id: "local-session", project_id: "project-1", branch: "local" });
     await storage.agentSessions.markUserMessage("local-session", 100);
@@ -229,15 +273,15 @@ describe("project activity route", () => {
       sessions: [
         {
           id: "remote-running", branch: "feature", title: "Remote running",
-          lastActiveAt: 9_000, favoritedAt: null, entryCount: 2,
+          lastActiveAt: Date.parse("2026-08-02T00:00:00.000Z"), favoritedAt: null, entryCount: 2,
           status: "running", agentType: "codex", model: "gpt-5",
-          lastUserMessageAt: 9_000, lastCompletedAt: null,
+          lastUserMessageAt: Date.parse("2026-08-02T00:00:00.000Z"), lastCompletedAt: null,
         },
         {
           id: "remote-error", branch: "broken", title: "Remote error",
-          lastActiveAt: 8_000, favoritedAt: null, entryCount: 2,
+          lastActiveAt: Date.parse("2026-08-01T00:00:00.000Z"), favoritedAt: null, entryCount: 2,
           status: "error", agentType: "claude-code", model: "opus",
-          lastUserMessageAt: 8_000, lastCompletedAt: null,
+          lastUserMessageAt: Date.parse("2026-08-01T00:00:00.000Z"), lastCompletedAt: null,
         },
       ],
     } as unknown as SearchCatalogSnapshot);

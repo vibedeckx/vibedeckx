@@ -43,6 +43,13 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   favorited_at: row.favorited_at,
 });
 
+const activityAt = (table = "agent_sessions") => sql<number>`max(
+  coalesce(${sql.ref(`${table}.last_user_message_at`)}, 0),
+  coalesce(${sql.ref(`${table}.last_completed_at`)}, 0),
+  coalesce(cast((julianday(${sql.ref(`${table}.updated_at`)}) - 2440587.5) * 86400000 as integer), 0),
+  coalesce(cast((julianday(${sql.ref(`${table}.created_at`)}) - 2440587.5) * 86400000 as integer), 0)
+)`;
+
 export const createAgentSessionRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
@@ -101,7 +108,7 @@ export const createAgentSessionRepos = (
     listRecentByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
-        .orderBy("updated_at", "desc")
+        .orderBy(activityAt(), "desc")
         .orderBy(h.rowIdDesc())
         .limit(limit)
         .execute();
@@ -122,7 +129,7 @@ export const createAgentSessionRepos = (
             ]),
           ]),
         ]))
-        .orderBy("updated_at", "desc")
+        .orderBy(activityAt(), "desc")
         .orderBy(h.rowIdDesc())
         .limit(limit)
         .execute();

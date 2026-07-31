@@ -93,33 +93,33 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
     },
   });
 
-  // Cache rows written before session activity fields existed carry
-  // `status=unknown`. Refresh those project/remote catalogs automatically in
-  // bounded worker lanes; do not make Project Activity (or Cmd+K) responsible
-  // for initiating the repair. Failed targets remain unknown and are retried.
-  let activityBackfillTimer: ReturnType<typeof setInterval> | undefined;
-  let activityBackfillRun: Promise<void> | undefined;
-  const runActivityBackfill = () => {
-    if (activityBackfillRun) return activityBackfillRun;
-    const run = refresher.backfillUnknownRemoteActivity().catch((error) => {
-      console.error("[Search] remote activity backfill failed:", error);
+  // Reconcile every authorized remote target automatically in fair bounded
+  // pages. This repairs both legacy unknown rows and known statuses (notably a
+  // stale `running`) after a front-server restart without requiring Cmd+K.
+  let activityRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let activityRefreshRun: Promise<void> | undefined;
+  const runActivityRefresh = () => {
+    if (activityRefreshRun) return activityRefreshRun;
+    const run = refresher.refreshRemoteActivity().catch((error) => {
+      console.error("[Search] remote activity refresh failed:", error);
     });
-    activityBackfillRun = run;
+    activityRefreshRun = run;
     void run.finally(() => {
-      if (activityBackfillRun === run) activityBackfillRun = undefined;
+      if (activityRefreshRun === run) activityRefreshRun = undefined;
     });
     return run;
   };
   fastify.addHook("onReady", async () => {
-    void runActivityBackfill();
-    activityBackfillTimer = setInterval(() => {
-      void runActivityBackfill();
+    void runActivityRefresh();
+    activityRefreshTimer = setInterval(() => {
+      void runActivityRefresh();
     }, 30_000);
-    activityBackfillTimer.unref?.();
+    activityRefreshTimer.unref?.();
   });
   fastify.addHook("onClose", async () => {
-    if (activityBackfillTimer) clearInterval(activityBackfillTimer);
-    await activityBackfillRun;
+    if (activityRefreshTimer) clearInterval(activityRefreshTimer);
+    await activityRefreshRun;
+    await refresher.drain();
   });
 
   async function currentCacheState(userId: string | undefined): Promise<"cold" | "stale" | "fresh"> {

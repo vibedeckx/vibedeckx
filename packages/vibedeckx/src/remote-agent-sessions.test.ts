@@ -242,6 +242,33 @@ describe("createRemoteAgentSession", () => {
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
 
+  it("timestamps an initial instruction before its ACK so a concurrent completion stays newer", async () => {
+    mapping = {
+      local_session_id: "preallocated", project_id: projectId, remote_server_id: agentMode,
+      remote_session_id: "worker-preallocated", branch: "main",
+    };
+    let clock = 1_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const updateActivity = vi.spyOn(storage.searchCache, "updateRemoteSessionActivity").mockResolvedValue(true);
+    proxyToRemoteAuto.mockImplementationOnce(async () => {
+      clock = 2_000;
+      return { ok: true, status: 200, data: { accepted: true } };
+    });
+
+    await createRemoteProjectChatSessionWithInstruction(makeDeps(), {
+      projectId, userId: "user-1", remoteServerId: agentMode,
+      remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
+      workerSessionId: "worker-preallocated", branch: "main", permissionMode: "edit",
+      agentType: "claude-code", model: null, instruction: "Implement", idempotencyKey: "delivery-key",
+    });
+
+    expect(updateActivity).toHaveBeenCalledWith(expect.objectContaining({
+      status: "running", activityAt: 1_000, lastUserMessageAt: 1_000,
+    }));
+    updateActivity.mockRestore();
+    now.mockRestore();
+  });
+
   it("id-echo mismatch: deletes the entry, does NOT upsert, returns status 409", async () => {
     proxyToRemoteAuto.mockResolvedValue({
       ok: true,

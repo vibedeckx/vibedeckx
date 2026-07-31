@@ -191,8 +191,8 @@ describe("POST /api/search/refresh: remote mapping provenance", () => {
   });
 });
 
-describe("automatic remote activity backfill", () => {
-  it("refreshes legacy unknown session activity without opening the quick switcher", async () => {
+describe("automatic remote activity repair", () => {
+  it("refreshes a stale known-running session after restart without opening the quick switcher", async () => {
     proxyMock.mockReset();
     const dir = mkdtempSync(path.join(tmpdir(), "vdx-search-activity-backfill-"));
     const storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
@@ -206,14 +206,15 @@ describe("automatic remote activity backfill", () => {
       const localId = `remote-${server.id}-p1-r1`;
       await storage.remoteSessionMappings.upsert(localId, "p1", server.id, "r1", "dev", "from_now");
       await storage.searchCache.noteSessionCreated({
-        localSessionId: localId, projectId: "p1", targetId: server.id, branch: "dev", title: "Legacy",
+        localSessionId: localId, projectId: "p1", targetId: server.id, branch: "dev",
+        title: "Stale running", status: "running", lastUserMessageAt: 100,
       });
       proxyMock.mockResolvedValue({
         ok: true, status: 200,
         data: {
           workspaces: [{ branch: "dev" }],
           sessions: [{
-            id: "r1", branch: "dev", title: "Legacy", lastActiveAt: 123,
+            id: "r1", branch: "dev", title: "Stale running", lastActiveAt: 123,
             favoritedAt: null, entryCount: 3, status: "stopped",
             agentType: "codex", model: "gpt-5", lastUserMessageAt: 100, lastCompletedAt: 120,
           }],

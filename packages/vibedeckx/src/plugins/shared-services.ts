@@ -159,14 +159,14 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
               input.sessionId, input.instruction, project!.path!, input.userId,
             );
           }
+          const activityAt = Date.now();
           const result = await proxyToRemoteAuto(
             input.target.remoteServerId, "POST",
             `/api/agent-sessions/${encodeURIComponent(input.target.remoteSessionId)}/message`,
             { content: input.instruction, idempotencyKey: input.idempotencyKey }, { reverseConnectManager },
           );
           if (!result.ok) return false;
-          const activityAt = Date.now();
-          return opts.storage.searchCache.updateRemoteSessionActivity({
+          const activityResult = await opts.storage.searchCache.updateRemoteSessionActivity({
             localSessionId: input.sessionId,
             projectId: input.projectId,
             targetId: input.target.remoteServerId,
@@ -178,6 +178,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             console.error(`[ProjectChat] remote activity write-through failed for ${input.sessionId}:`, error);
             return false;
           });
+          return activityResult !== false;
         },
         runScheduleNow: (scheduleId, runId) => scheduler.runNow(scheduleId, runId),
       },

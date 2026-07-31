@@ -1243,6 +1243,14 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       ON scheduled_task_runs(schedule_id, started_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_project_started_id
       ON scheduled_task_runs(project_id, started_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_project_status
+      ON scheduled_task_runs(project_id, status);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_project_attention_finished_id
+      ON scheduled_task_runs(
+        project_id,
+        coalesce(finished_at, started_at) DESC,
+        id DESC
+      ) WHERE status IN ('failed', 'timeout');
   `);
 
   // Migration: per-mapping notification sync provenance + watch window.

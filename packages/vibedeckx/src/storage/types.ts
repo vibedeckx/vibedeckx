@@ -482,6 +482,7 @@ export interface SearchCatalogSessionEntry {
 }
 
 export type AgentSessionActivityStatus = AgentSessionStatus | "unknown";
+export type RemoteSessionActivityUpdateResult = true | "stale" | false;
 
 /** Project Overview projection shared by local rows and cached remote rows. */
 export interface AgentSessionActivity {
@@ -979,9 +980,13 @@ export interface Storage {
       localSessionId: string; projectId: string; targetId: string; remoteSessionId: string;
       status: AgentSessionStatus; activityAt: number;
       lastUserMessageAt?: number; lastCompletedAt?: number;
-    }): Promise<boolean>;
+    }): Promise<RemoteSessionActivityUpdateResult>;
     /** Bounded target list used to backfill pre-activity-schema cache rows. */
     listUnknownRemoteActivityTargets(userId?: string, limit?: number): Promise<Array<{
+      projectId: string; targetId: string; remotePath: string;
+    }>>;
+    /** Fair, bounded authorized remote targets for automatic activity repair. */
+    listRemoteActivityRefreshTargets(userId?: string, limit?: number): Promise<Array<{
       projectId: string; targetId: string; remotePath: string;
     }>>;
     /**

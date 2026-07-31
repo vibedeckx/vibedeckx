@@ -182,6 +182,17 @@ describe("scheduledTasks storage", () => {
     }
     const db = new Database(dbPath);
     try {
+      const insertSchedule = db.prepare(`
+        INSERT INTO scheduled_tasks
+          (id, project_id, name, cron_expr, timezone, run_type, content, cwd_mode)
+        VALUES (?, ?, ?, '0 0 * * *', 'UTC', 'command', 'true', 'branch')
+      `);
+      db.transaction(() => {
+        for (let i = 0; i < 200; i++) {
+          const id = `unrelated-schedule-${i}`;
+          insertSchedule.run(id, projectId, id);
+        }
+      })();
       db.exec("ANALYZE");
       const names = new Set((db.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'index'",
@@ -192,6 +203,8 @@ describe("scheduledTasks storage", () => {
         "idx_workspace_search_cache_project_target_branch",
         "idx_scheduled_tasks_project_created_id",
         "idx_scheduled_task_runs_project_started_id",
+        "idx_scheduled_task_runs_project_status",
+        "idx_scheduled_task_runs_project_attention_finished_id",
       ]) expect(names.has(name), name).toBe(true);
       const plan = (db.prepare(`
         EXPLAIN QUERY PLAN
@@ -204,6 +217,53 @@ describe("scheduledTasks storage", () => {
       `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
       expect(plan).not.toMatch(/\bSCAN run\b/);
       expect(plan).not.toContain("USE TEMP B-TREE FOR ORDER BY");
+
+      const recentActivityPlan = (db.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT candidate.*, schedule.name, schedule.branch, schedule.target
+        FROM (
+          SELECT run.id, run.schedule_id, run.status, run.exit_code, run.process_id,
+                 run.started_at, run.finished_at,
+                 run.rowid AS sortRowId,
+                 CASE WHEN run.report IS NULL THEN NULL ELSE substr(run.report, 1, 500) END AS reportPreview
+          FROM scheduled_task_runs AS run
+          WHERE run.project_id = ?
+          ORDER BY run.started_at DESC, run.rowid DESC
+          LIMIT ?
+        ) AS candidate
+        INNER JOIN scheduled_tasks AS schedule ON schedule.id = candidate.schedule_id
+        ORDER BY candidate.started_at DESC, candidate.sortRowId DESC
+      `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+      expect(recentActivityPlan).toContain("idx_scheduled_task_runs_project_started_id");
+      expect(recentActivityPlan).not.toMatch(/\bSCAN schedule\b/);
+
+      const attentionPlan = (db.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT candidate.*, schedule.name, schedule.branch, schedule.target
+        FROM (
+          SELECT run.id, run.schedule_id, run.status, run.exit_code, run.process_id,
+                 run.started_at, run.finished_at,
+                 run.rowid AS sortRowId,
+                 CASE WHEN run.report IS NULL THEN NULL ELSE substr(run.report, 1, 500) END AS reportPreview
+          FROM scheduled_task_runs AS run
+          WHERE run.project_id = ? AND run.status IN ('failed', 'timeout')
+          ORDER BY coalesce(run.finished_at, run.started_at) DESC, run.rowid DESC
+          LIMIT ?
+        ) AS candidate
+        INNER JOIN scheduled_tasks AS schedule ON schedule.id = candidate.schedule_id
+        ORDER BY coalesce(candidate.finished_at, candidate.started_at) DESC, candidate.sortRowId DESC
+      `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+      expect(attentionPlan).toContain("idx_scheduled_task_runs_project_attention_finished_id");
+      expect(attentionPlan).not.toMatch(/\bSCAN schedule\b/);
+
+      const countPlan = (db.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT count(*)
+        FROM scheduled_task_runs AS run
+        WHERE run.project_id = ? AND run.status IN ('running', 'failed')
+      `).all(projectId) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+      expect(countPlan).toContain("idx_scheduled_task_runs_project_status");
+      expect(countPlan).not.toContain("scheduled_tasks");
     } finally {
       db.close();
     }

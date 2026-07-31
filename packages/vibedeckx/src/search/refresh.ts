@@ -4,7 +4,7 @@ const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_DEADLINE_MS = 5_000;
 const PER_WORKER_CONCURRENCY = 3;
 const LOCAL_CONCURRENCY = 4;
-const UNKNOWN_ACTIVITY_TARGET_LIMIT = 100;
+const REMOTE_ACTIVITY_TARGET_LIMIT = 100;
 
 export interface SearchTarget {
   projectId: string;
@@ -75,6 +75,9 @@ export function createSearchRefresher(deps: RefreshDeps) {
   const now = deps.now ?? Date.now;
   // Singleflight per (project, target): concurrent palette-opens share one fetch.
   const inflight = new Map<string, Promise<void>>();
+  // Deadline wrappers may return while their bounded lanes continue. Track
+  // those root batches so server shutdown can drain them before storage closes.
+  const pendingBatches = new Set<Promise<void>>();
 
   function refreshTarget(t: SearchTarget): Promise<void> {
     const key = `${t.projectId}:${t.targetId}`;
@@ -113,6 +116,11 @@ export function createSearchRefresher(deps: RefreshDeps) {
       ),
     );
     const all = Promise.all(lanes).then(() => undefined);
+    pendingBatches.add(all);
+    void all.then(
+      () => pendingBatches.delete(all),
+      () => pendingBatches.delete(all),
+    );
     await Promise.race([
       all,
       new Promise<void>((resolve) => {
@@ -134,10 +142,10 @@ export function createSearchRefresher(deps: RefreshDeps) {
     await refreshTargets(due);
   }
 
-  async function backfillUnknownRemoteActivity(userId?: string): Promise<void> {
-    const rows = await deps.storage.searchCache.listUnknownRemoteActivityTargets(
+  async function refreshRemoteActivity(userId?: string): Promise<void> {
+    const rows = await deps.storage.searchCache.listRemoteActivityRefreshTargets(
       userId,
-      UNKNOWN_ACTIVITY_TARGET_LIMIT,
+      REMOTE_ACTIVITY_TARGET_LIMIT,
     );
     await refreshTargets(rows.map((row) => ({
       projectId: row.projectId,
@@ -146,5 +154,11 @@ export function createSearchRefresher(deps: RefreshDeps) {
     })));
   }
 
-  return { refreshAll, backfillUnknownRemoteActivity };
+  async function drain(): Promise<void> {
+    while (pendingBatches.size > 0) {
+      await Promise.allSettled([...pendingBatches]);
+    }
+  }
+
+  return { refreshAll, refreshRemoteActivity, drain };
 }

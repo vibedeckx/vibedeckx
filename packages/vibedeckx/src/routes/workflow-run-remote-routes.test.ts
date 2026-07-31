@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import type { RemoteSessionActivityUpdateResult } from "../storage/types.js";
 
 const { proxyMock, ensureStreamMock } = vi.hoisted(() => ({
   proxyMock: vi.fn(),
@@ -36,7 +37,7 @@ function makeApp() {
   });
   const upsert = vi.fn(async () => undefined);
   const markTitleResolvedDb = vi.fn(async () => undefined);
-  const updateRemoteSessionActivity = vi.fn(async () => true);
+  const updateRemoteSessionActivity = vi.fn(async (): Promise<RemoteSessionActivityUpdateResult> => true);
   const markTitleResolvedMem = vi.fn(() => true);
   const emitBranchActivityIfChanged = vi.fn();
   const emit = vi.fn();
@@ -312,6 +313,49 @@ describe("workflow-run remote proxying (front server)", () => {
       .toBeLessThan(ensureStreamMock.mock.invocationCallOrder[0]);
     expect(updateRemoteSessionActivity.mock.invocationCallOrder[0])
       .toBeLessThan(emit.mock.invocationCallOrder[0]);
+  });
+
+  it("timestamps reviewer running before the outbound request so a completion before ACK wins", async () => {
+    const { updateRemoteSessionActivity } = makeApp();
+    let clock = 1_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    await app.register(workflowRunRoutes);
+    proxyMock.mockImplementationOnce(async () => {
+      clock = 2_000;
+      return { ok: true, status: 201, data: { run: bareRun } };
+    });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, intentBrief: "client brief" },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(updateRemoteSessionActivity).toHaveBeenCalledWith(expect.objectContaining({
+      status: "running", activityAt: 1_000, lastUserMessageAt: 1_000,
+    }));
+    now.mockRestore();
+  });
+
+  it("keeps a completion that arrives before ACK and suppresses stale running events", async () => {
+    const { updateRemoteSessionActivity, emit, emitBranchActivityIfChanged } = makeApp();
+    updateRemoteSessionActivity.mockResolvedValueOnce("stale");
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, intentBrief: "client brief" },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(ensureStreamMock).toHaveBeenCalledTimes(1);
+    expect(emitBranchActivityIfChanged).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "workflow:run-updated", projectId: "p1",
+    }));
+    expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session:process" }));
+    expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session:status" }));
   });
 
   it("does not attach or emit reviewer activity when the mapped projection is no longer authorized", async () => {

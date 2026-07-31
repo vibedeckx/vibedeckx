@@ -206,6 +206,7 @@ async function routes(fastify: FastifyInstance) {
       }
       // The worker derives branch from its own session row — the body branch
       // is not forwarded (server-derived branch, same rule as the local path).
+      const reviewerActivityAt = Date.now();
       const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
         sourceSessionId: remoteInfo.remoteSessionId,
         reviewFocus,
@@ -248,7 +249,6 @@ async function routes(fastify: FastifyInstance) {
         // so create the front's Activity projection from the acknowledged run
         // response. This exact mapping+association-validated write must precede
         // every local running/process/status invalidation below.
-        const reviewerActivityAt = Date.now();
         const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
           localSessionId: localRun.reviewer_session_id,
           projectId,
@@ -258,7 +258,7 @@ async function routes(fastify: FastifyInstance) {
           activityAt: reviewerActivityAt,
           lastUserMessageAt: reviewerActivityAt,
         });
-        if (!activityReady) {
+        if (activityReady === false) {
           return reply.code(409).send({ error: "Remote reviewer mapping is no longer authorized" });
         }
         // The reviewer may already have finished on the worker; ask for its
@@ -287,31 +287,35 @@ async function routes(fastify: FastifyInstance) {
         // the worker's WorkflowEngine and imported by RemoteNotificationSync;
         // the bell no longer derives anything from branch:activity, so this emit
         // exists purely to keep the workspace dot honest while a review runs.
-        fastify.agentSessionManager.emitBranchActivityIfChanged(projectId, bareRun.branch, {
-          activity: "working",
-          since: reviewerActivityAt,
-          sessionId: localRun.reviewer_session_id,
-        });
+        if (activityReady === true) {
+          fastify.agentSessionManager.emitBranchActivityIfChanged(projectId, bareRun.branch, {
+            activity: "working",
+            since: reviewerActivityAt,
+            sessionId: localRun.reviewer_session_id,
+          });
+        }
         // The worker's spawn-time announcements (session:status/processAlive)
         // fire before this front subscribes, so nothing surfaces the reviewer
         // here on its own. Same intent as the commander's remote spawn path:
         // session:process makes the sidebar (useResidentSessions) refetch the
         // branch list — which now includes the reviewer — and session:status
         // surfaces it in an open agent window on this workspace.
-        fastify.eventBus.emit({
-          type: "session:process",
-          projectId,
-          branch: bareRun.branch,
-          sessionId: localRun.reviewer_session_id,
-          alive: true,
-        });
-        fastify.eventBus.emit({
-          type: "session:status",
-          projectId,
-          branch: bareRun.branch,
-          sessionId: localRun.reviewer_session_id,
-          status: "running",
-        });
+        if (activityReady === true) {
+          fastify.eventBus.emit({
+            type: "session:process",
+            projectId,
+            branch: bareRun.branch,
+            sessionId: localRun.reviewer_session_id,
+            alive: true,
+          });
+          fastify.eventBus.emit({
+            type: "session:status",
+            projectId,
+            branch: bareRun.branch,
+            sessionId: localRun.reviewer_session_id,
+            status: "running",
+          });
+        }
         // The worker's engine already wrote the final "Review - …" title
         // before responding (the session:process refetch above picks it up).
         // Claim the front's one-shot title slots so a later /message through

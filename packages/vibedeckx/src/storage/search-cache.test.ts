@@ -136,6 +136,21 @@ describe("searchCache", () => {
     expect(states[0].last_success_at).toBeGreaterThan(0); // preserved from the earlier success
   });
 
+  it("selects bounded remote activity repair targets fairly by oldest attempt", async () => {
+    const first = await storage.remoteServers.create({ name: "A", url: "http://a" });
+    const second = await storage.remoteServers.create({ name: "B", url: "http://b" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: first.id, remote_path: "/a" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: second.id, remote_path: "/b" });
+    const repairTargets = () => storage.searchCache.listRemoteActivityRefreshTargets(undefined, 1);
+
+    const firstPage = await repairTargets();
+    expect(firstPage).toHaveLength(1);
+    await storage.searchCache.recordSyncFailure("p1", firstPage[0].targetId, "offline");
+    const secondPage = await repairTargets();
+    expect(secondPage).toHaveLength(1);
+    expect(secondPage[0].targetId).not.toBe(firstPage[0].targetId);
+  });
+
   it("an empty snapshot is a successful sync (updates last_success_at, deletes all rows)", async () => {
     await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
     await storage.searchCache.applyCatalogSnapshot("p1", "w1", { workspaces: [], sessions: [] });
@@ -430,6 +445,26 @@ describe("searchCache", () => {
       expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: localId, status: "running" })]),
       );
+
+      const completedAt = revivedAt + 10;
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-live", status: "stopped", activityAt: completedAt,
+        lastCompletedAt: completedAt,
+      })).resolves.toBe(true);
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-live", status: "running", activityAt: revivedAt + 5,
+        lastUserMessageAt: revivedAt + 5,
+      })).resolves.toBe("stale");
+      expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(
+        expect.arrayContaining([expect.objectContaining({
+          id: localId, status: "stopped", lastActiveAt: completedAt, lastCompletedAt: completedAt,
+        })]),
+      );
+      expect(rawQuery<{ status: string; written_at: number }>(
+        `SELECT status, written_at FROM session_search_cache WHERE local_session_id = '${localId}'`,
+      )).toEqual([{ status: "stopped", written_at: completedAt }]);
 
       await storage.remoteSessionMappings.delete(localId);
       await expect(storage.searchCache.updateRemoteSessionActivity({

@@ -118,6 +118,25 @@ describe("search refresh", () => {
     expect(Date.now() - started).toBeLessThan(500);
   });
 
+  it("drain waits for the underlying refresh after a deadline wrapper returns", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const refresher = createSearchRefresher({
+      storage,
+      buildLocalCatalog: async () => emptySnap,
+      fetchRemoteCatalog: async () => { await blocked; return emptySnap; },
+      deadlineMs: 1,
+    });
+    await refresher.refreshAll();
+    let drained = false;
+    const draining = refresher.drain().then(() => { drained = true; });
+    await wait(10);
+    expect(drained).toBe(false);
+    release();
+    await draining;
+    expect(drained).toBe(true);
+  });
+
   it("computeCacheState: cold until every target has succeeded, fresh within TTL, stale after", () => {
     const now = 100_000;
     expect(computeCacheState([], [], now)).toBe("fresh");
