@@ -79,6 +79,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       status TEXT NOT NULL CHECK (status IN (
         'accepted', 'running', 'completed', 'stopped', 'failed'
       )),
+      attempt INTEGER NOT NULL DEFAULT 0,
       error TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -284,6 +285,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
   `);
+
+  const projectChatWorkInfo = db.prepare("PRAGMA table_info(project_chat_work_items)").all() as { name: string }[];
+  if (!projectChatWorkInfo.some((column) => column.name === "attempt")) {
+    db.exec("ALTER TABLE project_chat_work_items ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0");
+  }
 
   // Migration: add title_resolved flag to remote_session_mappings so the
   // local-side AI title generator only fires once per remote session, even

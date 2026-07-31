@@ -247,6 +247,7 @@ export interface ProjectChatWorkItem {
   user_message_id: string;
   content: string;
   status: ProjectChatWorkStatus;
+  attempt: number;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -963,12 +964,14 @@ export interface Storage {
       threadId: string,
       projectId: string,
       userId: string,
+      attempt: number,
     ) => Promise<ProjectChatWorkItem | undefined>;
     appendEvent: (opts: {
       id: string;
       thread_id: string;
       project_id: string;
       user_id: string;
+      attempt: number;
       message_id: string;
       type: Exclude<ProjectChatMessageType, "user" | "turn_end">;
       content: string;
@@ -978,6 +981,7 @@ export interface Storage {
       thread_id: string;
       project_id: string;
       user_id: string;
+      attempt: number;
       status: Extract<ProjectChatWorkStatus, "completed" | "stopped" | "failed">;
       error: string | null;
       turn_end_id: string;

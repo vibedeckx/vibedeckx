@@ -168,6 +168,7 @@ export interface ProjectChatWorkItemsTable {
   user_message_id: string;
   content: string;
   status: ProjectChatWorkStatus;
+  attempt: Generated<number>;
   error: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;

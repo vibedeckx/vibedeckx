@@ -366,10 +366,11 @@ describe("project chat storage", () => {
       id: "w1", user_message_id: "m1", thread_id: "t1",
       project_id: "p1", user_id: "u1", content: "status?",
     });
-    await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
+    const running = await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
 
     const terminal = await storage.projectChatWorkItems.finish({
       id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: running!.attempt,
       status: "completed", error: null, turn_end_id: "end1",
       turn_end_content: JSON.stringify({ status: "completed", workId: "w1" }),
     });
@@ -385,23 +386,53 @@ describe("project chat storage", () => {
       id: "w1", user_message_id: "m1", thread_id: "t1",
       project_id: "p1", user_id: "u1", content: "status?",
     });
-    await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
+    const running = await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
     await expect(storage.projectChatWorkItems.appendEvent({
       id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: running!.attempt,
       message_id: "assistant-1", type: "assistant", content: "partial",
     })).resolves.toMatchObject({ id: "assistant-1", sequence: 2 });
 
-    await storage.projectChatWorkItems.markAccepted("w1", "t1", "p1", "u1");
+    await storage.projectChatWorkItems.markAccepted("w1", "t1", "p1", "u1", running!.attempt);
 
     await expect(storage.projectChatWorkItems.appendEvent({
       id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: running!.attempt,
       message_id: "assistant-late", type: "assistant", content: "late",
     })).resolves.toBeUndefined();
     await expect(storage.projectChatWorkItems.finish({
       id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: running!.attempt,
       status: "completed", error: null, turn_end_id: "end-late", turn_end_content: "{}",
     })).rejects.toThrow(/not found or already terminal/);
     expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1"))
       .map((message) => message.id)).toEqual(["m1", "assistant-1"]);
+  });
+
+  it("fences stale writes after detached work is claimed by a new attempt", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatWorkItems.accept({
+      id: "w1", user_message_id: "m1", thread_id: "t1",
+      project_id: "p1", user_id: "u1", content: "status?",
+    });
+    const first = await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
+    expect(first?.attempt).toBe(1);
+    await storage.projectChatWorkItems.markAccepted("w1", "t1", "p1", "u1", first!.attempt);
+    const second = await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
+    expect(second?.attempt).toBe(2);
+
+    await expect(storage.projectChatWorkItems.appendEvent({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: first!.attempt, message_id: "assistant-stale", type: "assistant", content: "stale",
+    })).resolves.toBeUndefined();
+    await expect(storage.projectChatWorkItems.finish({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: first!.attempt, status: "completed", error: null,
+      turn_end_id: "end-stale", turn_end_content: "{}",
+    })).rejects.toThrow(/not found or already terminal/);
+    await expect(storage.projectChatWorkItems.appendEvent({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      attempt: second!.attempt, message_id: "assistant-current", type: "assistant", content: "current",
+    })).resolves.toMatchObject({ id: "assistant-current" });
   });
 });

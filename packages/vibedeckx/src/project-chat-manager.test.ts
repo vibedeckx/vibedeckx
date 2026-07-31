@@ -320,6 +320,17 @@ describe("ProjectChatManager", () => {
     expect(usedWorkScopedAppend).toBe(true);
 
     await manager.shutdown();
+    const holdRecoveredRunner = deferred();
+    const recoveredManager = new ProjectChatManager(storage, {
+      async *run() {
+        await holdRecoveredRunner.promise;
+      },
+    }, { drainTimeoutMs: 20 });
+    await recoveredManager.openThread("thread-1", "user-1");
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    ))[0]?.attempt === 2);
+
     allowAppend.resolve();
     await new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -329,7 +340,40 @@ describe("ProjectChatManager", () => {
     expect(frames.some((frame) => frame.includes("late append"))).toBe(false);
     expect((await storage.projectChatWorkItems.listNonterminal(
       "thread-1", "project-1", "user-1",
-    ))[0]?.status).toBe("accepted");
+    ))[0]).toMatchObject({ status: "running", attempt: 2 });
+    holdRecoveredRunner.resolve();
+    await recoveredManager.shutdown();
+  });
+
+  it("preserves transcript order when partially-written work is detached and recovered", async () => {
+    await createThread("thread-1");
+    const holdFirstRunner = deferred();
+    const firstManager = new ProjectChatManager(storage, {
+      async *run() {
+        yield { type: "assistant", content: "partial" };
+        await holdFirstRunner.promise;
+      },
+    }, { drainTimeoutMs: 20 });
+    await firstManager.sendMessage("thread-1", "user-1", "work");
+    await waitFor(async () => (await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).some((message) => message.content === "partial"));
+    await firstManager.shutdown();
+
+    let recoveredInput: ProjectChatRunInput | undefined;
+    const recoveredManager = new ProjectChatManager(storage, {
+      async *run(input) {
+        recoveredInput = input;
+        return;
+      },
+    });
+    await recoveredManager.openThread("thread-1", "user-1");
+    await waitFor(() => recoveredInput !== undefined);
+
+    expect(recoveredInput!.messages.map((message) => [message.type, message.content]))
+      .toEqual([["user", "work"], ["assistant", "partial"]]);
+    holdFirstRunner.resolve();
+    await recoveredManager.shutdown();
   });
 
   it("contains stopped-terminal persistence failure and leaves work recoverable", async () => {
@@ -491,11 +535,12 @@ describe("ProjectChatManager", () => {
       id: "work-done", user_message_id: "user-done", thread_id: "thread-1",
       project_id: "project-1", user_id: "user-1", content: "done",
     });
-    await storage.projectChatWorkItems.markRunning(
+    const running = await storage.projectChatWorkItems.markRunning(
       "work-done", "thread-1", "project-1", "user-1",
     );
     await storage.projectChatWorkItems.finish({
       id: "work-done", thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+      attempt: running!.attempt,
       status: "completed", error: null, turn_end_id: "end-done",
       turn_end_content: JSON.stringify({ status: "completed", workId: "work-done" }),
     });

@@ -78,6 +78,7 @@ interface LiveThread {
   abortController: AbortController | null;
   activeWork: Promise<void> | null;
   activeWorkItemId: string | null;
+  activeAttempt: number | null;
   activeTurnId: string | null;
   pendingApprovals: Map<string, {
     turnId: string;
@@ -328,6 +329,7 @@ export class ProjectChatManager {
           abortController: null,
           activeWork: null,
           activeWorkItemId: null,
+          activeAttempt: null,
           activeTurnId: null,
           pendingApprovals: new Map(),
           writeTail: Promise.resolve(),
@@ -384,18 +386,21 @@ export class ProjectChatManager {
     if (timeout) clearTimeout(timeout);
     if (completed || live.activeWork !== work) return;
     const workItemId = live.activeWorkItemId;
+    const attempt = live.activeAttempt;
     live.activeTurnId = null;
-    if (workItemId) {
+    if (workItemId && attempt !== null) {
       await this.storage.projectChatWorkItems.markAccepted(
         workItemId,
         live.thread.id,
         live.thread.project_id,
         live.thread.user_id,
+        attempt,
       );
     }
     live.abortController = null;
     live.activeWork = null;
     live.activeWorkItemId = null;
+    live.activeAttempt = null;
     live.status = "idle";
   }
 
@@ -430,6 +435,7 @@ export class ProjectChatManager {
         if (live.activeWork !== work) return;
         live.activeWork = null;
         live.activeWorkItemId = null;
+        live.activeAttempt = null;
         live.abortController = null;
         if (live.queue.length > 0 && !this.shuttingDown && !this.closingThreads.has(live.thread.id)) {
           this.pump(live);
@@ -448,6 +454,7 @@ export class ProjectChatManager {
     live.abortController = abortController;
     live.activeWorkItemId = queued.workId;
     live.activeTurnId = turnId;
+    let attempt: number | null = null;
     try {
       const running = await this.storage.projectChatWorkItems.markRunning(
         queued.workId,
@@ -456,6 +463,8 @@ export class ProjectChatManager {
         live.thread.user_id,
       );
       if (!running) return;
+      attempt = running.attempt;
+      live.activeAttempt = attempt;
       live.status = "running";
       this.broadcastStatus(live);
       const futureUserMessages = new Set(live.queue.map((item) => item.userMessageId));
@@ -490,7 +499,7 @@ export class ProjectChatManager {
             try { resolveApproval(decision); } catch { /* runner already settled */ }
           };
           try {
-            await this.append(live, queued, turnId, event.type, event.content, () => {
+            await this.append(live, queued, turnId, attempt, event.type, event.content, () => {
               if (!approvalId || !resolveApproval || abortController.signal.aborted ||
                 live.activeTurnId !== turnId) {
                 settleApproval(false);
@@ -506,20 +515,21 @@ export class ProjectChatManager {
             throw error;
           }
         } else {
-          await this.append(live, queued, turnId, event.type, event.content);
+          await this.append(live, queued, turnId, attempt, event.type, event.content);
         }
       }
       if (!this.canPersistTurn(live, turnId)) return;
       const status = abortController.signal.aborted ? "stopped" : "completed";
       try {
-        await this.finishWork(live, queued, turnId, status, null);
+        await this.finishWork(live, queued, turnId, attempt, status, null);
       } catch {
         // A terminal write failure leaves the work nonterminal for recovery.
       }
     } catch (error) {
       if (!this.canPersistTurn(live, turnId)) return;
+      if (attempt === null) return;
       if (abortController.signal.aborted) {
-        await this.finishWork(live, queued, turnId, "stopped", null);
+        await this.finishWork(live, queued, turnId, attempt, "stopped", null);
         return;
       }
       try {
@@ -527,6 +537,7 @@ export class ProjectChatManager {
           live,
           queued,
           turnId,
+          attempt,
           "error",
           error instanceof Error ? error.message : String(error),
         );
@@ -534,6 +545,7 @@ export class ProjectChatManager {
           live,
           queued,
           turnId,
+          attempt,
           "failed",
           error instanceof Error ? error.message : String(error),
         );
@@ -576,6 +588,7 @@ export class ProjectChatManager {
     live: LiveThread,
     queued: QueuedTurn,
     turnId: string,
+    attempt: number,
     status: "completed" | "stopped" | "failed",
     error: string | null,
   ): Promise<ProjectChatMessage> {
@@ -590,6 +603,7 @@ export class ProjectChatManager {
         thread_id: live.thread.id,
         project_id: live.thread.project_id,
         user_id: live.thread.user_id,
+        attempt,
         status,
         error,
         turn_end_id: randomUUID(),
@@ -609,6 +623,7 @@ export class ProjectChatManager {
     live: LiveThread,
     queued: QueuedTurn,
     turnId: string,
+    attempt: number,
     type: ProjectChatStreamEvent["type"] | "error",
     content: string,
     beforeBroadcast?: (message: ProjectChatMessage) => void,
@@ -624,6 +639,7 @@ export class ProjectChatManager {
         thread_id: live.thread.id,
         project_id: live.thread.project_id,
         user_id: live.thread.user_id,
+        attempt,
         message_id: randomUUID(),
         type,
         content,
@@ -720,7 +736,7 @@ export class ProjectChatManager {
       workId: work.id,
       userMessageId: work.user_message_id,
       content: work.content,
-      wasRunning: work.status === "running",
+      wasRunning: work.attempt > 0,
     };
   }
 }

@@ -285,16 +285,17 @@ export const createProjectChatRepos = (
           .executeTakeFirst();
         if (!owned) return undefined;
         const row = await trx.updateTable("project_chat_work_items")
-          .set({ status: "running", updated_at: now() })
+          .set({ status: "running", attempt: sql`attempt + 1`, updated_at: now() })
           .where("id", "=", id)
           .where("thread_id", "=", threadId)
+          .where("status", "in", ["accepted", "running"])
           .returningAll()
           .executeTakeFirst();
         return row ? mapWorkItem(row) : undefined;
       });
     },
 
-    markAccepted: async (id, threadId, projectId, userId) => {
+    markAccepted: async (id, threadId, projectId, userId, attempt) => {
       return kdb.transaction().execute(async (trx) => {
         const owned = await trx.selectFrom("project_chat_work_items as work")
           .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
@@ -304,6 +305,7 @@ export const createProjectChatRepos = (
           .where("thread.project_id", "=", projectId)
           .where("thread.user_id", "=", userId)
           .where("work.status", "=", "running")
+          .where("work.attempt", "=", attempt)
           .executeTakeFirst();
         if (!owned) return undefined;
         const row = await trx.updateTable("project_chat_work_items")
@@ -311,13 +313,14 @@ export const createProjectChatRepos = (
           .where("id", "=", id)
           .where("thread_id", "=", threadId)
           .where("status", "=", "running")
+          .where("attempt", "=", attempt)
           .returningAll()
           .executeTakeFirst();
         return row ? mapWorkItem(row) : undefined;
       });
     },
 
-    appendEvent: async ({ id, thread_id, project_id, user_id, message_id, type, content }) => {
+    appendEvent: async ({ id, thread_id, project_id, user_id, attempt, message_id, type, content }) => {
       return kdb.transaction().execute(async (trx) => {
         const running = await trx.selectFrom("project_chat_work_items as work")
           .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
@@ -325,6 +328,7 @@ export const createProjectChatRepos = (
           .where("work.id", "=", id)
           .where("work.thread_id", "=", thread_id)
           .where("work.status", "=", "running")
+          .where("work.attempt", "=", attempt)
           .where("thread.project_id", "=", project_id)
           .where("thread.user_id", "=", user_id)
           .executeTakeFirst();
@@ -356,7 +360,7 @@ export const createProjectChatRepos = (
     },
 
     finish: async ({
-      id, thread_id, project_id, user_id, status, error, turn_end_id, turn_end_content,
+      id, thread_id, project_id, user_id, attempt, status, error, turn_end_id, turn_end_content,
     }) => {
       return kdb.transaction().execute(async (trx) => {
         const work = await trx.selectFrom("project_chat_work_items as work")
@@ -367,6 +371,7 @@ export const createProjectChatRepos = (
           .where("thread.project_id", "=", project_id)
           .where("thread.user_id", "=", user_id)
           .where("work.status", "=", "running")
+          .where("work.attempt", "=", attempt)
           .executeTakeFirst();
         if (!work) throw new Error("Project Chat work item not found or already terminal");
         const sequenceRow = await trx.selectFrom("project_chat_messages")
@@ -387,6 +392,8 @@ export const createProjectChatRepos = (
           .set({ status, error, updated_at: now() })
           .where("id", "=", id)
           .where("thread_id", "=", thread_id)
+          .where("status", "=", "running")
+          .where("attempt", "=", attempt)
           .returningAll()
           .executeTakeFirstOrThrow();
         const touched = await trx.updateTable("project_chat_threads")
