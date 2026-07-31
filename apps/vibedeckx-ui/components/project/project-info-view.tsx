@@ -5,7 +5,7 @@ import { Calendar, FolderOpen, Globe } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TaskDetailDialog } from "@/components/task/task-detail-dialog";
-import { useProjectChat } from "@/hooks/use-project-chat";
+import { useCreateProjectChatThread } from "@/hooks/use-create-project-chat-thread";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import type { Project, SyncButtonConfig, Task } from "@/lib/api";
 import { ProjectActivityView } from "./project-activity-view";
@@ -62,7 +62,7 @@ export function ProjectInfoView({
   onProjectUpdated,
 }: ProjectInfoViewProps) {
   const { remotes } = useProjectRemotes(project.id);
-  const { createThread } = useProjectChat(project.id, null);
+  const createThread = useCreateProjectChatThread(project.id);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
 
