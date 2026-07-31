@@ -253,6 +253,32 @@ describe("createProjectChatTools", () => {
     expect(createAgentSession).toHaveBeenCalledTimes(2);
   });
 
+  it("returns an explicit retryable response while workspace selection is still resolving", async () => {
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    createAgentSession.mockImplementationOnce(async ({ sessionId }) => {
+      await blocked;
+      return { sessionId };
+    });
+    const requested = await (await tools()).create_agent_session.execute({ instruction: "Implement it" });
+    const input = {
+      requestId: requested.requestId as string, workspaceId: JSON.stringify(["local", "dev"]),
+    };
+    const first = (await tools()).select_workspace.execute(input);
+    await vi.waitFor(() => expect(createAgentSession).toHaveBeenCalledTimes(1));
+
+    const retry = await (await tools()).select_workspace.execute(input);
+    expect(retry).toMatchObject({
+      ok: false, status: "resolving", retryable: true,
+      error: "Workspace selection resolution is still in progress",
+    });
+    release();
+    await expect(first).resolves.toMatchObject({ ok: true, status: "running" });
+  });
+
   it("rejects stale and foreign workspace selections before creating a session", async () => {
     await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
       workspaces: [{ branch: "dev" }], sessions: [],

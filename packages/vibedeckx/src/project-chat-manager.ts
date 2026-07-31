@@ -67,6 +67,7 @@ export interface ProjectChatManagerOptions {
   terminalRetryDelayMs?: number;
   terminalRetryAttempts?: number;
   terminalAttemptTimeoutMs?: number;
+  reconciliationIntervalMs?: number;
   toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
   eventBus?: EventBus;
 }
@@ -281,9 +282,13 @@ export class ProjectChatManager {
   private readonly terminalRetryDelayMs: number;
   private readonly terminalRetryAttempts: number;
   private readonly terminalAttemptTimeoutMs: number;
+  private readonly reconciliationIntervalMs: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private readonly unsubscribeEvents?: () => void;
   private readonly startupReconciliation: Promise<void>;
+  private reconciliationCursor: string | null = null;
+  private reconciliationTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconciliationDelayMs = 100;
   private shuttingDown = false;
 
   constructor(
@@ -297,13 +302,21 @@ export class ProjectChatManager {
     this.terminalRetryDelayMs = options.terminalRetryDelayMs ?? 100;
     this.terminalRetryAttempts = Math.max(1, options.terminalRetryAttempts ?? 3);
     this.terminalAttemptTimeoutMs = options.terminalAttemptTimeoutMs ?? this.drainTimeoutMs;
+    this.reconciliationIntervalMs = Math.max(1, options.reconciliationIntervalMs ?? 1_000);
+    this.reconciliationDelayMs = Math.min(100, this.reconciliationIntervalMs);
     this.toolDependencies = options.toolDependencies;
     this.unsubscribeEvents = options.eventBus?.subscribe((event) => {
       if (this.shuttingDown) return;
       void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
     });
-    this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations())
-      .catch(() => undefined);
+    this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations(2))
+      .catch(() => {
+        this.reconciliationDelayMs = Math.min(this.reconciliationDelayMs * 2, 5_000);
+      })
+      .finally(() => this.scheduleReconciliation(
+        this.reconciliationCursor === null
+          ? Math.max(this.reconciliationIntervalMs, this.reconciliationDelayMs) : 0,
+      ));
   }
 
   /** Resolves after the bounded startup operation-journal reconciliation. */
@@ -454,6 +467,8 @@ export class ProjectChatManager {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    if (this.reconciliationTimer) clearTimeout(this.reconciliationTimer);
+    this.reconciliationTimer = null;
     this.unsubscribeEvents?.();
     for (const live of this.liveThreads.values()) {
       this.cancelEviction(live);
@@ -551,18 +566,50 @@ export class ProjectChatManager {
     });
   }
 
-  private async reconcilePersistedOperations(): Promise<void> {
-    let cursor: string | null = null;
-    for (;;) {
+  private scheduleReconciliation(delayMs: number): void {
+    if (this.shuttingDown || this.reconciliationTimer) return;
+    this.reconciliationTimer = setTimeout(() => {
+      this.reconciliationTimer = null;
       if (this.shuttingDown) return;
-      const page = await this.storage.projectChatOperations.listNonterminal(cursor, 50);
-      if (page.length === 0) return;
-      for (const operation of page) {
-        if (this.shuttingDown) return;
-        await this.reconcilePersistedOperation(operation);
+      void this.trackOperation(this.reconcilePersistedOperations(2)).then(() => {
+        this.reconciliationDelayMs = 100;
+        this.scheduleReconciliation(
+          this.reconciliationCursor === null ? this.reconciliationIntervalMs : 0,
+        );
+      }).catch(() => {
+        this.reconciliationDelayMs = Math.min(this.reconciliationDelayMs * 2, 5_000);
+        this.scheduleReconciliation(this.reconciliationDelayMs);
+      });
+    }, delayMs);
+    this.reconciliationTimer.unref?.();
+  }
+
+  private async reconcilePersistedOperations(maxPages: number): Promise<void> {
+    for (let pages = 0; pages < maxPages; pages++) {
+      if (this.shuttingDown) return;
+      const page = await this.storage.projectChatOperations.listNonterminal(this.reconciliationCursor, 50);
+      if (page.malformed > 0) {
+        console.warn(`[ProjectChat] skipped ${page.malformed} malformed operation row(s)`);
       }
-      cursor = page.at(-1)!.id;
-      if (page.length < 50) return;
+      let retryableFailure = false;
+      for (const operation of page.operations) {
+        if (this.shuttingDown) return;
+        try {
+          await this.reconcilePersistedOperation(operation);
+        } catch (error) {
+          retryableFailure = true;
+          console.warn(`[ProjectChat] reconciliation failed for ${operation.id}:`, boundedStreamError(error).message);
+        }
+      }
+      if (retryableFailure) {
+        this.reconciliationCursor = null;
+        throw new Error("One or more Project Chat operations remain retryable");
+      }
+      if (!page.hasMore || page.nextCursor === null) {
+        this.reconciliationCursor = null;
+        return;
+      }
+      this.reconciliationCursor = page.nextCursor;
     }
   }
 
@@ -573,6 +620,72 @@ export class ProjectChatManager {
       operation.thread_id, operation.project_id, operation.user_id,
     );
     if (!ownedThread) return;
+    if (operation.kind === "task_create" && operation.payload.kind === "task_create") {
+      const payload = operation.payload;
+      let task = await this.storage.tasks.getById(payload.taskId);
+      if (task && task.project_id !== operation.project_id) {
+        await this.transitionOperation(operation, "failed", {}, "Task identity is already in use");
+        return;
+      }
+      if (!task) {
+        if (!payload.title) return;
+        try {
+          task = await this.storage.tasks.create({
+            id: payload.taskId, project_id: operation.project_id, title: payload.title,
+            description: payload.description ?? null, status: payload.taskStatus ?? "todo",
+            priority: payload.priority ?? "medium", assigned_branch: payload.assignedBranch ?? null,
+          });
+        } catch (error) {
+          console.warn(`[ProjectChat] task create ${operation.id} remains retryable:`, boundedStreamError(error).message);
+          throw error;
+        }
+      }
+      if (!(await this.restoreOperationContext(operation, [
+        { entityType: "task", entityId: payload.taskId },
+      ]))) return;
+      await this.transitionOperation(operation, "completed", { taskId: task.id, title: task.title });
+      return;
+    }
+    if (operation.kind === "task_update" && operation.payload.kind === "task_update") {
+      const payload = operation.payload;
+      const task = await this.storage.tasks.getById(payload.taskId);
+      if (!task || task.project_id !== operation.project_id) {
+        await this.transitionOperation(operation, "failed", {}, "Task is no longer authorized");
+        return;
+      }
+      if (!payload.patch || !payload.before) return;
+      const current = {
+        title: task.title, description: task.description, status: task.status,
+        priority: task.priority, assignedBranch: task.assigned_branch,
+      };
+      const desiredMatches = Object.entries(payload.patch)
+        .every(([key, value]) => current[key as keyof typeof current] === value);
+      if (!desiredMatches) {
+        const beforeMatches = Object.keys(payload.patch)
+          .every((key) => current[key as keyof typeof current] === payload.before![key as keyof typeof current]);
+        if (!beforeMatches) {
+          await this.transitionOperation(operation, "failed", {}, "Task changed while recovery was pending");
+          return;
+        }
+        try {
+          const { assignedBranch, ...patch } = payload.patch;
+          const updated = await this.storage.tasks.update(payload.taskId, {
+            ...patch, ...(assignedBranch !== undefined ? { assigned_branch: assignedBranch } : {}),
+          });
+          if (!updated) throw new Error("Task update failed");
+        } catch (error) {
+          console.warn(`[ProjectChat] task update ${operation.id} remains retryable:`, boundedStreamError(error).message);
+          throw error;
+        }
+      }
+      const confirmed = await this.storage.tasks.getById(payload.taskId);
+      if (!confirmed || confirmed.project_id !== operation.project_id) return;
+      if (!(await this.restoreOperationContext(operation, [
+        { entityType: "task", entityId: payload.taskId },
+      ]))) return;
+      await this.transitionOperation(operation, "completed", { taskId: confirmed.id, title: confirmed.title });
+      return;
+    }
     if (operation.kind === "agent_session_create" && operation.payload.kind === "agent_session_create") {
       const sessionId = operation.entity_id ?? operation.payload.sessionId;
       if (!operation.entity_id) return; // unresolved user selection
@@ -637,9 +750,30 @@ export class ProjectChatManager {
           { entityType: "workspace", entityId: payload.workspaceId },
           { entityType: "agent_session", entityId: sessionId },
         ]))) return;
-        await this.transitionOperation(operation, "running", {
+        const confirmed = await this.transitionOperation(operation, "running", {
           sessionId, initialInstructionDelivery: "confirmed",
         });
+        if (confirmed) {
+          const latestLocal = await this.storage.agentSessions.getById(sessionId);
+          if (latestLocal?.project_id === operation.project_id && latestLocal.status !== "running") {
+            const latestStatus = latestLocal.status === "stopped" && latestLocal.last_completed_at
+              ? "completed" : "failed";
+            await this.transitionOperation(confirmed.operation, latestStatus, { sessionId },
+              latestStatus === "failed" ? "Agent session failed" : null);
+          } else if (payload.target !== "local") {
+            const latestRemote = await this.toolDependencies?.remoteSessions?.getMapping(sessionId);
+            if (latestRemote?.projectId === operation.project_id) {
+              const detail = await this.toolDependencies?.remoteSessions?.getDetail(latestRemote, {
+                maxEntries: 1, maxChars: 256,
+              });
+              if (detail?.status === "error" || detail?.status === "stopped") {
+                const latestStatus = detail.status === "stopped" ? "completed" : "failed";
+                await this.transitionOperation(confirmed.operation, latestStatus, { sessionId },
+                  latestStatus === "failed" ? "Agent session failed" : null);
+              }
+            }
+          }
+        }
       } catch (error) {
         const currentRemote = await this.toolDependencies?.remoteSessions?.getMapping(sessionId);
         const exists = (await this.storage.agentSessions.getById(sessionId))?.project_id === operation.project_id
@@ -648,8 +782,11 @@ export class ProjectChatManager {
             && Boolean(await this.storage.projectRemotes.getByProjectAndServer(
               operation.project_id, currentRemote.remoteServerId,
             )));
-        if (!exists) {
+        if (!exists && error instanceof Error && error.message === "Session identity mismatch") {
           await this.transitionOperation(operation, "failed", { sessionId }, boundedStreamError(error).message);
+        } else {
+          console.warn(`[ProjectChat] session operation ${operation.id} remains retryable:`, boundedStreamError(error).message);
+          throw error;
         }
       }
       return;
@@ -686,7 +823,13 @@ export class ProjectChatManager {
         ]))) return;
         await this.transitionOperation(operation, "completed", { delivery: "confirmed" });
       } catch (error) {
-        await this.transitionOperation(operation, "failed", { delivery: "pending" }, boundedStreamError(error).message);
+        const message = boundedStreamError(error).message;
+        if (message.includes("no longer authorized")) {
+          await this.transitionOperation(operation, "failed", { delivery: "pending" }, message);
+        } else {
+          console.warn(`[ProjectChat] instruction operation ${operation.id} remains retryable:`, message);
+          throw error;
+        }
       }
       return;
     }
@@ -698,7 +841,7 @@ export class ProjectChatManager {
       }
       const run = await this.storage.scheduledTaskRuns.getById(operation.payload.runId);
       if (run?.project_id === operation.project_id && run.schedule_id === operation.payload.scheduleId) {
-        const status = run.status === "running" ? "running"
+        const status = run.status === "starting" || run.status === "running" ? "running"
           : run.status === "completed" || run.status === "skipped" ? "completed" : "failed";
         if (!(await this.restoreOperationContext(operation, [
           { entityType: "schedule", entityId: operation.payload.scheduleId },
@@ -727,12 +870,24 @@ export class ProjectChatManager {
             { entityType: "schedule", entityId: operation.payload.scheduleId },
             { entityType: "schedule_run", entityId: operation.payload.runId },
           ]))) return;
-          const status = persisted.status === "running" ? "running"
+          const status = persisted.status === "starting" || persisted.status === "running" ? "running"
             : persisted.status === "completed" || persisted.status === "skipped" ? "completed" : "failed";
-          await this.transitionOperation(operation, status, { contextConfirmed: true },
+          const confirmed = await this.transitionOperation(operation, status, { contextConfirmed: true },
             status === "failed" ? "Schedule run failed" : null);
+          if (confirmed && status === "running") {
+            const latest = await this.storage.scheduledTaskRuns.getById(operation.payload.runId);
+            if (latest?.project_id === operation.project_id
+              && latest.schedule_id === operation.payload.scheduleId
+              && latest.status !== "starting" && latest.status !== "running") {
+              const latestStatus = latest.status === "completed" || latest.status === "skipped"
+                ? "completed" : "failed";
+              await this.transitionOperation(confirmed.operation, latestStatus, {},
+                latestStatus === "failed" ? "Schedule run failed" : null);
+            }
+          }
         } else if ("error" in result) {
-          await this.transitionOperation(operation, "failed", {}, boundedStreamError(result.error).message);
+          console.warn(`[ProjectChat] schedule operation ${operation.id} remains retryable:`, boundedStreamError(result.error).message);
+          throw new Error(result.error);
         }
       }
     }

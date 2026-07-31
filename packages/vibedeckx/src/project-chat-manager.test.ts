@@ -324,6 +324,95 @@ describe("ProjectChatManager", () => {
     await manager.shutdown();
   });
 
+  it("retries a temporary instruction dependency failure while the manager stays live", async () => {
+    await createThread("thread-live-retry");
+    await storage.agentSessions.create({ id: "retry-session", project_id: "project-1", branch: "dev" });
+    await storage.projectChatOperations.create({
+      id: "retry-send", thread_id: "thread-live-retry", project_id: "project-1", user_id: "user-1",
+      kind: "agent_instruction", status: "running", entity_type: "agent_session", entity_id: "retry-session",
+      idempotency_key: "retry-key", payload: {
+        version: 1, kind: "agent_instruction", operationId: "retry-send", status: "running",
+        sessionId: "retry-session", instruction: "Continue", target: "local", delivery: "pending",
+      }, error: null,
+    });
+    const sendAgentInstruction = vi.fn()
+      .mockRejectedValueOnce(new Error("worker temporarily offline"))
+      .mockResolvedValue(true);
+    const manager = new ProjectChatManager(storage, reply("unused"), {
+      eventBus: new EventBus(), reconciliationIntervalMs: 5,
+      toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => true },
+        mutationServices: {
+          createAgentSession: async ({ sessionId }) => ({ sessionId }), sendAgentInstruction,
+          runScheduleNow: async (_id, runId) => ({ runId, skipped: false }),
+        },
+      },
+    });
+
+    await manager.ready();
+    expect((await storage.projectChatOperations.getById(
+      "retry-send", "thread-live-retry", "project-1", "user-1",
+    ))?.status).toBe("running");
+    await waitFor(() => sendAgentInstruction.mock.calls.length >= 2);
+    await waitFor(async () => (await storage.projectChatOperations.getById(
+      "retry-send", "thread-live-retry", "project-1", "user-1",
+    ))?.status === "completed");
+    expect(sendAgentInstruction).toHaveBeenCalledTimes(2);
+    await manager.shutdown();
+  });
+
+  it("reconciles task create and update crash windows without overwriting later edits", async () => {
+    await createThread("thread-task-recovery");
+    await storage.tasks.create({
+      id: "updated-task", project_id: "project-1", title: "After", description: null,
+      status: "in_progress", priority: "high", assigned_branch: "dev",
+    });
+    await storage.tasks.create({
+      id: "conflicted-task", project_id: "project-1", title: "Human edit", description: null,
+      status: "todo", priority: "medium", assigned_branch: null,
+    });
+    await storage.projectChatOperations.create({
+      id: "task-create-op", thread_id: "thread-task-recovery", project_id: "project-1", user_id: "user-1",
+      kind: "task_create", status: "pending", entity_type: "task", entity_id: "created-task",
+      idempotency_key: "task-create", payload: {
+        version: 1, kind: "task_create", operationId: "task-create-op", status: "pending",
+        taskId: "created-task", title: "Created", description: "Details", taskStatus: "todo",
+        priority: "urgent", assignedBranch: "dev",
+      }, error: null,
+    });
+    const updatePayload = (operationId: string, taskId: string) => ({
+      version: 1 as const, kind: "task_update" as const, operationId, status: "running" as const,
+      taskId, patch: { title: "After", status: "in_progress" as const, priority: "high" as const, assignedBranch: "dev" },
+      before: { title: "Before", description: null, status: "todo" as const, priority: "medium" as const, assignedBranch: null },
+    });
+    for (const [id, taskId] of [["task-update-op", "updated-task"], ["task-conflict-op", "conflicted-task"]] as const) {
+      await storage.projectChatOperations.create({
+        id, thread_id: "thread-task-recovery", project_id: "project-1", user_id: "user-1",
+        kind: "task_update", status: "running", entity_type: "task", entity_id: taskId,
+        idempotency_key: id, payload: updatePayload(id, taskId), error: null,
+      });
+    }
+    const update = vi.spyOn(storage.tasks, "update");
+    const manager = new ProjectChatManager(storage, reply("unused"), { eventBus: new EventBus() });
+
+    await manager.ready();
+    expect(await storage.tasks.getById("created-task")).toMatchObject({
+      title: "Created", description: "Details", priority: "urgent", assigned_branch: "dev",
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect((await storage.projectChatOperations.getById(
+      "task-create-op", "thread-task-recovery", "project-1", "user-1",
+    ))?.status).toBe("completed");
+    expect((await storage.projectChatOperations.getById(
+      "task-update-op", "thread-task-recovery", "project-1", "user-1",
+    ))?.status).toBe("completed");
+    expect((await storage.projectChatOperations.getById(
+      "task-conflict-op", "thread-task-recovery", "project-1", "user-1",
+    ))?.status).toBe("failed");
+    expect((await storage.tasks.getById("conflicted-task"))?.title).toBe("Human edit");
+    await manager.shutdown();
+  });
+
   it("does not let a spawn event confirm initial instruction delivery and retries the same local session", async () => {
     await createThread("thread-delivery");
     const workspaceId = JSON.stringify(["local", "dev"]);

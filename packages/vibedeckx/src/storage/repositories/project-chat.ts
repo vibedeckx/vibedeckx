@@ -30,8 +30,8 @@ const mapContextRef = (row: Selectable<ProjectChatContextRefsTable>): ProjectCha
 
 const operationStatusSchema = z.enum(["pending", "resolving", "running", "completed", "failed"]);
 const operationPayloadSchema = z.discriminatedUnion("kind", [
-  z.object({ version: z.literal(1), kind: z.literal("task_create"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional() }).strict(),
-  z.object({ version: z.literal(1), kind: z.literal("task_update"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("task_create"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional(), description: z.string().max(8_000).nullable().optional(), taskStatus: z.enum(["todo", "in_progress", "done", "cancelled"]).optional(), priority: z.enum(["low", "medium", "high", "urgent"]).optional(), assignedBranch: z.string().max(512).nullable().optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("task_update"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional(), patch: z.object({ title: z.string().max(512).optional(), description: z.string().max(8_000).nullable().optional(), status: z.enum(["todo", "in_progress", "done", "cancelled"]).optional(), priority: z.enum(["low", "medium", "high", "urgent"]).optional(), assignedBranch: z.string().max(512).nullable().optional() }).strict().optional(), before: z.object({ title: z.string().max(512), description: z.string().max(8_000).nullable(), status: z.enum(["todo", "in_progress", "done", "cancelled"]), priority: z.enum(["low", "medium", "high", "urgent"]), assignedBranch: z.string().max(512).nullable() }).strict().optional() }).strict(),
   z.object({
     version: z.literal(1), kind: z.literal("agent_session_create"), operationId: z.string().min(1).max(512),
     status: operationStatusSchema, sessionId: z.string().min(1).max(512), workerSessionId: z.string().min(1).max(512).optional(),
@@ -660,6 +660,7 @@ export const createProjectChatRepos = (
     },
 
     listNonterminal: async (afterId, limit) => {
+      const boundedLimit = Math.max(1, Math.min(limit, 100));
       let query = kdb.selectFrom("project_chat_operations as operation")
         .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
         .selectAll("operation")
@@ -668,8 +669,19 @@ export const createProjectChatRepos = (
         .where("operation.status", "in", ["pending", "resolving", "running"]);
       if (afterId !== null) query = query.where("operation.id", ">", afterId);
       const rows = await query.orderBy("operation.id", "asc")
-        .limit(Math.max(1, Math.min(limit, 100))).execute();
-      return rows.map(mapOperation);
+        .limit(boundedLimit + 1).execute();
+      const pageRows = rows.slice(0, boundedLimit);
+      const operations: ProjectChatOperation[] = [];
+      let malformed = 0;
+      for (const row of pageRows) {
+        try { operations.push(mapOperation(row)); } catch { malformed += 1; }
+      }
+      return {
+        operations,
+        nextCursor: pageRows.at(-1)?.id ?? null,
+        hasMore: rows.length > boundedLimit,
+        malformed,
+      };
     },
 
     announce: async (opts) => kdb.transaction().execute(async (trx) => {

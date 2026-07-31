@@ -24,6 +24,31 @@ describe("project chat storage", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("isolates malformed operation rows while advancing the reconciliation cursor", async () => {
+    await storage.projectChatThreads.create({ id: "thread", project_id: "p1", user_id: "local", title: null });
+    const raw = new Database(dbPath);
+    raw.prepare(`INSERT INTO project_chat_operations
+      (id, thread_id, project_id, user_id, kind, payload_version, status, entity_type, entity_id,
+       idempotency_key, payload, error)
+      VALUES (?, ?, ?, ?, ?, 1, 'pending', NULL, NULL, ?, ?, NULL)`)
+      .run("a-malformed", "thread", "p1", "local", "schedule_run", "bad-key",
+        JSON.stringify({ version: 1, kind: "schedule_run" }));
+    raw.close();
+    await storage.projectChatOperations.create({
+      id: "b-valid", thread_id: "thread", project_id: "p1", user_id: "local",
+      kind: "schedule_run", status: "pending", entity_type: "schedule_run", entity_id: "run",
+      idempotency_key: "valid-key", payload: {
+        version: 1, kind: "schedule_run", operationId: "b-valid", status: "pending",
+        scheduleId: "schedule", runId: "run",
+      }, error: null,
+    });
+
+    await expect(storage.projectChatOperations.listNonterminal(null, 50)).resolves.toMatchObject({
+      operations: [expect.objectContaining({ id: "b-valid" })],
+      nextCursor: "b-valid", hasMore: false, malformed: 1,
+    });
+  });
+
   it("stores multiple project-scoped threads without a branch property", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
     await storage.projectChatThreads.create({ id: "t2", project_id: "p1", user_id: "u1", title: "Second" });

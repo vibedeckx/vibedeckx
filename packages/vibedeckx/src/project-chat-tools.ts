@@ -645,7 +645,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         await revalidateScope();
         await validateAssignedBranch(assignedBranch);
         const taskId = randomUUID();
-        const operation = await beginOperation("task_create", "task", taskId, { taskId, title });
+        const operation = await beginOperation("task_create", "task", taskId, {
+          taskId, title, description: description ?? null, taskStatus: status ?? "todo",
+          priority: priority ?? "medium", assignedBranch: assignedBranch ?? null,
+        });
         try {
           await revalidateScope();
           await validateAssignedBranch(assignedBranch);
@@ -673,7 +676,16 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         if (!target) throw new Error("Task not found");
         if (target.project_id !== projectId) throw new Error("Object is not part of this project");
         await validateAssignedBranch(assignedBranch);
-        const operation = await beginOperation("task_update", "task", taskId, { taskId });
+        const operationPatch = {
+          ...patch, ...(assignedBranch !== undefined ? { assignedBranch } : {}),
+        };
+        const operation = await beginOperation("task_update", "task", taskId, {
+          taskId, patch: operationPatch,
+          before: {
+            title: target.title, description: target.description, status: target.status,
+            priority: target.priority, assignedBranch: target.assigned_branch,
+          },
+        });
         try {
           await revalidateScope();
           const current = await storage.tasks.getById(taskId);
@@ -802,7 +814,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (current.status === "failed") {
             return { ok: false, operationId: current.id, status: "failed", error: current.error ?? "Agent session creation failed" };
           }
-          throw new Error("Workspace selection resolution is still in progress");
+          return {
+            ok: false, operationId: current.id, sessionId: operation.payload.sessionId,
+            status: "resolving", retryable: true,
+            error: "Workspace selection resolution is still in progress",
+          };
         }
         if (operation.status !== "pending") {
           throw new Error("Workspace selection request is already resolved");
@@ -847,7 +863,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (correlated.status === "failed") {
             return { ok: false, operationId: correlated.id, status: "failed", error: correlated.error ?? "Agent session creation failed" };
           }
-          throw new Error("Workspace selection resolution is still in progress");
+          return {
+            ok: false, operationId: correlated.id, sessionId,
+            status: "resolving", retryable: true,
+            error: "Workspace selection resolution is still in progress",
+          };
         }
         let created = false;
         let failure: unknown;

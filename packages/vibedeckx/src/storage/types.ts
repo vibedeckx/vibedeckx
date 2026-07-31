@@ -278,8 +278,8 @@ export type ProjectChatOperationPayload = {
   operationId: string;
   status: ProjectChatOperationStatus;
 } & (
-  | { kind: "task_create"; taskId: string; title?: string }
-  | { kind: "task_update"; taskId: string; title?: string }
+  | { kind: "task_create"; taskId: string; title?: string; description?: string | null; taskStatus?: TaskStatus; priority?: TaskPriority; assignedBranch?: string | null }
+  | { kind: "task_update"; taskId: string; title?: string; patch?: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assignedBranch?: string | null }; before?: { title: string; description: string | null; status: TaskStatus; priority: TaskPriority; assignedBranch: string | null } }
   | { kind: "agent_session_create"; sessionId: string; workerSessionId?: string; workspaceId?: string; target?: string; branch?: string | null; instruction?: string; permissionMode?: string; agentType?: string; model?: string | null; initialInstructionDelivery?: "pending" | "confirmed"; phase?: "workspace_selection"; requestId?: string; candidates?: Array<{ id: string; target: string; branch: string | null }>; selectedWorkspaceId?: string; claimToken?: string }
   | { kind: "agent_instruction"; sessionId: string; instruction?: string; target?: "local" | { remoteServerId: string; remoteSessionId: string }; delivery?: "pending" | "confirmed" }
   | { kind: "schedule_run"; scheduleId: string; runId: string; contextConfirmed?: boolean; skipped?: boolean }
@@ -1094,7 +1094,12 @@ export interface Storage {
       entityId: string,
       limit: number,
     ) => Promise<ProjectChatOperation[]>;
-    listNonterminal: (afterId: string | null, limit: number) => Promise<ProjectChatOperation[]>;
+    listNonterminal: (afterId: string | null, limit: number) => Promise<{
+      operations: ProjectChatOperation[];
+      nextCursor: string | null;
+      hasMore: boolean;
+      malformed: number;
+    }>;
     announce: (opts: {
       id: string;
       thread_id: string;
