@@ -5,17 +5,18 @@ import { randomUUID } from "crypto";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import type { ExecutorType, PromptProvider } from "../storage/types.js";
+import { ProcessEffectConflictError } from "../process-manager.js";
 import { requireAuth } from "../server.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // Execute command at a path (for remote executor)
   fastify.post<{
-    Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean; processId?: string };
+    Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean; processId?: string; effectFingerprint?: string };
   }>("/api/path/execute", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
-    const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty, processId: requestedProcessId } = req.body;
+    const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty, processId: requestedProcessId, effectFingerprint } = req.body;
     if (!projectPath || !command) {
       return reply.code(400).send({ error: "Path and command are required" });
     }
@@ -51,9 +52,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     };
 
     try {
-      const processId = await fastify.processManager.start(tempExecutor, resolvedBase, true, requestedProcessId);
+      const processId = await fastify.processManager.start(tempExecutor, resolvedBase, true, requestedProcessId, effectFingerprint);
       return reply.code(200).send({ processId });
     } catch (error) {
+      if (error instanceof ProcessEffectConflictError) return reply.code(409).send({ error: error.message });
       return reply.code(500).send({ error: String(error) });
     }
   });

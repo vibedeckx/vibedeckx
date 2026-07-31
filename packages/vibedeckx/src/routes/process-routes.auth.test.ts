@@ -48,6 +48,6 @@ describe("POST /api/path/execute authorization", () => {
     await makeApp({ id: "p", path: "/repo", user_id: "owner" });
     const response = await app.inject({ method: "POST", url: "/api/path/execute", payload: { path: "/repo", command: "echo ok", processId: "schedule-run-1" } });
     expect(response.statusCode).toBe(200);
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ project_id: "p", command: "echo ok" }), "/repo", true, "schedule-run-1");
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ project_id: "p", command: "echo ok" }), "/repo", true, "schedule-run-1", undefined);
   });
 });

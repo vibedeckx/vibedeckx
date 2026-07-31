@@ -21,6 +21,8 @@ export type LogMessage =
   | { type: "pty"; data: string }
   | { type: "finished"; exitCode: number | null; finalResult?: string };
 
+export class ProcessEffectConflictError extends Error {}
+
 export type InputMessage =
   | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number };
@@ -81,6 +83,7 @@ fixNodePtyPermissions();
 
 export class ProcessManager {
   private processes: Map<string, RunningProcess> = new Map();
+  private processEffects = new Map<string, string>();
   private storage: Storage;
   private eventBus: EventBus | null = null;
   private terminalCounter = 0;
@@ -140,12 +143,26 @@ export class ProcessManager {
     projectPath: string,
     skipDb = false,
     preallocatedProcessId?: string,
+    suppliedEffectFingerprint?: string,
   ): Promise<string> {
     const processId = preallocatedProcessId ?? crypto.randomUUID();
+    const cwd = executor.cwd
+      ? (path.isAbsolute(executor.cwd) ? executor.cwd : path.join(projectPath, executor.cwd))
+      : projectPath;
+    const effect = JSON.stringify({ scope: suppliedEffectFingerprint ?? null,
+      projectId: executor.project_id, command: executor.command, executorType: executor.executor_type,
+      provider: executor.prompt_provider, cwd,
+    });
     // Retry of a durable schedule claim after a lost response: the first
     // request already spawned this exact process, so return its identity
     // instead of launching a duplicate.
-    if (preallocatedProcessId && this.processes.has(processId)) return processId;
+    if (preallocatedProcessId && this.processes.has(processId)) {
+      if (this.processEffects.get(processId) !== effect) {
+        throw new ProcessEffectConflictError("Process identity is already bound to a different effect");
+      }
+      return processId;
+    }
+    this.processEffects.set(processId, effect);
 
     // Create process record in database (skip for remote path-based execution)
     if (!skipDb) {
@@ -158,10 +175,6 @@ export class ProcessManager {
     // Determine working directory
     // If executor.cwd is set, resolve it relative to the worktree/project path
     // so that sub-directory paths work correctly across worktrees
-    const cwd = executor.cwd
-      ? (path.isAbsolute(executor.cwd) ? executor.cwd : path.join(projectPath, executor.cwd))
-      : projectPath;
-
     // For claude prompt executors, use stream-json mode for real-time streaming
     if (executor.executor_type === 'prompt' && (executor.prompt_provider ?? 'claude') === 'claude') {
       console.log(`[ProcessManager] Starting stream-json process ${processId}`);

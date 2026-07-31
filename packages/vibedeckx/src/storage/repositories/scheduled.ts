@@ -106,13 +106,24 @@ export const createScheduledRepos = (
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       return mapRun(row);
     },
-    claimStart: async ({ id, scheduleId, processId }) => kdb.transaction().execute(async (trx) => {
+    claimStart: async ({ id, scheduleId, processId, ownerToken, effectFingerprint, leaseMs = 30_000 }) => kdb.transaction().execute(async (trx) => {
+      const nowMs = Date.now();
       const existing = await trx.selectFrom("scheduled_task_runs")
         .selectAll().where("id", "=", id).executeTakeFirst();
       if (existing) {
         if (existing.schedule_id !== scheduleId
           || (existing.status === "starting" && existing.process_id !== processId)) return "conflict" as const;
-        return existing.status === "starting" ? "retry" as const : "existing" as const;
+        const claim = await trx.selectFrom("scheduled_task_execution_claims")
+          .selectAll().where("run_id", "=", id).executeTakeFirst();
+        if (!claim || claim.effect_fingerprint !== effectFingerprint) return "conflict" as const;
+        if (existing.status !== "starting" && existing.status !== "running") return "existing" as const;
+        if (claim.owner_token === ownerToken) return "retry" as const;
+        if (claim.lease_expires_at > nowMs) return "existing" as const;
+        const takeover = await trx.updateTable("scheduled_task_execution_claims")
+          .set({ owner_token: ownerToken, lease_expires_at: nowMs + leaseMs })
+          .where("run_id", "=", id).where("owner_token", "=", claim.owner_token)
+          .where("lease_expires_at", "<=", nowMs).executeTakeFirst();
+        return Number(takeover.numUpdatedRows) === 1 ? "retry" as const : "existing" as const;
       }
       const active = await trx.selectFrom("scheduled_task_execution_claims")
         .select("run_id")
@@ -126,15 +137,25 @@ export const createScheduledRepos = (
       })).execute();
       await trx.insertInto("scheduled_task_execution_claims").values({
         schedule_id: scheduleId, run_id: id, process_id: processId,
+        owner_token: ownerToken, lease_expires_at: nowMs + leaseMs,
+        effect_fingerprint: effectFingerprint,
       }).execute();
       return "claimed" as const;
     }),
-    markRunning: async (id, claimedProcessId, processId = claimedProcessId) => {
+    heartbeat: async (id, ownerToken, leaseMs = 30_000) => {
+      const result = await kdb.updateTable("scheduled_task_execution_claims")
+        .set({ lease_expires_at: Date.now() + leaseMs })
+        .where("run_id", "=", id).where("owner_token", "=", ownerToken).executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+    markRunning: async (id, claimedProcessId, processId = claimedProcessId, ownerToken) => {
       const result = await kdb.updateTable("scheduled_task_runs")
         .set({ status: "running", process_id: processId })
         .where("id", "=", id)
-        .where("status", "=", "starting")
+        .where("status", "in", ["starting", "running"])
         .where("process_id", "=", claimedProcessId)
+        .$if(ownerToken !== undefined, (qb) => qb.where("id", "in", kdb.selectFrom("scheduled_task_execution_claims")
+          .select("run_id").where("owner_token", "=", ownerToken!)))
         .executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
     },

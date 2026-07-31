@@ -979,17 +979,32 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       schedule_id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL UNIQUE,
       process_id TEXT NOT NULL,
+      owner_token TEXT NOT NULL DEFAULT '',
+      lease_expires_at INTEGER NOT NULL DEFAULT 0,
+      effect_fingerprint TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
       FOREIGN KEY (run_id) REFERENCES scheduled_task_runs(id) ON DELETE CASCADE
     );
   `);
 
-  // Server died mid-run: 'running' rows from a previous instance are orphans
-  // (same idiom as the executor_processes fixup earlier in this function).
-  db.exec("UPDATE scheduled_task_runs SET status = 'killed', finished_at = CURRENT_TIMESTAMP WHERE status = 'running'");
+  const scheduleClaimCols = db.prepare("PRAGMA table_info(scheduled_task_execution_claims)").all() as { name: string }[];
+  if (!scheduleClaimCols.some((c) => c.name === "owner_token")) {
+    db.exec("ALTER TABLE scheduled_task_execution_claims ADD COLUMN owner_token TEXT NOT NULL DEFAULT ''");
+  }
+  if (!scheduleClaimCols.some((c) => c.name === "lease_expires_at")) {
+    db.exec("ALTER TABLE scheduled_task_execution_claims ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!scheduleClaimCols.some((c) => c.name === "effect_fingerprint")) {
+    db.exec("ALTER TABLE scheduled_task_execution_claims ADD COLUMN effect_fingerprint TEXT NOT NULL DEFAULT ''");
+  }
+
+  // Claimed runs remain recoverable after their owner's lease expires. Merely
+  // opening another connection must not mutate a live owner's running row.
+  db.exec(`UPDATE scheduled_task_runs SET status = 'killed', finished_at = CURRENT_TIMESTAMP
+    WHERE status = 'running' AND id NOT IN (SELECT run_id FROM scheduled_task_execution_claims)`);
   db.exec(`DELETE FROM scheduled_task_execution_claims
-    WHERE run_id IN (SELECT id FROM scheduled_task_runs WHERE status != 'starting')`);
+    WHERE run_id IN (SELECT id FROM scheduled_task_runs WHERE status NOT IN ('starting', 'running'))`);
 
   // Add scheduled_tasks.target for DBs created before remote-schedule support.
   const scheduledTaskCols = db.prepare("PRAGMA table_info(scheduled_tasks)").all() as { name: string }[];

@@ -653,10 +653,11 @@ export interface Storage {
   };
   scheduledTaskRuns: {
     create: (opts: { id: string; schedule_id: string; status?: ScheduledTaskRunStatus; process_id?: string | null }) => Promise<ScheduledTaskRun>;
-    claimStart: (opts: { id: string; scheduleId: string; processId: string }) => Promise<
+    claimStart: (opts: { id: string; scheduleId: string; processId: string; ownerToken: string; effectFingerprint: string; leaseMs?: number }) => Promise<
       "claimed" | "retry" | "existing" | "occupied" | "conflict"
     >;
-    markRunning: (id: string, claimedProcessId: string, processId?: string) => Promise<boolean>;
+    heartbeat: (id: string, ownerToken: string, leaseMs?: number) => Promise<boolean>;
+    markRunning: (id: string, claimedProcessId: string, processId?: string, ownerToken?: string) => Promise<boolean>;
     getById: (id: string) => Promise<ScheduledTaskRun | undefined>;
     /** Newest runs across schedules belonging to exactly one project; output/report omitted. */
     listRecentByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRun[]>;

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import { createHash } from "crypto";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage, Executor } from "./storage/types.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
@@ -121,14 +122,20 @@ describe("SchedulerService.runNow", () => {
   });
 
   it("recovers a durable starting claim without creating a second run", async () => {
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      projectId: "proj-1", scheduleId: "s1", runId: "claimed-run", path: dir,
+      command: "echo hi", target: "local", executorType: "command", provider: null,
+    })).digest("hex");
     await storage.scheduledTaskRuns.claimStart({
       id: "claimed-run", scheduleId: "s1", processId: "schedule-run-claimed-run",
+      ownerToken: "dead-instance", effectFingerprint: fingerprint, leaseMs: 1,
     });
     scheduler.shutdown();
     await storage.close();
     storage = await createSqliteStorage(dbPath);
     pm = makeFakeProcessManager();
     scheduler = new SchedulerService(storage, pm as unknown as ProcessManager);
+    await new Promise((resolve) => setTimeout(resolve, 5));
 
     await expect(scheduler.runNow("s1", "claimed-run"))
       .resolves.toEqual({ runId: "claimed-run", skipped: false });
@@ -148,6 +155,19 @@ describe("SchedulerService.runNow", () => {
     } finally {
       other.shutdown();
     }
+  });
+
+  it("spawns the same durable run only once across scheduler owners", async () => {
+    const otherPm = makeFakeProcessManager();
+    const other = new SchedulerService(storage, otherPm as unknown as ProcessManager);
+    try {
+      const [first, second] = await Promise.all([
+        scheduler.runNow("s1", "shared-run"), other.runNow("s1", "shared-run"),
+      ]);
+      expect(first).toMatchObject({ runId: "shared-run" });
+      expect(second).toMatchObject({ runId: "shared-run" });
+      expect(pm.started.length + otherPm.started.length).toBe(1);
+    } finally { other.shutdown(); }
   });
 
   it("does not let a concurrent retry of the same starting run stop its process", async () => {

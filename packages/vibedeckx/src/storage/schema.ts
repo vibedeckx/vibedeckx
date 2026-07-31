@@ -382,6 +382,9 @@ export interface ScheduledTaskExecutionClaimsTable {
   schedule_id: string;
   run_id: string;
   process_id: string;
+  owner_token: string;
+  lease_expires_at: number;
+  effect_fingerprint: string;
   created_at: Generated<string>;
 }
 

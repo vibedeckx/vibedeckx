@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { existsSync } from "fs";
 import path from "path";
 import { Cron } from "croner";
@@ -15,6 +15,12 @@ import type { RemoteExecutorInfo } from "./server-types.js";
 const OUTPUT_CAP = 200_000;
 /** Run-history rows kept per schedule. */
 const RUNS_KEEP = 50;
+const CLAIM_LEASE_MS = 30_000;
+const CLAIM_HEARTBEAT_MS = 10_000;
+
+function effectFingerprint(value: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
 
 /**
  * Appended to prompt-type schedule content so the agent's final message doubles
@@ -59,6 +65,7 @@ export interface SchedulerRemoteDeps {
 }
 
 export class SchedulerService {
+  private readonly ownerToken = randomUUID();
   private jobs = new Map<string, Cron>();
   /** scheduleId -> runId of the currently active run (overlap guard). */
   private activeRuns = new Map<string, string>();
@@ -230,8 +237,12 @@ export class SchedulerService {
     };
 
     const claimedProcessId = `schedule-run-${runId}`;
+    const fingerprint = effectFingerprint({ projectId: task.project_id, scheduleId, runId, path: cwd,
+      command: executor.command, target: "local", executorType: executor.executor_type,
+      provider: executor.prompt_provider });
     const claim = await this.storage.scheduledTaskRuns.claimStart({
-      id: runId, scheduleId, processId: claimedProcessId,
+      id: runId, scheduleId, processId: claimedProcessId, ownerToken: this.ownerToken,
+      effectFingerprint: fingerprint, leaseMs: CLAIM_LEASE_MS,
     });
     if (claim === "conflict") return { error: "Run identity is already in use" };
     if (claim === "existing") {
@@ -248,14 +259,14 @@ export class SchedulerService {
 
     let processId: string;
     try {
-      processId = await this.processManager.start(executor, cwd, true, claimedProcessId);
+      processId = await this.processManager.start(executor, cwd, true, claimedProcessId, fingerprint);
     } catch (err) {
       this.activeRuns.delete(scheduleId);
       return this.failWithoutStart(task, runId, `Failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     if (processId !== claimedProcessId
-      || !(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId))) {
+      || !(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, claimedProcessId, this.ownerToken))) {
       await this.processManager.stop(processId);
       this.activeRuns.delete(scheduleId);
       return this.failWithoutStart(task, runId, "Failed to confirm the scheduled process claim");
@@ -265,6 +276,10 @@ export class SchedulerService {
     let output = "";
     let finalized = false;
     let timer: NodeJS.Timeout | undefined;
+    const heartbeat = setInterval(() => {
+      void this.storage.scheduledTaskRuns.heartbeat(runId, this.ownerToken, CLAIM_LEASE_MS);
+    }, CLAIM_HEARTBEAT_MS);
+    heartbeat.unref();
     let unsubscribe: (() => void) | null = null;
 
     // Cancels the timeout timer + process subscription without touching
@@ -272,6 +287,7 @@ export class SchedulerService {
     // shutdown()'s abort path so both leave no dangling timer/subscription.
     const releaseRunResources = () => {
       if (timer) clearTimeout(timer);
+      clearInterval(heartbeat);
       unsubscribe?.();
     };
 
@@ -353,8 +369,14 @@ export class SchedulerService {
 
     const proxy = this.remote.proxy ?? proxyToRemoteAuto;
     const claimedProcessId = `schedule-run-${runId}`;
+    const command = buildRunContent(task);
+    const fingerprint = effectFingerprint({ projectId: task.project_id, scheduleId: task.id, runId,
+      path: remotePath, command, target: task.target, executorType: task.run_type,
+      provider: task.run_type === "prompt" ? (task.prompt_provider ?? "claude") : null,
+      branch: remoteBranch });
     const claim = await this.storage.scheduledTaskRuns.claimStart({
-      id: runId, scheduleId: task.id, processId: claimedProcessId,
+      id: runId, scheduleId: task.id, processId: claimedProcessId, ownerToken: this.ownerToken,
+      effectFingerprint: fingerprint, leaseMs: CLAIM_LEASE_MS,
     });
     if (claim === "conflict") return { error: "Run identity is already in use" };
     if (claim === "existing") {
@@ -375,12 +397,13 @@ export class SchedulerService {
         task.target, "POST", "/api/path/execute",
         {
           path: remotePath,
-          command: buildRunContent(task),
+          command,
           executor_type: task.run_type,
           prompt_provider: task.run_type === "prompt" ? (task.prompt_provider ?? "claude") : null,
           branch: remoteBranch ?? undefined,
           pty: true,
           processId: claimedProcessId,
+          effectFingerprint: fingerprint,
         },
         { reverseConnectManager: this.remote.reverseConnectManager },
       );
@@ -406,7 +429,7 @@ export class SchedulerService {
     this.remote.remoteExecutorMap.set(localProcessId, remoteInfo);
     this.remote.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
 
-    if (!(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, localProcessId))) {
+    if (!(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, localProcessId, this.ownerToken))) {
       this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, "Failed to confirm the remote scheduled process claim");
     }
@@ -414,10 +437,15 @@ export class SchedulerService {
 
     let finalized = false;
     let timer: NodeJS.Timeout | undefined;
+    const heartbeat = setInterval(() => {
+      void this.storage.scheduledTaskRuns.heartbeat(runId, this.ownerToken, CLAIM_LEASE_MS);
+    }, CLAIM_HEARTBEAT_MS);
+    heartbeat.unref();
     let unsubscribe: (() => void) | undefined;
 
     const releaseRunResources = () => {
       if (timer) clearTimeout(timer);
+      clearInterval(heartbeat);
       unsubscribe?.();
     };
 
