@@ -1,4 +1,5 @@
 import type { ColumnType, Generated } from "kysely";
+import type { ProjectChatContextEntityType, ProjectChatMessageType } from "./types.js";
 
 /** Boolean column: 0/1 under sqlite, native boolean under pg. Always read via fromDbBool(), write via DialectHelpers.toDbBool(). */
 export type DbBool = ColumnType<number | boolean, number | boolean, number | boolean>;
@@ -152,14 +153,14 @@ export interface ProjectChatMessagesTable {
   id: string;
   thread_id: string;
   sequence: number;
-  type: string;
+  type: ProjectChatMessageType;
   content: string;
   created_at: Generated<string>;
 }
 
 export interface ProjectChatContextRefsTable {
   thread_id: string;
-  entity_type: string;
+  entity_type: ProjectChatContextEntityType;
   entity_id: string;
   last_referenced_at: Generated<string>;
 }

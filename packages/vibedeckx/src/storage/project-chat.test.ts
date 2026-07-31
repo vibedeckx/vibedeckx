@@ -100,37 +100,120 @@ describe("project chat storage", () => {
 
   it("orders messages by sequence ASC", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
-    await storage.projectChatMessages.append({ id: "m2", thread_id: "t1", sequence: 2, type: "assistant", content: "Working on it" });
-    await storage.projectChatMessages.append({ id: "m1", thread_id: "t1", sequence: 1, type: "user", content: "status?" });
+    await storage.projectChatMessages.append({ id: "m2", thread_id: "t1", project_id: "p1", user_id: "u1", sequence: 2, type: "assistant", content: "Working on it" });
+    await storage.projectChatMessages.append({ id: "m1", thread_id: "t1", project_id: "p1", user_id: "u1", sequence: 1, type: "user", content: "status?" });
 
-    expect((await storage.projectChatMessages.listByThread("t1")).map((message) => message.id)).toEqual(["m1", "m2"]);
+    expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1")).map((message) => message.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("does not append or list messages through a different project scope for the same user", async () => {
+    await storage.projectChatThreads.create({ id: "t2", project_id: "p2", user_id: "u1", title: null });
+
+    expect(await storage.projectChatMessages.append({
+      id: "m1",
+      thread_id: "t2",
+      project_id: "p1",
+      user_id: "u1",
+      sequence: 1,
+      type: "user",
+      content: "must not cross projects",
+    })).toBeUndefined();
+    expect(await storage.projectChatMessages.listByThread("t2", "p1", "u1")).toEqual([]);
+    expect(await storage.projectChatMessages.listByThread("t2", "p2", "u1")).toEqual([]);
   });
 
   it("atomically upserts context reference touches and keeps one row for duplicate touches", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
 
     await Promise.all([
-      storage.projectChatContextRefs.touch("t1", "agent_session", "s1"),
-      storage.projectChatContextRefs.touch("t1", "agent_session", "s1"),
+      storage.projectChatContextRefs.touch("t1", "p1", "u1", "agent_session", "s1"),
+      storage.projectChatContextRefs.touch("t1", "p1", "u1", "agent_session", "s1"),
     ]);
 
-    const refs = await storage.projectChatContextRefs.listByThread("t1");
+    const refs = await storage.projectChatContextRefs.listByThread("t1", "p1", "u1");
     expect(refs).toHaveLength(1);
     expect(refs[0]).toMatchObject({ thread_id: "t1", entity_type: "agent_session", entity_id: "s1" });
   });
 
+  it("does not touch or list context references through a different project scope for the same user", async () => {
+    await storage.projectChatThreads.create({ id: "t2", project_id: "p2", user_id: "u1", title: null });
+
+    expect(await storage.projectChatContextRefs.touch("t2", "p1", "u1", "task", "task1")).toBeUndefined();
+    expect(await storage.projectChatContextRefs.listByThread("t2", "p1", "u1")).toEqual([]);
+    expect(await storage.projectChatContextRefs.listByThread("t2", "p2", "u1")).toEqual([]);
+  });
+
   it("cascades thread deletion to messages and context references", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
-    await storage.projectChatMessages.append({ id: "m1", thread_id: "t1", sequence: 1, type: "user", content: "status?" });
-    await storage.projectChatContextRefs.touch("t1", "task", "task1");
+    await storage.projectChatMessages.append({ id: "m1", thread_id: "t1", project_id: "p1", user_id: "u1", sequence: 1, type: "user", content: "status?" });
+    await storage.projectChatContextRefs.touch("t1", "p1", "u1", "task", "task1");
 
     await storage.projectChatThreads.delete("t1", "p1", "u1");
 
-    expect(await storage.projectChatMessages.listByThread("t1")).toEqual([]);
-    expect(await storage.projectChatContextRefs.listByThread("t1")).toEqual([]);
+    expect(await storage.projectChatMessages.listByThread("t1", "p1", "u1")).toEqual([]);
+    expect(await storage.projectChatContextRefs.listByThread("t1", "p1", "u1")).toEqual([]);
 
     const db = new Database(dbPath, { readonly: true });
     try {
+      expect(db.prepare("SELECT count(*) AS count FROM project_chat_messages").get()).toEqual({ count: 0 });
+      expect(db.prepare("SELECT count(*) AS count FROM project_chat_context_refs").get()).toEqual({ count: 0 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("reopens the same database idempotently with the full thread ordering index", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+
+    expect((await storage.projectChatThreads.getById("t1", "p1", "u1"))?.id).toBe("t1");
+
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const index = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_chat_threads_project_user_updated_id'",
+      ).get() as { sql: string } | undefined;
+      expect(index?.sql.replace(/\s+/g, " ")).toContain("project_id, user_id, updated_at DESC, id DESC");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects invalid message and context entity types at the SQL boundary", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.prepare(
+        "INSERT INTO project_chat_messages (id, thread_id, sequence, type, content) VALUES (?, ?, ?, ?, ?)",
+      ).run("bad-message", "t1", 1, "invalid", "bad")).toThrow(/CHECK constraint failed/);
+      expect(() => db.prepare(
+        "INSERT INTO project_chat_context_refs (thread_id, entity_type, entity_id) VALUES (?, ?, ?)",
+      ).run("t1", "invalid", "bad")).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects orphan child writes and cascades project deletion through all project-chat rows", async () => {
+    expect(await storage.projectChatMessages.append({
+      id: "orphan-message", thread_id: "missing", project_id: "p1", user_id: "u1",
+      sequence: 1, type: "user", content: "orphan",
+    })).toBeUndefined();
+    expect(await storage.projectChatContextRefs.touch("missing", "p1", "u1", "task", "orphan-task")).toBeUndefined();
+
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatMessages.append({
+      id: "m1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      sequence: 1, type: "user", content: "status?",
+    });
+    await storage.projectChatContextRefs.touch("t1", "p1", "u1", "task", "task1");
+
+    await storage.projects.delete("p1");
+
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      expect(db.prepare("SELECT count(*) AS count FROM project_chat_threads").get()).toEqual({ count: 0 });
       expect(db.prepare("SELECT count(*) AS count FROM project_chat_messages").get()).toEqual({ count: 0 });
       expect(db.prepare("SELECT count(*) AS count FROM project_chat_context_refs").get()).toEqual({ count: 0 });
     } finally {

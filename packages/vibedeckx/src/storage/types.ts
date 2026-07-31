@@ -906,12 +906,12 @@ export interface Storage {
     delete: (id: string, projectId: string, userId: string) => Promise<void>;
   };
   projectChatMessages: {
-    append: (opts: { id: string; thread_id: string; sequence: number; type: ProjectChatMessageType; content: string }) => Promise<ProjectChatMessage>;
-    listByThread: (threadId: string) => Promise<ProjectChatMessage[]>;
+    append: (opts: { id: string; thread_id: string; project_id: string; user_id: string; sequence: number; type: ProjectChatMessageType; content: string }) => Promise<ProjectChatMessage | undefined>;
+    listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatMessage[]>;
   };
   projectChatContextRefs: {
-    touch: (threadId: string, entityType: ProjectChatContextEntityType, entityId: string) => Promise<ProjectChatContextRef>;
-    listByThread: (threadId: string) => Promise<ProjectChatContextRef[]>;
+    touch: (threadId: string, projectId: string, userId: string, entityType: ProjectChatContextEntityType, entityId: string) => Promise<ProjectChatContextRef | undefined>;
+    listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatContextRef[]>;
   };
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;

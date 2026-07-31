@@ -52,14 +52,17 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
-    CREATE INDEX IF NOT EXISTS idx_project_chat_threads_project_user_updated
-      ON project_chat_threads(project_id, user_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_project_chat_threads_project_user_updated_id
+      ON project_chat_threads(project_id, user_id, updated_at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS project_chat_messages (
       id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
       sequence INTEGER NOT NULL,
-      type TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN (
+        'user', 'assistant', 'system', 'tool_use', 'tool_result',
+        'tool_approval_request', 'operation', 'error', 'turn_end'
+      )),
       content TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(thread_id, sequence),
@@ -68,7 +71,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
     CREATE TABLE IF NOT EXISTS project_chat_context_refs (
       thread_id TEXT NOT NULL,
-      entity_type TEXT NOT NULL,
+      entity_type TEXT NOT NULL CHECK (entity_type IN (
+        'task', 'workspace', 'agent_session', 'schedule', 'schedule_run'
+      )),
       entity_id TEXT NOT NULL,
       last_referenced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (thread_id, entity_type, entity_id),

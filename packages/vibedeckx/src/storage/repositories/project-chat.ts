@@ -6,10 +6,8 @@ import type {
   ProjectChatThreadsTable,
 } from "../schema.js";
 import type {
-  ProjectChatContextEntityType,
   ProjectChatContextRef,
   ProjectChatMessage,
-  ProjectChatMessageType,
   ProjectChatThread,
   Storage,
 } from "../types.js";
@@ -18,15 +16,9 @@ const now = () => sql<string>`strftime('%Y-%m-%d %H:%M:%f', 'now')`;
 
 const mapThread = (row: Selectable<ProjectChatThreadsTable>): ProjectChatThread => row;
 
-const mapMessage = (row: Selectable<ProjectChatMessagesTable>): ProjectChatMessage => ({
-  ...row,
-  type: row.type as ProjectChatMessageType,
-});
+const mapMessage = (row: Selectable<ProjectChatMessagesTable>): ProjectChatMessage => row;
 
-const mapContextRef = (row: Selectable<ProjectChatContextRefsTable>): ProjectChatContextRef => ({
-  ...row,
-  entity_type: row.entity_type as ProjectChatContextEntityType,
-});
+const mapContextRef = (row: Selectable<ProjectChatContextRefsTable>): ProjectChatContextRef => row;
 
 export const createProjectChatRepos = (
   kdb: Kysely<DB>,
@@ -123,48 +115,85 @@ export const createProjectChatRepos = (
   },
 
   projectChatMessages: {
-    append: async ({ id, thread_id, sequence, type, content }) => {
-      await kdb.insertInto("project_chat_messages")
-        .values({ id, thread_id, sequence, type, content })
-        .execute();
-      const row = await kdb.selectFrom("project_chat_messages").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+    append: async ({ id, thread_id, project_id, user_id, sequence, type, content }) => {
+      const result = await kdb.insertInto("project_chat_messages")
+        .columns(["id", "thread_id", "sequence", "type", "content"])
+        .expression((eb) => eb.selectFrom("project_chat_threads")
+          .select([
+            sql<string>`${id}`.as("id"),
+            sql<string>`${thread_id}`.as("thread_id"),
+            sql<number>`${sequence}`.as("sequence"),
+            sql<typeof type>`${type}`.as("type"),
+            sql<string>`${content}`.as("content"),
+          ])
+          .where("id", "=", thread_id)
+          .where("project_id", "=", project_id)
+          .where("user_id", "=", user_id))
+        .executeTakeFirst();
+      if (result.numInsertedOrUpdatedRows === 0n) return undefined;
+      const row = await kdb.selectFrom("project_chat_messages as message")
+        .innerJoin("project_chat_threads as thread", "thread.id", "message.thread_id")
+        .selectAll("message")
+        .where("message.id", "=", id)
+        .where("thread.project_id", "=", project_id)
+        .where("thread.user_id", "=", user_id)
+        .executeTakeFirstOrThrow();
       return mapMessage(row);
     },
 
-    listByThread: async (threadId) => {
-      const rows = await kdb.selectFrom("project_chat_messages")
-        .selectAll()
-        .where("thread_id", "=", threadId)
-        .orderBy("sequence", "asc")
+    listByThread: async (threadId, projectId, userId) => {
+      const rows = await kdb.selectFrom("project_chat_messages as message")
+        .innerJoin("project_chat_threads as thread", "thread.id", "message.thread_id")
+        .selectAll("message")
+        .where("message.thread_id", "=", threadId)
+        .where("thread.project_id", "=", projectId)
+        .where("thread.user_id", "=", userId)
+        .orderBy("message.sequence", "asc")
         .execute();
       return rows.map(mapMessage);
     },
   },
 
   projectChatContextRefs: {
-    touch: async (threadId, entityType, entityId) => {
-      await kdb.insertInto("project_chat_context_refs")
-        .values({ thread_id: threadId, entity_type: entityType, entity_id: entityId })
+    touch: async (threadId, projectId, userId, entityType, entityId) => {
+      const result = await kdb.insertInto("project_chat_context_refs")
+        .columns(["thread_id", "entity_type", "entity_id"])
+        .expression((eb) => eb.selectFrom("project_chat_threads")
+          .select([
+            sql<string>`${threadId}`.as("thread_id"),
+            sql<typeof entityType>`${entityType}`.as("entity_type"),
+            sql<string>`${entityId}`.as("entity_id"),
+          ])
+          .where("id", "=", threadId)
+          .where("project_id", "=", projectId)
+          .where("user_id", "=", userId))
         .onConflict((conflict) => conflict
           .columns(["thread_id", "entity_type", "entity_id"])
           .doUpdateSet({ last_referenced_at: now() }))
-        .execute();
-      const row = await kdb.selectFrom("project_chat_context_refs")
-        .selectAll()
-        .where("thread_id", "=", threadId)
-        .where("entity_type", "=", entityType)
-        .where("entity_id", "=", entityId)
-        .executeTakeFirstOrThrow();
-      return mapContextRef(row);
+        .executeTakeFirst();
+      if (result.numInsertedOrUpdatedRows === 0n) return undefined;
+      const row = await kdb.selectFrom("project_chat_context_refs as ref")
+        .innerJoin("project_chat_threads as thread", "thread.id", "ref.thread_id")
+        .selectAll("ref")
+        .where("ref.thread_id", "=", threadId)
+        .where("ref.entity_type", "=", entityType)
+        .where("ref.entity_id", "=", entityId)
+        .where("thread.project_id", "=", projectId)
+        .where("thread.user_id", "=", userId)
+        .executeTakeFirst();
+      return row ? mapContextRef(row) : undefined;
     },
 
-    listByThread: async (threadId) => {
-      const rows = await kdb.selectFrom("project_chat_context_refs")
-        .selectAll()
-        .where("thread_id", "=", threadId)
-        .orderBy("last_referenced_at", "desc")
-        .orderBy("entity_type", "asc")
-        .orderBy("entity_id", "asc")
+    listByThread: async (threadId, projectId, userId) => {
+      const rows = await kdb.selectFrom("project_chat_context_refs as ref")
+        .innerJoin("project_chat_threads as thread", "thread.id", "ref.thread_id")
+        .selectAll("ref")
+        .where("ref.thread_id", "=", threadId)
+        .where("thread.project_id", "=", projectId)
+        .where("thread.user_id", "=", userId)
+        .orderBy("ref.last_referenced_at", "desc")
+        .orderBy("ref.entity_type", "asc")
+        .orderBy("ref.entity_id", "asc")
         .execute();
       return rows.map(mapContextRef);
     },
