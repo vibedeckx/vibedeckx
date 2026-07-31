@@ -297,9 +297,14 @@ describe("project activity route", () => {
     } as unknown as SearchCatalogSnapshot);
     const remoteInfo = { remoteServerId: remote.id, remoteSessionId: "worker-live", branch: "feature" };
 
-    await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
+    await storage.searchCache.noteSessionDeleted(liveId);
+    expect(await storage.searchCache.listRemoteSessionActivityByProject("project-1", 10))
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: liveId })]));
+
+    const revived = await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
       JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }],
     });
+    expect(revived).toBe(true);
     let body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
     expect(body.recentAgentSessions[0]).toMatchObject({ id: liveId, status: "running" });
     expect(body.summary).toMatchObject({ running: 1, failed: 0 });

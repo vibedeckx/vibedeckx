@@ -184,6 +184,7 @@ export const createSearchCacheRepos = (
         const sets: Record<string, unknown> = {
           status: entry.status,
           last_active_at: sql`max(coalesce(last_active_at, 0), ${entry.activityAt})`,
+          deleted_at: null,
           written_at: entry.activityAt,
         };
         if (entry.lastUserMessageAt !== undefined) {

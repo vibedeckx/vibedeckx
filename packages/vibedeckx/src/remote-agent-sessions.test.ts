@@ -280,6 +280,7 @@ describe("createRemoteAgentSession", () => {
     };
     const cache = new RemotePatchCache();
     const bus = new EventBus();
+    const updateActivity = vi.spyOn(storage.searchCache, "updateRemoteSessionActivity");
     const observed: Array<{
       event: Extract<GlobalEvent, { type: "session:status" | "session:taskCompleted" }>;
       activity: Promise<Awaited<ReturnType<Storage["searchCache"]["listRemoteSessionActivityByProject"]>>>;
@@ -316,6 +317,26 @@ describe("createRemoteAgentSession", () => {
       type: "session:status", sessionId, status: "error",
     }));
     expect((await observed[2].activity)[0]).toMatchObject({ id: sessionId, status: "error" });
+
+    await storage.remoteSessionMappings.delete(sessionId);
+    adapter!.deliverMessage(JSON.stringify({
+      JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }],
+    }));
+    await vi.waitFor(() => expect(updateActivity).toHaveBeenCalledTimes(4));
+    await expect(updateActivity.mock.results[3].value).resolves.toBe(false);
+    expect(observed).toHaveLength(3);
+
+    await storage.remoteSessionMappings.upsert(
+      sessionId, "stream-project", server.id, "worker-session", "dev", "from_now",
+    );
+    const association = (await storage.projectRemotes.getByProject("stream-project"))[0];
+    await storage.projectRemotes.remove(association.id);
+    adapter!.deliverMessage(JSON.stringify({ error: "worker failed again" }));
+    await vi.waitFor(() => expect(updateActivity).toHaveBeenCalledTimes(5));
+    await expect(updateActivity.mock.results[4].value).resolves.toBe(false);
+    expect(observed).toHaveLength(3);
+
+    updateActivity.mockRestore();
     cache.setFinished(sessionId);
     cache.shutdown();
   });

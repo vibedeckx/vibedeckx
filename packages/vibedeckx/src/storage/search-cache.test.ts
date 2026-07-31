@@ -388,29 +388,63 @@ describe("searchCache", () => {
       await storage.remoteSessionMappings.upsert(
         localId, "p1", serverId, "worker-live", "dev", "from_now",
       );
+      const firstActivityAt = Date.now();
 
       await expect(storage.searchCache.updateRemoteSessionActivity({
         localSessionId: localId, projectId: "other-project", targetId: serverId,
-        remoteSessionId: "worker-live", status: "running", activityAt: 10,
+        remoteSessionId: "worker-live", status: "running", activityAt: firstActivityAt,
       })).resolves.toBe(false);
       await expect(storage.searchCache.updateRemoteSessionActivity({
         localSessionId: localId, projectId: "p1", targetId: serverId,
-        remoteSessionId: "different-worker-session", status: "running", activityAt: 10,
+        remoteSessionId: "different-worker-session", status: "running", activityAt: firstActivityAt,
       })).resolves.toBe(false);
       await expect(storage.searchCache.updateRemoteSessionActivity({
         localSessionId: localId, projectId: "p1", targetId: serverId,
-        remoteSessionId: "worker-live", status: "running", activityAt: 10,
-        lastUserMessageAt: 10,
+        remoteSessionId: "worker-live", status: "running", activityAt: firstActivityAt,
+        lastUserMessageAt: firstActivityAt,
       })).resolves.toBe(true);
 
       expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: localId, status: "running" })]),
       );
+
+      await storage.searchCache.noteSessionDeleted(localId);
+      expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10))
+        .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: localId })]));
+      expect(await storage.searchCache.countRemoteSessionActivityByProject("p1"))
+        .toEqual({ running: 0, failed: 0 });
+
+      const revivedAt = Date.now() + 1;
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-live", status: "running", activityAt: revivedAt,
+        lastUserMessageAt: revivedAt,
+      })).resolves.toBe(true);
+      expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: localId, status: "running" })]),
+      );
+      expect(await storage.searchCache.countRemoteSessionActivityByProject("p1"))
+        .toEqual({ running: 1, failed: 0 });
+
+      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap({ sessions: [] }), revivedAt - 1);
+      expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: localId, status: "running" })]),
+      );
+
+      await storage.remoteSessionMappings.delete(localId);
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-live", status: "error", activityAt: revivedAt + 1,
+      })).resolves.toBe(false);
+
+      await storage.remoteSessionMappings.upsert(
+        localId, "p1", serverId, "worker-live", "dev", "from_now",
+      );
       const association = (await storage.projectRemotes.getByProject("p1"))[0];
       await storage.projectRemotes.remove(association.id);
       await expect(storage.searchCache.updateRemoteSessionActivity({
         localSessionId: localId, projectId: "p1", targetId: serverId,
-        remoteSessionId: "worker-live", status: "error", activityAt: 20,
+        remoteSessionId: "worker-live", status: "error", activityAt: revivedAt + 2,
       })).resolves.toBe(false);
     });
 
