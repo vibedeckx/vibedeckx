@@ -630,6 +630,24 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       projectId, mapping.remoteServerId,
     ));
   };
+  const rereadConfirmedSession = async (
+    operation: Awaited<ReturnType<typeof beginOperation>>, sessionId: string,
+  ) => {
+    const local = await storage.agentSessions.getById(sessionId);
+    if (local?.project_id === projectId && local.status !== "running") {
+      const status = local.status === "stopped" && local.last_completed_at ? "completed" : "failed";
+      return finishOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
+    }
+    const mapping = await remoteSessions?.getMapping(sessionId);
+    if (mapping?.projectId === projectId) {
+      const detail = await remoteSessions?.getDetail(mapping, { maxEntries: 1, maxChars: 256 });
+      if (detail?.status === "stopped" || detail?.status === "error") {
+        const status = detail.status === "stopped" ? "completed" : "failed";
+        return finishOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
+      }
+    }
+    return operation;
+  };
   const canonicalSessionId = (
     workspace: { target: string; branch: string | null }, seed: string,
   ): string => {
@@ -778,7 +796,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           const running = await markOperationRunning(operation, {
             sessionId, workspaceId, initialInstructionDelivery: "confirmed",
           });
-          return { ok: true, operationId: operation.id, sessionId, status: running.status };
+          const latest = await rereadConfirmedSession(running, sessionId);
+          return { ok: latest.status !== "failed", operationId: operation.id, sessionId, status: latest.status };
         } catch (error) {
           if (await sessionExistsInScope(sessionId)) {
             return {
@@ -923,7 +942,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const running = await markOperationRunning(correlated, {
           sessionId, workspaceId, initialInstructionDelivery: "confirmed",
         });
-        return { ok: true, operationId: operation.id, sessionId, status: running.status };
+        const latest = await rereadConfirmedSession(running, sessionId);
+        return { ok: latest.status !== "failed", operationId: operation.id, sessionId, status: latest.status };
       },
     },
     send_agent_instruction: {
@@ -1033,7 +1053,17 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             ? await markOperationRunning(operation, { scheduleId, runId, contextConfirmed: true, skipped })
             : await finishOperation(operation, status, { scheduleId, runId, contextConfirmed: true, skipped },
               status === "failed" ? "Schedule run failed" : null);
-          return { ok: status !== "failed", operationId: operation.id, scheduleId, runId, status: transitioned.status, skipped };
+          let final = transitioned;
+          if (status === "running") {
+            const latest = await storage.scheduledTaskRuns.getById(runId);
+            if (latest?.project_id === projectId && latest.schedule_id === scheduleId
+              && latest.status !== "starting" && latest.status !== "running") {
+              const latestStatus = latest.status === "completed" || latest.status === "skipped" ? "completed" : "failed";
+              final = await finishOperation(transitioned, latestStatus, { scheduleId, runId, contextConfirmed: true, skipped },
+                latestStatus === "failed" ? "Schedule run failed" : null);
+            }
+          }
+          return { ok: final.status !== "failed", operationId: operation.id, scheduleId, runId, status: final.status, skipped };
         } catch (error) {
           const persisted = await storage.scheduledTaskRuns.getById(runId);
           if (persisted?.project_id === projectId && persisted.schedule_id === scheduleId) {
