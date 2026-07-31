@@ -20,11 +20,6 @@ type ProjectChatPatch = {
     | { type: "QUEUE"; content: number };
 };
 
-type ProjectChatWsMessage =
-  | { type: "project_chat_snapshot"; snapshot: ProjectChatSnapshot }
-  | { JsonPatch: ProjectChatPatch[] }
-  | { error: string };
-
 interface ProjectChatStreamState {
   thread: ProjectChatThread | null;
   messages: ProjectChatMessage[];
@@ -32,7 +27,7 @@ interface ProjectChatStreamState {
   queueLength: number;
 }
 
-export const PROJECT_CHAT_SNAPSHOT_TIMEOUT_MS = 10_000;
+export const PROJECT_CHAT_CONNECT_TIMEOUT_MS = 10_000;
 export const PROJECT_CHAT_STALE_AFTER_MS = 40_000;
 export const PROJECT_CHAT_SNAPSHOT_CACHE_LIMIT = 5;
 
@@ -83,30 +78,49 @@ function isThreadNotFoundError(reason: unknown): boolean {
     || (reason instanceof Error && reason.message === "Thread not found");
 }
 
-function applyPatches(state: ProjectChatStreamState, patches: unknown[]): ProjectChatStreamState {
+function isProjectChatMessage(value: unknown): value is ProjectChatMessage {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.thread_id === "string"
+    && typeof value.sequence === "number"
+    && typeof value.type === "string"
+    && typeof value.content === "string"
+    && typeof value.created_at === "string";
+}
+
+function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
+  if (!isRecord(value) || !isRecord(value.identity) || !isRecord(value.thread)
+    || !Array.isArray(value.messages)) return false;
+  return typeof value.identity.projectId === "string"
+    && typeof value.identity.threadId === "string"
+    && typeof value.identity.userId === "string"
+    && typeof value.thread.id === "string"
+    && typeof value.thread.project_id === "string"
+    && typeof value.thread.user_id === "string"
+    && value.messages.every(isProjectChatMessage)
+    && (value.status === "idle" || value.status === "running")
+    && Number.isSafeInteger(value.queueLength)
+    && (value.queueLength as number) >= 0;
+}
+
+function applyPatches(state: ProjectChatStreamState, patches: unknown[]): ProjectChatStreamState | null {
   let next = state;
   for (const rawPatch of patches) {
     if (!isRecord(rawPatch) || (rawPatch.op !== "add" && rawPatch.op !== "replace")
-      || typeof rawPatch.path !== "string" || !isRecord(rawPatch.value)) continue;
+      || typeof rawPatch.path !== "string" || !isRecord(rawPatch.value)) return null;
     const patch = rawPatch as unknown as ProjectChatPatch;
     const messagePath = /^\/messages\/(0|[1-9]\d*)$/.exec(patch.path);
-    if (messagePath && patch.value.type === "ENTRY" && isRecord(patch.value.content)) {
-      const message = patch.value.content as unknown as ProjectChatMessage;
+    if (messagePath && patch.value.type === "ENTRY" && isProjectChatMessage(patch.value.content)) {
+      const message = patch.value.content;
       const index = Number(messagePath[1]);
       if (!Number.isSafeInteger(index)
-        || typeof message.id !== "string"
-        || typeof message.thread_id !== "string"
-        || typeof message.sequence !== "number"
-        || typeof message.type !== "string"
-        || typeof message.content !== "string"
-        || typeof message.created_at !== "string"
-        || (next.thread !== null && message.thread_id !== next.thread.id)) continue;
+        || (next.thread !== null && message.thread_id !== next.thread.id)) return null;
       const messages = [...next.messages];
       if (patch.op === "add") {
-        if (index > messages.length || messages.some((existing) => existing.id === message.id)) continue;
+        if (index > messages.length || messages.some((existing) => existing.id === message.id)) return null;
         messages.splice(index, 0, message);
       } else {
-        if (index >= messages.length || messages[index].id !== message.id) continue;
+        if (index >= messages.length || messages[index].id !== message.id) return null;
         messages[index] = message;
       }
       next = { ...next, messages };
@@ -116,6 +130,8 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
     } else if (patch.path === "/queueLength" && patch.value.type === "QUEUE"
       && Number.isSafeInteger(patch.value.content) && patch.value.content >= 0) {
       next = { ...next, queueLength: patch.value.content };
+    } else {
+      return null;
     }
   }
   return next;
@@ -130,17 +146,25 @@ export function useProjectChat(projectId: string | null, threadId: string | null
   const [threadsError, setThreadsError] = useState<string | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [terminalError, setTerminalError] = useState<ProjectChatTerminalError | null>(null);
+  const streamStateRef = useRef<ProjectChatStreamState>(emptyStreamState());
 
   const projectIdRef = useRef(projectId);
   const selectedThreadIdRef = useRef(threadId);
   const listGenerationRef = useRef(0);
   const listRequestEpochRef = useRef(0);
   const listAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const threadMutationEpochRef = useRef<Map<string, number>>(new Map());
   const connectionGenerationRef = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   // The cache is deliberately indexed by the durable Thread identity. It never
   // shares state with the branch-scoped Main Chat's project+branch cache.
   const snapshotCacheRef = useRef<Map<string, ProjectChatSnapshot>>(new Map());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     projectIdRef.current = projectId;
@@ -211,16 +235,35 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     await loadThreads(targetProjectId, listGenerationRef.current, includeArchived);
   }, [loadThreads]);
 
+  const invalidateThreadList = useCallback((targetProjectId: string, generation: number): boolean => {
+    if (!mountedRef.current || projectIdRef.current !== targetProjectId
+      || listGenerationRef.current !== generation) return false;
+    listRequestEpochRef.current += 1;
+    listAbortRef.current?.abort();
+    listAbortRef.current = null;
+    setThreadsLoading(false);
+    return true;
+  }, []);
+
   useEffect(() => {
     connectionGenerationRef.current += 1;
     const generation = connectionGenerationRef.current;
     let cancelled = false;
     let fatal = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
-    let connectInFlight = false;
     let lastFrameAt: number | null = null;
+    type ConnectAttempt = {
+      controller: AbortController;
+      timeout: ReturnType<typeof setTimeout> | null;
+      socket: WebSocket | null;
+    };
+    let activeAttempt: ConnectAttempt | null = null;
+
+    const publishStreamState = (next: ProjectChatStreamState) => {
+      streamStateRef.current = next;
+      setStreamState(next);
+    };
 
     socketRef.current?.close();
     socketRef.current = null;
@@ -229,7 +272,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     setTerminalError(null);
 
     if (!projectId || !threadId) {
-      setStreamState(emptyStreamState());
+      publishStreamState(emptyStreamState());
       setThreadLoading(false);
       return;
     }
@@ -239,7 +282,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     const cached = snapshotCacheRef.current.get(threadId);
     if (cached?.identity.projectId === projectId) {
       cacheSnapshot(snapshotCacheRef.current, cached);
-      setStreamState({
+      publishStreamState({
         thread: cached.thread,
         messages: cached.messages,
         status: cached.status,
@@ -247,7 +290,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       });
     } else {
       snapshotCacheRef.current.delete(threadId);
-      setStreamState(emptyStreamState());
+      publishStreamState(emptyStreamState());
     }
     setThreadLoading(true);
 
@@ -257,18 +300,36 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       && projectIdRef.current === projectId
       && selectedThreadIdRef.current === threadId;
 
-    const clearSnapshotTimer = () => {
-      if (snapshotTimer !== null) clearTimeout(snapshotTimer);
-      snapshotTimer = null;
+    const clearReconnectTimer = () => {
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    };
+
+    const isActiveAttempt = (attempt: ConnectAttempt) => current() && activeAttempt === attempt;
+
+    const completeAttempt = (attempt: ConnectAttempt) => {
+      if (attempt.timeout !== null) clearTimeout(attempt.timeout);
+      attempt.timeout = null;
+      if (activeAttempt === attempt) activeAttempt = null;
+    };
+
+    const cancelAttempt = (attempt: ConnectAttempt) => {
+      completeAttempt(attempt);
+      attempt.controller.abort();
+      const socket = attempt.socket;
+      attempt.socket = null;
+      if (socket && socketRef.current === socket) socketRef.current = null;
+      socket?.close();
     };
 
     const stopAsNotFound = (socket?: WebSocket) => {
       fatal = true;
-      clearSnapshotTimer();
-      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-      if (socket && socketRef.current === socket) socketRef.current = null;
-      socket?.close();
+      clearReconnectTimer();
+      if (activeAttempt) cancelAttempt(activeAttempt);
+      if (socket && socketRef.current === socket) {
+        socketRef.current = null;
+        socket.close();
+      }
       setIsConnected(false);
       setThreadLoading(false);
       setThreadError("Thread not found");
@@ -277,10 +338,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
 
     const scheduleReconnect = (immediate = false) => {
       if (!current()) return;
-      if (immediate && reconnectTimer !== null) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
+      if (immediate) clearReconnectTimer();
       if (reconnectTimer !== null) return;
       const delay = immediate ? 0 : Math.min(1000 * 2 ** reconnectAttempt, 30_000);
       if (!immediate) reconnectAttempt += 1;
@@ -290,37 +348,54 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       }, delay);
     };
 
+    const failSocket = (socket: WebSocket, message?: string) => {
+      if (!current() || socketRef.current !== socket) return;
+      if (activeAttempt?.socket === socket) cancelAttempt(activeAttempt);
+      else {
+        socketRef.current = null;
+        socket.close();
+      }
+      setIsConnected(false);
+      setThreadLoading(false);
+      if (message) setThreadError(message);
+      scheduleReconnect();
+    };
+
     async function connect(forceRefresh: boolean) {
-      if (!current() || connectInFlight) return;
-      connectInFlight = true;
+      if (!current() || activeAttempt) return;
+      const attempt: ConnectAttempt = {
+        controller: new AbortController(),
+        timeout: null,
+        socket: null,
+      };
+      activeAttempt = attempt;
+      attempt.timeout = setTimeout(() => {
+        if (!isActiveAttempt(attempt)) return;
+        cancelAttempt(attempt);
+        setIsConnected(false);
+        setThreadLoading(false);
+        setThreadError("Project Chat connection timed out");
+        scheduleReconnect();
+      }, PROJECT_CHAT_CONNECT_TIMEOUT_MS);
       try {
         const [ownedThread, token] = await Promise.all([
-          api.getProjectChatThread(activeThreadId),
+          api.getProjectChatThread(activeThreadId, { signal: attempt.controller.signal }),
           getFreshToken(forceRefresh ? { skipCache: true } : undefined),
         ]);
-        if (!current()) return;
+        if (!isActiveAttempt(attempt)) return;
         if (ownedThread.project_id !== activeProjectId || ownedThread.id !== activeThreadId) {
           fatal = true;
+          cancelAttempt(attempt);
           setThreadError("Project Chat stream identity mismatch");
           setThreadLoading(false);
           return;
         }
-        setStreamState((previous) => ({ ...previous, thread: ownedThread }));
+        publishStreamState({ ...streamStateRef.current, thread: ownedThread });
         const socket = new WebSocket(getWebSocketUrl(`/api/project-chat/threads/${activeThreadId}/stream`, token));
+        attempt.socket = socket;
         socketRef.current = socket;
         let receivedSnapshot = false;
         lastFrameAt = null;
-        clearSnapshotTimer();
-        snapshotTimer = setTimeout(() => {
-          if (!current() || socketRef.current !== socket || receivedSnapshot) return;
-          snapshotTimer = null;
-          socketRef.current = null;
-          socket.close();
-          setIsConnected(false);
-          setThreadLoading(false);
-          setThreadError("Project Chat snapshot timed out");
-          scheduleReconnect();
-        }, PROJECT_CHAT_SNAPSHOT_TIMEOUT_MS);
 
         socket.onopen = () => {
           if (!current() || socketRef.current !== socket) return;
@@ -329,11 +404,11 @@ export function useProjectChat(projectId: string | null, threadId: string | null
         socket.onmessage = (event) => {
           if (!current() || socketRef.current !== socket) return;
           try {
-            const message = JSON.parse(event.data) as ProjectChatWsMessage;
+            const message = JSON.parse(event.data) as unknown;
             if (!isRecord(message)) throw new Error("invalid frame");
-            lastFrameAt = Date.now();
             if ("type" in message && message.type === "project_chat_snapshot") {
               const snapshot = message.snapshot;
+              if (!isProjectChatSnapshot(snapshot)) throw new Error("invalid snapshot");
               if (snapshot.identity.threadId !== activeThreadId
                 || snapshot.identity.projectId !== activeProjectId
                 || snapshot.thread.id !== activeThreadId
@@ -341,18 +416,21 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                 fatal = true;
                 setThreadError("Project Chat stream identity mismatch");
                 setThreadLoading(false);
-                clearSnapshotTimer();
-                socketRef.current = null;
-                socket.close();
+                if (activeAttempt === attempt) cancelAttempt(attempt);
+                else {
+                  socketRef.current = null;
+                  socket.close();
+                }
                 return;
               }
               receivedSnapshot = true;
-              clearSnapshotTimer();
+              lastFrameAt = Date.now();
+              completeAttempt(attempt);
               reconnectAttempt = 0;
               setTerminalError(null);
               setThreadError(null);
               cacheSnapshot(snapshotCacheRef.current, snapshot);
-              setStreamState({
+              publishStreamState({
                 thread: snapshot.thread,
                 messages: snapshot.messages,
                 status: snapshot.status,
@@ -363,56 +441,49 @@ export function useProjectChat(projectId: string | null, threadId: string | null
               if (!receivedSnapshot || !Array.isArray(message.JsonPatch)) {
                 throw new Error("invalid patch frame");
               }
-              setStreamState((previous) => {
-                const next = applyPatches(previous, message.JsonPatch);
-                if (next.thread) {
-                  cacheSnapshot(snapshotCacheRef.current, {
-                    identity: {
-                      projectId: activeProjectId,
-                      threadId: activeThreadId,
-                      userId: next.thread.user_id,
-                    },
-                    thread: next.thread,
-                    messages: next.messages,
-                    status: next.status,
-                    queueLength: next.queueLength,
-                  });
-                }
-                return next;
-              });
+              const next = applyPatches(streamStateRef.current, message.JsonPatch);
+              if (!next) throw new Error("invalid patch frame");
+              lastFrameAt = Date.now();
+              if (next.thread) {
+                cacheSnapshot(snapshotCacheRef.current, {
+                  identity: {
+                    projectId: activeProjectId,
+                    threadId: activeThreadId,
+                    userId: next.thread.user_id,
+                  },
+                  thread: next.thread,
+                  messages: next.messages,
+                  status: next.status,
+                  queueLength: next.queueLength,
+                });
+              }
+              publishStreamState(next);
             } else if ("error" in message) {
               if (message.error === "Thread not found") {
                 stopAsNotFound(socket);
                 return;
               }
-              clearSnapshotTimer();
-              socketRef.current = null;
-              socket.close();
-              setIsConnected(false);
-              setThreadError(typeof message.error === "string" ? message.error : "Project Chat stream failed");
-              scheduleReconnect();
+              failSocket(socket, typeof message.error === "string" ? message.error : "Project Chat stream failed");
+            } else {
+              throw new Error("unknown frame");
             }
           } catch {
-            setThreadError("Invalid Project Chat stream message");
+            failSocket(socket, "Invalid Project Chat stream message");
           }
         };
         socket.onerror = () => {
-          if (!current() || socketRef.current !== socket) return;
-          clearSnapshotTimer();
-          socketRef.current = null;
-          socket.close();
-          setIsConnected(false);
-          scheduleReconnect();
+          failSocket(socket);
         };
         socket.onclose = () => {
           if (!current() || socketRef.current !== socket) return;
-          clearSnapshotTimer();
+          if (activeAttempt?.socket === socket) cancelAttempt(activeAttempt);
           socketRef.current = null;
           setIsConnected(false);
           scheduleReconnect();
         };
       } catch (reason) {
-        if (!current()) return;
+        if (!isActiveAttempt(attempt)) return;
+        cancelAttempt(attempt);
         if (isThreadNotFoundError(reason)) {
           stopAsNotFound();
           return;
@@ -420,26 +491,26 @@ export function useProjectChat(projectId: string | null, threadId: string | null
         setThreadLoading(false);
         setThreadError(reason instanceof Error ? reason.message : "Failed to open Project Chat thread");
         scheduleReconnect();
-      } finally {
-        connectInFlight = false;
       }
     }
 
     const reconnectForBrowserRecovery = () => {
-      if (!current() || connectInFlight) return;
+      if (!current()) return;
+      clearReconnectTimer();
+      if (activeAttempt) cancelAttempt(activeAttempt);
       const socket = socketRef.current;
-      clearSnapshotTimer();
       if (socket) {
         socketRef.current = null;
         socket.close();
       }
       setIsConnected(false);
-      scheduleReconnect(true);
+      void connect(true);
     };
     const handleOnline = () => reconnectForBrowserRecovery();
     const handleVisibility = () => {
-      if (document.visibilityState !== "visible" || lastFrameAt === null) return;
-      if (Date.now() - lastFrameAt > PROJECT_CHAT_STALE_AFTER_MS) reconnectForBrowserRecovery();
+      if (document.visibilityState !== "visible") return;
+      if (activeAttempt || (lastFrameAt !== null
+        && Date.now() - lastFrameAt > PROJECT_CHAT_STALE_AFTER_MS)) reconnectForBrowserRecovery();
     };
     // This stream has no application-level heartbeat. Recover from browser
     // network transitions and from a stale connection when a hidden tab wakes.
@@ -450,9 +521,8 @@ export function useProjectChat(projectId: string | null, threadId: string | null
 
     return () => {
       cancelled = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-      clearSnapshotTimer();
+      clearReconnectTimer();
+      if (activeAttempt) cancelAttempt(activeAttempt);
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibility);
       const socket = socketRef.current;
@@ -463,23 +533,26 @@ export function useProjectChat(projectId: string | null, threadId: string | null
 
   const createThread = useCallback(async (message?: string) => {
     const targetProjectId = projectIdRef.current;
+    const generation = listGenerationRef.current;
     if (!targetProjectId) throw new Error("No project selected");
     const normalized = message === undefined ? undefined : message.trim();
     if (message !== undefined && !normalized) throw new Error("Message is required");
     const created = await api.createProjectChatThread(targetProjectId, normalized);
-    if (projectIdRef.current === targetProjectId) {
+    if (created.project_id === targetProjectId && invalidateThreadList(targetProjectId, generation)) {
       setThreads((current) => [created, ...current.filter((item) => item.id !== created.id)]);
     }
     return created;
-  }, []);
+  }, [invalidateThreadList]);
 
   const updateThreadInState = useCallback((updated: ProjectChatThread) => {
     setThreads((current) => updated.archived_at === null
       ? [updated, ...current.filter((item) => item.id !== updated.id)]
       : current.filter((item) => item.id !== updated.id));
-    setStreamState((current) => current.thread?.id === updated.id
-      ? { ...current, thread: updated }
-      : current);
+    if (streamStateRef.current.thread?.id === updated.id) {
+      const next = { ...streamStateRef.current, thread: updated };
+      streamStateRef.current = next;
+      setStreamState(next);
+    }
     const cached = snapshotCacheRef.current.get(updated.id);
     if (cached) cacheSnapshot(snapshotCacheRef.current, { ...cached, thread: updated });
   }, []);
@@ -489,31 +562,43 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     const generation = listGenerationRef.current;
     const normalized = title.trim();
     if (!normalized) throw new Error("Title is required");
+    const mutationEpoch = (threadMutationEpochRef.current.get(targetThreadId) ?? 0) + 1;
+    threadMutationEpochRef.current.set(targetThreadId, mutationEpoch);
     const updated = await api.updateProjectChatThread(targetThreadId, { title: normalized });
-    if (targetProjectId && projectIdRef.current === targetProjectId
-      && listGenerationRef.current === generation && updated.project_id === targetProjectId) {
-      updateThreadInState(updated);
+    if (targetProjectId && updated.project_id === targetProjectId
+      && threadMutationEpochRef.current.get(targetThreadId) === mutationEpoch) {
+      const belongsToCurrentProject = invalidateThreadList(targetProjectId, generation);
+      if (belongsToCurrentProject) {
+        updateThreadInState(updated);
+      }
     }
     return updated;
-  }, [updateThreadInState]);
+  }, [invalidateThreadList, updateThreadInState]);
 
   const archiveThread = useCallback(async (targetThreadId: string, archived = true) => {
     const targetProjectId = projectIdRef.current;
     const generation = listGenerationRef.current;
+    const mutationEpoch = (threadMutationEpochRef.current.get(targetThreadId) ?? 0) + 1;
+    threadMutationEpochRef.current.set(targetThreadId, mutationEpoch);
     const updated = await api.updateProjectChatThread(targetThreadId, { archived });
-    if (targetProjectId && projectIdRef.current === targetProjectId
-      && listGenerationRef.current === generation && updated.project_id === targetProjectId) {
-      updateThreadInState(updated);
+    if (targetProjectId && updated.project_id === targetProjectId
+      && threadMutationEpochRef.current.get(targetThreadId) === mutationEpoch) {
+      const belongsToCurrentProject = invalidateThreadList(targetProjectId, generation);
+      if (belongsToCurrentProject) {
+        updateThreadInState(updated);
+      }
     }
     return updated;
-  }, [updateThreadInState]);
+  }, [invalidateThreadList, updateThreadInState]);
 
   const deleteThread = useCallback(async (targetThreadId: string) => {
     const targetProjectId = projectIdRef.current;
     const generation = listGenerationRef.current;
+    const mutationEpoch = (threadMutationEpochRef.current.get(targetThreadId) ?? 0) + 1;
+    threadMutationEpochRef.current.set(targetThreadId, mutationEpoch);
     await api.deleteProjectChatThread(targetThreadId);
-    if (!targetProjectId || projectIdRef.current !== targetProjectId
-      || listGenerationRef.current !== generation) return;
+    if (!targetProjectId || threadMutationEpochRef.current.get(targetThreadId) !== mutationEpoch
+      || !invalidateThreadList(targetProjectId, generation)) return;
     snapshotCacheRef.current.delete(targetThreadId);
     setThreads((current) => current.filter((item) => item.id !== targetThreadId));
     if (selectedThreadIdRef.current === targetThreadId) {
@@ -522,9 +607,11 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       socketRef.current = null;
       setIsConnected(false);
       setThreadLoading(false);
-      setStreamState(emptyStreamState());
+      const empty = emptyStreamState();
+      streamStateRef.current = empty;
+      setStreamState(empty);
     }
-  }, []);
+  }, [invalidateThreadList]);
 
   const sendMessage = useCallback(async (content: string) => {
     const targetThreadId = selectedThreadIdRef.current;

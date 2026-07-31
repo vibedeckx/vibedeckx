@@ -2029,8 +2029,13 @@ export const api = {
     return (await res.json()).thread;
   },
 
-  async getProjectChatThread(threadId: string): Promise<ProjectChatThread> {
-    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`);
+  async getProjectChatThread(
+    threadId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ProjectChatThread> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`, {
+      signal: opts?.signal,
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw Object.assign(

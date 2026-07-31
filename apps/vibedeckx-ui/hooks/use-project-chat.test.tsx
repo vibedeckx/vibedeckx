@@ -161,7 +161,9 @@ describe("useProjectChat", () => {
 
     render("p1", "t1");
     await flush();
-    expect(mocks.api.getProjectChatThread).toHaveBeenCalledWith("t1");
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledWith(
+      "t1", expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(FakeWebSocket.instances[0].url).toContain("/api/project-chat/threads/t1/stream");
     expect(mocks.getWebSocketUrl).not.toHaveBeenCalledWith(expect.stringContaining("/chat-sessions/"));
   });
@@ -270,6 +272,90 @@ describe("useProjectChat", () => {
     );
   });
 
+  it("does not let a list started before create overwrite the created Thread", async () => {
+    const staleList = deferred<ProjectChatThread[]>();
+    const created = thread("created");
+    mocks.api.listProjectChatThreads.mockReturnValue(staleList.promise);
+    mocks.api.createProjectChatThread.mockResolvedValue(created);
+    render("p1", null);
+    await flush();
+    const listSignal = mocks.api.listProjectChatThreads.mock.calls[0][2].signal as AbortSignal;
+
+    await act(async () => { await latest.createThread(); });
+    expect(listSignal.aborted).toBe(true);
+    expect(latest.threads).toEqual([created]);
+
+    await act(async () => staleList.resolve([]));
+    expect(latest.threads).toEqual([created]);
+  });
+
+  it("does not let a list started before rename overwrite the renamed Thread", async () => {
+    const staleList = deferred<ProjectChatThread[]>();
+    const renamed = thread("t1", "p1", "new title");
+    mocks.api.listProjectChatThreads.mockReturnValue(staleList.promise);
+    mocks.api.updateProjectChatThread.mockResolvedValue(renamed);
+    render("p1", null);
+    await flush();
+    const listSignal = mocks.api.listProjectChatThreads.mock.calls[0][2].signal as AbortSignal;
+
+    await act(async () => { await latest.renameThread("t1", "new title"); });
+    expect(listSignal.aborted).toBe(true);
+    expect(latest.threads).toEqual([renamed]);
+
+    await act(async () => staleList.resolve([thread("t1", "p1", "old title")]));
+    expect(latest.threads).toEqual([renamed]);
+  });
+
+  it("keeps the latest rename intent when responses arrive in reverse order", async () => {
+    const first = deferred<ProjectChatThread>();
+    const second = deferred<ProjectChatThread>();
+    mocks.api.listProjectChatThreads.mockResolvedValue([thread("t1", "p1", "original")]);
+    mocks.api.updateProjectChatThread
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    render("p1", null);
+    await flush();
+
+    let firstPromise!: Promise<ProjectChatThread>;
+    let secondPromise!: Promise<ProjectChatThread>;
+    act(() => {
+      firstPromise = latest.renameThread("t1", "first");
+      secondPromise = latest.renameThread("t1", "second");
+    });
+    await act(async () => second.resolve(thread("t1", "p1", "second")));
+    await secondPromise;
+    expect(latest.threads[0].title).toBe("second");
+
+    await act(async () => first.resolve(thread("t1", "p1", "first")));
+    await firstPromise;
+    expect(latest.threads[0].title).toBe("second");
+  });
+
+  it("keeps the latest archive intent when responses arrive in reverse order", async () => {
+    const archive = deferred<ProjectChatThread>();
+    const unarchive = deferred<ProjectChatThread>();
+    mocks.api.listProjectChatThreads.mockResolvedValue([thread("t1")]);
+    mocks.api.updateProjectChatThread
+      .mockReturnValueOnce(archive.promise)
+      .mockReturnValueOnce(unarchive.promise);
+    render("p1", null);
+    await flush();
+
+    let archivePromise!: Promise<ProjectChatThread>;
+    let unarchivePromise!: Promise<ProjectChatThread>;
+    act(() => {
+      archivePromise = latest.archiveThread("t1", true);
+      unarchivePromise = latest.archiveThread("t1", false);
+    });
+    await act(async () => unarchive.resolve(thread("t1")));
+    await unarchivePromise;
+    expect(latest.threads.map((item) => item.id)).toEqual(["t1"]);
+
+    await act(async () => archive.resolve({ ...thread("t1"), archived_at: 1 }));
+    await archivePromise;
+    expect(latest.threads.map((item) => item.id)).toEqual(["t1"]);
+  });
+
   it("keeps backing off after reconnect preflight and socket-construction failures until it succeeds", async () => {
     render("p1", "t1");
     await flush();
@@ -326,9 +412,73 @@ describe("useProjectChat", () => {
 
     act(() => vi.advanceTimersByTime(10_000));
     expect(first.close).toHaveBeenCalledOnce();
-    expect(latest.error).toBe("Project Chat snapshot timed out");
+    expect(latest.error).toBe("Project Chat connection timed out");
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
     expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("times out and aborts a hung REST preflight before retrying", async () => {
+    const firstPreflight = deferred<ProjectChatThread>();
+    let firstSignal!: AbortSignal;
+    mocks.api.getProjectChatThread
+      .mockImplementationOnce((_id: string, opts: { signal: AbortSignal }) => {
+        firstSignal = opts.signal;
+        return firstPreflight.promise;
+      })
+      .mockResolvedValue(thread("t1"));
+    render("p1", "t1");
+    await flush();
+
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(firstSignal.aborted).toBe(true);
+    expect(latest.error).toBe("Project Chat connection timed out");
+    await act(async () => firstPreflight.resolve(thread("t1")));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(2);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("ignores a token promise that resolves after its connect attempt timed out", async () => {
+    const staleToken = deferred<string>();
+    mocks.getFreshToken
+      .mockReturnValueOnce(staleToken.promise)
+      .mockResolvedValue("fresh-token");
+    render("p1", "t1");
+    await flush();
+
+    act(() => vi.advanceTimersByTime(10_000));
+    await act(async () => staleToken.resolve("stale-token"));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(mocks.getWebSocketUrl).toHaveBeenLastCalledWith(
+      "/api/project-chat/threads/t1/stream", "fresh-token",
+    );
+  });
+
+  it("aborts a hung connect attempt and starts one fresh attempt when coming online", async () => {
+    const stalePreflight = deferred<ProjectChatThread>();
+    let staleSignal!: AbortSignal;
+    mocks.api.getProjectChatThread
+      .mockImplementationOnce((_id: string, opts: { signal: AbortSignal }) => {
+        staleSignal = opts.signal;
+        return stalePreflight.promise;
+      })
+      .mockResolvedValue(thread("t1"));
+    render("p1", "t1");
+    await flush();
+
+    act(() => window.dispatchEvent(new Event("online")));
+    await flush();
+    expect(staleSignal.aborted).toBe(true);
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(2);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    await act(async () => stalePreflight.resolve(thread("t1")));
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
   it("treats Thread not found as terminal and never reconnects", async () => {
@@ -371,7 +521,7 @@ describe("useProjectChat", () => {
     visibility.mockReturnValue("visible");
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     expect(first.close).toHaveBeenCalledOnce();
-    await act(async () => { vi.runOnlyPendingTimers(); await Promise.resolve(); });
+    await flush();
     expect(FakeWebSocket.instances).toHaveLength(2);
 
     act(() => root.unmount());
@@ -508,7 +658,7 @@ describe("useProjectChat", () => {
     expect(latest.messages).toEqual([]);
   });
 
-  it("rejects malformed, out-of-range, and duplicate message patches", async () => {
+  it("reconnects for an authoritative snapshot after an invalid patch", async () => {
     render("p1", "t1");
     await flush();
     const socket = FakeWebSocket.instances[0];
@@ -525,9 +675,20 @@ describe("useProjectChat", () => {
     ] }));
     expect(latest.messages).toEqual([duplicate]);
     expect(latest).toMatchObject({ status: "idle", queueLength: 0 });
-
-    act(() => socket.message({ JsonPatch: "not-an-array" }));
-    expect(latest.messages).toEqual([duplicate]);
     expect(latest.error).toBe("Invalid Project Chat stream message");
+    expect(socket.close).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(999));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    const replacement = FakeWebSocket.instances[1];
+    act(() => {
+      replacement.message({ type: "project_chat_snapshot", snapshot: snapshot("t1") });
+      replacement.message({ JsonPatch: "not-an-array" });
+    });
+    expect(replacement.close).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(999));
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });
