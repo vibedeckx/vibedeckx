@@ -102,28 +102,34 @@ export function createRemoteProjectSessionReader(options: {
         "GET",
         `/api/agent-sessions/${encodeURIComponent(mapping.remoteSessionId)}`,
       );
-      if (!result.ok) return undefined;
-      const data = result.data as {
-        session?: {
-          branch?: unknown; title?: unknown; status?: unknown; processAlive?: unknown;
-          agentType?: unknown; agent_type?: unknown; model?: unknown;
-        };
-        messages?: unknown[];
-      };
-      if (!data.session) return undefined;
-      const transcript = transcriptPreview((data.messages ?? []).slice(-Math.min(limits.maxEntries, TRANSCRIPT_ENTRY_LIMIT)));
+      if (!isSafeRecord(result) || safeProperty(result, "ok") !== true) return undefined;
+      const data = safeRecord(safeProperty(result, "data"));
+      if (!data) return undefined;
+      const session = safeRecord(safeProperty(data, "session"));
+      if (!session) return undefined;
+      const branch = safeProperty(session, "branch");
+      const title = safeProperty(session, "title");
+      const status = safeProperty(session, "status");
+      const processAlive = safeProperty(session, "processAlive");
+      const agentType = safeProperty(session, "agentType");
+      const legacyAgentType = typeof agentType === "string" ? undefined : safeProperty(session, "agent_type");
+      const model = safeProperty(session, "model");
+      const messages = safeProperty(data, "messages");
+      const transcript = transcriptPreview(safeArrayTail(
+        messages,
+        Math.min(normalizeCollectionLimit(limits.maxEntries), TRANSCRIPT_ENTRY_LIMIT),
+      ));
       return {
         id: mapping.id,
         projectId: mapping.projectId,
-        branch: typeof data.session.branch === "string" ? data.session.branch : mapping.branch,
-        title: typeof data.session.title === "string" ? data.session.title : null,
-        status: typeof data.session.status === "string" ? data.session.status : "unknown",
+        branch: typeof branch === "string" ? branch : mapping.branch,
+        title: typeof title === "string" ? title : null,
+        status: typeof status === "string" ? status : "unknown",
         target: mapping.remoteServerId,
-        agentType: typeof (data.session.agentType ?? data.session.agent_type) === "string"
-          ? String(data.session.agentType ?? data.session.agent_type)
-          : null,
-        model: typeof data.session.model === "string" ? data.session.model : null,
-        processAlive: data.session.processAlive === true,
+        agentType: typeof agentType === "string" ? agentType
+          : typeof legacyAgentType === "string" ? legacyAgentType : null,
+        model: typeof model === "string" ? model : null,
+        processAlive: typeof processAlive === "boolean" ? processAlive : false,
         transcript: JSON.stringify(transcript).length <= Math.min(limits.maxChars, TRANSCRIPT_CHAR_LIMIT) + 1_000
           ? transcript
           : transcriptPreview(transcript),
@@ -170,6 +176,83 @@ const preview = (value: unknown, limit: number): string => {
 const nullablePreview = (value: unknown, limit: number): string | null =>
   value === null || value === undefined ? null : preview(value, limit);
 
+function safeIsArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+function isSafeRecord(value: unknown): value is Record<PropertyKey, unknown> {
+  if (value === null || typeof value !== "object" || safeIsArray(value)) return false;
+  try {
+    Object.getPrototypeOf(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeRecord(value: unknown): Record<PropertyKey, unknown> | undefined {
+  return isSafeRecord(value) ? value : undefined;
+}
+
+function safeProperty(value: Record<PropertyKey, unknown>, key: PropertyKey): unknown {
+  try {
+    return value[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeCollectionLimit(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function safeArrayTail(value: unknown, requestedLimit: number): unknown[] {
+  if (!safeIsArray(value)) return [];
+  let rawLength: unknown;
+  try {
+    rawLength = value.length;
+  } catch {
+    return [];
+  }
+  if (typeof rawLength !== "number" || !Number.isSafeInteger(rawLength) || rawLength < 0) return [];
+  const limit = Math.min(normalizeCollectionLimit(requestedLimit), TRANSCRIPT_ENTRY_LIMIT);
+  const start = Math.max(0, rawLength - limit);
+  const result: unknown[] = [];
+  for (let index = start; index < rawLength; index++) {
+    try {
+      result.push(value[index]);
+    } catch {
+      result.push(undefined);
+    }
+  }
+  return result;
+}
+
+function safeArrayPrefix(value: unknown, requestedLimit: number): unknown[] {
+  if (!safeIsArray(value)) return [];
+  let rawLength: unknown;
+  try {
+    rawLength = value.length;
+  } catch {
+    return [];
+  }
+  if (typeof rawLength !== "number" || !Number.isSafeInteger(rawLength) || rawLength < 0) return [];
+  const count = Math.min(rawLength, normalizeCollectionLimit(requestedLimit));
+  const result: unknown[] = [];
+  for (let index = 0; index < count; index++) {
+    try {
+      result.push(value[index]);
+    } catch {
+      result.push(undefined);
+    }
+  }
+  return result;
+}
+
 interface StructuralBudget {
   nodes: number;
   seen: WeakSet<object>;
@@ -190,17 +273,18 @@ function boundedStructure(value: unknown, depth: number, budget: StructuralBudge
   if (budget.seen.has(value)) return "[circular]";
   budget.seen.add(value);
 
-  if (Array.isArray(value)) {
+  if (safeIsArray(value)) {
     const result: unknown[] = [];
-    let length: number;
-    try { length = value.length; } catch { return "[unavailable]"; }
-    const count = Math.min(length, STRUCTURAL_ENTRY_LIMIT);
+    let rawLength: unknown;
+    try { rawLength = value.length; } catch { return "[unavailable]"; }
+    if (typeof rawLength !== "number" || !Number.isSafeInteger(rawLength) || rawLength < 0) return "[unavailable]";
+    const count = Math.min(rawLength, STRUCTURAL_ENTRY_LIMIT);
     for (let index = 0; index < count && budget.nodes < STRUCTURAL_NODE_LIMIT; index++) {
       let item: unknown;
       try { item = value[index]; } catch { item = "[unavailable]"; }
       result.push(boundedStructure(item, depth + 1, budget));
     }
-    if (length > count) result.push(`[${length - count} more items]`);
+    if (rawLength > count) result.push(`[${rawLength - count} more items]`);
     return result;
   }
 
@@ -252,16 +336,18 @@ function fitTranscriptBudget(entries: Array<{ type: string; content: string }>):
   return best;
 }
 
-function transcriptPreview(entries: unknown[]): unknown[] {
-  const selected = entries.slice(-TRANSCRIPT_ENTRY_LIMIT).filter((entry) => entry && typeof entry === "object");
+function transcriptPreview(entries: unknown): unknown[] {
+  const selected = safeArrayTail(entries, TRANSCRIPT_ENTRY_LIMIT);
   const result: Array<{ type: string; content: string }> = [];
   for (const entry of selected) {
+    const record = safeRecord(entry);
+    if (!record) continue;
     let typeValue: unknown;
     let contentValue: unknown;
     let textValue: unknown;
-    try { typeValue = (entry as Record<string, unknown>).type; } catch { typeValue = "message"; }
-    try { contentValue = (entry as Record<string, unknown>).content; } catch { contentValue = "[unavailable]"; }
-    try { textValue = (entry as Record<string, unknown>).text; } catch { textValue = undefined; }
+    typeValue = safeProperty(record, "type");
+    contentValue = safeProperty(record, "content");
+    if (contentValue === null || contentValue === undefined) textValue = safeProperty(record, "text");
     const type = preview(typeValue, TRANSCRIPT_TYPE_CHAR_LIMIT) || "message";
     const content = boundedTranscriptContent(contentValue ?? textValue ?? "");
     result.push({ type, content });
@@ -356,10 +442,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       description: "List recent agent sessions across local and remote project workspaces.",
       inputSchema: emptySchema,
       execute: async () => {
-        const [localRows, remoteRows] = await Promise.all([
+        const [localRows, untrustedRemoteRows] = await Promise.all([
           storage.agentSessions.listByProject(projectId, LIST_LIMIT / 2),
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
         ]);
+        const remoteRows = safeArrayPrefix(untrustedRemoteRows, LIST_LIMIT / 2);
         const local: ProjectSessionSummary[] = localRows.map((row) => ({
           id: preview(row.id, ID_CHAR_LIMIT),
           projectId: preview(row.project_id, ID_CHAR_LIMIT),
@@ -370,18 +457,25 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           agentType: nullablePreview(row.agent_type, ENUM_CHAR_LIMIT),
           model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
         }));
-        const authorizedRemote = remoteRows
-          .filter((row) => row.projectId === projectId)
-          .map((row): ProjectSessionSummary => ({
-            id: preview(row.id, ID_CHAR_LIMIT),
-            projectId: preview(row.projectId, ID_CHAR_LIMIT),
-            branch: nullablePreview(row.branch, BRANCH_CHAR_LIMIT),
-            title: nullablePreview(row.title, NAME_CHAR_LIMIT),
-            status: preview(row.status, ENUM_CHAR_LIMIT),
-            target: preview(row.target, TARGET_CHAR_LIMIT),
-            agentType: nullablePreview(row.agentType, ENUM_CHAR_LIMIT),
-            model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
-          }));
+        const authorizedRemote: ProjectSessionSummary[] = [];
+        for (const rowValue of remoteRows) {
+          const row = safeRecord(rowValue);
+          if (!row) continue;
+          const rowProjectId = safeProperty(row, "projectId");
+          if (rowProjectId !== projectId) continue;
+          const rowId = safeProperty(row, "id");
+          if (typeof rowId !== "string" || !rowId) continue;
+          authorizedRemote.push({
+            id: preview(rowId, ID_CHAR_LIMIT),
+            projectId: preview(rowProjectId, ID_CHAR_LIMIT),
+            branch: nullablePreview(safeProperty(row, "branch"), BRANCH_CHAR_LIMIT),
+            title: nullablePreview(safeProperty(row, "title"), NAME_CHAR_LIMIT),
+            status: preview(safeProperty(row, "status"), ENUM_CHAR_LIMIT),
+            target: preview(safeProperty(row, "target"), TARGET_CHAR_LIMIT),
+            agentType: nullablePreview(safeProperty(row, "agentType"), ENUM_CHAR_LIMIT),
+            model: nullablePreview(safeProperty(row, "model"), MODEL_CHAR_LIMIT),
+          });
+        }
         const items = [...local, ...authorizedRemote].slice(0, LIST_LIMIT);
         await touchAll("agent_session", items.map((item) => item.id));
         return {
@@ -412,27 +506,52 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           await touch("agent_session", local.id);
           return detail;
         }
-        const mapping = await remoteSessions?.getMapping(sessionId);
-        if (!mapping) throw new Error("Agent session not found");
-        if (mapping.projectId !== projectId) throw new Error("Object is not part of this project");
-        const remote = await remoteSessions?.getDetail(mapping, {
+        const mappingValue: unknown = await remoteSessions?.getMapping(sessionId);
+        const mappingRecord = safeRecord(mappingValue);
+        if (!mappingRecord) throw new Error("Agent session not found");
+        const mappingId = safeProperty(mappingRecord, "id");
+        const mappingProjectId = safeProperty(mappingRecord, "projectId");
+        const mappingRemoteServerId = safeProperty(mappingRecord, "remoteServerId");
+        const mappingRemoteSessionId = safeProperty(mappingRecord, "remoteSessionId");
+        const mappingBranch = safeProperty(mappingRecord, "branch");
+        if (typeof mappingId !== "string" || typeof mappingProjectId !== "string"
+          || typeof mappingRemoteServerId !== "string" || typeof mappingRemoteSessionId !== "string") {
+          throw new Error("Agent session not found");
+        }
+        if (mappingProjectId !== projectId) throw new Error("Object is not part of this project");
+        const mapping: RemoteProjectSessionMapping = {
+          id: mappingId,
+          projectId: mappingProjectId,
+          remoteServerId: mappingRemoteServerId,
+          remoteSessionId: mappingRemoteSessionId,
+          branch: typeof mappingBranch === "string" ? mappingBranch : null,
+        };
+        const remoteValue: unknown = await remoteSessions?.getDetail(mapping, {
           maxEntries: TRANSCRIPT_ENTRY_LIMIT, maxChars: TRANSCRIPT_CHAR_LIMIT,
         });
+        const remote = safeRecord(remoteValue);
         if (!remote) throw new Error("Agent session not found");
-        if (remote.projectId !== projectId || remote.id !== mapping.id) {
+        const remoteId = safeProperty(remote, "id");
+        const remoteProjectId = safeProperty(remote, "projectId");
+        if (typeof remoteId !== "string" || typeof remoteProjectId !== "string") {
+          throw new Error("Agent session not found");
+        }
+        if (remoteProjectId !== projectId || remoteId !== mapping.id) {
           throw new Error("Object is not part of this project");
         }
+        const remoteProcessAlive = safeProperty(remote, "processAlive");
+        const remoteTranscript = safeProperty(remote, "transcript");
         const detail: ProjectSessionDetail = {
-          id: preview(remote.id, ID_CHAR_LIMIT),
-          projectId: preview(remote.projectId, ID_CHAR_LIMIT),
-          branch: nullablePreview(remote.branch, BRANCH_CHAR_LIMIT),
-          title: nullablePreview(remote.title, NAME_CHAR_LIMIT),
-          status: preview(remote.status, ENUM_CHAR_LIMIT),
-          target: preview(remote.target, TARGET_CHAR_LIMIT),
-          agentType: nullablePreview(remote.agentType, ENUM_CHAR_LIMIT),
-          model: nullablePreview(remote.model, MODEL_CHAR_LIMIT),
-          processAlive: remote.processAlive,
-          transcript: transcriptPreview(remote.transcript),
+          id: preview(remoteId, ID_CHAR_LIMIT),
+          projectId: preview(remoteProjectId, ID_CHAR_LIMIT),
+          branch: nullablePreview(safeProperty(remote, "branch"), BRANCH_CHAR_LIMIT),
+          title: nullablePreview(safeProperty(remote, "title"), NAME_CHAR_LIMIT),
+          status: preview(safeProperty(remote, "status"), ENUM_CHAR_LIMIT) || "unknown",
+          target: preview(safeProperty(remote, "target"), TARGET_CHAR_LIMIT),
+          agentType: nullablePreview(safeProperty(remote, "agentType"), ENUM_CHAR_LIMIT),
+          model: nullablePreview(safeProperty(remote, "model"), MODEL_CHAR_LIMIT),
+          processAlive: typeof remoteProcessAlive === "boolean" ? remoteProcessAlive : false,
+          transcript: transcriptPreview(remoteTranscript),
         };
         await touch("agent_session", mapping.id);
         return detail;

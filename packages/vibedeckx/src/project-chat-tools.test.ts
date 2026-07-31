@@ -195,6 +195,124 @@ describe("createProjectChatTools", () => {
     expect(detail).toEqual(expect.objectContaining({ id: "opaque-local-id", projectId: "project-1", transcript: expect.any(Array) }));
   });
 
+  it("rejects malformed remote payload records without invoking hostile session getters", async () => {
+    const mapping = {
+      id: "opaque-local-id", projectId: "project-1", remoteServerId: "server-a",
+      remoteSessionId: "worker/session", branch: "dev",
+    };
+    let payload: unknown = null;
+    const proxy = vi.fn(async () => ({ ok: true, status: 200, data: payload }));
+    const reader = createRemoteProjectSessionReader({ storage, proxy });
+
+    for (const malformed of [null, 42, "remote secret", true, [], {}]) {
+      payload = malformed;
+      await expect(reader.getDetail(mapping, { maxEntries: 20, maxChars: 6_000 })).resolves.toBeUndefined();
+    }
+
+    payload = Object.defineProperty({}, "session", {
+      get() { throw new Error("session getter secret"); },
+    });
+    await expect(reader.getDetail(mapping, { maxEntries: 20, maxChars: 6_000 })).resolves.toBeUndefined();
+  });
+
+  it("safely projects hostile remote session fields and transcript containers", async () => {
+    const mapping = {
+      id: "opaque-local-id", projectId: "project-1", remoteServerId: "server-a",
+      remoteSessionId: "worker/session", branch: "dev",
+    };
+    const session: Record<string, unknown> = {};
+    for (const key of ["branch", "title", "status", "processAlive", "agentType", "agent_type", "model"]) {
+      Object.defineProperty(session, key, {
+        get() { throw new Error(`${key} getter secret`); },
+      });
+    }
+    let messages: unknown = "not an array";
+    const data = { session } as { session: Record<string, unknown>; messages?: unknown };
+    Object.defineProperty(data, "messages", { configurable: true, get: () => messages });
+    const proxy = vi.fn(async () => ({ ok: true, status: 200, data }));
+    const reader = createRemoteProjectSessionReader({ storage, proxy });
+
+    const revoked = Proxy.revocable([], {});
+    const hostileContainers: unknown[] = [
+      "not an array",
+      { 0: { type: "assistant", content: "object secret" }, length: 1 },
+      revoked.proxy,
+      new Proxy([], { get(_target, key) { if (key === "length") throw new Error("length secret"); return undefined; } }),
+      new Proxy([], { get(_target, key) { return key === "length" ? 1n : undefined; } }),
+      new Proxy([], { get(_target, key) { return key === "length" ? "1" : undefined; } }),
+    ];
+    revoked.revoke();
+
+    for (const container of hostileContainers) {
+      messages = container;
+      const detail = await reader.getDetail(mapping, { maxEntries: 20, maxChars: 6_000 });
+      expect(detail).toEqual(expect.objectContaining({
+        branch: "dev", title: null, status: "unknown", processAlive: false, transcript: [],
+      }));
+      expect(JSON.stringify(detail)).not.toContain("secret");
+    }
+
+    Object.defineProperty(data, "messages", {
+      configurable: true,
+      get() { throw new Error("messages getter secret"); },
+    });
+    await expect(reader.getDetail(mapping, { maxEntries: 20, maxChars: 6_000 }))
+      .resolves.toEqual(expect.objectContaining({ transcript: [] }));
+  });
+
+  it("defensively projects malformed injected remote details and hostile transcript getters", async () => {
+    const mapping = {
+      id: "opaque-local-id", projectId: "project-1", remoteServerId: "server-a",
+      remoteSessionId: "worker/session", branch: "dev",
+    };
+    vi.mocked(remote.getMapping).mockResolvedValue(mapping);
+    const hostile = {
+      id: mapping.id,
+      projectId: mapping.projectId,
+      branch: "dev",
+      title: "Remote",
+      status: "running",
+      target: "server-a",
+      processAlive: { credential: "PROCESS SECRET" },
+    };
+    Object.defineProperty(hostile, "transcript", {
+      get() { throw new Error("transcript getter secret"); },
+    });
+    vi.mocked(remote.getDetail).mockResolvedValue(hostile as never);
+
+    const surface = await tools();
+    const detail = await surface.get_agent_session.execute({ sessionId: mapping.id });
+    expect(detail.processAlive).toBe(false);
+    expect(detail.transcript).toEqual([]);
+    expect(JSON.stringify(detail)).not.toContain("SECRET");
+
+    hostile.processAlive = "running" as never;
+    await expect(surface.get_agent_session.execute({ sessionId: mapping.id }))
+      .resolves.toEqual(expect.objectContaining({ processAlive: false, transcript: [] }));
+
+    for (const malformed of [null, 7, "remote secret", [], {}]) {
+      vi.mocked(remote.getDetail).mockResolvedValue(malformed as never);
+      await expect(surface.get_agent_session.execute({ sessionId: mapping.id }))
+        .rejects.toThrow("Agent session not found");
+    }
+  });
+
+  it("skips malformed and hostile remote list results without tracking synthetic ids", async () => {
+    const hostileRow = Object.defineProperty({}, "projectId", {
+      get() { throw new Error("project getter secret"); },
+    });
+    vi.mocked(remote.listByProject).mockResolvedValue([
+      null,
+      7,
+      { projectId: "project-1" },
+      hostileRow,
+    ] as never);
+    const surface = await tools();
+
+    await expect(surface.list_agent_sessions.execute({})).resolves.toEqual({ items: [], truncated: false });
+    expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
+  });
+
   it("lists schedules and recent runs without content/output, tracking each returned entity once", async () => {
     await storage.scheduledTasks.create({
       id: "schedule-1", project_id: "project-1", name: "Nightly", cron_expr: "0 0 * * *", timezone: "UTC",
