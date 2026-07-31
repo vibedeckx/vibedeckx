@@ -21,7 +21,15 @@ import type {
 const now = () => sql<string>`strftime('%Y-%m-%d %H:%M:%f', 'now')`;
 
 const mapThread = (row: Selectable<ProjectChatThreadsTable>): ProjectChatThread => {
-  const { create_request_id: _requestId, create_payload_hash: _payloadHash, ...thread } = row;
+  const {
+    create_request_id: _requestId,
+    create_payload_hash: _payloadHash,
+    recovery_work_id: _recoveryWorkId,
+    recovery_status: _recoveryStatus,
+    recovery_created_at: _recoveryCreatedAt,
+    recovery_authorized: _recoveryAuthorized,
+    ...thread
+  } = row as Selectable<ProjectChatThreadsTable> & Record<string, unknown>;
   return thread;
 };
 
@@ -205,18 +213,6 @@ export const createProjectChatRepos = (
       return { thread: mapThread(existing), created: false };
     }),
 
-    listWithNonterminalWork: async (afterId, limit) => {
-      let query = kdb.selectFrom("project_chat_threads as thread")
-        .innerJoin("project_chat_work_items as work", "work.thread_id", "thread.id")
-        .selectAll("thread")
-        .where("work.status", "in", ["accepted", "running"])
-        .distinct()
-        .orderBy("thread.id", "asc");
-      if (afterId !== null) query = query.where("thread.id", ">", afterId);
-      const rows = await query.limit(Math.max(0, limit)).execute();
-      return rows.map(mapThread);
-    },
-
     listByProject: async (projectId, userId, limit, opts) => {
       let query = kdb.selectFrom("project_chat_threads")
         .selectAll()
@@ -367,6 +363,77 @@ export const createProjectChatRepos = (
   },
 
   projectChatWorkItems: {
+    listRecoveryPage: async (cursor, limit) => {
+      const boundedLimit = Math.max(0, limit);
+      let query = kdb.selectFrom("project_chat_work_items as work")
+        .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+        .leftJoin("projects as project", "project.id", "thread.project_id")
+        .selectAll("thread")
+        .select([
+          "work.id as recovery_work_id",
+          "work.status as recovery_status",
+          "work.created_at as recovery_created_at",
+          sql<number>`case when project.id is not null and
+            (thread.user_id = 'local' or project.user_id = thread.user_id)
+            then 1 else 0 end`.as("recovery_authorized"),
+        ])
+        .where("work.status", "in", ["accepted", "running"]);
+      if (cursor) {
+        query = query.where((eb) => eb.or([
+          eb("work.status", ">", cursor.status),
+          eb.and([
+            eb("work.status", "=", cursor.status),
+            eb("work.created_at", ">", cursor.createdAt),
+          ]),
+          eb.and([
+            eb("work.status", "=", cursor.status),
+            eb("work.created_at", "=", cursor.createdAt),
+            eb("work.id", ">", cursor.id),
+          ]),
+        ]));
+      }
+      const rows = await query
+        .orderBy("work.status", "asc")
+        .orderBy("work.created_at", "asc")
+        .orderBy("work.id", "asc")
+        .limit(boundedLimit + 1)
+        .execute();
+      const hasMore = rows.length > boundedLimit;
+      const selected = rows.slice(0, boundedLimit);
+      const candidates = selected.map((row) => {
+        const recoveryRow = row as typeof row & {
+          recovery_work_id: string;
+          recovery_status: "accepted" | "running";
+          recovery_created_at: string;
+          recovery_authorized: number | boolean;
+        };
+        return {
+          thread: mapThread(recoveryRow),
+          workItemId: recoveryRow.recovery_work_id,
+          cursor: {
+            status: recoveryRow.recovery_status,
+            createdAt: recoveryRow.recovery_created_at,
+            id: recoveryRow.recovery_work_id,
+          },
+          authorized: Boolean(recoveryRow.recovery_authorized),
+        };
+      });
+      return {
+        candidates,
+        nextCursor: hasMore ? candidates.at(-1)?.cursor ?? cursor : null,
+        hasMore,
+      };
+    },
+
+    quarantineRecovery: async (id, reason) => {
+      const result = await kdb.updateTable("project_chat_work_items")
+        .set({ status: "failed", error: reason.slice(0, 512), updated_at: now() })
+        .where("id", "=", id)
+        .where("status", "in", ["accepted", "running"])
+        .executeTakeFirst();
+      return result.numUpdatedRows === 1n;
+    },
+
     accept: async ({ id, user_message_id, thread_id, project_id, user_id, content }) => {
       return kdb.transaction().execute(async (trx) => {
         const thread = await trx.selectFrom("project_chat_threads")

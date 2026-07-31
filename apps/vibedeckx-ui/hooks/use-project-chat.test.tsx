@@ -114,6 +114,7 @@ beforeEach(() => {
   FakeWebSocket.instances = [];
   FakeWebSocket.constructionFailures = 0;
   vi.stubGlobal("WebSocket", FakeWebSocket);
+  window.sessionStorage.clear();
   mocks.getFreshToken.mockResolvedValue("token");
   mocks.api.listProjectChatThreads.mockResolvedValue([]);
   mocks.api.getProjectChatThread.mockImplementation(async (id: string) => detail(id));
@@ -175,7 +176,7 @@ describe("useProjectChat", () => {
     expect(mocks.getWebSocketUrl).not.toHaveBeenCalledWith(expect.stringContaining("/chat-sessions/"));
   });
 
-  it("reuses one create request id after a lost response and rotates it after success", async () => {
+  it("reuses one create request id after a lost response and hook remount, then rotates after success", async () => {
     const created = thread("created", "p1", null);
     mocks.api.createProjectChatThread
       .mockRejectedValueOnce(new Error("response lost"))
@@ -185,12 +186,44 @@ describe("useProjectChat", () => {
     await flush();
 
     await expect(latest.createThread("same intent")).rejects.toThrow("response lost");
+    act(() => root.unmount());
+    root = createRoot(container);
+    render("p1", null);
+    await flush();
     await act(async () => { await latest.createThread("same intent"); });
     await act(async () => { await latest.createThread("same intent"); });
 
     const keys = mocks.api.createProjectChatThread.mock.calls.map((call) => call[2]);
     expect(keys[0]).toBe(keys[1]);
     expect(keys[2]).not.toBe(keys[1]);
+    expect(Array.from({ length: window.sessionStorage.length }, (_, index) => [
+      window.sessionStorage.key(index),
+      window.sessionStorage.getItem(window.sessionStorage.key(index)!),
+    ]).flat().join(" ")).not.toContain("same intent");
+  });
+
+  it("isolates pending create ids by project and rotates after a deterministic conflict", async () => {
+    const conflict = Object.assign(new Error("payload mismatch"), { status: 409 });
+    mocks.api.createProjectChatThread
+      .mockRejectedValueOnce(new Error("p1 response lost"))
+      .mockRejectedValueOnce(new Error("p2 response lost"))
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(thread("created", "p1", null));
+    render("p1", null);
+    await flush();
+    await expect(latest.createThread("same")).rejects.toThrow("p1 response lost");
+    render("p2", null);
+    await flush();
+    await expect(latest.createThread("same")).rejects.toThrow("p2 response lost");
+    render("p1", null);
+    await flush();
+    await expect(latest.createThread("same")).rejects.toMatchObject({ status: 409 });
+    await act(async () => { await latest.createThread("same"); });
+
+    const keys = mocks.api.createProjectChatThread.mock.calls.map((call) => call[2]);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[2]).toBe(keys[0]);
+    expect(keys[3]).not.toBe(keys[2]);
   });
 
   it("rehydrates from the WebSocket snapshot and applies JSON patches", async () => {

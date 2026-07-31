@@ -164,9 +164,9 @@ describe("ProjectChatManager", () => {
       id: "retry-recovery", project_id: "project-1", user_id: "user-1", title: null,
       initialTurn: { messageId: "retry-user", workItemId: "retry-work", content: "begin" },
     });
-    const original = storage.projectChatThreads.listWithNonterminalWork
-      .bind(storage.projectChatThreads);
-    vi.spyOn(storage.projectChatThreads, "listWithNonterminalWork")
+    const original = storage.projectChatWorkItems.listRecoveryPage
+      .bind(storage.projectChatWorkItems);
+    vi.spyOn(storage.projectChatWorkItems, "listRecoveryPage")
       .mockRejectedValueOnce(new Error("startup storage unavailable"))
       .mockImplementation(original);
     const run = vi.fn(async function* () {
@@ -181,6 +181,133 @@ describe("ProjectChatManager", () => {
 
     expect(run).toHaveBeenCalledOnce();
     await manager.shutdown();
+  });
+
+  it("returns from ready at the startup deadline when the recovery read stalls", async () => {
+    vi.spyOn(storage.projectChatWorkItems, "listRecoveryPage")
+      .mockImplementation(() => new Promise(() => undefined));
+    const manager = new ProjectChatManager(storage, reply("unused"), {
+      startupReconciliationDeadlineMs: 15,
+      reconciliationIntervalMs: 10_000,
+    });
+    const startedAt = Date.now();
+
+    await manager.ready();
+
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    await manager.shutdown();
+  });
+
+  it("quarantines corrupt recovery ownership without invoking the model", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "corrupt-owner", project_id: "project-1", user_id: "user-1", title: null,
+      initialTurn: { messageId: "corrupt-message", workItemId: "corrupt-work", content: "must not run" },
+    });
+    const raw = new Database(dbPath);
+    raw.prepare("UPDATE project_chat_threads SET user_id = 'user-2' WHERE id = 'corrupt-owner'").run();
+    raw.close();
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "unsafe" };
+    });
+
+    const manager = new ProjectChatManager(storage, { run });
+    await manager.ready();
+
+    expect(run).not.toHaveBeenCalled();
+    const verify = new Database(dbPath, { readonly: true });
+    try {
+      expect(verify.prepare("SELECT status, error FROM project_chat_work_items WHERE id = 'corrupt-work'").get())
+        .toEqual({
+          status: "failed",
+          error: "Recovery quarantined: thread owner does not own the referenced project",
+        });
+    } finally {
+      verify.close();
+    }
+    await manager.shutdown();
+  });
+
+  it("preserves local-sentinel project authorization during autonomous recovery", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "local-owner", project_id: "project-1", user_id: "local", title: null,
+      initialTurn: { messageId: "local-message", workItemId: "local-work", content: "run locally" },
+    });
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "safe" };
+    });
+    const manager = new ProjectChatManager(storage, { run });
+
+    await manager.ready();
+    await waitFor(() => run.mock.calls.length === 1);
+
+    expect(run).toHaveBeenCalledOnce();
+    await manager.shutdown();
+  });
+
+  it("bounds startup recovery and fairly drains a large backlog under the global turn cap", async () => {
+    for (let index = 0; index < 12; index++) {
+      const id = `backlog-${String(index).padStart(2, "0")}`;
+      await storage.projectChatThreads.createWithInitialTurn({
+        id, project_id: "project-1", user_id: "user-1", title: null,
+        initialTurn: { messageId: `${id}-message`, workItemId: `${id}-work`, content: id },
+      });
+    }
+    let active = 0;
+    let maximumActive = 0;
+    const starts: string[] = [];
+    const run = vi.fn(async function* (input: ProjectChatRunInput) {
+      active++;
+      maximumActive = Math.max(maximumActive, active);
+      starts.push(input.threadId);
+      await new Promise((resolve) => setTimeout(resolve, 4));
+      active--;
+      yield { type: "assistant" as const, content: "done" };
+    });
+    const recoveryPages = vi.spyOn(storage.projectChatWorkItems, "listRecoveryPage");
+    const manager = new ProjectChatManager(storage, { run }, {
+      maxConcurrentTurns: 2,
+      recoveryPageSize: 3,
+      reconciliationIntervalMs: 2,
+      startupReconciliationDeadlineMs: 20,
+    });
+
+    await manager.ready();
+    expect(recoveryPages).toHaveBeenCalledTimes(1);
+    expect(starts.length).toBeLessThanOrEqual(2);
+    await waitFor(() => starts.length === 12);
+    await waitFor(() => active === 0);
+
+    expect(maximumActive).toBe(2);
+    expect(new Set(starts).size).toBe(12);
+    expect(starts.slice(0, 6)).toEqual([
+      "backlog-00", "backlog-01", "backlog-02", "backlog-03", "backlog-04", "backlog-05",
+    ]);
+    await manager.shutdown();
+  });
+
+  it("drops recovery backpressure on shutdown without starting queued turns", async () => {
+    for (let index = 0; index < 5; index++) {
+      const id = `shutdown-backlog-${index}`;
+      await storage.projectChatThreads.createWithInitialTurn({
+        id, project_id: "project-1", user_id: "user-1", title: null,
+        initialTurn: { messageId: `${id}-message`, workItemId: `${id}-work`, content: id },
+      });
+    }
+    const starts: string[] = [];
+    const run = vi.fn(async function* (input: ProjectChatRunInput) {
+      starts.push(input.threadId);
+      await new Promise<void>((resolve) => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    const manager = new ProjectChatManager(storage, { run }, {
+      maxConcurrentTurns: 1, recoveryPageSize: 5, drainTimeoutMs: 50,
+    });
+    await manager.ready();
+    await waitFor(() => starts.length === 1);
+
+    await manager.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(starts).toHaveLength(1);
   });
 
   it("opens and starts accepted work when the Context projection is temporarily unavailable", async () => {

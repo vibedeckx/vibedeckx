@@ -273,6 +273,20 @@ export interface ProjectChatWorkItem {
   updated_at: string;
 }
 
+export interface ProjectChatRecoveryCursor {
+  status: Extract<ProjectChatWorkStatus, "accepted" | "running">;
+  createdAt: string;
+  id: string;
+}
+
+export interface ProjectChatRecoveryCandidate {
+  thread: ProjectChatThread;
+  workItemId: string;
+  cursor: ProjectChatRecoveryCursor;
+  /** Equivalent to the normal thread/project authorization check. */
+  authorized: boolean;
+}
+
 export interface ProjectChatContextRef {
   thread_id: string;
   entity_type: ProjectChatContextEntityType;
@@ -1086,7 +1100,6 @@ export interface Storage {
       create_payload_hash: string;
       initialTurn?: { messageId: string; workItemId: string; content: string };
     }) => Promise<{ thread: ProjectChatThread; created: boolean }>;
-    listWithNonterminalWork: (afterId: string | null, limit: number) => Promise<ProjectChatThread[]>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
     /**
      * Discovery-only lookup for routes that receive no project id. Callers
@@ -1110,6 +1123,15 @@ export interface Storage {
     listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatMessage[]>;
   };
   projectChatWorkItems: {
+    listRecoveryPage: (
+      cursor: ProjectChatRecoveryCursor | null,
+      limit: number,
+    ) => Promise<{
+      candidates: ProjectChatRecoveryCandidate[];
+      nextCursor: ProjectChatRecoveryCursor | null;
+      hasMore: boolean;
+    }>;
+    quarantineRecovery: (id: string, reason: string) => Promise<boolean>;
     accept: (opts: {
       id: string;
       user_message_id: string;

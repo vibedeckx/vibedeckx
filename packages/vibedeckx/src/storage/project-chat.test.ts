@@ -149,16 +149,48 @@ describe("project chat storage", () => {
     expect(await storage.projectChatWorkItems.listNonterminal("empty-thread", "p1", "u1")).toEqual([]);
   });
 
-  it("pages every thread with recoverable work by stable thread id", async () => {
+  it("pages recoverable work by a stable status-first cursor and exposes ownership validity", async () => {
     for (const id of ["recover-a", "recover-b", "recover-c"]) {
       await storage.projectChatThreads.createWithInitialTurn({
-        id, project_id: "p1", user_id: "u1", title: null,
+        id, project_id: "p1", user_id: "local", title: null,
         initialTurn: { messageId: `${id}-message`, workItemId: `${id}-work`, content: id },
       });
     }
-    const first = await storage.projectChatThreads.listWithNonterminalWork(null, 2);
-    const second = await storage.projectChatThreads.listWithNonterminalWork(first.at(-1)!.id, 2);
-    expect([...first, ...second].map(({ id }) => id)).toEqual(["recover-a", "recover-b", "recover-c"]);
+    const first = await storage.projectChatWorkItems.listRecoveryPage(null, 2);
+    const second = await storage.projectChatWorkItems.listRecoveryPage(first.nextCursor, 2);
+    expect([...first.candidates, ...second.candidates].map(({ thread }) => thread.id))
+      .toEqual(["recover-a", "recover-b", "recover-c"]);
+    expect(first).toMatchObject({ hasMore: true });
+    expect(second).toMatchObject({ hasMore: false, nextCursor: null });
+    expect(first.candidates.every(({ authorized }) => authorized)).toBe(true);
+
+    const raw = new Database(dbPath);
+    raw.prepare("UPDATE project_chat_threads SET user_id = 'foreign' WHERE id = 'recover-c'").run();
+    raw.close();
+    const invalid = await storage.projectChatWorkItems.listRecoveryPage(null, 10);
+    expect(invalid.candidates.find(({ thread }) => thread.id === "recover-c")?.authorized).toBe(false);
+  });
+
+  it("uses the status-first recovery index without a temp distinct or sort", () => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const index = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_chat_work_items_recovery'",
+      ).get() as { sql: string } | undefined;
+      expect(index?.sql.replace(/\s+/g, " ")).toContain("status, created_at, id, thread_id");
+      const plan = db.prepare(`EXPLAIN QUERY PLAN
+        SELECT thread.*, work.id
+        FROM project_chat_work_items AS work
+        JOIN project_chat_threads AS thread ON thread.id = work.thread_id
+        LEFT JOIN projects AS project ON project.id = thread.project_id
+        WHERE work.status IN ('accepted', 'running')
+        ORDER BY work.status ASC, work.created_at ASC, work.id ASC LIMIT 26`
+      ).all() as Array<{ detail: string }>;
+      expect(plan.some(({ detail }) => /USE TEMP B-TREE|DISTINCT/i.test(detail))).toBe(false);
+      expect(plan.some(({ detail }) => detail.includes("idx_project_chat_work_items_recovery"))).toBe(true);
+    } finally {
+      db.close();
+    }
   });
 
   it("rolls back thread creation when the initial turn insert violates a constraint", async () => {
@@ -776,6 +808,9 @@ describe("project chat storage", () => {
       ).get() as { sql: string } | undefined;
       expect(index?.sql.replace(/\s+/g, " "))
         .toContain("thread_id, status, created_at, id");
+      expect(db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_chat_work_items_recovery'",
+      ).get()).toBeDefined();
     } finally {
       db.close();
     }

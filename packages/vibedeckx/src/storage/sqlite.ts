@@ -92,6 +92,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE INDEX IF NOT EXISTS idx_project_chat_work_items_thread_status_created_id
       ON project_chat_work_items(thread_id, status, created_at, id);
 
+    CREATE INDEX IF NOT EXISTS idx_project_chat_work_items_recovery
+      ON project_chat_work_items(status, created_at, id, thread_id);
+
     CREATE TABLE IF NOT EXISTS project_chat_context_refs (
       thread_id TEXT NOT NULL,
       entity_type TEXT NOT NULL CHECK (entity_type IN (

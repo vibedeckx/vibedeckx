@@ -33,6 +33,7 @@ interface ProjectChatStreamState {
 export const PROJECT_CHAT_CONNECT_TIMEOUT_MS = 10_000;
 export const PROJECT_CHAT_STALE_AFTER_MS = 40_000;
 export const PROJECT_CHAT_SNAPSHOT_CACHE_LIMIT = 5;
+const PROJECT_CHAT_CREATE_INTENT_PREFIX = "vibedeckx:project-chat:create:v1";
 
 export type ProjectChatTerminalError = "thread_not_found";
 
@@ -74,6 +75,34 @@ function cacheSnapshot(cache: Map<string, ProjectChatSnapshot>, snapshot: Projec
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function createIntentPayloadHash(message: string | undefined): string {
+  const value = message === undefined ? "\u0000" : `\u0001${message}`;
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+
+function createIntentStorageKey(projectId: string, message: string | undefined): string {
+  return `${PROJECT_CHAT_CREATE_INTENT_PREFIX}:${encodeURIComponent(projectId)}:${createIntentPayloadHash(message)}`;
+}
+
+function readCreateRequestId(key: string): string | undefined {
+  try { return window.sessionStorage.getItem(key) ?? undefined; } catch { return undefined; }
+}
+
+function persistCreateRequestId(key: string, value: string): void {
+  try { window.sessionStorage.setItem(key, value); } catch { /* in-memory fallback remains */ }
+}
+
+function clearCreateRequestId(key: string): void {
+  try { window.sessionStorage.removeItem(key); } catch { /* storage may be unavailable */ }
 }
 
 function isThreadNotFoundError(reason: unknown): boolean {
@@ -572,14 +601,28 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     if (!targetProjectId) throw new Error("No project selected");
     const normalized = message === undefined ? undefined : message.trim();
     if (message !== undefined && !normalized) throw new Error("Message is required");
-    const intentKey = JSON.stringify([targetProjectId, normalized ?? null]);
-    let createRequestId = pendingCreateRequestIdsRef.current.get(intentKey);
+    const intentKey = createIntentStorageKey(targetProjectId, normalized);
+    let createRequestId = pendingCreateRequestIdsRef.current.get(intentKey)
+      ?? readCreateRequestId(intentKey);
     if (!createRequestId) {
       createRequestId = crypto.randomUUID();
       pendingCreateRequestIdsRef.current.set(intentKey, createRequestId);
+      persistCreateRequestId(intentKey, createRequestId);
+    } else {
+      pendingCreateRequestIdsRef.current.set(intentKey, createRequestId);
     }
-    const created = await api.createProjectChatThread(targetProjectId, normalized, createRequestId);
+    let created: ProjectChatThread;
+    try {
+      created = await api.createProjectChatThread(targetProjectId, normalized, createRequestId);
+    } catch (reason) {
+      if (isRecord(reason) && reason.status === 409) {
+        pendingCreateRequestIdsRef.current.delete(intentKey);
+        clearCreateRequestId(intentKey);
+      }
+      throw reason;
+    }
     pendingCreateRequestIdsRef.current.delete(intentKey);
+    clearCreateRequestId(intentKey);
     if (created.project_id === targetProjectId && invalidateThreadList(targetProjectId, generation)) {
       setThreads((current) => [created, ...current.filter((item) => item.id !== created.id)]);
     }

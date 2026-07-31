@@ -75,6 +75,8 @@ export interface ProjectChatManagerOptions {
   reconciliationIntervalMs?: number;
   startupReconciliationDeadlineMs?: number;
   reconciliationOperationTimeoutMs?: number;
+  recoveryPageSize?: number;
+  maxConcurrentTurns?: number;
   toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
   eventBus?: EventBus;
 }
@@ -310,10 +312,16 @@ export class ProjectChatManager {
   private readonly reconciliationIntervalMs: number;
   private readonly startupReconciliationDeadlineMs: number;
   private readonly reconciliationOperationTimeoutMs: number;
+  private readonly recoveryPageSize: number;
+  private readonly maxConcurrentTurns: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private readonly unsubscribeEvents?: () => void;
   private readonly startupReconciliation: Promise<ProjectChatReconciliationReport>;
   private reconciliationCursor: string | null = null;
+  private recoveryCursor: import("./storage/types.js").ProjectChatRecoveryCursor | null = null;
+  private readonly pendingPumps: LiveThread[] = [];
+  private readonly pendingPumpIds = new Set<string>();
+  private activeTurnCount = 0;
   private reconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private reconciliationDelayMs = 100;
   private shuttingDown = false;
@@ -332,16 +340,17 @@ export class ProjectChatManager {
     this.reconciliationIntervalMs = Math.max(1, options.reconciliationIntervalMs ?? 1_000);
     this.startupReconciliationDeadlineMs = Math.max(10, options.startupReconciliationDeadlineMs ?? 1_000);
     this.reconciliationOperationTimeoutMs = Math.max(10, options.reconciliationOperationTimeoutMs ?? 250);
+    this.recoveryPageSize = Math.max(1, Math.min(100, options.recoveryPageSize ?? 25));
+    this.maxConcurrentTurns = Math.max(1, options.maxConcurrentTurns ?? 4);
     this.reconciliationDelayMs = Math.min(100, this.reconciliationIntervalMs);
     this.toolDependencies = options.toolDependencies;
     this.unsubscribeEvents = options.eventBus?.subscribe((event) => {
       if (this.shuttingDown) return;
       void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
     });
-    this.startupReconciliation = this.trackOperation(this.recoverAcceptedThreads()
-      .then(() => this.reconcilePersistedOperations(
-        2, Date.now() + this.startupReconciliationDeadlineMs,
-      )))
+    const startupDeadline = Date.now() + this.startupReconciliationDeadlineMs;
+    this.startupReconciliation = this.trackOperation(this.recoverAcceptedThreads(startupDeadline)
+      .then(() => this.reconcilePersistedOperations(2, startupDeadline)))
       .catch((error) => {
         this.reconciliationDelayMs = Math.min(this.reconciliationDelayMs * 2, 5_000);
         return { processed: 0, quarantined: 0, retryScheduled: 0, remaining: true,
@@ -356,18 +365,49 @@ export class ProjectChatManager {
   /** Resolves after the bounded startup operation-journal reconciliation. */
   ready(): Promise<ProjectChatReconciliationReport> { return this.startupReconciliation; }
 
-  private async recoverAcceptedThreads(): Promise<void> {
-    let afterId: string | null = null;
-    while (!this.shuttingDown) {
-      const threads = await this.storage.projectChatThreads.listWithNonterminalWork(afterId, 100);
-      for (const thread of threads) {
-        if (this.shuttingDown) return;
-        const generation = this.lifecycle(thread.id).generation;
-        const live = await this.loadLiveThread(thread, generation);
-        this.pump(live);
+  private async recoverAcceptedThreads(deadlineAt = Date.now() + this.reconciliationOperationTimeoutMs): Promise<void> {
+    if (this.shuttingDown || Date.now() >= deadlineAt) return;
+    const pageRead = await this.settleWithin(
+      this.storage.projectChatWorkItems.listRecoveryPage(this.recoveryCursor, this.recoveryPageSize),
+      Math.max(1, deadlineAt - Date.now()),
+    );
+    if (pageRead.status === "timeout") return;
+    if (pageRead.status === "rejected") throw pageRead.reason;
+    const page = pageRead.value;
+    let lastProcessed = this.recoveryCursor;
+    let completedPage = true;
+    for (const candidate of page.candidates) {
+      if (this.shuttingDown || Date.now() >= deadlineAt) {
+        completedPage = false;
+        break;
       }
-      if (threads.length < 100) return;
-      afterId = threads.at(-1)!.id;
+      const alreadyLoaded = this.liveThreads.has(candidate.thread.id)
+        || this.loadingThreads.has(candidate.thread.id);
+      if (!alreadyLoaded
+        && this.activeTurnCount + this.pendingPumpIds.size >= this.maxConcurrentTurns * 2) {
+        completedPage = false;
+        break;
+      }
+      const authorized = candidate.authorized
+        ? await this.findAuthorized(candidate.thread.id, candidate.thread.user_id)
+        : undefined;
+      if (!authorized || authorized.project_id !== candidate.thread.project_id) {
+        const reason = "Recovery quarantined: thread owner does not own the referenced project";
+        if (await this.storage.projectChatWorkItems.quarantineRecovery(candidate.workItemId, reason)) {
+          console.warn(`[ProjectChat] ${reason} (${candidate.workItemId})`);
+        }
+        lastProcessed = candidate.cursor;
+        continue;
+      }
+      const generation = this.lifecycle(authorized.id).generation;
+      const live = await this.loadLiveThread(authorized, generation);
+      this.pump(live);
+      lastProcessed = candidate.cursor;
+    }
+    if (!completedPage) {
+      this.recoveryCursor = lastProcessed;
+    } else {
+      this.recoveryCursor = page.hasMore ? page.nextCursor : null;
     }
   }
 
@@ -539,6 +579,8 @@ export class ProjectChatManager {
     this.shuttingDown = true;
     if (this.reconciliationTimer) clearTimeout(this.reconciliationTimer);
     this.reconciliationTimer = null;
+    this.pendingPumps.splice(0);
+    this.pendingPumpIds.clear();
     this.unsubscribeEvents?.();
     for (const live of this.liveThreads.values()) {
       this.cancelEviction(live);
@@ -642,7 +684,9 @@ export class ProjectChatManager {
     this.reconciliationTimer = setTimeout(() => {
       this.reconciliationTimer = null;
       if (this.shuttingDown) return;
-      void this.trackOperation(this.recoverAcceptedThreads()
+      void this.trackOperation(this.recoverAcceptedThreads(
+        Date.now() + this.reconciliationOperationTimeoutMs,
+      )
         .then(() => this.reconcilePersistedOperations(2))).then(() => {
         this.reconciliationDelayMs = 100;
         this.scheduleReconciliation(
@@ -1256,27 +1300,63 @@ export class ProjectChatManager {
 
   private pump(live: LiveThread): void {
     if (live.activeWork || this.shuttingDown || this.closingThreads.has(live.thread.id)) return;
+    if (live.queue.length === 0) return;
+    if (this.activeTurnCount >= this.maxConcurrentTurns) {
+      if (!this.pendingPumpIds.has(live.thread.id)) {
+        this.pendingPumpIds.add(live.thread.id);
+        this.pendingPumps.push(live);
+      }
+      return;
+    }
+    this.startPump(live);
+  }
+
+  private startPump(live: LiveThread): void {
+    if (live.activeWork || this.shuttingDown || this.closingThreads.has(live.thread.id)) return;
     const queued = live.queue.shift();
     if (!queued) return;
+    this.pendingPumpIds.delete(live.thread.id);
+    this.activeTurnCount++;
     this.cancelEviction(live);
     let work!: Promise<void>;
     work = this.runTurn(live, queued)
       .catch(() => undefined)
       .finally(() => {
-        if (live.activeWork !== work) return;
-        live.activeWork = null;
-        live.activeWorkItemId = null;
-        live.activeAttempt = null;
-        live.abortController = null;
-        if (live.queue.length > 0 && !this.shuttingDown && !this.closingThreads.has(live.thread.id)) {
-          this.pump(live);
-          return;
+        this.activeTurnCount = Math.max(0, this.activeTurnCount - 1);
+        if (live.activeWork === work) {
+          live.activeWork = null;
+          live.activeWorkItemId = null;
+          live.activeAttempt = null;
+          live.abortController = null;
+          if (live.queue.length > 0 && !this.shuttingDown && !this.closingThreads.has(live.thread.id)) {
+            if (this.pendingPumps.length > 0) {
+              if (!this.pendingPumpIds.has(live.thread.id)) {
+                this.pendingPumpIds.add(live.thread.id);
+                this.pendingPumps.push(live);
+              }
+            } else {
+              this.pump(live);
+            }
+          } else {
+            live.status = "idle";
+            this.broadcastStatus(live);
+            this.scheduleEviction(live);
+          }
         }
-        live.status = "idle";
-        this.broadcastStatus(live);
-        this.scheduleEviction(live);
+        this.drainPendingPumps();
       });
     live.activeWork = work;
+  }
+
+  private drainPendingPumps(): void {
+    while (!this.shuttingDown && this.activeTurnCount < this.maxConcurrentTurns) {
+      const live = this.pendingPumps.shift();
+      if (!live) return;
+      this.pendingPumpIds.delete(live.thread.id);
+      if (live.activeWork || live.queue.length === 0 || this.closingThreads.has(live.thread.id)
+        || this.liveThreads.get(live.thread.id) !== live) continue;
+      this.startPump(live);
+    }
   }
 
   private async runTurn(live: LiveThread, queued: QueuedTurn): Promise<void> {

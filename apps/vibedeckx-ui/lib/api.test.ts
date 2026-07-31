@@ -165,6 +165,20 @@ describe("Project Chat create", () => {
       global.fetch = originalFetch;
     }
   });
+
+  it("preserves the HTTP status on create conflicts", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 409,
+      json: async () => ({ error: "payload mismatch" }),
+    } as Response);
+    try {
+      await expect(api.createProjectChatThread("p1", "hello", "stable-create-key"))
+        .rejects.toMatchObject({ message: "payload mismatch", status: 409 });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });
 
 describe("setMergeTarget", () => {

@@ -2038,7 +2038,10 @@ export const api = {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error ?? `Failed to create Project Chat thread: ${res.status}`);
+      throw Object.assign(
+        new Error(body.error ?? `Failed to create Project Chat thread: ${res.status}`),
+        { status: res.status },
+      );
     }
     return (await res.json()).thread;
   },
