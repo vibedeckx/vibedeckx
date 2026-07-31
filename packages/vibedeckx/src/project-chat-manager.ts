@@ -64,6 +64,8 @@ interface QueuedTurn {
   workId: string;
   userMessageId: string;
   content: string;
+  wasRunning: boolean;
+  acceptedMessage?: ProjectChatMessage;
 }
 
 interface LiveThread {
@@ -75,6 +77,7 @@ interface LiveThread {
   subscribers: Set<WebSocket>;
   abortController: AbortController | null;
   activeWork: Promise<void> | null;
+  activeWorkItemId: string | null;
   activeTurnId: string | null;
   pendingApprovals: Map<string, {
     turnId: string;
@@ -193,6 +196,7 @@ export class ProjectChatManager {
       content: trimmed,
     });
     this.assertLifecycle(threadId, generation, true);
+    if (accepted.acceptedMessage) this.publishMessage(live, accepted.acceptedMessage);
     if (this.shuttingDown) return;
     live.queue.push(accepted);
     this.broadcastStatus(live);
@@ -323,6 +327,7 @@ export class ProjectChatManager {
           subscribers: new Set(),
           abortController: null,
           activeWork: null,
+          activeWorkItemId: null,
           activeTurnId: null,
           pendingApprovals: new Map(),
           writeTail: Promise.resolve(),
@@ -378,9 +383,19 @@ export class ProjectChatManager {
     ]);
     if (timeout) clearTimeout(timeout);
     if (completed || live.activeWork !== work) return;
+    const workItemId = live.activeWorkItemId;
     live.activeTurnId = null;
+    if (workItemId) {
+      await this.storage.projectChatWorkItems.markAccepted(
+        workItemId,
+        live.thread.id,
+        live.thread.project_id,
+        live.thread.user_id,
+      );
+    }
     live.abortController = null;
     live.activeWork = null;
+    live.activeWorkItemId = null;
     live.status = "idle";
   }
 
@@ -414,10 +429,14 @@ export class ProjectChatManager {
       .finally(() => {
         if (live.activeWork !== work) return;
         live.activeWork = null;
+        live.activeWorkItemId = null;
         live.abortController = null;
+        if (live.queue.length > 0 && !this.shuttingDown && !this.closingThreads.has(live.thread.id)) {
+          this.pump(live);
+          return;
+        }
         live.status = "idle";
         this.broadcastStatus(live);
-        this.pump(live);
         this.scheduleEviction(live);
       });
     live.activeWork = work;
@@ -427,6 +446,7 @@ export class ProjectChatManager {
     const abortController = new AbortController();
     const turnId = randomUUID();
     live.abortController = abortController;
+    live.activeWorkItemId = queued.workId;
     live.activeTurnId = turnId;
     try {
       const running = await this.storage.projectChatWorkItems.markRunning(
@@ -440,14 +460,16 @@ export class ProjectChatManager {
       this.broadcastStatus(live);
       const futureUserMessages = new Set(live.queue.map((item) => item.userMessageId));
       const currentUserMessage = live.messages.find((message) => message.id === queued.userMessageId);
-      const history = live.messages.filter((message) =>
-        message.type !== "turn_end" &&
-        message.id !== queued.userMessageId && !futureUserMessages.has(message.id));
+      const transcript = live.messages.filter((message) =>
+        message.type !== "turn_end" && !futureUserMessages.has(message.id));
+      const history = transcript.filter((message) => message.id !== queued.userMessageId);
       const input: ProjectChatRunInput = {
         projectId: live.thread.project_id,
         threadId: live.thread.id,
         userId: live.thread.user_id,
-        messages: currentUserMessage ? [...history, currentUserMessage] : history,
+        messages: queued.wasRunning
+          ? transcript
+          : currentUserMessage ? [...history, currentUserMessage] : history,
         signal: abortController.signal,
       };
       for await (const event of this.runner.run(input)) {
@@ -468,7 +490,7 @@ export class ProjectChatManager {
             try { resolveApproval(decision); } catch { /* runner already settled */ }
           };
           try {
-            await this.append(live, event.type, event.content, () => {
+            await this.append(live, queued, turnId, event.type, event.content, () => {
               if (!approvalId || !resolveApproval || abortController.signal.aborted ||
                 live.activeTurnId !== turnId) {
                 settleApproval(false);
@@ -484,23 +506,34 @@ export class ProjectChatManager {
             throw error;
           }
         } else {
-          await this.append(live, event.type, event.content);
+          await this.append(live, queued, turnId, event.type, event.content);
         }
       }
       if (!this.canPersistTurn(live, turnId)) return;
       const status = abortController.signal.aborted ? "stopped" : "completed";
-      await this.finishWork(live, queued, status, null);
+      try {
+        await this.finishWork(live, queued, turnId, status, null);
+      } catch {
+        // A terminal write failure leaves the work nonterminal for recovery.
+      }
     } catch (error) {
       if (!this.canPersistTurn(live, turnId)) return;
       if (abortController.signal.aborted) {
-        await this.finishWork(live, queued, "stopped", null);
+        await this.finishWork(live, queued, turnId, "stopped", null);
         return;
       }
       try {
-        await this.append(live, "error", error instanceof Error ? error.message : String(error));
+        await this.append(
+          live,
+          queued,
+          turnId,
+          "error",
+          error instanceof Error ? error.message : String(error),
+        );
         await this.finishWork(
           live,
           queued,
+          turnId,
           "failed",
           error instanceof Error ? error.message : String(error),
         );
@@ -530,8 +563,10 @@ export class ProjectChatManager {
         user_id: live.thread.user_id,
         content: input.content,
       });
-      this.publishMessage(live, accepted.userMessage);
-      return this.queueFromWorkItem(accepted.workItem);
+      return {
+        ...this.queueFromWorkItem(accepted.workItem),
+        acceptedMessage: accepted.userMessage,
+      };
     } finally {
       release();
     }
@@ -540,6 +575,7 @@ export class ProjectChatManager {
   private async finishWork(
     live: LiveThread,
     queued: QueuedTurn,
+    turnId: string,
     status: "completed" | "stopped" | "failed",
     error: string | null,
   ): Promise<ProjectChatMessage> {
@@ -548,6 +584,7 @@ export class ProjectChatManager {
     live.writeTail = new Promise<void>((resolve) => { release = resolve; });
     await previousWrite;
     try {
+      if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
       const result = await this.storage.projectChatWorkItems.finish({
         id: queued.workId,
         thread_id: live.thread.id,
@@ -560,6 +597,7 @@ export class ProjectChatManager {
           status: status === "failed" ? "error" : status,
         }),
       });
+      if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
       this.publishMessage(live, result.turnEnd);
       return result.turnEnd;
     } finally {
@@ -569,7 +607,9 @@ export class ProjectChatManager {
 
   private async append(
     live: LiveThread,
-    type: ProjectChatMessageType,
+    queued: QueuedTurn,
+    turnId: string,
+    type: ProjectChatStreamEvent["type"] | "error",
     content: string,
     beforeBroadcast?: (message: ProjectChatMessage) => void,
   ): Promise<ProjectChatMessage> {
@@ -578,21 +618,18 @@ export class ProjectChatManager {
     live.writeTail = new Promise<void>((resolve) => { release = resolve; });
     await previousWrite;
     try {
-      const message = await this.storage.projectChatMessages.append({
-        id: randomUUID(),
+      if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
+      const message = await this.storage.projectChatWorkItems.appendEvent({
+        id: queued.workId,
         thread_id: live.thread.id,
         project_id: live.thread.project_id,
         user_id: live.thread.user_id,
-        sequence: live.nextSequence,
+        message_id: randomUUID(),
         type,
         content,
       });
       if (!message) throw new ProjectChatNotFoundError();
-      await this.storage.projectChatThreads.touchUpdatedAt(
-        live.thread.id,
-        live.thread.project_id,
-        live.thread.user_id,
-      );
+      if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
       beforeBroadcast?.(message);
       this.publishMessage(live, message);
       return message;
@@ -683,6 +720,7 @@ export class ProjectChatManager {
       workId: work.id,
       userMessageId: work.user_message_id,
       content: work.content,
+      wasRunning: work.status === "running",
     };
   }
 }

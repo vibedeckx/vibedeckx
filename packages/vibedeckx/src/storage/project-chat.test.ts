@@ -319,11 +319,11 @@ describe("project chat storage", () => {
 
     const [first, second] = await Promise.all([
       storage.projectChatWorkItems.accept({
-        id: "w1", user_message_id: "m1", thread_id: "t1",
+        id: "z-work", user_message_id: "m1", thread_id: "t1",
         project_id: "p1", user_id: "u1", content: "first",
       }),
       storage.projectChatWorkItems.accept({
-        id: "w2", user_message_id: "m2", thread_id: "t1",
+        id: "a-work", user_message_id: "m2", thread_id: "t1",
         project_id: "p1", user_id: "u1", content: "second",
       }),
     ]);
@@ -336,7 +336,7 @@ describe("project chat storage", () => {
         { type: "user", content: "second" },
       ]);
     expect((await storage.projectChatWorkItems.listNonterminal("t1", "p1", "u1"))
-      .map((work) => work.id)).toEqual(["w1", "w2"]);
+      .map((work) => work.id)).toEqual(["z-work", "a-work"]);
   });
 
   it("rolls back both journal and user message when acceptance touch fails", async () => {
@@ -377,5 +377,31 @@ describe("project chat storage", () => {
     expect(terminal.workItem.status).toBe("completed");
     expect(terminal.turnEnd).toMatchObject({ id: "end1", sequence: 2, type: "turn_end" });
     expect(await storage.projectChatWorkItems.listNonterminal("t1", "p1", "u1")).toEqual([]);
+  });
+
+  it("fences work-scoped event and terminal writes after work returns to accepted", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatWorkItems.accept({
+      id: "w1", user_message_id: "m1", thread_id: "t1",
+      project_id: "p1", user_id: "u1", content: "status?",
+    });
+    await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
+    await expect(storage.projectChatWorkItems.appendEvent({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      message_id: "assistant-1", type: "assistant", content: "partial",
+    })).resolves.toMatchObject({ id: "assistant-1", sequence: 2 });
+
+    await storage.projectChatWorkItems.markAccepted("w1", "t1", "p1", "u1");
+
+    await expect(storage.projectChatWorkItems.appendEvent({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      message_id: "assistant-late", type: "assistant", content: "late",
+    })).resolves.toBeUndefined();
+    await expect(storage.projectChatWorkItems.finish({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      status: "completed", error: null, turn_end_id: "end-late", turn_end_content: "{}",
+    })).rejects.toThrow(/not found or already terminal/);
+    expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1"))
+      .map((message) => message.id)).toEqual(["m1", "assistant-1"]);
   });
 });

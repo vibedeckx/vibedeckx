@@ -261,13 +261,13 @@ export const createProjectChatRepos = (
     listNonterminal: async (threadId, projectId, userId) => {
       const rows = await kdb.selectFrom("project_chat_work_items as work")
         .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+        .innerJoin("project_chat_messages as user_message", "user_message.id", "work.user_message_id")
         .selectAll("work")
         .where("work.thread_id", "=", threadId)
         .where("thread.project_id", "=", projectId)
         .where("thread.user_id", "=", userId)
         .where("work.status", "in", ["accepted", "running"])
-        .orderBy("work.created_at", "asc")
-        .orderBy("work.id", "asc")
+        .orderBy("user_message.sequence", "asc")
         .execute();
       return rows.map(mapWorkItem);
     },
@@ -294,6 +294,67 @@ export const createProjectChatRepos = (
       });
     },
 
+    markAccepted: async (id, threadId, projectId, userId) => {
+      return kdb.transaction().execute(async (trx) => {
+        const owned = await trx.selectFrom("project_chat_work_items as work")
+          .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+          .select("work.id")
+          .where("work.id", "=", id)
+          .where("work.thread_id", "=", threadId)
+          .where("thread.project_id", "=", projectId)
+          .where("thread.user_id", "=", userId)
+          .where("work.status", "=", "running")
+          .executeTakeFirst();
+        if (!owned) return undefined;
+        const row = await trx.updateTable("project_chat_work_items")
+          .set({ status: "accepted", updated_at: now() })
+          .where("id", "=", id)
+          .where("thread_id", "=", threadId)
+          .where("status", "=", "running")
+          .returningAll()
+          .executeTakeFirst();
+        return row ? mapWorkItem(row) : undefined;
+      });
+    },
+
+    appendEvent: async ({ id, thread_id, project_id, user_id, message_id, type, content }) => {
+      return kdb.transaction().execute(async (trx) => {
+        const running = await trx.selectFrom("project_chat_work_items as work")
+          .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+          .select("work.id")
+          .where("work.id", "=", id)
+          .where("work.thread_id", "=", thread_id)
+          .where("work.status", "=", "running")
+          .where("thread.project_id", "=", project_id)
+          .where("thread.user_id", "=", user_id)
+          .executeTakeFirst();
+        if (!running) return undefined;
+        const sequenceRow = await trx.selectFrom("project_chat_messages")
+          .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+          .where("thread_id", "=", thread_id)
+          .executeTakeFirstOrThrow();
+        await trx.insertInto("project_chat_messages")
+          .values({
+            id: message_id,
+            thread_id,
+            sequence: Number(sequenceRow.sequence) + 1,
+            type,
+            content,
+          })
+          .execute();
+        const touched = await trx.updateTable("project_chat_threads")
+          .set({ updated_at: now() })
+          .where("id", "=", thread_id)
+          .where("project_id", "=", project_id)
+          .where("user_id", "=", user_id)
+          .executeTakeFirst();
+        if (touched.numUpdatedRows !== 1n) throw new Error("Project Chat thread not found");
+        const message = await trx.selectFrom("project_chat_messages")
+          .selectAll().where("id", "=", message_id).executeTakeFirstOrThrow();
+        return mapMessage(message);
+      });
+    },
+
     finish: async ({
       id, thread_id, project_id, user_id, status, error, turn_end_id, turn_end_content,
     }) => {
@@ -305,7 +366,7 @@ export const createProjectChatRepos = (
           .where("work.thread_id", "=", thread_id)
           .where("thread.project_id", "=", project_id)
           .where("thread.user_id", "=", user_id)
-          .where("work.status", "in", ["accepted", "running"])
+          .where("work.status", "=", "running")
           .executeTakeFirst();
         if (!work) throw new Error("Project Chat work item not found or already terminal");
         const sequenceRow = await trx.selectFrom("project_chat_messages")

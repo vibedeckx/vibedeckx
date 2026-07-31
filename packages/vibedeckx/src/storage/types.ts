@@ -958,6 +958,21 @@ export interface Storage {
       projectId: string,
       userId: string,
     ) => Promise<ProjectChatWorkItem | undefined>;
+    markAccepted: (
+      id: string,
+      threadId: string,
+      projectId: string,
+      userId: string,
+    ) => Promise<ProjectChatWorkItem | undefined>;
+    appendEvent: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      message_id: string;
+      type: Exclude<ProjectChatMessageType, "user" | "turn_end">;
+      content: string;
+    }) => Promise<ProjectChatMessage | undefined>;
     finish: (opts: {
       id: string;
       thread_id: string;
