@@ -6,6 +6,8 @@ import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
 import { RemotePatchCache } from "./remote-patch-cache.js";
 import type { RemoteSessionInfo } from "./server-types.js";
+import type { VirtualWsAdapter } from "./virtual-ws-adapter.js";
+import { EventBus, type GlobalEvent } from "./event-bus.js";
 
 const proxyToRemoteAuto = vi.hoisted(() => vi.fn());
 vi.mock("./utils/remote-proxy.js", () => ({
@@ -15,7 +17,7 @@ vi.mock("./utils/remote-proxy.js", () => ({
 
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
 import {
-  createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction,
+  connectPersistentRemoteWs, createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction,
   type RemoteAgentSessionDeps,
 } from "./remote-agent-sessions.js";
 
@@ -249,5 +251,52 @@ describe("createRemoteAgentSession", () => {
     expect(res).toMatchObject({ ok: false, status: 409 });
     expect(remoteSessionMap.size).toBe(0);
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("persists a remote status frame before emitting its local EventBus transition", async () => {
+    await storage.projects.create({ id: "stream-project", name: "Stream", path: null }, "user-1");
+    const server = await storage.remoteServers.create({ name: "Stream worker", url: "http://worker" }, "user-1");
+    await storage.projectRemotes.add({
+      project_id: "stream-project", remote_server_id: server.id, remote_path: "/repo",
+    });
+    const sessionId = `remote-${server.id}-stream-project-worker-session`;
+    const remoteInfo = { remoteServerId: server.id, remoteSessionId: "worker-session", branch: "dev" };
+    await storage.remoteSessionMappings.upsert(
+      sessionId, "stream-project", server.id, "worker-session", "dev", "from_now",
+    );
+    await storage.searchCache.noteSessionCreated({
+      localSessionId: sessionId, projectId: "stream-project", targetId: server.id, branch: "dev",
+    });
+
+    let adapter: VirtualWsAdapter | undefined;
+    const reverse = {
+      isConnected: () => true,
+      setChannelAdapter: (_serverId: string, _channelId: string, value: VirtualWsAdapter) => { adapter = value; },
+      openVirtualChannel: vi.fn(),
+      sendChannelData: vi.fn(),
+      closeChannel: vi.fn(),
+    };
+    const cache = new RemotePatchCache();
+    const bus = new EventBus();
+    let statusEvent: Extract<GlobalEvent, { type: "session:status" }> | undefined;
+    let activityAtEvent: Promise<Awaited<ReturnType<Storage["searchCache"]["listRemoteSessionActivityByProject"]>>> | undefined;
+    bus.subscribe((event) => {
+      if (event.type !== "session:status") return;
+      statusEvent = event;
+      activityAtEvent = storage.searchCache.listRemoteSessionActivityByProject("stream-project", 10);
+    });
+
+    connectPersistentRemoteWs(
+      sessionId, remoteInfo, cache, reverse as never, bus,
+      { emitBranchActivityIfChanged: vi.fn() } as never, storage,
+    );
+    adapter!.deliverMessage(JSON.stringify({
+      JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }],
+    }));
+
+    await vi.waitFor(() => expect(statusEvent).toMatchObject({ sessionId, status: "running" }));
+    expect((await activityAtEvent!)[0]).toMatchObject({ id: sessionId, status: "running" });
+    cache.setFinished(sessionId);
+    cache.shutdown();
   });
 });

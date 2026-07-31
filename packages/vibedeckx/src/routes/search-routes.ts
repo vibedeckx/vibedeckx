@@ -93,6 +93,35 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
     },
   });
 
+  // Cache rows written before session activity fields existed carry
+  // `status=unknown`. Refresh those project/remote catalogs automatically in
+  // bounded worker lanes; do not make Project Activity (or Cmd+K) responsible
+  // for initiating the repair. Failed targets remain unknown and are retried.
+  let activityBackfillTimer: ReturnType<typeof setInterval> | undefined;
+  let activityBackfillRun: Promise<void> | undefined;
+  const runActivityBackfill = () => {
+    if (activityBackfillRun) return activityBackfillRun;
+    const run = refresher.backfillUnknownRemoteActivity().catch((error) => {
+      console.error("[Search] remote activity backfill failed:", error);
+    });
+    activityBackfillRun = run;
+    void run.finally(() => {
+      if (activityBackfillRun === run) activityBackfillRun = undefined;
+    });
+    return run;
+  };
+  fastify.addHook("onReady", async () => {
+    void runActivityBackfill();
+    activityBackfillTimer = setInterval(() => {
+      void runActivityBackfill();
+    }, 30_000);
+    activityBackfillTimer.unref?.();
+  });
+  fastify.addHook("onClose", async () => {
+    if (activityBackfillTimer) clearInterval(activityBackfillTimer);
+    await activityBackfillRun;
+  });
+
   async function currentCacheState(userId: string | undefined): Promise<"cold" | "stale" | "fresh"> {
     const targets = await listSearchTargets(fastify.storage, userId);
     const states = await fastify.storage.searchCache.getSyncStates(

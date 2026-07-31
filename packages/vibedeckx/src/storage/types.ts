@@ -971,6 +971,20 @@ export interface Storage {
     listRemoteSessionAttentionByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
     countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number; failed: number }>;
     /**
+     * Persist one live remote-stream transition only when the exact durable
+     * mapping and project↔remote association still agree. Creates the cache
+     * projection when a mapped live session was not catalogued yet.
+     */
+    updateRemoteSessionActivity(entry: {
+      localSessionId: string; projectId: string; targetId: string; remoteSessionId: string;
+      status: AgentSessionStatus; activityAt: number;
+      lastUserMessageAt?: number; lastCompletedAt?: number;
+    }): Promise<boolean>;
+    /** Bounded target list used to backfill pre-activity-schema cache rows. */
+    listUnknownRemoteActivityTargets(userId?: string, limit?: number): Promise<Array<{
+      projectId: string; targetId: string; remotePath: string;
+    }>>;
+    /**
      * Reconcile one (project, target) snapshot into the cache. `collectedAt`
      * (default: now) is when the snapshot's data was collected — write-through
      * rows written at or after it are exempt from both the deletion sweep and

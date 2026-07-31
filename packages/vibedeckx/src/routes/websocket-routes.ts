@@ -29,7 +29,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       console.log(`[AgentWS] Reverse-connect restored for ${remoteServerId}, re-establishing WS for ${sessionId}`);
       cache.resetReconnectAttempt(sessionId);
-      connectPersistentRemoteWs(sessionId, remoteInfo, cache, fastify.reverseConnectManager, fastify.eventBus, fastify.agentSessionManager);
+      connectPersistentRemoteWs(
+        sessionId, remoteInfo, cache, fastify.reverseConnectManager,
+        fastify.eventBus, fastify.agentSessionManager, fastify.storage,
+      );
     }
   });
 
@@ -333,7 +336,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const existingRemoteWs = cache.getRemoteWs(sessionId);
           if (!existingRemoteWs && !cache.isReconnecting(sessionId)) {
             // Need to open a new persistent remote WS
-            connectPersistentRemoteWs(sessionId, remoteInfo, cache, fastify.reverseConnectManager, fastify.eventBus, fastify.agentSessionManager);
+            connectPersistentRemoteWs(
+              sessionId, remoteInfo, cache, fastify.reverseConnectManager,
+              fastify.eventBus, fastify.agentSessionManager, fastify.storage,
+            );
           }
 
           // Send current remote connection status to the newly connected frontend

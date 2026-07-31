@@ -190,3 +190,52 @@ describe("POST /api/search/refresh: remote mapping provenance", () => {
     expect((await storage.remoteSessionMappings.getByRemote(srv, "r1"))?.notification_sync_start).toBe("from_start");
   });
 });
+
+describe("automatic remote activity backfill", () => {
+  it("refreshes legacy unknown session activity without opening the quick switcher", async () => {
+    proxyMock.mockReset();
+    const dir = mkdtempSync(path.join(tmpdir(), "vdx-search-activity-backfill-"));
+    const storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    const app = Fastify();
+    try {
+      await storage.projects.create({ id: "p1", name: "proj", path: null });
+      const server = await storage.remoteServers.create({ name: "w1", url: "http://w1", api_key: "k1" });
+      await storage.projectRemotes.add({
+        project_id: "p1", remote_server_id: server.id, remote_path: "/srv/app",
+      });
+      const localId = `remote-${server.id}-p1-r1`;
+      await storage.remoteSessionMappings.upsert(localId, "p1", server.id, "r1", "dev", "from_now");
+      await storage.searchCache.noteSessionCreated({
+        localSessionId: localId, projectId: "p1", targetId: server.id, branch: "dev", title: "Legacy",
+      });
+      proxyMock.mockResolvedValue({
+        ok: true, status: 200,
+        data: {
+          workspaces: [{ branch: "dev" }],
+          sessions: [{
+            id: "r1", branch: "dev", title: "Legacy", lastActiveAt: 123,
+            favoritedAt: null, entryCount: 3, status: "stopped",
+            agentType: "codex", model: "gpt-5", lastUserMessageAt: 100, lastCompletedAt: 120,
+          }],
+        },
+      });
+
+      app.decorate("storage", storage);
+      app.decorate("agentSessionManager", { getSessionProcessAlive: () => false });
+      app.decorate("reverseConnectManager", undefined);
+      app.decorate("remoteSessionMap", new Map());
+      await app.register(searchRoutes);
+      await app.ready();
+
+      await vi.waitFor(async () => {
+        const rows = await storage.searchCache.listRemoteSessionActivityByProject("p1", 10);
+        expect(rows[0]).toMatchObject({ id: localId, status: "stopped", model: "gpt-5" });
+      });
+      expect(proxyMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+      await storage.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

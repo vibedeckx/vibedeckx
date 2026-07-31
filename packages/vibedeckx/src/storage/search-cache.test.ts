@@ -383,6 +383,37 @@ describe("searchCache", () => {
       expect(await recents()).toContain(X);
     });
 
+    it("updates live activity only for the exact mapped and still-associated remote session", async () => {
+      const localId = `remote-${serverId}-p1-worker-live`;
+      await storage.remoteSessionMappings.upsert(
+        localId, "p1", serverId, "worker-live", "dev", "from_now",
+      );
+
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "other-project", targetId: serverId,
+        remoteSessionId: "worker-live", status: "running", activityAt: 10,
+      })).resolves.toBe(false);
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "different-worker-session", status: "running", activityAt: 10,
+      })).resolves.toBe(false);
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-live", status: "running", activityAt: 10,
+        lastUserMessageAt: 10,
+      })).resolves.toBe(true);
+
+      expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: localId, status: "running" })]),
+      );
+      const association = (await storage.projectRemotes.getByProject("p1"))[0];
+      await storage.projectRemotes.remove(association.id);
+      await expect(storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localId, projectId: "p1", targetId: serverId,
+        remoteSessionId: "worker-live", status: "error", activityAt: 20,
+      })).resolves.toBe(false);
+    });
+
     it("a snapshot collected BEFORE the creation does not sweep the write-through row", async () => {
       await noteCreated();
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap(), past());

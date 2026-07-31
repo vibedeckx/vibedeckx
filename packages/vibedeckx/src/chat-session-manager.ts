@@ -603,6 +603,20 @@ export class ChatSessionManager {
       return { success: false, message: `Remote agent started but the task could not be delivered: ${String(error)}` };
     }
 
+    const initialActivityAt = Date.now();
+    await this.storage.searchCache.updateRemoteSessionActivity({
+      localSessionId: created.localSessionId,
+      projectId,
+      targetId: agentMode,
+      remoteSessionId: created.remoteSession.id,
+      status: "running",
+      activityAt: initialActivityAt,
+      lastUserMessageAt: initialActivityAt,
+    }).catch((error) => {
+      console.error(`[ChatSession] remote activity write-through failed for ${created.localSessionId}:`, error);
+      return false;
+    });
+
     // Generate a session title from the first task (the commander proxies
     // /message directly, bypassing the UI route that normally triggers this).
     // Fire-and-forget; idempotent per session id.
@@ -631,6 +645,7 @@ export class ChatSessionManager {
       reverseConnectManager: this.reverseConnectManager,
       eventBus: this.eventBus,
       agentSessionManager: this.agentSessionManager,
+      storage: this.storage,
     });
     this.registerChatInitiatedAgentTask(created.localSessionId);
     this.trackAgentSessionForChat(chatSessionId, created.localSessionId);
@@ -700,6 +715,20 @@ export class ChatSessionManager {
       return { success: false, message: `Failed to deliver the message to the remote coding agent: ${String(error)}` };
     }
 
+    const activityAt = Date.now();
+    await this.storage.searchCache.updateRemoteSessionActivity({
+      localSessionId: target.localSessionId,
+      projectId,
+      targetId: target.info.remoteServerId,
+      remoteSessionId: target.info.remoteSessionId,
+      status: "running",
+      activityAt,
+      lastUserMessageAt: activityAt,
+    }).catch((error) => {
+      console.error(`[ChatSession] remote activity write-through failed for ${target.localSessionId}:`, error);
+      return false;
+    });
+
     // Title generation for sessions that never got one (idempotent — no-op once
     // the title is already resolved, e.g. for sessions spawned by the commander).
     void generateAndPushRemoteSessionTitle(
@@ -721,6 +750,7 @@ export class ChatSessionManager {
       reverseConnectManager: this.reverseConnectManager,
       eventBus: this.eventBus,
       agentSessionManager: this.agentSessionManager,
+      storage: this.storage,
     });
     this.registerChatInitiatedAgentTask(target.localSessionId);
     this.trackAgentSessionForChat(chatSessionId, target.localSessionId);

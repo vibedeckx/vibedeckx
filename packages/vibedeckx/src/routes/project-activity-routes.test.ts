@@ -11,6 +11,7 @@ vi.mock("@clerk/fastify", () => ({
 }));
 
 import projectActivityRoutes from "./project-activity-routes.js";
+import { persistRemoteSessionActivityFrame } from "../remote-agent-sessions.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 import type { SearchCatalogSnapshot } from "../storage/types.js";
@@ -267,6 +268,75 @@ describe("project activity route", () => {
     ]));
     expect(body.summary).toMatchObject({ running: 2, failed: 1 });
     expect(JSON.stringify(body)).not.toContain("remote-unlinked");
+  });
+
+  it("reflects remote stream running, stopped, completed, and error transitions immediately", async () => {
+    const remote = await storage.remoteServers.create({ name: "Worker", url: "http://worker" }, "user-1");
+    const liveId = `remote-${remote.id}-project-1-worker-live`;
+    const olderId = `remote-${remote.id}-project-1-worker-older`;
+    await storage.projectRemotes.add({ project_id: "project-1", remote_server_id: remote.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert(
+      liveId, "project-1", remote.id, "worker-live", "feature", "from_now",
+    );
+    await storage.remoteSessionMappings.upsert(
+      olderId, "project-1", remote.id, "worker-older", "older", "from_now",
+    );
+    await storage.searchCache.applyCatalogSnapshot("project-1", remote.id, {
+      workspaces: [{ branch: "feature" }, { branch: "older" }],
+      sessions: [
+        {
+          id: liveId, branch: "feature", title: "Live", lastActiveAt: 1,
+          favoritedAt: null, entryCount: 1,
+        },
+        {
+          id: olderId, branch: "older", title: "Older", lastActiveAt: Date.now() - 1,
+          favoritedAt: null, entryCount: 1, status: "stopped",
+          lastUserMessageAt: 1, lastCompletedAt: 2,
+        },
+      ],
+    } as unknown as SearchCatalogSnapshot);
+    const remoteInfo = { remoteServerId: remote.id, remoteSessionId: "worker-live", branch: "feature" };
+
+    await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
+      JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }],
+    });
+    let body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
+    expect(body.recentAgentSessions[0]).toMatchObject({ id: liveId, status: "running" });
+    expect(body.summary).toMatchObject({ running: 1, failed: 0 });
+
+    vi.advanceTimersByTime(1_000);
+    await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
+      JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }],
+    });
+    body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
+    expect(body.summary).toMatchObject({ running: 0, failed: 1 });
+    expect(body.attention).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityId: liveId, status: "stopped" }),
+    ]));
+
+    vi.advanceTimersByTime(1_000);
+    await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, { taskCompleted: {} });
+    body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
+    expect(body.recentAgentSessions[0]).toMatchObject({ id: liveId, status: "stopped" });
+    expect(body.recentAgentSessions[0].lastCompletedAt).toBe(Date.now());
+    expect(body.summary).toMatchObject({ running: 0, failed: 0 });
+    expect(body.attention).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityId: liveId }),
+    ]));
+
+    vi.advanceTimersByTime(1_000);
+    await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
+      JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }],
+    });
+    vi.advanceTimersByTime(1_000);
+    await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
+      JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "error" } }],
+    });
+    body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
+    expect(body.summary).toMatchObject({ running: 0, failed: 1 });
+    expect(body.attention).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityId: liveId, status: "error" }),
+    ]));
   });
 
   it("finds the globally earliest enabled schedule beyond the old candidate cap", async () => {

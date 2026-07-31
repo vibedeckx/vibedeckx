@@ -934,14 +934,28 @@ const routes: FastifyPluginAsync = async (fastify) => {
           detail: result.data,
         });
       }
+      const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
+      const activityAt = Date.now();
+      await fastify.storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: req.params.sessionId,
+        projectId,
+        targetId: remoteInfo.remoteServerId,
+        remoteSessionId: remoteInfo.remoteSessionId,
+        status: "running",
+        activityAt,
+        lastUserMessageAt: activityAt,
+      }).catch((error) => {
+        console.error(`[API] remote activity write-through failed for ${req.params.sessionId}:`, error);
+        return false;
+      });
       // Emit branch:activity working — remote's own EventBus would also emit
       // this event but we don't subscribe to remote SSE; deriving from the
       // proxy success is the cheapest reliable signal. Dedupe handles
       // repeated sends within the same working turn.
       fastify.agentSessionManager.emitBranchActivityIfChanged(
-        projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
+        projectId,
         remoteInfo.branch ?? null,
-        { activity: "working", since: Date.now(), sessionId: req.params.sessionId },
+        { activity: "working", since: activityAt, sessionId: req.params.sessionId },
       );
       // First-message title generation runs locally (uses the same
       // chat_provider config as main chat), then PATCHes the result back to

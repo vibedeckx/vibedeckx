@@ -177,6 +177,19 @@ export async function createRemoteProjectChatSessionWithInstruction(
     { reverseConnectManager: deps.reverseConnectManager ?? undefined },
   );
   if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
+  const activityAt = Date.now();
+  await deps.storage.searchCache.updateRemoteSessionActivity({
+    localSessionId: params.sessionId,
+    projectId: params.projectId,
+    targetId: mapping.remote_server_id,
+    remoteSessionId: mapping.remote_session_id,
+    status: "running",
+    activityAt,
+    lastUserMessageAt: activityAt,
+  }).catch((error) => {
+    console.error(`[RemoteSession] activity write-through failed for ${params.sessionId}:`, error);
+    return false;
+  });
   return { sessionId: params.sessionId };
 }
 
@@ -197,6 +210,55 @@ export function tryParseWsMessage(raw: string): Record<string, unknown> | undefi
 }
 
 /**
+ * Persist the activity carried by one worker stream frame. The repository
+ * validates the exact project, remote target, and durable session mapping, so
+ * a malformed synthetic local id cannot move another project's cache row.
+ */
+export async function persistRemoteSessionActivityFrame(
+  storage: Storage,
+  sessionId: string,
+  remoteInfo: RemoteSessionInfo,
+  parsed: Record<string, unknown>,
+  activityAt: number = Date.now(),
+): Promise<boolean> {
+  const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
+  const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
+  if (statusEvent) {
+    return storage.searchCache.updateRemoteSessionActivity({
+      localSessionId: sessionId,
+      projectId,
+      targetId: remoteInfo.remoteServerId,
+      remoteSessionId: remoteInfo.remoteSessionId,
+      status: statusEvent.status,
+      activityAt,
+      ...(statusEvent.status === "running" ? { lastUserMessageAt: activityAt } : {}),
+    });
+  }
+  if ("taskCompleted" in parsed) {
+    return storage.searchCache.updateRemoteSessionActivity({
+      localSessionId: sessionId,
+      projectId,
+      targetId: remoteInfo.remoteServerId,
+      remoteSessionId: remoteInfo.remoteSessionId,
+      status: "stopped",
+      activityAt,
+      lastCompletedAt: activityAt,
+    });
+  }
+  if ("error" in parsed) {
+    return storage.searchCache.updateRemoteSessionActivity({
+      localSessionId: sessionId,
+      projectId,
+      targetId: remoteInfo.remoteServerId,
+      remoteSessionId: remoteInfo.remoteSessionId,
+      status: "error",
+      activityAt,
+    });
+  }
+  return false;
+}
+
+/**
  * Create a persistent WebSocket to the remote server and wire up message
  * handling (sync or live mode), reconnection on close, and status broadcasts.
  *
@@ -209,6 +271,7 @@ export function connectPersistentRemoteWs(
   reverseConnectManager?: ReverseConnectManager,
   eventBus?: EventBus,
   agentSessionManager?: AgentSessionManager,
+  storage?: Storage,
 ): void {
   const hasCachedData = cache.hasData(sessionId);
   console.log(`[AgentWS] Opening persistent remote WS for ${sessionId} (cached=${hasCachedData})`);
@@ -241,7 +304,7 @@ export function connectPersistentRemoteWs(
   cache.clearReconnectTimer(sessionId);
 
   /** Live-mode message handler — shared by both first-connect and post-sync paths. */
-  const handleLiveMessage = (data: import("ws").RawData) => {
+  const processLiveMessage = async (data: import("ws").RawData) => {
     const raw = data.toString();
     const parsed = tryParseWsMessage(raw);
     if (!parsed) return;
@@ -271,9 +334,13 @@ export function connectPersistentRemoteWs(
     if ("JsonPatch" in parsed) {
       cache.appendMessage(sessionId, raw, true);
       cache.broadcast(sessionId, raw);
-      if (eventBus) {
-        const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
-        if (statusEvent) {
+      const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
+      if (statusEvent) {
+        if (storage) {
+          await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
+            .catch((error) => console.error(`[AgentWS] activity write-through failed for ${sessionId}:`, error));
+        }
+        if (eventBus) {
           console.log(`[AgentWS:remote→eventBus] ${sessionId} session:status=${statusEvent.status}`);
           eventBus.emit(statusEvent);
         }
@@ -284,6 +351,10 @@ export function connectPersistentRemoteWs(
     } else if ("taskCompleted" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
+      if (storage) {
+        await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
+          .catch((error) => console.error(`[AgentWS] completion write-through failed for ${sessionId}:`, error));
+      }
       if (eventBus) {
         const evt = taskCompletedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
         if (evt) {
@@ -347,6 +418,10 @@ export function connectPersistentRemoteWs(
     } else if ("error" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
+      if (storage) {
+        await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
+          .catch((error) => console.error(`[AgentWS] error write-through failed for ${sessionId}:`, error));
+      }
       // If session not found on remote, stop reconnecting
       if (parsed.error === "Session not found") {
         cache.setFinished(sessionId);
@@ -354,6 +429,11 @@ export function connectPersistentRemoteWs(
     } else if ("Ready" in parsed) {
       cache.broadcast(sessionId, raw);
     }
+  };
+  const handleLiveMessage = (data: import("ws").RawData) => {
+    void processLiveMessage(data).catch((error) => {
+      console.error(`[AgentWS] live frame handling failed for ${sessionId}:`, error);
+    });
   };
 
   remoteWs.on("open", () => {
@@ -472,7 +552,7 @@ export function connectPersistentRemoteWs(
     const entry = cache.get(sessionId);
     if (!entry || entry.finished) return;
 
-    scheduleRemoteReconnect(sessionId, remoteInfo, cache, reverseConnectManager, eventBus, agentSessionManager);
+    scheduleRemoteReconnect(sessionId, remoteInfo, cache, reverseConnectManager, eventBus, agentSessionManager, storage);
   });
 }
 
@@ -487,6 +567,7 @@ function scheduleRemoteReconnect(
   reverseConnectManager?: ReverseConnectManager,
   eventBus?: EventBus,
   agentSessionManager?: AgentSessionManager,
+  storage?: Storage,
 ): void {
   const entry = cache.get(sessionId);
   if (!entry || entry.finished) return;
@@ -515,7 +596,7 @@ function scheduleRemoteReconnect(
       cache.setReconnecting(sessionId, false);
       return;
     }
-    connectPersistentRemoteWs(sessionId, remoteInfo, cache, reverseConnectManager, eventBus, agentSessionManager);
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, reverseConnectManager, eventBus, agentSessionManager, storage);
   }, totalDelay);
 
   cache.setReconnectTimer(sessionId, timer);
@@ -527,6 +608,7 @@ export interface EnsureStreamDeps {
   reverseConnectManager: ReverseConnectManager | null;
   eventBus: EventBus | null;
   agentSessionManager: AgentSessionManager;
+  storage: Storage;
 }
 
 /**
@@ -546,6 +628,7 @@ export function ensureRemoteAgentStream(localSessionId: string, deps: EnsureStre
     deps.reverseConnectManager ?? undefined,
     deps.eventBus ?? undefined,
     deps.agentSessionManager,
+    deps.storage,
   );
 }
 

@@ -256,6 +256,7 @@ async function routes(fastify: FastifyInstance) {
           reverseConnectManager: fastify.reverseConnectManager,
           eventBus: fastify.eventBus,
           agentSessionManager: fastify.agentSessionManager,
+          storage: fastify.storage,
         });
         // Seed branch:activity `working` for the reviewer's branch. The worker
         // already prompted the reviewer (working state produced on ITS bus), but

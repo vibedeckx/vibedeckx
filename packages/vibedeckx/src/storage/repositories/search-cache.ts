@@ -167,6 +167,90 @@ export const createSearchCacheRepos = (
       return { running: Number(row.running), failed: Number(row.failed) };
     },
 
+    updateRemoteSessionActivity: async (entry) => {
+      return kdb.transaction().execute(async (trx) => {
+        const authorized = await trx.selectFrom("remote_session_mappings as mapping")
+          .innerJoin("project_remotes as association", (join) => join
+            .onRef("association.project_id", "=", "mapping.project_id")
+            .onRef("association.remote_server_id", "=", "mapping.remote_server_id"))
+          .select("mapping.branch")
+          .where("mapping.local_session_id", "=", entry.localSessionId)
+          .where("mapping.project_id", "=", entry.projectId)
+          .where("mapping.remote_server_id", "=", entry.targetId)
+          .where("mapping.remote_session_id", "=", entry.remoteSessionId)
+          .executeTakeFirst();
+        if (!authorized) return false;
+
+        const sets: Record<string, unknown> = {
+          status: entry.status,
+          last_active_at: sql`max(coalesce(last_active_at, 0), ${entry.activityAt})`,
+          written_at: entry.activityAt,
+        };
+        if (entry.lastUserMessageAt !== undefined) {
+          sets.last_user_message_at = sql`max(coalesce(last_user_message_at, 0), ${entry.lastUserMessageAt})`;
+        }
+        if (entry.lastCompletedAt !== undefined) {
+          sets.last_completed_at = sql`max(coalesce(last_completed_at, 0), ${entry.lastCompletedAt})`;
+        }
+        const result = await trx.insertInto("session_search_cache")
+          .values({
+            local_session_id: entry.localSessionId,
+            project_id: entry.projectId,
+            target_id: entry.targetId,
+            branch: toDbBranch(authorized.branch),
+            title: null,
+            last_active_at: entry.activityAt,
+            favorited_at: null,
+            entry_count: 0,
+            status: entry.status,
+            agent_type: null,
+            model: null,
+            last_user_message_at: entry.lastUserMessageAt ?? null,
+            last_completed_at: entry.lastCompletedAt ?? null,
+            generation: 0,
+            deleted_at: null,
+            written_at: entry.activityAt,
+          })
+          .onConflict((conflict) => conflict.column("local_session_id").doUpdateSet(sets)
+            .where("session_search_cache.project_id", "=", entry.projectId)
+            .where("session_search_cache.target_id", "=", entry.targetId))
+          .executeTakeFirst();
+        return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
+      });
+    },
+
+    listUnknownRemoteActivityTargets: async (userId, limit = 100) => {
+      let query = kdb.selectFrom("session_search_cache as c")
+        .innerJoin("remote_session_mappings as mapping", (join) => join
+          .onRef("mapping.local_session_id", "=", "c.local_session_id")
+          .onRef("mapping.project_id", "=", "c.project_id")
+          .onRef("mapping.remote_server_id", "=", "c.target_id"))
+        .innerJoin("project_remotes as association", (join) => join
+          .onRef("association.project_id", "=", "c.project_id")
+          .onRef("association.remote_server_id", "=", "c.target_id"))
+        .innerJoin("projects as project", "project.id", "c.project_id")
+        .leftJoin("search_catalog_sync_state as sync", (join) => join
+          .onRef("sync.project_id", "=", "c.project_id")
+          .onRef("sync.target_id", "=", "c.target_id"))
+        .select([
+          "c.project_id as projectId",
+          "c.target_id as targetId",
+          "association.remote_path as remotePath",
+        ])
+        .where("c.target_id", "!=", "local")
+        .where("c.deleted_at", "is", null)
+        .where("c.status", "=", "unknown")
+        .groupBy(["c.project_id", "c.target_id", "association.remote_path", "sync.last_attempt_at"])
+        // Fair retry: a legacy worker that cannot yet return activity fields
+        // must not occupy the first page forever and starve later targets.
+        .orderBy(sql`coalesce(sync.last_attempt_at, 0)`, "asc")
+        .orderBy("c.project_id", "asc")
+        .orderBy("c.target_id", "asc")
+        .limit(Math.max(1, Math.min(limit, 100)));
+      if (userId) query = query.where("project.user_id", "=", userId);
+      return query.execute();
+    },
+
     // Generation-based reconciliation: only a FULLY successful snapshot may
     // mark rows deleted. Runs in one transaction so a crash mid-apply can't
     // leave a half-deleted cache.

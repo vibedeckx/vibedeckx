@@ -4,6 +4,7 @@ const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_DEADLINE_MS = 5_000;
 const PER_WORKER_CONCURRENCY = 3;
 const LOCAL_CONCURRENCY = 4;
+const UNKNOWN_ACTIVITY_TARGET_LIMIT = 100;
 
 export interface SearchTarget {
   projectId: string;
@@ -100,31 +101,18 @@ export function createSearchRefresher(deps: RefreshDeps) {
     return run;
   }
 
-  async function refreshAll(userId?: string): Promise<void> {
-    const targets = await listSearchTargets(deps.storage, userId);
-    const states = await deps.storage.searchCache.getSyncStates([...new Set(targets.map((t) => t.projectId))]);
-    const stateByKey = new Map(states.map((s) => [`${s.project_id}:${s.target_id}`, s]));
-    const due = targets.filter((t) => {
-      const s = stateByKey.get(`${t.projectId}:${t.targetId}`);
-      return !s?.last_success_at || now() - s.last_success_at > ttlMs;
-    });
-
-    // Group by worker: many projects can point at the same worker, and it
-    // must not be stampeded — cap in-flight catalog calls per worker.
+  async function refreshTargets(targets: SearchTarget[]): Promise<void> {
     const byWorker = new Map<string, SearchTarget[]>();
-    for (const t of due) {
-      const k = t.targetId;
-      byWorker.set(k, [...(byWorker.get(k) ?? []), t]);
+    for (const target of targets) {
+      byWorker.set(target.targetId, [...(byWorker.get(target.targetId) ?? []), target]);
     }
-    const lanes = [...byWorker.entries()].map(([workerId, ts]) =>
+    const lanes = [...byWorker.entries()].map(([workerId, workerTargets]) =>
       runWithConcurrency(
-        ts.map((t) => () => refreshTarget(t)),
+        workerTargets.map((target) => () => refreshTarget(target)),
         workerId === "local" ? LOCAL_CONCURRENCY : PER_WORKER_CONCURRENCY,
       ),
     );
     const all = Promise.all(lanes).then(() => undefined);
-    // Overall deadline: return with whatever completed; stragglers finish in
-    // the background (their singleflight entries prevent duplicate work).
     await Promise.race([
       all,
       new Promise<void>((resolve) => {
@@ -134,5 +122,29 @@ export function createSearchRefresher(deps: RefreshDeps) {
     ]);
   }
 
-  return { refreshAll };
+  async function refreshAll(userId?: string): Promise<void> {
+    const targets = await listSearchTargets(deps.storage, userId);
+    const states = await deps.storage.searchCache.getSyncStates([...new Set(targets.map((t) => t.projectId))]);
+    const stateByKey = new Map(states.map((s) => [`${s.project_id}:${s.target_id}`, s]));
+    const due = targets.filter((t) => {
+      const s = stateByKey.get(`${t.projectId}:${t.targetId}`);
+      return !s?.last_success_at || now() - s.last_success_at > ttlMs;
+    });
+
+    await refreshTargets(due);
+  }
+
+  async function backfillUnknownRemoteActivity(userId?: string): Promise<void> {
+    const rows = await deps.storage.searchCache.listUnknownRemoteActivityTargets(
+      userId,
+      UNKNOWN_ACTIVITY_TARGET_LIMIT,
+    );
+    await refreshTargets(rows.map((row) => ({
+      projectId: row.projectId,
+      targetId: row.targetId,
+      remote: { serverId: row.targetId, remotePath: row.remotePath },
+    })));
+  }
+
+  return { refreshAll, backfillUnknownRemoteActivity };
 }
