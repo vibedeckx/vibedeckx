@@ -658,6 +658,8 @@ export interface Storage {
     >;
     heartbeat: (id: string, ownerToken: string, leaseMs?: number) => Promise<boolean>;
     markRunning: (id: string, claimedProcessId: string, processId?: string, ownerToken?: string) => Promise<boolean>;
+    /** Insert a terminal pre-start failure only if the run identity is still unused. */
+    failBeforeStart: (opts: { id: string; scheduleId: string; output: string }) => Promise<boolean>;
     getById: (id: string) => Promise<ScheduledTaskRun | undefined>;
     /** Newest runs across schedules belonging to exactly one project; output/report omitted. */
     listRecentByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRun[]>;
@@ -666,6 +668,8 @@ export interface Storage {
     /** Most recent run per schedule for the given IDs (output omitted). */
     getLastByScheduleIds: (scheduleIds: string[]) => Promise<Record<string, ScheduledTaskRun>>;
     finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null }) => Promise<void>;
+    /** Atomically terminalize and release a claim only for its current owner. */
+    finishOwned: (id: string, ownerToken: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null }) => Promise<boolean>;
     /** Delete all but the newest `keep` terminal runs for a schedule. */
     prune: (scheduleId: string, keep: number) => Promise<void>;
   };

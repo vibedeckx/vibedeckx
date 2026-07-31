@@ -170,6 +170,36 @@ describe("SchedulerService.runNow", () => {
     } finally { other.shutdown(); }
   });
 
+  it("does not terminalize a live owner's run when pre-claim validation fails", async () => {
+    await storage.scheduledTaskRuns.claimStart({
+      id: "validation-race", scheduleId: "s1", processId: "live-process",
+      ownerToken: "live-owner", effectFingerprint: "live-effect",
+    });
+    await storage.scheduledTasks.update("s1", { directory: "relative/path" });
+
+    await scheduler.runNow("s1", "validation-race");
+
+    expect(await storage.scheduledTaskRuns.getById("validation-race"))
+      .toMatchObject({ status: "starting", output: null, process_id: "live-process" });
+  });
+
+  it("does not terminalize a taken-over run when local spawn fails", async () => {
+    pm.start = vi.fn(async () => {
+      const raw = new (await import("better-sqlite3")).default(dbPath);
+      raw.prepare("UPDATE scheduled_task_execution_claims SET owner_token = ? WHERE run_id = ?")
+        .run("new-owner", "spawn-race");
+      raw.close();
+      throw new Error("spawn failed");
+    });
+
+    await scheduler.runNow("s1", "spawn-race");
+
+    expect(await storage.scheduledTaskRuns.getById("spawn-race"))
+      .toMatchObject({ status: "starting", output: null });
+    await expect(storage.scheduledTaskRuns.heartbeat("spawn-race", "new-owner"))
+      .resolves.toBe(true);
+  });
+
   it("does not let a concurrent retry of the same starting run stop its process", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -354,15 +384,18 @@ describe("SchedulerService.runNow", () => {
 
 describe("SchedulerService remote runs", () => {
   let dir: string;
+  let dbPath: string;
   let storage: Storage;
   let pm: ReturnType<typeof makeFakeProcessManager>;
   let eventBus: EventBus;
   let proxyCalls: { path: string; body: unknown; serverId: string }[];
+  let executeOverride: (() => Promise<{ ok: boolean; status: number; data: unknown }>) | undefined;
   let scheduler: SchedulerService;
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-sched-remote-"));
-    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    dbPath = path.join(dir, "test.sqlite");
+    storage = await createSqliteStorage(dbPath);
     await storage.projects.create({ id: "proj-1", name: "p", path: dir });
     const server = await storage.remoteServers.create({ name: "r" });
     await storage.projectRemotes.add({ project_id: "proj-1", remote_server_id: server.id, remote_path: "/srv/app" });
@@ -375,8 +408,10 @@ describe("SchedulerService remote runs", () => {
     pm = makeFakeProcessManager();
     eventBus = new EventBus();
     proxyCalls = [];
+    executeOverride = undefined;
     const fakeProxy = async (serverId: string, _method: string, apiPath: string, body?: unknown) => {
       proxyCalls.push({ path: apiPath, body, serverId });
+      if (apiPath === "/api/path/execute" && executeOverride) return executeOverride();
       if (apiPath === "/api/path/execute") return { ok: true, status: 200, data: { processId: "rp-1" } };
       return { ok: true, status: 200, data: {} };
     };
@@ -408,6 +443,23 @@ describe("SchedulerService remote runs", () => {
     expect(runs[0].status).toBe("running");
     expect(runs[0].process_id).toBe("remote-schedule-s1-rp-1");
     expect(pm.started).toHaveLength(0); // never touches the local ProcessManager
+  });
+
+  it("does not terminalize a taken-over run when the remote proxy fails", async () => {
+    executeOverride = async () => {
+      const raw = new (await import("better-sqlite3")).default(dbPath);
+      raw.prepare("UPDATE scheduled_task_execution_claims SET owner_token = ? WHERE run_id = ?")
+        .run("new-remote-owner", "remote-proxy-race");
+      raw.close();
+      throw new Error("proxy failed");
+    };
+
+    await scheduler.runNow("s1", "remote-proxy-race");
+
+    expect(await storage.scheduledTaskRuns.getById("remote-proxy-race"))
+      .toMatchObject({ status: "starting", output: null });
+    await expect(storage.scheduledTaskRuns.heartbeat("remote-proxy-race", "new-remote-owner"))
+      .resolves.toBe(true);
   });
 
   it("finalizes completed from an executor:stopped event, storing tailOutput", async () => {

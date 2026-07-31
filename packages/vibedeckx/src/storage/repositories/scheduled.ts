@@ -168,6 +168,16 @@ export const createScheduledRepos = (
         .executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
     },
+    failBeforeStart: async ({ id, scheduleId, output }) => {
+      const result = await kdb.insertInto("scheduled_task_runs").values((eb) => ({
+        id, schedule_id: scheduleId, status: "failed",
+        project_id: eb.selectFrom("scheduled_tasks")
+          .select("project_id").where("id", "=", scheduleId),
+        process_id: null, exit_code: null, output, report: null,
+        finished_at: sql<string>`CURRENT_TIMESTAMP`,
+      })).onConflict((oc) => oc.column("id").doNothing()).executeTakeFirst();
+      return (result.numInsertedOrUpdatedRows ?? 0n) === 1n;
+    },
     getById: async (id) => {
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapRun(row) : undefined;
@@ -216,6 +226,26 @@ export const createScheduledRepos = (
         await trx.deleteFrom("scheduled_task_execution_claims").where("run_id", "=", id).execute();
       });
     },
+    finishOwned: async (id, ownerToken, opts) => kdb.transaction().execute(async (trx) => {
+      const result = await trx.updateTable("scheduled_task_runs").set({
+        status: opts.status,
+        exit_code: opts.exit_code ?? null,
+        output: opts.output ?? null,
+        report: opts.report ?? null,
+        finished_at: sql<string>`CURRENT_TIMESTAMP`,
+      }).where("id", "=", id)
+        .where("status", "in", ["starting", "running"])
+        .where("id", "in", trx.selectFrom("scheduled_task_execution_claims")
+          .select("run_id").where("owner_token", "=", ownerToken))
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows) !== 1) return false;
+      const deleted = await trx.deleteFrom("scheduled_task_execution_claims")
+        .where("run_id", "=", id).where("owner_token", "=", ownerToken).executeTakeFirst();
+      if (Number(deleted.numDeletedRows) !== 1) {
+        throw new Error("Scheduled run claim changed during owned finalization");
+      }
+      return true;
+    }),
     prune: async (scheduleId, keep) => {
       // Never delete a claimed or running row.
       await kdb.deleteFrom("scheduled_task_runs")

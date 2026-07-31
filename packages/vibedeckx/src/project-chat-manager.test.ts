@@ -361,6 +361,55 @@ describe("ProjectChatManager", () => {
     await manager.shutdown();
   });
 
+  it("keeps a timed-out mutation single-flight and records retries only after it settles", async () => {
+    await createThread("thread-slow-retry");
+    await storage.agentSessions.create({ id: "slow-session", project_id: "project-1", branch: "dev" });
+    await storage.projectChatOperations.create({
+      id: "slow-send", thread_id: "thread-slow-retry", project_id: "project-1", user_id: "user-1",
+      kind: "agent_instruction", status: "running", entity_type: "agent_session", entity_id: "slow-session",
+      idempotency_key: "slow-key", payload: {
+        version: 1, kind: "agent_instruction", operationId: "slow-send", status: "running",
+        sessionId: "slow-session", instruction: "Continue", target: "local", delivery: "pending",
+      }, error: null,
+    });
+    const first = deferred<boolean>();
+    const sendAgentInstruction = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValue(true);
+    const manager = new ProjectChatManager(storage, reply("unused"), {
+      eventBus: new EventBus(), reconciliationIntervalMs: 5,
+      reconciliationOperationTimeoutMs: 10, startupReconciliationDeadlineMs: 20,
+      toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => true },
+        mutationServices: {
+          createAgentSession: async ({ sessionId }) => ({ sessionId }), sendAgentInstruction,
+          runScheduleNow: async (_id, runId) => ({ runId, skipped: false }),
+        },
+      },
+    });
+
+    await manager.ready();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sendAgentInstruction).toHaveBeenCalledTimes(1);
+    expect(await storage.projectChatOperations.getById(
+      "slow-send", "thread-slow-retry", "project-1", "user-1",
+    )).toMatchObject({ status: "running", retry_count: 0 });
+
+    first.reject(new Error("settled failure"));
+    await waitFor(async () => (await storage.projectChatOperations.getById(
+      "slow-send", "thread-slow-retry", "project-1", "user-1",
+    ))?.retry_count === 1);
+    await waitFor(() => sendAgentInstruction.mock.calls.length === 2);
+    await waitFor(async () => (await storage.projectChatOperations.getById(
+      "slow-send", "thread-slow-retry", "project-1", "user-1",
+    ))?.status === "completed");
+    expect(sendAgentInstruction).toHaveBeenCalledTimes(2);
+    expect((await storage.projectChatOperations.getById(
+      "slow-send", "thread-slow-retry", "project-1", "user-1",
+    ))?.retry_count).toBe(0);
+    await manager.shutdown();
+  });
+
   it("reconciles task create and update crash windows without overwriting later edits", async () => {
     await createThread("thread-task-recovery");
     await storage.searchCache.applyCatalogSnapshot("project-1", "local", {

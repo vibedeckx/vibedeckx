@@ -162,8 +162,6 @@ export class ProcessManager {
       }
       return processId;
     }
-    this.processEffects.set(processId, effect);
-
     // Create process record in database (skip for remote path-based execution)
     if (!skipDb) {
       await this.storage.executorProcesses.create({
@@ -209,6 +207,10 @@ export class ProcessManager {
         this.startRegularProcess(processId, effectiveExecutor, cwd, skipDb, finalResultFile);
       }
     }
+
+    // Bind the effect only after a retained process identity exists. Exit keeps
+    // both entries for log replay; retention cleanup removes both together.
+    this.processEffects.set(processId, effect);
 
     // Store PID in database for recovery after server restart
     if (!skipDb) {
@@ -436,7 +438,6 @@ export class ProcessManager {
 
     // Handle PTY exit
     ptyProcess.onExit(({ exitCode }) => {
-      this.processEffects.delete(processId);
       const code = exitCode ?? 0;
       const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
 
@@ -518,7 +519,6 @@ export class ProcessManager {
 
     // Handle process exit
     childProcess.on("close", (code) => {
-      this.processEffects.delete(processId);
       const exitCode = code ?? 0;
       const status: ExecutorProcessStatus = exitCode === 0 ? "completed" : "failed";
 
@@ -723,7 +723,6 @@ export class ProcessManager {
 
     // Handle process exit
     childProcess.on('close', (code) => {
-      this.processEffects.delete(processId);
       const exitCode = code ?? 0;
       const status: ExecutorProcessStatus = exitCode === 0 ? 'completed' : 'failed';
 

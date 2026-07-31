@@ -51,6 +51,53 @@ describe("scheduledTasks storage", () => {
       .resolves.toBe("conflict");
   });
 
+  it("atomically fences terminal writes and claim deletion by owner token", async () => {
+    await createTask("owned-finish");
+    await storage.scheduledTaskRuns.claimStart({
+      id: "owned-run", scheduleId: "owned-finish", processId: "owned-process",
+      ownerToken: "owner-a", effectFingerprint: "effect", leaseMs: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await expect(storage.scheduledTaskRuns.claimStart({
+      id: "owned-run", scheduleId: "owned-finish", processId: "owned-process",
+      ownerToken: "owner-b", effectFingerprint: "effect",
+    })).resolves.toBe("retry");
+
+    await expect(storage.scheduledTaskRuns.finishOwned("owned-run", "owner-a", {
+      status: "failed", output: "stale owner",
+    })).resolves.toBe(false);
+    expect(await storage.scheduledTaskRuns.getById("owned-run"))
+      .toMatchObject({ status: "starting", output: null });
+
+    await expect(storage.scheduledTaskRuns.finishOwned("owned-run", "owner-b", {
+      status: "completed", exit_code: 0, output: "winner",
+    })).resolves.toBe(true);
+    expect(await storage.scheduledTaskRuns.getById("owned-run"))
+      .toMatchObject({ status: "completed", output: "winner" });
+    await expect(storage.scheduledTaskRuns.heartbeat("owned-run", "owner-b"))
+      .resolves.toBe(false);
+  });
+
+  it("records a before-claim failure only when the run identity is absent", async () => {
+    await createTask("before-claim");
+    await storage.scheduledTaskRuns.claimStart({
+      id: "shared-run", scheduleId: "before-claim", processId: "live-process",
+      ownerToken: "live-owner", effectFingerprint: "effect",
+    });
+
+    await expect(storage.scheduledTaskRuns.failBeforeStart({
+      id: "shared-run", scheduleId: "before-claim", output: "invalid input",
+    })).resolves.toBe(false);
+    expect(await storage.scheduledTaskRuns.getById("shared-run"))
+      .toMatchObject({ status: "starting", output: null, process_id: "live-process" });
+
+    await expect(storage.scheduledTaskRuns.failBeforeStart({
+      id: "new-run", scheduleId: "before-claim", output: "invalid input",
+    })).resolves.toBe(true);
+    expect(await storage.scheduledTaskRuns.getById("new-run"))
+      .toMatchObject({ status: "failed", output: "invalid input" });
+  });
+
   it("migrates and backfills project scope for old scheduled runs and derives it for new writes", async () => {
     await createTask("legacy-schedule");
     await storage.scheduledTaskRuns.create({

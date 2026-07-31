@@ -162,11 +162,17 @@ export class SchedulerService {
   }
 
   /** Record a run that failed before a process could be spawned. */
-  private async failWithoutStart(task: ScheduledTask, runId: string, message: string): Promise<RunNowResult> {
-    const existing = await this.storage.scheduledTaskRuns.getById(runId);
-    if (existing && existing.schedule_id !== task.id) return { error: "Run identity is already in use" };
-    if (!existing) await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id });
-    await this.storage.scheduledTaskRuns.finish(runId, { status: "failed", output: message });
+  private async failWithoutStart(
+    task: ScheduledTask, runId: string, message: string, claimed = false,
+  ): Promise<RunNowResult> {
+    const recorded = claimed
+      ? await this.storage.scheduledTaskRuns.finishOwned(
+        runId, this.ownerToken, { status: "failed", output: message },
+      )
+      : await this.storage.scheduledTaskRuns.failBeforeStart({ id: runId, scheduleId: task.id, output: message });
+    if (!recorded) return { error: claimed
+      ? "Scheduled execution ownership was lost"
+      : "Run identity is already in use" };
     await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
     this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status: "failed", exitCode: null });
     return { error: message };
@@ -281,7 +287,7 @@ export class SchedulerService {
     } catch (err) {
       clearInterval(heartbeat);
       this.activeRuns.delete(scheduleId);
-      return this.failWithoutStart(task, runId, `Failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+      return this.failWithoutStart(task, runId, `Failed to spawn: ${err instanceof Error ? err.message : String(err)}`, true);
     }
 
     if (ownershipLost || !(await renewOwnership())) {
@@ -295,7 +301,7 @@ export class SchedulerService {
       await this.processManager.stop(processId);
       clearInterval(heartbeat);
       this.activeRuns.delete(scheduleId);
-      return this.failWithoutStart(task, runId, "Failed to confirm the scheduled process claim");
+      return this.failWithoutStart(task, runId, "Failed to confirm the scheduled process claim", true);
     }
     if (!(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, claimedProcessId, this.ownerToken))) {
       await this.processManager.stop(processId);
@@ -332,7 +338,10 @@ export class SchedulerService {
       releaseRunResources();
       this.activeRuns.delete(scheduleId);
       this.activeRunCleanups.delete(scheduleId);
-      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP), report: report?.slice(0, OUTPUT_CAP) ?? null });
+      const recorded = await this.storage.scheduledTaskRuns.finishOwned(runId, this.ownerToken, {
+        status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP), report: report?.slice(0, OUTPUT_CAP) ?? null,
+      });
+      if (!recorded) return;
       await this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status, exitCode });
     };
@@ -464,14 +473,14 @@ export class SchedulerService {
     } catch (err) {
       clearInterval(heartbeat);
       this.activeRuns.delete(task.id);
-      return this.failWithoutStart(task, runId, `Remote start failed: ${err instanceof Error ? err.message : String(err)}`);
+      return this.failWithoutStart(task, runId, `Remote start failed: ${err instanceof Error ? err.message : String(err)}`, true);
     }
 
     const processId = (result.data as { processId?: unknown } | null)?.processId;
     if (!result.ok || typeof processId !== "string") {
       clearInterval(heartbeat);
       this.activeRuns.delete(task.id);
-      return this.failWithoutStart(task, runId, `Remote start rejected (status ${result.status})`);
+      return this.failWithoutStart(task, runId, `Remote start rejected (status ${result.status})`, true);
     }
     const remoteProcessId = processId;
     ownedRemoteProcessId = remoteProcessId;
@@ -526,7 +535,10 @@ export class SchedulerService {
       releaseRunResources();
       this.activeRuns.delete(task.id);
       this.activeRunCleanups.delete(task.id);
-      await this.storage.scheduledTaskRuns.finish(runId, { status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP), report: report?.slice(0, OUTPUT_CAP) ?? null });
+      const recorded = await this.storage.scheduledTaskRuns.finishOwned(runId, this.ownerToken, {
+        status, exit_code: exitCode, output: output.slice(-OUTPUT_CAP), report: report?.slice(0, OUTPUT_CAP) ?? null,
+      });
+      if (!recorded) return;
       await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status, exitCode });
     };

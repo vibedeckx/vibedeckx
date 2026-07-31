@@ -49,7 +49,32 @@ describe("ProcessManager preallocated process identity", () => {
       expect(pm.getProcessesByExecutorId("schedule-s1")).toHaveLength(1);
     } finally {
       await pm.stop("schedule-run-stable");
-      await vi.waitFor(() => expect((pm as unknown as { processEffects: Map<string, string> }).processEffects.size).toBe(0));
+      await vi.waitFor(() => expect(pm.getProcessesByExecutorId("schedule-s1")[0]?.logs)
+        .toContainEqual(expect.objectContaining({ type: "finished" })));
+      const retained = pm as unknown as { processes: Map<string, unknown>; processEffects: Map<string, string> };
+      expect(retained.processEffects.size).toBe(retained.processes.size);
     }
+  });
+
+  it("replays an identical preallocated effect after fast completion while logs are retained", async () => {
+    const pm = new ProcessManager(null as never);
+    const executor: Executor = {
+      id: "schedule-fast", project_id: "p1", group_id: "", name: "fast",
+      command: "true", executor_type: "command", prompt_provider: null,
+      cwd: null, pty: true, position: 0, disabled_targets: [],
+      created_at: new Date().toISOString(),
+    };
+
+    await expect(pm.start(executor, "/tmp", true, "schedule-run-fast", "stable-effect"))
+      .resolves.toBe("schedule-run-fast");
+    await vi.waitFor(() => expect(pm.getProcessesByExecutorId("schedule-fast")[0]?.logs)
+      .toContainEqual(expect.objectContaining({ type: "finished" })));
+
+    await expect(pm.start(executor, "/tmp", true, "schedule-run-fast", "stable-effect"))
+      .resolves.toBe("schedule-run-fast");
+    await expect(pm.start({ ...executor, command: "echo different" }, "/tmp", true,
+      "schedule-run-fast", "different-effect"))
+      .rejects.toBeInstanceOf(ProcessEffectConflictError);
+    expect(pm.getProcessesByExecutorId("schedule-fast")).toHaveLength(1);
   });
 });

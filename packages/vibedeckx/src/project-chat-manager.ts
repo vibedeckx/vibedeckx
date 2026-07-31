@@ -82,6 +82,10 @@ export interface ProjectChatReconciliationReport {
   infrastructureErrors: string[];
 }
 
+type OperationReconciliationOutcome =
+  | { ok: true }
+  | { ok: false; message: string; attempts: number };
+
 export type ProjectChatWsMessage =
   | { type: "project_chat_snapshot"; snapshot: ProjectChatSnapshot }
   | {
@@ -286,6 +290,7 @@ export class ProjectChatManager {
   }>();
   private readonly lifecycles = new Map<string, ThreadLifecycle>();
   private readonly outstandingOperations = new Set<Promise<unknown>>();
+  private readonly operationReconciliationFlights = new Map<string, Promise<OperationReconciliationOutcome>>();
   private readonly runner: ProjectChatModelRunner;
   private readonly drainTimeoutMs: number;
   private readonly idleEvictionMs: number;
@@ -621,34 +626,26 @@ export class ProjectChatManager {
           return report;
         }
         report.processed++;
-        try {
-          const attempt = this.trackOperation(this.reconcilePersistedOperation(operation));
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([
-            attempt,
-            new Promise<never>((_, reject) => {
-              const remaining = deadlineAt === undefined ? this.reconciliationOperationTimeoutMs
-                : Math.min(this.reconciliationOperationTimeoutMs, Math.max(1, deadlineAt - Date.now()));
-              timer = setTimeout(() => reject(new Error("Operation reconciliation timed out")), remaining);
-              timer.unref?.();
-            }),
-          ]).finally(() => { if (timer) clearTimeout(timer); });
-          await this.storage.projectChatOperations.clearRetry(
-            operation.id, operation.thread_id, operation.project_id, operation.user_id,
-          );
-        } catch (error) {
+        const attempt = this.getOperationReconciliationFlight(operation);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const outcome = await Promise.race([
+          attempt,
+          new Promise<"timeout">((resolve) => {
+            const remaining = deadlineAt === undefined ? this.reconciliationOperationTimeoutMs
+              : Math.min(this.reconciliationOperationTimeoutMs, Math.max(1, deadlineAt - Date.now()));
+            timer = setTimeout(() => resolve("timeout"), remaining);
+            timer.unref?.();
+          }),
+        ]).finally(() => { if (timer) clearTimeout(timer); });
+        if (outcome === "timeout") {
+          report.remaining = true;
+          report.infrastructureErrors.push("Operation reconciliation timed out");
+          continue;
+        }
+        if (!outcome.ok) {
           report.retryScheduled++;
-          const message = boundedStreamError(error).message;
-          report.infrastructureErrors.push(message);
-          console.warn(`[ProjectChat] reconciliation failed for ${operation.id}:`, message);
-          const attempts = await this.storage.projectChatOperations.recordRetry(
-            operation.id, operation.thread_id, operation.project_id, operation.user_id,
-            Math.min(10 * (2 ** Math.min(6, report.retryScheduled)), 5_000),
-          );
-          if (attempts >= 5) {
-            await this.transitionOperation(operation, "failed", {},
-              "Operation could not be confirmed after bounded retries");
-          }
+          report.infrastructureErrors.push(outcome.message);
+          console.warn(`[ProjectChat] reconciliation failed for ${operation.id}:`, outcome.message);
         }
       }
       if (!page.hasMore || page.nextCursor === null) {
@@ -660,6 +657,49 @@ export class ProjectChatManager {
       report.remaining = true;
     }
     return report;
+  }
+
+  private getOperationReconciliationFlight(
+    operation: import("./storage/types.js").ProjectChatOperation,
+  ): Promise<OperationReconciliationOutcome> {
+    const key = `${operation.user_id}\0${operation.project_id}\0${operation.thread_id}\0${operation.id}`;
+    const existing = this.operationReconciliationFlights.get(key);
+    if (existing) return existing;
+    const flight = this.trackOperation((async (): Promise<OperationReconciliationOutcome> => {
+      try {
+        await this.reconcilePersistedOperation(operation);
+      } catch (error) {
+        const message = boundedStreamError(error).message;
+        try {
+          const attempts = await this.storage.projectChatOperations.recordRetry(
+            operation.id, operation.thread_id, operation.project_id, operation.user_id,
+            20,
+          );
+          if (attempts >= 5) {
+            await this.transitionOperation(operation, "failed", {},
+              "Operation could not be confirmed after bounded retries");
+          }
+          return { ok: false, message, attempts };
+        } catch (retryError) {
+          return { ok: false, message: boundedStreamError(retryError).message, attempts: 0 };
+        }
+      }
+      try {
+        await this.storage.projectChatOperations.clearRetry(
+          operation.id, operation.thread_id, operation.project_id, operation.user_id,
+        );
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, message: boundedStreamError(error).message, attempts: 0 };
+      }
+    })());
+    this.operationReconciliationFlights.set(key, flight);
+    void flight.then(() => {
+      if (this.operationReconciliationFlights.get(key) === flight) {
+        this.operationReconciliationFlights.delete(key);
+      }
+    });
+    return flight;
   }
 
   private async reconcilePersistedOperation(
