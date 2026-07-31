@@ -217,6 +217,18 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       last_completed_at INTEGER DEFAULT NULL,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS agent_instruction_deliveries (
+      session_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 512),
+      content_hash TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'sent')),
+      claim_token TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      PRIMARY KEY (session_id, idempotency_key),
+      FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+    );
     -- Note: idx_agent_sessions_project_branch and idx_agent_sessions_updated_at
     -- are created AFTER the agent_sessions column migrations (see below), so
     -- existing databases that predate the updated_at column don't fail here.

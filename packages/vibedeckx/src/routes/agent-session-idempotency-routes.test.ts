@@ -17,6 +17,8 @@ describe("path agent session preallocated identity", () => {
     let row: Record<string, unknown> | undefined;
     let running: Record<string, unknown> | undefined;
     const projects = new Map<string, Record<string, unknown>>();
+    const deliveries = new Map<string, { hash: string; status: "pending" | "sent"; token: string | null }>();
+    const sendUserMessage = vi.fn(async () => true);
     const createNewSession = vi.fn(async (
       projectId: string, branch: string | null, projectPath: string, _skipDb: boolean,
       permissionMode: string, agentType: string, _announce: boolean, _force: boolean,
@@ -43,18 +45,54 @@ describe("path agent session preallocated identity", () => {
         },
       },
       agentSessions: { getById: async (id: string) => row?.id === id ? row : undefined },
+      agentInstructionDeliveries: {
+        claim: async ({ sessionId, idempotencyKey, contentHash, claimToken }: {
+          sessionId: string; idempotencyKey: string; contentHash: string; claimToken: string;
+        }) => {
+          const key = `${sessionId}:${idempotencyKey}`;
+          const current = deliveries.get(key);
+          if (!current) {
+            deliveries.set(key, { hash: contentHash, status: "pending", token: claimToken });
+            return "claimed";
+          }
+          if (current.hash !== contentHash) return "conflict";
+          if (current.status === "sent") return "sent";
+          if (current.token === claimToken) return "busy";
+          current.token = claimToken;
+          return "claimed";
+        },
+        markSent: async ({ sessionId, idempotencyKey, claimToken }: {
+          sessionId: string; idempotencyKey: string; claimToken: string;
+        }) => {
+          const row = deliveries.get(`${sessionId}:${idempotencyKey}`);
+          if (!row || row.token !== claimToken) return false;
+          row.status = "sent";
+          return true;
+        },
+        release: async ({ sessionId, idempotencyKey, claimToken }: {
+          sessionId: string; idempotencyKey: string; claimToken: string;
+        }) => {
+          const row = deliveries.get(`${sessionId}:${idempotencyKey}`);
+          if (row?.token === claimToken) row.token = null;
+        },
+      },
     });
     app.decorate("agentSessionManager", {
       createNewSession,
       getSession: (id: string) => running?.id === id ? running : null,
       getSessionProcessAlive: (id: string) => running?.id === id,
       getMessages: () => [],
+      sendUserMessage,
+      emitBranchActivityIfChanged: vi.fn(),
     });
     app.decorate("remoteSessionMap", new Map());
     app.decorate("remotePatchCache", {});
     app.decorate("reverseConnectManager", null);
+    app.decorate("workflowEngine", { handleExternalUserMessage: vi.fn(async () => undefined) });
+    app.decorate("remoteNotificationSync", { prepareForNewTurn: vi.fn(async () => true) });
     return {
       createNewSession,
+      sendUserMessage,
       projects,
       setStored: (nextRow: Record<string, unknown>, nextRunning?: Record<string, unknown>) => {
         row = nextRow;
@@ -158,5 +196,49 @@ describe("path agent session preallocated identity", () => {
     expect(response.statusCode).toBe(200);
     expect(createNewSession).toHaveBeenCalledTimes(1);
     expect(createNewSession.mock.calls[0]?.[8]).toMatchObject({ sessionId: "worker-id" });
+  });
+
+  it("delivers concurrent requests with the same stable key exactly once", async () => {
+    const { sendUserMessage } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    sendUserMessage.mockImplementation(async () => { await blocked; return true; });
+
+    const first = app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "Implement", idempotencyKey: "delivery-1" },
+    });
+    const second = app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "Implement", idempotencyKey: "delivery-1" },
+    });
+    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(1));
+    release();
+
+    const responses = await Promise.all([first, second]);
+    expect(responses.map(({ statusCode }) => statusCode)).toEqual([200, 200]);
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of a stable delivery key with different content", async () => {
+    const { sendUserMessage } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    const first = await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "One", idempotencyKey: "delivery-1" } });
+    const conflict = await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "Two", idempotencyKey: "delivery-1" } });
+
+    expect(first.statusCode).toBe(200);
+    expect(conflict.statusCode).toBe(409);
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
   });
 });

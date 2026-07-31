@@ -14,7 +14,7 @@ import { resolveUserId } from "../utils/resolve-user-id.js";
 import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
 
 // Resolve project path from a session's projectId.
@@ -47,6 +47,33 @@ function messageTextLength(content: string | ContentPart[]): number {
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  const instructionReceiverToken = randomUUID();
+  const instructionDeliveryLocks = new Map<string, Promise<void>>();
+
+  async function serializeInstructionDelivery<T>(key: string, effect: () => Promise<T>): Promise<T> {
+    const previous = instructionDeliveryLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => gate);
+    instructionDeliveryLocks.set(key, tail);
+    await previous;
+    try {
+      return await effect();
+    } finally {
+      release();
+      if (instructionDeliveryLocks.get(key) === tail) instructionDeliveryLocks.delete(key);
+    }
+  }
+
+  function instructionContentHash(content: string | ContentPart[]): string {
+    const canonical = typeof content === "string"
+      ? JSON.stringify({ type: "string", content })
+      : JSON.stringify(content.map((part) => part.type === "text"
+        ? { type: "text", text: part.text }
+        : { type: "image", mediaType: part.mediaType, data: part.data }));
+    return createHash("sha256").update(canonical).digest("hex");
+  }
+
   // Helper: proxy to a remote over its reverse-connect tunnel
   function proxyAuto(
     remoteServerId: string,
@@ -845,12 +872,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 发送消息到 Agent Session
   fastify.post<{
     Params: { sessionId: string };
-    Body: { content: string | ContentPart[] };
+    Body: { content: string | ContentPart[]; idempotencyKey?: string };
   }>("/api/agent-sessions/:sessionId/message", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
     const userId = resolveUserId(authResult);
-    const { content } = req.body;
+    const { content, idempotencyKey } = req.body;
 
     console.log(`[API] POST /message: sessionId=${req.params.sessionId}, isRemote=${req.params.sessionId.startsWith("remote-")}, remoteMapSize=${fastify.remoteSessionMap.size}`);
 
@@ -859,6 +886,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const isValidArray = Array.isArray(content) && content.length > 0;
     if (!isValidString && !isValidArray) {
       return reply.code(400).send({ error: "Content is required" });
+    }
+    if (idempotencyKey !== undefined
+      && (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 512)) {
+      return reply.code(400).send({ error: "idempotencyKey must contain 1-512 characters" });
     }
 
     // Cap the typed-text portion. Long content should be uploaded via /paste
@@ -891,7 +922,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         remoteInfo.remoteServerId,
         "POST",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/message`,
-        { content }
+        { content, ...(idempotencyKey ? { idempotencyKey } : {}) }
       );
       if (!result.ok) {
         const status = proxyStatus(result);
@@ -940,24 +971,63 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    // Human takeover (workflow spec §3.4): a user message into a session that
-    // belongs to an active review run ends that run. The engine's own feedback
-    // relay calls sendUserMessage directly on the manager, not this route, so
-    // it never self-triggers.
-    await fastify.workflowEngine.handleExternalUserMessage(req.params.sessionId);
+    const deliver = async () => {
+      // Human takeover (workflow spec §3.4): a user message into a session that
+      // belongs to an active review run ends that run. The engine's own feedback
+      // relay calls sendUserMessage directly on the manager, not this route, so
+      // it never self-triggers.
+      await fastify.workflowEngine.handleExternalUserMessage(req.params.sessionId);
+      return fastify.agentSessionManager.sendUserMessage(
+        req.params.sessionId, content, projectPathForWake, userId,
+      );
+    };
 
-    const success = await fastify.agentSessionManager.sendUserMessage(
-      req.params.sessionId,
-      content,
-      projectPathForWake,
-      userId,
-    );
-    if (!success) {
-      console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!session}, dormant=${session?.dormant}`);
-      return reply.code(404).send({ error: "Session not found or not running" });
+    if (!idempotencyKey) {
+      const success = await deliver();
+      if (!success) {
+        console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!session}, dormant=${session?.dormant}`);
+        return reply.code(404).send({ error: "Session not found or not running" });
+      }
+      return reply.code(200).send({ success: true });
     }
 
-    return reply.code(200).send({ success: true });
+    if (!session) return reply.code(404).send({ error: "Session not found or not running" });
+    const deliveryKey = `${req.params.sessionId}\0${idempotencyKey}`;
+    return serializeInstructionDelivery(deliveryKey, async () => {
+      const claim = await fastify.storage.agentInstructionDeliveries.claim({
+        sessionId: req.params.sessionId,
+        idempotencyKey,
+        contentHash: instructionContentHash(content),
+        claimToken: instructionReceiverToken,
+      });
+      if (claim === "conflict") {
+        return reply.code(409).send({ error: "Idempotency key was already used with different content" });
+      }
+      if (claim === "sent") return reply.code(200).send({ success: true, replayed: true });
+      if (claim === "busy") {
+        return reply.code(409).send({ error: "Instruction delivery is already in progress" });
+      }
+      try {
+        if (!(await deliver())) {
+          await fastify.storage.agentInstructionDeliveries.release({
+            sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
+          });
+          return reply.code(404).send({ error: "Session not found or not running" });
+        }
+        const confirmed = await fastify.storage.agentInstructionDeliveries.markSent({
+          sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
+        });
+        if (!confirmed) {
+          return reply.code(503).send({ error: "Instruction delivery could not be confirmed" });
+        }
+        return reply.code(200).send({ success: true });
+      } catch (error) {
+        await fastify.storage.agentInstructionDeliveries.release({
+          sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
+        });
+        throw error;
+      }
+    });
   });
 
   // Save a pasted blob of text to a temp file on the agent's execution machine.

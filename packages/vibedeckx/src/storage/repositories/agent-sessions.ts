@@ -46,7 +46,7 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
 export const createAgentSessionRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
-): Pick<Storage, "agentSessions" | "remoteSessionMappings"> => ({
+): Pick<Storage, "agentSessions" | "agentInstructionDeliveries" | "remoteSessionMappings"> => ({
   agentSessions: {
     // Millisecond-precision timestamps (h.nowMs()) are set explicitly here
     // (and in the UPDATE statements below) so existing databases whose
@@ -242,6 +242,54 @@ export const createAgentSessionRepos = (
         .select("session_id")
         .select(kdb.fn.countAll<number>().as("cnt"))
         .groupBy("session_id")
+        .execute();
+    },
+  },
+
+  agentInstructionDeliveries: {
+    claim: async ({ sessionId, idempotencyKey, contentHash, claimToken }) => kdb.transaction()
+      .execute(async (trx) => {
+        const existing = await trx.selectFrom("agent_instruction_deliveries")
+          .selectAll()
+          .where("session_id", "=", sessionId)
+          .where("idempotency_key", "=", idempotencyKey)
+          .executeTakeFirst();
+        if (!existing) {
+          await trx.insertInto("agent_instruction_deliveries").values({
+            session_id: sessionId, idempotency_key: idempotencyKey,
+            content_hash: contentHash, status: "pending", claim_token: claimToken,
+            updated_at: h.nowMs(),
+          }).execute();
+          return "claimed" as const;
+        }
+        if (existing.content_hash !== contentHash) return "conflict" as const;
+        if (existing.status === "sent") return "sent" as const;
+        if (existing.claim_token === claimToken) return "busy" as const;
+        await trx.updateTable("agent_instruction_deliveries")
+          .set({ claim_token: claimToken, updated_at: h.nowMs() })
+          .where("session_id", "=", sessionId)
+          .where("idempotency_key", "=", idempotencyKey)
+          .where("status", "=", "pending")
+          .execute();
+        return "claimed" as const;
+      }),
+    markSent: async ({ sessionId, idempotencyKey, claimToken }) => {
+      const result = await kdb.updateTable("agent_instruction_deliveries")
+        .set({ status: "sent", claim_token: null, updated_at: h.nowMs() })
+        .where("session_id", "=", sessionId)
+        .where("idempotency_key", "=", idempotencyKey)
+        .where("status", "=", "pending")
+        .where("claim_token", "=", claimToken)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+    release: async ({ sessionId, idempotencyKey, claimToken }) => {
+      await kdb.updateTable("agent_instruction_deliveries")
+        .set({ claim_token: null, updated_at: h.nowMs() })
+        .where("session_id", "=", sessionId)
+        .where("idempotency_key", "=", idempotencyKey)
+        .where("status", "=", "pending")
+        .where("claim_token", "=", claimToken)
         .execute();
     },
   },

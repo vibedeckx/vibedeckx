@@ -131,6 +131,16 @@ export interface AgentSessionEntriesTable {
   created_at: Generated<string>;
 }
 
+export interface AgentInstructionDeliveriesTable {
+  session_id: string;
+  idempotency_key: string;
+  content_hash: string;
+  status: "pending" | "sent";
+  claim_token: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface TasksTable {
   id: string;
   project_id: string;
@@ -416,6 +426,7 @@ export interface DB {
   machine_identity: MachineIdentityTable;
   agent_sessions: AgentSessionsTable;
   agent_session_entries: AgentSessionEntriesTable;
+  agent_instruction_deliveries: AgentInstructionDeliveriesTable;
   tasks: TasksTable;
   project_chat_threads: ProjectChatThreadsTable;
   project_chat_messages: ProjectChatMessagesTable;

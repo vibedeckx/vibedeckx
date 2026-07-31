@@ -779,6 +779,17 @@ export interface Storage {
     deleteEntries: (sessionId: string) => Promise<void>;
     countEntries: () => Promise<Array<{ session_id: string; cnt: number }>>;
   };
+  agentInstructionDeliveries: {
+    claim: (opts: {
+      sessionId: string; idempotencyKey: string; contentHash: string; claimToken: string;
+    }) => Promise<"claimed" | "sent" | "busy" | "conflict">;
+    markSent: (opts: {
+      sessionId: string; idempotencyKey: string; claimToken: string;
+    }) => Promise<boolean>;
+    release: (opts: {
+      sessionId: string; idempotencyKey: string; claimToken: string;
+    }) => Promise<void>;
+  };
   remoteSessionMappings: {
     /**
      * `notificationSyncStart` is applied ON INSERT ONLY (default `from_now`).
