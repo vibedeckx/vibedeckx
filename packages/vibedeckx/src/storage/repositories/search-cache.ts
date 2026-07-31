@@ -1,6 +1,6 @@
 import { sql, type Kysely } from "kysely";
 import type { DB } from "../schema.js";
-import type { Storage, SearchResultProjectRow, SearchResultSessionRow, SearchResultWorkspaceRow } from "../types.js";
+import type { AgentSessionActivity, AgentSessionActivityStatus, Storage, SearchResultProjectRow, SearchResultSessionRow, SearchResultWorkspaceRow } from "../types.js";
 import type { DialectHelpers } from "../dialect.js";
 
 export const toDbBranch = (branch: string | null): string => branch ?? "";
@@ -61,6 +61,52 @@ interface SessionCandidate {
   favoritedAt: number | null;
 }
 
+const activityStatus = (status: string): AgentSessionActivityStatus =>
+  status === "running" || status === "stopped" || status === "error" ? status : "unknown";
+
+const mapRemoteActivity = (row: {
+  local_session_id: string; project_id: string; target_id: string; branch: string;
+  title: string | null; last_active_at: number | null; status: string;
+  agent_type: string | null; model: string | null; last_user_message_at: number | null;
+  last_completed_at: number | null;
+}): AgentSessionActivity => {
+  const branch = fromDbBranch(row.branch);
+  return {
+    id: row.local_session_id,
+    projectId: row.project_id,
+    branch,
+    status: activityStatus(row.status),
+    title: row.title,
+    target: row.target_id,
+    workspace: { target: row.target_id, branch },
+    agentType: row.agent_type,
+    model: row.model,
+    lastActiveAt: row.last_active_at,
+    lastUserMessageAt: row.last_user_message_at,
+    lastCompletedAt: row.last_completed_at,
+  };
+};
+
+const remoteSessionScope = (kdb: Kysely<DB>, projectId: string) => kdb
+  .selectFrom("session_search_cache as c")
+  .innerJoin("remote_session_mappings as mapping", (join) => join
+    .onRef("mapping.local_session_id", "=", "c.local_session_id")
+    .onRef("mapping.project_id", "=", "c.project_id")
+    .onRef("mapping.remote_server_id", "=", "c.target_id"))
+  .innerJoin("project_remotes as association", (join) => join
+    .onRef("association.project_id", "=", "c.project_id")
+    .onRef("association.remote_server_id", "=", "c.target_id"))
+  .where("c.project_id", "=", projectId)
+  .where("c.target_id", "!=", "local")
+  .where("c.deleted_at", "is", null);
+
+const remoteActivityBase = (kdb: Kysely<DB>, projectId: string) => remoteSessionScope(kdb, projectId)
+  .select([
+    "c.local_session_id", "c.project_id", "c.target_id", "c.branch", "c.title",
+    "c.last_active_at", "c.status", "c.agent_type", "c.model",
+    "c.last_user_message_at", "c.last_completed_at",
+  ]);
+
 export const createSearchCacheRepos = (
   kdb: Kysely<DB>,
   _h: DialectHelpers,
@@ -76,6 +122,49 @@ export const createSearchCacheRepos = (
         .limit(limit)
         .execute();
       return rows.map((row) => ({ targetId: row.target_id, branch: fromDbBranch(row.branch) }));
+    },
+
+    listRemoteSessionActivityByProject: async (projectId, limit) => {
+      const rows = await remoteActivityBase(kdb, projectId)
+        .orderBy("c.last_active_at", "desc")
+        .orderBy("c.local_session_id", "asc")
+        .limit(limit)
+        .execute();
+      return rows.map(mapRemoteActivity);
+    },
+
+    listRemoteSessionAttentionByProject: async (projectId, limit) => {
+      const rows = await remoteActivityBase(kdb, projectId)
+        .where((eb) => eb.or([
+          eb("c.status", "=", "error"),
+          eb.and([
+            eb("c.status", "=", "stopped"),
+            eb("c.last_user_message_at", "is not", null),
+            eb.or([
+              eb("c.last_completed_at", "is", null),
+              eb("c.last_completed_at", "<", eb.ref("c.last_user_message_at")),
+            ]),
+          ]),
+        ]))
+        .orderBy("c.last_active_at", "desc")
+        .orderBy("c.local_session_id", "asc")
+        .limit(limit)
+        .execute();
+      return rows.map(mapRemoteActivity);
+    },
+
+    countRemoteSessionActivityByProject: async (projectId) => {
+      const row = await remoteSessionScope(kdb, projectId)
+        .select([
+          sql<number>`coalesce(sum(case when c.status = 'running' then 1 else 0 end), 0)`.as("running"),
+          sql<number>`coalesce(sum(case
+            when c.status = 'error' then 1
+            when c.status = 'stopped' and c.last_user_message_at is not null
+              and (c.last_completed_at is null or c.last_completed_at < c.last_user_message_at) then 1
+            else 0 end), 0)`.as("failed"),
+        ])
+        .executeTakeFirstOrThrow();
+      return { running: Number(row.running), failed: Number(row.failed) };
     },
 
     // Generation-based reconciliation: only a FULLY successful snapshot may
@@ -113,13 +202,21 @@ export const createSearchCacheRepos = (
             .values({
               local_session_id: s.id, project_id: projectId, target_id: targetId,
               branch: toDbBranch(s.branch), title: s.title, last_active_at: s.lastActiveAt,
-              favorited_at: s.favoritedAt, entry_count: s.entryCount, generation, deleted_at: null,
+              favorited_at: s.favoritedAt, entry_count: s.entryCount,
+              status: s.status ?? "unknown", agent_type: s.agentType ?? null, model: s.model ?? null,
+              last_user_message_at: s.lastUserMessageAt ?? null,
+              last_completed_at: s.lastCompletedAt ?? null,
+              generation, deleted_at: null,
               written_at: null,
             })
             .onConflict((oc) => oc.column("local_session_id").doUpdateSet({
               project_id: projectId, target_id: targetId, branch: toDbBranch(s.branch),
               title: s.title, last_active_at: s.lastActiveAt, favorited_at: s.favoritedAt,
-              entry_count: s.entryCount, generation, deleted_at: null, written_at: null,
+              entry_count: s.entryCount, status: s.status ?? "unknown",
+              agent_type: s.agentType ?? null, model: s.model ?? null,
+              last_user_message_at: s.lastUserMessageAt ?? null,
+              last_completed_at: s.lastCompletedAt ?? null,
+              generation, deleted_at: null, written_at: null,
             }).where((eb) => eb.or([
               eb("session_search_cache.written_at", "is", null),
               eb("session_search_cache.written_at", "<", snapshotCollectedAt),
@@ -192,18 +289,30 @@ export const createSearchCacheRepos = (
     // written_at stamp keeps the row exempt from snapshot reconciliation until
     // a snapshot collected after this instant confirms or deletes it — see
     // applyCatalogSnapshot. generation 0 marks it as never snapshot-confirmed.
-    noteSessionCreated: async ({ localSessionId, projectId, targetId, branch, title }) => {
+    noteSessionCreated: async ({
+      localSessionId, projectId, targetId, branch, title, status, agentType, model,
+      lastUserMessageAt, lastCompletedAt,
+    }) => {
       const now = Date.now();
       await kdb.insertInto("session_search_cache")
         .values({
           local_session_id: localSessionId, project_id: projectId, target_id: targetId,
           branch: toDbBranch(branch), title: title ?? null, last_active_at: now,
-          favorited_at: null, entry_count: 0, generation: 0, deleted_at: null, written_at: now,
+          favorited_at: null, entry_count: 0, status: status ?? "unknown",
+          agent_type: agentType ?? null, model: model ?? null,
+          last_user_message_at: lastUserMessageAt ?? null,
+          last_completed_at: lastCompletedAt ?? null,
+          generation: 0, deleted_at: null, written_at: now,
         })
         .onConflict((oc) => oc.column("local_session_id").doUpdateSet({
           project_id: projectId, target_id: targetId, branch: toDbBranch(branch),
           last_active_at: now, deleted_at: null, written_at: now,
           ...(title !== undefined ? { title } : {}),
+          ...(status !== undefined ? { status } : {}),
+          ...(agentType !== undefined ? { agent_type: agentType } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(lastUserMessageAt !== undefined ? { last_user_message_at: lastUserMessageAt } : {}),
+          ...(lastCompletedAt !== undefined ? { last_completed_at: lastCompletedAt } : {}),
         }))
         .execute();
     },

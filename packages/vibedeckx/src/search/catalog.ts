@@ -48,6 +48,11 @@ export async function buildSearchCatalog(
         lastActiveAt: s.last_user_message_at ?? parseDbTimestamp(s.updated_at),
         favoritedAt: s.favorited_at ?? null,
         entryCount,
+        status: s.status,
+        agentType: s.agent_type ?? null,
+        model: s.model ?? null,
+        lastUserMessageAt: s.last_user_message_at ?? null,
+        lastCompletedAt: s.last_completed_at ?? null,
       })),
   };
 }

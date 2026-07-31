@@ -1,4 +1,5 @@
 import { sql, type Kysely, type Selectable } from "kysely";
+import { Cron } from "croner";
 import type { DB, ScheduledTasksTable, ScheduledTaskRunsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type { Storage, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus, PromptProvider } from "../types.js";
@@ -15,6 +16,19 @@ const mapRun = (row: Selectable<ScheduledTaskRunsTable>): ScheduledTaskRun => ({
   ...row,
   status: row.status as ScheduledTaskRunStatus,
 });
+
+const computeNextRunAt = (cronExpr: string, timezone: string, enabled: boolean): string | null => {
+  if (!enabled) return null;
+  let cron: Cron | undefined;
+  try {
+    cron = new Cron(cronExpr, { paused: true, timezone });
+    return cron.nextRun()?.toISOString() ?? null;
+  } catch {
+    return null;
+  } finally {
+    cron?.stop();
+  }
+};
 
 export const createScheduledRepos = (
   kdb: Kysely<DB>,
@@ -37,6 +51,7 @@ export const createScheduledRepos = (
         branch: opts.branch ?? null,
         directory: opts.directory ?? null,
         timeout_seconds: opts.timeout_seconds ?? 1800,
+        next_run_at: computeNextRunAt(opts.cron_expr, opts.timezone, opts.enabled !== false),
       }).execute();
       const row = await kdb.selectFrom("scheduled_tasks").selectAll().where("id", "=", opts.id).executeTakeFirstOrThrow();
       return mapTask(row);
@@ -64,7 +79,30 @@ export const createScheduledRepos = (
         .where("enabled", "=", h.toDbBool(true)).execute();
       return rows.map(mapTask);
     },
+    getEarliestNextRunAt: async (projectId) => {
+      const row = await kdb.selectFrom("scheduled_tasks")
+        .select("next_run_at")
+        .where("project_id", "=", projectId)
+        .where("enabled", "=", h.toDbBool(true))
+        .where("next_run_at", "is not", null)
+        .orderBy("next_run_at", "asc")
+        .limit(1)
+        .executeTakeFirst();
+      return row?.next_run_at ?? null;
+    },
+    refreshNextRunAt: async (id) => {
+      const current = await kdb.selectFrom("scheduled_tasks")
+        .select(["cron_expr", "timezone", "enabled"])
+        .where("id", "=", id)
+        .executeTakeFirst();
+      if (!current) return null;
+      const nextRunAt = computeNextRunAt(current.cron_expr, current.timezone, fromDbBool(current.enabled));
+      await kdb.updateTable("scheduled_tasks").set({ next_run_at: nextRunAt }).where("id", "=", id).execute();
+      return nextRunAt;
+    },
     update: async (id, opts) => {
+      const current = await kdb.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
+      if (!current) return undefined;
       const sets: Record<string, unknown> = {};
       if (opts.name !== undefined) sets.name = opts.name;
       if (opts.cron_expr !== undefined) sets.cron_expr = opts.cron_expr;
@@ -78,6 +116,12 @@ export const createScheduledRepos = (
       if (opts.branch !== undefined) sets.branch = opts.branch;
       if (opts.directory !== undefined) sets.directory = opts.directory;
       if (opts.timeout_seconds !== undefined) sets.timeout_seconds = opts.timeout_seconds;
+      const nextRunAt = computeNextRunAt(
+        opts.cron_expr ?? current.cron_expr,
+        opts.timezone ?? current.timezone,
+        opts.enabled ?? fromDbBool(current.enabled),
+      );
+      if (nextRunAt !== current.next_run_at) sets.next_run_at = nextRunAt;
       if (Object.keys(sets).length > 0) {
         sets.updated_at = sql`CURRENT_TIMESTAMP`;
         await kdb.updateTable("scheduled_tasks").set(sets).where("id", "=", id).execute();

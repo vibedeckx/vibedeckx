@@ -93,6 +93,7 @@ export class SchedulerService {
   async start(): Promise<void> {
     for (const task of await this.storage.scheduledTasks.getAllEnabled()) {
       this.scheduleJob(task);
+      await this.storage.scheduledTasks.refreshNextRunAt(task.id);
     }
     console.log(`[Scheduler] Started with ${this.jobs.size} scheduled task(s)`);
   }
@@ -103,6 +104,7 @@ export class SchedulerService {
     const task = await this.storage.scheduledTasks.getById(scheduleId);
     if (task && task.enabled) {
       this.scheduleJob(task);
+      await this.storage.scheduledTasks.refreshNextRunAt(task.id);
     }
   }
 
@@ -146,6 +148,9 @@ export class SchedulerService {
     try {
       const job = new Cron(task.cron_expr, { timezone: task.timezone, catch: true }, () => {
         if (this.stopped) return;
+        void this.storage.scheduledTasks.refreshNextRunAt(task.id).catch((err) => {
+          console.error(`[Scheduler] Could not advance next run for ${task.id}: ${err}`);
+        });
         void this.executeRun(task.id).then((result) => {
           if ("error" in result) {
             console.error(`[Scheduler] Run of ${task.id} failed to start: ${result.error}`);

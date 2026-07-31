@@ -113,6 +113,11 @@ export async function createRemoteAgentSession(
     // the remote at this point, so a cache failure must not fail the create.
     await deps.storage.searchCache.noteSessionCreated({
       localSessionId, projectId, targetId: agentMode, branch: branch ?? null,
+      title: typeof remoteData.session.title === "string" ? remoteData.session.title : null,
+      ...(remoteData.session.status === "running" || remoteData.session.status === "stopped"
+        || remoteData.session.status === "error" ? { status: remoteData.session.status } : {}),
+      agentType: typeof remoteData.session.agent_type === "string" ? remoteData.session.agent_type : agentType ?? null,
+      model: typeof remoteData.session.model === "string" ? remoteData.session.model : model ?? null,
     }).catch((err) => console.error("[RemoteSession] search-cache create write-through failed:", err));
   } catch (err) {
     // A thrown transport error (reverse-connect send) or DB write rejection leaves

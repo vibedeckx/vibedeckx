@@ -326,6 +326,11 @@ export interface SessionSearchCacheTable {
   last_active_at: number | null;
   favorited_at: number | null;
   entry_count: number;
+  status: Generated<string>;
+  agent_type: string | null;
+  model: string | null;
+  last_user_message_at: number | null;
+  last_completed_at: number | null;
   generation: number;
   deleted_at: number | null;
   written_at: number | null;  // last out-of-band write-through; null = snapshot-owned
@@ -363,6 +368,7 @@ export interface ScheduledTasksTable {
   branch: string | null;
   directory: string | null;
   timeout_seconds: Generated<number>;
+  next_run_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

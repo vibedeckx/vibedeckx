@@ -53,7 +53,10 @@ describe("GET /api/path/search-catalog", () => {
     expect(body.snapshotAt).toBeGreaterThan(0);
     expect(body.workspaces).toEqual([{ branch: null }]);           // git-init repo: main worktree only
     expect(body.sessions).toHaveLength(1);
-    expect(body.sessions[0]).toMatchObject({ id: "s1", branch: null, title: "Investigate flaky test", entryCount: 1 });
+    expect(body.sessions[0]).toMatchObject({
+      id: "s1", branch: null, title: "Investigate flaky test", entryCount: 1,
+      status: "running", agentType: "claude-code", model: null,
+    });
   });
 
   it("returns an empty catalog for an unknown path", async () => {

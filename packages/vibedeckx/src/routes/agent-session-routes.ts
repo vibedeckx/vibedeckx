@@ -1365,6 +1365,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
             localSessionId, projectId, targetId: remoteInfo.remoteServerId,
             branch: remoteInfo.branch ?? null,
             title: (remoteData.session as { title?: string | null }).title ?? null,
+            status: (remoteData.session as { status?: "running" | "stopped" | "error" }).status,
+            agentType: (remoteData.session as { agent_type?: string | null }).agent_type,
+            model: (remoteData.session as { model?: string | null }).model,
           }).catch((err) => console.error("[Branch] search-cache create write-through failed:", err));
 
           // Seed remotePatchCache with the copied messages so WS replay has data

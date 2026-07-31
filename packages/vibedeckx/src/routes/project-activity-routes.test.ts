@@ -13,6 +13,7 @@ vi.mock("@clerk/fastify", () => ({
 import projectActivityRoutes from "./project-activity-routes.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
+import type { SearchCatalogSnapshot } from "../storage/types.js";
 
 describe("project activity route", () => {
   let app: FastifyInstance;
@@ -213,6 +214,74 @@ describe("project activity route", () => {
     ]));
     expect(body.summary).toMatchObject({ running: 10, failed: 1 });
   });
+
+  it("globally merges authorized remote cached sessions with target context and summary state", async () => {
+    await storage.agentSessions.create({ id: "local-session", project_id: "project-1", branch: "local" });
+    await storage.agentSessions.markUserMessage("local-session", 100);
+
+    const remote = await storage.remoteServers.create({ name: "Worker", url: "http://worker" }, "user-1");
+    await storage.projectRemotes.add({ project_id: "project-1", remote_server_id: remote.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert("remote-running", "project-1", remote.id, "worker-running", "feature", "from_now");
+    await storage.remoteSessionMappings.upsert("remote-error", "project-1", remote.id, "worker-error", "broken", "from_now");
+    await storage.searchCache.applyCatalogSnapshot("project-1", remote.id, {
+      workspaces: [{ branch: "feature" }, { branch: "broken" }],
+      sessions: [
+        {
+          id: "remote-running", branch: "feature", title: "Remote running",
+          lastActiveAt: 9_000, favoritedAt: null, entryCount: 2,
+          status: "running", agentType: "codex", model: "gpt-5",
+          lastUserMessageAt: 9_000, lastCompletedAt: null,
+        },
+        {
+          id: "remote-error", branch: "broken", title: "Remote error",
+          lastActiveAt: 8_000, favoritedAt: null, entryCount: 2,
+          status: "error", agentType: "claude-code", model: "opus",
+          lastUserMessageAt: 8_000, lastCompletedAt: null,
+        },
+      ],
+    } as unknown as SearchCatalogSnapshot);
+
+    // A cache row without an active project↔remote association must not leak.
+    await storage.searchCache.noteSessionCreated({
+      localSessionId: "remote-unlinked", projectId: "project-1", targetId: "unlinked",
+      branch: "secret", title: "Unlinked",
+    });
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    const body = response.json();
+
+    expect(body.recentAgentSessions.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        id: "remote-running", projectId: "project-1", target: remote.id,
+        branch: "feature", status: "running", title: "Remote running",
+        workspace: { target: remote.id, branch: "feature" },
+      }),
+      expect.objectContaining({
+        id: "remote-error", projectId: "project-1", target: remote.id,
+        branch: "broken", status: "error",
+      }),
+    ]);
+    expect(body.attention).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "agent_session", entityId: "remote-error", status: "error" }),
+    ]));
+    expect(body.summary).toMatchObject({ running: 2, failed: 1 });
+    expect(JSON.stringify(body)).not.toContain("remote-unlinked");
+  });
+
+  it("finds the globally earliest enabled schedule beyond the old candidate cap", async () => {
+    for (let index = 0; index < 1_001; index += 1) {
+      await createSchedule(`disabled-${String(index).padStart(4, "0")}`, "project-1", {
+        enabled: false,
+        cron: "* * * * *",
+      });
+    }
+    await createSchedule("enabled-after-cap", "project-1", { cron: "*/5 * * * *" });
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().summary.nextScheduleAt).toBe("2026-07-31T10:20:00.000Z");
+  }, 30_000);
 
   it("returns the same 404 for missing and foreign projects", async () => {
     for (const projectId of ["missing", "foreign-project"]) {

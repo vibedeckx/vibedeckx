@@ -962,6 +962,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       branch TEXT,
       directory TEXT,
       timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+      next_run_at TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -1022,6 +1023,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   }
   if (!scheduledTaskCols.some((c) => c.name === "prompt_provider")) {
     db.exec("ALTER TABLE scheduled_tasks ADD COLUMN prompt_provider TEXT DEFAULT NULL");
+  }
+  if (!scheduledTaskCols.some((c) => c.name === "next_run_at")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN next_run_at TEXT");
   }
 
   // Add scheduled_task_runs.report for DBs created before run reports.
@@ -1105,6 +1109,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       last_active_at INTEGER,
       favorited_at INTEGER,
       entry_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      agent_type TEXT,
+      model TEXT,
+      last_user_message_at INTEGER,
+      last_completed_at INTEGER,
       generation INTEGER NOT NULL,
       deleted_at INTEGER,
       written_at INTEGER
@@ -1228,6 +1237,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       ON workspace_search_cache(project_id, deleted_at, target_id ASC, branch ASC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project_created_id
       ON scheduled_tasks(project_id, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project_enabled_next_run
+      ON scheduled_tasks(project_id, enabled, next_run_at ASC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_schedule_started_id
       ON scheduled_task_runs(schedule_id, started_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_project_started_id
@@ -1255,6 +1266,23 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!sessionSearchCacheInfo.some((col) => col.name === "written_at")) {
     db.exec("ALTER TABLE session_search_cache ADD COLUMN written_at INTEGER");
   }
+  if (!sessionSearchCacheInfo.some((col) => col.name === "status")) {
+    db.exec("ALTER TABLE session_search_cache ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'");
+  }
+  if (!sessionSearchCacheInfo.some((col) => col.name === "agent_type")) {
+    db.exec("ALTER TABLE session_search_cache ADD COLUMN agent_type TEXT");
+  }
+  if (!sessionSearchCacheInfo.some((col) => col.name === "model")) {
+    db.exec("ALTER TABLE session_search_cache ADD COLUMN model TEXT");
+  }
+  if (!sessionSearchCacheInfo.some((col) => col.name === "last_user_message_at")) {
+    db.exec("ALTER TABLE session_search_cache ADD COLUMN last_user_message_at INTEGER");
+  }
+  if (!sessionSearchCacheInfo.some((col) => col.name === "last_completed_at")) {
+    db.exec("ALTER TABLE session_search_cache ADD COLUMN last_completed_at INTEGER");
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_session_search_cache_project_activity
+    ON session_search_cache(project_id, deleted_at, last_active_at DESC, local_session_id ASC, target_id)`);
 
   // Migration: add review_span to workflow_runs — the review-scope span
   // (this_turn default, or session_start). Existing rows default to this_turn.

@@ -135,6 +135,8 @@ export interface ScheduledTask {
   /** cwd_mode=directory: absolute path to run in. */
   directory: string | null;
   timeout_seconds: number;
+  /** Persisted scheduler projection used for an indexed project-wide minimum. */
+  next_run_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -472,6 +474,29 @@ export interface SearchCatalogSessionEntry {
   lastActiveAt: number | null;
   favoritedAt: number | null;
   entryCount: number;
+  status?: AgentSessionStatus;
+  agentType?: string | null;
+  model?: string | null;
+  lastUserMessageAt?: number | null;
+  lastCompletedAt?: number | null;
+}
+
+export type AgentSessionActivityStatus = AgentSessionStatus | "unknown";
+
+/** Project Overview projection shared by local rows and cached remote rows. */
+export interface AgentSessionActivity {
+  id: string;
+  projectId: string;
+  branch: string | null;
+  status: AgentSessionActivityStatus;
+  title: string | null;
+  target: string;
+  workspace: { target: string; branch: string | null };
+  agentType: string | null;
+  model: string | null;
+  lastActiveAt: number | null;
+  lastUserMessageAt: number | null;
+  lastCompletedAt: number | null;
 }
 
 export interface SearchCatalogSnapshot {
@@ -663,6 +688,10 @@ export interface Storage {
     listByProject: (projectId: string, limit: number) => Promise<ScheduledTask[]>;
     getById: (id: string) => Promise<ScheduledTask | undefined>;
     getAllEnabled: () => Promise<ScheduledTask[]>;
+    /** Indexed minimum across every enabled schedule in the project. */
+    getEarliestNextRunAt: (projectId: string) => Promise<string | null>;
+    /** Recompute after startup or a cron firing advances the next occurrence. */
+    refreshNextRunAt: (id: string) => Promise<string | null>;
     update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => Promise<ScheduledTask | undefined>;
     delete: (id: string) => Promise<void>;
   };
@@ -938,6 +967,9 @@ export interface Storage {
   searchCache: {
     /** Active workspace catalog rows for exactly one project, in stable target/branch order. */
     listWorkspacesByProject(projectId: string, limit: number): Promise<Array<{ targetId: string; branch: string | null }>>;
+    listRemoteSessionActivityByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
+    listRemoteSessionAttentionByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
+    countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number; failed: number }>;
     /**
      * Reconcile one (project, target) snapshot into the cache. `collectedAt`
      * (default: now) is when the snapshot's data was collected — write-through
@@ -955,7 +987,11 @@ export interface Storage {
      * row stays exempt from snapshot reconciliation until a snapshot collected
      * after this call confirms (or deletes) it.
      */
-    noteSessionCreated(entry: { localSessionId: string; projectId: string; targetId: string; branch: string | null; title?: string | null }): Promise<void>;
+    noteSessionCreated(entry: {
+      localSessionId: string; projectId: string; targetId: string; branch: string | null;
+      title?: string | null; status?: AgentSessionStatus; agentType?: string | null;
+      model?: string | null; lastUserMessageAt?: number | null; lastCompletedAt?: number | null;
+    }): Promise<void>;
     /** Write-through for a remote session deleted via this server (soft-delete). */
     noteSessionDeleted(localSessionId: string): Promise<void>;
     /**

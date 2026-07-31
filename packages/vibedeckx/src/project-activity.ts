@@ -1,8 +1,7 @@
-import { Cron } from "croner";
 import type {
   AgentSession,
+  AgentSessionActivity,
   ProjectChatThread,
-  ScheduledTask,
   ScheduledTaskRunActivity,
   Storage,
   Task,
@@ -13,7 +12,6 @@ const RECENT_SESSION_LIMIT = 8;
 const RECENT_RUN_LIMIT = 5;
 const PRIORITY_TASK_LIMIT = 5;
 const ATTENTION_LIMIT = 10;
-const SCHEDULE_SCAN_LIMIT = 1_000;
 
 export interface ProjectActivityAttentionItem {
   type: "agent_session" | "schedule_run";
@@ -21,11 +19,13 @@ export interface ProjectActivityAttentionItem {
   status: string;
   title: string;
   occurredAt: string;
+  target?: string;
+  workspace?: { target: string; branch: string | null };
 }
 
 export interface ProjectActivity {
   recentThreads: ProjectChatThread[];
-  recentAgentSessions: AgentSession[];
+  recentAgentSessions: AgentSessionActivity[];
   recentScheduleRuns: ScheduledTaskRunActivity[];
   priorityTasks: Task[];
   attention: ProjectActivityAttentionItem[];
@@ -36,30 +36,38 @@ export interface ProjectActivity {
   };
 }
 
-function nextRunAt(schedule: ScheduledTask): string | null {
-  if (!schedule.enabled) return null;
-  let cron: Cron | undefined;
-  try {
-    cron = new Cron(schedule.cron_expr, {
-      paused: true,
-      timezone: schedule.timezone,
-    });
-    return cron.nextRun()?.toISOString() ?? null;
-  } catch {
-    return null;
-  } finally {
-    cron?.stop();
-  }
-}
+const parseDbTimestamp = (value: string | undefined): number | null => {
+  if (!value) return null;
+  const parsed = Date.parse(`${value.replace(" ", "T")}Z`);
+  return Number.isNaN(parsed) ? null : parsed;
+};
 
-function earliestNextSchedule(schedules: ScheduledTask[]): string | null {
-  let earliest: string | null = null;
-  for (const schedule of schedules) {
-    const next = nextRunAt(schedule);
-    if (next !== null && (earliest === null || next < earliest)) earliest = next;
-  }
-  return earliest;
-}
+const localActivity = (session: AgentSession): AgentSessionActivity => {
+  const branch = session.branch || null;
+  return {
+    id: session.id,
+    projectId: session.project_id,
+    branch,
+    status: session.status,
+    title: session.title ?? null,
+    target: "local",
+    workspace: { target: "local", branch },
+    agentType: session.agent_type ?? null,
+    model: session.model ?? null,
+    lastActiveAt: session.last_user_message_at ?? parseDbTimestamp(session.updated_at ?? session.created_at),
+    lastUserMessageAt: session.last_user_message_at ?? null,
+    lastCompletedAt: session.last_completed_at ?? null,
+  };
+};
+
+const mergeActivity = (local: AgentSessionActivity[], remote: AgentSessionActivity[], limit: number) => {
+  const byId = new Map<string, AgentSessionActivity>();
+  for (const row of [...local, ...remote]) if (!byId.has(row.id)) byId.set(row.id, row);
+  return [...byId.values()]
+    .sort((left, right) => (right.lastActiveAt ?? 0) - (left.lastActiveAt ?? 0)
+      || left.id.localeCompare(right.id))
+    .slice(0, limit);
+};
 
 export async function getProjectActivity(
   storage: Storage,
@@ -68,29 +76,46 @@ export async function getProjectActivity(
 ): Promise<ProjectActivity> {
   const [
     recentThreads,
-    recentAgentSessions,
+    localRecentSessions,
+    remoteRecentSessions,
     recentScheduleRuns,
     priorityTasks,
-    schedules,
-    attentionSessions,
+    localAttentionSessions,
+    remoteAttentionSessions,
     attentionRuns,
     runningSessions,
     runningRuns,
     failedSessions,
     failedRuns,
+    remoteCounts,
+    nextScheduleAt,
   ] = await Promise.all([
     storage.projectChatThreads.listByProject(projectId, userId, RECENT_THREAD_LIMIT),
     storage.agentSessions.listRecentByProject(projectId, RECENT_SESSION_LIMIT),
+    storage.searchCache.listRemoteSessionActivityByProject(projectId, RECENT_SESSION_LIMIT),
     storage.scheduledTaskRuns.getRecentByProject(projectId, RECENT_RUN_LIMIT),
     storage.tasks.listPriorityByProject(projectId, PRIORITY_TASK_LIMIT),
-    storage.scheduledTasks.listByProject(projectId, SCHEDULE_SCAN_LIMIT),
     storage.agentSessions.listAttentionByProject(projectId, ATTENTION_LIMIT),
+    storage.searchCache.listRemoteSessionAttentionByProject(projectId, ATTENTION_LIMIT),
     storage.scheduledTaskRuns.getAttentionByProject(projectId, ATTENTION_LIMIT),
     storage.agentSessions.countRunningByProject(projectId),
     storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["starting", "running"]),
     storage.agentSessions.countAttentionByProject(projectId),
     storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["failed", "timeout"]),
+    storage.searchCache.countRemoteSessionActivityByProject(projectId),
+    storage.scheduledTasks.getEarliestNextRunAt(projectId),
   ]);
+
+  const recentAgentSessions = mergeActivity(
+    localRecentSessions.map(localActivity),
+    remoteRecentSessions,
+    RECENT_SESSION_LIMIT,
+  );
+  const attentionSessions = mergeActivity(
+    localAttentionSessions.map(localActivity),
+    remoteAttentionSessions,
+    ATTENTION_LIMIT,
+  );
 
   const attention: ProjectActivityAttentionItem[] = [
     ...attentionSessions
@@ -99,7 +124,9 @@ export async function getProjectActivity(
         entityId: session.id,
         status: session.status,
         title: session.title ?? (session.branch || "Main workspace"),
-        occurredAt: session.updated_at ?? session.created_at,
+        occurredAt: new Date(session.lastActiveAt ?? 0).toISOString(),
+        target: session.target,
+        workspace: session.workspace,
       })),
     ...attentionRuns
       .map((run) => ({
@@ -120,9 +147,9 @@ export async function getProjectActivity(
     priorityTasks,
     attention,
     summary: {
-      running: runningSessions + runningRuns,
-      failed: failedSessions + failedRuns,
-      nextScheduleAt: earliestNextSchedule(schedules),
+      running: runningSessions + runningRuns + remoteCounts.running,
+      failed: failedSessions + failedRuns + remoteCounts.failed,
+      nextScheduleAt,
     },
   };
 }
