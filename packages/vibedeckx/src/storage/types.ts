@@ -898,12 +898,12 @@ export interface Storage {
   projectChatThreads: {
     create: (opts: { id: string; project_id: string; user_id: string; title: string | null }) => Promise<ProjectChatThread>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
-    getById: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
-    updateTitle: (id: string, userId: string, title: string | null) => Promise<ProjectChatThread | undefined>;
-    archive: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
-    unarchive: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
-    touchUpdatedAt: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
-    delete: (id: string, userId: string) => Promise<void>;
+    getById: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    updateTitle: (id: string, projectId: string, userId: string, title: string | null) => Promise<ProjectChatThread | undefined>;
+    archive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    unarchive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    touchUpdatedAt: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    delete: (id: string, projectId: string, userId: string) => Promise<void>;
   };
   projectChatMessages: {
     append: (opts: { id: string; thread_id: string; sequence: number; type: ProjectChatMessageType; content: string }) => Promise<ProjectChatMessage>;

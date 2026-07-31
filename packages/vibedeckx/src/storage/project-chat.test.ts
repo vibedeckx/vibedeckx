@@ -42,7 +42,7 @@ describe("project chat storage", () => {
     expect((await storage.projectChatThreads.listByProject("p1", "u1", 10)).map((thread) => thread.id))
       .toEqual(["t2", "t1"]);
 
-    await storage.projectChatThreads.touchUpdatedAt("t1", "u1");
+    await storage.projectChatThreads.touchUpdatedAt("t1", "p1", "u1");
     expect((await storage.projectChatThreads.listByProject("p1", "u1", 10)).map((thread) => thread.id))
       .toEqual(["t1", "t2"]);
   });
@@ -50,30 +50,52 @@ describe("project chat storage", () => {
   it("looks threads up within a user scope and updates titles", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
 
-    expect(await storage.projectChatThreads.getById("t1", "u2")).toBeUndefined();
-    expect((await storage.projectChatThreads.getById("t1", "u1"))?.id).toBe("t1");
+    expect(await storage.projectChatThreads.getById("t1", "p1", "u2")).toBeUndefined();
+    expect((await storage.projectChatThreads.getById("t1", "p1", "u1"))?.id).toBe("t1");
 
-    const updated = await storage.projectChatThreads.updateTitle("t1", "u1", "Project status");
+    const updated = await storage.projectChatThreads.updateTitle("t1", "p1", "u1", "Project status");
     expect(updated?.title).toBe("Project status");
-    expect(await storage.projectChatThreads.updateTitle("t1", "u2", "Not allowed")).toBeUndefined();
+    expect(await storage.projectChatThreads.updateTitle("t1", "p1", "u2", "Not allowed")).toBeUndefined();
+  });
+
+  it("does not read or mutate a same-user thread through a different project scope", async () => {
+    const original = await storage.projectChatThreads.create({
+      id: "t2", project_id: "p2", user_id: "u1", title: "Private to p2",
+    });
+
+    // This cast models the legacy API that had no project scope. It must stop
+    // granting access once project_id becomes part of every thread identity.
+    const legacyGetById = storage.projectChatThreads.getById as unknown as
+      (id: string, userId: string) => ReturnType<typeof storage.projectChatThreads.getById>;
+    expect(await legacyGetById("t2", "u1")).toBeUndefined();
+
+    expect(await storage.projectChatThreads.getById("t2", "p1", "u1")).toBeUndefined();
+    expect(await storage.projectChatThreads.updateTitle("t2", "p1", "u1", "Leaked title")).toBeUndefined();
+    expect(await storage.projectChatThreads.archive("t2", "p1", "u1")).toBeUndefined();
+    expect(await storage.projectChatThreads.unarchive("t2", "p1", "u1")).toBeUndefined();
+    expect(await storage.projectChatThreads.touchUpdatedAt("t2", "p1", "u1")).toBeUndefined();
+    await storage.projectChatThreads.delete("t2", "p1", "u1");
+
+    const untouched = await storage.projectChatThreads.getById("t2", "p2", "u1");
+    expect(untouched).toEqual(original);
   });
 
   it("archives and unarchives threads while keeping archived rows out of the default list", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
 
-    expect((await storage.projectChatThreads.archive("t1", "u1"))?.archived_at).not.toBeNull();
+    expect((await storage.projectChatThreads.archive("t1", "p1", "u1"))?.archived_at).not.toBeNull();
     expect(await storage.projectChatThreads.listByProject("p1", "u1", 10)).toEqual([]);
     expect(await storage.projectChatThreads.listByProject("p1", "u1", 10, { includeArchived: true })).toHaveLength(1);
 
-    expect((await storage.projectChatThreads.unarchive("t1", "u1"))?.archived_at).toBeNull();
+    expect((await storage.projectChatThreads.unarchive("t1", "p1", "u1"))?.archived_at).toBeNull();
     expect(await storage.projectChatThreads.listByProject("p1", "u1", 10)).toHaveLength(1);
   });
 
   it("touches updated_at explicitly", async () => {
     const thread = await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
-    await storage.projectChatThreads.touchUpdatedAt("t1", "u1");
+    await storage.projectChatThreads.touchUpdatedAt("t1", "p1", "u1");
 
-    expect((await storage.projectChatThreads.getById("t1", "u1"))?.updated_at).not.toBe(thread.updated_at);
+    expect((await storage.projectChatThreads.getById("t1", "p1", "u1"))?.updated_at).not.toBe(thread.updated_at);
   });
 
   it("orders messages by sequence ASC", async () => {
@@ -102,7 +124,7 @@ describe("project chat storage", () => {
     await storage.projectChatMessages.append({ id: "m1", thread_id: "t1", sequence: 1, type: "user", content: "status?" });
     await storage.projectChatContextRefs.touch("t1", "task", "task1");
 
-    await storage.projectChatThreads.delete("t1", "u1");
+    await storage.projectChatThreads.delete("t1", "p1", "u1");
 
     expect(await storage.projectChatMessages.listByThread("t1")).toEqual([]);
     expect(await storage.projectChatContextRefs.listByThread("t1")).toEqual([]);

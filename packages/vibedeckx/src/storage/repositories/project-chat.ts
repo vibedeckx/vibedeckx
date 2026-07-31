@@ -54,62 +54,69 @@ export const createProjectChatRepos = (
       return rows.map(mapThread);
     },
 
-    getById: async (id, userId) => {
+    getById: async (id, projectId, userId) => {
+      if (!userId) return undefined;
       const row = await kdb.selectFrom("project_chat_threads")
         .selectAll()
         .where("id", "=", id)
+        .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },
 
-    updateTitle: async (id, userId, title) => {
+    updateTitle: async (id, projectId, userId, title) => {
       await kdb.updateTable("project_chat_threads")
         .set({ title, updated_at: now() })
         .where("id", "=", id)
+        .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .execute();
       const row = await kdb.selectFrom("project_chat_threads")
-        .selectAll().where("id", "=", id).where("user_id", "=", userId).executeTakeFirst();
+        .selectAll().where("id", "=", id).where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },
 
-    archive: async (id, userId) => {
+    archive: async (id, projectId, userId) => {
       await kdb.updateTable("project_chat_threads")
         .set({ archived_at: Date.now(), updated_at: now() })
         .where("id", "=", id)
+        .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .execute();
       const row = await kdb.selectFrom("project_chat_threads")
-        .selectAll().where("id", "=", id).where("user_id", "=", userId).executeTakeFirst();
+        .selectAll().where("id", "=", id).where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },
 
-    unarchive: async (id, userId) => {
+    unarchive: async (id, projectId, userId) => {
       await kdb.updateTable("project_chat_threads")
         .set({ archived_at: null, updated_at: now() })
         .where("id", "=", id)
+        .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .execute();
       const row = await kdb.selectFrom("project_chat_threads")
-        .selectAll().where("id", "=", id).where("user_id", "=", userId).executeTakeFirst();
+        .selectAll().where("id", "=", id).where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },
 
-    touchUpdatedAt: async (id, userId) => {
+    touchUpdatedAt: async (id, projectId, userId) => {
       await kdb.updateTable("project_chat_threads")
         .set({ updated_at: now() })
         .where("id", "=", id)
+        .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .execute();
       const row = await kdb.selectFrom("project_chat_threads")
-        .selectAll().where("id", "=", id).where("user_id", "=", userId).executeTakeFirst();
+        .selectAll().where("id", "=", id).where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },
 
-    delete: async (id, userId) => {
+    delete: async (id, projectId, userId) => {
       await kdb.deleteFrom("project_chat_threads")
         .where("id", "=", id)
+        .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .execute();
     },
