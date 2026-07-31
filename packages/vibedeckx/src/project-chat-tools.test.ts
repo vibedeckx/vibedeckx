@@ -183,7 +183,7 @@ describe("createProjectChatTools", () => {
       requestId, workspaceId: JSON.stringify(["local", "dev"]),
     });
 
-    expect(first).toMatchObject({ ok: true, status: "completed", sessionId: expect.any(String) });
+    expect(first).toMatchObject({ ok: true, status: "running", sessionId: expect.any(String) });
     expect(replay).toEqual(first);
     expect(createAgentSession).toHaveBeenCalledTimes(1);
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
@@ -226,10 +226,42 @@ describe("createProjectChatTools", () => {
     const resolved = await (await tools()).select_workspace.execute({
       requestId: requested.requestId as string, workspaceId: JSON.stringify(["local", "dev"]),
     });
-    expect(resolved).toMatchObject({ ok: true, status: "completed", sessionId: expect.any(String) });
+    expect(resolved).toMatchObject({ ok: true, status: "running", sessionId: expect.any(String) });
     expect(createAgentSession).toHaveBeenCalledTimes(1);
     expect(await storage.agentSessions.getById(resolved.sessionId as string))
       .toMatchObject({ project_id: "project-1", branch: "dev" });
+  });
+
+  it("recovers the preallocated identity on the direct explicit-workspace path", async () => {
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
+    createAgentSession.mockImplementationOnce(async ({ sessionId }) => {
+      await storage.agentSessions.create({ id: sessionId, project_id: "project-1", branch: "dev" });
+      throw new Error("crash after spawn");
+    });
+
+    const result = await (await tools()).create_agent_session.execute({
+      workspaceId: JSON.stringify(["local", "dev"]), instruction: "Implement it",
+    });
+    expect(result).toMatchObject({ ok: true, status: "running", sessionId: expect.any(String) });
+    expect(createAgentSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("preallocates canonical remote handles without decoding synthetic ids", async () => {
+    const serverId = await linkedRemoteServer();
+    await storage.searchCache.applyCatalogSnapshot("project-1", serverId, {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
+
+    const result = await (await tools()).create_agent_session.execute({
+      workspaceId: JSON.stringify([serverId, "dev"]), instruction: "Implement remotely",
+    });
+
+    expect(result).toMatchObject({ ok: true, status: "running", sessionId: expect.stringMatching(/^remote-/) });
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: result.sessionId, target: serverId, branch: "dev",
+    }));
   });
 
   it("uses explicit session and schedule identities and returns bounded structured failures", async () => {

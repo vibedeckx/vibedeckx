@@ -18,6 +18,7 @@ import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
 import { RemoteNotificationSync } from "../remote-notification-sync.js";
+import { createRemoteAgentSession } from "../remote-agent-sessions.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -95,19 +96,107 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     remoteExecutorMonitor,
   });
   const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
+  const projectChatRemoteSessions = createRemoteProjectSessionReader({
+    storage: opts.storage,
+    proxy: (remoteServerId, method, apiPath) => proxyToRemoteAuto(
+      remoteServerId,
+      method,
+      apiPath,
+      undefined,
+      { reverseConnectManager },
+    ),
+  });
   const projectChatManager = new ProjectChatManager(opts.storage, undefined, {
+    eventBus,
     toolDependencies: {
       agentSessionManager,
-      remoteSessions: createRemoteProjectSessionReader({
-        storage: opts.storage,
-        proxy: (remoteServerId, method, apiPath) => proxyToRemoteAuto(
-          remoteServerId,
-          method,
-          apiPath,
-          undefined,
-          { reverseConnectManager },
-        ),
-      }),
+      remoteSessions: projectChatRemoteSessions,
+      mutationServices: {
+        createAgentSession: async (input) => {
+          if (input.target === "local") {
+            const project = await opts.storage.projects.getById(input.projectId, input.userId);
+            if (!project?.path) throw new Error("Project has no local path");
+            const existing = await opts.storage.agentSessions.getById(input.sessionId);
+            if (existing && existing.project_id !== input.projectId) {
+              throw new Error("Session identity is already in use");
+            }
+            if (!existing) {
+              await agentSessionManager.createNewSession(
+                input.projectId, input.branch, project.path, false, input.permissionMode,
+                input.agentType, true, false, { sessionId: input.sessionId, model: input.model },
+              );
+            }
+            const alreadySent = agentSessionManager.getMessages(input.sessionId).some((message) => {
+              if (!message || typeof message !== "object") return false;
+              const candidate = message as { type?: unknown; content?: unknown };
+              return candidate.type === "user" && candidate.content === input.instruction;
+            });
+            if (!alreadySent && !(await agentSessionManager.sendUserMessage(
+              input.sessionId, input.instruction, project.path, input.userId,
+            ))) throw new Error("Agent session did not accept its initial instruction");
+            return { sessionId: input.sessionId };
+          }
+
+          const association = await opts.storage.projectRemotes.getByProjectAndServer(
+            input.projectId, input.target,
+          );
+          if (!association) throw new Error("Remote workspace is no longer authorized");
+          let mapping = await opts.storage.remoteSessionMappings.getByLocal(input.sessionId);
+          if (mapping && (mapping.project_id !== input.projectId || mapping.remote_server_id !== input.target)) {
+            throw new Error("Session identity is already in use");
+          }
+          if (!mapping) {
+            const created = await createRemoteAgentSession({
+              remoteSessionMap, remoteSessionMappings: opts.storage.remoteSessionMappings,
+              remotePatchCache, agentSessionManager, reverseConnectManager, storage: opts.storage,
+            }, {
+              projectId: input.projectId, agentMode: input.target, remoteConfig: association,
+              branch: input.branch, permissionMode: input.permissionMode,
+              agentType: input.agentType, model: input.model, userId: input.userId,
+              remoteSessionId: input.sessionId, localSessionId: input.sessionId,
+            });
+            if (!created.ok) throw new Error("Remote agent session creation failed");
+            mapping = await opts.storage.remoteSessionMappings.getByLocal(input.sessionId);
+          }
+          if (!mapping) throw new Error("Remote session mapping was not persisted");
+          const detail = await proxyToRemoteAuto(
+            mapping.remote_server_id, "GET",
+            `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}`,
+            undefined, { reverseConnectManager },
+          );
+          const messages = detail.ok && detail.data && typeof detail.data === "object"
+            ? (detail.data as { messages?: unknown }).messages : undefined;
+          const alreadySent = Array.isArray(messages) && messages.some((message) => {
+            if (!message || typeof message !== "object") return false;
+            const candidate = message as { type?: unknown; content?: unknown };
+            return candidate.type === "user" && candidate.content === input.instruction;
+          });
+          if (!alreadySent) {
+            const sent = await proxyToRemoteAuto(
+              mapping.remote_server_id, "POST",
+              `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
+              { content: input.instruction }, { reverseConnectManager },
+            );
+            if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
+          }
+          return { sessionId: input.sessionId };
+        },
+        sendAgentInstruction: async (input) => {
+          if (input.target === "local") {
+            const project = await opts.storage.projects.getById(input.projectId, input.userId);
+            return Boolean(project?.path) && agentSessionManager.sendUserMessage(
+              input.sessionId, input.instruction, project!.path!, input.userId,
+            );
+          }
+          const result = await proxyToRemoteAuto(
+            input.target.remoteServerId, "POST",
+            `/api/agent-sessions/${encodeURIComponent(input.target.remoteSessionId)}/message`,
+            { content: input.instruction }, { reverseConnectManager },
+          );
+          return result.ok;
+        },
+        runScheduleNow: (scheduleId, runId) => scheduler.runNow(scheduleId, runId),
+      },
     },
   });
   // Restore persisted remote executors by verifying against a connected

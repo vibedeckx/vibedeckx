@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
+import { EventBus } from "./event-bus.js";
 import {
   adaptProjectChatFullStream,
   PROJECT_CHAT_SYSTEM_PROMPT,
@@ -51,6 +52,21 @@ describe("ProjectChatManager", () => {
     });
   }
 
+  async function correlate(
+    threadId: string, operationId: string,
+    kind: "agent_session_create" | "schedule_run",
+    entityType: "agent_session" | "schedule_run", entityId: string,
+    details: Record<string, unknown> = {},
+  ) {
+    return storage.projectChatOperations.create({
+      id: operationId, thread_id: threadId, project_id: "project-1", user_id: "user-1",
+      kind, status: "running", entity_type: entityType, entity_id: entityId,
+      idempotency_key: operationId,
+      payload: JSON.stringify({ version: 1, kind, operationId, status: "running", ...details }),
+      error: null,
+    });
+  }
+
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-project-chat-manager-"));
     dbPath = path.join(dir, "test.sqlite");
@@ -91,6 +107,97 @@ describe("ProjectChatManager", () => {
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("project-scoped");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("multiple workspaces");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("does not belong to a branch or workspace");
+  });
+
+  it("persists a matching session event only to its correlated thread and ignores foreign or stale events", async () => {
+    await createThread("thread-1");
+    await createThread("thread-2");
+    await correlate("thread-1", "op-1", "agent_session_create", "agent_session", "session-1", { sessionId: "session-1" });
+    await correlate("thread-2", "op-2", "agent_session_create", "agent_session", "session-2", { sessionId: "session-2" });
+    const eventBus = new EventBus();
+    const manager = new ProjectChatManager(storage, reply("unused"), { eventBus });
+
+    eventBus.emit({
+      type: "session:taskCompleted", projectId: "project-1", branch: "dev",
+      sessionId: "session-1", summaryText: "done",
+    });
+    await waitFor(async () => (await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).some(({ type }) => type === "operation"));
+    eventBus.emit({ type: "session:status", projectId: "project-1", branch: "dev", sessionId: "session-1", status: "running" });
+    eventBus.emit({
+      type: "session:taskCompleted", projectId: "project-1", branch: "dev", sessionId: "session-1",
+    });
+    eventBus.emit({
+      type: "session:taskCompleted", projectId: "project-2", branch: "dev", sessionId: "session-2",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const first = await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1");
+    const second = await storage.projectChatMessages.listByThread("thread-2", "project-1", "user-1");
+    expect(first.filter(({ type }) => type === "operation")).toHaveLength(1);
+    expect(JSON.parse(first[0].content)).toMatchObject({
+      version: 1, kind: "agent_session_create", operationId: "op-1", status: "completed",
+      sessionId: "session-1",
+    });
+    expect(second).toEqual([]);
+    expect((await storage.projectChatOperations.getById("op-1", "thread-1", "project-1", "user-1"))?.status)
+      .toBe("completed");
+    await manager.shutdown();
+  });
+
+  it("updates every legitimately correlated thread and survives absent subscribers and restart", async () => {
+    await createThread("thread-1");
+    await createThread("thread-2");
+    await correlate("thread-1", "op-1", "schedule_run", "schedule_run", "run-1", {
+      scheduleId: "schedule-1", runId: "run-1",
+    });
+    await correlate("thread-2", "op-2", "schedule_run", "schedule_run", "run-1", {
+      scheduleId: "schedule-1", runId: "run-1",
+    });
+    const eventBus = new EventBus();
+    const firstManager = new ProjectChatManager(storage, reply("unused"), { eventBus });
+
+    eventBus.emit({
+      type: "schedule:run-finished", projectId: "project-1", scheduleId: "schedule-1",
+      runId: "run-1", status: "completed", exitCode: 0,
+    });
+    await waitFor(async () => (await storage.projectChatMessages.listByThread(
+      "thread-2", "project-1", "user-1",
+    )).some(({ type }) => type === "operation"));
+    await firstManager.shutdown();
+
+    const secondManager = new ProjectChatManager(storage, reply("unused"), { eventBus: new EventBus() });
+    const first = await secondManager.openThread("thread-1", "user-1");
+    const second = await secondManager.openThread("thread-2", "user-1");
+    expect(first.messages.filter(({ type }) => type === "operation")).toHaveLength(1);
+    expect(second.messages.filter(({ type }) => type === "operation")).toHaveLength(1);
+    await secondManager.shutdown();
+  });
+
+  it("subscribes to global events once, persists before websocket delivery, and unsubscribes on shutdown", async () => {
+    await createThread("thread-1");
+    await correlate("thread-1", "op-1", "agent_session_create", "agent_session", "session-1", { sessionId: "session-1" });
+    const eventBus = new EventBus();
+    const subscribe = vi.spyOn(eventBus, "subscribe");
+    const manager = new ProjectChatManager(storage, reply("unused"), { eventBus });
+    await manager.openThread("thread-1", "user-1");
+    const send = vi.fn(async () => undefined);
+    manager.subscribe("thread-1", { projectChatUserId: "user-1", send, readyState: 1 } as never);
+    send.mockClear();
+
+    eventBus.emit({
+      type: "session:status", projectId: "project-1", branch: "dev", sessionId: "session-1", status: "error",
+    });
+    await waitFor(() => send.mock.calls.length > 0);
+    expect(await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
+      .toContainEqual(expect.objectContaining({ id: "operation:op-1:failed", type: "operation" }));
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    await manager.shutdown();
+    expect(eventBus.emit({
+      type: "session:taskCompleted", projectId: "project-1", branch: "dev", sessionId: "session-1",
+    })).toBeUndefined();
+    expect(subscribe).toHaveBeenCalledTimes(1);
   });
 
   it("fails the turn when the production fullStream adapter receives an error part", async () => {
@@ -180,8 +287,9 @@ describe("ProjectChatManager", () => {
     const runner: ProjectChatModelRunner = {
       async *run(input) {
         expect(Object.keys(input.tools ?? {}).sort()).toEqual([
-          "get_agent_session", "get_project_summary", "get_schedule_run", "get_task",
+          "create_agent_session", "create_task", "get_agent_session", "get_project_summary", "get_schedule_run", "get_task",
           "list_agent_sessions", "list_schedule_runs", "list_schedules", "list_tasks", "list_workspaces",
+          "run_schedule_now", "select_workspace", "send_agent_instruction", "update_task",
         ]);
         const result = await input.tools!.get_task.execute({ taskId: "task-1" });
         yield { type: "tool_use", content: JSON.stringify({ toolName: "get_task", input: { taskId: "task-1" } }) };
@@ -192,6 +300,11 @@ describe("ProjectChatManager", () => {
     const manager = new ProjectChatManager(storage, runner, {
       toolDependencies: {
         agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => false },
+        mutationServices: {
+          createAgentSession: async ({ sessionId }) => ({ sessionId }),
+          sendAgentInstruction: async () => true,
+          runScheduleNow: async (_scheduleId, runId) => ({ runId, skipped: false }),
+        },
       },
     });
 

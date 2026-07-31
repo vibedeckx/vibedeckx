@@ -96,6 +96,13 @@ describe("SchedulerService.runNow", () => {
     expect(scheduler.isRunning("s1")).toBe(false);
   });
 
+  it("uses a caller-preallocated run id for recoverable operation correlation", async () => {
+    const result = await scheduler.runNow("s1", "commander-run-1");
+    expect(result).toEqual({ runId: "commander-run-1", skipped: false });
+    expect(await storage.scheduledTaskRuns.getById("commander-run-1"))
+      .toMatchObject({ schedule_id: "s1", status: "running" });
+  });
+
   it("records failed on non-zero exit", async () => {
     const result = await scheduler.runNow("s1") as { runId: string };
     pm.emit("proc-1", { type: "finished", exitCode: 3 });

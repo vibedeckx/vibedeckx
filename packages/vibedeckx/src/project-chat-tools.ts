@@ -260,9 +260,9 @@ const pendingSessionOperationSchema = z.object({
     branch: z.string().max(BRANCH_CHAR_LIMIT).nullable(),
   }).strict()).max(LIST_LIMIT),
 }).strict();
-const completedSessionOperationSchema = z.object({
+const activeSessionOperationSchema = z.object({
   version: z.literal(1), kind: z.literal("agent_session_create"),
-  operationId: selectorSchema, status: z.literal("completed"),
+  operationId: selectorSchema, status: z.enum(["running", "completed"]),
   sessionId: selectorSchema, workspaceId: selectorSchema,
 }).strict();
 const preview = (value: unknown, limit: number): string => {
@@ -536,7 +536,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
   };
   const finishOperation = async (
     operation: Awaited<ReturnType<typeof beginOperation>>,
-    status: "completed" | "failed",
+    status: "running" | "completed" | "failed",
     details: Record<string, unknown>,
     error: string | null = null,
   ) => {
@@ -548,6 +548,19 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     });
     if (!result) throw new Error("Failed to update Project Chat operation");
     return result.operation;
+  };
+  const markOperationRunning = async (
+    operation: Awaited<ReturnType<typeof beginOperation>>,
+    details: Record<string, unknown>,
+  ) => {
+    const current = await storage.projectChatOperations.getById(
+      operation.id, threadId, projectId, userId,
+    );
+    if (!current) throw new Error("Project Chat operation not found");
+    if (current.status === "completed" || current.status === "failed" || current.status === "running") {
+      return current;
+    }
+    return finishOperation(current, "running", details);
   };
   const workspaceCandidates = async () => {
     const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
@@ -566,6 +579,24 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       if (!association) throw new Error("Workspace is no longer available in this project");
     }
     return candidate;
+  };
+  const sessionExistsInScope = async (sessionId: string): Promise<boolean> => {
+    const local = await storage.agentSessions.getById(sessionId);
+    if (local) return local.project_id === projectId;
+    const mapping = await remoteSessions?.getMapping(sessionId);
+    if (!mapping || mapping.projectId !== projectId) return false;
+    return Boolean(await storage.projectRemotes.getByProjectAndServer(
+      projectId, mapping.remoteServerId,
+    ));
+  };
+  const canonicalSessionId = (
+    workspace: { target: string; branch: string | null }, seed: string,
+  ): string => {
+    const sessionId = workspace.target === "local"
+      ? seed
+      : `remote-${workspace.target}-${projectId}-${seed}`;
+    if (!isToolSelectorId(sessionId)) throw new Error("Workspace identity is too long for a session handle");
+    return sessionId;
   };
 
   return {
@@ -628,14 +659,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const service = mutationService();
         await revalidateScope();
         const operationId = randomUUID();
-        const sessionId = randomUUID();
+        const sessionSeed = randomUUID();
         const candidates = await workspaceCandidates();
         if (!workspaceId) {
           const operation = await beginOperation("agent_session_create", null, null, {
-            phase: "workspace_selection", requestId: operationId, sessionId, instruction,
+            phase: "workspace_selection", requestId: operationId, sessionId: sessionSeed, instruction,
             permissionMode, agentType, model,
             candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
-          }, { operationId, idempotencyKey: `session:${sessionId}` });
+          }, { operationId, idempotencyKey: `session:${sessionSeed}` });
           const selectionContent = operationPayload(
             "workspace_selection", operation.id, "pending",
             { requestId: operation.id, candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })) },
@@ -652,6 +683,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           };
         }
         const workspace = await resolveWorkspace(workspaceId);
+        const sessionId = canonicalSessionId(workspace, sessionSeed);
         const operation = await beginOperation("agent_session_create", "agent_session", sessionId, {
           sessionId, workspaceId, target: workspace.target, branch: workspace.branch,
         }, { operationId, idempotencyKey: `session:${sessionId}` });
@@ -666,9 +698,15 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (created.sessionId !== sessionId) throw new Error("Session identity mismatch");
           await touchAll("workspace", [workspaceId]);
           await touch("agent_session", sessionId);
-          await finishOperation(operation, "completed", { sessionId, workspaceId });
-          return { ok: true, operationId: operation.id, sessionId, status: "completed" };
+          const running = await markOperationRunning(operation, { sessionId, workspaceId });
+          return { ok: true, operationId: operation.id, sessionId, status: running.status };
         } catch (error) {
+          if (await sessionExistsInScope(sessionId)) {
+            await touchAll("workspace", [workspaceId]);
+            await touch("agent_session", sessionId);
+            const running = await markOperationRunning(operation, { sessionId, workspaceId });
+            return { ok: true, operationId: operation.id, sessionId, status: running.status };
+          }
           const message = boundedError(error);
           await finishOperation(operation, "failed", { sessionId, workspaceId }, message);
           return { ok: false, operationId: operation.id, status: "failed", error: message };
@@ -693,14 +731,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         } catch {
           throw new Error("Workspace selection request is invalid");
         }
-        if (operation.status === "completed") {
-          const completed = completedSessionOperationSchema.safeParse(decoded);
-          if (!completed.success || completed.data.workspaceId !== workspaceId) {
+        if (operation.status === "running" || operation.status === "completed") {
+          const active = activeSessionOperationSchema.safeParse(decoded);
+          if (!active.success || active.data.workspaceId !== workspaceId) {
             throw new Error("Workspace selection request is already resolved");
           }
           return {
-            ok: true, operationId: operation.id, sessionId: completed.data.sessionId,
-            status: "completed",
+            ok: true, operationId: operation.id, sessionId: active.data.sessionId,
+            status: active.data.status,
           };
         }
         if (operation.status !== "pending") {
@@ -714,7 +752,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           throw new Error("Workspace was not offered by this selection request");
         }
         const workspace = await resolveWorkspace(workspaceId);
-        const sessionId = pending.data.sessionId;
+        const sessionId = canonicalSessionId(workspace, pending.data.sessionId);
         const correlated = await storage.projectChatOperations.bindCorrelation({
           id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
           entity_type: "agent_session", entity_id: sessionId,
@@ -737,18 +775,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (!created) failure = new Error("Session identity mismatch");
         } catch (error) {
           failure = error;
-          const local = await storage.agentSessions.getById(sessionId);
-          if (local?.project_id === projectId) {
-            created = true;
-          } else {
-            const mapping = await remoteSessions?.getMapping(sessionId);
-            if (mapping?.projectId === projectId) {
-              const association = await storage.projectRemotes.getByProjectAndServer(
-                projectId, mapping.remoteServerId,
-              );
-              created = Boolean(association);
-            }
-          }
+          created = await sessionExistsInScope(sessionId);
         }
         if (!created) {
           const message = boundedError(failure ?? new Error("Agent session creation failed"));
@@ -757,8 +784,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         }
         await touchAll("workspace", [workspaceId]);
         await touch("agent_session", sessionId);
-        await finishOperation(correlated, "completed", { sessionId, workspaceId });
-        return { ok: true, operationId: operation.id, sessionId, status: "completed" };
+        const running = await markOperationRunning(correlated, { sessionId, workspaceId });
+        return { ok: true, operationId: operation.id, sessionId, status: running.status };
       },
     },
     send_agent_instruction: {
@@ -832,7 +859,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (result.runId !== runId) throw new Error("Schedule run identity mismatch");
           await touchAll("schedule", [scheduleId]);
           await touch("schedule_run", runId);
-          return { ok: true, operationId: operation.id, scheduleId, runId, status: "running", skipped: result.skipped };
+          const running = await markOperationRunning(operation, { scheduleId, runId });
+          return { ok: true, operationId: operation.id, scheduleId, runId, status: running.status, skipped: result.skipped };
         } catch (error) {
           const message = boundedError(error);
           await finishOperation(operation, "failed", { scheduleId, runId }, message);

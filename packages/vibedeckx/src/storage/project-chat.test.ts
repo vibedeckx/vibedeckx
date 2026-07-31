@@ -319,6 +319,12 @@ describe("project chat storage", () => {
       expect(indexes.map(({ name }) => name)).toContain(
         "idx_project_chat_operations_entity_correlation",
       );
+      expect(() => db.prepare(`
+        INSERT INTO project_chat_operations
+          (id, thread_id, kind, status, entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, 'task_create', 'pending', 'task', ?, ?, ?)
+      `).run("oversized", "t1", "task", "oversized", "x".repeat(32_769)))
+        .toThrow(/CHECK constraint failed/);
     } finally {
       db.close();
     }

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "crypto";
 import { stepCountIs, streamText, tool, type ToolSet } from "ai";
 import type WebSocket from "ws";
+import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type {
   ProjectChatMessage,
   ProjectChatMessageType,
@@ -64,7 +65,8 @@ export interface ProjectChatManagerOptions {
   terminalRetryDelayMs?: number;
   terminalRetryAttempts?: number;
   terminalAttemptTimeoutMs?: number;
-  toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions">;
+  toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
+  eventBus?: EventBus;
 }
 
 export type ProjectChatWsMessage =
@@ -278,6 +280,7 @@ export class ProjectChatManager {
   private readonly terminalRetryAttempts: number;
   private readonly terminalAttemptTimeoutMs: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
+  private readonly unsubscribeEvents?: () => void;
   private shuttingDown = false;
 
   constructor(
@@ -292,6 +295,10 @@ export class ProjectChatManager {
     this.terminalRetryAttempts = Math.max(1, options.terminalRetryAttempts ?? 3);
     this.terminalAttemptTimeoutMs = options.terminalAttemptTimeoutMs ?? this.drainTimeoutMs;
     this.toolDependencies = options.toolDependencies;
+    this.unsubscribeEvents = options.eventBus?.subscribe((event) => {
+      if (this.shuttingDown) return;
+      void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
+    });
   }
 
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
@@ -439,6 +446,7 @@ export class ProjectChatManager {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.unsubscribeEvents?.();
     for (const live of this.liveThreads.values()) {
       this.cancelEviction(live);
       this.settlePendingApprovals(live, live.activeTurnId, false);
@@ -449,6 +457,76 @@ export class ProjectChatManager {
     await Promise.all([...this.liveThreads.values()]
       .map((live) => this.detachActiveWork(live, "accepted", false)));
     for (const live of this.liveThreads.values()) live.subscribers.clear();
+  }
+
+  private async handleCorrelatedEvent(event: GlobalEvent): Promise<void> {
+    let entityType: "agent_session" | "schedule_run";
+    let entityId: string;
+    let status: "running" | "completed" | "failed";
+    let expectedKind: "agent_session_create" | "schedule_run";
+    if (event.type === "session:taskCompleted" || event.type === "session:finished") {
+      entityType = "agent_session";
+      entityId = event.sessionId;
+      status = "completed";
+      expectedKind = "agent_session_create";
+    } else if (event.type === "session:status" && event.status === "error") {
+      entityType = "agent_session";
+      entityId = event.sessionId;
+      status = "failed";
+      expectedKind = "agent_session_create";
+    } else if (event.type === "session:status" && event.status === "running") {
+      entityType = "agent_session";
+      entityId = event.sessionId;
+      status = "running";
+      expectedKind = "agent_session_create";
+    } else if (event.type === "schedule:run-started") {
+      entityType = "schedule_run";
+      entityId = event.runId;
+      status = "running";
+      expectedKind = "schedule_run";
+    } else if (event.type === "schedule:run-finished") {
+      entityType = "schedule_run";
+      entityId = event.runId;
+      status = event.status === "completed" || event.status === "skipped" ? "completed" : "failed";
+      expectedKind = "schedule_run";
+    } else {
+      return;
+    }
+
+    const operations = await this.storage.projectChatOperations.listByCorrelation(
+      event.projectId, entityType, entityId, 100,
+    );
+    for (const operation of operations) {
+      if (operation.kind !== expectedKind) continue;
+      if (expectedKind === "schedule_run") {
+        let payload: unknown;
+        try { payload = JSON.parse(operation.payload); } catch { continue; }
+        if (!payload || typeof payload !== "object"
+          || (payload as { scheduleId?: unknown }).scheduleId !== (event as { scheduleId: string }).scheduleId) continue;
+      }
+      const details = expectedKind === "agent_session_create"
+        ? { sessionId: entityId }
+        : { scheduleId: (event as { scheduleId: string }).scheduleId, runId: entityId };
+      const content = JSON.stringify({
+        version: 1, kind: expectedKind, operationId: operation.id, status, ...details,
+      });
+      const transitioned = await this.storage.projectChatOperations.transition({
+        id: operation.id,
+        thread_id: operation.thread_id,
+        project_id: operation.project_id,
+        user_id: operation.user_id,
+        status,
+        payload: content,
+        error: status === "failed" ? "Operation failed" : null,
+        message: { id: `operation:${operation.id}:${status}`, content },
+      });
+      if (!transitioned?.changed) continue;
+      const live = this.liveThreads.get(operation.thread_id);
+      if (live && live.thread.project_id === operation.project_id
+        && live.thread.user_id === operation.user_id) {
+        this.publishMessage(live, transitioned.message);
+      }
+    }
   }
 
   private async findAuthorized(threadId: string, userId: string): Promise<ProjectChatThread | undefined> {

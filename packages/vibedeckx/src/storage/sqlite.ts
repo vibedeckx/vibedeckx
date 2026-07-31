@@ -102,8 +102,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     );
 
     CREATE TABLE IF NOT EXISTS project_chat_operations (
-      id TEXT PRIMARY KEY,
-      thread_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 512),
+      thread_id TEXT NOT NULL CHECK (length(thread_id) BETWEEN 1 AND 512),
       kind TEXT NOT NULL CHECK (kind IN (
         'task_create', 'task_update', 'agent_session_create',
         'agent_instruction', 'schedule_run', 'workspace_selection'
@@ -114,10 +114,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       entity_type TEXT CHECK (entity_type IS NULL OR entity_type IN (
         'task', 'workspace', 'agent_session', 'schedule', 'schedule_run'
       )),
-      entity_id TEXT,
-      idempotency_key TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      error TEXT,
+      entity_id TEXT CHECK (entity_id IS NULL OR length(entity_id) BETWEEN 1 AND 512),
+      idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 512),
+      payload TEXT NOT NULL CHECK (length(payload) <= 32768),
+      error TEXT CHECK (error IS NULL OR length(error) <= 1024),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(thread_id, idempotency_key),

@@ -47,14 +47,16 @@ export async function createRemoteAgentSession(
     model?: string | null;
     force?: boolean;
     userId: string | undefined;
+    remoteSessionId?: string;
+    localSessionId?: string;
   },
 ): Promise<CreateRemoteAgentSessionResult> {
   const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, model, force, userId } = params;
 
   // The server picks the session id so it can mint a token bound to it before the
   // remote spawns claude. The remote honours the supplied id.
-  const remoteSessionId = randomUUID();
-  const localSessionId = `remote-${agentMode}-${projectId}-${remoteSessionId}`;
+  const remoteSessionId = params.remoteSessionId ?? randomUUID();
+  const localSessionId = params.localSessionId ?? `remote-${agentMode}-${projectId}-${remoteSessionId}`;
 
   const crossRemoteMcp = await mintCrossRemoteMcpConfig(
     { storage: deps.storage },

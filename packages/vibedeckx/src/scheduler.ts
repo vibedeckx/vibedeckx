@@ -115,9 +115,9 @@ export class SchedulerService {
     return this.activeRuns.has(scheduleId);
   }
 
-  async runNow(scheduleId: string): Promise<RunNowResult> {
+  async runNow(scheduleId: string, runId?: string): Promise<RunNowResult> {
     if (this.stopped) return { error: "Scheduler stopped" };
-    return this.executeRun(scheduleId);
+    return this.executeRun(scheduleId, runId);
   }
 
   shutdown(): void {
@@ -163,11 +163,11 @@ export class SchedulerService {
     return { error: message };
   }
 
-  private async executeRun(scheduleId: string): Promise<RunNowResult> {
+  private async executeRun(scheduleId: string, preallocatedRunId?: string): Promise<RunNowResult> {
     const task = await this.storage.scheduledTasks.getById(scheduleId);
     if (!task) return { error: "Schedule not found" };
 
-    const runId = randomUUID();
+    const runId = preallocatedRunId ?? randomUUID();
 
     // Overlap policy: skip (recorded) when the previous run is still going.
     if (this.activeRuns.has(scheduleId)) {
