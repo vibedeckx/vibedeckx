@@ -184,19 +184,101 @@ describe("ProjectChatManager", () => {
   });
 
   it("returns from ready at the startup deadline when the recovery read stalls", async () => {
-    vi.spyOn(storage.projectChatWorkItems, "listRecoveryPage")
+    const pageRead = vi.spyOn(storage.projectChatWorkItems, "listRecoveryPage")
       .mockImplementation(() => new Promise(() => undefined));
     const manager = new ProjectChatManager(storage, reply("unused"), {
       startupReconciliationDeadlineMs: 15,
-      reconciliationIntervalMs: 10_000,
+      reconciliationIntervalMs: 5,
+      drainTimeoutMs: 20,
     });
     const startedAt = Date.now();
 
     await manager.ready();
+    await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(pageRead).toHaveBeenCalledOnce();
     await manager.shutdown();
   });
+
+  it.each(["authorization", "hydration", "quarantine"] as const)(
+    "bounds recovery when %s stalls and resumes the same candidate on a later tick",
+    async (phase) => {
+      await storage.projectChatThreads.createWithInitialTurn({
+        id: "stalled-recovery", project_id: "project-1", user_id: "user-1", title: null,
+        initialTurn: { messageId: "stalled-message", workItemId: "stalled-work", content: "resume me" },
+      });
+      if (phase === "quarantine") {
+        const raw = new Database(dbPath);
+        raw.prepare("UPDATE project_chat_threads SET user_id = 'foreign' WHERE id = 'stalled-recovery'").run();
+        raw.close();
+      }
+      const started = deferred();
+      const release = deferred();
+      let stalledCalls = 0;
+      if (phase === "authorization") {
+        const original = storage.projectChatThreads.getOwnedById.bind(storage.projectChatThreads);
+        vi.spyOn(storage.projectChatThreads, "getOwnedById").mockImplementation(async (...args) => {
+          if (args[0] === "stalled-recovery" && stalledCalls++ === 0) {
+            started.resolve();
+            await release.promise;
+          }
+          return original(...args);
+        });
+      } else if (phase === "hydration") {
+        const original = storage.projectChatMessages.listByThread.bind(storage.projectChatMessages);
+        vi.spyOn(storage.projectChatMessages, "listByThread").mockImplementation(async (...args) => {
+          if (args[0] === "stalled-recovery" && stalledCalls++ === 0) {
+            started.resolve();
+            await release.promise;
+          }
+          return original(...args);
+        });
+      } else {
+        const original = storage.projectChatWorkItems.quarantineRecovery
+          .bind(storage.projectChatWorkItems);
+        vi.spyOn(storage.projectChatWorkItems, "quarantineRecovery").mockImplementation(async (...args) => {
+          if (args[0] === "stalled-work" && stalledCalls++ === 0) {
+            started.resolve();
+            await release.promise;
+          }
+          return original(...args);
+        });
+      }
+      const run = vi.fn(async function* () {
+        yield { type: "assistant" as const, content: "recovered" };
+      });
+      const manager = new ProjectChatManager(storage, { run }, {
+        startupReconciliationDeadlineMs: 12,
+        reconciliationOperationTimeoutMs: 12,
+        reconciliationIntervalMs: 5,
+        drainTimeoutMs: 20,
+      });
+      await started.promise;
+      const readyStartedAt = Date.now();
+
+      await manager.ready();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(Date.now() - readyStartedAt).toBeLessThan(150);
+      expect(stalledCalls).toBe(1);
+      expect(run).not.toHaveBeenCalled();
+      release.resolve();
+      if (phase === "quarantine") {
+        await waitFor(() => {
+          const verify = new Database(dbPath, { readonly: true });
+          try {
+            return (verify.prepare("SELECT status FROM project_chat_work_items WHERE id = 'stalled-work'")
+              .get() as { status: string }).status === "failed";
+          } finally { verify.close(); }
+        });
+        expect(run).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() => run.mock.calls.length === 1);
+      }
+      await manager.shutdown();
+    },
+  );
 
   it("quarantines corrupt recovery ownership without invoking the model", async () => {
     await storage.projectChatThreads.createWithInitialTurn({
@@ -1532,6 +1614,67 @@ describe("ProjectChatManager", () => {
     expect((await storage.projectChatMessages.listByThread(
       "thread-1", "project-1", "user-1",
     )).some((message) => message.content === "stale append")).toBe(false);
+  });
+
+  it.each(["stop", "delete"] as const)(
+    "releases a global turn slot exactly once when %s detaches an abort-ignoring runner",
+    async (action) => {
+      for (const id of ["slot-one", "slot-two", "slot-three"]) await createThread(id);
+      const firstGate = deferred();
+      const secondGate = deferred();
+      const starts: string[] = [];
+      const manager = new ProjectChatManager(storage, {
+        async *run(input) {
+          starts.push(input.threadId);
+          if (input.threadId === "slot-one") await firstGate.promise;
+          if (input.threadId === "slot-two") await secondGate.promise;
+          yield { type: "assistant", content: input.threadId };
+        },
+      }, { maxConcurrentTurns: 1, drainTimeoutMs: 12 });
+      await manager.sendMessage("slot-one", "user-1", "one");
+      await waitFor(() => starts.length === 1);
+      await manager.sendMessage("slot-two", "user-1", "two");
+
+      if (action === "stop") {
+        await manager.stopGeneration("slot-one", "user-1");
+      } else {
+        await manager.deleteThread("slot-one", "user-1");
+      }
+      await waitFor(() => starts.includes("slot-two"));
+      await manager.sendMessage("slot-three", "user-1", "three");
+
+      firstGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(starts).toEqual(["slot-one", "slot-two"]);
+
+      secondGate.resolve();
+      await waitFor(() => starts.includes("slot-three"));
+      expect(starts).toEqual(["slot-one", "slot-two", "slot-three"]);
+      await manager.shutdown();
+    },
+  );
+
+  it("does not exhaust the default four global slots after four turns are detached", async () => {
+    const ids = Array.from({ length: 8 }, (_, index) => `default-slot-${index}`);
+    for (const id of ids) await createThread(id);
+    const gates = new Map(ids.map((id) => [id, deferred()]));
+    const starts: string[] = [];
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        starts.push(input.threadId);
+        await gates.get(input.threadId)!.promise;
+        yield { type: "assistant", content: input.threadId };
+      },
+    }, { drainTimeoutMs: 12 });
+    for (const id of ids) await manager.sendMessage(id, "user-1", id);
+    await waitFor(() => starts.length === 4);
+
+    await Promise.all(ids.slice(0, 4).map((id) => manager.stopGeneration(id, "user-1")));
+    await waitFor(() => starts.length === 8);
+
+    expect(new Set(starts)).toEqual(new Set(ids));
+    for (const gate of gates.values()) gate.resolve();
+    await manager.shutdown();
   });
 
   it("executes two threads in one project independently", async () => {
