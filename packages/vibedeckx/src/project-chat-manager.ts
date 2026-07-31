@@ -68,6 +68,8 @@ export interface ProjectChatManagerOptions {
   terminalRetryAttempts?: number;
   terminalAttemptTimeoutMs?: number;
   reconciliationIntervalMs?: number;
+  startupReconciliationDeadlineMs?: number;
+  reconciliationOperationTimeoutMs?: number;
   toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
   eventBus?: EventBus;
 }
@@ -291,6 +293,8 @@ export class ProjectChatManager {
   private readonly terminalRetryAttempts: number;
   private readonly terminalAttemptTimeoutMs: number;
   private readonly reconciliationIntervalMs: number;
+  private readonly startupReconciliationDeadlineMs: number;
+  private readonly reconciliationOperationTimeoutMs: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private readonly unsubscribeEvents?: () => void;
   private readonly startupReconciliation: Promise<ProjectChatReconciliationReport>;
@@ -311,13 +315,17 @@ export class ProjectChatManager {
     this.terminalRetryAttempts = Math.max(1, options.terminalRetryAttempts ?? 3);
     this.terminalAttemptTimeoutMs = options.terminalAttemptTimeoutMs ?? this.drainTimeoutMs;
     this.reconciliationIntervalMs = Math.max(1, options.reconciliationIntervalMs ?? 1_000);
+    this.startupReconciliationDeadlineMs = Math.max(10, options.startupReconciliationDeadlineMs ?? 1_000);
+    this.reconciliationOperationTimeoutMs = Math.max(10, options.reconciliationOperationTimeoutMs ?? 250);
     this.reconciliationDelayMs = Math.min(100, this.reconciliationIntervalMs);
     this.toolDependencies = options.toolDependencies;
     this.unsubscribeEvents = options.eventBus?.subscribe((event) => {
       if (this.shuttingDown) return;
       void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
     });
-    this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations(2))
+    this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations(
+      2, Date.now() + this.startupReconciliationDeadlineMs,
+    ))
       .catch((error) => {
         this.reconciliationDelayMs = Math.min(this.reconciliationDelayMs * 2, 5_000);
         return { processed: 0, quarantined: 0, retryScheduled: 0, remaining: true,
@@ -594,7 +602,7 @@ export class ProjectChatManager {
     this.reconciliationTimer.unref?.();
   }
 
-  private async reconcilePersistedOperations(maxPages: number): Promise<ProjectChatReconciliationReport> {
+  private async reconcilePersistedOperations(maxPages: number, deadlineAt?: number): Promise<ProjectChatReconciliationReport> {
     const report: ProjectChatReconciliationReport = {
       processed: 0, quarantined: 0, retryScheduled: 0, remaining: false, infrastructureErrors: [],
     };
@@ -607,9 +615,27 @@ export class ProjectChatManager {
       }
       for (const operation of page.operations) {
         if (this.shuttingDown) return report;
+        if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+          report.remaining = true;
+          report.infrastructureErrors.push("Startup reconciliation deadline reached");
+          return report;
+        }
         report.processed++;
         try {
-          await this.reconcilePersistedOperation(operation);
+          const attempt = this.trackOperation(this.reconcilePersistedOperation(operation));
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            attempt,
+            new Promise<never>((_, reject) => {
+              const remaining = deadlineAt === undefined ? this.reconciliationOperationTimeoutMs
+                : Math.min(this.reconciliationOperationTimeoutMs, Math.max(1, deadlineAt - Date.now()));
+              timer = setTimeout(() => reject(new Error("Operation reconciliation timed out")), remaining);
+              timer.unref?.();
+            }),
+          ]).finally(() => { if (timer) clearTimeout(timer); });
+          await this.storage.projectChatOperations.clearRetry(
+            operation.id, operation.thread_id, operation.project_id, operation.user_id,
+          );
         } catch (error) {
           report.retryScheduled++;
           const message = boundedStreamError(error).message;

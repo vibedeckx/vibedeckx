@@ -316,6 +316,7 @@ export class ProcessManager {
         this.broadcast(processId, msg);
         setTimeout(() => {
           this.processes.delete(processId);
+          this.processEffects.delete(processId);
         }, LOG_RETENTION_MS);
       });
     } else {
@@ -344,6 +345,7 @@ export class ProcessManager {
         this.broadcast(processId, msg);
         setTimeout(() => {
           this.processes.delete(processId);
+          this.processEffects.delete(processId);
         }, LOG_RETENTION_MS);
       });
     }
@@ -434,6 +436,7 @@ export class ProcessManager {
 
     // Handle PTY exit
     ptyProcess.onExit(({ exitCode }) => {
+      this.processEffects.delete(processId);
       const code = exitCode ?? 0;
       const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
 
@@ -459,6 +462,7 @@ export class ProcessManager {
       setTimeout(() => {
         console.log(`[ProcessManager] Cleaning up process ${processId}`);
         this.processes.delete(processId);
+        this.processEffects.delete(processId);
       }, LOG_RETENTION_MS);
     });
   }
@@ -514,6 +518,7 @@ export class ProcessManager {
 
     // Handle process exit
     childProcess.on("close", (code) => {
+      this.processEffects.delete(processId);
       const exitCode = code ?? 0;
       const status: ExecutorProcessStatus = exitCode === 0 ? "completed" : "failed";
 
@@ -536,6 +541,7 @@ export class ProcessManager {
       setTimeout(() => {
         console.log(`[ProcessManager] Cleaning up process ${processId}`);
         this.processes.delete(processId);
+        this.processEffects.delete(processId);
       }, LOG_RETENTION_MS);
     });
 
@@ -717,6 +723,7 @@ export class ProcessManager {
 
     // Handle process exit
     childProcess.on('close', (code) => {
+      this.processEffects.delete(processId);
       const exitCode = code ?? 0;
       const status: ExecutorProcessStatus = exitCode === 0 ? 'completed' : 'failed';
 
@@ -738,6 +745,7 @@ export class ProcessManager {
       setTimeout(() => {
         console.log(`[ProcessManager] Cleaning up process ${processId}`);
         this.processes.delete(processId);
+        this.processEffects.delete(processId);
       }, LOG_RETENTION_MS);
     });
 

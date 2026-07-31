@@ -69,6 +69,9 @@ describe("path agent session preallocated identity", () => {
           row.status = "sent";
           return true;
         },
+        renewClaim: async ({ sessionId, idempotencyKey, claimToken }: {
+          sessionId: string; idempotencyKey: string; claimToken: string;
+        }) => deliveries.get(`${sessionId}:${idempotencyKey}`)?.token === claimToken,
         release: async ({ sessionId, idempotencyKey, claimToken }: {
           sessionId: string; idempotencyKey: string; claimToken: string;
         }) => {

@@ -36,6 +36,21 @@ describe("scheduledTasks storage", () => {
       cwd_mode: "branch",
     });
 
+  it("binds an empty legacy execution fingerprint exactly once", async () => {
+    await createTask("legacy-fingerprint");
+    await storage.scheduledTaskRuns.claimStart({ id: "legacy-run", scheduleId: "legacy-fingerprint",
+      processId: "schedule-run-legacy-run", ownerToken: "owner", effectFingerprint: "seed" });
+    const raw = new Database(dbPath);
+    raw.prepare("UPDATE scheduled_task_execution_claims SET effect_fingerprint = '' WHERE run_id = ?").run("legacy-run");
+    raw.close();
+    await expect(storage.scheduledTaskRuns.claimStart({ id: "legacy-run", scheduleId: "legacy-fingerprint",
+      processId: "schedule-run-legacy-run", ownerToken: "owner", effectFingerprint: "bound" }))
+      .resolves.toBe("retry");
+    await expect(storage.scheduledTaskRuns.claimStart({ id: "legacy-run", scheduleId: "legacy-fingerprint",
+      processId: "schedule-run-legacy-run", ownerToken: "owner", effectFingerprint: "different" }))
+      .resolves.toBe("conflict");
+  });
+
   it("migrates and backfills project scope for old scheduled runs and derives it for new writes", async () => {
     await createTask("legacy-schedule");
     await storage.scheduledTaskRuns.create({

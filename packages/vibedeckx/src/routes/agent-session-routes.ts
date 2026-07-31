@@ -1016,13 +1016,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (claim === "busy") {
         return reply.code(409).send({ error: "Instruction delivery is already in progress" });
       }
+      let ownershipLost = false;
+      const renew = async () => {
+        try {
+          if (!(await fastify.storage.agentInstructionDeliveries.renewClaim({
+            sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
+          }))) ownershipLost = true;
+        } catch { ownershipLost = true; }
+      };
+      await renew();
+      const heartbeat = setInterval(() => { void renew(); }, 10_000);
+      heartbeat.unref();
       try {
+        if (ownershipLost) return reply.code(409).send({ error: "Instruction delivery ownership was lost" });
         if (!(await deliver())) {
           await fastify.storage.agentInstructionDeliveries.release({
             sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
           });
           return reply.code(404).send({ error: "Session not found or not running" });
         }
+        await renew();
+        if (ownershipLost) return reply.code(409).send({ error: "Instruction delivery ownership was lost" });
         const confirmed = await fastify.storage.agentInstructionDeliveries.markSent({
           sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
         });
@@ -1035,6 +1049,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
           sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
         });
         throw error;
+      } finally {
+        clearInterval(heartbeat);
       }
     });
   });

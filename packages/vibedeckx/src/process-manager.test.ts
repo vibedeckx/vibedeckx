@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { clearBinaryCaches, detectBinary } from "./protocol/shared/binary.js";
 import { ProcessEffectConflictError, ProcessManager } from "./process-manager.js";
 import type { Executor } from "./storage/types.js";
@@ -49,6 +49,7 @@ describe("ProcessManager preallocated process identity", () => {
       expect(pm.getProcessesByExecutorId("schedule-s1")).toHaveLength(1);
     } finally {
       await pm.stop("schedule-run-stable");
+      await vi.waitFor(() => expect((pm as unknown as { processEffects: Map<string, string> }).processEffects.size).toBe(0));
     }
   });
 });

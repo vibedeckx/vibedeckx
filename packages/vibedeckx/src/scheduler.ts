@@ -255,31 +255,59 @@ export class SchedulerService {
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status: "skipped", exitCode: null });
       return { runId, skipped: true };
     }
+    let ownershipLost = false;
+    let ownedProcessId: string | undefined;
+    const renewOwnership = async () => {
+      try {
+        const renewed = await this.storage.scheduledTaskRuns.heartbeat(runId, this.ownerToken, CLAIM_LEASE_MS);
+        if (!renewed) ownershipLost = true;
+      } catch { ownershipLost = true; }
+      return !ownershipLost;
+    };
+    const heartbeat = setInterval(() => { void renewOwnership().then((owned) => {
+      if (!owned && ownedProcessId) void this.processManager.stop(ownedProcessId);
+    }); }, CLAIM_HEARTBEAT_MS);
+    heartbeat.unref();
+    if (!(await renewOwnership())) {
+      clearInterval(heartbeat);
+      return { error: "Scheduled execution ownership was lost" };
+    }
     this.activeRuns.set(scheduleId, runId);
 
     let processId: string;
     try {
       processId = await this.processManager.start(executor, cwd, true, claimedProcessId, fingerprint);
+      ownedProcessId = processId;
     } catch (err) {
+      clearInterval(heartbeat);
       this.activeRuns.delete(scheduleId);
       return this.failWithoutStart(task, runId, `Failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    if (processId !== claimedProcessId
-      || !(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, claimedProcessId, this.ownerToken))) {
+    if (ownershipLost || !(await renewOwnership())) {
       await this.processManager.stop(processId);
+      clearInterval(heartbeat);
+      this.activeRuns.delete(scheduleId);
+      return { error: "Scheduled execution ownership was lost" };
+    }
+
+    if (processId !== claimedProcessId) {
+      await this.processManager.stop(processId);
+      clearInterval(heartbeat);
       this.activeRuns.delete(scheduleId);
       return this.failWithoutStart(task, runId, "Failed to confirm the scheduled process claim");
+    }
+    if (!(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, claimedProcessId, this.ownerToken))) {
+      await this.processManager.stop(processId);
+      clearInterval(heartbeat);
+      this.activeRuns.delete(scheduleId);
+      return { error: "Scheduled execution ownership was lost" };
     }
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId, runId });
 
     let output = "";
     let finalized = false;
     let timer: NodeJS.Timeout | undefined;
-    const heartbeat = setInterval(() => {
-      void this.storage.scheduledTaskRuns.heartbeat(runId, this.ownerToken, CLAIM_LEASE_MS);
-    }, CLAIM_HEARTBEAT_MS);
-    heartbeat.unref();
     let unsubscribe: (() => void) | null = null;
 
     // Cancels the timeout timer + process subscription without touching
@@ -293,6 +321,13 @@ export class SchedulerService {
 
     const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null, report?: string) => {
       if (finalized) return;
+      if (ownershipLost) {
+        finalized = true;
+        releaseRunResources();
+        this.activeRuns.delete(scheduleId);
+        this.activeRunCleanups.delete(scheduleId);
+        return;
+      }
       finalized = true;
       releaseRunResources();
       this.activeRuns.delete(scheduleId);
@@ -389,6 +424,25 @@ export class SchedulerService {
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status: "skipped", exitCode: null });
       return { runId, skipped: true };
     }
+    let ownershipLost = false;
+    let ownedRemoteProcessId: string | undefined;
+    const renewOwnership = async () => {
+      try {
+        const renewed = await this.storage.scheduledTaskRuns.heartbeat(runId, this.ownerToken, CLAIM_LEASE_MS);
+        if (!renewed) ownershipLost = true;
+      } catch { ownershipLost = true; }
+      return !ownershipLost;
+    };
+    const heartbeat = setInterval(() => { void renewOwnership().then((owned) => {
+      if (!owned && ownedRemoteProcessId) void proxy(task.target, "POST",
+        `/api/executor-processes/${ownedRemoteProcessId}/stop`, undefined,
+        { reverseConnectManager: this.remote!.reverseConnectManager }).catch(() => undefined);
+    }); }, CLAIM_HEARTBEAT_MS);
+    heartbeat.unref();
+    if (!(await renewOwnership())) {
+      clearInterval(heartbeat);
+      return { error: "Scheduled execution ownership was lost" };
+    }
     this.activeRuns.set(task.id, runId);
 
     let result;
@@ -408,16 +462,26 @@ export class SchedulerService {
         { reverseConnectManager: this.remote.reverseConnectManager },
       );
     } catch (err) {
+      clearInterval(heartbeat);
       this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, `Remote start failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const processId = (result.data as { processId?: unknown } | null)?.processId;
     if (!result.ok || typeof processId !== "string") {
+      clearInterval(heartbeat);
       this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, `Remote start rejected (status ${result.status})`);
     }
     const remoteProcessId = processId;
+    ownedRemoteProcessId = remoteProcessId;
+    if (ownershipLost || !(await renewOwnership())) {
+      await proxy(task.target, "POST", `/api/executor-processes/${remoteProcessId}/stop`, undefined,
+        { reverseConnectManager: this.remote.reverseConnectManager }).catch(() => undefined);
+      clearInterval(heartbeat);
+      this.activeRuns.delete(task.id);
+      return { error: "Scheduled execution ownership was lost" };
+    }
     const localProcessId = `remote-schedule-${task.id}-${remoteProcessId}`;
 
     const remoteInfo: RemoteExecutorInfo = {
@@ -430,17 +494,17 @@ export class SchedulerService {
     this.remote.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
 
     if (!(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, localProcessId, this.ownerToken))) {
+      await proxy(task.target, "POST", `/api/executor-processes/${remoteProcessId}/stop`, undefined,
+        { reverseConnectManager: this.remote.reverseConnectManager }).catch(() => undefined);
+      this.remote.remoteExecutorMap.delete(localProcessId);
+      clearInterval(heartbeat);
       this.activeRuns.delete(task.id);
-      return this.failWithoutStart(task, runId, "Failed to confirm the remote scheduled process claim");
+      return { error: "Scheduled execution ownership was lost" };
     }
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId: task.id, runId });
 
     let finalized = false;
     let timer: NodeJS.Timeout | undefined;
-    const heartbeat = setInterval(() => {
-      void this.storage.scheduledTaskRuns.heartbeat(runId, this.ownerToken, CLAIM_LEASE_MS);
-    }, CLAIM_HEARTBEAT_MS);
-    heartbeat.unref();
     let unsubscribe: (() => void) | undefined;
 
     const releaseRunResources = () => {
@@ -451,6 +515,13 @@ export class SchedulerService {
 
     const finalize = async (status: ScheduledTaskRunStatus, exitCode: number | null, output: string, report?: string) => {
       if (finalized) return;
+      if (ownershipLost) {
+        finalized = true;
+        releaseRunResources();
+        this.activeRuns.delete(task.id);
+        this.activeRunCleanups.delete(task.id);
+        return;
+      }
       finalized = true;
       releaseRunResources();
       this.activeRuns.delete(task.id);

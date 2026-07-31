@@ -58,6 +58,20 @@ describe("project chat storage", () => {
       .resolves.toMatchObject({ malformed: 0 });
   });
 
+  it("increments retry attempts atomically and clears consecutive failures", async () => {
+    await storage.projectChatThreads.create({ id: "retry-thread", project_id: "p1", user_id: "local", title: null });
+    await storage.projectChatOperations.create({ id: "retry-op", thread_id: "retry-thread", project_id: "p1", user_id: "local",
+      kind: "task_create", status: "pending", entity_type: "task", entity_id: "task",
+      idempotency_key: "retry", payload: { version: 1, kind: "task_create", operationId: "retry-op",
+        status: "pending", taskId: "task", title: "Task" }, error: null });
+    const attempts = await Promise.all(Array.from({ length: 5 }, () =>
+      storage.projectChatOperations.recordRetry("retry-op", "retry-thread", "p1", "local", 100)));
+    expect(attempts.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+    await storage.projectChatOperations.clearRetry("retry-op", "retry-thread", "p1", "local");
+    await expect(storage.projectChatOperations.recordRetry("retry-op", "retry-thread", "p1", "local", 100))
+      .resolves.toBe(1);
+  });
+
   it("stores multiple project-scoped threads without a branch property", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
     await storage.projectChatThreads.create({ id: "t2", project_id: "p1", user_id: "u1", title: "Second" });

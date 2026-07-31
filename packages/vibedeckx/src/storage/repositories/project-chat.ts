@@ -697,7 +697,13 @@ export const createProjectChatRepos = (
       let malformed = 0;
       for (const row of pageRows) {
         try {
-          operations.push(mapOperation(row));
+          const operation = mapOperation(row);
+          if ((operation.payload.kind === "task_create" && !operation.payload.title)
+            || (operation.payload.kind === "task_update"
+              && (!operation.payload.patch || !operation.payload.before))) {
+            throw new Error("Legacy task operation is missing recovery intent");
+          }
+          operations.push(operation);
         } catch {
           malformed += 1;
           await kdb.transaction().execute(async (trx) => {
@@ -732,15 +738,21 @@ export const createProjectChatRepos = (
     },
 
     recordRetry: async (id, threadId, projectId, userId, delayMs) => {
-      await kdb.updateTable("project_chat_operations")
+      const row = await kdb.updateTable("project_chat_operations")
         .set({ retry_count: sql`retry_count + 1`, next_retry_at: Date.now() + Math.max(1, delayMs), updated_at: now() })
         .where("id", "=", id).where("thread_id", "=", threadId)
         .where("project_id", "=", projectId).where("user_id", "=", userId)
-        .where("status", "in", ["pending", "resolving", "running"]).execute();
-      const row = await kdb.selectFrom("project_chat_operations").select("retry_count")
-        .where("id", "=", id).where("thread_id", "=", threadId)
-        .where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
+        .where("status", "in", ["pending", "resolving", "running"])
+        .returning("retry_count").executeTakeFirst();
       return row?.retry_count ?? 0;
+    },
+    clearRetry: async (id, threadId, projectId, userId) => {
+      await kdb.updateTable("project_chat_operations")
+        .set({ retry_count: 0, next_retry_at: null, updated_at: now() })
+        .where("id", "=", id).where("thread_id", "=", threadId)
+        .where("project_id", "=", projectId).where("user_id", "=", userId)
+        .where((eb) => eb.or([eb("retry_count", ">", 0), eb("next_retry_at", "is not", null)]))
+        .execute();
     },
 
     announce: async (opts) => kdb.transaction().execute(async (trx) => {

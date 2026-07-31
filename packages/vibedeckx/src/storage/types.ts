@@ -791,6 +791,9 @@ export interface Storage {
     markSent: (opts: {
       sessionId: string; idempotencyKey: string; claimToken: string;
     }) => Promise<boolean>;
+    renewClaim: (opts: {
+      sessionId: string; idempotencyKey: string; claimToken: string; leaseMs?: number;
+    }) => Promise<boolean>;
     release: (opts: {
       sessionId: string; idempotencyKey: string; claimToken: string;
     }) => Promise<void>;
@@ -1102,6 +1105,7 @@ export interface Storage {
       malformed: number;
     }>;
     recordRetry: (id: string, threadId: string, projectId: string, userId: string, delayMs: number) => Promise<number>;
+    clearRetry: (id: string, threadId: string, projectId: string, userId: string) => Promise<void>;
     announce: (opts: {
       id: string;
       thread_id: string;

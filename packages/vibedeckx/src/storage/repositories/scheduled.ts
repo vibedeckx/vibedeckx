@@ -113,9 +113,18 @@ export const createScheduledRepos = (
       if (existing) {
         if (existing.schedule_id !== scheduleId
           || (existing.status === "starting" && existing.process_id !== processId)) return "conflict" as const;
-        const claim = await trx.selectFrom("scheduled_task_execution_claims")
+        let claim = await trx.selectFrom("scheduled_task_execution_claims")
           .selectAll().where("run_id", "=", id).executeTakeFirst();
-        if (!claim || claim.effect_fingerprint !== effectFingerprint) return "conflict" as const;
+        if (!claim) return "conflict" as const;
+        if (claim.effect_fingerprint === "") {
+          const bound = await trx.updateTable("scheduled_task_execution_claims")
+            .set({ effect_fingerprint: effectFingerprint })
+            .where("run_id", "=", id).where("schedule_id", "=", scheduleId)
+            .where("effect_fingerprint", "=", "").executeTakeFirst();
+          if (Number(bound.numUpdatedRows) !== 1) return "conflict" as const;
+          claim = { ...claim, effect_fingerprint: effectFingerprint };
+        }
+        if (claim.effect_fingerprint !== effectFingerprint) return "conflict" as const;
         if (existing.status !== "starting" && existing.status !== "running") return "existing" as const;
         if (claim.owner_token === ownerToken) return "retry" as const;
         if (claim.lease_expires_at > nowMs) return "existing" as const;

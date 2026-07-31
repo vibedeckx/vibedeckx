@@ -37,6 +37,10 @@ describe("agent instruction delivery claims", () => {
     await new Promise((resolve) => setTimeout(resolve, 15));
     await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
       .resolves.toBe("claimed");
+    await expect(storage.agentInstructionDeliveries.renewClaim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
+      .resolves.toBe(true);
+    await expect(storage.agentInstructionDeliveries.renewClaim({ ...input, claimToken: "instance-a", leaseMs: 10 }))
+      .resolves.toBe(false);
     await expect(storage.agentInstructionDeliveries.markSent({
       sessionId: "s1", idempotencyKey: "delivery-1", claimToken: "instance-b",
     })).resolves.toBe(true);

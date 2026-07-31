@@ -570,20 +570,27 @@ export class AgentSessionManager {
     force: boolean = false,
     opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null } = {},
   ): Promise<string> {
-    await this.ensureResidentCapacity({ projectId, branch }, { force });
-
     // The caller may supply the id so it can mint a session-scoped token before spawn.
     const sessionId = opts.sessionId ?? randomUUID();
     const branchKey = branch ?? "";
     const model = opts.model?.trim() ? opts.model.trim() : null;
 
+    const active = opts.sessionId ? this.sessions.get(sessionId) : undefined;
+    if (active) {
+      if (active.projectId !== projectId || active.branch !== branch
+        || active.permissionMode !== permissionMode || active.agentType !== agentType
+        || (active.model ?? null) !== model || active.skipDb !== skipDb) {
+        throw new Error("Session identity is already in use");
+      }
+      return this.reuseExistingSession(active, projectPath);
+    }
     if (this.sessions.has(sessionId)) {
       throw new Error("Session identity is already active");
     }
     const stored = !skipDb && opts.sessionId
       ? await this.storage.agentSessions.getById(sessionId)
       : undefined;
-    if (stored && (stored.status !== "running"
+    if (stored && (!(["running", "stopped"] as string[]).includes(stored.status)
       || stored.project_id !== projectId
       || stored.branch !== branchKey
       || stored.permission_mode !== permissionMode
@@ -591,6 +598,8 @@ export class AgentSessionManager {
       || (stored.model ?? null) !== model)) {
       throw new Error("Session identity is already in use");
     }
+
+    await this.ensureResidentCapacity({ projectId, branch }, { force });
 
     // Calculate absolute worktree path
     const absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
@@ -610,16 +619,16 @@ export class AgentSessionManager {
       await recordTurnSnapshot(this.storage, sessionId, -1, absoluteWorktreePath);
     }
 
-    // Initialize message store with EntryIndexProvider
-    const indexProvider = new EntryIndexProvider();
-
-    const store: MessageStore = {
-      patches: [],
-      entries: [],
-      indexProvider,
-      toolTracker: new EntryTracker(indexProvider),
-      currentAssistantIndex: null,
-    };
+    // Explicit durable recovery keeps any transcript rows. Zero-entry rows get
+    // the same fresh store as a newly allocated session, but retain identity.
+    const storedEntries = stored ? await this.storage.agentSessions.getEntries(sessionId) : [];
+    const store: MessageStore = storedEntries.length > 0
+      ? this.rebuildStoreFromRows(storedEntries, sessionId)
+      : (() => {
+        const indexProvider = new EntryIndexProvider();
+        return { patches: [], entries: [], indexProvider,
+          toolTracker: new EntryTracker(indexProvider), currentAssistantIndex: null };
+      })();
 
     // Initialize running session
     const session: RunningSession = {
@@ -717,7 +726,7 @@ export class AgentSessionManager {
     // conversation. sendUserMessage flips status back to "running" and writes
     // to stdin on the next turn.
     const processAlive = session.process != null && session.process.exitCode === null;
-    if (session.status === "running" || processAlive) {
+    if (processAlive) {
       console.log(`[AgentSession] Returning existing session ${session.id} (status=${session.status}, processAlive=${processAlive}, entries=${entriesCount})`);
       return session.id;
     }

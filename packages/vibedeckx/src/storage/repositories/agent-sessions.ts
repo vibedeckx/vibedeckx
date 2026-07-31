@@ -292,6 +292,14 @@ export const createAgentSessionRepos = (
         .executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
     },
+    renewClaim: async ({ sessionId, idempotencyKey, claimToken, leaseMs = 30_000 }) => {
+      const result = await kdb.updateTable("agent_instruction_deliveries")
+        .set({ lease_expires_at: Date.now() + leaseMs, updated_at: h.nowMs() })
+        .where("session_id", "=", sessionId).where("idempotency_key", "=", idempotencyKey)
+        .where("status", "=", "pending").where("owner_token", "=", claimToken)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
     release: async ({ sessionId, idempotencyKey, claimToken }) => {
       await kdb.updateTable("agent_instruction_deliveries")
         .set({ claim_token: null, owner_token: null, lease_expires_at: null, updated_at: h.nowMs() })
