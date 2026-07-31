@@ -263,6 +263,30 @@ export interface ProjectChatContextRef {
   last_referenced_at: string;
 }
 
+export type ProjectChatOperationKind =
+  | "task_create"
+  | "task_update"
+  | "agent_session_create"
+  | "agent_instruction"
+  | "schedule_run"
+  | "workspace_selection";
+
+export type ProjectChatOperationStatus = "pending" | "running" | "completed" | "failed";
+
+export interface ProjectChatOperation {
+  id: string;
+  thread_id: string;
+  kind: ProjectChatOperationKind;
+  status: ProjectChatOperationStatus;
+  entity_type: ProjectChatContextEntityType | null;
+  entity_id: string | null;
+  idempotency_key: string;
+  payload: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Rule {
   id: string;
   project_id: string;
@@ -1014,6 +1038,40 @@ export interface Storage {
       refs: Array<{ entityType: ProjectChatContextEntityType; entityId: string }>,
     ) => Promise<ProjectChatContextRef[] | undefined>;
     listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatContextRef[]>;
+  };
+  projectChatOperations: {
+    create: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      kind: ProjectChatOperationKind;
+      status: ProjectChatOperationStatus;
+      entity_type: ProjectChatContextEntityType | null;
+      entity_id: string | null;
+      idempotency_key: string;
+      payload: string;
+      error: string | null;
+    }) => Promise<ProjectChatOperation | undefined>;
+    getById: (
+      id: string, threadId: string, projectId: string, userId: string,
+    ) => Promise<ProjectChatOperation | undefined>;
+    listByCorrelation: (
+      projectId: string,
+      entityType: ProjectChatContextEntityType,
+      entityId: string,
+      limit: number,
+    ) => Promise<Array<ProjectChatOperation & { project_id: string; user_id: string }>>;
+    transition: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      status: ProjectChatOperationStatus;
+      payload: string;
+      error: string | null;
+      message: { id: string; content: string };
+    }) => Promise<{ operation: ProjectChatOperation; message: ProjectChatMessage; changed: boolean } | undefined>;
   };
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;

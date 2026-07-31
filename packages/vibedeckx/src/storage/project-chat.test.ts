@@ -298,6 +298,94 @@ describe("project chat storage", () => {
     }
   });
 
+  it("migrates operation correlations with exact indexes and thread cascade", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+
+    const db = new Database(dbPath);
+    try {
+      db.prepare(`
+        INSERT INTO project_chat_operations
+          (id, thread_id, kind, status, entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        "op1", "t1", "agent_session_create", "running", "agent_session", "s1", "idem-1",
+        JSON.stringify({ version: 1, kind: "agent_session_create", sessionId: "s1" }),
+      );
+      const indexes = db.prepare(`
+        SELECT name FROM pragma_index_list('project_chat_operations')
+        WHERE name LIKE 'idx_project_chat_operations_%'
+        ORDER BY name
+      `).all() as Array<{ name: string }>;
+      expect(indexes.map(({ name }) => name)).toContain(
+        "idx_project_chat_operations_entity_correlation",
+      );
+    } finally {
+      db.close();
+    }
+
+    await storage.projectChatThreads.delete("t1", "p1", "u1");
+    const verify = new Database(dbPath, { readonly: true });
+    try {
+      expect(verify.prepare("SELECT count(*) AS count FROM project_chat_operations").get())
+        .toEqual({ count: 0 });
+    } finally {
+      verify.close();
+    }
+
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+  });
+
+  it("authorizes, bounds, and monotonically updates operation correlations", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatThreads.create({ id: "t2", project_id: "p1", user_id: "u2", title: null });
+
+    const created = await storage.projectChatOperations.create({
+      id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      kind: "agent_session_create", status: "running", entity_type: "agent_session",
+      entity_id: "s1", idempotency_key: "idem-1",
+      payload: JSON.stringify({ version: 1, kind: "agent_session_create", sessionId: "s1" }),
+      error: null,
+    });
+    expect(created).toMatchObject({ id: "op1", thread_id: "t1", status: "running" });
+    expect(await storage.projectChatOperations.create({
+      id: "foreign", thread_id: "t1", project_id: "p2", user_id: "u1",
+      kind: "agent_session_create", status: "running", entity_type: "agent_session",
+      entity_id: "s1", idempotency_key: "foreign",
+      payload: "{}", error: null,
+    })).toBeUndefined();
+    expect(await storage.projectChatOperations.getById("op1", "t1", "p1", "u2"))
+      .toBeUndefined();
+
+    expect((await storage.projectChatOperations.listByCorrelation(
+      "p1", "agent_session", "s1", 1,
+    )).map(({ id }) => id)).toEqual(["op1"]);
+
+    const terminal = await storage.projectChatOperations.transition({
+      id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      status: "completed", payload: JSON.stringify({
+        version: 1, kind: "agent_session_create", sessionId: "s1", status: "completed",
+      }), error: null,
+      message: { id: "operation:op1:completed", content: JSON.stringify({
+        version: 1, kind: "agent_session_create", operationId: "op1", status: "completed",
+      }) },
+    });
+    expect(terminal?.changed).toBe(true);
+    const duplicate = await storage.projectChatOperations.transition({
+      id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      status: "completed", payload: terminal!.operation.payload, error: null,
+      message: { id: "operation:op1:completed", content: terminal!.message.content },
+    });
+    expect(duplicate?.changed).toBe(false);
+    expect(await storage.projectChatOperations.transition({
+      id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      status: "running", payload: "{}", error: null,
+      message: { id: "operation:op1:running-late", content: "{}" },
+    })).toBeUndefined();
+    expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1"))
+      .filter(({ type }) => type === "operation")).toHaveLength(1);
+  });
+
   it("accepts public operation messages while rejecting invalid SQL-boundary types", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
     await expect(storage.projectChatMessages.append({

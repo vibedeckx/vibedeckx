@@ -3,12 +3,14 @@ import type {
   DB,
   ProjectChatContextRefsTable,
   ProjectChatMessagesTable,
+  ProjectChatOperationsTable,
   ProjectChatThreadsTable,
   ProjectChatWorkItemsTable,
 } from "../schema.js";
 import type {
   ProjectChatContextRef,
   ProjectChatMessage,
+  ProjectChatOperation,
   ProjectChatThread,
   ProjectChatWorkItem,
   Storage,
@@ -24,9 +26,11 @@ const mapWorkItem = (row: Selectable<ProjectChatWorkItemsTable>): ProjectChatWor
 
 const mapContextRef = (row: Selectable<ProjectChatContextRefsTable>): ProjectChatContextRef => row;
 
+const mapOperation = (row: Selectable<ProjectChatOperationsTable>): ProjectChatOperation => row;
+
 export const createProjectChatRepos = (
   kdb: Kysely<DB>,
-): Pick<Storage, "projectChatThreads" | "projectChatMessages" | "projectChatWorkItems" | "projectChatContextRefs"> => ({
+): Pick<Storage, "projectChatThreads" | "projectChatMessages" | "projectChatWorkItems" | "projectChatContextRefs" | "projectChatOperations"> => ({
   projectChatThreads: {
     create: async ({ id, project_id, user_id, title }) => {
       await kdb.insertInto("project_chat_threads")
@@ -513,5 +517,120 @@ export const createProjectChatRepos = (
         .execute();
       return rows.map(mapContextRef);
     },
+  },
+
+  projectChatOperations: {
+    create: async (opts) => {
+      const result = await kdb.insertInto("project_chat_operations")
+        .columns([
+          "id", "thread_id", "kind", "status", "entity_type", "entity_id",
+          "idempotency_key", "payload", "error",
+        ])
+        .expression((eb) => eb.selectFrom("project_chat_threads")
+          .select([
+            sql<string>`${opts.id}`.as("id"),
+            sql<string>`${opts.thread_id}`.as("thread_id"),
+            sql<typeof opts.kind>`${opts.kind}`.as("kind"),
+            sql<typeof opts.status>`${opts.status}`.as("status"),
+            sql<typeof opts.entity_type>`${opts.entity_type}`.as("entity_type"),
+            sql<string | null>`${opts.entity_id}`.as("entity_id"),
+            sql<string>`${opts.idempotency_key}`.as("idempotency_key"),
+            sql<string>`${opts.payload}`.as("payload"),
+            sql<string | null>`${opts.error}`.as("error"),
+          ])
+          .where("id", "=", opts.thread_id)
+          .where("project_id", "=", opts.project_id)
+          .where("user_id", "=", opts.user_id))
+        .onConflict((conflict) => conflict.columns(["thread_id", "idempotency_key"]).doNothing())
+        .executeTakeFirst();
+      if (result.numInsertedOrUpdatedRows === 0n) {
+        const existing = await kdb.selectFrom("project_chat_operations as operation")
+          .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+          .selectAll("operation")
+          .where("operation.thread_id", "=", opts.thread_id)
+          .where("operation.idempotency_key", "=", opts.idempotency_key)
+          .where("thread.project_id", "=", opts.project_id)
+          .where("thread.user_id", "=", opts.user_id)
+          .executeTakeFirst();
+        return existing ? mapOperation(existing) : undefined;
+      }
+      const row = await kdb.selectFrom("project_chat_operations")
+        .selectAll().where("id", "=", opts.id).executeTakeFirstOrThrow();
+      return mapOperation(row);
+    },
+
+    getById: async (id, threadId, projectId, userId) => {
+      const row = await kdb.selectFrom("project_chat_operations as operation")
+        .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+        .selectAll("operation")
+        .where("operation.id", "=", id)
+        .where("operation.thread_id", "=", threadId)
+        .where("thread.project_id", "=", projectId)
+        .where("thread.user_id", "=", userId)
+        .executeTakeFirst();
+      return row ? mapOperation(row) : undefined;
+    },
+
+    listByCorrelation: async (projectId, entityType, entityId, limit) => {
+      const rows = await kdb.selectFrom("project_chat_operations as operation")
+        .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+        .selectAll("operation")
+        .select(["thread.project_id", "thread.user_id"])
+        .where("thread.project_id", "=", projectId)
+        .where("operation.entity_type", "=", entityType)
+        .where("operation.entity_id", "=", entityId)
+        .orderBy("operation.created_at", "asc")
+        .orderBy("operation.id", "asc")
+        .limit(Math.max(0, Math.min(limit, 100)))
+        .execute();
+      return rows.map((row) => ({ ...mapOperation(row), project_id: row.project_id, user_id: row.user_id }));
+    },
+
+    transition: async (opts) => kdb.transaction().execute(async (trx) => {
+      const row = await trx.selectFrom("project_chat_operations as operation")
+        .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+        .selectAll("operation")
+        .where("operation.id", "=", opts.id)
+        .where("operation.thread_id", "=", opts.thread_id)
+        .where("thread.project_id", "=", opts.project_id)
+        .where("thread.user_id", "=", opts.user_id)
+        .executeTakeFirst();
+      if (!row) return undefined;
+      const terminal = row.status === "completed" || row.status === "failed";
+      if (terminal && row.status !== opts.status) return undefined;
+      if (row.status === opts.status) {
+        const existingMessage = await trx.selectFrom("project_chat_messages")
+          .selectAll().where("id", "=", opts.message.id)
+          .where("thread_id", "=", opts.thread_id).executeTakeFirst();
+        if (!existingMessage) return undefined;
+        return { operation: mapOperation(row), message: mapMessage(existingMessage), changed: false };
+      }
+
+      const allowed = (row.status === "pending" && ["running", "completed", "failed"].includes(opts.status))
+        || (row.status === "running" && ["completed", "failed"].includes(opts.status));
+      if (!allowed) return undefined;
+      const sequenceRow = await trx.selectFrom("project_chat_messages")
+        .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+        .where("thread_id", "=", opts.thread_id).executeTakeFirstOrThrow();
+      await trx.insertInto("project_chat_messages").values({
+        id: opts.message.id,
+        thread_id: opts.thread_id,
+        sequence: Number(sequenceRow.sequence) + 1,
+        type: "operation",
+        content: opts.message.content,
+      }).execute();
+      const updated = await trx.updateTable("project_chat_operations")
+        .set({ status: opts.status, payload: opts.payload, error: opts.error, updated_at: now() })
+        .where("id", "=", opts.id)
+        .where("thread_id", "=", opts.thread_id)
+        .where("status", "=", row.status)
+        .returningAll().executeTakeFirst();
+      if (!updated) throw new Error("Project Chat operation changed concurrently");
+      await trx.updateTable("project_chat_threads")
+        .set({ updated_at: now() }).where("id", "=", opts.thread_id).execute();
+      const message = await trx.selectFrom("project_chat_messages")
+        .selectAll().where("id", "=", opts.message.id).executeTakeFirstOrThrow();
+      return { operation: mapOperation(updated), message: mapMessage(message), changed: true };
+    }),
   },
 });

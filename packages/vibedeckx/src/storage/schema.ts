@@ -2,6 +2,8 @@ import type { ColumnType, Generated } from "kysely";
 import type {
   ProjectChatContextEntityType,
   ProjectChatMessageType,
+  ProjectChatOperationKind,
+  ProjectChatOperationStatus,
   ProjectChatWorkStatus,
 } from "./types.js";
 
@@ -179,6 +181,20 @@ export interface ProjectChatContextRefsTable {
   entity_type: ProjectChatContextEntityType;
   entity_id: string;
   last_referenced_at: Generated<string>;
+}
+
+export interface ProjectChatOperationsTable {
+  id: string;
+  thread_id: string;
+  kind: ProjectChatOperationKind;
+  status: ProjectChatOperationStatus;
+  entity_type: ProjectChatContextEntityType | null;
+  entity_id: string | null;
+  idempotency_key: string;
+  payload: string;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
 }
 
 export interface RulesTable {
@@ -402,6 +418,7 @@ export interface DB {
   project_chat_messages: ProjectChatMessagesTable;
   project_chat_work_items: ProjectChatWorkItemsTable;
   project_chat_context_refs: ProjectChatContextRefsTable;
+  project_chat_operations: ProjectChatOperationsTable;
   rules: RulesTable;
   commands: CommandsTable;
   global_settings: GlobalSettingsTable;
