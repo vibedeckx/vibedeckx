@@ -186,7 +186,10 @@ export interface ProjectChatContextRefsTable {
 export interface ProjectChatOperationsTable {
   id: string;
   thread_id: string;
+  project_id: string;
+  user_id: string;
   kind: ProjectChatOperationKind;
+  payload_version: 1;
   status: ProjectChatOperationStatus;
   entity_type: ProjectChatContextEntityType | null;
   entity_id: string | null;

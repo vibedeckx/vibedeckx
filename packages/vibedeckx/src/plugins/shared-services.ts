@@ -126,12 +126,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
                 input.agentType, true, false, { sessionId: input.sessionId, model: input.model },
               );
             }
-            const alreadySent = agentSessionManager.getMessages(input.sessionId).some((message) => {
-              if (!message || typeof message !== "object") return false;
-              const candidate = message as { type?: unknown; content?: unknown };
-              return candidate.type === "user" && candidate.content === input.instruction;
-            });
-            if (!alreadySent && !(await agentSessionManager.sendUserMessage(
+            // Local stdin has no acknowledgement protocol. Retrying a durable
+            // unconfirmed operation is intentionally at-least-once: a crash
+            // after write may duplicate, but transcript persistence is never
+            // treated as proof that stdin accepted the command.
+            if (!(await agentSessionManager.sendUserMessage(
               input.sessionId, input.instruction, project.path, input.userId,
             ))) throw new Error("Agent session did not accept its initial instruction");
             return { sessionId: input.sessionId };
@@ -159,26 +158,12 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             mapping = await opts.storage.remoteSessionMappings.getByLocal(input.sessionId);
           }
           if (!mapping) throw new Error("Remote session mapping was not persisted");
-          const detail = await proxyToRemoteAuto(
-            mapping.remote_server_id, "GET",
-            `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}`,
-            undefined, { reverseConnectManager },
+          const sent = await proxyToRemoteAuto(
+            mapping.remote_server_id, "POST",
+            `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
+            { content: input.instruction, idempotencyKey: input.idempotencyKey }, { reverseConnectManager },
           );
-          const messages = detail.ok && detail.data && typeof detail.data === "object"
-            ? (detail.data as { messages?: unknown }).messages : undefined;
-          const alreadySent = Array.isArray(messages) && messages.some((message) => {
-            if (!message || typeof message !== "object") return false;
-            const candidate = message as { type?: unknown; content?: unknown };
-            return candidate.type === "user" && candidate.content === input.instruction;
-          });
-          if (!alreadySent) {
-            const sent = await proxyToRemoteAuto(
-              mapping.remote_server_id, "POST",
-              `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
-              { content: input.instruction }, { reverseConnectManager },
-            );
-            if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
-          }
+          if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
           return { sessionId: input.sessionId };
         },
         sendAgentInstruction: async (input) => {
@@ -191,7 +176,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
           const result = await proxyToRemoteAuto(
             input.target.remoteServerId, "POST",
             `/api/agent-sessions/${encodeURIComponent(input.target.remoteSessionId)}/message`,
-            { content: input.instruction }, { reverseConnectManager },
+            { content: input.instruction, idempotencyKey: input.idempotencyKey }, { reverseConnectManager },
           );
           return result.ok;
         },

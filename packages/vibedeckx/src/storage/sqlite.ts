@@ -104,28 +104,34 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE TABLE IF NOT EXISTS project_chat_operations (
       id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 512),
       thread_id TEXT NOT NULL CHECK (length(thread_id) BETWEEN 1 AND 512),
+      project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 512),
+      user_id TEXT NOT NULL CHECK (length(user_id) BETWEEN 1 AND 512),
       kind TEXT NOT NULL CHECK (kind IN (
         'task_create', 'task_update', 'agent_session_create',
         'agent_instruction', 'schedule_run', 'workspace_selection'
       )),
+      payload_version INTEGER NOT NULL CHECK (payload_version = 1),
       status TEXT NOT NULL CHECK (status IN (
-        'pending', 'running', 'completed', 'failed'
+        'pending', 'resolving', 'running', 'completed', 'failed'
       )),
       entity_type TEXT CHECK (entity_type IS NULL OR entity_type IN (
         'task', 'workspace', 'agent_session', 'schedule', 'schedule_run'
       )),
       entity_id TEXT CHECK (entity_id IS NULL OR length(entity_id) BETWEEN 1 AND 512),
       idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 512),
-      payload TEXT NOT NULL CHECK (length(payload) <= 32768),
+      payload TEXT NOT NULL CHECK (
+        length(payload) <= 32768 AND json_valid(payload)
+        AND coalesce(json_type(payload, '$.version') = 'integer', 0)
+        AND coalesce(json_type(payload, '$.kind') = 'text', 0)
+        AND json_extract(payload, '$.version') = payload_version
+        AND json_extract(payload, '$.kind') = kind
+      ),
       error TEXT CHECK (error IS NULL OR length(error) <= 1024),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(thread_id, idempotency_key),
       FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE
     );
-
-    CREATE INDEX IF NOT EXISTS idx_project_chat_operations_entity_correlation
-      ON project_chat_operations(entity_type, entity_id, status, thread_id, id);
 
     CREATE INDEX IF NOT EXISTS idx_project_chat_operations_thread_status_created_id
       ON project_chat_operations(thread_id, status, created_at, id);
@@ -313,6 +319,95 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     );
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
+  `);
+
+  // Project Chat mutation journal v2: persist immutable scope and an
+  // independently constrained payload version. Task 5 intermediate databases
+  // had neither column, so rebuild and backfill from the authoritative thread.
+  const projectChatOperationInfo = db.prepare("PRAGMA table_info(project_chat_operations)").all() as { name: string }[];
+  if (!projectChatOperationInfo.some((column) => column.name === "project_id")) {
+    db.transaction(() => db.exec(`
+      DROP INDEX IF EXISTS idx_project_chat_operations_entity_correlation;
+      DROP INDEX IF EXISTS idx_project_chat_operations_thread_status_created_id;
+      ALTER TABLE project_chat_operations RENAME TO project_chat_operations_v1;
+      CREATE TABLE project_chat_operations (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 512),
+        thread_id TEXT NOT NULL CHECK (length(thread_id) BETWEEN 1 AND 512),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 512),
+        user_id TEXT NOT NULL CHECK (length(user_id) BETWEEN 1 AND 512),
+        kind TEXT NOT NULL CHECK (kind IN (
+          'task_create', 'task_update', 'agent_session_create',
+          'agent_instruction', 'schedule_run', 'workspace_selection'
+        )),
+        payload_version INTEGER NOT NULL CHECK (payload_version = 1),
+        status TEXT NOT NULL CHECK (status IN (
+          'pending', 'resolving', 'running', 'completed', 'failed'
+        )),
+        entity_type TEXT CHECK (entity_type IS NULL OR entity_type IN (
+          'task', 'workspace', 'agent_session', 'schedule', 'schedule_run'
+        )),
+        entity_id TEXT CHECK (entity_id IS NULL OR length(entity_id) BETWEEN 1 AND 512),
+        idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 512),
+        payload TEXT NOT NULL CHECK (
+          length(payload) <= 32768 AND json_valid(payload)
+          AND coalesce(json_type(payload, '$.version') = 'integer', 0)
+          AND coalesce(json_type(payload, '$.kind') = 'text', 0)
+          AND json_extract(payload, '$.version') = payload_version
+          AND json_extract(payload, '$.kind') = kind
+        ),
+        error TEXT CHECK (error IS NULL OR length(error) <= 1024),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(thread_id, idempotency_key),
+        FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE
+      );
+      INSERT INTO project_chat_operations
+        (id, thread_id, project_id, user_id, kind, payload_version, status,
+         entity_type, entity_id, idempotency_key, payload, error, created_at, updated_at)
+      SELECT operation.id, operation.thread_id, thread.project_id, thread.user_id,
+             operation.kind, 1, operation.status, operation.entity_type,
+             operation.entity_id, operation.idempotency_key, operation.payload,
+             operation.error, operation.created_at, operation.updated_at
+        FROM project_chat_operations_v1 operation
+        JOIN project_chat_threads thread ON thread.id = operation.thread_id;
+      DROP TABLE project_chat_operations_v1;
+      CREATE INDEX idx_project_chat_operations_entity_correlation
+        ON project_chat_operations(project_id, entity_type, entity_id, status, id);
+      CREATE INDEX idx_project_chat_operations_thread_status_created_id
+        ON project_chat_operations(thread_id, status, created_at, id);
+    `))();
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_project_chat_operations_entity_correlation
+      ON project_chat_operations(project_id, entity_type, entity_id, status, id);
+    DROP TRIGGER IF EXISTS project_chat_operations_scope_insert;
+    DROP TRIGGER IF EXISTS project_chat_operations_scope_update;
+    DROP TRIGGER IF EXISTS project_chat_operations_immutable;
+    CREATE TRIGGER project_chat_operations_scope_insert
+      BEFORE INSERT ON project_chat_operations
+      WHEN NOT EXISTS (
+        SELECT 1 FROM project_chat_threads thread
+         WHERE thread.id = NEW.thread_id
+           AND thread.project_id = NEW.project_id
+           AND thread.user_id = NEW.user_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'project chat operation scope mismatch'); END;
+    CREATE TRIGGER project_chat_operations_scope_update
+      BEFORE UPDATE ON project_chat_operations
+      WHEN NOT EXISTS (
+        SELECT 1 FROM project_chat_threads thread
+         WHERE thread.id = NEW.thread_id
+           AND thread.project_id = NEW.project_id
+           AND thread.user_id = NEW.user_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'project chat operation scope mismatch'); END;
+    CREATE TRIGGER project_chat_operations_immutable
+      BEFORE UPDATE ON project_chat_operations
+      WHEN OLD.id != NEW.id OR OLD.thread_id != NEW.thread_id
+        OR OLD.project_id != NEW.project_id OR OLD.user_id != NEW.user_id
+        OR OLD.kind != NEW.kind OR OLD.payload_version != NEW.payload_version
+        OR OLD.idempotency_key != NEW.idempotency_key
+      BEGIN SELECT RAISE(ABORT, 'project chat operation immutable fields changed'); END;
   `);
 
   const projectChatWorkInfo = db.prepare("PRAGMA table_info(project_chat_work_items)").all() as { name: string }[];

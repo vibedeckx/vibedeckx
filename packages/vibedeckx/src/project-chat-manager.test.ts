@@ -62,7 +62,7 @@ describe("ProjectChatManager", () => {
       id: operationId, thread_id: threadId, project_id: "project-1", user_id: "user-1",
       kind, status: "running", entity_type: entityType, entity_id: entityId,
       idempotency_key: operationId,
-      payload: JSON.stringify({ version: 1, kind, operationId, status: "running", ...details }),
+      payload: { version: 1, kind, operationId, status: "running", ...details } as never,
       error: null,
     });
   }
@@ -107,6 +107,17 @@ describe("ProjectChatManager", () => {
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("project-scoped");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("multiple workspaces");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("does not belong to a branch or workspace");
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/create.*task/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/update.*task/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/agent session/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/instruction/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/run.*schedule/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).not.toMatch(/read-only|never claim to have changed/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/no delete/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/no .*worktree/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/no .*schedule configuration/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/no .*stop/i);
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toMatch(/no Git/i);
   });
 
   it("persists a matching session event only to its correlated thread and ignores foreign or stale events", async () => {
@@ -198,6 +209,91 @@ describe("ProjectChatManager", () => {
       type: "session:taskCompleted", projectId: "project-1", branch: "dev", sessionId: "session-1",
     })).toBeUndefined();
     expect(subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles missed terminal session and schedule events on startup without a subscriber", async () => {
+    await createThread("thread-1");
+    await storage.agentSessions.create({ id: "session-1", project_id: "project-1", branch: "dev" });
+    await storage.agentSessions.updateStatus("session-1", "error");
+    await storage.scheduledTasks.create({
+      id: "schedule-1", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project",
+    });
+    await storage.scheduledTaskRuns.create({ id: "run-1", schedule_id: "schedule-1", status: "running" });
+    await storage.scheduledTaskRuns.finish("run-1", { status: "completed", exit_code: 0 });
+    await correlate("thread-1", "session-op", "agent_session_create", "agent_session", "session-1", { sessionId: "session-1" });
+    await correlate("thread-1", "run-op", "schedule_run", "schedule_run", "run-1", { scheduleId: "schedule-1", runId: "run-1" });
+
+    const manager = new ProjectChatManager(storage, reply("unused"), { eventBus: new EventBus() });
+    await manager.ready();
+    expect((await storage.projectChatOperations.getById("session-op", "thread-1", "project-1", "user-1"))?.status)
+      .toBe("failed");
+    expect((await storage.projectChatOperations.getById("run-op", "thread-1", "project-1", "user-1"))?.status)
+      .toBe("completed");
+    expect((await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
+      .filter(({ type }) => type === "operation")).toHaveLength(2);
+    await manager.shutdown();
+  });
+
+  it("resumes pending creates, runs, and unconfirmed instruction delivery with stable identities", async () => {
+    await createThread("thread-1");
+    await storage.agentSessions.create({ id: "already-created", project_id: "project-1", branch: "dev" });
+    await storage.scheduledTasks.create({
+      id: "schedule-1", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project",
+    });
+    const sessionPayload = (operationId: string, sessionId: string) => ({
+      version: 1 as const, kind: "agent_session_create" as const, operationId, status: "pending" as const,
+      sessionId, workspaceId: JSON.stringify(["local", "dev"]), target: "local", branch: "dev",
+      instruction: "Implement", permissionMode: "edit", agentType: "claude-code", model: null,
+    });
+    for (const [id, sessionId] of [["before-effect", "new-session"], ["after-effect", "already-created"]] as const) {
+      await storage.projectChatOperations.create({
+        id, thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+        kind: "agent_session_create", status: "pending", entity_type: "agent_session", entity_id: sessionId,
+        idempotency_key: `session:${sessionId}`, payload: sessionPayload(id, sessionId), error: null,
+      });
+    }
+    await storage.projectChatOperations.create({
+      id: "pending-run", thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+      kind: "schedule_run", status: "pending", entity_type: "schedule_run", entity_id: "run-1",
+      idempotency_key: "run-1", payload: { version: 1, kind: "schedule_run", operationId: "pending-run", status: "pending", scheduleId: "schedule-1", runId: "run-1" }, error: null,
+    });
+    await storage.projectChatOperations.create({
+      id: "pending-send", thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+      kind: "agent_instruction", status: "running", entity_type: "agent_session", entity_id: "already-created",
+      idempotency_key: "send-key", payload: { version: 1, kind: "agent_instruction", operationId: "pending-send", status: "running", sessionId: "already-created", instruction: "Continue", target: "local", delivery: "pending" }, error: null,
+    });
+    const createAgentSession = vi.fn(async ({ sessionId }) => {
+      if (!(await storage.agentSessions.getById(sessionId))) {
+        await storage.agentSessions.create({ id: sessionId, project_id: "project-1", branch: "dev" });
+      }
+      return { sessionId };
+    });
+    const sendAgentInstruction = vi.fn(async () => true);
+    const runScheduleNow = vi.fn(async (_scheduleId, runId) => {
+      await storage.scheduledTaskRuns.create({ id: runId, schedule_id: "schedule-1", status: "running" });
+      return { runId, skipped: false } as const;
+    });
+    const manager = new ProjectChatManager(storage, reply("unused"), {
+      eventBus: new EventBus(),
+      toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => false },
+        mutationServices: { createAgentSession, sendAgentInstruction, runScheduleNow },
+      },
+    });
+    await manager.ready();
+    expect(createAgentSession).toHaveBeenCalledTimes(2);
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "new-session", idempotencyKey: "session:new-session" }));
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "already-created", idempotencyKey: "session:already-created" }));
+    expect(sendAgentInstruction).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "send-key" }));
+    expect(runScheduleNow).toHaveBeenCalledWith("schedule-1", "run-1");
+    for (const id of ["before-effect", "after-effect", "pending-run"]) {
+      expect((await storage.projectChatOperations.getById(id, "thread-1", "project-1", "user-1"))?.status).toBe("running");
+    }
+    expect((await storage.projectChatOperations.getById("pending-send", "thread-1", "project-1", "user-1"))?.status)
+      .toBe("completed");
+    await manager.shutdown();
   });
 
   it("fails the turn when the production fullStream adapter receives an error part", async () => {

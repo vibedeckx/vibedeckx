@@ -305,11 +305,11 @@ describe("project chat storage", () => {
     try {
       db.prepare(`
         INSERT INTO project_chat_operations
-          (id, thread_id, kind, status, entity_type, entity_id, idempotency_key, payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (id, thread_id, project_id, user_id, kind, payload_version, status, entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, 'p1', 'u1', ?, 1, ?, ?, ?, ?, ?)
       `).run(
         "op1", "t1", "agent_session_create", "running", "agent_session", "s1", "idem-1",
-        JSON.stringify({ version: 1, kind: "agent_session_create", sessionId: "s1" }),
+        JSON.stringify({ version: 1, kind: "agent_session_create", operationId: "op1", status: "running", sessionId: "s1" }),
       );
       const indexes = db.prepare(`
         SELECT name FROM pragma_index_list('project_chat_operations')
@@ -321,9 +321,11 @@ describe("project chat storage", () => {
       );
       expect(() => db.prepare(`
         INSERT INTO project_chat_operations
-          (id, thread_id, kind, status, entity_type, entity_id, idempotency_key, payload)
-        VALUES (?, ?, 'task_create', 'pending', 'task', ?, ?, ?)
-      `).run("oversized", "t1", "task", "oversized", "x".repeat(32_769)))
+          (id, thread_id, project_id, user_id, kind, payload_version, status, entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, 'p1', 'u1', 'task_create', 1, 'pending', 'task', ?, ?, ?)
+      `).run("oversized", "t1", "task", "oversized", JSON.stringify({
+        version: 1, kind: "task_create", operationId: "oversized", status: "pending", taskId: "task", padding: "x".repeat(32_769),
+      })))
         .toThrow(/CHECK constraint failed/);
     } finally {
       db.close();
@@ -342,6 +344,124 @@ describe("project chat storage", () => {
     storage = await createSqliteStorage(dbPath);
   });
 
+  it("stores immutable operation scope and independently constrained payload versions", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    const db = new Database(dbPath);
+    try {
+      const columns = db.prepare("PRAGMA table_info(project_chat_operations)").all() as Array<{ name: string; notnull: number }>;
+      expect(columns.find(({ name }) => name === "project_id")?.notnull).toBe(1);
+      expect(columns.find(({ name }) => name === "user_id")?.notnull).toBe(1);
+      expect(columns.find(({ name }) => name === "payload_version")?.notnull).toBe(1);
+      const index = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?")
+        .get("idx_project_chat_operations_entity_correlation") as { sql: string };
+      expect(index.sql.replace(/\s+/g, " ")).toContain(
+        "project_id, entity_type, entity_id, status, id",
+      );
+      expect(() => db.prepare(`
+        INSERT INTO project_chat_operations
+          (id, thread_id, project_id, user_id, kind, payload_version, status,
+           entity_type, entity_id, idempotency_key, payload)
+        VALUES ('bad-json', 't1', 'p1', 'u1', 'task_create', 1, 'pending',
+                'task', 'task-1', 'bad-json', '{}')
+      `).run()).toThrow(/constraint|payload/i);
+      expect(() => db.prepare(`
+        INSERT INTO project_chat_operations
+          (id, thread_id, project_id, user_id, kind, payload_version, status,
+           entity_type, entity_id, idempotency_key, payload)
+        VALUES ('bad-version', 't1', 'p1', 'u1', 'task_create', 2, 'pending',
+                'task', 'task-1', 'bad-version', json_object('version',2,'kind','task_create'))
+      `).run()).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("backfills immutable scope when reopening a Task 5 intermediate operation journal", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.close();
+    const legacy = new Database(dbPath);
+    try {
+      legacy.pragma("foreign_keys = OFF");
+      legacy.exec(`
+        DROP TABLE project_chat_operations;
+        CREATE TABLE project_chat_operations (
+          id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, kind TEXT NOT NULL,
+          status TEXT NOT NULL, entity_type TEXT, entity_id TEXT,
+          idempotency_key TEXT NOT NULL, payload TEXT NOT NULL, error TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(thread_id, idempotency_key)
+        );
+      `);
+      legacy.prepare(`INSERT INTO project_chat_operations
+        (id, thread_id, kind, status, entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run("legacy-op", "t1", "agent_session_create", "running", "agent_session", "s1", "legacy",
+          JSON.stringify({ version: 1, kind: "agent_session_create", operationId: "legacy-op", status: "running", sessionId: "s1" }));
+    } finally {
+      legacy.close();
+    }
+    storage = await createSqliteStorage(dbPath);
+    expect(await storage.projectChatOperations.getById("legacy-op", "t1", "p1", "u1"))
+      .toMatchObject({ project_id: "p1", user_id: "u1", payload_version: 1 });
+  });
+
+  it("rejects cross-scope and immutable operation updates in sqlite", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.prepare(`
+        INSERT INTO project_chat_operations
+          (id, thread_id, project_id, user_id, kind, payload_version, status,
+           entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("cross", "t1", "p2", "u1", "task_create", 1, "pending", "task", "task-1", "cross",
+        JSON.stringify({ version: 1, kind: "task_create", operationId: "cross", status: "pending", taskId: "task-1", title: "x" })))
+        .toThrow(/scope/i);
+      db.prepare(`
+        INSERT INTO project_chat_operations
+          (id, thread_id, project_id, user_id, kind, payload_version, status,
+           entity_type, entity_id, idempotency_key, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("op", "t1", "p1", "u1", "task_create", 1, "pending", "task", "task-1", "op",
+        JSON.stringify({ version: 1, kind: "task_create", operationId: "op", status: "pending", taskId: "task-1", title: "x" }));
+      expect(() => db.prepare("UPDATE project_chat_operations SET project_id='p2' WHERE id='op'").run())
+        .toThrow(/immutable/i);
+      expect(() => db.prepare("UPDATE project_chat_operations SET payload_version=2 WHERE id='op'").run())
+        .toThrow(/immutable|CHECK/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("atomically claims a workspace selection without overwriting a concurrent claim", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatOperations.create({
+      id: "selection", thread_id: "t1", project_id: "p1", user_id: "u1",
+      kind: "agent_session_create", status: "pending", entity_type: null, entity_id: null,
+      idempotency_key: "session:seed", error: null,
+      payload: { version: 1, kind: "agent_session_create", operationId: "selection", status: "pending", sessionId: "seed", instruction: "do it", candidates: [] },
+    });
+    const [first, second] = await Promise.all([
+      storage.projectChatOperations.claimWorkspaceSelection({
+        id: "selection", thread_id: "t1", project_id: "p1", user_id: "u1",
+        workspace_id: '["local","one"]', session_id: "session-one", claim_token: "claim-one",
+        payload: { version: 1, kind: "agent_session_create", operationId: "selection", status: "resolving", sessionId: "session-one", workspaceId: '["local","one"]', selectedWorkspaceId: '["local","one"]', claimToken: "claim-one" },
+      }),
+      storage.projectChatOperations.claimWorkspaceSelection({
+        id: "selection", thread_id: "t1", project_id: "p1", user_id: "u1",
+        workspace_id: '["remote","two"]', session_id: "session-two", claim_token: "claim-two",
+        payload: { version: 1, kind: "agent_session_create", operationId: "selection", status: "resolving", sessionId: "session-two", workspaceId: '["remote","two"]', selectedWorkspaceId: '["remote","two"]', claimToken: "claim-two" },
+      }),
+    ]);
+    expect([first?.claimed, second?.claimed].filter(Boolean)).toHaveLength(1);
+    expect(first?.operation.payload.selectedWorkspaceId ?? second?.operation.payload.selectedWorkspaceId)
+      .toBe(first?.claimed ? '["local","one"]' : '["remote","two"]');
+    const persisted = await storage.projectChatOperations.getById("selection", "t1", "p1", "u1");
+    expect(persisted?.status).toBe("resolving");
+    expect(persisted?.entity_type).toBe("agent_session");
+  });
+
   it("authorizes, bounds, and monotonically updates operation correlations", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
     await storage.projectChatThreads.create({ id: "t2", project_id: "p1", user_id: "u2", title: null });
@@ -350,7 +470,7 @@ describe("project chat storage", () => {
       id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
       kind: "agent_session_create", status: "running", entity_type: "agent_session",
       entity_id: "s1", idempotency_key: "idem-1",
-      payload: JSON.stringify({ version: 1, kind: "agent_session_create", sessionId: "s1" }),
+      payload: { version: 1, kind: "agent_session_create", operationId: "op1", status: "running", sessionId: "s1" },
       error: null,
     });
     expect(created).toMatchObject({ id: "op1", thread_id: "t1", status: "running" });
@@ -358,7 +478,7 @@ describe("project chat storage", () => {
       id: "foreign", thread_id: "t1", project_id: "p2", user_id: "u1",
       kind: "agent_session_create", status: "running", entity_type: "agent_session",
       entity_id: "s1", idempotency_key: "foreign",
-      payload: "{}", error: null,
+      payload: { version: 1, kind: "agent_session_create", operationId: "foreign", status: "running", sessionId: "s1" }, error: null,
     })).toBeUndefined();
     expect(await storage.projectChatOperations.getById("op1", "t1", "p1", "u2"))
       .toBeUndefined();
@@ -369,9 +489,9 @@ describe("project chat storage", () => {
 
     const terminal = await storage.projectChatOperations.transition({
       id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
-      status: "completed", payload: JSON.stringify({
-        version: 1, kind: "agent_session_create", sessionId: "s1", status: "completed",
-      }), error: null,
+      status: "completed", payload: {
+        version: 1, kind: "agent_session_create", operationId: "op1", sessionId: "s1", status: "completed",
+      }, error: null,
       message: { id: "operation:op1:completed", content: JSON.stringify({
         version: 1, kind: "agent_session_create", operationId: "op1", status: "completed",
       }) },
@@ -385,7 +505,7 @@ describe("project chat storage", () => {
     expect(duplicate?.changed).toBe(false);
     expect(await storage.projectChatOperations.transition({
       id: "op1", thread_id: "t1", project_id: "p1", user_id: "u1",
-      status: "running", payload: "{}", error: null,
+      status: "running", payload: terminal!.operation.payload, error: null,
       message: { id: "operation:op1:running-late", content: "{}" },
     })).toBeUndefined();
     expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1"))

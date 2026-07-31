@@ -195,8 +195,15 @@ export interface ProjectChatMutationServices {
     target: string; branch: string | null; instruction: string;
     permissionMode: "plan" | "edit"; agentType: "claude-code" | "codex"; model: string | null;
   }): Promise<{ sessionId: string }>;
+  /**
+   * At-least-once across process crashes. Callers persist `idempotencyKey`
+   * before invoking this method and confirm delivery only after it resolves
+   * true. Local raw stdin cannot close the write-before-confirm crash window;
+   * remote transports receive the stable key when their endpoint supports it.
+   */
   sendAgentInstruction(input: {
     projectId: string; userId: string; sessionId: string; instruction: string;
+    idempotencyKey: string;
     target: "local" | { remoteServerId: string; remoteSessionId: string };
   }): Promise<boolean>;
   runScheduleNow(scheduleId: string, runId: string): Promise<
@@ -514,8 +521,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     const message = error instanceof Error ? error.message : String(error);
     return preview(message || "Mutation failed", 512);
   };
-  const operationPayload = (kind: string, operationId: string, status: string, details: Record<string, unknown>) =>
-    JSON.stringify({ version: 1, kind, operationId, status, ...details });
+  const operationPayload = (
+    kind: Parameters<Storage["projectChatOperations"]["create"]>[0]["kind"],
+    operationId: string,
+    status: Parameters<Storage["projectChatOperations"]["transition"]>[0]["status"],
+    details: Record<string, unknown>,
+  ) => ({ version: 1 as const, kind, operationId, status, ...details }) as Parameters<Storage["projectChatOperations"]["create"]>[0]["payload"];
   const beginOperation = async (
     kind: Parameters<Storage["projectChatOperations"]["create"]>[0]["kind"],
     entityType: ProjectChatContextEntityType | null,
@@ -540,10 +551,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     details: Record<string, unknown>,
     error: string | null = null,
   ) => {
-    const content = operationPayload(operation.kind, operation.id, status, details);
+    const payload = operationPayload(operation.kind, operation.id, status, details);
+    const content = JSON.stringify(payload);
     const result = await storage.projectChatOperations.transition({
       id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
-      status, payload: content, error,
+      status, payload, error,
       message: { id: `operation:${operation.id}:${status}`, content },
     });
     if (!result) throw new Error("Failed to update Project Chat operation");
@@ -570,6 +582,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       if (!isToolSelectorId(id)) return [];
       return [{ id, target: row.targetId, branch: row.branch }];
     });
+  };
+  const validateAssignedBranch = async (branch: string | null | undefined): Promise<void> => {
+    if (branch === null || branch === undefined) return;
+    if (!(await workspaceCandidates()).some((workspace) => workspace.branch === branch)) {
+      throw new Error("Assigned branch is not an available workspace in this project");
+    }
   };
   const resolveWorkspace = async (workspaceId: string) => {
     const candidate = (await workspaceCandidates()).find(({ id }) => id === workspaceId);
@@ -606,10 +624,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       execute: async ({ title, description, status, priority, assignedBranch }) => {
         mutationService();
         await revalidateScope();
+        await validateAssignedBranch(assignedBranch);
         const taskId = randomUUID();
         const operation = await beginOperation("task_create", "task", taskId, { taskId, title });
         try {
           await revalidateScope();
+          await validateAssignedBranch(assignedBranch);
           const task = await storage.tasks.create({
             id: taskId, project_id: projectId, title, description, status, priority,
             assigned_branch: assignedBranch,
@@ -633,11 +653,13 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const target = await storage.tasks.getById(taskId);
         if (!target) throw new Error("Task not found");
         if (target.project_id !== projectId) throw new Error("Object is not part of this project");
+        await validateAssignedBranch(assignedBranch);
         const operation = await beginOperation("task_update", "task", taskId, { taskId });
         try {
           await revalidateScope();
           const current = await storage.tasks.getById(taskId);
           if (!current || current.project_id !== projectId) throw new Error("Task is no longer authorized");
+          await validateAssignedBranch(assignedBranch);
           const updated = await storage.tasks.update(taskId, {
             ...patch, ...(assignedBranch !== undefined ? { assigned_branch: assignedBranch } : {}),
           });
@@ -667,10 +689,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             permissionMode, agentType, model,
             candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
           }, { operationId, idempotencyKey: `session:${sessionSeed}` });
-          const selectionContent = operationPayload(
+          const selectionContent = JSON.stringify(operationPayload(
             "workspace_selection", operation.id, "pending",
             { requestId: operation.id, candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })) },
-          );
+          ));
           const announced = await storage.projectChatOperations.announce({
             id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
             message: { id: `operation:${operation.id}:workspace_selection`, content: selectionContent },
@@ -686,6 +708,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const sessionId = canonicalSessionId(workspace, sessionSeed);
         const operation = await beginOperation("agent_session_create", "agent_session", sessionId, {
           sessionId, workspaceId, target: workspace.target, branch: workspace.branch,
+          instruction, permissionMode, agentType, model,
         }, { operationId, idempotencyKey: `session:${sessionId}` });
         try {
           await revalidateScope();
@@ -702,10 +725,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           return { ok: true, operationId: operation.id, sessionId, status: running.status };
         } catch (error) {
           if (await sessionExistsInScope(sessionId)) {
-            await touchAll("workspace", [workspaceId]);
-            await touch("agent_session", sessionId);
-            const running = await markOperationRunning(operation, { sessionId, workspaceId });
-            return { ok: true, operationId: operation.id, sessionId, status: running.status };
+            return {
+              ok: false, operationId: operation.id, sessionId, status: "pending",
+              error: "Agent session creation is awaiting delivery confirmation",
+            };
           }
           const message = boundedError(error);
           await finishOperation(operation, "failed", { sessionId, workspaceId }, message);
@@ -725,12 +748,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         if (!operation || operation.kind !== "agent_session_create") {
           throw new Error("Workspace selection request not found");
         }
-        let decoded: unknown;
-        try {
-          decoded = JSON.parse(operation.payload);
-        } catch {
-          throw new Error("Workspace selection request is invalid");
-        }
+        const decoded: unknown = operation.payload;
         if (operation.status === "running" || operation.status === "completed") {
           const active = activeSessionOperationSchema.safeParse(decoded);
           if (!active.success || active.data.workspaceId !== workspaceId) {
@@ -740,6 +758,26 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             ok: true, operationId: operation.id, sessionId: active.data.sessionId,
             status: active.data.status,
           };
+        }
+        if (operation.status === "resolving") {
+          if (operation.payload.kind !== "agent_session_create"
+            || operation.payload.selectedWorkspaceId !== workspaceId) {
+            throw new Error("Workspace selection request is already resolved to another workspace");
+          }
+          let current = operation;
+          for (let attempt = 0; attempt < 100 && current.status === "resolving"; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            current = await storage.projectChatOperations.getById(
+              requestId, threadId, projectId, userId,
+            ) ?? current;
+          }
+          if (current.status === "running" || current.status === "completed") {
+            return { ok: true, operationId: current.id, sessionId: operation.payload.sessionId, status: current.status };
+          }
+          if (current.status === "failed") {
+            return { ok: false, operationId: current.id, status: "failed", error: current.error ?? "Agent session creation failed" };
+          }
+          throw new Error("Workspace selection resolution is still in progress");
         }
         if (operation.status !== "pending") {
           throw new Error("Workspace selection request is already resolved");
@@ -753,11 +791,37 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         }
         const workspace = await resolveWorkspace(workspaceId);
         const sessionId = canonicalSessionId(workspace, pending.data.sessionId);
-        const correlated = await storage.projectChatOperations.bindCorrelation({
+        const claimToken = randomUUID();
+        const claim = await storage.projectChatOperations.claimWorkspaceSelection({
           id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
-          entity_type: "agent_session", entity_id: sessionId,
+          workspace_id: workspaceId, session_id: sessionId, claim_token: claimToken,
+          payload: {
+            ...pending.data, version: 1, kind: "agent_session_create", operationId: operation.id,
+            status: "resolving", sessionId, workspaceId, selectedWorkspaceId: workspaceId,
+            claimToken, target: workspace.target, branch: workspace.branch,
+          },
         });
-        if (!correlated) throw new Error("Workspace selection request is already resolved");
+        if (!claim) throw new Error("Workspace selection request not found");
+        let correlated = claim.operation;
+        if (!claim.claimed) {
+          if (correlated.payload.kind !== "agent_session_create"
+            || correlated.payload.selectedWorkspaceId !== workspaceId) {
+            throw new Error("Workspace selection request is already resolved to another workspace");
+          }
+          for (let attempt = 0; attempt < 100 && correlated.status === "resolving"; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            correlated = await storage.projectChatOperations.getById(
+              requestId, threadId, projectId, userId,
+            ) ?? correlated;
+          }
+          if (correlated.status === "running" || correlated.status === "completed") {
+            return { ok: true, operationId: correlated.id, sessionId, status: correlated.status };
+          }
+          if (correlated.status === "failed") {
+            return { ok: false, operationId: correlated.id, status: "failed", error: correlated.error ?? "Agent session creation failed" };
+          }
+          throw new Error("Workspace selection resolution is still in progress");
+        }
         let created = false;
         let failure: unknown;
         try {
@@ -775,7 +839,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (!created) failure = new Error("Session identity mismatch");
         } catch (error) {
           failure = error;
-          created = await sessionExistsInScope(sessionId);
+          if (await sessionExistsInScope(sessionId)) {
+            return {
+              ok: false, operationId: operation.id, sessionId, status: "pending",
+              error: "Agent session creation is awaiting delivery confirmation",
+            };
+          }
         }
         if (!created) {
           const message = boundedError(failure ?? new Error("Agent session creation failed"));
@@ -807,7 +876,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (!association) throw new Error("Agent session not found");
           target = { remoteServerId: mapping.remoteServerId, remoteSessionId: mapping.remoteSessionId };
         }
-        const operation = await beginOperation("agent_instruction", "agent_session", sessionId, { sessionId });
+        const operation = await beginOperation("agent_instruction", "agent_session", sessionId, {
+          sessionId, instruction, target, delivery: "pending",
+        });
+        let deliveryAttempted = false;
         try {
           await revalidateScope();
           if (target === "local") {
@@ -827,13 +899,21 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             );
             if (!association) throw new Error("Agent session is no longer authorized");
           }
-          const sent = await service.sendAgentInstruction({ projectId, userId, sessionId, instruction, target });
+          await markOperationRunning(operation, { sessionId, instruction, target, delivery: "pending" });
+          deliveryAttempted = true;
+          const sent = await service.sendAgentInstruction({
+            projectId, userId, sessionId, instruction, target,
+            idempotencyKey: operation.idempotency_key,
+          });
           if (!sent) throw new Error("Agent session did not accept the instruction");
           await touch("agent_session", sessionId);
-          await finishOperation(operation, "completed", { sessionId });
+          await finishOperation(operation, "completed", { sessionId, instruction, target, delivery: "confirmed" });
           return { ok: true, operationId: operation.id, sessionId, status: "completed" };
         } catch (error) {
           const message = boundedError(error);
+          if (deliveryAttempted) {
+            return { ok: false, operationId: operation.id, status: "pending", error: message };
+          }
           await finishOperation(operation, "failed", { sessionId }, message);
           return { ok: false, operationId: operation.id, status: "failed", error: message };
         }

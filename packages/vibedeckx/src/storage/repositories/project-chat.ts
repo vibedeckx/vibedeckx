@@ -1,4 +1,5 @@
 import { sql, type Kysely, type Selectable } from "kysely";
+import { z } from "zod";
 import type {
   DB,
   ProjectChatContextRefsTable,
@@ -26,7 +27,48 @@ const mapWorkItem = (row: Selectable<ProjectChatWorkItemsTable>): ProjectChatWor
 
 const mapContextRef = (row: Selectable<ProjectChatContextRefsTable>): ProjectChatContextRef => row;
 
-const mapOperation = (row: Selectable<ProjectChatOperationsTable>): ProjectChatOperation => row;
+const operationStatusSchema = z.enum(["pending", "resolving", "running", "completed", "failed"]);
+const operationPayloadSchema = z.discriminatedUnion("kind", [
+  z.object({ version: z.literal(1), kind: z.literal("task_create"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("task_update"), operationId: z.string().min(1).max(512), status: operationStatusSchema, taskId: z.string().min(1).max(512), title: z.string().max(512).optional() }).strict(),
+  z.object({
+    version: z.literal(1), kind: z.literal("agent_session_create"), operationId: z.string().min(1).max(512),
+    status: operationStatusSchema, sessionId: z.string().min(1).max(512), workspaceId: z.string().min(1).max(512).optional(),
+    target: z.string().min(1).max(512).optional(), branch: z.string().max(512).nullable().optional(), instruction: z.string().max(8_000).optional(),
+    permissionMode: z.enum(["plan", "edit"]).optional(), agentType: z.enum(["claude-code", "codex"]).optional(), model: z.string().max(512).nullable().optional(),
+    phase: z.literal("workspace_selection").optional(), requestId: z.string().min(1).max(512).optional(),
+    candidates: z.array(z.object({ id: z.string().min(1).max(512), target: z.string().min(1).max(512), branch: z.string().max(512).nullable() }).strict()).max(20).optional(),
+    selectedWorkspaceId: z.string().min(1).max(512).optional(), claimToken: z.string().min(1).max(512).optional(),
+  }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("agent_instruction"), operationId: z.string().min(1).max(512), status: operationStatusSchema, sessionId: z.string().min(1).max(512), instruction: z.string().max(8_000).optional(), target: z.union([z.literal("local"), z.object({ remoteServerId: z.string().min(1).max(512), remoteSessionId: z.string().min(1).max(512) }).strict()]).optional(), delivery: z.enum(["pending", "confirmed"]).optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("schedule_run"), operationId: z.string().min(1).max(512), status: operationStatusSchema, scheduleId: z.string().min(1).max(512), runId: z.string().min(1).max(512), skipped: z.boolean().optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("workspace_selection"), operationId: z.string().min(1).max(512), status: operationStatusSchema, requestId: z.string().min(1).max(512), candidates: z.array(z.object({ id: z.string().min(1).max(512), target: z.string().min(1).max(512), branch: z.string().max(512).nullable() }).strict()).max(20) }).strict(),
+]);
+
+const serializeOperationPayload = (
+  payload: ProjectChatOperation["payload"],
+  expected: { id: string; kind: ProjectChatOperation["kind"]; status: ProjectChatOperation["status"] },
+): string => {
+  const parsed = operationPayloadSchema.safeParse(payload);
+  if (!parsed.success || parsed.data.operationId !== expected.id
+    || parsed.data.kind !== expected.kind || parsed.data.status !== expected.status) {
+    throw new Error("Invalid Project Chat operation payload");
+  }
+  const serialized = JSON.stringify(parsed.data);
+  if (Buffer.byteLength(serialized, "utf8") > 32_768) throw new Error("Project Chat operation payload is too large");
+  return serialized;
+};
+
+const mapOperation = (row: Selectable<ProjectChatOperationsTable>): ProjectChatOperation => {
+  let decoded: unknown;
+  try { decoded = JSON.parse(row.payload); } catch { throw new Error("Project Chat operation data is malformed"); }
+  const parsed = operationPayloadSchema.safeParse(decoded);
+  if (!parsed.success || parsed.data.kind !== row.kind || parsed.data.version !== row.payload_version
+    || parsed.data.operationId !== row.id || parsed.data.status !== row.status) {
+    throw new Error("Project Chat operation data does not match its kind/version");
+  }
+  return { ...row, payload: parsed.data as ProjectChatOperation["payload"] };
+};
 
 export const createProjectChatRepos = (
   kdb: Kysely<DB>,
@@ -523,19 +565,22 @@ export const createProjectChatRepos = (
     create: async (opts) => {
       const result = await kdb.insertInto("project_chat_operations")
         .columns([
-          "id", "thread_id", "kind", "status", "entity_type", "entity_id",
-          "idempotency_key", "payload", "error",
+          "id", "thread_id", "project_id", "user_id", "kind", "payload_version",
+          "status", "entity_type", "entity_id", "idempotency_key", "payload", "error",
         ])
         .expression((eb) => eb.selectFrom("project_chat_threads")
           .select([
             sql<string>`${opts.id}`.as("id"),
             sql<string>`${opts.thread_id}`.as("thread_id"),
+            sql<string>`${opts.project_id}`.as("project_id"),
+            sql<string>`${opts.user_id}`.as("user_id"),
             sql<typeof opts.kind>`${opts.kind}`.as("kind"),
+            sql<1>`${opts.payload_version ?? 1}`.as("payload_version"),
             sql<typeof opts.status>`${opts.status}`.as("status"),
             sql<typeof opts.entity_type>`${opts.entity_type}`.as("entity_type"),
             sql<string | null>`${opts.entity_id}`.as("entity_id"),
             sql<string>`${opts.idempotency_key}`.as("idempotency_key"),
-            sql<string>`${opts.payload}`.as("payload"),
+            sql<string>`${serializeOperationPayload(opts.payload, { id: opts.id, kind: opts.kind, status: opts.status })}`.as("payload"),
             sql<string | null>`${opts.error}`.as("error"),
           ])
           .where("id", "=", opts.thread_id)
@@ -549,8 +594,10 @@ export const createProjectChatRepos = (
           .selectAll("operation")
           .where("operation.thread_id", "=", opts.thread_id)
           .where("operation.idempotency_key", "=", opts.idempotency_key)
-          .where("thread.project_id", "=", opts.project_id)
-          .where("thread.user_id", "=", opts.user_id)
+          .where("operation.project_id", "=", opts.project_id)
+          .where("operation.user_id", "=", opts.user_id)
+          .whereRef("thread.project_id", "=", "operation.project_id")
+          .whereRef("thread.user_id", "=", "operation.user_id")
           .executeTakeFirst();
         return existing ? mapOperation(existing) : undefined;
       }
@@ -565,8 +612,10 @@ export const createProjectChatRepos = (
         .selectAll("operation")
         .where("operation.id", "=", id)
         .where("operation.thread_id", "=", threadId)
-        .where("thread.project_id", "=", projectId)
-        .where("thread.user_id", "=", userId)
+        .where("operation.project_id", "=", projectId)
+        .where("operation.user_id", "=", userId)
+        .whereRef("thread.project_id", "=", "operation.project_id")
+        .whereRef("thread.user_id", "=", "operation.user_id")
         .executeTakeFirst();
       return row ? mapOperation(row) : undefined;
     },
@@ -575,15 +624,29 @@ export const createProjectChatRepos = (
       const rows = await kdb.selectFrom("project_chat_operations as operation")
         .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
         .selectAll("operation")
-        .select(["thread.project_id", "thread.user_id"])
-        .where("thread.project_id", "=", projectId)
+        .where("operation.project_id", "=", projectId)
+        .whereRef("thread.project_id", "=", "operation.project_id")
+        .whereRef("thread.user_id", "=", "operation.user_id")
         .where("operation.entity_type", "=", entityType)
         .where("operation.entity_id", "=", entityId)
         .orderBy("operation.created_at", "asc")
         .orderBy("operation.id", "asc")
         .limit(Math.max(0, Math.min(limit, 100)))
         .execute();
-      return rows.map((row) => ({ ...mapOperation(row), project_id: row.project_id, user_id: row.user_id }));
+      return rows.map(mapOperation);
+    },
+
+    listNonterminal: async (afterId, limit) => {
+      let query = kdb.selectFrom("project_chat_operations as operation")
+        .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+        .selectAll("operation")
+        .whereRef("thread.project_id", "=", "operation.project_id")
+        .whereRef("thread.user_id", "=", "operation.user_id")
+        .where("operation.status", "in", ["pending", "resolving", "running"]);
+      if (afterId !== null) query = query.where("operation.id", ">", afterId);
+      const rows = await query.orderBy("operation.id", "asc")
+        .limit(Math.max(1, Math.min(limit, 100))).execute();
+      return rows.map(mapOperation);
     },
 
     announce: async (opts) => kdb.transaction().execute(async (trx) => {
@@ -592,8 +655,10 @@ export const createProjectChatRepos = (
         .select("operation.id")
         .where("operation.id", "=", opts.id)
         .where("operation.thread_id", "=", opts.thread_id)
-        .where("thread.project_id", "=", opts.project_id)
-        .where("thread.user_id", "=", opts.user_id)
+        .where("operation.project_id", "=", opts.project_id)
+        .where("operation.user_id", "=", opts.user_id)
+        .whereRef("thread.project_id", "=", "operation.project_id")
+        .whereRef("thread.user_id", "=", "operation.user_id")
         .executeTakeFirst();
       if (!operation) return undefined;
       const existing = await trx.selectFrom("project_chat_messages")
@@ -617,14 +682,54 @@ export const createProjectChatRepos = (
       return mapMessage(message);
     }),
 
+    claimWorkspaceSelection: async (opts) => {
+      if (opts.payload.claimToken !== opts.claim_token
+        || opts.payload.selectedWorkspaceId !== opts.workspace_id
+        || opts.payload.workspaceId !== opts.workspace_id
+        || opts.payload.sessionId !== opts.session_id) {
+        throw new Error("Invalid Project Chat workspace-selection claim");
+      }
+      const updated = await kdb.updateTable("project_chat_operations")
+        .set({
+          status: "resolving",
+          entity_type: "agent_session",
+          entity_id: opts.session_id,
+          payload: serializeOperationPayload(opts.payload, {
+            id: opts.id, kind: "agent_session_create", status: "resolving",
+          }),
+          updated_at: now(),
+        })
+        .where("id", "=", opts.id)
+        .where("thread_id", "=", opts.thread_id)
+        .where("project_id", "=", opts.project_id)
+        .where("user_id", "=", opts.user_id)
+        .where("kind", "=", "agent_session_create")
+        .where("status", "=", "pending")
+        .where("entity_type", "is", null)
+        .where("entity_id", "is", null)
+        .returningAll()
+        .executeTakeFirst();
+      if (updated) return { operation: mapOperation(updated), claimed: true };
+      const existing = await kdb.selectFrom("project_chat_operations")
+        .selectAll()
+        .where("id", "=", opts.id)
+        .where("thread_id", "=", opts.thread_id)
+        .where("project_id", "=", opts.project_id)
+        .where("user_id", "=", opts.user_id)
+        .executeTakeFirst();
+      return existing ? { operation: mapOperation(existing), claimed: false } : undefined;
+    },
+
     bindCorrelation: async (opts) => {
       const owned = await kdb.selectFrom("project_chat_operations as operation")
         .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
         .select(["operation.entity_type", "operation.entity_id"])
         .where("operation.id", "=", opts.id)
         .where("operation.thread_id", "=", opts.thread_id)
-        .where("thread.project_id", "=", opts.project_id)
-        .where("thread.user_id", "=", opts.user_id)
+        .where("operation.project_id", "=", opts.project_id)
+        .where("operation.user_id", "=", opts.user_id)
+        .whereRef("thread.project_id", "=", "operation.project_id")
+        .whereRef("thread.user_id", "=", "operation.user_id")
         .where("operation.status", "=", "pending")
         .executeTakeFirst();
       if (!owned) return undefined;
@@ -645,8 +750,10 @@ export const createProjectChatRepos = (
         .selectAll("operation")
         .where("operation.id", "=", opts.id)
         .where("operation.thread_id", "=", opts.thread_id)
-        .where("thread.project_id", "=", opts.project_id)
-        .where("thread.user_id", "=", opts.user_id)
+        .where("operation.project_id", "=", opts.project_id)
+        .where("operation.user_id", "=", opts.user_id)
+        .whereRef("thread.project_id", "=", "operation.project_id")
+        .whereRef("thread.user_id", "=", "operation.user_id")
         .executeTakeFirst();
       if (!row) return undefined;
       const terminal = row.status === "completed" || row.status === "failed";
@@ -660,6 +767,7 @@ export const createProjectChatRepos = (
       }
 
       const allowed = (row.status === "pending" && ["running", "completed", "failed"].includes(opts.status))
+        || (row.status === "resolving" && ["running", "completed", "failed"].includes(opts.status))
         || (row.status === "running" && ["completed", "failed"].includes(opts.status));
       if (!allowed) return undefined;
       const sequenceRow = await trx.selectFrom("project_chat_messages")
@@ -673,7 +781,9 @@ export const createProjectChatRepos = (
         content: opts.message.content,
       }).execute();
       const updated = await trx.updateTable("project_chat_operations")
-        .set({ status: opts.status, payload: opts.payload, error: opts.error, updated_at: now() })
+        .set({ status: opts.status, payload: serializeOperationPayload(opts.payload, {
+          id: opts.id, kind: row.kind, status: opts.status,
+        }), error: opts.error, updated_at: now() })
         .where("id", "=", opts.id)
         .where("thread_id", "=", opts.thread_id)
         .where("status", "=", row.status)

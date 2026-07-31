@@ -151,6 +151,34 @@ describe("createProjectChatTools", () => {
     }
   });
 
+  it("revalidates assigned task branches against current authorized workspaces and allows null clears", async () => {
+    const serverId = await linkedRemoteServer();
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
+    await storage.searchCache.applyCatalogSnapshot("project-1", serverId, {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
+    const surface = await tools();
+    const valid = await surface.create_task.execute({ title: "Assigned", assignedBranch: "dev" });
+    expect(valid).toMatchObject({ ok: true });
+    const taskId = valid.taskId as string;
+    expect((await storage.tasks.getById(taskId))?.assigned_branch).toBe("dev");
+
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", { workspaces: [], sessions: [] }, 2);
+    await storage.searchCache.applyCatalogSnapshot("project-1", serverId, { workspaces: [], sessions: [] }, 2);
+    const createOperation = vi.spyOn(storage.projectChatOperations, "create");
+    await expect(surface.create_task.execute({ title: "Stale", assignedBranch: "dev" }))
+      .rejects.toThrow(/workspace|branch/i);
+    expect(createOperation).not.toHaveBeenCalled();
+    await expect(surface.update_task.execute({ taskId, assignedBranch: "dev" }))
+      .rejects.toThrow(/workspace|branch/i);
+    expect(createOperation).not.toHaveBeenCalled();
+    await expect(surface.update_task.execute({ taskId, assignedBranch: null }))
+      .resolves.toMatchObject({ ok: true });
+    expect((await storage.tasks.getById(taskId))?.assigned_branch).toBeNull();
+  });
+
   it("requires explicit workspace selection even with one candidate and persists the request", async () => {
     await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
       workspaces: [{ branch: "dev" }], sessions: [],
@@ -194,6 +222,37 @@ describe("createProjectChatTools", () => {
     )).map(({ id }) => id)).toEqual([requestId]);
   });
 
+  it("allows one side effect for simultaneous same-workspace selection and rejects a conflicting loser", async () => {
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "dev" }, { branch: "other" }], sessions: [],
+    });
+    createAgentSession.mockImplementationOnce(async ({ sessionId }) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { sessionId };
+    });
+    const requested = await (await tools()).create_agent_session.execute({ instruction: "Implement it" });
+    const requestId = requested.requestId as string;
+    const firstSurface = await tools();
+    const secondSurface = await tools();
+    const same = await Promise.all([
+      firstSurface.select_workspace.execute({ requestId, workspaceId: JSON.stringify(["local", "dev"]) }),
+      secondSurface.select_workspace.execute({ requestId, workspaceId: JSON.stringify(["local", "dev"]) }),
+    ]);
+    expect(same[0]).toEqual(same[1]);
+    expect(createAgentSession).toHaveBeenCalledTimes(1);
+
+    const another = await (await tools()).create_agent_session.execute({ instruction: "Again" });
+    const results = await Promise.allSettled([
+      (await tools()).select_workspace.execute({ requestId: another.requestId as string, workspaceId: JSON.stringify(["local", "dev"]) }),
+      (await tools()).select_workspace.execute({ requestId: another.requestId as string, workspaceId: JSON.stringify(["local", "other"]) }),
+    ]);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    expect(String((results.find(({ status }) => status === "rejected") as PromiseRejectedResult).reason))
+      .toMatch(/already resolved/);
+    expect(createAgentSession).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects stale and foreign workspace selections before creating a session", async () => {
     await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
       workspaces: [{ branch: "dev" }], sessions: [],
@@ -213,7 +272,7 @@ describe("createProjectChatTools", () => {
     expect(createAgentSession).not.toHaveBeenCalled();
   });
 
-  it("recovers a preallocated local session created before the service throws", async () => {
+  it("does not treat a preallocated session as proof that initial instruction delivery succeeded", async () => {
     await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
       workspaces: [{ branch: "dev" }], sessions: [],
     });
@@ -226,13 +285,13 @@ describe("createProjectChatTools", () => {
     const resolved = await (await tools()).select_workspace.execute({
       requestId: requested.requestId as string, workspaceId: JSON.stringify(["local", "dev"]),
     });
-    expect(resolved).toMatchObject({ ok: true, status: "running", sessionId: expect.any(String) });
+    expect(resolved).toMatchObject({ ok: false, status: "pending", sessionId: expect.any(String) });
     expect(createAgentSession).toHaveBeenCalledTimes(1);
     expect(await storage.agentSessions.getById(resolved.sessionId as string))
       .toMatchObject({ project_id: "project-1", branch: "dev" });
   });
 
-  it("recovers the preallocated identity on the direct explicit-workspace path", async () => {
+  it("keeps direct explicit creation pending when spawn succeeded but delivery confirmation failed", async () => {
     await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
       workspaces: [{ branch: "dev" }], sessions: [],
     });
@@ -244,7 +303,7 @@ describe("createProjectChatTools", () => {
     const result = await (await tools()).create_agent_session.execute({
       workspaceId: JSON.stringify(["local", "dev"]), instruction: "Implement it",
     });
-    expect(result).toMatchObject({ ok: true, status: "running", sessionId: expect.any(String) });
+    expect(result).toMatchObject({ ok: false, status: "pending", sessionId: expect.any(String) });
     expect(createAgentSession).toHaveBeenCalledTimes(1);
   });
 
@@ -306,6 +365,31 @@ describe("createProjectChatTools", () => {
     expect(result).toMatchObject({ ok: false, status: "failed" });
     expect(lookup).toHaveBeenCalledTimes(2);
     expect(sendAgentInstruction).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unconfirmed instruction durable and marks only confirmed sends completed", async () => {
+    await storage.agentSessions.create({ id: "local-session", project_id: "project-1", branch: "dev" });
+    sendAgentInstruction.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const first = await (await tools()).send_agent_instruction.execute({
+      sessionId: "local-session", instruction: "Continue safely",
+    });
+    expect(first).toMatchObject({ ok: false, status: "pending" });
+    const pending = (await storage.projectChatOperations.listByCorrelation(
+      "project-1", "agent_session", "local-session", 10,
+    )).find(({ kind }) => kind === "agent_instruction");
+    expect(pending).toMatchObject({ status: "running", payload: { delivery: "pending", instruction: "Continue safely" } });
+    expect(sendAgentInstruction).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: pending?.idempotency_key,
+    }));
+
+    const second = await (await tools()).send_agent_instruction.execute({
+      sessionId: "local-session", instruction: "A distinct command",
+    });
+    expect(second).toMatchObject({ ok: true, status: "completed" });
+    const confirmed = await storage.projectChatOperations.getById(
+      second.operationId as string, "thread-1", "project-1", "user-1",
+    );
+    expect(confirmed).toMatchObject({ status: "completed", payload: { delivery: "confirmed" } });
   });
 
   it("returns a sanitized project summary and project-scoped bounded task results", async () => {

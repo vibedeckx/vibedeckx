@@ -271,17 +271,33 @@ export type ProjectChatOperationKind =
   | "schedule_run"
   | "workspace_selection";
 
-export type ProjectChatOperationStatus = "pending" | "running" | "completed" | "failed";
+export type ProjectChatOperationStatus = "pending" | "resolving" | "running" | "completed" | "failed";
+
+export type ProjectChatOperationPayload = {
+  version: 1;
+  operationId: string;
+  status: ProjectChatOperationStatus;
+} & (
+  | { kind: "task_create"; taskId: string; title?: string }
+  | { kind: "task_update"; taskId: string; title?: string }
+  | { kind: "agent_session_create"; sessionId: string; workspaceId?: string; target?: string; branch?: string | null; instruction?: string; permissionMode?: string; agentType?: string; model?: string | null; phase?: "workspace_selection"; requestId?: string; candidates?: Array<{ id: string; target: string; branch: string | null }>; selectedWorkspaceId?: string; claimToken?: string }
+  | { kind: "agent_instruction"; sessionId: string; instruction?: string; target?: "local" | { remoteServerId: string; remoteSessionId: string }; delivery?: "pending" | "confirmed" }
+  | { kind: "schedule_run"; scheduleId: string; runId: string }
+  | { kind: "workspace_selection"; requestId: string; candidates: Array<{ id: string; target: string; branch: string | null }> }
+);
 
 export interface ProjectChatOperation {
   id: string;
   thread_id: string;
+  project_id: string;
+  user_id: string;
   kind: ProjectChatOperationKind;
+  payload_version: 1;
   status: ProjectChatOperationStatus;
   entity_type: ProjectChatContextEntityType | null;
   entity_id: string | null;
   idempotency_key: string;
-  payload: string;
+  payload: ProjectChatOperationPayload;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -1046,11 +1062,12 @@ export interface Storage {
       project_id: string;
       user_id: string;
       kind: ProjectChatOperationKind;
+      payload_version?: 1;
       status: ProjectChatOperationStatus;
       entity_type: ProjectChatContextEntityType | null;
       entity_id: string | null;
       idempotency_key: string;
-      payload: string;
+      payload: ProjectChatOperationPayload;
       error: string | null;
     }) => Promise<ProjectChatOperation | undefined>;
     getById: (
@@ -1061,7 +1078,8 @@ export interface Storage {
       entityType: ProjectChatContextEntityType,
       entityId: string,
       limit: number,
-    ) => Promise<Array<ProjectChatOperation & { project_id: string; user_id: string }>>;
+    ) => Promise<ProjectChatOperation[]>;
+    listNonterminal: (afterId: string | null, limit: number) => Promise<ProjectChatOperation[]>;
     announce: (opts: {
       id: string;
       thread_id: string;
@@ -1077,13 +1095,23 @@ export interface Storage {
       entity_type: ProjectChatContextEntityType;
       entity_id: string;
     }) => Promise<ProjectChatOperation | undefined>;
+    claimWorkspaceSelection: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      workspace_id: string;
+      session_id: string;
+      claim_token: string;
+      payload: Extract<ProjectChatOperationPayload, { kind: "agent_session_create" }>;
+    }) => Promise<{ operation: ProjectChatOperation; claimed: boolean } | undefined>;
     transition: (opts: {
       id: string;
       thread_id: string;
       project_id: string;
       user_id: string;
       status: ProjectChatOperationStatus;
-      payload: string;
+      payload: ProjectChatOperationPayload;
       error: string | null;
       message: { id: string; content: string };
     }) => Promise<{ operation: ProjectChatOperation; message: ProjectChatMessage; changed: boolean } | undefined>;

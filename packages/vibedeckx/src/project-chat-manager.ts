@@ -18,10 +18,12 @@ import {
 } from "./project-chat-tools.js";
 
 export const PROJECT_CHAT_SYSTEM_PROMPT = [
-  "You are Project Commander, a project-scoped read-only assistant.",
+  "You are Project Commander, a project-scoped assistant with a small safe mutation surface.",
   "You can inspect tasks, schedules, agent sessions, and multiple workspaces within the bound project.",
   "Project Chat does not belong to a branch or workspace; never assume one workspace is the whole project.",
-  "Use the supplied read tools when factual project context is needed. Never claim to have changed project state.",
+  "You may create a task, update a task, create an agent session in an explicitly selected existing workspace, select a requested workspace, send an agent instruction, and run an existing schedule now.",
+  "Use supplied tools for factual context and report mutations only from successful tool results.",
+  "There is no delete capability, no worktree creation, no schedule configuration, no agent-session stop, and no Git capability.",
 ].join(" ");
 export const PROJECT_CHAT_TOOL_CALL_LIMIT = 8;
 export const PROJECT_CHAT_TOOL_RESULT_BYTE_LIMIT = 64 * 1024;
@@ -281,6 +283,7 @@ export class ProjectChatManager {
   private readonly terminalAttemptTimeoutMs: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private readonly unsubscribeEvents?: () => void;
+  private readonly startupReconciliation: Promise<void>;
   private shuttingDown = false;
 
   constructor(
@@ -299,7 +302,12 @@ export class ProjectChatManager {
       if (this.shuttingDown) return;
       void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
     });
+    this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations())
+      .catch(() => undefined);
   }
+
+  /** Resolves after the bounded startup operation-journal reconciliation. */
+  ready(): Promise<void> { return this.startupReconciliation; }
 
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
     return this.trackOperation(this.openThreadInternal(threadId, userId));
@@ -453,7 +461,10 @@ export class ProjectChatManager {
       live.abortController?.abort();
       live.queue.splice(0);
     }
-    await Promise.allSettled([...this.outstandingOperations]);
+    await Promise.race([
+      Promise.allSettled([...this.outstandingOperations]),
+      new Promise<void>((resolve) => setTimeout(resolve, this.drainTimeoutMs)),
+    ]);
     await Promise.all([...this.liveThreads.values()]
       .map((live) => this.detachActiveWork(live, "accepted", false)));
     for (const live of this.liveThreads.values()) live.subscribers.clear();
@@ -499,32 +510,160 @@ export class ProjectChatManager {
     for (const operation of operations) {
       if (operation.kind !== expectedKind) continue;
       if (expectedKind === "schedule_run") {
-        let payload: unknown;
-        try { payload = JSON.parse(operation.payload); } catch { continue; }
-        if (!payload || typeof payload !== "object"
-          || (payload as { scheduleId?: unknown }).scheduleId !== (event as { scheduleId: string }).scheduleId) continue;
+        if (operation.payload.kind !== "schedule_run"
+          || operation.payload.scheduleId !== (event as { scheduleId: string }).scheduleId) continue;
       }
       const details = expectedKind === "agent_session_create"
         ? { sessionId: entityId }
         : { scheduleId: (event as { scheduleId: string }).scheduleId, runId: entityId };
-      const content = JSON.stringify({
-        version: 1, kind: expectedKind, operationId: operation.id, status, ...details,
-      });
-      const transitioned = await this.storage.projectChatOperations.transition({
-        id: operation.id,
-        thread_id: operation.thread_id,
-        project_id: operation.project_id,
-        user_id: operation.user_id,
-        status,
-        payload: content,
-        error: status === "failed" ? "Operation failed" : null,
-        message: { id: `operation:${operation.id}:${status}`, content },
-      });
+      const transitioned = await this.transitionOperation(
+        operation, status, details, status === "failed" ? "Operation failed" : null,
+      );
       if (!transitioned?.changed) continue;
       const live = this.liveThreads.get(operation.thread_id);
       if (live && live.thread.project_id === operation.project_id
         && live.thread.user_id === operation.user_id) {
         this.publishMessage(live, transitioned.message);
+      }
+    }
+  }
+
+  private async transitionOperation(
+    operation: import("./storage/types.js").ProjectChatOperation,
+    status: "running" | "completed" | "failed",
+    details: Record<string, unknown>,
+    error: string | null = null,
+  ) {
+    const payload = { ...operation.payload, status, ...details } as import("./storage/types.js").ProjectChatOperationPayload;
+    const content = JSON.stringify(payload);
+    return this.storage.projectChatOperations.transition({
+      id: operation.id, thread_id: operation.thread_id,
+      project_id: operation.project_id, user_id: operation.user_id,
+      status, payload, error,
+      message: { id: `operation:${operation.id}:${status}`, content },
+    });
+  }
+
+  private async reconcilePersistedOperations(): Promise<void> {
+    let cursor: string | null = null;
+    for (;;) {
+      if (this.shuttingDown) return;
+      const page = await this.storage.projectChatOperations.listNonterminal(cursor, 50);
+      if (page.length === 0) return;
+      for (const operation of page) {
+        if (this.shuttingDown) return;
+        await this.reconcilePersistedOperation(operation);
+      }
+      cursor = page.at(-1)!.id;
+      if (page.length < 50) return;
+    }
+  }
+
+  private async reconcilePersistedOperation(
+    operation: import("./storage/types.js").ProjectChatOperation,
+  ): Promise<void> {
+    const ownedThread = await this.storage.projectChatThreads.getById(
+      operation.thread_id, operation.project_id, operation.user_id,
+    );
+    if (!ownedThread) return;
+    if (operation.kind === "agent_session_create" && operation.payload.kind === "agent_session_create") {
+      const sessionId = operation.entity_id ?? operation.payload.sessionId;
+      if (!operation.entity_id) return; // unresolved user selection
+      const local = await this.storage.agentSessions.getById(sessionId);
+      if (local?.project_id === operation.project_id && operation.status === "running") {
+        const status = local.status === "error" ? "failed"
+          : local.status === "stopped" && local.last_completed_at ? "completed"
+            : local.status === "stopped" ? "failed" : "running";
+        await this.transitionOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
+        return;
+      }
+      const remote = await this.toolDependencies?.remoteSessions?.getMapping(sessionId);
+      if (remote?.projectId === operation.project_id && operation.status === "running") {
+        const detail = await this.toolDependencies?.remoteSessions?.getDetail(remote, {
+          maxEntries: 1, maxChars: 256,
+        });
+        const status = detail?.status === "error" ? "failed"
+          : detail?.status === "stopped" ? "completed" : "running";
+        await this.transitionOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
+        return;
+      }
+      const service = this.toolDependencies?.mutationServices;
+      const payload = operation.payload;
+      if (!service || !payload.workspaceId || !payload.target || payload.instruction === undefined
+        || !payload.permissionMode || !payload.agentType) return;
+      try {
+        await service.createAgentSession({
+          sessionId, idempotencyKey: operation.idempotency_key,
+          projectId: operation.project_id, userId: operation.user_id,
+          target: payload.target, branch: payload.branch ?? null,
+          instruction: payload.instruction,
+          permissionMode: payload.permissionMode as "plan" | "edit",
+          agentType: payload.agentType as "claude-code" | "codex",
+          model: payload.model ?? null,
+        });
+        await this.transitionOperation(operation, "running", { sessionId });
+      } catch (error) {
+        await this.transitionOperation(operation, "failed", { sessionId }, boundedStreamError(error).message);
+      }
+      return;
+    }
+    if (operation.kind === "agent_instruction" && operation.payload.kind === "agent_instruction"
+      && operation.payload.delivery !== "confirmed") {
+      const service = this.toolDependencies?.mutationServices;
+      if (!service || !operation.payload.instruction || !operation.payload.target) return;
+      try {
+        if (operation.payload.target === "local") {
+          const session = await this.storage.agentSessions.getById(operation.payload.sessionId);
+          if (!session || session.project_id !== operation.project_id) {
+            throw new Error("Agent session is no longer authorized");
+          }
+        } else {
+          const mapping = await this.toolDependencies?.remoteSessions?.getMapping(operation.payload.sessionId);
+          if (!mapping || mapping.projectId !== operation.project_id
+            || mapping.remoteServerId !== operation.payload.target.remoteServerId
+            || mapping.remoteSessionId !== operation.payload.target.remoteSessionId
+            || !(await this.storage.projectRemotes.getByProjectAndServer(
+              operation.project_id, mapping.remoteServerId,
+            ))) {
+            throw new Error("Agent session is no longer authorized");
+          }
+        }
+        const sent = await service.sendAgentInstruction({
+          projectId: operation.project_id, userId: operation.user_id,
+          sessionId: operation.payload.sessionId, instruction: operation.payload.instruction,
+          target: operation.payload.target, idempotencyKey: operation.idempotency_key,
+        });
+        if (!sent) throw new Error("Agent session did not accept the instruction");
+        await this.transitionOperation(operation, "completed", { delivery: "confirmed" });
+      } catch (error) {
+        await this.transitionOperation(operation, "failed", { delivery: "pending" }, boundedStreamError(error).message);
+      }
+      return;
+    }
+    if (operation.kind === "schedule_run" && operation.payload.kind === "schedule_run") {
+      const schedule = await this.storage.scheduledTasks.getById(operation.payload.scheduleId);
+      if (!schedule || schedule.project_id !== operation.project_id) {
+        await this.transitionOperation(operation, "failed", {}, "Schedule is no longer authorized");
+        return;
+      }
+      const run = await this.storage.scheduledTaskRuns.getById(operation.payload.runId);
+      if (run?.project_id === operation.project_id) {
+        const status = run.status === "running" ? "running"
+          : run.status === "completed" || run.status === "skipped" ? "completed" : "failed";
+        await this.transitionOperation(operation, status, {
+          scheduleId: operation.payload.scheduleId, runId: operation.payload.runId,
+        }, status === "failed" ? "Schedule run failed" : null);
+        return;
+      }
+      if (operation.status === "pending" && this.toolDependencies?.mutationServices) {
+        const result = await this.toolDependencies.mutationServices.runScheduleNow(
+          operation.payload.scheduleId, operation.payload.runId,
+        );
+        if ("error" in result) {
+          await this.transitionOperation(operation, "failed", {}, boundedStreamError(result.error).message);
+        } else {
+          await this.transitionOperation(operation, "running", {});
+        }
       }
     }
   }
