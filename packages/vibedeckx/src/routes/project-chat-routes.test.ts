@@ -11,6 +11,7 @@ vi.mock("@clerk/fastify", () => ({
 }));
 
 import projectChatRoutes from "./project-chat-routes.js";
+import { ProjectChatManager } from "../project-chat-manager.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { ProjectChatThread, Storage } from "../storage/types.js";
 
@@ -323,6 +324,45 @@ describe("project chat thread routes", () => {
       expect(await storage.projectChatThreads.getById("thread-1", "project-1", "user-1")).toBeUndefined();
       expect(await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
       expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
+    });
+
+    it("returns 404 when a concurrent manager delete reports no deletion", async () => {
+      await createThread();
+      projectChatManager.deleteThread.mockResolvedValueOnce(false);
+
+      const response = await app.inject({ method: "DELETE", url: "/api/project-chat/threads/thread-1" });
+
+      expect(response.statusCode).toBe(404);
+      expect(await storage.projectChatThreads.getById(
+        "thread-1", "project-1", "user-1",
+      )).toBeDefined();
+    });
+
+    it("returns 500 for a failed storage delete and succeeds on a fresh retry", async () => {
+      await createThread();
+      const actualManager = new ProjectChatManager(storage, {
+        async *run() { return; },
+      });
+      projectChatManager.deleteThread.mockImplementation(
+        actualManager.deleteThread.bind(actualManager),
+      );
+      const originalDelete = storage.projectChatThreads.delete.bind(storage.projectChatThreads);
+      let deletes = 0;
+      vi.spyOn(storage.projectChatThreads, "delete").mockImplementation(async (...args) => {
+        deletes++;
+        if (deletes === 1) throw new Error("delete unavailable");
+        return originalDelete(...args);
+      });
+
+      const first = await app.inject({ method: "DELETE", url: "/api/project-chat/threads/thread-1" });
+      const second = await app.inject({ method: "DELETE", url: "/api/project-chat/threads/thread-1" });
+
+      expect(first.statusCode).toBe(500);
+      expect(second.statusCode).toBe(204);
+      expect(deletes).toBe(2);
+      expect(await storage.projectChatThreads.getById(
+        "thread-1", "project-1", "user-1",
+      )).toBeUndefined();
     });
 
     it("does not delete a foreign thread", async () => {

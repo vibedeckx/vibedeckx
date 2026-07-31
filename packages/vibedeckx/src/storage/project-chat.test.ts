@@ -239,16 +239,17 @@ describe("project chat storage", () => {
     }
   });
 
-  it("rejects invalid message and context entity types at the SQL boundary", async () => {
+  it("accepts public operation messages while rejecting invalid SQL-boundary types", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await expect(storage.projectChatMessages.append({
+      id: "public-operation", thread_id: "t1", project_id: "p1", user_id: "u1",
+      sequence: 1, type: "operation", content: JSON.stringify({ status: "running" }),
+    })).resolves.toMatchObject({ type: "operation" });
     const db = new Database(dbPath);
     try {
       expect(() => db.prepare(
         "INSERT INTO project_chat_messages (id, thread_id, sequence, type, content) VALUES (?, ?, ?, ?, ?)",
       ).run("bad-message", "t1", 1, "invalid", "bad")).toThrow(/CHECK constraint failed/);
-      expect(() => db.prepare(
-        "INSERT INTO project_chat_messages (id, thread_id, sequence, type, content) VALUES (?, ?, ?, ?, ?)",
-      ).run("internal-marker", "t1", 2, "operation", "hidden work")).toThrow(/CHECK constraint failed/);
       expect(() => db.prepare(
         "INSERT INTO project_chat_context_refs (thread_id, entity_type, entity_id) VALUES (?, ?, ?)",
       ).run("t1", "invalid", "bad")).toThrow(/CHECK constraint failed/);

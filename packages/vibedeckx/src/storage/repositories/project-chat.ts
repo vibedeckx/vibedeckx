@@ -320,8 +320,12 @@ export const createProjectChatRepos = (
       });
     },
 
-    appendEvent: async ({ id, thread_id, project_id, user_id, attempt, message_id, type, content }) => {
+    appendEvent: async ({
+      id, thread_id, project_id, user_id, attempt, is_current, message_id, type, content,
+    }) => {
+      if (is_current && !is_current()) return undefined;
       return kdb.transaction().execute(async (trx) => {
+        if (is_current && !is_current()) return undefined;
         const running = await trx.selectFrom("project_chat_work_items as work")
           .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
           .select("work.id")
@@ -333,10 +337,12 @@ export const createProjectChatRepos = (
           .where("thread.user_id", "=", user_id)
           .executeTakeFirst();
         if (!running) return undefined;
+        if (is_current && !is_current()) return undefined;
         const sequenceRow = await trx.selectFrom("project_chat_messages")
           .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
           .where("thread_id", "=", thread_id)
           .executeTakeFirstOrThrow();
+        if (is_current && !is_current()) return undefined;
         await trx.insertInto("project_chat_messages")
           .values({
             id: message_id,
@@ -360,9 +366,16 @@ export const createProjectChatRepos = (
     },
 
     finish: async ({
-      id, thread_id, project_id, user_id, attempt, status, error, turn_end_id, turn_end_content,
+      id, thread_id, project_id, user_id, attempt, is_current,
+      status, error, turn_end_id, turn_end_content,
     }) => {
+      if (is_current && !is_current()) {
+        throw new Error("Project Chat work item not found or already terminal");
+      }
       return kdb.transaction().execute(async (trx) => {
+        if (is_current && !is_current()) {
+          throw new Error("Project Chat work item not found or already terminal");
+        }
         const work = await trx.selectFrom("project_chat_work_items as work")
           .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
           .selectAll("work")
@@ -370,14 +383,32 @@ export const createProjectChatRepos = (
           .where("work.thread_id", "=", thread_id)
           .where("thread.project_id", "=", project_id)
           .where("thread.user_id", "=", user_id)
-          .where("work.status", "=", "running")
-          .where("work.attempt", "=", attempt)
           .executeTakeFirst();
         if (!work) throw new Error("Project Chat work item not found or already terminal");
+        if (!["accepted", "running"].includes(work.status) && work.attempt === attempt) {
+          const existingTurnEnd = await trx.selectFrom("project_chat_messages")
+            .selectAll()
+            .where("id", "=", turn_end_id)
+            .where("thread_id", "=", thread_id)
+            .where("type", "=", "turn_end")
+            .executeTakeFirst();
+          if (existingTurnEnd) {
+            return { workItem: mapWorkItem(work), turnEnd: mapMessage(existingTurnEnd) };
+          }
+        }
+        if (work.status !== "running" || work.attempt !== attempt) {
+          throw new Error("Project Chat work item not found or already terminal");
+        }
+        if (is_current && !is_current()) {
+          throw new Error("Project Chat work item not found or already terminal");
+        }
         const sequenceRow = await trx.selectFrom("project_chat_messages")
           .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
           .where("thread_id", "=", thread_id)
           .executeTakeFirstOrThrow();
+        if (is_current && !is_current()) {
+          throw new Error("Project Chat work item not found or already terminal");
+        }
         const sequence = Number(sequenceRow.sequence) + 1;
         await trx.insertInto("project_chat_messages")
           .values({
@@ -388,6 +419,9 @@ export const createProjectChatRepos = (
             content: turn_end_content,
           })
           .execute();
+        if (is_current && !is_current()) {
+          throw new Error("Project Chat work item not found or already terminal");
+        }
         const terminalWork = await trx.updateTable("project_chat_work_items")
           .set({ status, error, updated_at: now() })
           .where("id", "=", id)

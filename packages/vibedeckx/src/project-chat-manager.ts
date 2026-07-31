@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { streamText } from "ai";
 import type WebSocket from "ws";
 import type {
@@ -45,6 +45,9 @@ export interface ProjectChatModelRunner {
 export interface ProjectChatManagerOptions {
   drainTimeoutMs?: number;
   idleEvictionMs?: number;
+  terminalRetryDelayMs?: number;
+  terminalRetryAttempts?: number;
+  terminalAttemptTimeoutMs?: number;
 }
 
 export type ProjectChatWsMessage =
@@ -141,11 +144,18 @@ export class ProjectChatManager {
   private readonly liveThreads = new Map<string, LiveThread>();
   private readonly loadingThreads = new Map<string, Promise<LiveThread>>();
   private readonly closingThreads = new Set<string>();
+  private readonly deletingThreads = new Map<string, {
+    userId: string;
+    promise: Promise<boolean>;
+  }>();
   private readonly lifecycles = new Map<string, ThreadLifecycle>();
   private readonly outstandingOperations = new Set<Promise<unknown>>();
   private readonly runner: ProjectChatModelRunner;
   private readonly drainTimeoutMs: number;
   private readonly idleEvictionMs: number;
+  private readonly terminalRetryDelayMs: number;
+  private readonly terminalRetryAttempts: number;
+  private readonly terminalAttemptTimeoutMs: number;
   private shuttingDown = false;
 
   constructor(
@@ -156,6 +166,9 @@ export class ProjectChatManager {
     this.runner = runner ?? new DefaultProjectChatModelRunner(storage);
     this.drainTimeoutMs = options.drainTimeoutMs ?? 2_000;
     this.idleEvictionMs = options.idleEvictionMs ?? 30_000;
+    this.terminalRetryDelayMs = options.terminalRetryDelayMs ?? 100;
+    this.terminalRetryAttempts = Math.max(1, options.terminalRetryAttempts ?? 3);
+    this.terminalAttemptTimeoutMs = options.terminalAttemptTimeoutMs ?? this.drainTimeoutMs;
   }
 
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
@@ -212,6 +225,7 @@ export class ProjectChatManager {
     if (!live?.abortController || live.status !== "running") return false;
     this.settlePendingApprovals(live, live.activeTurnId, false);
     live.abortController.abort();
+    await this.detachActiveWork(live, "stopped", true);
     return true;
   }
 
@@ -248,11 +262,35 @@ export class ProjectChatManager {
   }
 
   async deleteThread(threadId: string, userId: string): Promise<boolean> {
+    const pendingAtStart = this.deletingThreads.get(threadId);
+    if (pendingAtStart) {
+      return pendingAtStart.userId === userId ? pendingAtStart.promise : false;
+    }
     const thread = await this.findAuthorized(threadId, userId);
     if (!thread) return false;
+    const pendingAfterAuthorization = this.deletingThreads.get(threadId);
+    if (pendingAfterAuthorization) {
+      return pendingAfterAuthorization.userId === userId
+        ? pendingAfterAuthorization.promise
+        : false;
+    }
+    let operation!: Promise<boolean>;
+    operation = this.deleteAuthorizedThread(thread, userId).finally(() => {
+      if (this.deletingThreads.get(threadId)?.promise !== operation) return;
+      this.deletingThreads.delete(threadId);
+      this.closingThreads.delete(threadId);
+    });
+    this.deletingThreads.set(threadId, { userId, promise: operation });
+    return operation;
+  }
+
+  private async deleteAuthorizedThread(
+    thread: ProjectChatThread,
+    userId: string,
+  ): Promise<boolean> {
+    const threadId = thread.id;
     const lifecycle = this.lifecycle(threadId);
     lifecycle.generation++;
-    lifecycle.deleted = true;
     this.closingThreads.add(threadId);
     try {
       const live = this.liveThreads.get(threadId);
@@ -261,18 +299,18 @@ export class ProjectChatManager {
         this.settlePendingApprovals(live, live.activeTurnId, false);
         live.abortController?.abort();
         live.queue.splice(0);
-        await this.drainActiveWork(live);
+        await this.detachActiveWork(live, "none", false);
         for (const socket of live.subscribers) {
           try { socket.close(); } catch { /* disconnected */ }
         }
         live.subscribers.clear();
       }
       await this.storage.projectChatThreads.delete(thread.id, thread.project_id, userId);
+      lifecycle.deleted = true;
       return true;
     } finally {
       this.liveThreads.delete(threadId);
       this.loadingThreads.delete(threadId);
-      this.closingThreads.delete(threadId);
     }
   }
 
@@ -285,7 +323,8 @@ export class ProjectChatManager {
       live.queue.splice(0);
     }
     await Promise.allSettled([...this.outstandingOperations]);
-    await Promise.all([...this.liveThreads.values()].map((live) => this.drainActiveWork(live)));
+    await Promise.all([...this.liveThreads.values()]
+      .map((live) => this.detachActiveWork(live, "accepted", false)));
     for (const live of this.liveThreads.values()) live.subscribers.clear();
   }
 
@@ -370,38 +409,88 @@ export class ProjectChatManager {
   }
 
   private canPersistTurn(live: LiveThread, turnId: string): boolean {
-    return live.activeTurnId === turnId && !this.lifecycle(live.thread.id).deleted;
+    return live.activeTurnId === turnId &&
+      !this.lifecycle(live.thread.id).deleted &&
+      !this.closingThreads.has(live.thread.id);
   }
 
-  private async drainActiveWork(live: LiveThread): Promise<void> {
-    const work = live.activeWork;
-    if (!work) return;
+  private terminalMessageId(workItemId: string, attempt: number): string {
+    const digest = createHash("sha256").update(`${workItemId}\0${attempt}`).digest("hex");
+    return `turn-end-${digest}`;
+  }
+
+  private async settleWithin<T>(promise: Promise<T>, timeoutMs = this.drainTimeoutMs): Promise<
+    | { status: "fulfilled"; value: T }
+    | { status: "rejected"; reason: unknown }
+    | { status: "timeout" }
+  > {
     let timeout: ReturnType<typeof setTimeout> | undefined;
-    const completed = await Promise.race([
-      work.then(() => true),
-      new Promise<false>((resolve) => {
-        timeout = setTimeout(() => resolve(false), this.drainTimeoutMs);
+    const result = await Promise.race([
+      promise.then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      ),
+      new Promise<{ status: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
       }),
     ]);
     if (timeout) clearTimeout(timeout);
-    if (completed || live.activeWork !== work) return;
+    return result;
+  }
+
+  private async detachActiveWork(
+    live: LiveThread,
+    persistence: "accepted" | "stopped" | "none",
+    resumeQueue: boolean,
+  ): Promise<void> {
+    const work = live.activeWork;
+    if (!work) return;
+    const drained = await this.settleWithin(work);
+    if (drained.status !== "timeout" || live.activeWork !== work) return;
     const workItemId = live.activeWorkItemId;
     const attempt = live.activeAttempt;
     live.activeTurnId = null;
-    if (workItemId && attempt !== null) {
-      await this.storage.projectChatWorkItems.markAccepted(
+    live.abortController = null;
+    live.activeWork = null;
+    live.activeWorkItemId = null;
+    live.activeAttempt = null;
+    live.writeTail = Promise.resolve();
+    live.status = "idle";
+
+    if (workItemId && attempt !== null && persistence === "accepted") {
+      await this.settleWithin(this.storage.projectChatWorkItems.markAccepted(
         workItemId,
         live.thread.id,
         live.thread.project_id,
         live.thread.user_id,
         attempt,
-      );
+      ));
+    } else if (workItemId && attempt !== null && persistence === "stopped") {
+      const terminal = this.storage.projectChatWorkItems.finish({
+        id: workItemId,
+        thread_id: live.thread.id,
+        project_id: live.thread.project_id,
+        user_id: live.thread.user_id,
+        attempt,
+        status: "stopped",
+        error: null,
+        turn_end_id: this.terminalMessageId(workItemId, attempt),
+        turn_end_content: JSON.stringify({ status: "stopped" }),
+      }).then((result) => {
+        if (this.liveThreads.get(live.thread.id) === live &&
+          !this.lifecycle(live.thread.id).deleted) this.publishMessage(live, result.turnEnd);
+        return result;
+      });
+      await this.settleWithin(terminal);
     }
-    live.abortController = null;
-    live.activeWork = null;
-    live.activeWorkItemId = null;
-    live.activeAttempt = null;
-    live.status = "idle";
+
+    if (!resumeQueue) return;
+    if (live.queue.length > 0 && !this.shuttingDown && !this.closingThreads.has(live.thread.id)) {
+      this.pump(live);
+    } else {
+      this.broadcastStatus(live);
+      this.scheduleEviction(live);
+    }
   }
 
   private cancelEviction(live: LiveThread): void {
@@ -521,7 +610,7 @@ export class ProjectChatManager {
       if (!this.canPersistTurn(live, turnId)) return;
       const status = abortController.signal.aborted ? "stopped" : "completed";
       try {
-        await this.finishWork(live, queued, turnId, attempt, status, null);
+        await this.finishWorkWithRetry(live, queued, turnId, attempt, status, null);
       } catch {
         // A terminal write failure leaves the work nonterminal for recovery.
       }
@@ -529,7 +618,11 @@ export class ProjectChatManager {
       if (!this.canPersistTurn(live, turnId)) return;
       if (attempt === null) return;
       if (abortController.signal.aborted) {
-        await this.finishWork(live, queued, turnId, attempt, "stopped", null);
+        try {
+          await this.finishWorkWithRetry(live, queued, turnId, attempt, "stopped", null);
+        } catch {
+          // A terminal write failure leaves the work nonterminal for recovery.
+        }
         return;
       }
       try {
@@ -541,7 +634,7 @@ export class ProjectChatManager {
           "error",
           error instanceof Error ? error.message : String(error),
         );
-        await this.finishWork(
+        await this.finishWorkWithRetry(
           live,
           queued,
           turnId,
@@ -562,26 +655,18 @@ export class ProjectChatManager {
     live: LiveThread,
     input: { id: string; userMessageId: string; content: string },
   ): Promise<QueuedTurn> {
-    const previousWrite = live.writeTail;
-    let release!: () => void;
-    live.writeTail = new Promise<void>((resolve) => { release = resolve; });
-    await previousWrite;
-    try {
-      const accepted = await this.storage.projectChatWorkItems.accept({
-        id: input.id,
-        user_message_id: input.userMessageId,
-        thread_id: live.thread.id,
-        project_id: live.thread.project_id,
-        user_id: live.thread.user_id,
-        content: input.content,
-      });
-      return {
-        ...this.queueFromWorkItem(accepted.workItem),
-        acceptedMessage: accepted.userMessage,
-      };
-    } finally {
-      release();
-    }
+    const accepted = await this.storage.projectChatWorkItems.accept({
+      id: input.id,
+      user_message_id: input.userMessageId,
+      thread_id: live.thread.id,
+      project_id: live.thread.project_id,
+      user_id: live.thread.user_id,
+      content: input.content,
+    });
+    return {
+      ...this.queueFromWorkItem(accepted.workItem),
+      acceptedMessage: accepted.userMessage,
+    };
   }
 
   private async finishWork(
@@ -591,6 +676,7 @@ export class ProjectChatManager {
     attempt: number,
     status: "completed" | "stopped" | "failed",
     error: string | null,
+    turnEndId: string = randomUUID(),
   ): Promise<ProjectChatMessage> {
     const previousWrite = live.writeTail;
     let release!: () => void;
@@ -604,9 +690,10 @@ export class ProjectChatManager {
         project_id: live.thread.project_id,
         user_id: live.thread.user_id,
         attempt,
+        is_current: () => this.canPersistTurn(live, turnId),
         status,
         error,
-        turn_end_id: randomUUID(),
+        turn_end_id: turnEndId,
         turn_end_content: JSON.stringify({
           status: status === "failed" ? "error" : status,
         }),
@@ -617,6 +704,32 @@ export class ProjectChatManager {
     } finally {
       release();
     }
+  }
+
+  private async finishWorkWithRetry(
+    live: LiveThread,
+    queued: QueuedTurn,
+    turnId: string,
+    attempt: number,
+    status: "completed" | "stopped" | "failed",
+    error: string | null,
+  ): Promise<ProjectChatMessage> {
+    const turnEndId = this.terminalMessageId(queued.workId, attempt);
+    let lastError: unknown;
+    for (let retry = 0; retry < this.terminalRetryAttempts; retry++) {
+      const settled = await this.settleWithin(
+        this.finishWork(live, queued, turnId, attempt, status, error, turnEndId),
+        this.terminalAttemptTimeoutMs,
+      );
+      if (settled.status === "fulfilled") return settled.value;
+      lastError = settled.status === "rejected"
+        ? settled.reason
+        : new Error("Project Chat terminal persistence timed out");
+      if (settled.status === "timeout") live.writeTail = Promise.resolve();
+      if (!this.canPersistTurn(live, turnId) || retry + 1 >= this.terminalRetryAttempts) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, this.terminalRetryDelayMs));
+    }
+    throw lastError;
   }
 
   private async append(
@@ -640,6 +753,7 @@ export class ProjectChatManager {
         project_id: live.thread.project_id,
         user_id: live.thread.user_id,
         attempt,
+        is_current: () => this.canPersistTurn(live, turnId),
         message_id: randomUUID(),
         type,
         content,

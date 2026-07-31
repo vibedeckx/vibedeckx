@@ -63,7 +63,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       sequence INTEGER NOT NULL,
       type TEXT NOT NULL CHECK (type IN (
         'user', 'assistant', 'system', 'tool_use', 'tool_result',
-        'tool_approval_request', 'error', 'turn_end'
+        'tool_approval_request', 'operation', 'error', 'turn_end'
       )),
       content TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

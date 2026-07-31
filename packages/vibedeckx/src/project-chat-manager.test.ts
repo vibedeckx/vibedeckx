@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
@@ -121,6 +122,51 @@ describe("ProjectChatManager", () => {
     await expect(Promise.all(frames)).resolves.not.toContain(false);
   });
 
+  it("keeps journal rows private while public operation messages reach every chat surface", async () => {
+    await createThread("thread-1");
+    let secondInput: ProjectChatRunInput | undefined;
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        const current = input.messages.filter((message) => message.type === "user").at(-1)?.content;
+        if (current === "first") {
+          yield { type: "operation", content: JSON.stringify({ label: "Deploy", status: "running" }) };
+        } else {
+          secondInput = input;
+          yield { type: "assistant", content: "done" };
+        }
+      },
+    });
+    await manager.openThread("thread-1", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1,
+      send: (raw: string) => { frames.push(raw); },
+    } as never);
+
+    await manager.sendMessage("thread-1", "user-1", "first");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    await manager.sendMessage("thread-1", "user-1", "second");
+    await waitFor(() => secondInput !== undefined);
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    const snapshot = await manager.openThread("thread-1", "user-1");
+    const messages = await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    );
+    const db = new Database(dbPath, { readonly: true });
+    const workRows = db.prepare("SELECT id FROM project_chat_work_items ORDER BY created_at, id")
+      .all() as Array<{ id: string }>;
+    const workIds = workRows.map((row) => row.id);
+    db.close();
+    const publicSurfaces = JSON.stringify({ messages, snapshot, frames, model: secondInput!.messages });
+
+    expect(messages).toContainEqual(expect.objectContaining({ type: "operation" }));
+    expect(secondInput!.messages).toContainEqual(expect.objectContaining({ type: "operation" }));
+    expect(frames.some((frame) => frame.includes('"operation"'))).toBe(true);
+    for (const workId of workIds) expect(publicSurfaces).not.toContain(workId);
+    expect(publicSurfaces).not.toContain("workId");
+  });
+
   it("runs one turn at a time per thread and drains queued messages in order", async () => {
     await createThread("thread-1");
     const firstGate = deferred();
@@ -181,6 +227,123 @@ describe("ProjectChatManager", () => {
     await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "idle");
     expect((await storage.projectChatMessages.listByThread("thread-2", "project-1", "user-1"))
       .some((message) => message.content === "thread two complete")).toBe(true);
+  });
+
+  it("bounds stop for an abort-ignoring runner, terminalizes it, and starts queued work", async () => {
+    await createThread("thread-1");
+    const releaseFirst = deferred();
+    const starts: string[] = [];
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        const current = input.messages.filter((message) => message.type === "user").at(-1)?.content ?? "";
+        starts.push(current);
+        if (current === "first") {
+          await releaseFirst.promise;
+          yield { type: "assistant", content: "stale first output" };
+          return;
+        }
+        yield { type: "assistant", content: "second output" };
+      },
+    }, { drainTimeoutMs: 20 });
+    await manager.sendMessage("thread-1", "user-1", "first");
+    await waitFor(() => starts.length === 1);
+    await manager.sendMessage("thread-1", "user-1", "second");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).queueLength === 1);
+
+    const stopped = await Promise.race([
+      manager.stopGeneration("thread-1", "user-1"),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
+    ]);
+    expect(stopped).toBe(true);
+    await waitFor(() => starts.length === 2);
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    releaseFirst.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const messages = await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    );
+    expect(starts).toEqual(["first", "second"]);
+    expect(messages.some((message) => message.content === "stale first output")).toBe(false);
+    expect(messages).toContainEqual(expect.objectContaining({ type: "assistant", content: "second output" }));
+    expect(messages.filter((message) => message.type === "turn_end").map((message) => message.content))
+      .toContain(JSON.stringify({ status: "stopped" }));
+    expect(await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    )).toEqual([]);
+  });
+
+  it.each(["stalled", "rejected"] as const)(
+    "bounds stop when detached terminal persistence is %s",
+    async (failure) => {
+      await createThread("thread-1");
+      const releaseRunner = deferred();
+      const manager = new ProjectChatManager(storage, {
+        async *run() {
+          await releaseRunner.promise;
+          yield { type: "assistant", content: "stale output" };
+        },
+      }, { drainTimeoutMs: 20 });
+      await manager.sendMessage("thread-1", "user-1", "work");
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+      vi.spyOn(storage.projectChatWorkItems, "finish").mockImplementation(async () => {
+        if (failure === "rejected") throw new Error("terminal failed");
+        await new Promise<void>(() => undefined);
+        throw new Error("unreachable");
+      });
+
+      const result = await Promise.race([
+        manager.stopGeneration("thread-1", "user-1").then(() => "settled" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
+      ]);
+      expect(result).toBe("settled");
+      expect((await manager.openThread("thread-1", "user-1")).status).toBe("idle");
+      expect(await storage.projectChatWorkItems.listNonterminal(
+        "thread-1", "project-1", "user-1",
+      )).toHaveLength(1);
+      releaseRunner.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect((await storage.projectChatMessages.listByThread(
+        "thread-1", "project-1", "user-1",
+      )).some((message) => message.content === "stale output")).toBe(false);
+    },
+  );
+
+  it("starts queued work on a fresh write lane when the stopped append never settles", async () => {
+    await createThread("thread-1");
+    const staleAppendStarted = deferred();
+    const releaseStaleAppend = deferred();
+    const starts: string[] = [];
+    const originalAppend = storage.projectChatWorkItems.appendEvent.bind(storage.projectChatWorkItems);
+    vi.spyOn(storage.projectChatWorkItems, "appendEvent").mockImplementation(async (opts) => {
+      if (opts.content === "stale append") {
+        staleAppendStarted.resolve();
+        await releaseStaleAppend.promise;
+      }
+      return originalAppend(opts);
+    });
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        const current = input.messages.filter((message) => message.type === "user").at(-1)?.content ?? "";
+        starts.push(current);
+        yield { type: "assistant", content: current === "first" ? "stale append" : "second output" };
+      },
+    }, { drainTimeoutMs: 20 });
+    await manager.sendMessage("thread-1", "user-1", "first");
+    await staleAppendStarted.promise;
+    await manager.sendMessage("thread-1", "user-1", "second");
+
+    await manager.stopGeneration("thread-1", "user-1");
+    await waitFor(() => starts.length === 2);
+    await waitFor(async () => (await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).some((message) => message.content === "second output"));
+
+    releaseStaleAppend.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).some((message) => message.content === "stale append")).toBe(false);
   });
 
   it("executes two threads in one project independently", async () => {
@@ -291,6 +454,61 @@ describe("ProjectChatManager", () => {
     expect(await storage.projectChatWorkItems.listNonterminal(
       "thread-1", "project-1", "user-1",
     )).toHaveLength(1);
+  });
+
+  it.each(["stalled", "rejected"] as const)(
+    "bounds shutdown when detached-work reset is %s",
+    async (failure) => {
+      await createThread("thread-1");
+      const releaseRunner = deferred();
+      const manager = new ProjectChatManager(storage, {
+        async *run() { await releaseRunner.promise; },
+      }, { drainTimeoutMs: 20 });
+      await manager.sendMessage("thread-1", "user-1", "work");
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+      vi.spyOn(storage.projectChatWorkItems, "markAccepted").mockImplementation(async () => {
+        if (failure === "rejected") throw new Error("reset failed");
+        await new Promise<void>(() => undefined);
+        return undefined;
+      });
+
+      const result = await Promise.race([
+        manager.shutdown().then(() => "settled" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
+      ]);
+      expect(result).toBe("settled");
+      expect(await storage.projectChatWorkItems.listNonterminal(
+        "thread-1", "project-1", "user-1",
+      )).toHaveLength(1);
+      releaseRunner.resolve();
+    },
+  );
+
+  it("fences an append paused before storage even when shutdown reset stalls", async () => {
+    await createThread("thread-1");
+    const appendStarted = deferred();
+    const allowAppend = deferred();
+    const originalAppend = storage.projectChatWorkItems.appendEvent.bind(storage.projectChatWorkItems);
+    vi.spyOn(storage.projectChatWorkItems, "appendEvent").mockImplementation(async (opts) => {
+      appendStarted.resolve();
+      await allowAppend.promise;
+      return originalAppend(opts);
+    });
+    vi.spyOn(storage.projectChatWorkItems, "markAccepted").mockImplementation(async () => {
+      await new Promise<void>(() => undefined);
+      return undefined;
+    });
+    const manager = new ProjectChatManager(storage, reply("must remain private"), { drainTimeoutMs: 20 });
+    await manager.sendMessage("thread-1", "user-1", "work");
+    await appendStarted.promise;
+
+    await manager.shutdown();
+    allowAppend.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).map((message) => message.type)).toEqual(["user"]);
   });
 
   it("fences an output append already awaiting storage when shutdown detaches", async () => {
@@ -408,28 +626,193 @@ describe("ProjectChatManager", () => {
     await waitFor(() => recovered.length === 1);
   });
 
-  it("leaves completed work recoverable after a one-shot terminal persistence failure", async () => {
+  it("retries a transient terminal failure while subscribers still observe running", async () => {
     await createThread("thread-1");
     const originalFinish = storage.projectChatWorkItems.finish.bind(storage.projectChatWorkItems);
+    const firstFailure = deferred();
     let finishCalls = 0;
     vi.spyOn(storage.projectChatWorkItems, "finish").mockImplementation(async (opts) => {
       finishCalls++;
-      if (finishCalls === 1) throw new Error("transient terminal failure");
+      if (finishCalls === 1) {
+        firstFailure.resolve();
+        throw new Error("transient terminal failure");
+      }
       return originalFinish(opts);
     });
-    const manager = new ProjectChatManager(storage, reply("model result"));
+    const run = vi.fn(reply("model result").run);
+    const manager = new ProjectChatManager(storage, { run }, {
+      terminalRetryDelayMs: 20,
+      terminalRetryAttempts: 3,
+    });
+    await manager.openThread("thread-1", "user-1");
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1, send: vi.fn(),
+    } as never);
 
     await manager.sendMessage("thread-1", "user-1", "retry terminal");
+    await firstFailure.promise;
+    expect((await manager.openThread("thread-1", "user-1")).status).toBe("running");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
 
-    expect(finishCalls).toBe(1);
+    expect(finishCalls).toBe(2);
+    expect(run).toHaveBeenCalledOnce();
     expect(await storage.projectChatWorkItems.listNonterminal(
       "thread-1", "project-1", "user-1",
-    )).toHaveLength(1);
+    )).toEqual([]);
     const messages = await storage.projectChatMessages.listByThread(
       "thread-1", "project-1", "user-1",
     );
-    expect(messages.map((message) => message.type)).toEqual(["user", "assistant"]);
+    expect(messages.map((message) => message.type)).toEqual(["user", "assistant", "turn_end"]);
+  });
+
+  it("bounds persistent terminal retries without rerunning the model or spinning", async () => {
+    await createThread("thread-1");
+    const finish = vi.spyOn(storage.projectChatWorkItems, "finish")
+      .mockRejectedValue(new Error("terminal unavailable"));
+    const run = vi.fn(reply("model result").run);
+    const manager = new ProjectChatManager(storage, { run }, {
+      terminalRetryDelayMs: 1,
+      terminalRetryAttempts: 3,
+    });
+    await manager.openThread("thread-1", "user-1");
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1, send: vi.fn(),
+    } as never);
+
+    await manager.sendMessage("thread-1", "user-1", "retry terminal");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(finish).toHaveBeenCalledTimes(3);
+    expect(run).toHaveBeenCalledOnce();
+    expect(await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    )).toHaveLength(1);
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).map((message) => message.type)).toEqual(["user", "assistant"]);
+  });
+
+  it("times out a stalled terminal attempt and retries without releasing the runner", async () => {
+    await createThread("thread-1");
+    const firstStarted = deferred();
+    const originalFinish = storage.projectChatWorkItems.finish.bind(storage.projectChatWorkItems);
+    let calls = 0;
+    vi.spyOn(storage.projectChatWorkItems, "finish").mockImplementation(async (opts) => {
+      calls++;
+      if (calls === 1) {
+        firstStarted.resolve();
+        await new Promise<void>(() => undefined);
+      }
+      return originalFinish(opts);
+    });
+    const run = vi.fn(reply("model result").run);
+    const manager = new ProjectChatManager(storage, { run }, {
+      terminalRetryDelayMs: 1,
+      terminalRetryAttempts: 3,
+      terminalAttemptTimeoutMs: 20,
+    });
+    await manager.sendMessage("thread-1", "user-1", "retry stalled terminal");
+    await firstStarted.promise;
+
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    expect(calls).toBe(2);
+    expect(run).toHaveBeenCalledOnce();
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).map((message) => message.type)).toEqual(["user", "assistant", "turn_end"]);
+  });
+
+  it("fences terminal attempts released only after retry exhaustion", async () => {
+    await createThread("thread-1");
+    const releaseFinishes = deferred();
+    const originalFinish = storage.projectChatWorkItems.finish.bind(storage.projectChatWorkItems);
+    const finish = vi.spyOn(storage.projectChatWorkItems, "finish").mockImplementation(async (opts) => {
+      await releaseFinishes.promise;
+      return originalFinish(opts);
+    });
+    const manager = new ProjectChatManager(storage, reply("model result"), {
+      terminalRetryDelayMs: 1,
+      terminalRetryAttempts: 2,
+      terminalAttemptTimeoutMs: 10,
+    });
+    await manager.sendMessage("thread-1", "user-1", "exhaust terminal");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    expect(finish).toHaveBeenCalledTimes(2);
+    releaseFinishes.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-1", "project-1", "user-1",
+    )).map((message) => message.type)).toEqual(["user", "assistant"]);
+    expect((await manager.openThread("thread-1", "user-1")).messages.map((message) => message.type))
+      .toEqual(["user", "assistant"]);
+    expect(await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    )).toHaveLength(1);
+  });
+
+  it("reconciles a retry when the first terminal commit succeeded but its response failed", async () => {
+    await createThread("thread-1");
+    const originalFinish = storage.projectChatWorkItems.finish.bind(storage.projectChatWorkItems);
+    let first = true;
+    const finish = vi.spyOn(storage.projectChatWorkItems, "finish").mockImplementation(async (opts) => {
+      const result = await originalFinish(opts);
+      if (first) {
+        first = false;
+        throw new Error("response lost after commit");
+      }
+      return result;
+    });
+    const manager = new ProjectChatManager(storage, reply("model result"), {
+      terminalRetryDelayMs: 1,
+      terminalRetryAttempts: 3,
+    });
+    await manager.openThread("thread-1", "user-1");
+
+    await manager.sendMessage("thread-1", "user-1", "retry committed terminal");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    expect(finish).toHaveBeenCalledTimes(2);
+    expect((await manager.openThread("thread-1", "user-1")).messages.map((message) => message.type))
+      .toEqual(["user", "assistant", "turn_end"]);
+  });
+
+  it("reconciles stop with a normal terminal write already stalled at detach", async () => {
+    await createThread("thread-1");
+    const firstStarted = deferred();
+    const secondStarted = deferred();
+    const releaseFirst = deferred();
+    const releaseSecond = deferred();
+    const originalFinish = storage.projectChatWorkItems.finish.bind(storage.projectChatWorkItems);
+    let calls = 0;
+    vi.spyOn(storage.projectChatWorkItems, "finish").mockImplementation(async (opts) => {
+      calls++;
+      if (calls === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        return originalFinish(opts);
+      }
+      if (calls === 2) {
+        secondStarted.resolve();
+        await releaseSecond.promise;
+      }
+      return originalFinish(opts);
+    });
+    const manager = new ProjectChatManager(storage, reply("model result"), { drainTimeoutMs: 20 });
+    await manager.sendMessage("thread-1", "user-1", "stop finishing");
+    await firstStarted.promise;
+
+    const stopping = manager.stopGeneration("thread-1", "user-1");
+    await secondStarted.promise;
+    releaseFirst.resolve();
+    releaseSecond.resolve();
+    await expect(stopping).resolves.toBe(true);
+
+    expect((await manager.openThread("thread-1", "user-1")).messages
+      .filter((message) => message.type === "turn_end")).toHaveLength(1);
   });
 
   it("recovers a first idle turn after acceptance and a crash before terminal persistence", async () => {
@@ -630,7 +1013,7 @@ describe("ProjectChatManager", () => {
         };
         observedDecision = await decision;
       },
-    });
+    }, { drainTimeoutMs: 20 });
     await manager.sendMessage("thread-1", "user-1", "do it");
     await waitFor(async () => (await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .some((message) => message.type === "tool_approval_request"));
@@ -671,27 +1054,22 @@ describe("ProjectChatManager", () => {
         const decision = new Promise<boolean>((resolve) => { decide = resolve; });
         yield {
           type: "tool_approval_request", content: "persisting",
-          approvalId: "persisting-approval", resolveApproval: decide,
+          approvalId: "persisting-approval", resolveApproval: (decision_) => {
+            observedDecision = decision_;
+            decide(decision_);
+          },
         };
-        observedDecision = await decision;
+        await decision;
       },
-    });
+    }, { drainTimeoutMs: 20 });
     await manager.sendMessage("thread-1", "user-1", "do it");
     await approvalPersisted.promise;
 
     await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
     releaseAppend.resolve();
-    const settled = await Promise.race([
-      waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle")
-        .then(() => true),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
-    ]);
-    if (!settled) {
-      await manager.resolveToolApproval("thread-1", "user-1", "persisting-approval", false);
-      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
-    }
+    await waitFor(() => observedDecision !== undefined);
 
-    expect(settled).toBe(true);
+    expect((await manager.openThread("thread-1", "user-1")).status).toBe("idle");
     expect(observedDecision).toBe(false);
   });
 
@@ -846,6 +1224,11 @@ describe("ProjectChatManager", () => {
     } as never);
     await manager.sendMessage("thread-1", "user-1", "work");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+    const markAccepted = vi.spyOn(storage.projectChatWorkItems, "markAccepted")
+      .mockImplementation(async () => {
+        await new Promise<void>(() => undefined);
+        return undefined;
+      });
 
     const deleting = manager.deleteThread("thread-1", "user-1");
     const bounded = await Promise.race([
@@ -861,7 +1244,100 @@ describe("ProjectChatManager", () => {
     releaseRunner.resolve();
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(frames.some((frame) => frame.includes("too late"))).toBe(false);
+    expect(markAccepted).not.toHaveBeenCalled();
     expect(await storage.projectChatThreads.getOwnedById("thread-1", "user-1")).toBeUndefined();
+  });
+
+  it("does not publish an append that returns after deletion enters its drain window", async () => {
+    await createThread("thread-1");
+    const appendCommitted = deferred();
+    const releaseAppend = deferred();
+    const deletionFenced = deferred();
+    const originalAppend = storage.projectChatWorkItems.appendEvent.bind(storage.projectChatWorkItems);
+    vi.spyOn(storage.projectChatWorkItems, "appendEvent").mockImplementation(async (opts) => {
+      const result = await originalAppend(opts);
+      appendCommitted.resolve();
+      await releaseAppend.promise;
+      return result;
+    });
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        input.signal.addEventListener("abort", () => deletionFenced.resolve(), { once: true });
+        yield { type: "assistant", content: "ghost" };
+      },
+    }, { drainTimeoutMs: 50 });
+    await manager.openThread("thread-1", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1,
+      send: (raw: string) => { frames.push(raw); }, close: vi.fn(),
+    } as never);
+    await manager.sendMessage("thread-1", "user-1", "work");
+    await appendCommitted.promise;
+
+    const deleting = manager.deleteThread("thread-1", "user-1");
+    await deletionFenced.promise;
+    releaseAppend.resolve();
+    await deleting;
+
+    expect(frames.some((frame) => frame.includes("ghost"))).toBe(false);
+  });
+
+  it("allows a fresh open and delete retry after storage deletion fails", async () => {
+    await createThread("thread-1");
+    const originalDelete = storage.projectChatThreads.delete.bind(storage.projectChatThreads);
+    let calls = 0;
+    vi.spyOn(storage.projectChatThreads, "delete").mockImplementation(async (...args) => {
+      calls++;
+      if (calls === 1) throw new Error("delete unavailable");
+      return originalDelete(...args);
+    });
+    const manager = new ProjectChatManager(storage, reply("unused"));
+    await manager.openThread("thread-1", "user-1");
+
+    await expect(manager.deleteThread("thread-1", "user-1")).rejects.toThrow(/delete unavailable/);
+    await expect(manager.openThread("thread-1", "user-1"))
+      .resolves.toMatchObject({ thread: { id: "thread-1" } });
+    await expect(manager.deleteThread("thread-1", "user-1")).resolves.toBe(true);
+
+    expect(calls).toBe(2);
+    expect(await storage.projectChatThreads.getOwnedById("thread-1", "user-1")).toBeUndefined();
+  });
+
+  it("shares concurrent deletion and keeps one owner for its in-progress fence", async () => {
+    await createThread("thread-1");
+    const bothAuthorized = deferred();
+    const releaseAuthorization = deferred();
+    const originalGetById = storage.projectChatThreads.getById.bind(storage.projectChatThreads);
+    let authorizations = 0;
+    vi.spyOn(storage.projectChatThreads, "getById").mockImplementation(async (...args) => {
+      if (args[0] === "thread-1" && authorizations < 2) {
+        authorizations++;
+        if (authorizations === 2) bothAuthorized.resolve();
+        await releaseAuthorization.promise;
+      }
+      return originalGetById(...args);
+    });
+    const releaseDelete = deferred();
+    let storageDeletes = 0;
+    vi.spyOn(storage.projectChatThreads, "delete").mockImplementation(async () => {
+      storageDeletes++;
+      await releaseDelete.promise;
+      throw new Error("shared delete failure");
+    });
+    const manager = new ProjectChatManager(storage, reply("unused"));
+
+    const first = manager.deleteThread("thread-1", "user-1");
+    const second = manager.deleteThread("thread-1", "user-1");
+    await bothAuthorized.promise;
+    releaseAuthorization.resolve();
+    await waitFor(() => storageDeletes >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(storageDeletes).toBe(1);
+    releaseDelete.resolve();
+    await expect(first).rejects.toThrow(/shared delete failure/);
+    await expect(second).rejects.toThrow(/shared delete failure/);
   });
 
   it("hydrates a live thread only once while messages are being appended", async () => {

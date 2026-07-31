@@ -210,6 +210,7 @@ export type ProjectChatMessageType =
   | "tool_use"
   | "tool_result"
   | "tool_approval_request"
+  | "operation"
   | "error"
   | "turn_end";
 
@@ -972,6 +973,7 @@ export interface Storage {
       project_id: string;
       user_id: string;
       attempt: number;
+      is_current?: () => boolean;
       message_id: string;
       type: Exclude<ProjectChatMessageType, "user" | "turn_end">;
       content: string;
@@ -982,6 +984,7 @@ export interface Storage {
       project_id: string;
       user_id: string;
       attempt: number;
+      is_current?: () => boolean;
       status: Extract<ProjectChatWorkStatus, "completed" | "stopped" | "failed">;
       error: string | null;
       turn_end_id: string;

@@ -187,7 +187,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const owned = await getOwnedThread(req, reply, req.params.threadId);
       if (!owned) return;
-      await fastify.projectChatManager.deleteThread(owned.thread.id, owned.userId);
+      const deleted = await fastify.projectChatManager.deleteThread(owned.thread.id, owned.userId);
+      if (!deleted) return reply.code(404).send({ error: "Thread not found" });
       return reply.code(204).send();
     },
   );
