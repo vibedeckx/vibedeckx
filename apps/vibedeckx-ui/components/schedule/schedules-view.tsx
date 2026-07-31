@@ -325,7 +325,18 @@ export function SchedulesView({
                     </div>
                   ) : selectedRun ? (
                     <>
-                      <div className="mb-3 text-sm font-medium">Run output — {fmtTs(selectedRun.started_at)}</div>
+                      <div className="mb-4 pb-3 border-b border-border/60">
+                        <div className="text-sm font-medium">
+                          {selectedRun.report ? "Run report" : "Run output"} — {fmtTs(selectedRun.started_at)}
+                        </div>
+                        <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
+                          <span className={cn("px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[selectedRun.status])}>
+                            {selectedRun.status}
+                          </span>
+                          <span>{fmtDuration(selectedRun)}</span>
+                          <span>Exit code: {selectedRun.exit_code ?? "—"}</span>
+                        </div>
+                      </div>
                       {selectedRun.report ? (
                         <>
                           <div className="rounded-md border border-border/50 p-3 text-sm">

@@ -229,4 +229,40 @@ describe("schedule run split view", () => {
     await flush();
     expect(getScheduleRun).not.toHaveBeenCalledWith("run-skipped");
   });
+
+  it("shows run metadata and keeps raw output collapsed beneath a report", async () => {
+    getScheduleRun.mockResolvedValue({
+      ...makeRun(newest.id, newest.started_at, "\u001b[31mraw diagnostic\u001b[0m"),
+      report: "# Summary\nEverything completed.",
+    });
+
+    await act(async () => renderView());
+    await flush();
+
+    const panels = container.querySelectorAll("[data-testid='resizable-panel']");
+    const detailPanel = panels[1];
+    expect(detailPanel.textContent).toContain("Summary");
+    expect(detailPanel.textContent).toContain("completed");
+    expect(detailPanel.textContent).toContain("1m 0s");
+    expect(detailPanel.textContent).toContain("Exit code: 0");
+    const rawDetails = detailPanel.querySelector("details");
+    expect(rawDetails).not.toBeNull();
+    expect(rawDetails?.hasAttribute("open")).toBe(false);
+    expect(rawDetails?.textContent).toContain("raw diagnostic");
+    expect(rawDetails?.textContent).not.toContain("\u001b[31m");
+  });
+
+  it("shows cleaned raw output directly when the run has no report", async () => {
+    getScheduleRun.mockResolvedValue(
+      makeRun(newest.id, newest.started_at, "\u001b[32mplain output\u001b[0m"),
+    );
+
+    await act(async () => renderView());
+    await flush();
+
+    const panels = container.querySelectorAll("[data-testid='resizable-panel']");
+    const detailPanel = panels[1];
+    expect(detailPanel.querySelector("details")).toBeNull();
+    expect(detailPanel.querySelector("pre")?.textContent).toBe("plain output");
+  });
 });
