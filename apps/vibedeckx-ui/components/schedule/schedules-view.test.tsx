@@ -100,11 +100,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function renderView() {
+function renderView(schedules: Schedule[] = [schedule]) {
   root.render(
     <SchedulesView
       projectId="project-1"
-      schedules={[schedule]}
+      schedules={schedules}
       loading={false}
       selectedId={schedule.id}
       onSelect={vi.fn()}
@@ -120,7 +120,7 @@ function renderView() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   getScheduleRuns.mockResolvedValue([newest, older]);
   getScheduleRun.mockImplementation(async (id: string) =>
     id === newest.id
@@ -152,9 +152,7 @@ describe("schedule run split view", () => {
     await act(async () => renderView());
     await flush();
 
-    const oldRow = Array.from(container.querySelectorAll("tbody tr")).find((row) =>
-      row.textContent?.includes("7/30/2026"),
-    );
+    const oldRow = container.querySelectorAll("tbody tr")[1];
     await click(oldRow ?? null);
     await flush();
 
@@ -173,9 +171,7 @@ describe("schedule run split view", () => {
 
     await act(async () => renderView());
     await flush();
-    const oldRow = Array.from(container.querySelectorAll("tbody tr")).find((row) =>
-      row.textContent?.includes("7/30/2026"),
-    );
+    const oldRow = container.querySelectorAll("tbody tr")[1];
     await click(oldRow ?? null);
     await flush();
     expect(container.textContent).toContain("old output");
@@ -187,6 +183,34 @@ describe("schedule run split view", () => {
 
     expect(container.textContent).toContain("old output");
     expect(container.textContent).not.toContain("late new output");
+  });
+
+  it("refreshes the selected detail when a running run finishes", async () => {
+    const running: ScheduleRun = {
+      ...newest,
+      status: "running",
+      exit_code: null,
+      finished_at: null,
+    };
+    const completed = makeRun(newest.id, newest.started_at, "finished output");
+    getScheduleRuns
+      .mockResolvedValueOnce([running])
+      .mockResolvedValueOnce([completed]);
+    getScheduleRun
+      .mockResolvedValueOnce({ ...running, output: null })
+      .mockResolvedValueOnce(completed);
+
+    await act(async () => renderView([{ ...schedule, running: true }]));
+    await flush();
+    expect(getScheduleRun).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("(no output captured)");
+
+    await act(async () => renderView([{ ...schedule, running: false, last_run: completed }]));
+    await flush();
+
+    expect(getScheduleRun).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("finished output");
+    expect(container.textContent).not.toContain("(no output captured)");
   });
 
   it("offers a retry when loading the selected run fails", async () => {

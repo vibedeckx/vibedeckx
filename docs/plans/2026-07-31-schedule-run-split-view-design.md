@@ -14,7 +14,7 @@ below them:
 - The left panel contains the run history and defaults to 33% width.
 - The right panel contains the selected run result and defaults to 67% width.
 - Reuse the same resizable panel components and interaction used by Workspace.
-- Persist the panel ratio under a schedule-specific autosave key.
+- Persist one shared panel ratio for the Schedule run view.
 
 On desktop, both panels remain visible. The panel minimum sizes should preserve a
 usable run list and readable output area.

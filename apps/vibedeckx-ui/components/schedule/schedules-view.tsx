@@ -135,6 +135,13 @@ export function SchedulesView({
     };
   }, [selected?.id, schedules, refetchRuns, externallyOpenedRunId]);
 
+  const selectedRunSummary = runs.find(
+    (run) => run.id === selectedRunId && run.schedule_id === selected?.id,
+  );
+  const selectedRunRevision = selectedRunSummary
+    ? `${selectedRunSummary.status}:${selectedRunSummary.finished_at ?? ""}`
+    : null;
+
   useEffect(() => {
     if (!selectedRunId) return;
 
@@ -160,7 +167,7 @@ export function SchedulesView({
     return () => {
       stale = true;
     };
-  }, [selectedRunId, runRetryNonce]);
+  }, [selectedRunId, runRetryNonce, selectedRunRevision]);
 
   const handleRunNow = async () => {
     if (!selected) return;
@@ -293,7 +300,6 @@ export function SchedulesView({
                         <TableRow
                           key={run.id}
                           onClick={() => openRun(run)}
-                          aria-selected={run.id === selectedRunId}
                           aria-disabled={run.status === "skipped"}
                           className={cn(
                             run.status !== "skipped" && "cursor-pointer",
