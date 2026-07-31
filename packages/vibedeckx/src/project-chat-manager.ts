@@ -78,6 +78,11 @@ interface LiveThread {
   writeTail: Promise<void>;
 }
 
+interface ThreadLifecycle {
+  generation: number;
+  deleted: boolean;
+}
+
 export class ProjectChatNotFoundError extends Error {
   readonly code = "PROJECT_CHAT_NOT_FOUND";
 
@@ -126,6 +131,8 @@ export class ProjectChatManager {
   private readonly liveThreads = new Map<string, LiveThread>();
   private readonly loadingThreads = new Map<string, Promise<LiveThread>>();
   private readonly closingThreads = new Set<string>();
+  private readonly lifecycles = new Map<string, ThreadLifecycle>();
+  private readonly outstandingOperations = new Set<Promise<unknown>>();
   private readonly runner: ProjectChatModelRunner;
   private shuttingDown = false;
 
@@ -133,28 +140,42 @@ export class ProjectChatManager {
     this.runner = runner ?? new DefaultProjectChatModelRunner(storage);
   }
 
-  async openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
+  openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
+    return this.trackOperation(this.openThreadInternal(threadId, userId));
+  }
+
+  private async openThreadInternal(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
+    const generation = this.lifecycle(threadId).generation;
+    const existingAtStart = this.liveThreads.has(threadId);
+    if (this.shuttingDown && !existingAtStart) throw new Error("Project Chat manager is shutting down");
     const thread = await this.authorize(threadId, userId);
-    const live = await this.loadLiveThread(thread);
-    if (this.closingThreads.has(threadId)) throw new ProjectChatNotFoundError();
+    this.assertLifecycle(threadId, generation, existingAtStart);
+    const live = await this.loadLiveThread(thread, generation);
+    this.assertLifecycle(threadId, generation, existingAtStart);
     live.thread = thread;
     return this.snapshot(live);
   }
 
-  async sendMessage(threadId: string, userId: string, content: string): Promise<void> {
+  sendMessage(threadId: string, userId: string, content: string): Promise<void> {
+    return this.trackOperation(this.sendMessageInternal(threadId, userId, content));
+  }
+
+  private async sendMessageInternal(threadId: string, userId: string, content: string): Promise<void> {
     if (this.shuttingDown) throw new Error("Project Chat manager is shutting down");
+    const generation = this.lifecycle(threadId).generation;
     const trimmed = content.trim();
     if (!trimmed) throw new TypeError("Project Chat message must not be empty");
     const thread = await this.authorize(threadId, userId);
-    const live = await this.loadLiveThread(thread);
-    if (this.closingThreads.has(threadId)) throw new ProjectChatNotFoundError();
+    this.assertLifecycle(threadId, generation);
+    const live = await this.loadLiveThread(thread, generation);
+    this.assertLifecycle(threadId, generation);
 
     const accepted = await this.acceptWork(live, {
       id: randomUUID(),
       userMessageId: randomUUID(),
       content: trimmed,
     });
-    if (this.closingThreads.has(threadId)) throw new ProjectChatNotFoundError();
+    this.assertLifecycle(threadId, generation);
     live.queue.push(accepted);
     this.broadcastStatus(live);
     this.pump(live);
@@ -172,7 +193,7 @@ export class ProjectChatManager {
   }
 
   subscribe(threadId: string, socket: WebSocket): (() => void) | null {
-    if (this.closingThreads.has(threadId)) return null;
+    if (this.closingThreads.has(threadId) || this.lifecycle(threadId).deleted) return null;
     const live = this.liveThreads.get(threadId);
     if (!live) return null;
     const subscriberUserId = (socket as WebSocket & { projectChatUserId?: string }).projectChatUserId;
@@ -202,6 +223,9 @@ export class ProjectChatManager {
   async deleteThread(threadId: string, userId: string): Promise<boolean> {
     const thread = await this.findAuthorized(threadId, userId);
     if (!thread) return false;
+    const lifecycle = this.lifecycle(threadId);
+    lifecycle.generation++;
+    lifecycle.deleted = true;
     this.closingThreads.add(threadId);
     try {
       const live = this.liveThreads.get(threadId);
@@ -233,12 +257,13 @@ export class ProjectChatManager {
       live.queue.splice(0);
       if (live.activeWork) active.push(live.activeWork);
     }
+    await Promise.allSettled([...this.outstandingOperations]);
     await Promise.allSettled(active);
     for (const live of this.liveThreads.values()) live.subscribers.clear();
   }
 
   private async findAuthorized(threadId: string, userId: string): Promise<ProjectChatThread | undefined> {
-    if (!userId || this.closingThreads.has(threadId)) return undefined;
+    if (!userId || this.closingThreads.has(threadId) || this.lifecycle(threadId).deleted) return undefined;
     const thread = await this.storage.projectChatThreads.getOwnedById(threadId, userId);
     if (!thread) return undefined;
     const project = userId === "local"
@@ -254,17 +279,19 @@ export class ProjectChatManager {
     return thread;
   }
 
-  private async loadLiveThread(thread: ProjectChatThread): Promise<LiveThread> {
+  private async loadLiveThread(thread: ProjectChatThread, generation: number): Promise<LiveThread> {
     const existing = this.liveThreads.get(thread.id);
     if (existing) return existing;
     const loading = this.loadingThreads.get(thread.id);
     if (loading) return loading;
 
-    const promise = Promise.all([
+    let promise!: Promise<LiveThread>;
+    promise = Promise.all([
       this.storage.projectChatMessages.listByThread(thread.id, thread.project_id, thread.user_id),
       this.storage.projectChatWorkItems.listNonterminal(thread.id, thread.project_id, thread.user_id),
     ])
       .then(([messages, workItems]): LiveThread => {
+        this.assertLifecycle(thread.id, generation);
         const live: LiveThread = {
           thread,
           messages,
@@ -282,9 +309,34 @@ export class ProjectChatManager {
         if (live.queue.length > 0) queueMicrotask(() => this.pump(live));
         return live;
       })
-      .finally(() => this.loadingThreads.delete(thread.id));
+      .finally(() => {
+        if (this.loadingThreads.get(thread.id) === promise) this.loadingThreads.delete(thread.id);
+      });
     this.loadingThreads.set(thread.id, promise);
     return promise;
+  }
+
+  private lifecycle(threadId: string): ThreadLifecycle {
+    let lifecycle = this.lifecycles.get(threadId);
+    if (!lifecycle) {
+      lifecycle = { generation: 0, deleted: false };
+      this.lifecycles.set(threadId, lifecycle);
+    }
+    return lifecycle;
+  }
+
+  private assertLifecycle(threadId: string, generation: number, allowShutdown = false): void {
+    const lifecycle = this.lifecycle(threadId);
+    if (lifecycle.deleted || lifecycle.generation !== generation || this.closingThreads.has(threadId)) {
+      throw new ProjectChatNotFoundError();
+    }
+    if (this.shuttingDown && !allowShutdown) throw new Error("Project Chat manager is shutting down");
+  }
+
+  private trackOperation<T>(operation: Promise<T>): Promise<T> {
+    const tracked = operation.finally(() => this.outstandingOperations.delete(tracked));
+    this.outstandingOperations.add(tracked);
+    return tracked;
   }
 
   private pump(live: LiveThread): void {

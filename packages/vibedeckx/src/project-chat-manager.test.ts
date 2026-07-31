@@ -653,6 +653,73 @@ describe("ProjectChatManager", () => {
       .toEqual([1, 2, 3]);
   });
 
+  it("does not resurrect a thread deleted while hydration is in flight", async () => {
+    await createThread("thread-1");
+    const hydrationStarted = deferred();
+    const allowHydration = deferred();
+    const originalList = storage.projectChatMessages.listByThread.bind(storage.projectChatMessages);
+    vi.spyOn(storage.projectChatMessages, "listByThread").mockImplementation(async (...args) => {
+      hydrationStarted.resolve();
+      await allowHydration.promise;
+      return originalList(...args);
+    });
+    const manager = new ProjectChatManager(storage, reply("unused"));
+
+    const opening = manager.openThread("thread-1", "user-1");
+    await hydrationStarted.promise;
+    await expect(manager.deleteThread("thread-1", "user-1")).resolves.toBe(true);
+    allowHydration.resolve();
+
+    await expect(opening).rejects.toMatchObject({ code: "PROJECT_CHAT_NOT_FOUND" });
+    await expect(manager.openThread("thread-1", "user-1"))
+      .rejects.toMatchObject({ code: "PROJECT_CHAT_NOT_FOUND" });
+    expect(manager.subscribe(
+      "thread-1", { projectChatUserId: "user-1", readyState: 1, send: vi.fn() } as never,
+    )).toBeNull();
+  });
+
+  it.each(["authorization", "hydration"] as const)(
+    "settles and rejects a send paused in %s before shutdown completes",
+    async (phase) => {
+      await createThread("thread-1");
+      const phaseStarted = deferred();
+      const allowPhase = deferred();
+      if (phase === "authorization") {
+        const originalGetOwned = storage.projectChatThreads.getOwnedById.bind(storage.projectChatThreads);
+        vi.spyOn(storage.projectChatThreads, "getOwnedById").mockImplementation(async (...args) => {
+          phaseStarted.resolve();
+          await allowPhase.promise;
+          return originalGetOwned(...args);
+        });
+      } else {
+        const originalList = storage.projectChatMessages.listByThread.bind(storage.projectChatMessages);
+        vi.spyOn(storage.projectChatMessages, "listByThread").mockImplementation(async (...args) => {
+          phaseStarted.resolve();
+          await allowPhase.promise;
+          return originalList(...args);
+        });
+      }
+      const manager = new ProjectChatManager(storage, reply("must not run"));
+
+      const sending = manager.sendMessage("thread-1", "user-1", "race shutdown");
+      await phaseStarted.promise;
+      let shutdownSettled = false;
+      const shutdown = manager.shutdown().then(() => { shutdownSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(shutdownSettled).toBe(false);
+      allowPhase.resolve();
+
+      await expect(sending).rejects.toThrow(/shutting down/);
+      await shutdown;
+      expect(await storage.projectChatMessages.listByThread(
+        "thread-1", "project-1", "user-1",
+      )).toEqual([]);
+      expect(await storage.projectChatWorkItems.listNonterminal(
+        "thread-1", "project-1", "user-1",
+      )).toEqual([]);
+    },
+  );
+
   it("rejects new opens and sends while a thread deletion is in progress", async () => {
     await createThread("thread-1");
     const deleteStarted = deferred();
