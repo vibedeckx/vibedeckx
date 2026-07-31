@@ -112,10 +112,10 @@ export function CreateWorktreeDialog({
             message = "Connection to remote server timed out. The remote server may be slow or unreachable.";
             break;
           case "network_error":
-            message = "Remote server is not connected. Run the connect command on the remote machine (Settings → Remote Servers → generate token).";
+            message = "Remote server is not connected. Run the connect command on the remote machine (Settings → Remote Servers → connect token).";
             break;
           case "auth_error":
-            message = "Authentication failed with remote server. Regenerate the connect token and reconnect the remote machine.";
+            message = "Authentication failed with remote server. Copy the current connect command (Settings → Remote Servers → connect token) and re-run it on the remote machine; rotate the token only if you need to replace it.";
             break;
           case "server_error":
             message = `Remote server returned an error: ${failedError}`;

@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { RemoteServer, CrossRemoteAccess } from "../storage/types.js";
 import { proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
@@ -91,29 +91,39 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // POST /api/remote-servers/:id/generate-token — generate a connect token for inbound servers
-  fastify.post<{ Params: { id: string } }>(
-    "/api/remote-servers/:id/generate-token",
-    async (request, reply) => {
-      const userId = requireAuth(request, reply);
-      if (userId === null) return;
-      const { id } = request.params;
-      const server = await fastify.storage.remoteServers.getById(id, userId);
-      if (!server)
-        return reply.code(404).send({ error: "Server not found" });
+  // Derive the worker-facing server URL from the incoming request.
+  const connectCommandFor = (request: FastifyRequest, token: string) => {
+    const proto = request.headers["x-forwarded-proto"] || request.protocol || "http";
+    const host = request.headers["x-forwarded-host"] || request.headers.host || "localhost";
+    return `npx vibedeckx@latest connect --connect-to ${proto}://${host} --token ${token}`;
+  };
 
-      const token = await fastify.storage.remoteServers.generateToken(id, userId);
-      if (!token)
-        return reply.code(500).send({ error: "Failed to generate token" });
+  // POST /api/remote-servers/:id/generate-token — read the connect token, minting
+  // one on first use. Idempotent: an already-issued token is returned as-is so
+  // re-opening the dialog can't strand a connected worker. Use /rotate-token to
+  // deliberately replace it.
+  // POST /api/remote-servers/:id/rotate-token — mint a replacement, invalidating the old token.
+  for (const mode of ["generate", "rotate"] as const) {
+    fastify.post<{ Params: { id: string } }>(
+      `/api/remote-servers/:id/${mode}-token`,
+      async (request, reply) => {
+        const userId = requireAuth(request, reply);
+        if (userId === null) return;
+        const { id } = request.params;
+        const server = await fastify.storage.remoteServers.getById(id, userId);
+        if (!server)
+          return reply.code(404).send({ error: "Server not found" });
 
-      // Derive server URL from the incoming request
-      const proto = request.headers["x-forwarded-proto"] || request.protocol || "http";
-      const host = request.headers["x-forwarded-host"] || request.headers.host || "localhost";
-      const serverUrl = `${proto}://${host}`;
-      const connectCommand = `npx vibedeckx@latest connect --connect-to ${serverUrl} --token ${token}`;
-      return reply.send({ token, connectCommand });
-    }
-  );
+        const token = mode === "generate"
+          ? await fastify.storage.remoteServers.generateToken(id, userId)
+          : await fastify.storage.remoteServers.rotateToken(id, userId);
+        if (!token)
+          return reply.code(500).send({ error: `Failed to ${mode} token` });
+
+        return reply.send({ token, connectCommand: connectCommandFor(request, token) });
+      }
+    );
+  }
 
   // POST /api/remote-servers/:id/browse — browse directories on remote server
   fastify.post<{ Params: { id: string } }>(

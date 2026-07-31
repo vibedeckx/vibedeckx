@@ -253,6 +253,43 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     expect(revokedWrongUser).toBe(false);
   });
 
+  it("remoteServers generateToken is idempotent, rotateToken mints a fresh one", async () => {
+    const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
+
+    const first = await storage.remoteServers.generateToken(server.id, "user-a");
+    const again = await storage.remoteServers.generateToken(server.id, "user-a");
+    expect(again).toBe(first);
+
+    // Rotating replaces the token and invalidates the previous one.
+    const rotated = await storage.remoteServers.rotateToken(server.id, "user-a");
+    expect(rotated).toMatch(/^[0-9a-f]{64}$/);
+    expect(rotated).not.toBe(first);
+    expect(await storage.remoteServers.getByToken(first!)).toBeUndefined();
+    expect((await storage.remoteServers.getByToken(rotated!))?.id).toBe(server.id);
+
+    // A revoked server mints a new token on the next generate.
+    await storage.remoteServers.revokeToken(server.id, "user-a");
+    const reissued = await storage.remoteServers.generateToken(server.id, "user-a");
+    expect(reissued).toMatch(/^[0-9a-f]{64}$/);
+    expect(reissued).not.toBe(rotated);
+
+    // Concurrent first-time reads must not each mint a token: the CAS write
+    // means one of them wins and the other reports the token that landed, so
+    // both callers hand out a connect command that actually authenticates.
+    await storage.remoteServers.revokeToken(server.id, "user-a");
+    const [raced1, raced2] = await Promise.all([
+      storage.remoteServers.generateToken(server.id, "user-a"),
+      storage.remoteServers.generateToken(server.id, "user-a"),
+    ]);
+    expect(raced1).toBe(raced2);
+    expect((await storage.remoteServers.getByToken(raced1!))?.id).toBe(server.id);
+
+    // Wrong owner can neither read nor rotate.
+    expect(await storage.remoteServers.generateToken(server.id, "user-b")).toBeUndefined();
+    expect(await storage.remoteServers.rotateToken(server.id, "user-b")).toBeUndefined();
+    expect((await storage.remoteServers.getByToken(raced1!))?.id).toBe(server.id);
+  });
+
   it("remoteServers delete respects ownership and reports whether a row was removed", async () => {
     const server = await storage.remoteServers.create({ name: "srv" }, "user-a");
     const deniedDelete = await storage.remoteServers.delete(server.id, "user-b");

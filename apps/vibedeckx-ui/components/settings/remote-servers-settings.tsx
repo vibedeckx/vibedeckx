@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -38,6 +38,7 @@ import {
   Loader2,
   KeyRound,
   Copy,
+  RefreshCw,
 } from 'lucide-react';
 
 type TestStatus = 'idle' | 'testing' | 'success' | 'error';
@@ -74,6 +75,12 @@ export function RemoteServersSettings() {
   const [connectCommand, setConnectCommand] = useState<string | null>(null);
   const [generatingToken, setGeneratingToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [rotateConfirm, setRotateConfirm] = useState(false);
+  // Server the in-flight token request belongs to. A request can outlive the
+  // dialog it was opened from — close it and open another remote and a late
+  // response would otherwise paint server A's connect command under B's name.
+  const tokenRequestRef = useRef<string | null>(null);
 
   const loadServers = useCallback(async () => {
     try {
@@ -188,21 +195,47 @@ export function RemoteServersSettings() {
 
   // --- Token Generation ---
 
-  const handleGenerateToken = async (server: RemoteServer) => {
+  // Opening the dialog reads the server's existing token (minting one only on
+  // first use), so the connect command a worker was given stays valid.
+  const handleShowToken = async (server: RemoteServer) => {
+    tokenRequestRef.current = server.id;
     setTokenDialogServer(server);
     setGeneratedToken(null);
     setConnectCommand(null);
     setTokenCopied(false);
+    setRotateConfirm(false);
+    setRotating(false);
     setGeneratingToken(true);
     try {
       const result = await api.generateRemoteServerToken(server.id);
+      if (tokenRequestRef.current !== server.id) return;
       setGeneratedToken(result.token);
       setConnectCommand(result.connectCommand);
     } catch (e) {
-      setFormError(e instanceof Error ? e.message : 'Failed to generate token');
+      if (tokenRequestRef.current !== server.id) return;
+      tokenRequestRef.current = null;
+      setFormError(e instanceof Error ? e.message : 'Failed to load token');
       setTokenDialogServer(null);
     } finally {
-      setGeneratingToken(false);
+      if (tokenRequestRef.current === server.id) setGeneratingToken(false);
+    }
+  };
+
+  const handleRotateToken = async (server: RemoteServer) => {
+    setRotating(true);
+    setTokenCopied(false);
+    try {
+      const result = await api.rotateRemoteServerToken(server.id);
+      if (tokenRequestRef.current === server.id) {
+        setGeneratedToken(result.token);
+        setConnectCommand(result.connectCommand);
+        setRotateConfirm(false);
+      }
+      await loadServers();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to rotate token');
+    } finally {
+      if (tokenRequestRef.current === server.id) setRotating(false);
     }
   };
 
@@ -344,8 +377,8 @@ export function RemoteServersSettings() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => handleGenerateToken(server)}
-                      title="Generate connect token"
+                      onClick={() => handleShowToken(server)}
+                      title="Connect token"
                       className="h-8 w-8"
                     >
                       <KeyRound className="h-4 w-4" />
@@ -439,9 +472,11 @@ export function RemoteServersSettings() {
         open={tokenDialogServer !== null}
         onOpenChange={(open) => {
           if (!open) {
+            tokenRequestRef.current = null;
             setTokenDialogServer(null);
             setGeneratedToken(null);
             setConnectCommand(null);
+            setRotateConfirm(false);
           }
         }}
       >
@@ -451,7 +486,8 @@ export function RemoteServersSettings() {
             <DialogDescription>
               Use this token to connect a remote node to{' '}
               <span className="font-semibold">{tokenDialogServer?.name}</span>.
-              The token is shown only once.
+              It stays the same every time you open this dialog — rotate it to
+              issue a replacement.
             </DialogDescription>
           </DialogHeader>
 
@@ -482,30 +518,56 @@ export function RemoteServersSettings() {
                 <p className="text-xs text-muted-foreground">
                   Run this command on the remote machine to establish the reverse connection.
                 </p>
+                {rotateConfirm && (
+                  <p className="text-xs text-destructive">
+                    Rotating invalidates the current token immediately. Any worker
+                    still using it will fail to reconnect until you re-run the new command.
+                  </p>
+                )}
               </div>
             </div>
           ) : null}
 
           <DialogFooter>
             {generatedToken && tokenDialogServer && (
-              <Button
-                variant="outline"
-                className="mr-auto text-destructive hover:text-destructive"
-                onClick={() => {
-                  handleRevokeToken(tokenDialogServer);
-                  setTokenDialogServer(null);
-                  setGeneratedToken(null);
-                }}
-              >
-                Revoke Token
-              </Button>
+              <div className="mr-auto flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  disabled={rotating}
+                  onClick={() => {
+                    if (rotateConfirm) handleRotateToken(tokenDialogServer);
+                    else setRotateConfirm(true);
+                  }}
+                >
+                  {rotating ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                  )}
+                  {rotateConfirm ? 'Confirm rotate' : 'Rotate Token'}
+                </Button>
+                <Button
+                  variant="outline"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => {
+                    handleRevokeToken(tokenDialogServer);
+                    tokenRequestRef.current = null;
+                    setTokenDialogServer(null);
+                    setGeneratedToken(null);
+                  }}
+                >
+                  Revoke Token
+                </Button>
+              </div>
             )}
             <Button
               variant="outline"
               onClick={() => {
+                tokenRequestRef.current = null;
                 setTokenDialogServer(null);
                 setGeneratedToken(null);
                 setConnectCommand(null);
+                setRotateConfirm(false);
               }}
             >
               Close

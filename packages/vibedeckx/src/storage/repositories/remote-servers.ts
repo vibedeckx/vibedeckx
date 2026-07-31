@@ -70,6 +70,38 @@ async function renumberProjectRemotes(
   }
 }
 
+/** Owner-scoped row read — undefined when the row is missing or belongs to someone else. */
+function readRemoteServerRow(kdb: Kysely<DB>, id: string, userId?: string) {
+  let query = kdb.selectFrom("remote_servers").selectAll().where("id", "=", id);
+  if (userId) query = query.where("user_id", "=", userId);
+  return query.executeTakeFirst();
+}
+
+/**
+ * Persist a freshly minted connect token. With `onlyIfAbsent` the write is a
+ * compare-and-set against a NULL token, so two concurrent first-time reads
+ * can't hand out two different tokens (only one survives in the row).
+ * Returns undefined when the CAS lost.
+ */
+async function mintConnectToken(
+  kdb: Kysely<DB>,
+  id: string,
+  userId: string | undefined,
+  opts: { onlyIfAbsent?: boolean } = {},
+): Promise<string | undefined> {
+  const token = crypto.randomBytes(32).toString("hex");
+  let query = kdb.updateTable("remote_servers").set({
+    connect_token: token,
+    connect_token_created_at: sql`datetime('now')`,
+    updated_at: sql`datetime('now')`,
+  }).where("id", "=", id);
+  if (userId) query = query.where("user_id", "=", userId);
+  if (opts.onlyIfAbsent) query = query.where("connect_token", "is", null);
+  const result = await query.executeTakeFirst();
+  if (opts.onlyIfAbsent && (result?.numUpdatedRows ?? 0n) === 0n) return undefined;
+  return token;
+}
+
 export const createRemoteServerRepos = (
   kdb: Kysely<DB>,
   _h: DialectHelpers,
@@ -142,20 +174,24 @@ export const createRemoteServerRepos = (
     },
 
     generateToken: async (id, userId) => {
-      let existingQuery = kdb.selectFrom("remote_servers").selectAll().where("id", "=", id);
-      if (userId) existingQuery = existingQuery.where("user_id", "=", userId);
-      const existing = await existingQuery.executeTakeFirst();
+      const existing = await readRemoteServerRow(kdb, id, userId);
       if (!existing) return undefined;
+      // A remote keeps one long-lived connect token: re-opening the token
+      // dialog must hand back the same connect command, not silently break
+      // the worker already using the old one. Minting a replacement is an
+      // explicit act — see rotateToken.
+      if (existing.connect_token) return existing.connect_token;
 
-      const token = crypto.randomBytes(32).toString("hex");
-      let updateQuery = kdb.updateTable("remote_servers").set({
-        connect_token: token,
-        connect_token_created_at: sql`datetime('now')`,
-        updated_at: sql`datetime('now')`,
-      }).where("id", "=", id);
-      if (userId) updateQuery = updateQuery.where("user_id", "=", userId);
-      await updateQuery.execute();
-      return token;
+      const minted = await mintConnectToken(kdb, id, userId, { onlyIfAbsent: true });
+      if (minted) return minted;
+      // A concurrent call minted first — hand back the token that landed.
+      return (await readRemoteServerRow(kdb, id, userId))?.connect_token ?? undefined;
+    },
+
+    rotateToken: async (id, userId) => {
+      const existing = await readRemoteServerRow(kdb, id, userId);
+      if (!existing) return undefined;
+      return mintConnectToken(kdb, id, userId);
     },
 
     revokeToken: async (id, userId) => {

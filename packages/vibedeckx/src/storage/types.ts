@@ -455,7 +455,10 @@ export interface Storage {
     getOwnerId(id: string): Promise<string | undefined>;
     update(id: string, opts: { name?: string; cross_remote_access?: CrossRemoteAccess }, userId?: string): Promise<RemoteServer | undefined>;
     updateStatus(id: string, status: RemoteServerStatus): Promise<void>;
+    /** Current connect token, minting one on first use. Idempotent — never invalidates a token in use. */
     generateToken(id: string, userId?: string): Promise<string | undefined>;
+    /** Replace the connect token with a fresh one, invalidating the previous token immediately. */
+    rotateToken(id: string, userId?: string): Promise<string | undefined>;
     revokeToken(id: string, userId?: string): Promise<boolean>;
     delete(id: string, userId?: string): Promise<boolean>;
   };

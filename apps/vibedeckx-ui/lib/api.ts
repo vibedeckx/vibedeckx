@@ -2201,8 +2201,21 @@ export const api = {
     return res.json();
   },
 
+  /** Current connect token (minted on first call). Idempotent — safe to re-open the dialog. */
   async generateRemoteServerToken(id: string): Promise<{ token: string; connectCommand: string }> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/generate-token`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error);
+    }
+    return res.json();
+  },
+
+  /** Replaces the connect token — the previous one stops working immediately. */
+  async rotateRemoteServerToken(id: string): Promise<{ token: string; connectCommand: string }> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/rotate-token`, {
       method: "POST",
     });
     if (!res.ok) {
