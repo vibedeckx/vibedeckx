@@ -88,6 +88,7 @@ export function SchedulesView({
   const [selectedRun, setSelectedRun] = useState<ScheduleRun | null>(null);
   const [runLoading, setRunLoading] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const [runRetryNonce, setRunRetryNonce] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
   // Schedule awaiting delete confirmation. Held as the full object (not a
   // boolean on `selected`) so the dialog text stays stable even if the
@@ -160,7 +161,7 @@ export function SchedulesView({
     return () => {
       stale = true;
     };
-  }, [selectedRunId]);
+  }, [selectedRunId, runRetryNonce]);
 
   const handleRunNow = async () => {
     if (!selected) return;
@@ -281,6 +282,7 @@ export function SchedulesView({
                           key={run.id}
                           onClick={() => openRun(run)}
                           aria-selected={run.id === selectedRunId}
+                          aria-disabled={run.status === "skipped"}
                           className={cn(
                             run.status !== "skipped" && "cursor-pointer",
                             run.id === selectedRunId && "bg-muted/50",
@@ -315,7 +317,12 @@ export function SchedulesView({
                       Loading run output…
                     </div>
                   ) : runError ? (
-                    <div className="text-sm text-destructive">{runError}</div>
+                    <div className="h-full flex flex-col items-center justify-center gap-3 text-sm">
+                      <div className="text-destructive">{runError}</div>
+                      <Button size="sm" variant="outline" onClick={() => setRunRetryNonce((nonce) => nonce + 1)}>
+                        Retry
+                      </Button>
+                    </div>
                   ) : selectedRun ? (
                     <>
                       <div className="mb-3 text-sm font-medium">Run output — {fmtTs(selectedRun.started_at)}</div>

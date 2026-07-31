@@ -90,6 +90,16 @@ const click = async (element: Element | null) => {
   });
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function renderView() {
   root.render(
     <SchedulesView
@@ -151,5 +161,72 @@ describe("schedule run split view", () => {
     expect(getScheduleRun).toHaveBeenLastCalledWith("run-old");
     expect(container.textContent).toContain("old output");
     expect(container.textContent).not.toContain("new output");
+  });
+
+  it("does not let an older detail request replace the newly selected run", async () => {
+    const first = deferred<ScheduleRun>();
+    getScheduleRun.mockImplementation((id: string) =>
+      id === newest.id
+        ? first.promise
+        : Promise.resolve(makeRun(older.id, older.started_at, "old output")),
+    );
+
+    await act(async () => renderView());
+    await flush();
+    const oldRow = Array.from(container.querySelectorAll("tbody tr")).find((row) =>
+      row.textContent?.includes("7/30/2026"),
+    );
+    await click(oldRow ?? null);
+    await flush();
+    expect(container.textContent).toContain("old output");
+
+    await act(async () => {
+      first.resolve(makeRun(newest.id, newest.started_at, "late new output"));
+      await first.promise;
+    });
+
+    expect(container.textContent).toContain("old output");
+    expect(container.textContent).not.toContain("late new output");
+  });
+
+  it("offers a retry when loading the selected run fails", async () => {
+    getScheduleRun
+      .mockRejectedValueOnce(new Error("detail unavailable"))
+      .mockResolvedValueOnce(makeRun(newest.id, newest.started_at, "retried output"));
+
+    await act(async () => renderView());
+    await flush();
+
+    expect(container.textContent).toContain("detail unavailable");
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retry).not.toBeNull();
+    await click(retry ?? null);
+    await flush();
+
+    expect(getScheduleRun).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("retried output");
+  });
+
+  it("marks skipped runs unavailable and never requests their details", async () => {
+    const skipped: ScheduleRun = {
+      ...makeRun("run-skipped", "2026-07-29 02:00:00"),
+      status: "skipped",
+      exit_code: null,
+      finished_at: "2026-07-29 02:00:00",
+    };
+    getScheduleRuns.mockResolvedValue([newest, skipped]);
+
+    await act(async () => renderView());
+    await flush();
+    const skippedRow = Array.from(container.querySelectorAll("tbody tr")).find((row) =>
+      row.textContent?.includes("skipped"),
+    );
+
+    expect(skippedRow?.getAttribute("aria-disabled")).toBe("true");
+    await click(skippedRow ?? null);
+    await flush();
+    expect(getScheduleRun).not.toHaveBeenCalledWith("run-skipped");
   });
 });
