@@ -56,6 +56,23 @@ export const createWorkspaceRepos = (
       return rows.map(mapTask);
     },
 
+    queryByProject: async (projectId, opts) => {
+      let query = kdb.selectFrom("tasks").selectAll()
+        .where("project_id", "=", projectId)
+        .where("archived_at", "is", null);
+      if (opts.status) query = query.where("status", "=", opts.status);
+      const term = opts.query?.trim().slice(0, 256).toLowerCase();
+      if (term) {
+        const pattern = `%${term.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+        query = query.where((eb) => eb.or([
+          sql<boolean>`lower(title) like ${pattern} escape '\\'`,
+          sql<boolean>`lower(coalesce(description, '')) like ${pattern} escape '\\'`,
+        ]));
+      }
+      const rows = await query.orderBy("position", "asc").limit(opts.limit).execute();
+      return rows.map(mapTask);
+    },
+
     getById: async (id) => {
       const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapTask(row) : undefined;

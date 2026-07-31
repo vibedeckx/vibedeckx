@@ -66,6 +66,18 @@ export const createSearchCacheRepos = (
   _h: DialectHelpers,
 ): Pick<Storage, "searchCache"> => ({
   searchCache: {
+    listWorkspacesByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("workspace_search_cache")
+        .select(["target_id", "branch"])
+        .where("project_id", "=", projectId)
+        .where("deleted_at", "is", null)
+        .orderBy("target_id", "asc")
+        .orderBy("branch", "asc")
+        .limit(limit)
+        .execute();
+      return rows.map((row) => ({ targetId: row.target_id, branch: fromDbBranch(row.branch) }));
+    },
+
     // Generation-based reconciliation: only a FULLY successful snapshot may
     // mark rows deleted. Runs in one transaction so a crash mid-apply can't
     // leave a half-deleted cache.

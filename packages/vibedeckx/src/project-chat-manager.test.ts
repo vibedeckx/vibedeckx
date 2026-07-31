@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
 import {
+  PROJECT_CHAT_SYSTEM_PROMPT,
   ProjectChatManager,
   type ProjectChatModelRunner,
   type ProjectChatRunInput,
@@ -78,6 +79,42 @@ describe("ProjectChatManager", () => {
     expect(snapshot.identity).not.toHaveProperty("branch");
     expect(snapshot.identity).not.toHaveProperty("workspace");
     expect(snapshot).toMatchObject({ status: "idle", queueLength: 0 });
+  });
+
+  it("describes Project Chat as project-scoped and independent of branches or workspaces", () => {
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("project-scoped");
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("multiple workspaces");
+    expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("does not belong to a branch or workspace");
+  });
+
+  it("binds authorized read tools to the production runner input without changing the fake runner seam", async () => {
+    await createThread("thread-1");
+    await storage.tasks.create({ id: "task-1", project_id: "project-1", title: "Inspect me" });
+    const runner: ProjectChatModelRunner = {
+      async *run(input) {
+        expect(Object.keys(input.tools ?? {}).sort()).toEqual([
+          "get_agent_session", "get_project_summary", "get_schedule_run", "get_task",
+          "list_agent_sessions", "list_schedule_runs", "list_schedules", "list_tasks", "list_workspaces",
+        ]);
+        const result = await input.tools!.get_task.execute({ taskId: "task-1" });
+        yield { type: "tool_use", content: JSON.stringify({ toolName: "get_task", input: { taskId: "task-1" } }) };
+        yield { type: "tool_result", content: JSON.stringify({ toolName: "get_task", output: result }) };
+        yield { type: "assistant", content: "I inspected the task." };
+      },
+    };
+    const manager = new ProjectChatManager(storage, runner, {
+      toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => false },
+      },
+    });
+
+    await manager.sendMessage("thread-1", "user-1", "inspect task");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    const messages = await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1");
+    expect(messages.map((message) => message.type)).toEqual(["user", "tool_use", "tool_result", "assistant", "turn_end"]);
+    expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1"))
+      .toContainEqual(expect.objectContaining({ entity_type: "task", entity_id: "task-1" }));
   });
 
   it("persists user, assistant, tool, and turn-end items monotonically before broadcasting", async () => {

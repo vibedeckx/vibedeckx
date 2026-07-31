@@ -88,6 +88,16 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
+    listByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("agent_sessions").selectAll()
+        .where("project_id", "=", projectId)
+        .orderBy("updated_at", "desc")
+        .orderBy("id", "asc")
+        .limit(limit)
+        .execute();
+      return rows.map(mapAgentSession);
+    },
+
     getByBranch: async (projectId, branch) => {
       const row = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
@@ -267,6 +277,15 @@ export const createAgentSessionRepos = (
 
     getAll: async () => {
       const rows = await kdb.selectFrom("remote_session_mappings").selectAll().execute();
+      return rows.map(mapRemoteSessionMapping);
+    },
+
+    listByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("remote_session_mappings").selectAll()
+        .where("project_id", "=", projectId)
+        .orderBy("local_session_id", "asc")
+        .limit(limit)
+        .execute();
       return rows.map(mapRemoteSessionMapping);
     },
 

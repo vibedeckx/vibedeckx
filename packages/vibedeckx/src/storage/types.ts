@@ -602,6 +602,8 @@ export interface Storage {
   scheduledTasks: {
     create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => Promise<ScheduledTask>;
     getByProjectId: (projectId: string) => Promise<ScheduledTask[]>;
+    /** Stable project-scoped list capped in SQL. */
+    listByProject: (projectId: string, limit: number) => Promise<ScheduledTask[]>;
     getById: (id: string) => Promise<ScheduledTask | undefined>;
     getAllEnabled: () => Promise<ScheduledTask[]>;
     update: (id: string, opts: { name?: string; cron_expr?: string; timezone?: string; enabled?: boolean; run_type?: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content?: string; cwd_mode?: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; target?: string }) => Promise<ScheduledTask | undefined>;
@@ -610,6 +612,8 @@ export interface Storage {
   scheduledTaskRuns: {
     create: (opts: { id: string; schedule_id: string; status?: ScheduledTaskRunStatus; process_id?: string | null }) => Promise<ScheduledTaskRun>;
     getById: (id: string) => Promise<ScheduledTaskRun | undefined>;
+    /** Newest runs across schedules belonging to exactly one project; output/report omitted. */
+    listRecentByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRun[]>;
     /** Newest first. Never includes the output column (always null) — use getById for output. */
     getByScheduleId: (scheduleId: string, limit?: number) => Promise<ScheduledTaskRun[]>;
     /** Most recent run per schedule for the given IDs (output omitted). */
@@ -676,6 +680,8 @@ export interface Storage {
     getAll: () => Promise<AgentSession[]>;
     getById: (id: string) => Promise<AgentSession | undefined>;
     getByProjectId: (projectId: string) => Promise<AgentSession[]>;
+    /** Newest sessions for exactly one project, capped in SQL. */
+    listByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** @deprecated — use listByBranch + getLatestByBranch */
     getByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
     listByBranch: (projectId: string, branch: string) => Promise<AgentSession[]>;
@@ -747,6 +753,8 @@ export interface Storage {
       notificationSyncStart?: NotificationSyncStart,
     ) => Promise<void>;
     getAll: () => Promise<RemoteSessionMapping[]>;
+    /** Persisted remote mappings for exactly one project, capped in SQL. */
+    listByProject: (projectId: string, limit: number) => Promise<RemoteSessionMapping[]>;
     getByLocal: (localSessionId: string) => Promise<RemoteSessionMapping | undefined>;
     /** Resolve the local target of a milestone the worker reported. */
     getByRemote: (remoteServerId: string, remoteSessionId: string) => Promise<RemoteSessionMapping | undefined>;
@@ -834,6 +842,8 @@ export interface Storage {
     initializeIfAbsent: (remoteServerId: string, remoteSessionId: string, lastSeq: number) => Promise<boolean>;
   };
   searchCache: {
+    /** Active workspace catalog rows for exactly one project, in stable target/branch order. */
+    listWorkspacesByProject(projectId: string, limit: number): Promise<Array<{ targetId: string; branch: string | null }>>;
     /**
      * Reconcile one (project, target) snapshot into the cache. `collectedAt`
      * (default: now) is when the snapshot's data was collected — write-through
@@ -998,6 +1008,8 @@ export interface Storage {
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;
     getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
+    /** Project-scoped, SQL-bounded task lookup for read-only assistant tools. */
+    queryByProject: (projectId: string, opts: { query?: string; status?: TaskStatus; limit: number }) => Promise<Task[]>;
     getById: (id: string) => Promise<Task | undefined>;
     update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => Promise<Task | undefined>;
     archive: (id: string) => Promise<Task | undefined>;

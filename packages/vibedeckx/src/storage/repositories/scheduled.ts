@@ -48,6 +48,13 @@ export const createScheduledRepos = (
         .execute();
       return rows.map(mapTask);
     },
+    listByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("scheduled_tasks").selectAll()
+        .where("project_id", "=", projectId)
+        .orderBy("created_at", "asc").orderBy("id", "asc")
+        .limit(limit).execute();
+      return rows.map(mapTask);
+    },
     getById: async (id) => {
       const row = await kdb.selectFrom("scheduled_tasks").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapTask(row) : undefined;
@@ -99,6 +106,19 @@ export const createScheduledRepos = (
     getById: async (id) => {
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapRun(row) : undefined;
+    },
+    listRecentByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("scheduled_task_runs as run")
+        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+        .select([
+          "run.id", "run.schedule_id", "run.status", "run.exit_code",
+          sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"),
+          "run.process_id", "run.started_at", "run.finished_at",
+        ])
+        .where("schedule.project_id", "=", projectId)
+        .orderBy("run.started_at", "desc").orderBy("run.id", "desc")
+        .limit(limit).execute();
+      return rows.map(mapRun);
     },
     getByScheduleId: async (scheduleId, limit = 50) => {
       const rows = await kdb.selectFrom("scheduled_task_runs")

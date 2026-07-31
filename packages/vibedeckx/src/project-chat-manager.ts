@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "crypto";
-import { streamText } from "ai";
+import { stepCountIs, streamText, tool, type ToolSet } from "ai";
 import type WebSocket from "ws";
 import type {
   ProjectChatMessage,
@@ -9,6 +9,19 @@ import type {
   Storage,
 } from "./storage/types.js";
 import { resolveChatModel } from "./utils/chat-model.js";
+import {
+  createProjectChatTools,
+  type CreateProjectChatToolsOptions,
+  type ProjectChatTool,
+  type ProjectChatTools,
+} from "./project-chat-tools.js";
+
+export const PROJECT_CHAT_SYSTEM_PROMPT = [
+  "You are Project Commander, a project-scoped read-only assistant.",
+  "You can inspect tasks, schedules, agent sessions, and multiple workspaces within the bound project.",
+  "Project Chat does not belong to a branch or workspace; never assume one workspace is the whole project.",
+  "Use the supplied read tools when factual project context is needed. Never claim to have changed project state.",
+].join(" ");
 
 export type ProjectChatStatus = "idle" | "running";
 
@@ -36,6 +49,7 @@ export type ProjectChatStreamEvent = {
 export interface ProjectChatRunInput extends ProjectChatIdentity {
   messages: ProjectChatMessage[];
   signal: AbortSignal;
+  tools?: ProjectChatTools;
 }
 
 export interface ProjectChatModelRunner {
@@ -48,6 +62,7 @@ export interface ProjectChatManagerOptions {
   terminalRetryDelayMs?: number;
   terminalRetryAttempts?: number;
   terminalAttemptTimeoutMs?: number;
+  toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions">;
 }
 
 export type ProjectChatWsMessage =
@@ -108,9 +123,10 @@ class DefaultProjectChatModelRunner implements ProjectChatModelRunner {
   constructor(private readonly storage: Storage) {}
 
   async *run(input: ProjectChatRunInput): AsyncGenerator<ProjectChatStreamEvent> {
+    const tools = input.tools ? projectChatAiTools(input.tools) : {};
     const result = streamText({
       model: await resolveChatModel(this.storage, input.userId),
-      system: "You are the project assistant. Answer clearly using the supplied project chat transcript.",
+      system: PROJECT_CHAT_SYSTEM_PROMPT,
       messages: input.messages
         .filter((message) => message.type === "user" || message.type === "assistant" || message.type === "system")
         .map((message) => ({
@@ -118,6 +134,8 @@ class DefaultProjectChatModelRunner implements ProjectChatModelRunner {
           content: message.content,
         })),
       abortSignal: input.signal,
+      tools,
+      stopWhen: stepCountIs(8),
       experimental_telemetry: {
         isEnabled: true,
         functionId: "project-chat",
@@ -131,9 +149,53 @@ class DefaultProjectChatModelRunner implements ProjectChatModelRunner {
     });
 
     let content = "";
-    for await (const delta of result.textStream) content += delta;
+    for await (const part of result.fullStream) {
+      if (part.type === "text-delta") {
+        content += part.text;
+      } else if (part.type === "tool-call") {
+        yield {
+          type: "tool_use",
+          content: JSON.stringify({
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            input: part.input,
+          }),
+        };
+      } else if (part.type === "tool-result") {
+        yield {
+          type: "tool_result",
+          content: JSON.stringify({
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            output: part.output,
+          }),
+        };
+      } else if (part.type === "tool-error") {
+        yield {
+          type: "tool_result",
+          content: JSON.stringify({
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            error: part.error instanceof Error ? part.error.message : String(part.error),
+          }),
+        };
+      }
+    }
     if (content) yield { type: "assistant", content };
   }
+}
+
+export function projectChatAiTools(domainTools: ProjectChatTools): ToolSet {
+  const adapted: ToolSet = {};
+  for (const [name, entry] of Object.entries(domainTools)) {
+    const generic = entry as ProjectChatTool<unknown, unknown>;
+    adapted[name] = tool({
+      description: generic.description,
+      inputSchema: generic.inputSchema,
+      execute: generic.execute,
+    }) as ToolSet[string];
+  }
+  return adapted;
 }
 
 /**
@@ -156,6 +218,7 @@ export class ProjectChatManager {
   private readonly terminalRetryDelayMs: number;
   private readonly terminalRetryAttempts: number;
   private readonly terminalAttemptTimeoutMs: number;
+  private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private shuttingDown = false;
 
   constructor(
@@ -169,6 +232,7 @@ export class ProjectChatManager {
     this.terminalRetryDelayMs = options.terminalRetryDelayMs ?? 100;
     this.terminalRetryAttempts = Math.max(1, options.terminalRetryAttempts ?? 3);
     this.terminalAttemptTimeoutMs = options.terminalAttemptTimeoutMs ?? this.drainTimeoutMs;
+    this.toolDependencies = options.toolDependencies;
   }
 
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
@@ -569,6 +633,15 @@ export class ProjectChatManager {
           ? transcript
           : currentUserMessage ? [...history, currentUserMessage] : history,
         signal: abortController.signal,
+        tools: this.toolDependencies
+          ? await createProjectChatTools({
+            projectId: live.thread.project_id,
+            threadId: live.thread.id,
+            userId: live.thread.user_id,
+            storage: this.storage,
+            ...this.toolDependencies,
+          })
+          : undefined,
       };
       for await (const event of this.runner.run(input)) {
         if (abortController.signal.aborted) {
