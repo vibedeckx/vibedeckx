@@ -5,7 +5,22 @@ const LIST_LIMIT = 50;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
 const TRANSCRIPT_CHAR_LIMIT = 6_000;
 const RUN_PREVIEW_CHAR_LIMIT = 4_000;
-const FIELD_PREVIEW_CHAR_LIMIT = 1_000;
+const ID_CHAR_LIMIT = 512;
+const NAME_CHAR_LIMIT = 512;
+const DESCRIPTION_CHAR_LIMIT = 2_000;
+const BRANCH_CHAR_LIMIT = 512;
+const TARGET_CHAR_LIMIT = 512;
+const ENUM_CHAR_LIMIT = 64;
+const MODEL_CHAR_LIMIT = 256;
+const TIMESTAMP_CHAR_LIMIT = 128;
+const CRON_CHAR_LIMIT = 512;
+const TIMEZONE_CHAR_LIMIT = 128;
+const TRANSCRIPT_TYPE_CHAR_LIMIT = 32;
+const STRUCTURAL_DEPTH_LIMIT = 4;
+const STRUCTURAL_ENTRY_LIMIT = 20;
+const STRUCTURAL_NODE_LIMIT = 100;
+const STRUCTURAL_KEY_CHAR_LIMIT = 128;
+const STRUCTURAL_STRING_CHAR_LIMIT = 1_000;
 
 export interface ProjectAgentSessionReader {
   getMessages(sessionId: string): unknown[];
@@ -27,6 +42,8 @@ export interface ProjectSessionSummary {
   title: string | null;
   status: string;
   target: string;
+  agentType?: string | null;
+  model?: string | null;
 }
 
 export interface ProjectSessionDetail extends ProjectSessionSummary {
@@ -87,7 +104,10 @@ export function createRemoteProjectSessionReader(options: {
       );
       if (!result.ok) return undefined;
       const data = result.data as {
-        session?: { branch?: unknown; title?: unknown; status?: unknown; processAlive?: unknown };
+        session?: {
+          branch?: unknown; title?: unknown; status?: unknown; processAlive?: unknown;
+          agentType?: unknown; agent_type?: unknown; model?: unknown;
+        };
         messages?: unknown[];
       };
       if (!data.session) return undefined;
@@ -99,6 +119,10 @@ export function createRemoteProjectSessionReader(options: {
         title: typeof data.session.title === "string" ? data.session.title : null,
         status: typeof data.session.status === "string" ? data.session.status : "unknown",
         target: mapping.remoteServerId,
+        agentType: typeof (data.session.agentType ?? data.session.agent_type) === "string"
+          ? String(data.session.agentType ?? data.session.agent_type)
+          : null,
+        model: typeof data.session.model === "string" ? data.session.model : null,
         processAlive: data.session.processAlive === true,
         transcript: JSON.stringify(transcript).length <= Math.min(limits.maxChars, TRANSCRIPT_CHAR_LIMIT) + 1_000
           ? transcript
@@ -138,26 +162,111 @@ export interface CreateProjectChatToolsOptions {
 }
 
 const emptySchema = z.object({}).strict();
-const preview = (value: string | null | undefined, limit: number): string => {
-  if (!value) return "";
+const preview = (value: unknown, limit: number): string => {
+  if (typeof value !== "string" || !value) return "";
   return value.length <= limit ? value : `${value.slice(0, limit)}…`;
 };
 
-function transcriptPreview(entries: unknown[]): unknown[] {
-  const selected = entries.slice(-TRANSCRIPT_ENTRY_LIMIT).filter((entry) => entry && typeof entry === "object");
-  const perEntryLimit = Math.max(1, Math.floor(TRANSCRIPT_CHAR_LIMIT / Math.max(1, selected.length)) - 1);
-  const result: unknown[] = [];
-  for (const entry of selected) {
-    if (!entry || typeof entry !== "object") continue;
-    const value = entry as Record<string, unknown>;
-    const type = typeof value.type === "string" ? value.type : "message";
-    const raw = typeof value.content === "string"
-      ? value.content
-      : typeof value.text === "string" ? value.text : JSON.stringify(value.content ?? "");
-    const content = preview(raw, perEntryLimit);
-    result.push({ type, content });
+const nullablePreview = (value: unknown, limit: number): string | null =>
+  value === null || value === undefined ? null : preview(value, limit);
+
+interface StructuralBudget {
+  nodes: number;
+  seen: WeakSet<object>;
+}
+
+function boundedStructure(value: unknown, depth: number, budget: StructuralBudget): unknown {
+  if (budget.nodes >= STRUCTURAL_NODE_LIMIT) return "[node limit]";
+  budget.nodes++;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") return preview(value, STRUCTURAL_STRING_CHAR_LIMIT);
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "bigint") return preview(`${value}n`, STRUCTURAL_STRING_CHAR_LIMIT);
+  if (typeof value === "undefined") return "[undefined]";
+  if (typeof value === "symbol") return "[symbol]";
+  if (typeof value === "function") return "[function]";
+  if (typeof value !== "object") return "[unavailable]";
+  if (depth >= STRUCTURAL_DEPTH_LIMIT) return "[depth limit]";
+  if (budget.seen.has(value)) return "[circular]";
+  budget.seen.add(value);
+
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    let length: number;
+    try { length = value.length; } catch { return "[unavailable]"; }
+    const count = Math.min(length, STRUCTURAL_ENTRY_LIMIT);
+    for (let index = 0; index < count && budget.nodes < STRUCTURAL_NODE_LIMIT; index++) {
+      let item: unknown;
+      try { item = value[index]; } catch { item = "[unavailable]"; }
+      result.push(boundedStructure(item, depth + 1, budget));
+    }
+    if (length > count) result.push(`[${length - count} more items]`);
+    return result;
+  }
+
+  const result: Record<string, unknown> = {};
+  let count = 0;
+  try {
+    for (const key in value) {
+      if (count >= STRUCTURAL_ENTRY_LIMIT || budget.nodes >= STRUCTURAL_NODE_LIMIT) break;
+      let isOwn = false;
+      try { isOwn = Object.prototype.hasOwnProperty.call(value, key); } catch { /* hostile proxy */ }
+      if (!isOwn) continue;
+      const safeKey = preview(key, STRUCTURAL_KEY_CHAR_LIMIT) || "[empty key]";
+      let item: unknown;
+      try { item = (value as Record<string, unknown>)[key]; } catch { item = "[unavailable]"; }
+      result[safeKey] = boundedStructure(item, depth + 1, budget);
+      count++;
+    }
+  } catch {
+    result["[enumeration error]"] = true;
   }
   return result;
+}
+
+function boundedTranscriptContent(value: unknown): string {
+  if (typeof value === "string") return preview(value, TRANSCRIPT_CHAR_LIMIT);
+  const bounded = boundedStructure(value, 0, { nodes: 0, seen: new WeakSet() });
+  try {
+    return preview(JSON.stringify(bounded), TRANSCRIPT_CHAR_LIMIT);
+  } catch {
+    return "[unavailable]";
+  }
+}
+
+function fitTranscriptBudget(entries: Array<{ type: string; content: string }>): Array<{ type: string; content: string }> {
+  if (JSON.stringify(entries).length <= TRANSCRIPT_CHAR_LIMIT) return entries;
+  let low = 0;
+  let high = Math.max(0, ...entries.map((entry) => entry.content.length));
+  let best = entries.map((entry) => ({ ...entry, content: "" }));
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = entries.map((entry) => ({ ...entry, content: preview(entry.content, middle) }));
+    if (JSON.stringify(candidate).length <= TRANSCRIPT_CHAR_LIMIT) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
+function transcriptPreview(entries: unknown[]): unknown[] {
+  const selected = entries.slice(-TRANSCRIPT_ENTRY_LIMIT).filter((entry) => entry && typeof entry === "object");
+  const result: Array<{ type: string; content: string }> = [];
+  for (const entry of selected) {
+    let typeValue: unknown;
+    let contentValue: unknown;
+    let textValue: unknown;
+    try { typeValue = (entry as Record<string, unknown>).type; } catch { typeValue = "message"; }
+    try { contentValue = (entry as Record<string, unknown>).content; } catch { contentValue = "[unavailable]"; }
+    try { textValue = (entry as Record<string, unknown>).text; } catch { textValue = undefined; }
+    const type = preview(typeValue, TRANSCRIPT_TYPE_CHAR_LIMIT) || "message";
+    const content = boundedTranscriptContent(contentValue ?? textValue ?? "");
+    result.push({ type, content });
+  }
+  return fitTranscriptBudget(result);
 }
 
 export async function createProjectChatTools(options: CreateProjectChatToolsOptions): Promise<ProjectChatTools> {
@@ -179,7 +288,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     get_project_summary: {
       description: "Return a safe summary of the current Project Chat project.",
       inputSchema: emptySchema,
-      execute: async () => ({ id: project.id, name: preview(project.name, FIELD_PREVIEW_CHAR_LIMIT), executionTarget: project.agent_mode }),
+      execute: async () => ({
+        id: preview(project.id, ID_CHAR_LIMIT),
+        name: preview(project.name, NAME_CHAR_LIMIT),
+        executionTarget: preview(project.agent_mode, ENUM_CHAR_LIMIT),
+      }),
     },
     list_tasks: {
       description: "List or search tasks in this project. Results are capped by the server.",
@@ -192,9 +305,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         await touchAll("task", rows.map((row) => row.id));
         return {
           items: rows.map((row) => ({
-            id: row.id, title: preview(row.title, FIELD_PREVIEW_CHAR_LIMIT),
-            description: preview(row.description, FIELD_PREVIEW_CHAR_LIMIT), status: row.status,
-            priority: row.priority, assignedBranch: row.assigned_branch,
+            id: preview(row.id, ID_CHAR_LIMIT),
+            title: preview(row.title, NAME_CHAR_LIMIT),
+            description: nullablePreview(row.description, DESCRIPTION_CHAR_LIMIT),
+            status: preview(row.status, ENUM_CHAR_LIMIT),
+            priority: preview(row.priority, ENUM_CHAR_LIMIT),
+            assignedBranch: nullablePreview(row.assigned_branch, BRANCH_CHAR_LIMIT),
           })),
           truncated: rows.length === LIST_LIMIT,
         };
@@ -209,9 +325,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         if (row.project_id !== projectId) throw new Error("Object is not part of this project");
         await touch("task", row.id);
         return {
-          id: row.id, title: preview(row.title, FIELD_PREVIEW_CHAR_LIMIT),
-          description: preview(row.description, FIELD_PREVIEW_CHAR_LIMIT), status: row.status,
-          priority: row.priority, assignedBranch: row.assigned_branch,
+          id: preview(row.id, ID_CHAR_LIMIT),
+          title: preview(row.title, NAME_CHAR_LIMIT),
+          description: nullablePreview(row.description, DESCRIPTION_CHAR_LIMIT),
+          status: preview(row.status, ENUM_CHAR_LIMIT),
+          priority: preview(row.priority, ENUM_CHAR_LIMIT),
+          assignedBranch: nullablePreview(row.assigned_branch, BRANCH_CHAR_LIMIT),
         };
       },
     },
@@ -220,9 +339,15 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: async () => {
         const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
-        const items = rows.map((row) => ({
-          id: `${row.targetId}:${row.branch ?? "main"}`, target: row.targetId, branch: row.branch,
-        }));
+        const items = rows.map((row) => {
+          const target = preview(row.targetId, TARGET_CHAR_LIMIT);
+          const branch = nullablePreview(row.branch, BRANCH_CHAR_LIMIT);
+          return {
+            id: preview(`${target}:${branch ?? "main"}`, ID_CHAR_LIMIT * 2),
+            target,
+            branch,
+          };
+        });
         await touchAll("workspace", items.map((item) => item.id));
         return { items, truncated: rows.length === LIST_LIMIT };
       },
@@ -236,13 +361,27 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
         ]);
         const local: ProjectSessionSummary[] = localRows.map((row) => ({
-          id: row.id, projectId: row.project_id, branch: row.branch || null,
-          title: preview(row.title, FIELD_PREVIEW_CHAR_LIMIT) || null,
-          status: row.status, target: "local",
+          id: preview(row.id, ID_CHAR_LIMIT),
+          projectId: preview(row.project_id, ID_CHAR_LIMIT),
+          branch: nullablePreview(row.branch || null, BRANCH_CHAR_LIMIT),
+          title: nullablePreview(row.title, NAME_CHAR_LIMIT),
+          status: preview(row.status, ENUM_CHAR_LIMIT),
+          target: "local",
+          agentType: nullablePreview(row.agent_type, ENUM_CHAR_LIMIT),
+          model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
         }));
         const authorizedRemote = remoteRows
           .filter((row) => row.projectId === projectId)
-          .map((row) => ({ ...row, title: preview(row.title, FIELD_PREVIEW_CHAR_LIMIT) || null }));
+          .map((row): ProjectSessionSummary => ({
+            id: preview(row.id, ID_CHAR_LIMIT),
+            projectId: preview(row.projectId, ID_CHAR_LIMIT),
+            branch: nullablePreview(row.branch, BRANCH_CHAR_LIMIT),
+            title: nullablePreview(row.title, NAME_CHAR_LIMIT),
+            status: preview(row.status, ENUM_CHAR_LIMIT),
+            target: preview(row.target, TARGET_CHAR_LIMIT),
+            agentType: nullablePreview(row.agentType, ENUM_CHAR_LIMIT),
+            model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
+          }));
         const items = [...local, ...authorizedRemote].slice(0, LIST_LIMIT);
         await touchAll("agent_session", items.map((item) => item.id));
         return {
@@ -259,9 +398,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         if (local) {
           if (local.project_id !== projectId) throw new Error("Object is not part of this project");
           const detail: ProjectSessionDetail = {
-            id: local.id, projectId: local.project_id, branch: local.branch || null,
-            title: preview(local.title, FIELD_PREVIEW_CHAR_LIMIT) || null,
-            status: local.status, target: "local",
+            id: preview(local.id, ID_CHAR_LIMIT),
+            projectId: preview(local.project_id, ID_CHAR_LIMIT),
+            branch: nullablePreview(local.branch || null, BRANCH_CHAR_LIMIT),
+            title: nullablePreview(local.title, NAME_CHAR_LIMIT),
+            status: preview(local.status, ENUM_CHAR_LIMIT),
+            target: "local",
+            agentType: nullablePreview(local.agent_type, ENUM_CHAR_LIMIT),
+            model: nullablePreview(local.model, MODEL_CHAR_LIMIT),
             processAlive: agentSessionManager.getSessionProcessAlive(local.id),
             transcript: transcriptPreview(agentSessionManager.getMessages(local.id)),
           };
@@ -279,12 +423,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           throw new Error("Object is not part of this project");
         }
         const detail: ProjectSessionDetail = {
-          id: remote.id,
-          projectId: remote.projectId,
-          branch: remote.branch,
-          title: preview(remote.title, FIELD_PREVIEW_CHAR_LIMIT) || null,
-          status: preview(remote.status, FIELD_PREVIEW_CHAR_LIMIT),
-          target: remote.target,
+          id: preview(remote.id, ID_CHAR_LIMIT),
+          projectId: preview(remote.projectId, ID_CHAR_LIMIT),
+          branch: nullablePreview(remote.branch, BRANCH_CHAR_LIMIT),
+          title: nullablePreview(remote.title, NAME_CHAR_LIMIT),
+          status: preview(remote.status, ENUM_CHAR_LIMIT),
+          target: preview(remote.target, TARGET_CHAR_LIMIT),
+          agentType: nullablePreview(remote.agentType, ENUM_CHAR_LIMIT),
+          model: nullablePreview(remote.model, MODEL_CHAR_LIMIT),
           processAlive: remote.processAlive,
           transcript: transcriptPreview(remote.transcript),
         };
@@ -300,9 +446,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         await touchAll("schedule", rows.map((row) => row.id));
         return {
           items: rows.map((row) => ({
-            id: row.id, name: preview(row.name, FIELD_PREVIEW_CHAR_LIMIT), enabled: row.enabled,
-            cron: preview(row.cron_expr, FIELD_PREVIEW_CHAR_LIMIT),
-            timezone: row.timezone, runType: row.run_type, target: row.target, branch: row.branch,
+            id: preview(row.id, ID_CHAR_LIMIT),
+            name: preview(row.name, NAME_CHAR_LIMIT),
+            enabled: row.enabled,
+            cron: preview(row.cron_expr, CRON_CHAR_LIMIT),
+            timezone: preview(row.timezone, TIMEZONE_CHAR_LIMIT),
+            runType: preview(row.run_type, ENUM_CHAR_LIMIT),
+            target: preview(row.target, TARGET_CHAR_LIMIT),
+            branch: nullablePreview(row.branch, BRANCH_CHAR_LIMIT),
           })),
           truncated: rows.length === LIST_LIMIT,
         };
@@ -316,8 +467,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         await touchAll("schedule_run", rows.map((row) => row.id));
         return {
           items: rows.map((row) => ({
-            id: row.id, scheduleId: row.schedule_id, status: row.status, exitCode: row.exit_code,
-            startedAt: row.started_at, finishedAt: row.finished_at,
+            id: preview(row.id, ID_CHAR_LIMIT),
+            scheduleId: preview(row.schedule_id, ID_CHAR_LIMIT),
+            status: preview(row.status, ENUM_CHAR_LIMIT),
+            exitCode: row.exit_code,
+            startedAt: preview(row.started_at, TIMESTAMP_CHAR_LIMIT),
+            finishedAt: nullablePreview(row.finished_at, TIMESTAMP_CHAR_LIMIT),
           })),
           truncated: rows.length === LIST_LIMIT,
         };
@@ -334,8 +489,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         if (schedule.project_id !== projectId) throw new Error("Object is not part of this project");
         await touch("schedule_run", run.id);
         return {
-          id: run.id, scheduleId: run.schedule_id, status: run.status, exitCode: run.exit_code,
-          startedAt: run.started_at, finishedAt: run.finished_at,
+          id: preview(run.id, ID_CHAR_LIMIT),
+          scheduleId: preview(run.schedule_id, ID_CHAR_LIMIT),
+          status: preview(run.status, ENUM_CHAR_LIMIT),
+          exitCode: run.exit_code,
+          startedAt: preview(run.started_at, TIMESTAMP_CHAR_LIMIT),
+          finishedAt: nullablePreview(run.finished_at, TIMESTAMP_CHAR_LIMIT),
           outputPreview: preview(run.output, RUN_PREVIEW_CHAR_LIMIT),
           reportPreview: preview(run.report, RUN_PREVIEW_CHAR_LIMIT),
         };

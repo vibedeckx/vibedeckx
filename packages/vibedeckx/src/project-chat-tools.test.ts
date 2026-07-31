@@ -148,10 +148,12 @@ describe("createProjectChatTools", () => {
   });
 
   it("retrieves remote session detail through the injected mapping reader without parsing its opaque ID", async () => {
-    const mapping = { id: "not-a-synthetic-id", projectId: "project-1", remoteServerId: "server-a", remoteSessionId: "worker-id", branch: "dev" };
+    const huge = "r".repeat(20_000);
+    const mapping = { id: huge, projectId: "project-1", remoteServerId: "server-a", remoteSessionId: "worker-id", branch: "dev" };
     vi.mocked(remote.getMapping).mockResolvedValue(mapping);
     vi.mocked(remote.getDetail).mockResolvedValue({
-      id: mapping.id, projectId: "project-1", branch: "dev", title: "Remote", status: "running", target: "server-a",
+      id: huge, projectId: "project-1", branch: huge, title: huge, status: huge, target: huge,
+      agentType: huge, model: huge,
       transcript: [{ type: "assistant", content: `remote-${"y".repeat(20_000)}` }],
       credential: "SECRET-REMOTE-CREDENTIAL",
     } as never);
@@ -159,8 +161,14 @@ describe("createProjectChatTools", () => {
     const detail = await (await tools()).get_agent_session.execute({ sessionId: mapping.id });
 
     expect(remote.getDetail).toHaveBeenCalledWith(mapping, expect.objectContaining({ maxEntries: expect.any(Number), maxChars: expect.any(Number) }));
-    expect(JSON.stringify(detail).length).toBeLessThan(10_000);
+    expect(JSON.stringify(detail).length).toBeLessThan(12_000);
     expect(JSON.stringify(detail)).not.toContain("SECRET-REMOTE-CREDENTIAL");
+    for (const value of [detail.id, detail.projectId, detail.branch!, detail.title!, detail.target]) {
+      expect(value.length).toBeLessThanOrEqual(513);
+    }
+    expect(detail.status.length).toBeLessThanOrEqual(65);
+    expect(detail.agentType!.length).toBeLessThanOrEqual(65);
+    expect(detail.model!.length).toBeLessThanOrEqual(257);
     expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1"))
       .toContainEqual(expect.objectContaining({ entity_type: "agent_session", entity_id: mapping.id }));
   });
@@ -241,5 +249,140 @@ describe("createProjectChatTools", () => {
     vi.spyOn(storage.projectChatContextRefs, "touch").mockResolvedValue(undefined);
 
     await expect((await tools()).get_task.execute({ taskId: "task-1" })).rejects.toThrow("Failed to track Project Chat context");
+  });
+
+  it("caps every project, task, workspace, and session string field with field-appropriate budgets", async () => {
+    const huge = "x".repeat(20_000);
+    await storage.projects.update("project-1", { agent_mode: huge as never }, "user-1");
+    await storage.tasks.create({
+      id: huge, project_id: "project-1", title: huge, description: huge,
+      status: huge as never, priority: huge as never, assigned_branch: huge,
+    });
+    await storage.searchCache.applyCatalogSnapshot("project-1", huge, {
+      workspaces: [{ branch: huge }], sessions: [],
+    });
+    await storage.agentSessions.create({
+      id: `session-${huge}`, project_id: "project-1", branch: huge,
+      agent_type: huge, model: huge,
+    });
+    await storage.agentSessions.updateTitle(`session-${huge}`, huge);
+    await storage.agentSessions.updateStatus(`session-${huge}`, huge as never);
+    localMessages.mockReturnValue([]);
+    vi.mocked(remote.listByProject).mockResolvedValue([{
+      id: `remote-${huge}`, projectId: "project-1", branch: huge, title: huge,
+      status: huge, target: huge, agentType: huge, model: huge,
+    }]);
+    const surface = await tools();
+
+    const summary = await surface.get_project_summary.execute({});
+    const task = (await surface.list_tasks.execute({})).items[0] as Record<string, string>;
+    const taskDetail = await surface.get_task.execute({ taskId: huge }) as Record<string, string>;
+    const workspace = (await surface.list_workspaces.execute({})).items[0];
+    const sessions = (await surface.list_agent_sessions.execute({})).items;
+    const localDetail = await surface.get_agent_session.execute({ sessionId: `session-${huge}` });
+
+    expect(summary.name.length).toBeLessThanOrEqual(513);
+    expect(summary.executionTarget.length).toBeLessThanOrEqual(65);
+    expect(task.id.length).toBeLessThanOrEqual(513);
+    expect(task.title.length).toBeLessThanOrEqual(513);
+    expect(task.description.length).toBeLessThanOrEqual(2_001);
+    expect(task.status.length).toBeLessThanOrEqual(65);
+    expect(task.priority.length).toBeLessThanOrEqual(65);
+    expect(task.assignedBranch.length).toBeLessThanOrEqual(513);
+    for (const field of ["id", "title", "description", "status", "priority", "assignedBranch"] as const) {
+      expect(taskDetail[field].length).toBeLessThanOrEqual(field === "description" ? 2_001 : 513);
+    }
+    expect(workspace.id.length).toBeLessThanOrEqual(1_025);
+    expect(workspace.target.length).toBeLessThanOrEqual(513);
+    expect(workspace.branch!.length).toBeLessThanOrEqual(513);
+    for (const session of sessions) {
+      expect(session.id.length).toBeLessThanOrEqual(513);
+      expect(session.branch!.length).toBeLessThanOrEqual(513);
+      expect(session.title!.length).toBeLessThanOrEqual(513);
+      expect(session.status.length).toBeLessThanOrEqual(65);
+      expect(session.target.length).toBeLessThanOrEqual(513);
+      expect(session.agentType!.length).toBeLessThanOrEqual(65);
+      expect(session.model!.length).toBeLessThanOrEqual(257);
+    }
+    expect(localDetail.id.length).toBeLessThanOrEqual(513);
+    expect(localDetail.projectId.length).toBeLessThanOrEqual(513);
+    expect(localDetail.branch!.length).toBeLessThanOrEqual(513);
+    expect(localDetail.title!.length).toBeLessThanOrEqual(513);
+    expect(localDetail.status.length).toBeLessThanOrEqual(65);
+    expect(localDetail.target.length).toBeLessThanOrEqual(513);
+    expect(localDetail.agentType!.length).toBeLessThanOrEqual(65);
+    expect(localDetail.model!.length).toBeLessThanOrEqual(257);
+  });
+
+  it("caps every schedule and run string while preserving nulls, booleans, and numbers", async () => {
+    const huge = "s".repeat(20_000);
+    await storage.scheduledTasks.create({
+      id: huge, project_id: "project-1", name: huge, cron_expr: huge, timezone: huge,
+      run_type: huge as never, prompt_provider: null, content: huge, cwd_mode: "branch",
+      branch: huge, timeout_seconds: 10, enabled: true, target: huge,
+    });
+    await storage.scheduledTaskRuns.create({ id: `run-${huge}`, schedule_id: huge, status: huge as never });
+    await storage.scheduledTaskRuns.finish(`run-${huge}`, {
+      status: huge as never, exit_code: 7, output: huge, report: huge,
+    });
+    const surface = await tools();
+
+    const schedule = (await surface.list_schedules.execute({})).items[0] as Record<string, unknown>;
+    const run = (await surface.list_schedule_runs.execute({})).items[0] as Record<string, unknown>;
+    const detail = await surface.get_schedule_run.execute({ runId: `run-${huge}` });
+
+    expect((schedule.id as string).length).toBeLessThanOrEqual(513);
+    expect((schedule.name as string).length).toBeLessThanOrEqual(513);
+    expect((schedule.cron as string).length).toBeLessThanOrEqual(513);
+    expect((schedule.timezone as string).length).toBeLessThanOrEqual(129);
+    expect((schedule.runType as string).length).toBeLessThanOrEqual(65);
+    expect((schedule.target as string).length).toBeLessThanOrEqual(513);
+    expect((schedule.branch as string).length).toBeLessThanOrEqual(513);
+    expect(schedule.enabled).toBe(true);
+    expect((run.id as string).length).toBeLessThanOrEqual(513);
+    expect((run.scheduleId as string).length).toBeLessThanOrEqual(513);
+    expect((run.status as string).length).toBeLessThanOrEqual(65);
+    expect((run.startedAt as string).length).toBeLessThanOrEqual(129);
+    expect(run.finishedAt === null || (run.finishedAt as string).length <= 129).toBe(true);
+    expect(run.exitCode).toBe(7);
+    expect((detail.id as string).length).toBeLessThanOrEqual(513);
+    expect((detail.scheduleId as string).length).toBeLessThanOrEqual(513);
+    expect((detail.status as string).length).toBeLessThanOrEqual(65);
+    expect(detail.outputPreview.length).toBeLessThanOrEqual(4_001);
+    expect(detail.reportPreview.length).toBeLessThanOrEqual(4_001);
+  });
+
+  it("renders cyclic, deeply nested, getter-throwing transcript content with structural budgets", async () => {
+    await storage.agentSessions.create({ id: "hostile-session", project_id: "project-1", branch: "dev" });
+    const hostile: Record<string, unknown> = {
+      ["k".repeat(20_000)]: "v".repeat(20_000),
+      deep: { one: { two: { three: { four: { five: "too deep" } } } } },
+      array: Array.from({ length: 5_000 }, (_, index) => ({ index, value: "a".repeat(2_000) })),
+      bigint: 1n,
+    };
+    hostile.self = hostile;
+    Object.defineProperty(hostile, "throws", {
+      enumerable: true,
+      get() { throw new Error("getter secret"); },
+    });
+    localMessages.mockReturnValue([{
+      type: "t".repeat(20_000),
+      content: hostile,
+    }, {
+      type: "proxy",
+      content: new Proxy([], {
+        get() { throw new Error("proxy trap secret"); },
+      }),
+    }]);
+
+    const detail = await (await tools()).get_agent_session.execute({ sessionId: "hostile-session" });
+    const serialized = JSON.stringify(detail);
+
+    expect(detail.transcript).toHaveLength(2);
+    expect((detail.transcript[0] as { type: string }).type.length).toBeLessThanOrEqual(65);
+    expect((detail.transcript[0] as { content: string }).content.length).toBeLessThanOrEqual(6_001);
+    expect(serialized.length).toBeLessThan(8_000);
+    expect(serialized).not.toContain("getter secret");
+    expect(serialized).not.toContain("proxy trap secret");
   });
 });
