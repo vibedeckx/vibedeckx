@@ -794,7 +794,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             </>
           )}
           <ModelPicker
-            agentType={agentType}
             models={providers.find((p) => p.type === agentType)?.models ?? []}
             widthCandidates={providers.flatMap((p) => p.models ?? [])}
             value={session ? (session.model ?? null) : pendingModel}

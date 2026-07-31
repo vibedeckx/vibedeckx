@@ -70,6 +70,12 @@ describe("ModelPicker rendering", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as never;
+    Element.prototype.scrollIntoView = () => {};
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -83,7 +89,7 @@ describe("ModelPicker rendering", () => {
   it("renders a clickable trigger before the session exists", async () => {
     await act(async () => {
       root.render(
-        <ModelPicker agentType="claude-code" models={["opus"]} value={null} onChange={vi.fn()} locked={false} />,
+        <ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked={false} />,
       );
     });
 
@@ -92,10 +98,30 @@ describe("ModelPicker rendering", () => {
     expect(trigger!.textContent).toContain("Default");
   });
 
+  it("does not set a placeholder on the model search input", async () => {
+    await act(async () => {
+      root.render(
+        <ModelPicker
+          models={["opus"]}
+          value={null}
+          onChange={vi.fn()}
+          locked={false}
+        />,
+      );
+    });
+    await act(async () => {
+      container.querySelector("button")!.click();
+    });
+
+    const input = document.querySelector<HTMLInputElement>("[data-slot='command-input']");
+    expect(input).not.toBeNull();
+    expect(input!.hasAttribute("placeholder")).toBe(false);
+  });
+
   it("is not a control once locked, but keeps the chip it was", async () => {
     await act(async () => {
       root.render(
-        <ModelPicker agentType="claude-code" models={["opus"]} value="opus" onChange={vi.fn()} locked />,
+        <ModelPicker models={["opus"]} value="opus" onChange={vi.fn()} locked />,
       );
     });
 
@@ -128,7 +154,6 @@ describe("ModelPicker rendering", () => {
     await act(async () => {
       root.render(
         <ModelPicker
-          agentType="codex"
           models={["gpt-5.6-codex"]}
           value="some-very-long-custom-model-name"
           onChange={vi.fn()}
@@ -146,7 +171,6 @@ describe("ModelPicker rendering", () => {
     await act(async () => {
       root.render(
         <ModelPicker
-          agentType="codex"
           models={["gpt-5.6-codex"]}
           value="some-very-long-custom-model-name"
           onChange={vi.fn()}
@@ -169,7 +193,6 @@ describe("ModelPicker rendering", () => {
     await act(async () => {
       root.render(
         <ModelPicker
-          agentType="claude-code"
           models={["opus"]}
           // Reserving only "opus" would leave the chip resizing on every agent
           // switch, which is the shift the header row actually shows.
@@ -190,7 +213,7 @@ describe("ModelPicker rendering", () => {
   it("shows Default rather than nothing when locked with no model", async () => {
     await act(async () => {
       root.render(
-        <ModelPicker agentType="claude-code" models={["opus"]} value={null} onChange={vi.fn()} locked />,
+        <ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked />,
       );
     });
 
@@ -238,7 +261,6 @@ describe("ModelPicker panel width wiring", () => {
     await act(async () => {
       root.render(
         <ModelPicker
-          agentType="codex"
           models={models}
           value={null}
           onChange={vi.fn()}

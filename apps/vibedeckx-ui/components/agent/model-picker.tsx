@@ -19,10 +19,8 @@ import {
 } from "@/components/ui/tooltip";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { cn } from "@/lib/utils";
-import type { AgentType } from "@/lib/api";
 
 interface ModelPickerProps {
-  agentType: AgentType;
   /** Suggestions only — free text is always allowed. */
   models: string[];
   /**
@@ -111,7 +109,6 @@ export function shouldOfferCustom(query: string, models: string[]): boolean {
 }
 
 export function ModelPicker({
-  agentType,
   models,
   widthCandidates,
   value,
@@ -218,10 +215,6 @@ export function ModelPicker({
         <Command shouldFilter>
           <CommandInput
             ref={inputRef}
-            // The panel is chip-width, which leaves the search field roughly
-            // nine characters — hence the bare agent name rather than
-            // "Model for <agent>…", which would clip mid-word.
-            placeholder={`${agentType === "codex" ? "Codex" : "Claude"}…`}
             // An <input> is intrinsically ~20 characters wide; without this it
             // would push the fixed-width panel wider from the inside.
             className="min-w-0"
