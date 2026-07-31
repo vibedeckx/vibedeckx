@@ -138,6 +138,32 @@ export interface TasksTable {
   updated_at: Generated<string>;
 }
 
+export interface ProjectChatThreadsTable {
+  id: string;
+  project_id: string;
+  user_id: string;
+  title: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+  archived_at: number | null;
+}
+
+export interface ProjectChatMessagesTable {
+  id: string;
+  thread_id: string;
+  sequence: number;
+  type: string;
+  content: string;
+  created_at: Generated<string>;
+}
+
+export interface ProjectChatContextRefsTable {
+  thread_id: string;
+  entity_type: string;
+  entity_id: string;
+  last_referenced_at: Generated<string>;
+}
+
 export interface RulesTable {
   id: string;
   project_id: string;
@@ -354,6 +380,9 @@ export interface DB {
   agent_sessions: AgentSessionsTable;
   agent_session_entries: AgentSessionEntriesTable;
   tasks: TasksTable;
+  project_chat_threads: ProjectChatThreadsTable;
+  project_chat_messages: ProjectChatMessagesTable;
+  project_chat_context_refs: ProjectChatContextRefsTable;
   rules: RulesTable;
   commands: CommandsTable;
   global_settings: GlobalSettingsTable;

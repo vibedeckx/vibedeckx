@@ -203,6 +203,50 @@ export interface Task {
   updated_at: string;
 }
 
+export type ProjectChatMessageType =
+  | "user"
+  | "assistant"
+  | "system"
+  | "tool_use"
+  | "tool_result"
+  | "tool_approval_request"
+  | "operation"
+  | "error"
+  | "turn_end";
+
+export type ProjectChatContextEntityType =
+  | "task"
+  | "workspace"
+  | "agent_session"
+  | "schedule"
+  | "schedule_run";
+
+export interface ProjectChatThread {
+  id: string;
+  project_id: string;
+  user_id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  archived_at: number | null;
+}
+
+export interface ProjectChatMessage {
+  id: string;
+  thread_id: string;
+  sequence: number;
+  type: ProjectChatMessageType;
+  content: string;
+  created_at: string;
+}
+
+export interface ProjectChatContextRef {
+  thread_id: string;
+  entity_type: ProjectChatContextEntityType;
+  entity_id: string;
+  last_referenced_at: string;
+}
+
 export interface Rule {
   id: string;
   project_id: string;
@@ -850,6 +894,24 @@ export interface Storage {
      * to abort without writing.
      */
     update: (userId: string, key: string, mergeFn: (current: string | undefined) => string) => Promise<string>;
+  };
+  projectChatThreads: {
+    create: (opts: { id: string; project_id: string; user_id: string; title: string | null }) => Promise<ProjectChatThread>;
+    listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
+    getById: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    updateTitle: (id: string, userId: string, title: string | null) => Promise<ProjectChatThread | undefined>;
+    archive: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    unarchive: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    touchUpdatedAt: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    delete: (id: string, userId: string) => Promise<void>;
+  };
+  projectChatMessages: {
+    append: (opts: { id: string; thread_id: string; sequence: number; type: ProjectChatMessageType; content: string }) => Promise<ProjectChatMessage>;
+    listByThread: (threadId: string) => Promise<ProjectChatMessage[]>;
+  };
+  projectChatContextRefs: {
+    touch: (threadId: string, entityType: ProjectChatContextEntityType, entityId: string) => Promise<ProjectChatContextRef>;
+    listByThread: (threadId: string) => Promise<ProjectChatContextRef[]>;
   };
   tasks: {
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;

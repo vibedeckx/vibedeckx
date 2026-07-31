@@ -19,6 +19,7 @@ import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
 import { createTurnSnapshotRepos } from "./repositories/turn-snapshots.js";
 import { createNotificationRepos } from "./repositories/notifications.js";
+import { createProjectChatRepos } from "./repositories/project-chat.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -38,6 +39,40 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       remote_project_id TEXT,
       user_id TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS project_chat_threads (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      title TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      archived_at INTEGER,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_chat_threads_project_user_updated
+      ON project_chat_threads(project_id, user_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS project_chat_messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(thread_id, sequence),
+      FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS project_chat_context_refs (
+      thread_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      last_referenced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (thread_id, entity_type, entity_id),
+      FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS executor_groups (
@@ -999,6 +1034,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createWorkflowRunRepos(kdb),
     ...createTurnSnapshotRepos(kdb),
     ...createNotificationRepos(kdb),
+    ...createProjectChatRepos(kdb),
 
     close: async () => {
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
