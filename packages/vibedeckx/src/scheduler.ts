@@ -156,7 +156,9 @@ export class SchedulerService {
 
   /** Record a run that failed before a process could be spawned. */
   private async failWithoutStart(task: ScheduledTask, runId: string, message: string): Promise<RunNowResult> {
-    await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id });
+    const existing = await this.storage.scheduledTaskRuns.getById(runId);
+    if (existing && existing.schedule_id !== task.id) return { error: "Run identity is already in use" };
+    if (!existing) await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id });
     await this.storage.scheduledTaskRuns.finish(runId, { status: "failed", output: message });
     await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
     this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status: "failed", exitCode: null });
@@ -169,8 +171,12 @@ export class SchedulerService {
 
     const runId = preallocatedRunId ?? randomUUID();
 
-    // Overlap policy: skip (recorded) when the previous run is still going.
-    if (this.activeRuns.has(scheduleId)) {
+    // Fast in-process guard. The durable claim below is authoritative across
+    // service instances/restarts; this also prevents a concurrent retry of
+    // the *same* starting run from racing its own markRunning step.
+    const activeRunId = this.activeRuns.get(scheduleId);
+    if (activeRunId) {
+      if (activeRunId === runId) return { runId, skipped: false };
       await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "skipped" });
       await this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
       this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status: "skipped", exitCode: null });
@@ -223,15 +229,37 @@ export class SchedulerService {
       created_at: new Date().toISOString(),
     };
 
+    const claimedProcessId = `schedule-run-${runId}`;
+    const claim = await this.storage.scheduledTaskRuns.claimStart({
+      id: runId, scheduleId, processId: claimedProcessId,
+    });
+    if (claim === "conflict") return { error: "Run identity is already in use" };
+    if (claim === "existing") {
+      const existing = await this.storage.scheduledTaskRuns.getById(runId);
+      return { runId, skipped: existing?.status === "skipped" };
+    }
+    if (claim === "occupied") {
+      await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "skipped" });
+      await this.storage.scheduledTaskRuns.prune(scheduleId, RUNS_KEEP);
+      this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId, runId, status: "skipped", exitCode: null });
+      return { runId, skipped: true };
+    }
+    this.activeRuns.set(scheduleId, runId);
+
     let processId: string;
     try {
-      processId = await this.processManager.start(executor, cwd, true);
+      processId = await this.processManager.start(executor, cwd, true, claimedProcessId);
     } catch (err) {
+      this.activeRuns.delete(scheduleId);
       return this.failWithoutStart(task, runId, `Failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "running", process_id: processId });
-    this.activeRuns.set(scheduleId, runId);
+    if (processId !== claimedProcessId
+      || !(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId))) {
+      await this.processManager.stop(processId);
+      this.activeRuns.delete(scheduleId);
+      return this.failWithoutStart(task, runId, "Failed to confirm the scheduled process claim");
+    }
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId, runId });
 
     let output = "";
@@ -301,26 +329,11 @@ export class SchedulerService {
   }
 
   private async executeRemoteRun(task: ScheduledTask, runId: string): Promise<RunNowResult> {
-    // Reserve the overlap slot SYNCHRONOUSLY, as the very first step of this
-    // method — before ANY `await`, including the storage lookup right below.
-    // Unlike the local branch (which runs to this same point without
-    // yielding), this method's very first line used to already be past every
-    // synchronous check in the caller (executeRun), so a second concurrent
-    // trigger (double-clicked Run Now, or Run Now racing a cron tick) could
-    // never observe an unreserved slot. Once `projectRemotes.getByProjectAndServer`
-    // became async, inserting the reservation after it would reopen exactly
-    // that race — a second call could pass executeRun's `activeRuns.has` guard
-    // before this method reserves the slot. Every early-return below must
-    // release this slot.
-    this.activeRuns.set(task.id, runId);
-
     if (!this.remote) {
-      this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, "Remote execution is not configured on this server");
     }
     const remoteConfig = await this.storage.projectRemotes.getByProjectAndServer(task.project_id, task.target);
     if (!remoteConfig) {
-      this.activeRuns.delete(task.id);
       return this.failWithoutStart(task, runId, `Remote server config not found for target ${task.target}`);
     }
 
@@ -329,7 +342,6 @@ export class SchedulerService {
     let remoteBranch: string | null;
     if (task.cwd_mode === "directory") {
       if (!task.directory || !path.isAbsolute(task.directory)) {
-        this.activeRuns.delete(task.id);
         return this.failWithoutStart(task, runId, `Schedule directory must be an absolute path: ${task.directory ?? "(unset)"}`);
       }
       remotePath = task.directory;
@@ -340,6 +352,22 @@ export class SchedulerService {
     }
 
     const proxy = this.remote.proxy ?? proxyToRemoteAuto;
+    const claimedProcessId = `schedule-run-${runId}`;
+    const claim = await this.storage.scheduledTaskRuns.claimStart({
+      id: runId, scheduleId: task.id, processId: claimedProcessId,
+    });
+    if (claim === "conflict") return { error: "Run identity is already in use" };
+    if (claim === "existing") {
+      const existing = await this.storage.scheduledTaskRuns.getById(runId);
+      return { runId, skipped: existing?.status === "skipped" };
+    }
+    if (claim === "occupied") {
+      await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id, status: "skipped" });
+      await this.storage.scheduledTaskRuns.prune(task.id, RUNS_KEEP);
+      this.eventBus?.emit({ type: "schedule:run-finished", projectId: task.project_id, scheduleId: task.id, runId, status: "skipped", exitCode: null });
+      return { runId, skipped: true };
+    }
+    this.activeRuns.set(task.id, runId);
 
     let result;
     try {
@@ -352,6 +380,7 @@ export class SchedulerService {
           prompt_provider: task.run_type === "prompt" ? (task.prompt_provider ?? "claude") : null,
           branch: remoteBranch ?? undefined,
           pty: true,
+          processId: claimedProcessId,
         },
         { reverseConnectManager: this.remote.reverseConnectManager },
       );
@@ -377,7 +406,10 @@ export class SchedulerService {
     this.remote.remoteExecutorMap.set(localProcessId, remoteInfo);
     this.remote.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
 
-    await this.storage.scheduledTaskRuns.create({ id: runId, schedule_id: task.id, status: "running", process_id: localProcessId });
+    if (!(await this.storage.scheduledTaskRuns.markRunning(runId, claimedProcessId, localProcessId))) {
+      this.activeRuns.delete(task.id);
+      return this.failWithoutStart(task, runId, "Failed to confirm the remote scheduled process claim");
+    }
     this.eventBus?.emit({ type: "schedule:run-started", projectId: task.project_id, scheduleId: task.id, runId });
 
     let finalized = false;

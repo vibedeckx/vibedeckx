@@ -113,7 +113,7 @@ export interface ExecutorProcess {
 
 export type ScheduledTaskRunType = 'command' | 'prompt';
 export type ScheduledTaskCwdMode = 'branch' | 'directory';
-export type ScheduledTaskRunStatus = 'running' | 'completed' | 'failed' | 'timeout' | 'killed' | 'skipped';
+export type ScheduledTaskRunStatus = 'starting' | 'running' | 'completed' | 'failed' | 'timeout' | 'killed' | 'skipped';
 
 export interface ScheduledTask {
   id: string;
@@ -653,6 +653,10 @@ export interface Storage {
   };
   scheduledTaskRuns: {
     create: (opts: { id: string; schedule_id: string; status?: ScheduledTaskRunStatus; process_id?: string | null }) => Promise<ScheduledTaskRun>;
+    claimStart: (opts: { id: string; scheduleId: string; processId: string }) => Promise<
+      "claimed" | "retry" | "existing" | "occupied" | "conflict"
+    >;
+    markRunning: (id: string, claimedProcessId: string, processId?: string) => Promise<boolean>;
     getById: (id: string) => Promise<ScheduledTaskRun | undefined>;
     /** Newest runs across schedules belonging to exactly one project; output/report omitted. */
     listRecentByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRun[]>;
@@ -661,7 +665,7 @@ export interface Storage {
     /** Most recent run per schedule for the given IDs (output omitted). */
     getLastByScheduleIds: (scheduleIds: string[]) => Promise<Record<string, ScheduledTaskRun>>;
     finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null }) => Promise<void>;
-    /** Delete all but the newest `keep` runs for a schedule. */
+    /** Delete all but the newest `keep` terminal runs for a schedule. */
     prune: (scheduleId: string, keep: number) => Promise<void>;
   };
   remoteExecutorProcesses: {

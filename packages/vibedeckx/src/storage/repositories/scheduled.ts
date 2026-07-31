@@ -106,6 +106,38 @@ export const createScheduledRepos = (
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       return mapRun(row);
     },
+    claimStart: async ({ id, scheduleId, processId }) => kdb.transaction().execute(async (trx) => {
+      const existing = await trx.selectFrom("scheduled_task_runs")
+        .selectAll().where("id", "=", id).executeTakeFirst();
+      if (existing) {
+        if (existing.schedule_id !== scheduleId
+          || (existing.status === "starting" && existing.process_id !== processId)) return "conflict" as const;
+        return existing.status === "starting" ? "retry" as const : "existing" as const;
+      }
+      const active = await trx.selectFrom("scheduled_task_execution_claims")
+        .select("run_id")
+        .where("schedule_id", "=", scheduleId)
+        .executeTakeFirst();
+      if (active) return "occupied" as const;
+      await trx.insertInto("scheduled_task_runs").values((eb) => ({
+        id, schedule_id: scheduleId, status: "starting", process_id: processId,
+        project_id: eb.selectFrom("scheduled_tasks").select("project_id").where("id", "=", scheduleId),
+        exit_code: null, output: null, report: null, finished_at: null,
+      })).execute();
+      await trx.insertInto("scheduled_task_execution_claims").values({
+        schedule_id: scheduleId, run_id: id, process_id: processId,
+      }).execute();
+      return "claimed" as const;
+    }),
+    markRunning: async (id, claimedProcessId, processId = claimedProcessId) => {
+      const result = await kdb.updateTable("scheduled_task_runs")
+        .set({ status: "running", process_id: processId })
+        .where("id", "=", id)
+        .where("status", "=", "starting")
+        .where("process_id", "=", claimedProcessId)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
     getById: async (id) => {
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapRun(row) : undefined;
@@ -143,19 +175,22 @@ export const createScheduledRepos = (
       return result;
     },
     finish: async (id, opts) => {
-      await kdb.updateTable("scheduled_task_runs").set({
-        status: opts.status,
-        exit_code: opts.exit_code ?? null,
-        output: opts.output ?? null,
-        report: opts.report ?? null,
-        finished_at: sql<string>`CURRENT_TIMESTAMP`,
-      }).where("id", "=", id).execute();
+      await kdb.transaction().execute(async (trx) => {
+        await trx.updateTable("scheduled_task_runs").set({
+          status: opts.status,
+          exit_code: opts.exit_code ?? null,
+          output: opts.output ?? null,
+          report: opts.report ?? null,
+          finished_at: sql<string>`CURRENT_TIMESTAMP`,
+        }).where("id", "=", id).execute();
+        await trx.deleteFrom("scheduled_task_execution_claims").where("run_id", "=", id).execute();
+      });
     },
     prune: async (scheduleId, keep) => {
-      // Never delete a 'running' row — see original comment at sqlite.ts:1601.
+      // Never delete a claimed or running row.
       await kdb.deleteFrom("scheduled_task_runs")
         .where("schedule_id", "=", scheduleId)
-        .where("status", "!=", "running")
+        .where("status", "not in", ["starting", "running"])
         .where("id", "not in", kdb.selectFrom("scheduled_task_runs").select("id")
           .where("schedule_id", "=", scheduleId)
           .orderBy("started_at", "desc").orderBy(h.rowIdDesc())

@@ -376,6 +376,13 @@ export interface ScheduledTaskRunsTable {
   finished_at: string | null;
 }
 
+export interface ScheduledTaskExecutionClaimsTable {
+  schedule_id: string;
+  run_id: string;
+  process_id: string;
+  created_at: Generated<string>;
+}
+
 export interface WorkflowRunsTable {
   id: string;
   project_id: string;
@@ -448,6 +455,7 @@ export interface DB {
   search_catalog_sync_state: SearchCatalogSyncStateTable;
   scheduled_tasks: ScheduledTasksTable;
   scheduled_task_runs: ScheduledTaskRunsTable;
+  scheduled_task_execution_claims: ScheduledTaskExecutionClaimsTable;
   cross_remote_audit: CrossRemoteAuditTable;
   workflow_runs: WorkflowRunsTable;
   turn_snapshots: TurnSnapshotsTable;

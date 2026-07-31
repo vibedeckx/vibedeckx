@@ -11,11 +11,15 @@ import "../server-types.js";
 const routes: FastifyPluginAsync = async (fastify) => {
   // Execute command at a path (for remote executor)
   fastify.post<{
-    Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean };
+    Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean; processId?: string };
   }>("/api/path/execute", async (req, reply) => {
-    const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty } = req.body;
+    const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty, processId: requestedProcessId } = req.body;
     if (!projectPath || !command) {
       return reply.code(400).send({ error: "Path and command are required" });
+    }
+    if (requestedProcessId !== undefined
+      && (typeof requestedProcessId !== "string" || requestedProcessId.length < 1 || requestedProcessId.length > 512)) {
+      return reply.code(400).send({ error: "processId must contain 1-512 characters" });
     }
 
     const resolvedBase = resolveWorktreePath(projectPath, branch ?? null);
@@ -37,7 +41,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     };
 
     try {
-      const processId = await fastify.processManager.start(tempExecutor, resolvedBase, true);
+      const processId = await fastify.processManager.start(tempExecutor, resolvedBase, true, requestedProcessId);
       return reply.code(200).send({ processId });
     } catch (error) {
       return reply.code(500).send({ error: String(error) });

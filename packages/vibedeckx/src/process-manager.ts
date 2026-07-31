@@ -135,8 +135,17 @@ export class ProcessManager {
    * @param skipDb - When true, skip database operations (used for remote path-based execution
    *                 where the executor doesn't exist in the local DB)
    */
-  async start(executor: Executor, projectPath: string, skipDb = false): Promise<string> {
-    const processId = crypto.randomUUID();
+  async start(
+    executor: Executor,
+    projectPath: string,
+    skipDb = false,
+    preallocatedProcessId?: string,
+  ): Promise<string> {
+    const processId = preallocatedProcessId ?? crypto.randomUUID();
+    // Retry of a durable schedule claim after a lost response: the first
+    // request already spawned this exact process, so return its identity
+    // instead of launching a duplicate.
+    if (preallocatedProcessId && this.processes.has(processId)) return processId;
 
     // Create process record in database (skip for remote path-based execution)
     if (!skipDb) {
