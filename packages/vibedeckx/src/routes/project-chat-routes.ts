@@ -11,6 +11,8 @@ const MAX_MESSAGE_LENGTH = 100_000;
 const LIST_LIMIT = 100;
 
 type PatchBody = { title?: string | null; archived?: boolean };
+type MessageBody = { content: string };
+type ToolApprovalBody = { approvalId: string; approved: boolean };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -49,6 +51,23 @@ function parsePatchBody(body: unknown): PatchBody | null {
     patch.archived = body.archived;
   }
   return patch;
+}
+
+function parseMessageBody(body: unknown): MessageBody | null {
+  if (!isRecord(body) || Object.keys(body).some((key) => key !== "content")) return null;
+  if (typeof body.content !== "string") return null;
+  const content = body.content.trim();
+  if (!content || content.length > MAX_MESSAGE_LENGTH) return null;
+  return { content };
+}
+
+function parseToolApprovalBody(body: unknown): ToolApprovalBody | null {
+  if (!isRecord(body)) return null;
+  const keys = Object.keys(body);
+  if (keys.length !== 2 || keys.some((key) => key !== "approvalId" && key !== "approved")) return null;
+  if (typeof body.approvalId !== "string" || !body.approvalId.trim()) return null;
+  if (typeof body.approved !== "boolean") return null;
+  return { approvalId: body.approvalId.trim(), approved: body.approved };
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -168,14 +187,54 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const owned = await getOwnedThread(req, reply, req.params.threadId);
       if (!owned) return;
-      await fastify.storage.projectChatThreads.delete(
-        owned.thread.id,
-        owned.thread.project_id,
-        owned.userId,
-      );
+      await fastify.projectChatManager.deleteThread(owned.thread.id, owned.userId);
       return reply.code(204).send();
     },
   );
+
+  fastify.post<{
+    Params: { threadId: string };
+    Body: unknown;
+  }>("/api/project-chat/threads/:threadId/messages", async (req, reply) => {
+    const owned = await getOwnedThread(req, reply, req.params.threadId);
+    if (!owned) return;
+    const body = parseMessageBody(req.body);
+    if (!body) return reply.code(400).send({ error: "A non-empty content string is required" });
+
+    // Wait only for durable acceptance; generation continues over WebSocket.
+    await fastify.projectChatManager.sendMessage(owned.thread.id, owned.userId, body.content);
+    return reply.code(202).send({ accepted: true });
+  });
+
+  fastify.post<{ Params: { threadId: string } }>(
+    "/api/project-chat/threads/:threadId/stop",
+    async (req, reply) => {
+      const owned = await getOwnedThread(req, reply, req.params.threadId);
+      if (!owned) return;
+      const stopped = await fastify.projectChatManager.stopGeneration(owned.thread.id, owned.userId);
+      return reply.code(200).send({ stopped });
+    },
+  );
+
+  fastify.post<{
+    Params: { threadId: string };
+    Body: unknown;
+  }>("/api/project-chat/threads/:threadId/tool-approval", async (req, reply) => {
+    const owned = await getOwnedThread(req, reply, req.params.threadId);
+    if (!owned) return;
+    const body = parseToolApprovalBody(req.body);
+    if (!body) {
+      return reply.code(400).send({ error: "approvalId (string) and approved (boolean) are required" });
+    }
+    const resolved = await fastify.projectChatManager.resolveToolApproval(
+      owned.thread.id,
+      owned.userId,
+      body.approvalId,
+      body.approved,
+    );
+    if (!resolved) return reply.code(404).send({ error: "Tool approval not found" });
+    return reply.code(200).send({ resolved: true });
+  });
 };
 
 export default fp(routes, { name: "project-chat-routes" });

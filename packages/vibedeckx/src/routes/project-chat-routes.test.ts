@@ -18,11 +18,18 @@ describe("project chat thread routes", () => {
   let app: FastifyInstance;
   let storage: Storage;
   let dir: string;
+  let projectChatManager: {
+    sendMessage: ReturnType<typeof vi.fn>;
+    stopGeneration: ReturnType<typeof vi.fn>;
+    resolveToolApproval: ReturnType<typeof vi.fn>;
+    deleteThread: ReturnType<typeof vi.fn>;
+  };
 
   async function build(authEnabled = true) {
     const instance = Fastify({ logger: false });
     instance.decorate("authEnabled", authEnabled);
     instance.decorate("storage", storage);
+    instance.decorate("projectChatManager", projectChatManager as never);
     await instance.register(projectChatRoutes);
     await instance.ready();
     return instance;
@@ -41,6 +48,17 @@ describe("project chat thread routes", () => {
     auth.currentUserId = "user-1";
     dir = mkdtempSync(path.join(tmpdir(), "vdx-project-chat-routes-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    projectChatManager = {
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      stopGeneration: vi.fn().mockResolvedValue(true),
+      resolveToolApproval: vi.fn().mockResolvedValue(true),
+      deleteThread: vi.fn(async (threadId: string, userId: string) => {
+        const thread = await storage.projectChatThreads.getOwnedById(threadId, userId);
+        if (!thread) return false;
+        await storage.projectChatThreads.delete(threadId, thread.project_id, userId);
+        return true;
+      }),
+    };
     await storage.projects.create({ id: "project-1", name: "Mine", path: "/tmp/mine" }, "user-1");
     await storage.projects.create({ id: "project-2", name: "Also mine", path: "/tmp/also-mine" }, "user-1");
     await storage.projects.create({ id: "foreign-project", name: "Theirs", path: "/tmp/theirs" }, "user-2");
@@ -301,6 +319,7 @@ describe("project chat thread routes", () => {
       const response = await app.inject({ method: "DELETE", url: "/api/project-chat/threads/thread-1" });
 
       expect(response.statusCode).toBe(204);
+      expect(projectChatManager.deleteThread).toHaveBeenCalledWith("thread-1", "user-1");
       expect(await storage.projectChatThreads.getById("thread-1", "project-1", "user-1")).toBeUndefined();
       expect(await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
       expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
@@ -316,6 +335,112 @@ describe("project chat thread routes", () => {
     });
   });
 
+  describe("thread runtime routes", () => {
+    it("sends a trimmed message through the authorized thread runtime", async () => {
+      await createThread();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/messages",
+        payload: { content: "  What changed?  " },
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(projectChatManager.sendMessage).toHaveBeenCalledWith("thread-1", "user-1", "What changed?");
+    });
+
+    it("does not acknowledge a message when durable acceptance fails", async () => {
+      await createThread();
+      projectChatManager.sendMessage.mockRejectedValue(new Error("write failed"));
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/messages",
+        payload: { content: "persist this" },
+      });
+
+      expect(response.statusCode).toBe(500);
+    });
+
+    it("rejects malformed messages before invoking the runtime", async () => {
+      await createThread();
+      for (const payload of [
+        {}, { content: "" }, { content: "   " }, { content: 1 },
+        { content: "x".repeat(100_001) }, { content: "ok", extra: true },
+      ]) {
+        const response = await app.inject({
+          method: "POST", url: "/api/project-chat/threads/thread-1/messages", payload,
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(projectChatManager.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("stops only an owned thread and reports whether work was active", async () => {
+      await createThread();
+      projectChatManager.stopGeneration.mockResolvedValue(false);
+
+      const response = await app.inject({
+        method: "POST", url: "/api/project-chat/threads/thread-1/stop",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ stopped: false });
+      expect(projectChatManager.stopGeneration).toHaveBeenCalledWith("thread-1", "user-1");
+    });
+
+    it("resolves a validated tool approval and reports stale approvals as 404", async () => {
+      await createThread();
+      const approved = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/tool-approval",
+        payload: { approvalId: "approval-1", approved: true },
+      });
+      expect(approved.statusCode).toBe(200);
+      expect(projectChatManager.resolveToolApproval)
+        .toHaveBeenCalledWith("thread-1", "user-1", "approval-1", true);
+
+      projectChatManager.resolveToolApproval.mockResolvedValue(false);
+      const stale = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/tool-approval",
+        payload: { approvalId: "stale", approved: false },
+      });
+      expect(stale.statusCode).toBe(404);
+      expect(stale.json()).toEqual({ error: "Tool approval not found" });
+    });
+
+    it("validates tool approval bodies", async () => {
+      await createThread();
+      for (const payload of [
+        {}, { approvalId: "", approved: true }, { approvalId: 1, approved: true },
+        { approvalId: "a", approved: "yes" }, { approvalId: "a", approved: true, extra: true },
+      ]) {
+        const response = await app.inject({
+          method: "POST", url: "/api/project-chat/threads/thread-1/tool-approval", payload,
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(projectChatManager.resolveToolApproval).not.toHaveBeenCalled();
+    });
+
+    it("returns the same 404 for foreign runtime operations without invoking the manager", async () => {
+      await createThread({ id: "theirs", user_id: "user-2" });
+      for (const request of [
+        { url: "/api/project-chat/threads/theirs/messages", payload: { content: "steal" } },
+        { url: "/api/project-chat/threads/theirs/stop", payload: undefined },
+        { url: "/api/project-chat/threads/theirs/tool-approval", payload: { approvalId: "a", approved: true } },
+      ]) {
+        const response = await app.inject({ method: "POST", ...request });
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: "Thread not found" });
+      }
+      expect(projectChatManager.sendMessage).not.toHaveBeenCalled();
+      expect(projectChatManager.stopGeneration).not.toHaveBeenCalled();
+      expect(projectChatManager.resolveToolApproval).not.toHaveBeenCalled();
+    });
+  });
+
   it("returns 401 for every route without an authenticated identity", async () => {
     auth.currentUserId = null;
     const requests = [
@@ -324,6 +449,9 @@ describe("project chat thread routes", () => {
       { method: "GET", url: "/api/project-chat/threads/thread-1" },
       { method: "PATCH", url: "/api/project-chat/threads/thread-1", payload: { title: "Nope" } },
       { method: "DELETE", url: "/api/project-chat/threads/thread-1" },
+      { method: "POST", url: "/api/project-chat/threads/thread-1/messages", payload: { content: "Nope" } },
+      { method: "POST", url: "/api/project-chat/threads/thread-1/stop" },
+      { method: "POST", url: "/api/project-chat/threads/thread-1/tool-approval", payload: { approvalId: "a", approved: true } },
     ];
 
     for (const request of requests) {

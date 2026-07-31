@@ -35,6 +35,44 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // WebSocket routes must be registered after the websocket plugin is ready
   fastify.after(() => {
+    fastify.get<{
+      Params: { threadId: string };
+      Querystring: { apiKey?: string; token?: string };
+    }>(
+      "/api/project-chat/threads/:threadId/stream",
+      { websocket: true },
+      async (socket, req) => {
+        const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
+        if (!principal) return;
+        const userId = principal.userId ?? "local";
+
+        try {
+          await fastify.projectChatManager.openThread(req.params.threadId, userId);
+        } catch {
+          try { socket.send(JSON.stringify({ error: "Thread not found" })); } catch { /* closed */ }
+          try { socket.close(); } catch { /* closed */ }
+          return;
+        }
+
+        (socket as WebSocket & { projectChatUserId: string }).projectChatUserId = userId;
+        const unsubscribe = fastify.projectChatManager.subscribe(req.params.threadId, socket);
+        if (!unsubscribe) {
+          try { socket.send(JSON.stringify({ error: "Thread not found" })); } catch { /* closed */ }
+          try { socket.close(); } catch { /* closed */ }
+          return;
+        }
+
+        let cleaned = false;
+        const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
+          unsubscribe();
+        };
+        socket.on("close", cleanup);
+        socket.on("error", cleanup);
+      },
+    );
+
     // Executor process logs WebSocket
     fastify.get<{ Params: { processId: string }; Querystring: { apiKey?: string; token?: string } }>(
       "/api/executor-processes/:processId/logs",

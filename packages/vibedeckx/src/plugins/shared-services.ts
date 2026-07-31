@@ -4,6 +4,7 @@ import type { Storage } from "../storage/types.js";
 import { ProcessManager } from "../process-manager.js";
 import { AgentSessionManager } from "../agent-session-manager.js";
 import { ChatSessionManager } from "../chat-session-manager.js";
+import { ProjectChatManager } from "../project-chat-manager.js";
 import { WorkflowEngine } from "../workflow-engine.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
@@ -93,6 +94,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     remoteExecutorMonitor,
   });
   const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
+  const projectChatManager = new ProjectChatManager(opts.storage);
   // Restore persisted remote executors by verifying against a connected
   // server's running process list and repopulating remoteExecutorMap.
   async function restoreRemoteExecutorsForServer(connectedServerId: string, machineId?: string): Promise<void> {
@@ -189,6 +191,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("processManager", processManager);
   fastify.decorate("agentSessionManager", agentSessionManager);
   fastify.decorate("chatSessionManager", chatSessionManager);
+  fastify.decorate("projectChatManager", projectChatManager);
   fastify.decorate("remoteExecutorMap", remoteExecutorMap);
   fastify.decorate("remoteExecutorMonitor", remoteExecutorMonitor);
   fastify.decorate("remoteSessionMap", remoteSessionMap);
@@ -269,6 +272,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     remotePatchCache.shutdown();
     remoteExecutorMonitor.shutdown();
     reverseConnectManager.shutdown();
+    await projectChatManager.shutdown();
     await browserManager.shutdown();
   });
 };
