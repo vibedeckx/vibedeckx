@@ -471,7 +471,7 @@ export interface Command {
   updated_at: string;
 }
 
-export type ScheduleRunStatus = "running" | "completed" | "failed" | "timeout" | "killed" | "skipped";
+export type ScheduleRunStatus = "starting" | "running" | "completed" | "failed" | "timeout" | "killed" | "skipped";
 
 export interface ScheduleRun {
   id: string;
@@ -523,6 +523,205 @@ export interface ScheduleInput {
   branch?: string | null;
   directory?: string | null;
   timeout_seconds?: number;
+}
+
+// ============ Project Activity / Project Chat ============
+
+export interface ProjectChatThread {
+  id: string;
+  project_id: string;
+  user_id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  archived_at: number | null;
+}
+
+export type ProjectChatMessageType =
+  | "user"
+  | "assistant"
+  | "system"
+  | "tool_use"
+  | "tool_result"
+  | "tool_approval_request"
+  | "operation"
+  | "error"
+  | "turn_end";
+
+export interface ProjectChatMessage {
+  id: string;
+  thread_id: string;
+  sequence: number;
+  type: ProjectChatMessageType;
+  content: string;
+  created_at: string;
+}
+
+export type ProjectChatContextEntityType =
+  | "task"
+  | "workspace"
+  | "agent_session"
+  | "schedule"
+  | "schedule_run";
+
+export interface ProjectChatContextRef {
+  thread_id: string;
+  entity_type: ProjectChatContextEntityType;
+  entity_id: string;
+  last_referenced_at: string;
+}
+
+export type ProjectChatOperationKind =
+  | "task_create"
+  | "task_update"
+  | "agent_session_create"
+  | "agent_instruction"
+  | "schedule_run"
+  | "workspace_selection";
+
+export type ProjectChatOperationStatus = "pending" | "resolving" | "running" | "completed" | "failed";
+
+interface ProjectChatOperationMessageBase {
+  version: 1;
+  operationId: string;
+  status: ProjectChatOperationStatus;
+}
+
+export type ProjectChatOperationMessage = ProjectChatOperationMessageBase & (
+  | {
+    kind: "task_create";
+    taskId: string;
+    title?: string;
+    description?: string | null;
+    taskStatus?: TaskStatus;
+    priority?: TaskPriority;
+    assignedBranch?: string | null;
+  }
+  | {
+    kind: "task_update";
+    taskId: string;
+    title?: string;
+    patch?: {
+      title?: string;
+      description?: string | null;
+      status?: TaskStatus;
+      priority?: TaskPriority;
+      assignedBranch?: string | null;
+    };
+    before?: {
+      title: string;
+      description: string | null;
+      status: TaskStatus;
+      priority: TaskPriority;
+      assignedBranch: string | null;
+    };
+  }
+  | {
+    kind: "agent_session_create";
+    sessionId: string;
+    workerSessionId?: string;
+    workspaceId?: string;
+    target?: string;
+    branch?: string | null;
+    instruction?: string;
+    permissionMode?: string;
+    agentType?: string;
+    model?: string | null;
+    phase?: "workspace_selection";
+    requestId?: string;
+    candidates?: ProjectChatWorkspaceCandidate[];
+    selectedWorkspaceId?: string;
+    claimToken?: string;
+  }
+  | {
+    kind: "agent_instruction";
+    sessionId: string;
+    instruction?: string;
+    target?: "local" | { remoteServerId: string; remoteSessionId: string };
+    delivery?: "pending" | "confirmed";
+  }
+  | {
+    kind: "schedule_run";
+    scheduleId: string;
+    runId: string;
+    skipped?: boolean;
+  }
+  | {
+    kind: "workspace_selection";
+    requestId: string;
+    candidates: ProjectChatWorkspaceCandidate[];
+  }
+);
+
+export interface ProjectChatWorkspaceCandidate {
+  id: string;
+  target: string;
+  branch: string | null;
+}
+
+export interface ProjectChatToolApprovalMessage {
+  approvalId: string;
+  tool?: string;
+  input?: unknown;
+  [key: string]: unknown;
+}
+
+export type ProjectChatStatus = "idle" | "running";
+
+export interface ProjectChatSnapshot {
+  identity: { projectId: string; threadId: string; userId: string };
+  thread: ProjectChatThread;
+  messages: ProjectChatMessage[];
+  status: ProjectChatStatus;
+  queueLength: number;
+}
+
+export interface ProjectAgentSessionActivity {
+  id: string;
+  projectId: string;
+  branch: string | null;
+  status: "running" | "stopped" | "error" | "unknown";
+  title: string | null;
+  target: string;
+  workspace: { target: string; branch: string | null };
+  agentType: string | null;
+  model: string | null;
+  lastActiveAt: number | null;
+  lastUserMessageAt: number | null;
+  lastCompletedAt: number | null;
+}
+
+export interface ProjectScheduleRunActivity {
+  id: string;
+  schedule_id: string;
+  status: ScheduleRunStatus;
+  exit_code: number | null;
+  process_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+  scheduleName: string;
+  branch: string | null;
+  target: string;
+  reportPreview: string | null;
+}
+
+export interface ProjectActivityAttentionItem {
+  type: "agent_session" | "schedule_run";
+  entityId: string;
+  status: string;
+  title: string;
+  occurredAt: string;
+  target?: string;
+  workspace?: { target: string; branch: string | null };
+}
+
+export interface ProjectActivity {
+  recentThreads: ProjectChatThread[];
+  recentAgentSessions: ProjectAgentSessionActivity[];
+  recentScheduleRuns: ProjectScheduleRunActivity[];
+  priorityTasks: Task[];
+  attention: ProjectActivityAttentionItem[];
+  summary: { running: number; failed: number; nextScheduleAt: string | null };
 }
 
 export interface DiffLine {
@@ -1788,6 +1987,107 @@ export const api = {
     }
     const data = await res.json();
     return data.run;
+  },
+
+  async getProjectActivity(projectId: string): Promise<ProjectActivity> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/activity`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to fetch project activity: ${res.status}`);
+    }
+    return res.json();
+  },
+
+  async listProjectChatThreads(
+    projectId: string,
+    includeArchived = false,
+  ): Promise<ProjectChatThread[]> {
+    const query = includeArchived ? "?includeArchived=true" : "";
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/project-chat/threads${query}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to list Project Chat threads: ${res.status}`);
+    }
+    return (await res.json()).threads;
+  },
+
+  async createProjectChatThread(projectId: string, message?: string): Promise<ProjectChatThread> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/project-chat/threads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(message === undefined ? {} : { message }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to create Project Chat thread: ${res.status}`);
+    }
+    return (await res.json()).thread;
+  },
+
+  async getProjectChatThread(threadId: string): Promise<ProjectChatThread> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to fetch Project Chat thread: ${res.status}`);
+    }
+    return (await res.json()).thread;
+  },
+
+  async updateProjectChatThread(
+    threadId: string,
+    patch: { title?: string | null; archived?: boolean },
+  ): Promise<ProjectChatThread> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to update Project Chat thread: ${res.status}`);
+    }
+    return (await res.json()).thread;
+  },
+
+  async deleteProjectChatThread(threadId: string): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`, { method: "DELETE" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to delete Project Chat thread: ${res.status}`);
+    }
+  },
+
+  async sendProjectChatMessage(threadId: string, content: string): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to send Project Chat message: ${res.status}`);
+    }
+  },
+
+  async stopProjectChatTurn(threadId: string): Promise<boolean> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/stop`, { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to stop Project Chat turn: ${res.status}`);
+    }
+    return (await res.json()).stopped;
+  },
+
+  async approveProjectChatTool(threadId: string, approvalId: string, approved: boolean): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/tool-approval`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approvalId, approved }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to resolve Project Chat tool approval: ${res.status}`);
+    }
   },
 
   // File Browser API
