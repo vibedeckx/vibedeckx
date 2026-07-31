@@ -58,6 +58,16 @@ describe("project chat storage", () => {
     expect(await storage.projectChatThreads.updateTitle("t1", "p1", "u2", "Not allowed")).toBeUndefined();
   });
 
+  it("discovers an owned thread by id without exposing another user's row", async () => {
+    await storage.projectChatThreads.create({ id: "mine", project_id: "p2", user_id: "u1", title: null });
+    await storage.projectChatThreads.create({ id: "theirs", project_id: "p1", user_id: "u2", title: null });
+
+    expect(await storage.projectChatThreads.getOwnedById("mine", "u1"))
+      .toMatchObject({ id: "mine", project_id: "p2", user_id: "u1" });
+    expect(await storage.projectChatThreads.getOwnedById("theirs", "u1")).toBeUndefined();
+    expect(await storage.projectChatThreads.getOwnedById("missing", "u1")).toBeUndefined();
+  });
+
   it("does not read or mutate a same-user thread through a different project scope", async () => {
     const original = await storage.projectChatThreads.create({
       id: "t2", project_id: "p2", user_id: "u1", title: "Private to p2",

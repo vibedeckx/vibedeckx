@@ -46,6 +46,16 @@ export const createProjectChatRepos = (
       return rows.map(mapThread);
     },
 
+    getOwnedById: async (id, userId) => {
+      if (!userId) return undefined;
+      const row = await kdb.selectFrom("project_chat_threads")
+        .selectAll()
+        .where("id", "=", id)
+        .where("user_id", "=", userId)
+        .executeTakeFirst();
+      return row ? mapThread(row) : undefined;
+    },
+
     getById: async (id, projectId, userId) => {
       if (!userId) return undefined;
       const row = await kdb.selectFrom("project_chat_threads")

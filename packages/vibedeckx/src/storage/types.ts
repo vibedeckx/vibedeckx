@@ -898,6 +898,7 @@ export interface Storage {
   projectChatThreads: {
     create: (opts: { id: string; project_id: string; user_id: string; title: string | null }) => Promise<ProjectChatThread>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
+    getOwnedById: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
     getById: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
     updateTitle: (id: string, projectId: string, userId: string, title: string | null) => Promise<ProjectChatThread | undefined>;
     archive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
