@@ -47,6 +47,7 @@ class FakeWebSocket {
   static readonly CLOSING = 2;
   static readonly CLOSED = 3;
   static instances: FakeWebSocket[] = [];
+  static constructionFailures = 0;
 
   readonly url: string;
   readyState = FakeWebSocket.CONNECTING;
@@ -57,6 +58,10 @@ class FakeWebSocket {
   close = vi.fn(() => { this.readyState = FakeWebSocket.CLOSED; });
 
   constructor(url: string | URL) {
+    if (FakeWebSocket.constructionFailures > 0) {
+      FakeWebSocket.constructionFailures -= 1;
+      throw new Error("socket construction failed");
+    }
     this.url = String(url);
     FakeWebSocket.instances.push(this);
   }
@@ -73,6 +78,10 @@ class FakeWebSocket {
   disconnect() {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.(new CloseEvent("close"));
+  }
+
+  error() {
+    this.onerror?.(new Event("error"));
   }
 }
 
@@ -98,6 +107,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   FakeWebSocket.instances = [];
+  FakeWebSocket.constructionFailures = 0;
   vi.stubGlobal("WebSocket", FakeWebSocket);
   mocks.getFreshToken.mockResolvedValue("token");
   mocks.api.listProjectChatThreads.mockResolvedValue([]);
@@ -232,5 +242,123 @@ describe("useProjectChat", () => {
 
     await act(async () => list.resolve([]));
     expect(latest.error).toBe("Project Chat stream identity mismatch");
+  });
+
+  it("keeps backing off after reconnect preflight and socket-construction failures until it succeeds", async () => {
+    render("p1", "t1");
+    await flush();
+    const first = FakeWebSocket.instances[0];
+    act(() => first.open());
+    mocks.api.getProjectChatThread
+      .mockRejectedValueOnce(new Error("preflight unavailable"))
+      .mockResolvedValue(thread("t1"));
+    FakeWebSocket.constructionFailures = 1;
+
+    act(() => first.disconnect());
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(2);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    act(() => vi.advanceTimersByTime(1_999));
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(2);
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(3);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    await act(async () => { vi.advanceTimersByTime(4_000); await Promise.resolve(); });
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(4);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(FakeWebSocket.instances[1].url).toContain("/t1/stream");
+  });
+
+  it("cancels pending reconnects on a thread switch and on unmount", async () => {
+    render("p1", "t1");
+    await flush();
+    act(() => FakeWebSocket.instances[0].disconnect());
+
+    render("p1", "t2");
+    await flush();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(mocks.api.getProjectChatThread.mock.calls.filter(([id]) => id === "t1")).toHaveLength(1);
+
+    act(() => FakeWebSocket.instances[1].disconnect());
+    act(() => root.unmount());
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(mocks.api.getProjectChatThread.mock.calls.filter(([id]) => id === "t2")).toHaveLength(1);
+  });
+
+  it("does not let a late close from a replaced socket schedule a duplicate attempt", async () => {
+    render("p1", "t1");
+    await flush();
+    const first = FakeWebSocket.instances[0];
+    act(() => first.error());
+    expect(first.close).toHaveBeenCalledOnce();
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    act(() => {
+      FakeWebSocket.instances[1].open();
+      first.disconnect();
+    });
+    await act(async () => { vi.advanceTimersByTime(30_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("ignores a rename response that arrives after switching projects", async () => {
+    const renamed = deferred<ProjectChatThread>();
+    mocks.api.listProjectChatThreads.mockImplementation(async (projectId: string) => [thread(
+      projectId === "p1" ? "a" : "b", projectId,
+    )]);
+    mocks.api.updateProjectChatThread.mockReturnValue(renamed.promise);
+    render("p1", null);
+    await flush();
+
+    let renamePromise!: Promise<ProjectChatThread>;
+    act(() => { renamePromise = latest.renameThread("a", "renamed"); });
+    render("p2", null);
+    await flush();
+    await act(async () => renamed.resolve(thread("a", "p1", "renamed")));
+    await renamePromise;
+
+    expect(latest.threads.map((item) => item.id)).toEqual(["b"]);
+  });
+
+  it("ignores an unarchive response from archiveThread that arrives after switching projects", async () => {
+    const archived = deferred<ProjectChatThread>();
+    mocks.api.listProjectChatThreads.mockImplementation(async (projectId: string) => [thread(
+      projectId === "p1" ? "a" : "b", projectId,
+    )]);
+    mocks.api.updateProjectChatThread.mockReturnValue(archived.promise);
+    render("p1", null);
+    await flush();
+
+    let archivePromise!: Promise<ProjectChatThread>;
+    act(() => { archivePromise = latest.archiveThread("a", false); });
+    render("p2", null);
+    await flush();
+    await act(async () => archived.resolve(thread("a", "p1")));
+    await archivePromise;
+
+    expect(latest.threads.map((item) => item.id)).toEqual(["b"]);
+  });
+
+  it("does not apply a late delete response to the newly selected project", async () => {
+    const deleted = deferred<void>();
+    mocks.api.listProjectChatThreads.mockImplementation(async (projectId: string) => [
+      thread("same-visible-id", projectId),
+    ]);
+    mocks.api.deleteProjectChatThread.mockReturnValue(deleted.promise);
+    render("p1", null);
+    await flush();
+
+    let deletePromise!: Promise<void>;
+    act(() => { deletePromise = latest.deleteThread("same-visible-id"); });
+    render("p2", null);
+    await flush();
+    await act(async () => deleted.resolve(undefined));
+    await deletePromise;
+
+    expect(latest.threads).toEqual([thread("same-visible-id", "p2")]);
   });
 });

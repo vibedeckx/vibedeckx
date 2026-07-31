@@ -146,6 +146,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     let fatal = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
+    let connectInFlight = false;
 
     socketRef.current?.close();
     socketRef.current = null;
@@ -157,6 +158,8 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       setThreadLoading(false);
       return;
     }
+    const activeProjectId = projectId;
+    const activeThreadId = threadId;
 
     const cached = snapshotCacheRef.current.get(threadId);
     if (cached?.identity.projectId === projectId) {
@@ -178,21 +181,33 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       && projectIdRef.current === projectId
       && selectedThreadIdRef.current === threadId;
 
-    const connect = async (forceRefresh: boolean) => {
+    const scheduleReconnect = () => {
+      if (!current() || reconnectTimer !== null) return;
+      const delay = Math.min(1000 * 2 ** reconnectAttempt, 30_000);
+      reconnectAttempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect(true);
+      }, delay);
+    };
+
+    async function connect(forceRefresh: boolean) {
+      if (!current() || connectInFlight) return;
+      connectInFlight = true;
       try {
         const [ownedThread, token] = await Promise.all([
-          api.getProjectChatThread(threadId),
+          api.getProjectChatThread(activeThreadId),
           getFreshToken(forceRefresh ? { skipCache: true } : undefined),
         ]);
         if (!current()) return;
-        if (ownedThread.project_id !== projectId || ownedThread.id !== threadId) {
+        if (ownedThread.project_id !== activeProjectId || ownedThread.id !== activeThreadId) {
           fatal = true;
           setThreadError("Project Chat stream identity mismatch");
           setThreadLoading(false);
           return;
         }
         setStreamState((previous) => ({ ...previous, thread: ownedThread }));
-        const socket = new WebSocket(getWebSocketUrl(`/api/project-chat/threads/${threadId}/stream`, token));
+        const socket = new WebSocket(getWebSocketUrl(`/api/project-chat/threads/${activeThreadId}/stream`, token));
         socketRef.current = socket;
 
         socket.onopen = () => {
@@ -207,17 +222,17 @@ export function useProjectChat(projectId: string | null, threadId: string | null
             const message = JSON.parse(event.data) as ProjectChatWsMessage;
             if ("type" in message && message.type === "project_chat_snapshot") {
               const snapshot = message.snapshot;
-              if (snapshot.identity.threadId !== threadId
-                || snapshot.identity.projectId !== projectId
-                || snapshot.thread.id !== threadId
-                || snapshot.thread.project_id !== projectId) {
+              if (snapshot.identity.threadId !== activeThreadId
+                || snapshot.identity.projectId !== activeProjectId
+                || snapshot.thread.id !== activeThreadId
+                || snapshot.thread.project_id !== activeProjectId) {
                 fatal = true;
                 setThreadError("Project Chat stream identity mismatch");
                 setThreadLoading(false);
                 socket.close();
                 return;
               }
-              snapshotCacheRef.current.set(threadId, snapshot);
+              snapshotCacheRef.current.set(activeThreadId, snapshot);
               setStreamState({
                 thread: snapshot.thread,
                 messages: snapshot.messages,
@@ -229,8 +244,12 @@ export function useProjectChat(projectId: string | null, threadId: string | null
               setStreamState((previous) => {
                 const next = applyPatches(previous, message.JsonPatch);
                 if (next.thread) {
-                  snapshotCacheRef.current.set(threadId, {
-                    identity: { projectId, threadId, userId: next.thread.user_id },
+                  snapshotCacheRef.current.set(activeThreadId, {
+                    identity: {
+                      projectId: activeProjectId,
+                      threadId: activeThreadId,
+                      userId: next.thread.user_id,
+                    },
                     thread: next.thread,
                     messages: next.messages,
                     status: next.status,
@@ -247,22 +266,27 @@ export function useProjectChat(projectId: string | null, threadId: string | null
           }
         };
         socket.onerror = () => {
-          if (current() && socketRef.current === socket) setIsConnected(false);
+          if (!current() || socketRef.current !== socket) return;
+          socketRef.current = null;
+          socket.close();
+          setIsConnected(false);
+          scheduleReconnect();
         };
         socket.onclose = () => {
-          if (socketRef.current === socket) socketRef.current = null;
-          if (!current()) return;
+          if (!current() || socketRef.current !== socket) return;
+          socketRef.current = null;
           setIsConnected(false);
-          const delay = Math.min(1000 * 2 ** reconnectAttempt, 30_000);
-          reconnectAttempt += 1;
-          reconnectTimer = setTimeout(() => { void connect(true); }, delay);
+          scheduleReconnect();
         };
       } catch (reason) {
         if (!current()) return;
         setThreadLoading(false);
         setThreadError(reason instanceof Error ? reason.message : "Failed to open Project Chat thread");
+        scheduleReconnect();
+      } finally {
+        connectInFlight = false;
       }
-    };
+    }
 
     void connect(false);
 
@@ -300,21 +324,35 @@ export function useProjectChat(projectId: string | null, threadId: string | null
   }, []);
 
   const renameThread = useCallback(async (targetThreadId: string, title: string) => {
+    const targetProjectId = projectIdRef.current;
+    const generation = listGenerationRef.current;
     const normalized = title.trim();
     if (!normalized) throw new Error("Title is required");
     const updated = await api.updateProjectChatThread(targetThreadId, { title: normalized });
-    updateThreadInState(updated);
+    if (targetProjectId && projectIdRef.current === targetProjectId
+      && listGenerationRef.current === generation && updated.project_id === targetProjectId) {
+      updateThreadInState(updated);
+    }
     return updated;
   }, [updateThreadInState]);
 
   const archiveThread = useCallback(async (targetThreadId: string, archived = true) => {
+    const targetProjectId = projectIdRef.current;
+    const generation = listGenerationRef.current;
     const updated = await api.updateProjectChatThread(targetThreadId, { archived });
-    updateThreadInState(updated);
+    if (targetProjectId && projectIdRef.current === targetProjectId
+      && listGenerationRef.current === generation && updated.project_id === targetProjectId) {
+      updateThreadInState(updated);
+    }
     return updated;
   }, [updateThreadInState]);
 
   const deleteThread = useCallback(async (targetThreadId: string) => {
+    const targetProjectId = projectIdRef.current;
+    const generation = listGenerationRef.current;
     await api.deleteProjectChatThread(targetThreadId);
+    if (!targetProjectId || projectIdRef.current !== targetProjectId
+      || listGenerationRef.current !== generation) return;
     snapshotCacheRef.current.delete(targetThreadId);
     setThreads((current) => current.filter((item) => item.id !== targetThreadId));
     if (selectedThreadIdRef.current === targetThreadId) {
