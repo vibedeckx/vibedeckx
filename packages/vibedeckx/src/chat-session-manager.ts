@@ -604,7 +604,7 @@ export class ChatSessionManager {
     }
 
     const initialActivityAt = Date.now();
-    await this.storage.searchCache.updateRemoteSessionActivity({
+    const initialActivityReady = await this.storage.searchCache.updateRemoteSessionActivity({
       localSessionId: created.localSessionId,
       projectId,
       targetId: agentMode,
@@ -659,13 +659,15 @@ export class ChatSessionManager {
     // (the remote's createNewSession doesn't broadcast one, and its
     // sendUserMessage skips the broadcast because status is already "running"),
     // so without this emit the session would only ever land in the dropdown.
-    this.eventBus?.emit({
-      type: "session:status",
-      projectId,
-      branch,
-      sessionId: created.localSessionId,
-      status: "running",
-    });
+    if (initialActivityReady) {
+      this.eventBus?.emit({
+        type: "session:status",
+        projectId,
+        branch,
+        sessionId: created.localSessionId,
+        status: "running",
+      });
+    }
 
     return {
       success: true,

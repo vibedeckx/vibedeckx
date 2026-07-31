@@ -192,6 +192,7 @@ describe("createRemoteAgentSession", () => {
   });
 
   it("recreates a lost frontend mapping and only then delivers the initial instruction with the stable key", async () => {
+    const activitySpy = vi.spyOn(storage.searchCache, "updateRemoteSessionActivity").mockResolvedValue(true);
     proxyToRemoteAuto.mockImplementation(async (
       _serverId: string, _method: string, apiPath: string, body: Record<string, unknown>,
     ) => apiPath === "/api/path/agent-sessions/new"
@@ -222,6 +223,7 @@ describe("createRemoteAgentSession", () => {
       { content: "Implement", idempotencyKey: "stable-delivery-key" },
       expect.objectContaining({ reverseConnectManager: undefined }),
     );
+    activitySpy.mockRestore();
   });
 
   it("rejects an existing frontend mapping whose branch does not match the requested scope", async () => {
@@ -253,7 +255,7 @@ describe("createRemoteAgentSession", () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
-  it("persists a remote status frame before emitting its local EventBus transition", async () => {
+  it("persists status, taskCompleted, and raw error frames before their local EventBus transitions", async () => {
     await storage.projects.create({ id: "stream-project", name: "Stream", path: null }, "user-1");
     const server = await storage.remoteServers.create({ name: "Stream worker", url: "http://worker" }, "user-1");
     await storage.projectRemotes.add({
@@ -278,12 +280,16 @@ describe("createRemoteAgentSession", () => {
     };
     const cache = new RemotePatchCache();
     const bus = new EventBus();
-    let statusEvent: Extract<GlobalEvent, { type: "session:status" }> | undefined;
-    let activityAtEvent: Promise<Awaited<ReturnType<Storage["searchCache"]["listRemoteSessionActivityByProject"]>>> | undefined;
+    const observed: Array<{
+      event: Extract<GlobalEvent, { type: "session:status" | "session:taskCompleted" }>;
+      activity: Promise<Awaited<ReturnType<Storage["searchCache"]["listRemoteSessionActivityByProject"]>>>;
+    }> = [];
     bus.subscribe((event) => {
-      if (event.type !== "session:status") return;
-      statusEvent = event;
-      activityAtEvent = storage.searchCache.listRemoteSessionActivityByProject("stream-project", 10);
+      if (event.type !== "session:status" && event.type !== "session:taskCompleted") return;
+      observed.push({
+        event,
+        activity: storage.searchCache.listRemoteSessionActivityByProject("stream-project", 10),
+      });
     });
 
     connectPersistentRemoteWs(
@@ -294,8 +300,22 @@ describe("createRemoteAgentSession", () => {
       JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }],
     }));
 
-    await vi.waitFor(() => expect(statusEvent).toMatchObject({ sessionId, status: "running" }));
-    expect((await activityAtEvent!)[0]).toMatchObject({ id: sessionId, status: "running" });
+    await vi.waitFor(() => expect(observed[0]?.event).toMatchObject({ sessionId, status: "running" }));
+    expect((await observed[0].activity)[0]).toMatchObject({ id: sessionId, status: "running" });
+
+    adapter!.deliverMessage(JSON.stringify({ taskCompleted: { summaryText: "done" } }));
+    await vi.waitFor(() => expect(observed[1]?.event).toMatchObject({
+      type: "session:taskCompleted", sessionId,
+    }));
+    expect((await observed[1].activity)[0]).toMatchObject({
+      id: sessionId, status: "stopped", lastCompletedAt: expect.any(Number),
+    });
+
+    adapter!.deliverMessage(JSON.stringify({ error: "worker failed" }));
+    await vi.waitFor(() => expect(observed[2]?.event).toMatchObject({
+      type: "session:status", sessionId, status: "error",
+    }));
+    expect((await observed[2].activity)[0]).toMatchObject({ id: sessionId, status: "error" });
     cache.setFinished(sessionId);
     cache.shutdown();
   });

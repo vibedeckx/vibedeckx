@@ -244,6 +244,23 @@ async function routes(fastify: FastifyInstance) {
           localRun.reviewer_session_id, projectId, remoteInfo.remoteServerId,
           bareRun.reviewer_session_id, bareRun.branch, "from_start",
         );
+        // The worker may be offline again before the resident stream attaches,
+        // so create the front's Activity projection from the acknowledged run
+        // response. This exact mapping+association-validated write must precede
+        // every local running/process/status invalidation below.
+        const reviewerActivityAt = Date.now();
+        const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
+          localSessionId: localRun.reviewer_session_id,
+          projectId,
+          targetId: remoteInfo.remoteServerId,
+          remoteSessionId: bareRun.reviewer_session_id,
+          status: "running",
+          activityAt: reviewerActivityAt,
+          lastUserMessageAt: reviewerActivityAt,
+        });
+        if (!activityReady) {
+          return reply.code(409).send({ error: "Remote reviewer mapping is no longer authorized" });
+        }
         // The reviewer may already have finished on the worker; ask for its
         // milestones now rather than waiting for the next periodic sweep.
         await fastify.remoteNotificationSync.extendWatch(localRun.reviewer_session_id);
@@ -272,7 +289,7 @@ async function routes(fastify: FastifyInstance) {
         // exists purely to keep the workspace dot honest while a review runs.
         fastify.agentSessionManager.emitBranchActivityIfChanged(projectId, bareRun.branch, {
           activity: "working",
-          since: Date.now(),
+          since: reviewerActivityAt,
           sessionId: localRun.reviewer_session_id,
         });
         // The worker's spawn-time announcements (session:status/processAlive)

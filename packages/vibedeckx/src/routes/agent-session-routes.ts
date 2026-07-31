@@ -936,7 +936,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
       const activityAt = Date.now();
-      await fastify.storage.searchCache.updateRemoteSessionActivity({
+      const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
         localSessionId: req.params.sessionId,
         projectId,
         targetId: remoteInfo.remoteServerId,
@@ -952,11 +952,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // this event but we don't subscribe to remote SSE; deriving from the
       // proxy success is the cheapest reliable signal. Dedupe handles
       // repeated sends within the same working turn.
-      fastify.agentSessionManager.emitBranchActivityIfChanged(
-        projectId,
-        remoteInfo.branch ?? null,
-        { activity: "working", since: activityAt, sessionId: req.params.sessionId },
-      );
+      if (activityReady) {
+        fastify.agentSessionManager.emitBranchActivityIfChanged(
+          projectId,
+          remoteInfo.branch ?? null,
+          { activity: "working", since: activityAt, sessionId: req.params.sessionId },
+        );
+      }
       // First-message title generation runs locally (uses the same
       // chat_provider config as main chat), then PATCHes the result back to
       // the remote. Fire-and-forget so it doesn't delay the response.

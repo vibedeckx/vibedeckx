@@ -111,14 +111,22 @@ export async function createRemoteAgentSession(
     // Search-cache write-through: surface the new session in Cmd+K now instead
     // of after the next on-open refresh. Best-effort — the session exists on
     // the remote at this point, so a cache failure must not fail the create.
-    await deps.storage.searchCache.noteSessionCreated({
+    const activityProjectionReady = await deps.storage.searchCache.noteSessionCreated({
       localSessionId, projectId, targetId: agentMode, branch: branch ?? null,
       title: typeof remoteData.session.title === "string" ? remoteData.session.title : null,
       ...(remoteData.session.status === "running" || remoteData.session.status === "stopped"
         || remoteData.session.status === "error" ? { status: remoteData.session.status } : {}),
       agentType: typeof remoteData.session.agent_type === "string" ? remoteData.session.agent_type : agentType ?? null,
       model: typeof remoteData.session.model === "string" ? remoteData.session.model : model ?? null,
-    }).catch((err) => console.error("[RemoteSession] search-cache create write-through failed:", err));
+    }).then(() => true).catch((err) => {
+      console.error("[RemoteSession] search-cache create write-through failed:", err);
+      return false;
+    });
+    if (activityProjectionReady) {
+      deps.agentSessionManager.emitBranchActivityIfChanged(
+        projectId, branch ?? null, { activity: "idle", since: Date.now() },
+      );
+    }
   } catch (err) {
     // A thrown transport error (reverse-connect send) or DB write rejection leaves
     // the pre-registered entry orphaned. Remove it, then rethrow so the caller's
@@ -136,8 +144,6 @@ export async function createRemoteAgentSession(
       }
     }
   }
-
-  deps.agentSessionManager.emitBranchActivityIfChanged(projectId, branch ?? null, { activity: "idle", since: Date.now() });
 
   return { ok: true, localSessionId, remoteSession: remoteData.session, messages: remoteData.messages };
 }
@@ -178,7 +184,7 @@ export async function createRemoteProjectChatSessionWithInstruction(
   );
   if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
   const activityAt = Date.now();
-  await deps.storage.searchCache.updateRemoteSessionActivity({
+  const activityReady = await deps.storage.searchCache.updateRemoteSessionActivity({
     localSessionId: params.sessionId,
     projectId: params.projectId,
     targetId: mapping.remote_server_id,
@@ -186,10 +192,8 @@ export async function createRemoteProjectChatSessionWithInstruction(
     status: "running",
     activityAt,
     lastUserMessageAt: activityAt,
-  }).catch((error) => {
-    console.error(`[RemoteSession] activity write-through failed for ${params.sessionId}:`, error);
-    return false;
   });
+  if (!activityReady) throw new Error("Remote session mapping is no longer authorized");
   return { sessionId: params.sessionId };
 }
 
@@ -336,11 +340,15 @@ export function connectPersistentRemoteWs(
       cache.broadcast(sessionId, raw);
       const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
       if (statusEvent) {
+        let activityReady = true;
         if (storage) {
-          await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
-            .catch((error) => console.error(`[AgentWS] activity write-through failed for ${sessionId}:`, error));
+          activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
+            .catch((error) => {
+              console.error(`[AgentWS] activity write-through failed for ${sessionId}:`, error);
+              return false;
+            });
         }
-        if (eventBus) {
+        if (eventBus && activityReady) {
           console.log(`[AgentWS:remote→eventBus] ${sessionId} session:status=${statusEvent.status}`);
           eventBus.emit(statusEvent);
         }
@@ -351,11 +359,15 @@ export function connectPersistentRemoteWs(
     } else if ("taskCompleted" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
+      let activityReady = true;
       if (storage) {
-        await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
-          .catch((error) => console.error(`[AgentWS] completion write-through failed for ${sessionId}:`, error));
+        activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
+          .catch((error) => {
+            console.error(`[AgentWS] completion write-through failed for ${sessionId}:`, error);
+            return false;
+          });
       }
-      if (eventBus) {
+      if (eventBus && activityReady) {
         const evt = taskCompletedEventFromRemoteFrame(parsed, sessionId, remoteInfo);
         if (evt) {
           eventBus.emit(evt);
@@ -418,9 +430,22 @@ export function connectPersistentRemoteWs(
     } else if ("error" in parsed) {
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
+      let activityReady = true;
       if (storage) {
-        await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
-          .catch((error) => console.error(`[AgentWS] error write-through failed for ${sessionId}:`, error));
+        activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
+          .catch((error) => {
+            console.error(`[AgentWS] error write-through failed for ${sessionId}:`, error);
+            return false;
+          });
+      }
+      if (eventBus && activityReady) {
+        eventBus.emit({
+          type: "session:status",
+          projectId: projectIdFromRemoteSessionId(sessionId, remoteInfo),
+          branch: remoteInfo.branch ?? null,
+          sessionId,
+          status: "error",
+        });
       }
       // If session not found on remote, stop reconnecting
       if (parsed.error === "Session not found") {
