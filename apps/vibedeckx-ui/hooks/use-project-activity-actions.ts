@@ -9,6 +9,11 @@ export interface ManualScheduleRunRequest {
   sourceRunId: string;
 }
 
+interface StoredRerunIntent extends ManualScheduleRunRequest {
+  projectId: string;
+  scheduleId: string;
+}
+
 export interface ProjectActivityActionsOptions {
   projectId: string | null;
   resolveProjectForTarget: (projectId: string, target: string) => Promise<Project | null>;
@@ -26,23 +31,25 @@ interface Scope {
   generation: number;
 }
 
-const RERUN_INTENT_PREFIX = "vibedeckx:schedule-rerun:v1";
+const RERUN_INTENT_PREFIX = "vibedeckx:schedule-rerun:v2";
 
 function intentKey(projectId: string, sourceRunId: string): string {
   return `${RERUN_INTENT_PREFIX}:${encodeURIComponent(projectId)}:${encodeURIComponent(sourceRunId)}`;
 }
 
-function readIntent(key: string): ManualScheduleRunRequest | undefined {
+function readIntent(key: string, projectId: string, sourceRunId: string): StoredRerunIntent | undefined {
   try {
     const value = window.sessionStorage.getItem(key);
     if (!value) return undefined;
-    const parsed = JSON.parse(value) as Partial<ManualScheduleRunRequest>;
+    const parsed = JSON.parse(value) as Partial<StoredRerunIntent>;
     return typeof parsed.requestId === "string" && typeof parsed.runId === "string"
-      && typeof parsed.sourceRunId === "string" ? parsed as ManualScheduleRunRequest : undefined;
+      && parsed.projectId === projectId && typeof parsed.scheduleId === "string"
+      && parsed.scheduleId.length > 0 && parsed.sourceRunId === sourceRunId
+      ? parsed as StoredRerunIntent : undefined;
   } catch { return undefined; }
 }
 
-function persistIntent(key: string, value: ManualScheduleRunRequest): void {
+function persistIntent(key: string, value: StoredRerunIntent): void {
   try { window.sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* in-memory copy remains */ }
 }
 
@@ -63,7 +70,7 @@ export function useProjectActivityActions(options: ProjectActivityActionsOptions
   if (scopeRef.current.projectId !== options.projectId) {
     scopeRef.current = { projectId: options.projectId, generation: scopeRef.current.generation + 1 };
   }
-  const intentsRef = useRef(new Map<string, ManualScheduleRunRequest>());
+  const intentsRef = useRef(new Map<string, StoredRerunIntent>());
   const inFlightRef = useRef(new Map<string, Promise<void>>());
 
   const isCurrent = useCallback((scope: Scope) => (
@@ -120,17 +127,37 @@ export function useProjectActivityActions(options: ProjectActivityActionsOptions
 
     const operation = (async () => {
       try {
-        const verified = await verifyScheduleRun(scope, sourceRunId);
-        if (!verified || !isCurrent(scope)) return;
         const key = intentKey(scope.projectId!, sourceRunId);
-        let request = intentsRef.current.get(key) ?? readIntent(key);
-        if (!request) {
+        let intent = intentsRef.current.get(key) ?? readIntent(key, scope.projectId!, sourceRunId);
+        let schedule: Schedule;
+        if (intent) {
+          const schedules = await optionsRef.current.getSchedules(scope.projectId!);
+          if (!isCurrent(scope)) return;
+          const storedScheduleId = intent.scheduleId;
+          const storedSchedule = schedules.find((candidate) => candidate.id === storedScheduleId);
+          if (!storedSchedule || storedSchedule.project_id !== scope.projectId) {
+            throw new Error("Schedule does not belong to the active project");
+          }
+          schedule = storedSchedule;
+          intentsRef.current.set(key, intent);
+        } else {
+          const verified = await verifyScheduleRun(scope, sourceRunId);
+          if (!verified || !isCurrent(scope)) return;
+          schedule = verified.schedule;
           const id = crypto.randomUUID();
-          request = { requestId: id, runId: id, sourceRunId };
-          intentsRef.current.set(key, request);
-          persistIntent(key, request);
+          intent = {
+            projectId: scope.projectId!, scheduleId: schedule.id,
+            requestId: id, runId: id, sourceRunId,
+          };
+          intentsRef.current.set(key, intent);
+          persistIntent(key, intent);
         }
-        await optionsRef.current.runScheduleNow(verified.schedule.id, request);
+        const request: ManualScheduleRunRequest = {
+          requestId: intent.requestId,
+          runId: intent.runId,
+          sourceRunId: intent.sourceRunId,
+        };
+        await optionsRef.current.runScheduleNow(schedule.id, request);
         intentsRef.current.delete(key);
         clearIntent(key);
         if (!isCurrent(scope)) return;

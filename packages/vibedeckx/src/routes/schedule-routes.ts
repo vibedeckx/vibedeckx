@@ -238,7 +238,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
       }
       const occupiedRun = await fastify.storage.scheduledTaskRuns.getById(runId);
-      if (occupiedRun && occupiedRun.schedule_id !== existing.id) {
+      if (occupiedRun && (!priorRequest || occupiedRun.schedule_id !== existing.id)) {
         return reply.code(409).send({ error: "Run identity is already in use" });
       }
       const requestClaim = await fastify.storage.scheduledTaskRuns.claimManualRequest({

@@ -188,8 +188,13 @@ export const createScheduledRepos = (
       const existing = await trx.selectFrom("scheduled_task_runs")
         .selectAll().where("id", "=", id).executeTakeFirst();
       if (existing) {
-        if (existing.schedule_id !== scheduleId
-          || (existing.status === "starting" && existing.process_id !== processId)) return "conflict" as const;
+        if (existing.schedule_id !== scheduleId) return "conflict" as const;
+        // Terminal rows are the durable result of this identity. Their active
+        // execution claim is deliberately released at finish, so replay them
+        // before looking for a claim rather than treating the missing claim as
+        // permission to execute again (or as a permanent conflict).
+        if (existing.status !== "starting" && existing.status !== "running") return "existing" as const;
+        if (existing.status === "starting" && existing.process_id !== processId) return "conflict" as const;
         let claim = await trx.selectFrom("scheduled_task_execution_claims")
           .selectAll().where("run_id", "=", id).executeTakeFirst();
         if (!claim) return "conflict" as const;
@@ -202,7 +207,6 @@ export const createScheduledRepos = (
           claim = { ...claim, effect_fingerprint: effectFingerprint };
         }
         if (claim.effect_fingerprint !== effectFingerprint) return "conflict" as const;
-        if (existing.status !== "starting" && existing.status !== "running") return "existing" as const;
         if (claim.owner_token === ownerToken) return "retry" as const;
         if (claim.lease_expires_at > nowMs) return "existing" as const;
         const takeover = await trx.updateTable("scheduled_task_execution_claims")
@@ -390,10 +394,17 @@ export const createScheduledRepos = (
       return true;
     }),
     prune: async (scheduleId, keep) => {
-      // Never delete a claimed or running row.
+      // Never delete a claimed/running row or the result identity of a live
+      // manual request. Manual requests intentionally live for the lifetime of
+      // their schedule (schedule deletion cascades both records), which is the
+      // idempotency horizon: as long as a request can be retried, its terminal
+      // result must remain available so SchedulerService returns it instead of
+      // executing the same effect again.
       await kdb.deleteFrom("scheduled_task_runs")
         .where("schedule_id", "=", scheduleId)
         .where("status", "not in", ["starting", "running"])
+        .where("id", "not in", kdb.selectFrom("scheduled_task_run_requests")
+          .select("run_id").where("schedule_id", "=", scheduleId))
         .where("id", "not in", kdb.selectFrom("scheduled_task_runs").select("id")
           .where("schedule_id", "=", scheduleId)
           .orderBy("started_at", "desc").orderBy(h.rowIdDesc())

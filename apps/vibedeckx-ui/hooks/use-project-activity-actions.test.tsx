@@ -126,6 +126,52 @@ describe("useProjectActivityActions", () => {
     expect(options.onRerunStarted).toHaveBeenCalledOnce();
   });
 
+  it("retries a stored rerun intent without requiring deleted source history", async () => {
+    const getScheduleRun = vi.fn()
+      .mockResolvedValueOnce(run("project-1"))
+      .mockRejectedValue(new Error("source run was pruned"));
+    const firstRunNow = vi.fn().mockRejectedValue(new Error("response lost"));
+    setup("project-1", { getScheduleRun, runScheduleNow: firstRunNow });
+    await expect(actions.runScheduleAgain("source-run")).rejects.toThrow("response lost");
+    const firstRequest = firstRunNow.mock.calls[0][1];
+
+    const stored = JSON.parse(window.sessionStorage.getItem(
+      "vibedeckx:schedule-rerun:v2:project-1:source-run",
+    ) ?? "null");
+    expect(stored).toMatchObject({
+      projectId: "project-1",
+      scheduleId: "schedule-1",
+      sourceRunId: "source-run",
+      requestId: firstRequest.requestId,
+      runId: firstRequest.runId,
+    });
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    const retryRunNow = vi.fn(async (_id, request) => ({ runId: request.runId }));
+    setup("project-1", { getScheduleRun, runScheduleNow: retryRunNow });
+    await expect(actions.runScheduleAgain("source-run")).resolves.toBeUndefined();
+
+    expect(getScheduleRun).toHaveBeenCalledOnce();
+    expect(retryRunNow).toHaveBeenCalledWith("schedule-1", firstRequest);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("never trusts a stored intent whose schedule is outside the active project", async () => {
+    window.sessionStorage.setItem(
+      "vibedeckx:schedule-rerun:v2:project-1:source-run",
+      JSON.stringify({
+        projectId: "project-1", scheduleId: "foreign-schedule", sourceRunId: "source-run",
+        requestId: "request-foreign", runId: "run-foreign",
+      }),
+    );
+    const options = setup("project-1", { getScheduleRun: vi.fn(async () => { throw new Error("must not read source"); }) });
+
+    await expect(actions.runScheduleAgain("source-run"))
+      .rejects.toThrow("Schedule does not belong to the active project");
+    expect(options.runScheduleNow).not.toHaveBeenCalled();
+  });
+
   it("coalesces duplicate rerun calls while one mutation is in flight", async () => {
     let resolve!: (value: { runId: string }) => void;
     const runScheduleNow = vi.fn(() => new Promise<{ runId: string }>((done) => { resolve = done; }));

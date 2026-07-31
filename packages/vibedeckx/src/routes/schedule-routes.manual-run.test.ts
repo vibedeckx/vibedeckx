@@ -86,6 +86,12 @@ describe("manual schedule run route", () => {
     });
     expect(invalid.statusCode).toBe(400);
 
+    const reusedResultIdentity = await app.inject({
+      method: "POST", url: "/api/schedules/schedule-1/run",
+      payload: { requestId: "new-request", runId: "source-1" },
+    });
+    expect(reusedResultIdentity.statusCode).toBe(409);
+
     auth.currentUserId = "user-1";
     const foreign = await app.inject({
       method: "POST", url: "/api/schedules/foreign-schedule/run",

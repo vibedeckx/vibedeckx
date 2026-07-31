@@ -419,6 +419,30 @@ describe("scheduledTasks storage", () => {
     expect(remaining.map((r) => r.id)).toEqual(["r4", "r3"]);
   });
 
+  it("prune retains terminal result runs protected by durable manual requests", async () => {
+    await createTask();
+    await storage.scheduledTaskRuns.create({ id: "source", schedule_id: "s1", status: "failed" });
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-protected",
+      runId: "result-protected",
+      projectId,
+      scheduleId: "s1",
+      sourceRunId: "source",
+    });
+    await storage.scheduledTaskRuns.create({ id: "result-protected", schedule_id: "s1", status: "completed" });
+    for (let index = 0; index < 55; index += 1) {
+      await storage.scheduledTaskRuns.create({ id: `newer-${index}`, schedule_id: "s1", status: "completed" });
+    }
+
+    await storage.scheduledTaskRuns.prune("s1", 50);
+
+    expect(await storage.scheduledTaskRuns.getById("result-protected"))
+      .toMatchObject({ status: "completed", schedule_id: "s1" });
+    expect(await storage.scheduledTaskRuns.getById("newer-0")).toBeUndefined();
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-protected"))
+      .toMatchObject({ runId: "result-protected", sourceRunId: "source" });
+  });
+
   it("prune never deletes a 'running' row, even when it falls outside the keep-newest-N window", async () => {
     await createTask();
     // The running row is created first, so it is the OLDEST row overall

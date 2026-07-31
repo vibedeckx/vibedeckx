@@ -107,6 +107,45 @@ describe("SchedulerService.runNow", () => {
       .toMatchObject({ schedule_id: "s1", status: "running" });
   });
 
+  it("resumes a request-only crash with the same run identity after restart", async () => {
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-before-run", runId: "run-after-restart", projectId: "proj-1", scheduleId: "s1",
+    });
+    scheduler.shutdown();
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    pm = makeFakeProcessManager();
+    scheduler = new SchedulerService(storage, pm as unknown as ProcessManager);
+
+    await expect(scheduler.runNow("s1", "run-after-restart"))
+      .resolves.toEqual({ runId: "run-after-restart", skipped: false });
+    expect(pm.started).toHaveLength(1);
+  });
+
+  it("does not respawn a protected terminal result after pruning and restart", async () => {
+    await storage.scheduledTaskRuns.create({ id: "source-run", schedule_id: "s1", status: "failed" });
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-terminal", runId: "protected-terminal", projectId: "proj-1",
+      scheduleId: "s1", sourceRunId: "source-run",
+    });
+    await storage.scheduledTaskRuns.create({ id: "protected-terminal", schedule_id: "s1", status: "completed" });
+    for (let index = 0; index < 55; index += 1) {
+      await storage.scheduledTaskRuns.create({ id: `new-terminal-${index}`, schedule_id: "s1", status: "completed" });
+    }
+    await storage.scheduledTaskRuns.prune("s1", 50);
+    scheduler.shutdown();
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    pm = makeFakeProcessManager();
+    scheduler = new SchedulerService(storage, pm as unknown as ProcessManager);
+
+    await expect(scheduler.runNow("s1", "protected-terminal"))
+      .resolves.toEqual({ runId: "protected-terminal", skipped: false });
+    expect(pm.started).toHaveLength(0);
+    expect(await storage.scheduledTaskRuns.getById("protected-terminal"))
+      .toMatchObject({ status: "completed" });
+  });
+
   it("persists a starting claim and deterministic process id before local spawn", async () => {
     const observed: Array<{ status?: string; processId?: string | null }> = [];
     pm.start = vi.fn(async (_executor, _cwd, _skipDb, processId?: string) => {
