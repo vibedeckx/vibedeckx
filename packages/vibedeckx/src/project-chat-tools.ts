@@ -665,6 +665,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           return { ok: true, operationId: operation.id, taskId: task.id, status: "completed" };
         } catch (error) {
           const message = boundedError(error);
+          const applied = await storage.tasks.getById(taskId);
+          if (applied?.project_id === projectId) {
+            return { ok: false, operationId: operation.id, taskId, status: "pending",
+              retryable: true, error: "Task was created; confirmation is pending" };
+          }
           await finishOperation(operation, "failed", { taskId }, message);
           return { ok: false, operationId: operation.id, status: "failed", error: message };
         }
@@ -704,6 +709,16 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           return { ok: true, operationId: operation.id, taskId, status: "completed" };
         } catch (error) {
           const message = boundedError(error);
+          const applied = await storage.tasks.getById(taskId);
+          const current = applied && {
+            title: applied.title, description: applied.description, status: applied.status,
+            priority: applied.priority, assignedBranch: applied.assigned_branch,
+          };
+          if (applied?.project_id === projectId && current
+            && Object.entries(operationPatch).every(([key, value]) => current[key as keyof typeof current] === value)) {
+            return { ok: false, operationId: operation.id, taskId, status: "pending",
+              retryable: true, error: "Task was updated; confirmation is pending" };
+          }
           await finishOperation(operation, "failed", { taskId }, message);
           return { ok: false, operationId: operation.id, status: "failed", error: message };
         }

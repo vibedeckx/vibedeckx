@@ -127,6 +127,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         AND json_extract(payload, '$.kind') = kind
       ),
       error TEXT CHECK (error IS NULL OR length(error) <= 1024),
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      next_retry_at INTEGER,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(thread_id, idempotency_key),
@@ -431,6 +433,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         OR OLD.idempotency_key != NEW.idempotency_key
       BEGIN SELECT RAISE(ABORT, 'project chat operation immutable fields changed'); END;
   `);
+  const projectChatOperationCols = db.prepare("PRAGMA table_info(project_chat_operations)").all() as { name: string }[];
+  if (!projectChatOperationCols.some((c) => c.name === "retry_count")) {
+    db.exec("ALTER TABLE project_chat_operations ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!projectChatOperationCols.some((c) => c.name === "next_retry_at")) {
+    db.exec("ALTER TABLE project_chat_operations ADD COLUMN next_retry_at INTEGER");
+  }
 
   const projectChatWorkInfo = db.prepare("PRAGMA table_info(project_chat_work_items)").all() as { name: string }[];
   if (!projectChatWorkInfo.some((column) => column.name === "attempt")) {

@@ -72,6 +72,14 @@ export interface ProjectChatManagerOptions {
   eventBus?: EventBus;
 }
 
+export interface ProjectChatReconciliationReport {
+  processed: number;
+  quarantined: number;
+  retryScheduled: number;
+  remaining: boolean;
+  infrastructureErrors: string[];
+}
+
 export type ProjectChatWsMessage =
   | { type: "project_chat_snapshot"; snapshot: ProjectChatSnapshot }
   | {
@@ -285,7 +293,7 @@ export class ProjectChatManager {
   private readonly reconciliationIntervalMs: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private readonly unsubscribeEvents?: () => void;
-  private readonly startupReconciliation: Promise<void>;
+  private readonly startupReconciliation: Promise<ProjectChatReconciliationReport>;
   private reconciliationCursor: string | null = null;
   private reconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private reconciliationDelayMs = 100;
@@ -310,8 +318,10 @@ export class ProjectChatManager {
       void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
     });
     this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations(2))
-      .catch(() => {
+      .catch((error) => {
         this.reconciliationDelayMs = Math.min(this.reconciliationDelayMs * 2, 5_000);
+        return { processed: 0, quarantined: 0, retryScheduled: 0, remaining: true,
+          infrastructureErrors: [boundedStreamError(error).message] };
       })
       .finally(() => this.scheduleReconciliation(
         this.reconciliationCursor === null
@@ -320,7 +330,7 @@ export class ProjectChatManager {
   }
 
   /** Resolves after the bounded startup operation-journal reconciliation. */
-  ready(): Promise<void> { return this.startupReconciliation; }
+  ready(): Promise<ProjectChatReconciliationReport> { return this.startupReconciliation; }
 
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
     return this.trackOperation(this.openThreadInternal(threadId, userId));
@@ -584,33 +594,46 @@ export class ProjectChatManager {
     this.reconciliationTimer.unref?.();
   }
 
-  private async reconcilePersistedOperations(maxPages: number): Promise<void> {
+  private async reconcilePersistedOperations(maxPages: number): Promise<ProjectChatReconciliationReport> {
+    const report: ProjectChatReconciliationReport = {
+      processed: 0, quarantined: 0, retryScheduled: 0, remaining: false, infrastructureErrors: [],
+    };
     for (let pages = 0; pages < maxPages; pages++) {
-      if (this.shuttingDown) return;
+      if (this.shuttingDown) return report;
       const page = await this.storage.projectChatOperations.listNonterminal(this.reconciliationCursor, 50);
+      report.quarantined += page.malformed;
       if (page.malformed > 0) {
         console.warn(`[ProjectChat] quarantined ${page.malformed} malformed operation row(s)`);
       }
-      let retryableFailure = false;
       for (const operation of page.operations) {
-        if (this.shuttingDown) return;
+        if (this.shuttingDown) return report;
+        report.processed++;
         try {
           await this.reconcilePersistedOperation(operation);
         } catch (error) {
-          retryableFailure = true;
-          console.warn(`[ProjectChat] reconciliation failed for ${operation.id}:`, boundedStreamError(error).message);
+          report.retryScheduled++;
+          const message = boundedStreamError(error).message;
+          report.infrastructureErrors.push(message);
+          console.warn(`[ProjectChat] reconciliation failed for ${operation.id}:`, message);
+          const attempts = await this.storage.projectChatOperations.recordRetry(
+            operation.id, operation.thread_id, operation.project_id, operation.user_id,
+            Math.min(10 * (2 ** Math.min(6, report.retryScheduled)), 5_000),
+          );
+          if (attempts >= 5) {
+            await this.transitionOperation(operation, "failed", {},
+              "Operation could not be confirmed after bounded retries");
+          }
         }
-      }
-      if (retryableFailure) {
-        this.reconciliationCursor = null;
-        throw new Error("One or more Project Chat operations remain retryable");
       }
       if (!page.hasMore || page.nextCursor === null) {
         this.reconciliationCursor = null;
-        return;
+        report.remaining = report.retryScheduled > 0;
+        return report;
       }
       this.reconciliationCursor = page.nextCursor;
+      report.remaining = true;
     }
+    return report;
   }
 
   private async reconcilePersistedOperation(
@@ -622,6 +645,10 @@ export class ProjectChatManager {
     if (!ownedThread) return;
     if (operation.kind === "task_create" && operation.payload.kind === "task_create") {
       const payload = operation.payload;
+      if (!(await this.isAssignedBranchAuthorized(operation.project_id, payload.assignedBranch))) {
+        await this.transitionOperation(operation, "failed", {}, "Assigned workspace is no longer authorized");
+        return;
+      }
       let task = await this.storage.tasks.getById(payload.taskId);
       if (task && task.project_id !== operation.project_id) {
         await this.transitionOperation(operation, "failed", {}, "Task identity is already in use");
@@ -654,6 +681,10 @@ export class ProjectChatManager {
         return;
       }
       if (!payload.patch || !payload.before) return;
+      if (!(await this.isAssignedBranchAuthorized(operation.project_id, payload.patch.assignedBranch))) {
+        await this.transitionOperation(operation, "failed", {}, "Assigned workspace is no longer authorized");
+        return;
+      }
       const current = {
         title: task.title, description: task.description, status: task.status,
         priority: task.priority, assignedBranch: task.assigned_branch,
@@ -906,6 +937,17 @@ export class ProjectChatManager {
     } catch {
       return false;
     }
+  }
+
+  private async isAssignedBranchAuthorized(projectId: string, branch: string | null | undefined): Promise<boolean> {
+    if (branch === null || branch === undefined) return true;
+    const workspaces = await this.storage.searchCache.listWorkspacesByProject(projectId, 20);
+    for (const workspace of workspaces) {
+      if (workspace.branch !== branch) continue;
+      if (workspace.targetId === "local") return true;
+      if (await this.storage.projectRemotes.getByProjectAndServer(projectId, workspace.targetId)) return true;
+    }
+    return false;
   }
 
   private async findAuthorized(threadId: string, userId: string): Promise<ProjectChatThread | undefined> {

@@ -685,7 +685,10 @@ export const createProjectChatRepos = (
         .selectAll("operation")
         .whereRef("thread.project_id", "=", "operation.project_id")
         .whereRef("thread.user_id", "=", "operation.user_id")
-        .where("operation.status", "in", ["pending", "resolving", "running"]);
+        .where("operation.status", "in", ["pending", "resolving", "running"])
+        .where((eb) => eb.or([
+          eb("operation.next_retry_at", "is", null), eb("operation.next_retry_at", "<=", Date.now()),
+        ]));
       if (afterId !== null) query = query.where("operation.id", ">", afterId);
       const rows = await query.orderBy("operation.id", "asc")
         .limit(boundedLimit + 1).execute();
@@ -697,8 +700,8 @@ export const createProjectChatRepos = (
           operations.push(mapOperation(row));
         } catch {
           malformed += 1;
-          await kdb.updateTable("project_chat_operations")
-            .set({
+          await kdb.transaction().execute(async (trx) => {
+            const updated = await trx.updateTable("project_chat_operations").set({
               status: "failed",
               payload: JSON.stringify(quarantinedPayload(row)),
               error: "Malformed operation data was quarantined",
@@ -706,7 +709,18 @@ export const createProjectChatRepos = (
             })
             .where("id", "=", row.id)
             .where("status", "in", ["pending", "resolving", "running"])
-            .execute();
+            .executeTakeFirst();
+            if (Number(updated.numUpdatedRows) !== 1) return;
+            const sequenceRow = await trx.selectFrom("project_chat_messages")
+              .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+              .where("thread_id", "=", row.thread_id).executeTakeFirstOrThrow();
+            await trx.insertInto("project_chat_messages").values({
+              id: `operation:${row.id}:failed`, thread_id: row.thread_id,
+              sequence: Number(sequenceRow.sequence) + 1, type: "operation",
+              content: JSON.stringify({ operationId: row.id, status: "failed",
+                error: "Malformed operation data was quarantined" }),
+            }).onConflict((oc) => oc.column("id").doNothing()).execute();
+          });
         }
       }
       return {
@@ -715,6 +729,18 @@ export const createProjectChatRepos = (
         hasMore: rows.length > boundedLimit,
         malformed,
       };
+    },
+
+    recordRetry: async (id, threadId, projectId, userId, delayMs) => {
+      await kdb.updateTable("project_chat_operations")
+        .set({ retry_count: sql`retry_count + 1`, next_retry_at: Date.now() + Math.max(1, delayMs), updated_at: now() })
+        .where("id", "=", id).where("thread_id", "=", threadId)
+        .where("project_id", "=", projectId).where("user_id", "=", userId)
+        .where("status", "in", ["pending", "resolving", "running"]).execute();
+      const row = await kdb.selectFrom("project_chat_operations").select("retry_count")
+        .where("id", "=", id).where("thread_id", "=", threadId)
+        .where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
+      return row?.retry_count ?? 0;
     },
 
     announce: async (opts) => kdb.transaction().execute(async (trx) => {

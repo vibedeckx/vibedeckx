@@ -208,6 +208,8 @@ export interface ProjectChatOperationsTable {
   idempotency_key: string;
   payload: string;
   error: string | null;
+  retry_count: Generated<number>;
+  next_retry_at: number | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

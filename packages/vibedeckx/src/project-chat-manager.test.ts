@@ -363,6 +363,9 @@ describe("ProjectChatManager", () => {
 
   it("reconciles task create and update crash windows without overwriting later edits", async () => {
     await createThread("thread-task-recovery");
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
     await storage.tasks.create({
       id: "updated-task", project_id: "project-1", title: "After", description: null,
       status: "in_progress", priority: "high", assigned_branch: "dev",

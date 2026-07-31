@@ -1101,6 +1101,7 @@ export interface Storage {
       hasMore: boolean;
       malformed: number;
     }>;
+    recordRetry: (id: string, threadId: string, projectId: string, userId: string, delayMs: number) => Promise<number>;
     announce: (opts: {
       id: string;
       thread_id: string;
