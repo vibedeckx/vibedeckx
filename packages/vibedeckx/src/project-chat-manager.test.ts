@@ -867,6 +867,46 @@ describe("ProjectChatManager", () => {
     },
   );
 
+  it("resolves a send whose acceptance commits during shutdown and leaves it recoverable", async () => {
+    await createThread("thread-1");
+    const manager = new ProjectChatManager(storage, reply("must not run"));
+    await manager.openThread("thread-1", "user-1");
+    const acceptanceStarted = deferred();
+    const allowAcceptance = deferred();
+    const originalAccept = storage.projectChatWorkItems.accept.bind(storage.projectChatWorkItems);
+    vi.spyOn(storage.projectChatWorkItems, "accept").mockImplementation(async (opts) => {
+      acceptanceStarted.resolve();
+      await allowAcceptance.promise;
+      return originalAccept(opts);
+    });
+
+    const sending = manager.sendMessage("thread-1", "user-1", "accepted at shutdown");
+    await acceptanceStarted.promise;
+    let shutdownSettled = false;
+    const shutdown = manager.shutdown().then(() => { shutdownSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(shutdownSettled).toBe(false);
+    allowAcceptance.resolve();
+
+    await expect(sending).resolves.toBeUndefined();
+    await shutdown;
+    expect(await storage.projectChatWorkItems.listNonterminal(
+      "thread-1", "project-1", "user-1",
+    )).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    const recovered: string[] = [];
+    const nextManager = new ProjectChatManager(storage, {
+      async *run(input) {
+        recovered.push(input.messages.at(-1)?.content ?? "");
+        yield { type: "assistant", content: "recovered" };
+      },
+    });
+    await nextManager.openThread("thread-1", "user-1");
+    await waitFor(() => recovered.length === 1);
+    expect(recovered).toEqual(["accepted at shutdown"]);
+  });
+
   it("rejects new opens and sends while a thread deletion is in progress", async () => {
     await createThread("thread-1");
     const deleteStarted = deferred();

@@ -192,7 +192,8 @@ export class ProjectChatManager {
       userMessageId: randomUUID(),
       content: trimmed,
     });
-    this.assertLifecycle(threadId, generation);
+    this.assertLifecycle(threadId, generation, true);
+    if (this.shuttingDown) return;
     live.queue.push(accepted);
     this.broadcastStatus(live);
     this.pump(live);
