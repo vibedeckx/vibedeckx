@@ -6,6 +6,7 @@ const TRANSCRIPT_ENTRY_LIMIT = 20;
 const TRANSCRIPT_CHAR_LIMIT = 6_000;
 const RUN_PREVIEW_CHAR_LIMIT = 4_000;
 const ID_CHAR_LIMIT = 512;
+const CANONICAL_ID_CHAR_LIMIT = 65_536;
 const NAME_CHAR_LIMIT = 512;
 const DESCRIPTION_CHAR_LIMIT = 2_000;
 const BRANCH_CHAR_LIMIT = 512;
@@ -206,8 +207,32 @@ function safeProperty(value: Record<PropertyKey, unknown>, key: PropertyKey): un
   }
 }
 
+function safePropertyRead(
+  value: Record<PropertyKey, unknown>,
+  key: PropertyKey,
+): { readable: true; value: unknown } | { readable: false } {
+  try {
+    return { readable: true, value: value[key] };
+  } catch {
+    return { readable: false };
+  }
+}
+
 function normalizeCollectionLimit(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function isCanonicalId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0
+    && value.length <= CANONICAL_ID_CHAR_LIMIT && !value.includes("\0");
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isOptionalNullableString(value: unknown): value is string | null | undefined {
+  return value === undefined || isNullableString(value);
 }
 
 function safeArrayTail(value: unknown, requestedLimit: number): unknown[] {
@@ -388,9 +413,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       }).strict(),
       execute: async ({ query, status }) => {
         const rows = await storage.tasks.queryByProject(projectId, { query, status, limit: LIST_LIMIT });
-        await touchAll("task", rows.map((row) => row.id));
+        const validRows = rows.filter((row) => isCanonicalId(row.id));
+        await touchAll("task", validRows.map((row) => row.id));
         return {
-          items: rows.map((row) => ({
+          items: validRows.map((row) => ({
             id: preview(row.id, ID_CHAR_LIMIT),
             title: preview(row.title, NAME_CHAR_LIMIT),
             description: nullablePreview(row.description, DESCRIPTION_CHAR_LIMIT),
@@ -409,6 +435,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const row = await storage.tasks.getById(taskId);
         if (!row) throw new Error("Task not found");
         if (row.project_id !== projectId) throw new Error("Object is not part of this project");
+        if (!isCanonicalId(row.id)) throw new Error("Task not found");
         await touch("task", row.id);
         return {
           id: preview(row.id, ID_CHAR_LIMIT),
@@ -425,17 +452,23 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: async () => {
         const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
-        const items = rows.map((row) => {
+        const entries = rows.flatMap((row) => {
+          if (typeof row.targetId !== "string" || !isNullableString(row.branch)) return [];
+          const canonicalId = `${row.targetId}:${row.branch ?? "main"}`;
+          if (!isCanonicalId(canonicalId)) return [];
           const target = preview(row.targetId, TARGET_CHAR_LIMIT);
           const branch = nullablePreview(row.branch, BRANCH_CHAR_LIMIT);
-          return {
-            id: preview(`${target}:${branch ?? "main"}`, ID_CHAR_LIMIT * 2),
-            target,
-            branch,
-          };
+          return [{
+            canonicalId,
+            item: {
+              id: preview(`${target}:${branch ?? "main"}`, ID_CHAR_LIMIT * 2),
+              target,
+              branch,
+            },
+          }];
         });
-        await touchAll("workspace", items.map((item) => item.id));
-        return { items, truncated: rows.length === LIST_LIMIT };
+        await touchAll("workspace", entries.map((entry) => entry.canonicalId));
+        return { items: entries.map((entry) => entry.item), truncated: rows.length === LIST_LIMIT };
       },
     },
     list_agent_sessions: {
@@ -447,39 +480,65 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
         ]);
         const remoteRows = safeArrayPrefix(untrustedRemoteRows, LIST_LIMIT / 2);
-        const local: ProjectSessionSummary[] = localRows.map((row) => ({
-          id: preview(row.id, ID_CHAR_LIMIT),
-          projectId: preview(row.project_id, ID_CHAR_LIMIT),
-          branch: nullablePreview(row.branch || null, BRANCH_CHAR_LIMIT),
-          title: nullablePreview(row.title, NAME_CHAR_LIMIT),
-          status: preview(row.status, ENUM_CHAR_LIMIT),
-          target: "local",
-          agentType: nullablePreview(row.agent_type, ENUM_CHAR_LIMIT),
-          model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
-        }));
-        const authorizedRemote: ProjectSessionSummary[] = [];
+        const local = localRows.flatMap((row) => isCanonicalId(row.id) ? [{
+          canonicalId: row.id,
+          item: {
+            id: preview(row.id, ID_CHAR_LIMIT),
+            projectId: preview(row.project_id, ID_CHAR_LIMIT),
+            branch: nullablePreview(row.branch || null, BRANCH_CHAR_LIMIT),
+            title: nullablePreview(row.title, NAME_CHAR_LIMIT),
+            status: preview(row.status, ENUM_CHAR_LIMIT),
+            target: "local",
+            agentType: nullablePreview(row.agent_type, ENUM_CHAR_LIMIT),
+            model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
+          } satisfies ProjectSessionSummary,
+        }] : []);
+        const authorizedRemote: Array<{ canonicalId: string; item: ProjectSessionSummary }> = [];
         for (const rowValue of remoteRows) {
           const row = safeRecord(rowValue);
           if (!row) continue;
-          const rowProjectId = safeProperty(row, "projectId");
-          if (rowProjectId !== projectId) continue;
-          const rowId = safeProperty(row, "id");
-          if (typeof rowId !== "string" || !rowId) continue;
+          const projectIdRead = safePropertyRead(row, "projectId");
+          if (!projectIdRead.readable || projectIdRead.value !== projectId) continue;
+          const idRead = safePropertyRead(row, "id");
+          const statusRead = safePropertyRead(row, "status");
+          const targetRead = safePropertyRead(row, "target");
+          const branchRead = safePropertyRead(row, "branch");
+          const titleRead = safePropertyRead(row, "title");
+          const agentTypeRead = safePropertyRead(row, "agentType");
+          const modelRead = safePropertyRead(row, "model");
+          if (!idRead.readable || !statusRead.readable || !targetRead.readable
+            || !branchRead.readable || !titleRead.readable
+            || !agentTypeRead.readable || !modelRead.readable) continue;
+          const rowProjectId = projectIdRead.value;
+          const rowId = idRead.value;
+          const rowStatus = statusRead.value;
+          const rowTarget = targetRead.value;
+          const rowBranch = branchRead.value;
+          const rowTitle = titleRead.value;
+          const rowAgentType = agentTypeRead.value;
+          const rowModel = modelRead.value;
+          if (!isCanonicalId(rowId) || !isCanonicalId(rowProjectId)
+            || typeof rowStatus !== "string" || typeof rowTarget !== "string"
+            || !isNullableString(rowBranch) || !isNullableString(rowTitle)
+            || !isOptionalNullableString(rowAgentType) || !isOptionalNullableString(rowModel)) continue;
           authorizedRemote.push({
-            id: preview(rowId, ID_CHAR_LIMIT),
-            projectId: preview(rowProjectId, ID_CHAR_LIMIT),
-            branch: nullablePreview(safeProperty(row, "branch"), BRANCH_CHAR_LIMIT),
-            title: nullablePreview(safeProperty(row, "title"), NAME_CHAR_LIMIT),
-            status: preview(safeProperty(row, "status"), ENUM_CHAR_LIMIT),
-            target: preview(safeProperty(row, "target"), TARGET_CHAR_LIMIT),
-            agentType: nullablePreview(safeProperty(row, "agentType"), ENUM_CHAR_LIMIT),
-            model: nullablePreview(safeProperty(row, "model"), MODEL_CHAR_LIMIT),
+            canonicalId: rowId,
+            item: {
+              id: preview(rowId, ID_CHAR_LIMIT),
+              projectId: preview(rowProjectId, ID_CHAR_LIMIT),
+              branch: nullablePreview(rowBranch, BRANCH_CHAR_LIMIT),
+              title: nullablePreview(rowTitle, NAME_CHAR_LIMIT),
+              status: preview(rowStatus, ENUM_CHAR_LIMIT),
+              target: preview(rowTarget, TARGET_CHAR_LIMIT),
+              agentType: nullablePreview(rowAgentType, ENUM_CHAR_LIMIT),
+              model: nullablePreview(rowModel, MODEL_CHAR_LIMIT),
+            },
           });
         }
-        const items = [...local, ...authorizedRemote].slice(0, LIST_LIMIT);
-        await touchAll("agent_session", items.map((item) => item.id));
+        const entries = [...local, ...authorizedRemote].slice(0, LIST_LIMIT);
+        await touchAll("agent_session", entries.map((entry) => entry.canonicalId));
         return {
-          items,
+          items: entries.map((entry) => entry.item),
           truncated: localRows.length === LIST_LIMIT / 2 || remoteRows.length === LIST_LIMIT / 2,
         };
       },
@@ -491,6 +550,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const local = await storage.agentSessions.getById(sessionId);
         if (local) {
           if (local.project_id !== projectId) throw new Error("Object is not part of this project");
+          if (!isCanonicalId(local.id)) throw new Error("Agent session not found");
           const detail: ProjectSessionDetail = {
             id: preview(local.id, ID_CHAR_LIMIT),
             projectId: preview(local.project_id, ID_CHAR_LIMIT),
@@ -514,7 +574,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const mappingRemoteServerId = safeProperty(mappingRecord, "remoteServerId");
         const mappingRemoteSessionId = safeProperty(mappingRecord, "remoteSessionId");
         const mappingBranch = safeProperty(mappingRecord, "branch");
-        if (typeof mappingId !== "string" || typeof mappingProjectId !== "string"
+        if (!isCanonicalId(mappingId) || !isCanonicalId(mappingProjectId)
           || typeof mappingRemoteServerId !== "string" || typeof mappingRemoteSessionId !== "string") {
           throw new Error("Agent session not found");
         }
@@ -562,9 +622,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: async () => {
         const rows = await storage.scheduledTasks.listByProject(projectId, LIST_LIMIT);
-        await touchAll("schedule", rows.map((row) => row.id));
+        const validRows = rows.filter((row) => isCanonicalId(row.id));
+        await touchAll("schedule", validRows.map((row) => row.id));
         return {
-          items: rows.map((row) => ({
+          items: validRows.map((row) => ({
             id: preview(row.id, ID_CHAR_LIMIT),
             name: preview(row.name, NAME_CHAR_LIMIT),
             enabled: row.enabled,
@@ -583,9 +644,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: async () => {
         const rows = await storage.scheduledTaskRuns.listRecentByProject(projectId, LIST_LIMIT);
-        await touchAll("schedule_run", rows.map((row) => row.id));
+        const validRows = rows.filter((row) => isCanonicalId(row.id));
+        await touchAll("schedule_run", validRows.map((row) => row.id));
         return {
-          items: rows.map((row) => ({
+          items: validRows.map((row) => ({
             id: preview(row.id, ID_CHAR_LIMIT),
             scheduleId: preview(row.schedule_id, ID_CHAR_LIMIT),
             status: preview(row.status, ENUM_CHAR_LIMIT),
@@ -606,6 +668,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const schedule = await storage.scheduledTasks.getById(run.schedule_id);
         if (!schedule) throw new Error("Schedule run not found");
         if (schedule.project_id !== projectId) throw new Error("Object is not part of this project");
+        if (!isCanonicalId(run.id)) throw new Error("Schedule run not found");
         await touch("schedule_run", run.id);
         return {
           id: preview(run.id, ID_CHAR_LIMIT),

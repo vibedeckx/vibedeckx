@@ -313,6 +313,65 @@ describe("createProjectChatTools", () => {
     expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
   });
 
+  it("skips remote summaries that violate required and optional field contracts", async () => {
+    const base = {
+      projectId: "project-1", branch: null, title: null, status: "running", target: "server-a",
+    };
+    const throwingOptional = { ...base, id: "throwing-agent" };
+    Object.defineProperty(throwingOptional, "agentType", {
+      get() { throw new Error("OPTIONAL GETTER SECRET"); },
+    });
+    vi.mocked(remote.listByProject).mockResolvedValue([
+      { ...base, id: "missing-status", status: undefined },
+      { ...base, id: "numeric-status", status: 7 },
+      { ...base, id: "missing-target", target: undefined },
+      { ...base, id: "object-target", target: { credential: "TARGET SECRET" } },
+      { ...base, id: "invalid-branch", branch: 3 },
+      { ...base, id: "invalid-title", title: { credential: "TITLE SECRET" } },
+      { ...base, id: "invalid-agent", agentType: { credential: "AGENT SECRET" } },
+      { ...base, id: "invalid-model", model: 9 },
+      { ...base, id: "x".repeat(70_000) },
+      throwingOptional,
+    ] as never);
+
+    const result = await (await tools()).list_agent_sessions.execute({});
+
+    expect(result).toEqual({ items: [], truncated: false });
+    expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1")).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("SECRET");
+  });
+
+  it("tracks canonical workspace and session ids when capped display ids collide", async () => {
+    const commonWorkspace = "w".repeat(600);
+    const workspaceIds = [`${commonWorkspace}a`, `${commonWorkspace}b`];
+    for (const targetId of workspaceIds) {
+      await storage.searchCache.applyCatalogSnapshot("project-1", targetId, {
+        workspaces: [{ branch: null }], sessions: [],
+      });
+    }
+    const commonSession = "s".repeat(600);
+    const sessionIds = [`${commonSession}a`, `${commonSession}b`];
+    for (const id of sessionIds) {
+      await storage.agentSessions.create({ id, project_id: "project-1", branch: "dev" });
+    }
+    const surface = await tools();
+
+    const workspaces = await surface.list_workspaces.execute({});
+    const sessions = await surface.list_agent_sessions.execute({});
+    const refs = await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1");
+
+    expect(workspaces.items).toHaveLength(2);
+    expect(workspaces.items[0].id).toBe(workspaces.items[1].id);
+    expect(workspaces.items.every((item) => item.id.length <= 1_025)).toBe(true);
+    expect(sessions.items).toHaveLength(2);
+    expect(sessions.items[0].id).toBe(sessions.items[1].id);
+    expect(sessions.items.every((item) => item.id.length <= 513)).toBe(true);
+    expect(refs.filter((ref) => ref.entity_type === "workspace").map((ref) => ref.entity_id).sort())
+      .toEqual(workspaceIds.map((id) => `${id}:main`).sort());
+    expect(refs.filter((ref) => ref.entity_type === "agent_session").map((ref) => ref.entity_id).sort())
+      .toEqual([...sessionIds].sort());
+  });
+
   it("lists schedules and recent runs without content/output, tracking each returned entity once", async () => {
     await storage.scheduledTasks.create({
       id: "schedule-1", project_id: "project-1", name: "Nightly", cron_expr: "0 0 * * *", timezone: "UTC",
