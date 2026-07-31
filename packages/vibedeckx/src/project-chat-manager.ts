@@ -589,7 +589,7 @@ export class ProjectChatManager {
       if (this.shuttingDown) return;
       const page = await this.storage.projectChatOperations.listNonterminal(this.reconciliationCursor, 50);
       if (page.malformed > 0) {
-        console.warn(`[ProjectChat] skipped ${page.malformed} malformed operation row(s)`);
+        console.warn(`[ProjectChat] quarantined ${page.malformed} malformed operation row(s)`);
       }
       let retryableFailure = false;
       for (const operation of page.operations) {

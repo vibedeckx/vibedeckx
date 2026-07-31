@@ -93,6 +93,25 @@ const mapOperation = (row: Selectable<ProjectChatOperationsTable>): ProjectChatO
   return { ...row, payload: parsed.data as ProjectChatOperation["payload"] };
 };
 
+const quarantinedPayload = (
+  row: Selectable<ProjectChatOperationsTable>,
+): ProjectChatOperation["payload"] => {
+  const base = { version: 1 as const, operationId: row.id, status: "failed" as const };
+  const entityId = row.entity_id ?? row.id;
+  switch (row.kind) {
+    case "task_create": return { ...base, kind: "task_create", taskId: entityId };
+    case "task_update": return { ...base, kind: "task_update", taskId: entityId };
+    case "agent_session_create": return { ...base, kind: "agent_session_create", sessionId: entityId };
+    case "agent_instruction": return { ...base, kind: "agent_instruction", sessionId: entityId };
+    case "schedule_run": return {
+      ...base, kind: "schedule_run", scheduleId: row.entity_id ?? row.id, runId: entityId,
+    };
+    case "workspace_selection": return {
+      ...base, kind: "workspace_selection", requestId: row.id, candidates: [],
+    };
+  }
+};
+
 export const createProjectChatRepos = (
   kdb: Kysely<DB>,
 ): Pick<Storage, "projectChatThreads" | "projectChatMessages" | "projectChatWorkItems" | "projectChatContextRefs" | "projectChatOperations"> => ({
@@ -674,7 +693,21 @@ export const createProjectChatRepos = (
       const operations: ProjectChatOperation[] = [];
       let malformed = 0;
       for (const row of pageRows) {
-        try { operations.push(mapOperation(row)); } catch { malformed += 1; }
+        try {
+          operations.push(mapOperation(row));
+        } catch {
+          malformed += 1;
+          await kdb.updateTable("project_chat_operations")
+            .set({
+              status: "failed",
+              payload: JSON.stringify(quarantinedPayload(row)),
+              error: "Malformed operation data was quarantined",
+              updated_at: now(),
+            })
+            .where("id", "=", row.id)
+            .where("status", "in", ["pending", "resolving", "running"])
+            .execute();
+        }
       }
       return {
         operations,

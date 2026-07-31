@@ -47,6 +47,10 @@ describe("project chat storage", () => {
       operations: [expect.objectContaining({ id: "b-valid" })],
       nextCursor: "b-valid", hasMore: false, malformed: 1,
     });
+    expect(await storage.projectChatOperations.getById("a-malformed", "thread", "p1", "local"))
+      .toMatchObject({ status: "failed", error: "Malformed operation data was quarantined" });
+    await expect(storage.projectChatOperations.listNonterminal(null, 50))
+      .resolves.toMatchObject({ malformed: 0 });
   });
 
   it("stores multiple project-scoped threads without a branch property", async () => {
