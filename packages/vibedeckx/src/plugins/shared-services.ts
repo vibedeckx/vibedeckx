@@ -116,16 +116,17 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
           if (input.target === "local") {
             const project = await opts.storage.projects.getById(input.projectId, input.userId);
             if (!project?.path) throw new Error("Project has no local path");
-            const existing = await opts.storage.agentSessions.getById(input.sessionId);
+            const existing = await opts.storage.agentSessions.getById(input.workerSessionId);
             if (existing && existing.project_id !== input.projectId) {
               throw new Error("Session identity is already in use");
             }
-            if (!existing) {
-              await agentSessionManager.createNewSession(
-                input.projectId, input.branch, project.path, false, input.permissionMode,
-                input.agentType, true, false, { sessionId: input.workerSessionId, model: input.model },
-              );
-            }
+            // Always enter the manager's exact-scope create/recovery path. A
+            // durable row alone does not prove this process has rehydrated or
+            // spawned the resident session after restart.
+            await agentSessionManager.createNewSession(
+              input.projectId, input.branch, project.path, false, input.permissionMode,
+              input.agentType, true, false, { sessionId: input.workerSessionId, model: input.model },
+            );
             // Local stdin has no acknowledgement protocol. Retrying a durable
             // unconfirmed operation is intentionally at-least-once: a crash
             // after write may duplicate, but transcript persistence is never

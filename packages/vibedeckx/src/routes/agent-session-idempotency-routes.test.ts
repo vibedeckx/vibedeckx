@@ -218,6 +218,22 @@ describe("path agent session preallocated identity", () => {
     expect(createNewSession.mock.calls[0]?.[8]).toMatchObject({ sessionId: "worker-id" });
   });
 
+  it("rehydrates a stopped zero-entry worker session with the same identity", async () => {
+    auth.userId = "user-1";
+    const { createNewSession, projects, setStored } = makeApp(true);
+    projects.set("path:/repo", { id: "path:/repo", path: "/repo", user_id: "user-1" });
+    setStored({
+      id: "worker-id", project_id: "path:/repo", branch: "dev", status: "stopped",
+      permission_mode: "edit", agent_type: "claude-code", model: null,
+    });
+    await app.register(agentSessionRoutes);
+    const response = await app.inject({ method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", branch: "dev", sessionId: "worker-id" } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().session.id).toBe("worker-id");
+    expect(createNewSession).toHaveBeenCalledTimes(1);
+  });
+
   it("delivers concurrent requests with the same stable key exactly once", async () => {
     const { sendUserMessage } = makeApp();
     await app.register(agentSessionRoutes);

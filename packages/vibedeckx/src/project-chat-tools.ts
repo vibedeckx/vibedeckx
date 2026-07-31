@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import type { ProjectChatContextEntityType, Storage } from "./storage/types.js";
+import type { ProjectChatContextEntityType, ProjectChatOperationPayload, Storage } from "./storage/types.js";
 
 const LIST_LIMIT = 20;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
@@ -274,7 +274,7 @@ const activeSessionOperationSchema = z.object({
   operationId: selectorSchema, status: z.enum(["running", "completed"]),
   sessionId: selectorSchema, workspaceId: selectorSchema,
   initialInstructionDelivery: z.literal("confirmed"),
-}).strict();
+}).passthrough();
 const preview = (value: unknown, limit: number): string => {
   if (typeof value !== "string" || !value) return "";
   return value.length <= limit ? value : `${value.slice(0, limit)}…`;
@@ -561,7 +561,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     details: Record<string, unknown>,
     error: string | null = null,
   ) => {
-    const payload = operationPayload(operation.kind, operation.id, status, details);
+    const current = await storage.projectChatOperations.getById(
+      operation.id, threadId, projectId, userId,
+    );
+    if (!current) throw new Error("Project Chat operation not found");
+    const payload = { ...current.payload, status, ...details } as ProjectChatOperationPayload;
     const content = publicOperationContent(payload);
     const result = await storage.projectChatOperations.transition({
       id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,

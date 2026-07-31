@@ -370,7 +370,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const requestedPermission = permissionMode || "edit";
           const requestedAgentType = (agentType as AgentType) || "claude-code";
           const requestedModel = model?.trim() ? model.trim() : null;
-          const storedMatches = !stored || (stored.status === "running"
+          const storedMatches = !stored || (["running", "stopped"].includes(stored.status)
             && stored.project_id === pseudoProjectId
             && (stored.branch || null) === requestedBranch
             && stored.permission_mode === requestedPermission
@@ -384,7 +384,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           if (!storedMatches || !activeMatches || (active && !stored)) {
             return reply.code(409).send({ error: "Session identity is already in use" });
           }
-          if (!active) {
+          if (!active || active.dormant) {
             const recoveredSessionId = await fastify.agentSessionManager.createNewSession(
               pseudoProjectId, requestedBranch, projectPath, false,
               requestedPermission, requestedAgentType, false, force === true,
