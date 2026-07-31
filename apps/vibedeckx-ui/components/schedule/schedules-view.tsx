@@ -85,10 +85,14 @@ export function SchedulesView({
   const [runs, setRuns] = useState<ScheduleRun[]>([]);
   const [editOpen, setEditOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [selectedRun, setSelectedRun] = useState<ScheduleRun | null>(null);
-  const [runLoading, setRunLoading] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
+  const [externallyOpenedRunId, setExternallyOpenedRunId] = useState<string | null>(null);
   const [runRetryNonce, setRunRetryNonce] = useState(0);
+  const [runResult, setRunResult] = useState<{
+    runId: string;
+    nonce: number;
+    run: ScheduleRun | null;
+    error: string | null;
+  } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Schedule awaiting delete confirmation. Held as the full object (not a
   // boolean on `selected`) so the dialog text stays stable even if the
@@ -116,7 +120,11 @@ export function SchedulesView({
       const nextRuns = result ?? [];
       setRuns(nextRuns);
       setSelectedRunId((current) => {
-        if (current && nextRuns.some((run) => run.id === current && run.status !== "skipped")) {
+        if (
+          current &&
+          (current === externallyOpenedRunId ||
+            nextRuns.some((run) => run.id === current && run.status !== "skipped"))
+        ) {
           return current;
         }
         return nextRuns.find((run) => run.status !== "skipped")?.id ?? null;
@@ -125,36 +133,27 @@ export function SchedulesView({
     return () => {
       stale = true;
     };
-  }, [selected?.id, schedules, refetchRuns]);
+  }, [selected?.id, schedules, refetchRuns, externallyOpenedRunId]);
 
   useEffect(() => {
-    setSelectedRunId(null);
-    setSelectedRun(null);
-    setRunError(null);
-  }, [selected?.id]);
-
-  useEffect(() => {
-    if (!selectedRunId) {
-      setSelectedRun(null);
-      setRunLoading(false);
-      setRunError(null);
-      return;
-    }
+    if (!selectedRunId) return;
 
     let stale = false;
-    setSelectedRun(null);
-    setRunLoading(true);
-    setRunError(null);
+    const runId = selectedRunId;
+    const nonce = runRetryNonce;
     void api.getScheduleRun(selectedRunId).then(
       (run) => {
         if (stale) return;
-        setSelectedRun(run);
-        setRunLoading(false);
+        setRunResult({ runId, nonce, run, error: null });
       },
       (err: unknown) => {
         if (stale) return;
-        setRunError(err instanceof Error ? err.message : "Failed to load run output");
-        setRunLoading(false);
+        setRunResult({
+          runId,
+          nonce,
+          run: null,
+          error: err instanceof Error ? err.message : "Failed to load run output",
+        });
       },
     );
 
@@ -180,6 +179,7 @@ export function SchedulesView({
 
   const openRun = (run: ScheduleRun) => {
     if (run.status === "skipped") return;
+    setExternallyOpenedRunId(null);
     setSelectedRunId(run.id);
   };
 
@@ -189,9 +189,21 @@ export function SchedulesView({
   useEffect(() => {
     if (!openRunId) return;
     const requestedRunId = openRunId;
+    setExternallyOpenedRunId(requestedRunId);
     setSelectedRunId(requestedRunId);
     onOpenRunHandled?.(requestedRunId);
   }, [openRunId, onOpenRunHandled]);
+
+  const visibleRuns = selected ? runs.filter((run) => run.schedule_id === selected.id) : [];
+  const selectedRunIsVisible =
+    selectedRunId === externallyOpenedRunId ||
+    visibleRuns.some((run) => run.id === selectedRunId && run.status !== "skipped");
+  const currentRunResult =
+    selectedRunIsVisible &&
+    runResult?.runId === selectedRunId &&
+    runResult.nonce === runRetryNonce
+      ? runResult
+      : null;
 
   if (!loading && schedules.length === 0) {
     return (
@@ -277,7 +289,7 @@ export function SchedulesView({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {runs.map((run) => (
+                      {visibleRuns.map((run) => (
                         <TableRow
                           key={run.id}
                           onClick={() => openRun(run)}
@@ -296,7 +308,7 @@ export function SchedulesView({
                           <TableCell>{run.exit_code ?? "—"}</TableCell>
                         </TableRow>
                       ))}
-                      {runs.length === 0 && (
+                      {visibleRuns.length === 0 && (
                         <TableRow>
                           <TableCell colSpan={4} className="text-center text-muted-foreground">
                             No runs yet — click “Run now” to try it
@@ -312,46 +324,46 @@ export function SchedulesView({
 
               <ResizablePanel defaultSize={67} minSize={25}>
                 <div className="h-full overflow-auto px-5 py-4">
-                  {runLoading ? (
+                  {selectedRunIsVisible && !currentRunResult ? (
                     <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                       Loading run output…
                     </div>
-                  ) : runError ? (
+                  ) : currentRunResult?.error ? (
                     <div className="h-full flex flex-col items-center justify-center gap-3 text-sm">
-                      <div className="text-destructive">{runError}</div>
+                      <div className="text-destructive">{currentRunResult.error}</div>
                       <Button size="sm" variant="outline" onClick={() => setRunRetryNonce((nonce) => nonce + 1)}>
                         Retry
                       </Button>
                     </div>
-                  ) : selectedRun ? (
+                  ) : currentRunResult?.run ? (
                     <>
                       <div className="mb-4 pb-3 border-b border-border/60">
                         <div className="text-sm font-medium">
-                          {selectedRun.report ? "Run report" : "Run output"} — {fmtTs(selectedRun.started_at)}
+                          {currentRunResult.run.report ? "Run report" : "Run output"} — {fmtTs(currentRunResult.run.started_at)}
                         </div>
                         <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
-                          <span className={cn("px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[selectedRun.status])}>
-                            {selectedRun.status}
+                          <span className={cn("px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[currentRunResult.run.status])}>
+                            {currentRunResult.run.status}
                           </span>
-                          <span>{fmtDuration(selectedRun)}</span>
-                          <span>Exit code: {selectedRun.exit_code ?? "—"}</span>
+                          <span>{fmtDuration(currentRunResult.run)}</span>
+                          <span>Exit code: {currentRunResult.run.exit_code ?? "—"}</span>
                         </div>
                       </div>
-                      {selectedRun.report ? (
+                      {currentRunResult.run.report ? (
                         <>
                           <div className="rounded-md border border-border/50 p-3 text-sm">
-                            <Streamdown className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">{selectedRun.report}</Streamdown>
+                            <Streamdown className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">{currentRunResult.run.report}</Streamdown>
                           </div>
                           <details className="mt-3">
                             <summary className="text-xs text-muted-foreground cursor-pointer select-none">Raw output</summary>
                             <pre className="mt-2 overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
-                              {selectedRun.output ? cleanOutput(selectedRun.output) : "(no output captured)"}
+                              {currentRunResult.run.output ? cleanOutput(currentRunResult.run.output) : "(no output captured)"}
                             </pre>
                           </details>
                         </>
                       ) : (
                         <pre className="overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
-                          {selectedRun.output ? cleanOutput(selectedRun.output) : "(no output captured)"}
+                          {currentRunResult.run.output ? cleanOutput(currentRunResult.run.output) : "(no output captured)"}
                         </pre>
                       )}
                     </>
