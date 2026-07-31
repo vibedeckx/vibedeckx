@@ -116,7 +116,7 @@ describe("project chat thread routes", () => {
       const response = await app.inject({
         method: "POST",
         url: "/api/projects/project-1/project-chat/threads",
-        payload: { message: "  What changed?  " },
+        payload: { message: "  What changed?  ", createRequestId: "create-1" },
       });
 
       expect(response.statusCode).toBe(201);
@@ -131,6 +131,40 @@ describe("project chat thread routes", () => {
         .toEqual([expect.objectContaining({ status: "accepted", content: "What changed?" })]);
       expect(projectChatManager.startAcceptedThread).toHaveBeenCalledOnce();
       expect(projectChatManager.startAcceptedThread).toHaveBeenCalledWith(thread.id, "user-1");
+    });
+
+    it("returns the same accepted thread for a lost-201 retry without restarting work", async () => {
+      const request = {
+        method: "POST" as const,
+        url: "/api/projects/project-1/project-chat/threads",
+        payload: { message: "recover this response", createRequestId: "lost-201" },
+      };
+
+      const first = await app.inject(request);
+      const retry = await app.inject(request);
+
+      expect(first.statusCode).toBe(201);
+      expect(retry.statusCode).toBe(201);
+      expect(retry.json().thread.id).toBe(first.json().thread.id);
+      expect(projectChatManager.startAcceptedThread).toHaveBeenCalledOnce();
+      expect(await storage.projectChatMessages.listByThread(
+        first.json().thread.id, "project-1", "user-1",
+      )).toHaveLength(1);
+    });
+
+    it("scopes create idempotency by project and user and rejects payload collisions", async () => {
+      const first = await app.inject({ method: "POST", url: "/api/projects/project-1/project-chat/threads",
+        payload: { message: "one", createRequestId: "shared-key" } });
+      const otherProject = await app.inject({ method: "POST", url: "/api/projects/project-2/project-chat/threads",
+        payload: { message: "two", createRequestId: "shared-key" } });
+      const mismatch = await app.inject({ method: "POST", url: "/api/projects/project-1/project-chat/threads",
+        payload: { message: "different", createRequestId: "shared-key" } });
+
+      expect(first.statusCode).toBe(201);
+      expect(otherProject.statusCode).toBe(201);
+      expect(otherProject.json().thread.id).not.toBe(first.json().thread.id);
+      expect(mismatch.statusCode).toBe(409);
+      expect(mismatch.json()).toEqual({ error: "createRequestId was already used with a different payload" });
     });
 
     it("creates an empty thread when message is omitted", async () => {
@@ -153,6 +187,8 @@ describe("project chat thread routes", () => {
         { message: 3 },
         { message: "x".repeat(100_001) },
         { unexpected: true },
+        { createRequestId: "" },
+        { createRequestId: "x".repeat(513) },
       ];
       for (const payload of invalidPayloads) {
         const response = await app.inject({
@@ -166,10 +202,10 @@ describe("project chat thread routes", () => {
     });
 
     it("delegates initial-turn persistence to the atomic thread create operation", async () => {
-      const createWithInitialTurn = vi.fn().mockRejectedValue(new Error("write failed"));
+      const createIdempotent = vi.fn().mockRejectedValue(new Error("write failed"));
       (storage.projectChatThreads as typeof storage.projectChatThreads & {
-        createWithInitialTurn: typeof createWithInitialTurn;
-      }).createWithInitialTurn = createWithInitialTurn;
+        createIdempotent: typeof createIdempotent;
+      }).createIdempotent = createIdempotent;
 
       const response = await app.inject({
         method: "POST",
@@ -178,7 +214,7 @@ describe("project chat thread routes", () => {
       });
 
       expect(response.statusCode).toBe(500);
-      expect(createWithInitialTurn).toHaveBeenCalledOnce();
+      expect(createIdempotent).toHaveBeenCalledOnce();
       expect(await storage.projectChatThreads.listByProject("project-1", "user-1", 100)).toEqual([]);
       expect(projectChatManager.startAcceptedThread).not.toHaveBeenCalled();
     });

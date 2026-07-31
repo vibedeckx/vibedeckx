@@ -593,7 +593,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       ? await storage.projects.getById(projectId)
       : await storage.projects.getById(projectId, userId);
     if (!project) throw new Error("Project is no longer authorized");
-    const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
+    const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT + 1);
     const candidates = rows.flatMap((row) => {
       if (typeof row.targetId !== "string" || !isNullableString(row.branch)) return [];
       if (row.targetId.length > TARGET_CHAR_LIMIT || (row.branch?.length ?? 0) > BRANCH_CHAR_LIMIT) return [];
@@ -604,16 +604,17 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     const authorized = await Promise.all(candidates.map(async (candidate) => candidate.target === "local"
       ? candidate
       : (await storage.projectRemotes.getByProjectAndServer(projectId, candidate.target)) ? candidate : undefined));
-    return authorized.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
+    const available = authorized.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
+    return { items: available.slice(0, LIST_LIMIT), truncated: available.length > LIST_LIMIT };
   };
   const validateAssignedBranch = async (branch: string | null | undefined): Promise<void> => {
     if (branch === null || branch === undefined) return;
-    if (!(await workspaceCandidates()).some((workspace) => workspace.branch === branch)) {
+    if (!(await workspaceCandidates()).items.some((workspace) => workspace.branch === branch)) {
       throw new Error("Assigned branch is not an available workspace in this project");
     }
   };
   const resolveWorkspace = async (workspaceId: string) => {
-    const candidate = (await workspaceCandidates()).find(({ id }) => id === workspaceId);
+    const candidate = (await workspaceCandidates()).items.find(({ id }) => id === workspaceId);
     if (!candidate) throw new Error("Workspace is no longer available in this project");
     if (candidate.target !== "local") {
       const association = await storage.projectRemotes.getByProjectAndServer(projectId, candidate.target);
@@ -750,7 +751,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         await revalidateScope();
         const operationId = randomUUID();
         const sessionSeed = randomUUID();
-        const candidates = await workspaceCandidates();
+        const candidates = (await workspaceCandidates()).items;
         if (!workspaceId) {
           const operation = await beginOperation("agent_session_create", null, null, {
             phase: "workspace_selection", requestId: operationId, sessionId: sessionSeed,
@@ -1133,7 +1134,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       description: "List known local and remote workspaces for this project.",
       inputSchema: emptySchema,
       execute: async () => {
-        const candidates = await workspaceCandidates();
+        const { items: candidates, truncated } = await workspaceCandidates();
         const entries = candidates.map(({ id: canonicalId, target: rawTarget, branch: rawBranch }) => {
           const target = preview(rawTarget, TARGET_CHAR_LIMIT);
           const branch = nullablePreview(rawBranch, BRANCH_CHAR_LIMIT);
@@ -1147,7 +1148,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           }];
         }).flat();
         await touchAll("workspace", entries.map((entry) => entry.canonicalId));
-        return { items: entries.map((entry) => entry.item), truncated: candidates.length === LIST_LIMIT };
+        return { items: entries.map((entry) => entry.item), truncated };
       },
     },
     list_agent_sessions: {

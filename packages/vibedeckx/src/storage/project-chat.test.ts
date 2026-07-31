@@ -107,6 +107,39 @@ describe("project chat storage", () => {
       })]);
   });
 
+  it("deduplicates concurrent create requests durably and rejects payload reuse", async () => {
+    const input = {
+      project_id: "p1", user_id: "u1", title: null,
+      create_request_id: "request-1", create_payload_hash: "hash:start here",
+      initialTurn: { messageId: "m1", workItemId: "w1", content: "start here" },
+    };
+    const [first, second] = await Promise.all([
+      storage.projectChatThreads.createIdempotent({ ...input, id: "thread-a" }),
+      storage.projectChatThreads.createIdempotent({
+        ...input, id: "thread-b",
+        initialTurn: { messageId: "m2", workItemId: "w2", content: "start here" },
+      }),
+    ]);
+
+    expect(first.thread.id).toBe(second.thread.id);
+    expect([first.created, second.created].sort()).toEqual([false, true]);
+    expect(await storage.projectChatMessages.listByThread(first.thread.id, "p1", "u1"))
+      .toHaveLength(1);
+    expect(await storage.projectChatWorkItems.listNonterminal(first.thread.id, "p1", "u1"))
+      .toHaveLength(1);
+    await expect(storage.projectChatThreads.createIdempotent({
+      ...input, id: "thread-c", create_payload_hash: "hash:different",
+      initialTurn: { messageId: "m3", workItemId: "w3", content: "different" },
+    })).rejects.toMatchObject({ code: "PROJECT_CHAT_CREATE_CONFLICT" });
+
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    await expect(storage.projectChatThreads.createIdempotent({
+      ...input, id: "thread-after-restart",
+      initialTurn: { messageId: "m4", workItemId: "w4", content: "start here" },
+    })).resolves.toMatchObject({ thread: { id: first.thread.id }, created: false });
+  });
+
   it("creates only the thread when no initial turn is supplied", async () => {
     await storage.projectChatThreads.createWithInitialTurn({
       id: "empty-thread", project_id: "p1", user_id: "u1", title: null,
@@ -114,6 +147,18 @@ describe("project chat storage", () => {
 
     expect(await storage.projectChatMessages.listByThread("empty-thread", "p1", "u1")).toEqual([]);
     expect(await storage.projectChatWorkItems.listNonterminal("empty-thread", "p1", "u1")).toEqual([]);
+  });
+
+  it("pages every thread with recoverable work by stable thread id", async () => {
+    for (const id of ["recover-a", "recover-b", "recover-c"]) {
+      await storage.projectChatThreads.createWithInitialTurn({
+        id, project_id: "p1", user_id: "u1", title: null,
+        initialTurn: { messageId: `${id}-message`, workItemId: `${id}-work`, content: id },
+      });
+    }
+    const first = await storage.projectChatThreads.listWithNonterminalWork(null, 2);
+    const second = await storage.projectChatThreads.listWithNonterminalWork(first.at(-1)!.id, 2);
+    expect([...first, ...second].map(({ id }) => id)).toEqual(["recover-a", "recover-b", "recover-c"]);
   });
 
   it("rolls back thread creation when the initial turn insert violates a constraint", async () => {
@@ -377,6 +422,29 @@ describe("project chat storage", () => {
       expect(orderingIndexes.map(({ name }) => name)).toEqual([
         "idx_project_chat_threads_project_user_updated_id",
       ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("uses a covering recency index for bounded Context reads without a temp sort", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const index = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_chat_context_refs_thread_recency'",
+      ).get() as { sql: string } | undefined;
+      expect(index?.sql.replace(/\s+/g, " ")).toContain(
+        "thread_id, last_referenced_at DESC, entity_type, entity_id",
+      );
+      const plan = db.prepare(`EXPLAIN QUERY PLAN
+        SELECT ref.* FROM project_chat_context_refs AS ref
+        JOIN project_chat_threads AS thread ON thread.id = ref.thread_id
+        WHERE ref.thread_id = ? AND thread.project_id = ? AND thread.user_id = ?
+        ORDER BY ref.last_referenced_at DESC, ref.entity_type ASC, ref.entity_id ASC LIMIT 100`
+      ).all("t1", "p1", "u1") as Array<{ detail: string }>;
+      expect(plan.some(({ detail }) => /USE TEMP B-TREE FOR ORDER BY/i.test(detail))).toBe(false);
+      expect(plan.some(({ detail }) => detail.includes("idx_project_chat_context_refs_thread_recency"))).toBe(true);
     } finally {
       db.close();
     }

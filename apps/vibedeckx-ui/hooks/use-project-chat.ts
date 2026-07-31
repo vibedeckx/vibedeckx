@@ -179,6 +179,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
   const listAbortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(false);
   const threadMutationEpochRef = useRef<Map<string, number>>(new Map());
+  const pendingCreateRequestIdsRef = useRef<Map<string, string>>(new Map());
   const connectionGenerationRef = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   // The cache is deliberately indexed by the durable Thread identity. It never
@@ -441,8 +442,10 @@ export function useProjectChat(projectId: string | null, threadId: string | null
               if (!isProjectChatSnapshot(snapshot)) throw new Error("invalid snapshot");
               if (snapshot.identity.threadId !== activeThreadId
                 || snapshot.identity.projectId !== activeProjectId
+                || snapshot.identity.userId !== ownedThread.user_id
                 || snapshot.thread.id !== activeThreadId
-                || snapshot.thread.project_id !== activeProjectId) {
+                || snapshot.thread.project_id !== activeProjectId
+                || snapshot.thread.user_id !== ownedThread.user_id) {
                 fatal = true;
                 setThreadError("Project Chat stream identity mismatch");
                 setThreadLoading(false);
@@ -569,7 +572,14 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     if (!targetProjectId) throw new Error("No project selected");
     const normalized = message === undefined ? undefined : message.trim();
     if (message !== undefined && !normalized) throw new Error("Message is required");
-    const created = await api.createProjectChatThread(targetProjectId, normalized);
+    const intentKey = JSON.stringify([targetProjectId, normalized ?? null]);
+    let createRequestId = pendingCreateRequestIdsRef.current.get(intentKey);
+    if (!createRequestId) {
+      createRequestId = crypto.randomUUID();
+      pendingCreateRequestIdsRef.current.set(intentKey, createRequestId);
+    }
+    const created = await api.createProjectChatThread(targetProjectId, normalized, createRequestId);
+    pendingCreateRequestIdsRef.current.delete(intentKey);
     if (created.project_id === targetProjectId && invalidateThreadList(targetProjectId, generation)) {
       setThreads((current) => [created, ...current.filter((item) => item.id !== created.id)]);
     }

@@ -137,6 +137,75 @@ describe("ProjectChatManager", () => {
     )).toEqual([]);
   });
 
+  it("recovers a durably accepted initial turn from ready without a route start or stream open", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "autonomous-thread", project_id: "project-1", user_id: "user-1", title: null,
+      initialTurn: { messageId: "autonomous-user", workItemId: "autonomous-work", content: "begin" },
+    });
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "recovered" };
+    });
+
+    const manager = new ProjectChatManager(storage, { run });
+    await manager.ready();
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "autonomous-thread", "project-1", "user-1",
+    )).length === 0);
+
+    expect(run).toHaveBeenCalledOnce();
+    expect((await storage.projectChatMessages.listByThread(
+      "autonomous-thread", "project-1", "user-1",
+    )).map(({ type }) => type)).toEqual(["user", "assistant", "turn_end"]);
+    await manager.shutdown();
+  });
+
+  it("retries autonomous accepted-work recovery after transient startup storage failure", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "retry-recovery", project_id: "project-1", user_id: "user-1", title: null,
+      initialTurn: { messageId: "retry-user", workItemId: "retry-work", content: "begin" },
+    });
+    const original = storage.projectChatThreads.listWithNonterminalWork
+      .bind(storage.projectChatThreads);
+    vi.spyOn(storage.projectChatThreads, "listWithNonterminalWork")
+      .mockRejectedValueOnce(new Error("startup storage unavailable"))
+      .mockImplementation(original);
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "recovered later" };
+    });
+    const manager = new ProjectChatManager(storage, { run }, { reconciliationIntervalMs: 5 });
+
+    expect((await manager.ready()).infrastructureErrors).toContain("startup storage unavailable");
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "retry-recovery", "project-1", "user-1",
+    )).length === 0);
+
+    expect(run).toHaveBeenCalledOnce();
+    await manager.shutdown();
+  });
+
+  it("opens and starts accepted work when the Context projection is temporarily unavailable", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "context-start", project_id: "project-1", user_id: "user-1", title: null,
+      initialTurn: { messageId: "context-user", workItemId: "context-work", content: "begin" },
+    });
+    const resolveExisting = vi.spyOn(storage.projectChatContextRefs, "resolveExisting")
+      .mockRejectedValue(new Error("context infrastructure unavailable"));
+    const manager = new ProjectChatManager(storage, reply("survived"));
+
+    await expect(manager.openThread("context-start", "user-1"))
+      .resolves.toMatchObject({ identity: { threadId: "context-start" }, contextRefs: [] });
+    await manager.startAcceptedThread("context-start", "user-1");
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "context-start", "project-1", "user-1",
+    )).length === 0);
+
+    expect(resolveExisting).toHaveBeenCalled();
+    expect((await storage.projectChatMessages.listByThread(
+      "context-start", "project-1", "user-1",
+    )).map(({ type }) => type)).toEqual(["user", "assistant", "turn_end"]);
+    await manager.shutdown();
+  });
+
   it("resumes an accepted initial turn after manager restart without duplicating acceptance", async () => {
     await storage.projectChatThreads.createWithInitialTurn({
       id: "restart-thread", project_id: "project-1", user_id: "user-1", title: null,
@@ -1016,6 +1085,59 @@ describe("ProjectChatManager", () => {
       { type: "assistant", content: "reply survived" },
       { type: "turn_end", content: JSON.stringify({ status: "completed" }) },
     ]);
+    await manager.shutdown();
+  });
+
+  it("does not refresh Context for ordinary transcript events", async () => {
+    await createThread("thread-no-context-refresh");
+    const resolveExisting = vi.spyOn(storage.projectChatContextRefs, "resolveExisting");
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        yield { type: "assistant", content: "one" } as const;
+        yield { type: "assistant", content: "two" } as const;
+      },
+    });
+    await manager.openThread("thread-no-context-refresh", "user-1");
+    resolveExisting.mockClear();
+
+    await manager.sendMessage("thread-no-context-refresh", "user-1", "continue");
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "thread-no-context-refresh", "project-1", "user-1",
+    )).length === 0);
+
+    expect(resolveExisting).not.toHaveBeenCalled();
+    await manager.shutdown();
+  });
+
+  it("coalesces Context refreshes and never lets an older projection replace a newer one", async () => {
+    await createThread("thread-context-order");
+    await storage.tasks.create({ id: "task-old", project_id: "project-1", title: "Old" });
+    await storage.tasks.create({ id: "task-new", project_id: "project-1", title: "New" });
+    await storage.projectChatContextRefs.touch(
+      "thread-context-order", "project-1", "user-1", "task", "task-old",
+    );
+    const first = deferred<Array<{ entity_type: "task"; entity_id: string }>>();
+    const original = storage.projectChatContextRefs.resolveExisting.bind(storage.projectChatContextRefs);
+    let calls = 0;
+    vi.spyOn(storage.projectChatContextRefs, "resolveExisting").mockImplementation(async (...args) => {
+      calls++;
+      if (calls === 2) return first.promise;
+      return original(...args);
+    });
+    const manager = new ProjectChatManager(storage, reply("unused"));
+    // Hydration performs call 1; this open refresh is the delayed call 2.
+    const opening = manager.openThread("thread-context-order", "user-1");
+    await waitFor(() => calls === 2);
+    await storage.projectChatContextRefs.touch(
+      "thread-context-order", "project-1", "user-1", "task", "task-new",
+    );
+    const newerOpen = manager.openThread("thread-context-order", "user-1");
+    first.resolve([{ entity_type: "task", entity_id: "task-old" }]);
+    await Promise.all([opening, newerOpen]);
+
+    expect((await manager.openThread("thread-context-order", "user-1")).contextRefs
+      .map(({ entity_id }) => entity_id)).toEqual(["task-new", "task-old"]);
+    expect(calls).toBeLessThanOrEqual(4);
     await manager.shutdown();
   });
 

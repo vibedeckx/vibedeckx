@@ -148,7 +148,9 @@ describe("useProjectChat", () => {
     expect(latest.threads).toEqual([first]);
 
     await act(async () => { await latest.createThread("first question"); });
-    expect(mocks.api.createProjectChatThread).toHaveBeenCalledWith("p1", "first question");
+    expect(mocks.api.createProjectChatThread).toHaveBeenCalledWith(
+      "p1", "first question", expect.any(String),
+    );
     // The existing create route owns initial-message persistence; the hook must
     // not duplicate it through the separate enqueue endpoint.
     expect(mocks.api.sendProjectChatMessage).not.toHaveBeenCalled();
@@ -171,6 +173,24 @@ describe("useProjectChat", () => {
     );
     expect(FakeWebSocket.instances[0].url).toContain("/api/project-chat/threads/t1/stream");
     expect(mocks.getWebSocketUrl).not.toHaveBeenCalledWith(expect.stringContaining("/chat-sessions/"));
+  });
+
+  it("reuses one create request id after a lost response and rotates it after success", async () => {
+    const created = thread("created", "p1", null);
+    mocks.api.createProjectChatThread
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(created)
+      .mockResolvedValueOnce(thread("next", "p1", null));
+    render("p1", null);
+    await flush();
+
+    await expect(latest.createThread("same intent")).rejects.toThrow("response lost");
+    await act(async () => { await latest.createThread("same intent"); });
+    await act(async () => { await latest.createThread("same intent"); });
+
+    const keys = mocks.api.createProjectChatThread.mock.calls.map((call) => call[2]);
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[2]).not.toBe(keys[1]);
   });
 
   it("rehydrates from the WebSocket snapshot and applies JSON patches", async () => {
@@ -312,6 +332,24 @@ describe("useProjectChat", () => {
     }));
     expect(latest.messages[0].content).toBe("authoritative");
     expect(latest.contextRefs).toEqual([]);
+  });
+
+  it("rejects a self-consistent foreign-user snapshot against the REST-owned Thread", async () => {
+    const owned = { ...detail("t1").thread, user_id: "owned-user" };
+    mocks.api.getProjectChatThread.mockResolvedValue({ thread: owned, contextRefs: [] });
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+    const foreign = snapshot("t1");
+    foreign.thread = { ...foreign.thread, user_id: "foreign-user" };
+    foreign.identity = { ...foreign.identity, userId: "foreign-user" };
+
+    act(() => socket.message({ type: "project_chat_snapshot", snapshot: foreign }));
+
+    expect(latest.thread).toEqual(owned);
+    expect(latest.messages).toEqual([]);
+    expect(latest.error).toBe("Project Chat stream identity mismatch");
+    expect(socket.close).toHaveBeenCalledOnce();
   });
 
   it("does not let a late thread-list success clear a stream identity error", async () => {
@@ -574,6 +612,19 @@ describe("useProjectChat", () => {
     expect(latest.error).toBe("Thread not found");
     await act(async () => { vi.advanceTimersByTime(60_000); await Promise.resolve(); });
     expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("reconnects when the server reports a retryable Project Chat open failure", async () => {
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.message({ error: "Project Chat temporarily unavailable" }));
+
+    expect(latest.terminalError).toBeNull();
+    expect(latest.error).toBe("Project Chat temporarily unavailable");
+    expect(socket.close).toHaveBeenCalledOnce();
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
   it("does not retry a REST 404 while opening a Thread", async () => {

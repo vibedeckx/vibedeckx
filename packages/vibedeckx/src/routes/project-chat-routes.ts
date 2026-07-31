@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { ProjectChatThread } from "../storage/types.js";
@@ -19,16 +19,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseCreateBody(body: unknown): { message?: string } | null {
+function parseCreateBody(body: unknown): { message?: string; createRequestId?: string } | null {
   if (body === undefined) return {};
   if (!isRecord(body)) return null;
   const keys = Object.keys(body);
-  if (keys.some((key) => key !== "message")) return null;
-  if (!("message" in body)) return {};
+  if (keys.some((key) => key !== "message" && key !== "createRequestId")) return null;
+  let createRequestId: string | undefined;
+  if ("createRequestId" in body) {
+    if (typeof body.createRequestId !== "string") return null;
+    createRequestId = body.createRequestId.trim();
+    if (!createRequestId || createRequestId.length > 512) return null;
+  }
+  if (!("message" in body)) return createRequestId ? { createRequestId } : {};
   if (typeof body.message !== "string") return null;
   const message = body.message.trim();
   if (!message || message.length > MAX_MESSAGE_LENGTH) return null;
-  return { message };
+  return { message, ...(createRequestId ? { createRequestId } : {}) };
 }
 
 function parsePatchBody(body: unknown): PatchBody | null {
@@ -137,19 +143,29 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!body) return reply.code(400).send({ error: "Body must contain only an optional non-empty message" });
 
     const userId = resolveUserId(authResult);
-    const threadId = randomUUID();
-    const thread = await fastify.storage.projectChatThreads.createWithInitialTurn({
-      id: threadId,
-      project_id: projectId,
-      user_id: userId,
-      title: null,
-      ...(body.message !== undefined
-        ? { initialTurn: {
-          messageId: randomUUID(), workItemId: randomUUID(), content: body.message,
-        } }
-        : {}),
-    });
-    if (body.message !== undefined) {
+    const createRequestId = body.createRequestId ?? randomUUID();
+    const createPayloadHash = createHash("sha256")
+      .update(JSON.stringify({ message: body.message ?? null }))
+      .digest("hex");
+    let accepted: { thread: ProjectChatThread; created: boolean };
+    try {
+      accepted = await fastify.storage.projectChatThreads.createIdempotent({
+        id: randomUUID(), project_id: projectId, user_id: userId, title: null,
+        create_request_id: createRequestId, create_payload_hash: createPayloadHash,
+        ...(body.message !== undefined
+          ? { initialTurn: {
+            messageId: randomUUID(), workItemId: randomUUID(), content: body.message,
+          } }
+          : {}),
+      });
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === "PROJECT_CHAT_CREATE_CONFLICT") {
+        return reply.code(409).send({ error: "createRequestId was already used with a different payload" });
+      }
+      throw error;
+    }
+    const { thread } = accepted;
+    if (accepted.created && body.message !== undefined) {
       try {
         await fastify.projectChatManager.startAcceptedThread(thread.id, userId);
       } catch (error) {

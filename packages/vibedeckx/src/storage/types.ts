@@ -1077,6 +1077,16 @@ export interface Storage {
       title: string | null;
       initialTurn?: { messageId: string; workItemId: string; content: string };
     }) => Promise<ProjectChatThread>;
+    createIdempotent: (opts: {
+      id: string;
+      project_id: string;
+      user_id: string;
+      title: string | null;
+      create_request_id: string;
+      create_payload_hash: string;
+      initialTurn?: { messageId: string; workItemId: string; content: string };
+    }) => Promise<{ thread: ProjectChatThread; created: boolean }>;
+    listWithNonterminalWork: (afterId: string | null, limit: number) => Promise<ProjectChatThread[]>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
     /**
      * Discovery-only lookup for routes that receive no project id. Callers
@@ -1159,6 +1169,10 @@ export interface Storage {
       refs: Array<{ entityType: ProjectChatContextEntityType; entityId: string }>,
     ) => Promise<ProjectChatContextRef[] | undefined>;
     listByThread: (threadId: string, projectId: string, userId: string, limit?: number) => Promise<ProjectChatContextRef[]>;
+    resolveExisting: (
+      projectId: string,
+      refs: Array<{ entity_type: ProjectChatContextEntityType; entity_id: string }>,
+    ) => Promise<Array<{ entity_type: ProjectChatContextEntityType; entity_id: string }>>;
   };
   projectChatOperations: {
     create: (opts: {

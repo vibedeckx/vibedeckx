@@ -132,6 +132,9 @@ interface LiveThread {
   }>;
   writeTail: Promise<void>;
   evictionTimer: ReturnType<typeof setTimeout> | null;
+  contextRefreshGeneration: number;
+  contextRefreshFlight: Promise<void> | null;
+  contextRefreshBroadcast: boolean;
 }
 
 interface ThreadLifecycle {
@@ -335,9 +338,10 @@ export class ProjectChatManager {
       if (this.shuttingDown) return;
       void this.trackOperation(this.handleCorrelatedEvent(event)).catch(() => undefined);
     });
-    this.startupReconciliation = this.trackOperation(this.reconcilePersistedOperations(
-      2, Date.now() + this.startupReconciliationDeadlineMs,
-    ))
+    this.startupReconciliation = this.trackOperation(this.recoverAcceptedThreads()
+      .then(() => this.reconcilePersistedOperations(
+        2, Date.now() + this.startupReconciliationDeadlineMs,
+      )))
       .catch((error) => {
         this.reconciliationDelayMs = Math.min(this.reconciliationDelayMs * 2, 5_000);
         return { processed: 0, quarantined: 0, retryScheduled: 0, remaining: true,
@@ -352,6 +356,21 @@ export class ProjectChatManager {
   /** Resolves after the bounded startup operation-journal reconciliation. */
   ready(): Promise<ProjectChatReconciliationReport> { return this.startupReconciliation; }
 
+  private async recoverAcceptedThreads(): Promise<void> {
+    let afterId: string | null = null;
+    while (!this.shuttingDown) {
+      const threads = await this.storage.projectChatThreads.listWithNonterminalWork(afterId, 100);
+      for (const thread of threads) {
+        if (this.shuttingDown) return;
+        const generation = this.lifecycle(thread.id).generation;
+        const live = await this.loadLiveThread(thread, generation);
+        this.pump(live);
+      }
+      if (threads.length < 100) return;
+      afterId = threads.at(-1)!.id;
+    }
+  }
+
   openThread(threadId: string, userId: string): Promise<ProjectChatSnapshot> {
     return this.trackOperation(this.openThreadInternal(threadId, userId));
   }
@@ -365,7 +384,7 @@ export class ProjectChatManager {
     const live = await this.loadLiveThread(thread, generation);
     this.assertLifecycle(threadId, generation, existingAtStart);
     live.thread = thread;
-    await this.refreshContextRefs(live, false);
+    await this.refreshContextRefsBestEffort(live, false);
     const snapshot = this.snapshot(live);
     this.scheduleEviction(live);
     return snapshot;
@@ -623,7 +642,8 @@ export class ProjectChatManager {
     this.reconciliationTimer = setTimeout(() => {
       this.reconciliationTimer = null;
       if (this.shuttingDown) return;
-      void this.trackOperation(this.reconcilePersistedOperations(2)).then(() => {
+      void this.trackOperation(this.recoverAcceptedThreads()
+        .then(() => this.reconcilePersistedOperations(2))).then(() => {
         this.reconciliationDelayMs = 100;
         this.scheduleReconciliation(
           this.reconciliationCursor === null ? this.reconciliationIntervalMs : 0,
@@ -1072,9 +1092,9 @@ export class ProjectChatManager {
     promise = Promise.all([
       this.storage.projectChatMessages.listByThread(thread.id, thread.project_id, thread.user_id),
       this.storage.projectChatWorkItems.listNonterminal(thread.id, thread.project_id, thread.user_id),
-      listProjectChatPublicContextRefs(this.storage, thread),
     ])
-      .then(([messages, workItems, contextRefs]): LiveThread => {
+      .then(async ([messages, workItems]): Promise<LiveThread> => {
+        const contextRefs = await listProjectChatPublicContextRefs(this.storage, thread).catch(() => []);
         this.assertLifecycle(thread.id, generation);
         const live: LiveThread = {
           thread,
@@ -1092,6 +1112,9 @@ export class ProjectChatManager {
           pendingApprovals: new Map(),
           writeTail: Promise.resolve(),
           evictionTimer: null,
+          contextRefreshGeneration: 0,
+          contextRefreshFlight: null,
+          contextRefreshBroadcast: false,
         };
         this.liveThreads.set(thread.id, live);
         if (live.queue.length > 0) queueMicrotask(() => this.pump(live));
@@ -1473,9 +1496,10 @@ export class ProjectChatManager {
     let release!: () => void;
     live.writeTail = new Promise<void>((resolve) => { release = resolve; });
     await previousWrite;
+    let message: ProjectChatMessage;
     try {
       if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
-      const message = await this.storage.projectChatWorkItems.appendEvent({
+      const persisted = await this.storage.projectChatWorkItems.appendEvent({
         id: queued.workId,
         thread_id: live.thread.id,
         project_id: live.thread.project_id,
@@ -1486,15 +1510,16 @@ export class ProjectChatManager {
         type,
         content,
       });
-      if (!message) throw new ProjectChatNotFoundError();
+      if (!persisted) throw new ProjectChatNotFoundError();
       if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
-      beforeBroadcast?.(message);
-      this.publishMessage(live, message);
-      await this.refreshContextRefsBestEffort(live);
-      return message;
+      beforeBroadcast?.(persisted);
+      this.publishMessage(live, persisted);
+      message = persisted;
     } finally {
       release();
     }
+    if (type === "tool_result") void this.refreshContextRefsBestEffort(live);
+    return message;
   }
 
   private publishMessage(live: LiveThread, message: ProjectChatMessage): void {
@@ -1528,22 +1553,41 @@ export class ProjectChatManager {
   }
 
   private async refreshContextRefs(live: LiveThread, broadcast = true): Promise<void> {
-    const next = await listProjectChatPublicContextRefs(this.storage, live.thread);
-    if (JSON.stringify(next) === JSON.stringify(live.contextRefs)) return;
-    live.contextRefs = next;
-    if (!broadcast) return;
-    this.broadcast(live, {
-      JsonPatch: [{
-        op: "replace",
-        path: "/contextRefs",
-        value: { type: "CONTEXT", content: [...next] },
-      }],
+    live.contextRefreshGeneration += 1;
+    live.contextRefreshBroadcast ||= broadcast;
+    if (live.contextRefreshFlight) return live.contextRefreshFlight;
+    const flight = (async () => {
+      while (true) {
+        const generation = live.contextRefreshGeneration;
+        const next = await listProjectChatPublicContextRefs(this.storage, live.thread);
+        if (generation !== live.contextRefreshGeneration) continue;
+        const shouldBroadcast = live.contextRefreshBroadcast;
+        live.contextRefreshBroadcast = false;
+        if (JSON.stringify(next) !== JSON.stringify(live.contextRefs)) {
+          live.contextRefs = next;
+          if (shouldBroadcast) {
+            this.broadcast(live, {
+              JsonPatch: [{
+                op: "replace",
+                path: "/contextRefs",
+                value: { type: "CONTEXT", content: [...next] },
+              }],
+            });
+          }
+        }
+        return;
+      }
+    })();
+    const wrapped = flight.finally(() => {
+      if (live.contextRefreshFlight === wrapped) live.contextRefreshFlight = null;
     });
+    live.contextRefreshFlight = wrapped;
+    return wrapped;
   }
 
-  private async refreshContextRefsBestEffort(live: LiveThread): Promise<void> {
+  private async refreshContextRefsBestEffort(live: LiveThread, broadcast = true): Promise<void> {
     try {
-      await this.refreshContextRefs(live);
+      await this.refreshContextRefs(live, broadcast);
     } catch {
       // Context is a recoverable projection of already-durable references.
       // A transient projection read must not turn a successfully persisted

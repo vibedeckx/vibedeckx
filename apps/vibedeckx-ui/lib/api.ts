@@ -2023,11 +2023,18 @@ export const api = {
     return (await res.json()).threads;
   },
 
-  async createProjectChatThread(projectId: string, message?: string): Promise<ProjectChatThread> {
+  async createProjectChatThread(
+    projectId: string,
+    message?: string,
+    createRequestId?: string,
+  ): Promise<ProjectChatThread> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/project-chat/threads`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(message === undefined ? {} : { message }),
+      body: JSON.stringify({
+        ...(message === undefined ? {} : { message }),
+        ...(createRequestId === undefined ? {} : { createRequestId }),
+      }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

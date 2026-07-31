@@ -16,7 +16,9 @@ vi.mock("./ws-authz.js", async (importOriginal) => {
 });
 
 import websocketRoutes from "./websocket-routes.js";
-import { ProjectChatManager, type ProjectChatModelRunner } from "../project-chat-manager.js";
+import {
+  ProjectChatManager, ProjectChatNotFoundError, type ProjectChatModelRunner,
+} from "../project-chat-manager.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 
@@ -141,6 +143,29 @@ describe("Project Chat WebSocket route", () => {
 
     await expect(firstMessage).resolves.toEqual({ error: "Thread not found" });
     await new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  });
+
+  it("distinguishes retryable open infrastructure failures from terminal not-found", async () => {
+    const infrastructureManager = {
+      openThread: vi.fn().mockRejectedValue(new Error("context storage unavailable")),
+      subscribe: vi.fn(),
+    };
+    await app.close();
+    app = await build(infrastructureManager as never);
+    baseUrl = app.listeningOrigin;
+    const retryable = await connect("thread-1");
+    await expect(retryable.firstMessage).resolves.toEqual({ error: "Project Chat temporarily unavailable" });
+    expect(infrastructureManager.subscribe).not.toHaveBeenCalled();
+
+    const notFoundManager = {
+      openThread: vi.fn().mockRejectedValue(new ProjectChatNotFoundError()),
+      subscribe: vi.fn(),
+    };
+    await app.close();
+    app = await build(notFoundManager as never);
+    baseUrl = app.listeningOrigin;
+    const missing = await connect("missing");
+    await expect(missing.firstMessage).resolves.toEqual({ error: "Thread not found" });
   });
 
   it("unsubscribes when the socket closes", async () => {

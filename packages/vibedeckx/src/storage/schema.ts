@@ -166,6 +166,8 @@ export interface ProjectChatThreadsTable {
   created_at: Generated<string>;
   updated_at: Generated<string>;
   archived_at: number | null;
+  create_request_id: Generated<string | null>;
+  create_payload_hash: Generated<string | null>;
 }
 
 export interface ProjectChatMessagesTable {

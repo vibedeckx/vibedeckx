@@ -49,6 +49,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       archived_at INTEGER,
+      create_request_id TEXT,
+      create_payload_hash TEXT,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
@@ -100,6 +102,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       PRIMARY KEY (thread_id, entity_type, entity_id),
       FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE
     );
+
+    CREATE INDEX IF NOT EXISTS idx_project_chat_context_refs_thread_recency
+      ON project_chat_context_refs(thread_id, last_referenced_at DESC, entity_type, entity_id);
 
     CREATE TABLE IF NOT EXISTS project_chat_operations (
       id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 512),
@@ -441,6 +446,19 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!projectChatOperationCols.some((c) => c.name === "next_retry_at")) {
     db.exec("ALTER TABLE project_chat_operations ADD COLUMN next_retry_at INTEGER");
   }
+
+  const projectChatThreadInfo = db.prepare("PRAGMA table_info(project_chat_threads)").all() as { name: string }[];
+  if (!projectChatThreadInfo.some((column) => column.name === "create_request_id")) {
+    db.exec("ALTER TABLE project_chat_threads ADD COLUMN create_request_id TEXT");
+  }
+  if (!projectChatThreadInfo.some((column) => column.name === "create_payload_hash")) {
+    db.exec("ALTER TABLE project_chat_threads ADD COLUMN create_payload_hash TEXT");
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_project_chat_threads_create_request
+      ON project_chat_threads(project_id, user_id, create_request_id)
+      WHERE create_request_id IS NOT NULL;
+  `);
 
   const projectChatWorkInfo = db.prepare("PRAGMA table_info(project_chat_work_items)").all() as { name: string }[];
   if (!projectChatWorkInfo.some((column) => column.name === "attempt")) {

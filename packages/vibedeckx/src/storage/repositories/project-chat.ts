@@ -20,7 +20,10 @@ import type {
 
 const now = () => sql<string>`strftime('%Y-%m-%d %H:%M:%f', 'now')`;
 
-const mapThread = (row: Selectable<ProjectChatThreadsTable>): ProjectChatThread => row;
+const mapThread = (row: Selectable<ProjectChatThreadsTable>): ProjectChatThread => {
+  const { create_request_id: _requestId, create_payload_hash: _payloadHash, ...thread } = row;
+  return thread;
+};
 
 const mapMessage = (row: Selectable<ProjectChatMessagesTable>): ProjectChatMessage => row;
 
@@ -158,6 +161,60 @@ export const createProjectChatRepos = (
           .executeTakeFirstOrThrow();
         return mapThread(row);
       });
+    },
+
+    createIdempotent: async ({
+      id, project_id, user_id, title, create_request_id, create_payload_hash, initialTurn,
+    }) => kdb.transaction().execute(async (trx) => {
+      const inserted = await trx.insertInto("project_chat_threads")
+        .values({
+          id, project_id, user_id, title, archived_at: null,
+          create_request_id, create_payload_hash,
+        })
+        .onConflict((conflict) => conflict
+          .columns(["project_id", "user_id", "create_request_id"])
+          .where("create_request_id", "is not", null)
+          .doNothing())
+        .returningAll()
+        .executeTakeFirst();
+      if (inserted) {
+        if (initialTurn) {
+          await trx.insertInto("project_chat_messages").values({
+            id: initialTurn.messageId, thread_id: id, sequence: 1,
+            type: "user", content: initialTurn.content,
+          }).execute();
+          await trx.insertInto("project_chat_work_items").values({
+            id: initialTurn.workItemId, thread_id: id, user_message_id: initialTurn.messageId,
+            content: initialTurn.content, status: "accepted", error: null,
+          }).execute();
+        }
+        return { thread: mapThread(inserted), created: true };
+      }
+      const existing = await trx.selectFrom("project_chat_threads")
+        .selectAll()
+        .where("project_id", "=", project_id)
+        .where("user_id", "=", user_id)
+        .where("create_request_id", "=", create_request_id)
+        .executeTakeFirst();
+      if (!existing) throw new Error("Project Chat thread identity collision");
+      if (existing.create_payload_hash !== create_payload_hash) {
+        throw Object.assign(new Error("Project Chat create request payload mismatch"), {
+          code: "PROJECT_CHAT_CREATE_CONFLICT",
+        });
+      }
+      return { thread: mapThread(existing), created: false };
+    }),
+
+    listWithNonterminalWork: async (afterId, limit) => {
+      let query = kdb.selectFrom("project_chat_threads as thread")
+        .innerJoin("project_chat_work_items as work", "work.thread_id", "thread.id")
+        .selectAll("thread")
+        .where("work.status", "in", ["accepted", "running"])
+        .distinct()
+        .orderBy("thread.id", "asc");
+      if (afterId !== null) query = query.where("thread.id", ">", afterId);
+      const rows = await query.limit(Math.max(0, limit)).execute();
+      return rows.map(mapThread);
     },
 
     listByProject: async (projectId, userId, limit, opts) => {
@@ -611,6 +668,79 @@ export const createProjectChatRepos = (
       if (limit !== undefined) query = query.limit(Math.max(0, limit));
       const rows = await query.execute();
       return rows.map(mapContextRef);
+    },
+
+    resolveExisting: async (projectId, refs) => {
+      const found = new Map<string, { entity_type: ProjectChatContextRef["entity_type"]; entity_id: string }>();
+      const add = (entity_type: ProjectChatContextRef["entity_type"], entity_id: string) => {
+        found.set(`${entity_type}\0${entity_id}`, { entity_type, entity_id });
+      };
+      const ids = (type: ProjectChatContextRef["entity_type"]) =>
+        [...new Set(refs.filter((ref) => ref.entity_type === type).map((ref) => ref.entity_id))];
+
+      const taskIds = ids("task");
+      if (taskIds.length) {
+        for (const row of await kdb.selectFrom("tasks").select("id")
+          .where("project_id", "=", projectId).where("id", "in", taskIds).execute()) add("task", row.id);
+      }
+      const sessionIds = ids("agent_session");
+      if (sessionIds.length) {
+        for (const row of await kdb.selectFrom("agent_sessions").select("id")
+          .where("project_id", "=", projectId).where("id", "in", sessionIds).execute()) add("agent_session", row.id);
+        for (const row of await kdb.selectFrom("remote_session_mappings as mapping")
+          .innerJoin("project_remotes as remote", (join) => join
+            .onRef("remote.project_id", "=", "mapping.project_id")
+            .onRef("remote.remote_server_id", "=", "mapping.remote_server_id"))
+          .select("mapping.local_session_id")
+          .where("mapping.project_id", "=", projectId)
+          .where("mapping.local_session_id", "in", sessionIds).execute()) {
+          add("agent_session", row.local_session_id);
+        }
+      }
+      const scheduleIds = ids("schedule");
+      if (scheduleIds.length) {
+        for (const row of await kdb.selectFrom("scheduled_tasks").select("id")
+          .where("project_id", "=", projectId).where("id", "in", scheduleIds).execute()) add("schedule", row.id);
+      }
+      const runIds = ids("schedule_run");
+      if (runIds.length) {
+        for (const row of await kdb.selectFrom("scheduled_task_runs as run")
+          .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+          .select("run.id")
+          .where("schedule.project_id", "=", projectId).where("run.id", "in", runIds).execute()) add("schedule_run", row.id);
+      }
+
+      const workspaceRefs = refs.flatMap((ref) => {
+        if (ref.entity_type !== "workspace") return [];
+        try {
+          const parsed = JSON.parse(ref.entity_id) as unknown;
+          if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== "string"
+            || (parsed[1] !== null && typeof parsed[1] !== "string")) return [];
+          return [{ entityId: ref.entity_id, target: parsed[0], branch: parsed[1] ?? "" }];
+        } catch { return []; }
+      });
+      if (workspaceRefs.length) {
+        const rows = await kdb.selectFrom("workspace_search_cache as workspace")
+          .leftJoin("project_remotes as remote", (join) => join
+            .onRef("remote.project_id", "=", "workspace.project_id")
+            .onRef("remote.remote_server_id", "=", "workspace.target_id"))
+          .select(["workspace.target_id", "workspace.branch"])
+          .where("workspace.project_id", "=", projectId)
+          .where("workspace.deleted_at", "is", null)
+          .where((eb) => eb.or(workspaceRefs.map(({ target, branch }) => eb.and([
+            eb("workspace.target_id", "=", target), eb("workspace.branch", "=", branch),
+          ]))))
+          .where((eb) => eb.or([
+            eb("workspace.target_id", "=", "local"), eb("remote.id", "is not", null),
+          ]))
+          .execute();
+        const available = new Set(rows
+          .map(({ target_id, branch }) => `${target_id}\0${branch}`));
+        for (const ref of workspaceRefs) {
+          if (available.has(`${ref.target}\0${ref.branch}`)) add("workspace", ref.entityId);
+        }
+      }
+      return [...found.values()];
     },
   },
 

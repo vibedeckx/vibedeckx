@@ -515,6 +515,26 @@ describe("createProjectChatTools", () => {
       .filter((ref) => ref.entity_type === "workspace")).toHaveLength(2);
   });
 
+  it("reports workspace truncation only when another authorized workspace exists", async () => {
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: Array.from({ length: 20 }, (_, index) => ({ branch: `branch-${index}` })),
+      sessions: [],
+    });
+    const surface = await tools();
+    await expect(surface.list_workspaces.execute({})).resolves.toMatchObject({
+      items: expect.arrayContaining([expect.objectContaining({ branch: "branch-19" })]),
+      truncated: false,
+    });
+
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: Array.from({ length: 21 }, (_, index) => ({ branch: `branch-${index}` })),
+      sessions: [],
+    }, 2);
+    const bounded = await surface.list_workspaces.execute({});
+    expect(bounded.items).toHaveLength(20);
+    expect(bounded.truncated).toBe(true);
+  });
+
   it("filters a retained remote workspace cache entry after project access is revoked", async () => {
     const serverId = await linkedRemoteServer();
     await storage.searchCache.applyCatalogSnapshot("project-1", serverId, {

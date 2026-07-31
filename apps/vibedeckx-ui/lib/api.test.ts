@@ -148,6 +148,25 @@ describe("createNewAgentSession", () => {
   });
 });
 
+describe("Project Chat create", () => {
+  it("sends the caller's explicit create request id", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 201,
+      json: async () => ({ thread: { id: "thread" } }),
+    } as Response);
+    global.fetch = fetchMock;
+    try {
+      await api.createProjectChatThread("p1", "hello", "stable-create-key");
+      expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+        message: "hello", createRequestId: "stable-create-key",
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
 describe("setMergeTarget", () => {
   it("PUTs an explicit target and returns true when the response is ok", async () => {
     const originalFetch = global.fetch;

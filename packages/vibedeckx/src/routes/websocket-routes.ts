@@ -10,6 +10,7 @@ import {
 import type { AgentWsInput } from "../agent-types.js";
 import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs } from "./ws-authz.js";
 import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
+import { ProjectChatNotFoundError } from "../project-chat-manager.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -51,8 +52,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         try {
           await fastify.projectChatManager.openThread(req.params.threadId, userId);
-        } catch {
-          try { socket.send(JSON.stringify({ error: "Thread not found" })); } catch { /* closed */ }
+        } catch (error) {
+          const message = error instanceof ProjectChatNotFoundError
+            ? "Thread not found"
+            : "Project Chat temporarily unavailable";
+          try { socket.send(JSON.stringify({ error: message })); } catch { /* closed */ }
           try { socket.close(); } catch { /* closed */ }
           return;
         }
