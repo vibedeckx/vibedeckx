@@ -22,6 +22,7 @@ import branchActivityRoutes from "./routes/branch-activity-routes.js";
 import mergeStatusRoutes from "./routes/merge-status-routes.js";
 import chatSessionRoutes from "./routes/chat-session-routes.js";
 import projectChatRoutes from "./routes/project-chat-routes.js";
+import projectActivityRoutes from "./routes/project-activity-routes.js";
 import taskRoutes from "./routes/task-routes.js";
 import ruleRoutes from "./routes/rule-routes.js";
 import commandRoutes from "./routes/command-routes.js";
@@ -367,6 +368,7 @@ export const createServer = async (opts: {
   server.register(mergeStatusRoutes);
   server.register(chatSessionRoutes);
   server.register(projectChatRoutes);
+  server.register(projectActivityRoutes);
   server.register(taskRoutes);
   server.register(ruleRoutes);
   server.register(commandRoutes);

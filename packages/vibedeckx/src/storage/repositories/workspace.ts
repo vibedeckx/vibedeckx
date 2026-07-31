@@ -73,6 +73,29 @@ export const createWorkspaceRepos = (
       return rows.map(mapTask);
     },
 
+    listPriorityByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("tasks")
+        .selectAll()
+        .where("project_id", "=", projectId)
+        .where("archived_at", "is", null)
+        .where("status", "in", ["todo", "in_progress"])
+        .where((eb) => eb.or([
+          eb("status", "=", "in_progress"),
+          eb("priority", "in", ["urgent", "high"]),
+        ]))
+        .orderBy(sql<number>`case
+          when status = 'in_progress' then 0
+          when priority = 'urgent' then 1
+          when priority = 'high' then 2
+          else 3
+        end`)
+        .orderBy("position", "asc")
+        .orderBy("id", "asc")
+        .limit(limit)
+        .execute();
+      return rows.map(mapTask);
+    },
+
     getById: async (id) => {
       const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapTask(row) : undefined;

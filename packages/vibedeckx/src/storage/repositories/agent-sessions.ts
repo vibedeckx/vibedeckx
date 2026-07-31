@@ -98,6 +98,65 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
+    listRecentByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("agent_sessions").selectAll()
+        .where("project_id", "=", projectId)
+        .orderBy("updated_at", "desc")
+        .orderBy(h.rowIdDesc())
+        .limit(limit)
+        .execute();
+      return rows.map(mapAgentSession);
+    },
+
+    listAttentionByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("agent_sessions").selectAll()
+        .where("project_id", "=", projectId)
+        .where((eb) => eb.or([
+          eb("status", "=", "error"),
+          eb.and([
+            eb("status", "=", "stopped"),
+            eb("last_user_message_at", "is not", null),
+            eb.or([
+              eb("last_completed_at", "is", null),
+              eb("last_completed_at", "<", eb.ref("last_user_message_at")),
+            ]),
+          ]),
+        ]))
+        .orderBy("updated_at", "desc")
+        .orderBy(h.rowIdDesc())
+        .limit(limit)
+        .execute();
+      return rows.map(mapAgentSession);
+    },
+
+    countRunningByProject: async (projectId) => {
+      const row = await kdb.selectFrom("agent_sessions")
+        .select(kdb.fn.countAll<number>().as("count"))
+        .where("project_id", "=", projectId)
+        .where("status", "=", "running")
+        .executeTakeFirstOrThrow();
+      return Number(row.count);
+    },
+
+    countAttentionByProject: async (projectId) => {
+      const row = await kdb.selectFrom("agent_sessions")
+        .select(kdb.fn.countAll<number>().as("count"))
+        .where("project_id", "=", projectId)
+        .where((eb) => eb.or([
+          eb("status", "=", "error"),
+          eb.and([
+            eb("status", "=", "stopped"),
+            eb("last_user_message_at", "is not", null),
+            eb.or([
+              eb("last_completed_at", "is", null),
+              eb("last_completed_at", "<", eb.ref("last_user_message_at")),
+            ]),
+          ]),
+        ]))
+        .executeTakeFirstOrThrow();
+      return Number(row.count);
+    },
+
     getByBranch: async (projectId, branch) => {
       const row = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)

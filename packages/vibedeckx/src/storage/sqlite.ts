@@ -1218,6 +1218,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       ON tasks(project_id, archived_at, position ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_status_position_id
       ON tasks(project_id, archived_at, status, position ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_status_priority_position_id
+      ON tasks(project_id, archived_at, status, priority, position ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_updated_id
       ON agent_sessions(project_id, updated_at DESC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_remote_session_mappings_project_local

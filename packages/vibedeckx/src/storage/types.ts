@@ -155,6 +155,21 @@ export interface ScheduledTaskRun {
   finished_at: string | null;
 }
 
+/** Bounded Project Overview projection. Full report/output stay on getById(). */
+export interface ScheduledTaskRunActivity {
+  id: string;
+  schedule_id: string;
+  status: ScheduledTaskRunStatus;
+  exit_code: number | null;
+  process_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+  scheduleName: string;
+  branch: string | null;
+  target: string;
+  reportPreview: string | null;
+}
+
 export interface RemoteExecutorProcessRow {
   local_process_id: string;
   remote_server_id: string;
@@ -663,6 +678,11 @@ export interface Storage {
     getById: (id: string) => Promise<ScheduledTaskRun | undefined>;
     /** Newest runs across schedules belonging to exactly one project; output/report omitted. */
     listRecentByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRun[]>;
+    /** Newest Project Overview rows, joined to schedule context with only a bounded report preview. */
+    getRecentByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRunActivity[]>;
+    /** Newest failed/timeout Project Overview rows, independent of the recent-runs card window. */
+    getAttentionByProject: (projectId: string, limit: number) => Promise<ScheduledTaskRunActivity[]>;
+    countByProjectStatuses: (projectId: string, statuses: ScheduledTaskRunStatus[]) => Promise<number>;
     /** Newest first. Never includes the output column (always null) — use getById for output. */
     getByScheduleId: (scheduleId: string, limit?: number) => Promise<ScheduledTaskRun[]>;
     /** Most recent run per schedule for the given IDs (output omitted). */
@@ -733,6 +753,13 @@ export interface Storage {
     getByProjectId: (projectId: string) => Promise<AgentSession[]>;
     /** Newest sessions for exactly one project, capped in SQL. */
     listByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
+    /** Project Overview recency list; insertion order breaks sub-millisecond timestamp ties. */
+    listRecentByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
+    /** Newest stopped/error sessions, independent of the recent-sessions card window. */
+    listAttentionByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
+    countRunningByProject: (projectId: string) => Promise<number>;
+    /** Errors plus stopped sessions whose latest user turn never completed. */
+    countAttentionByProject: (projectId: string) => Promise<number>;
     /** @deprecated — use listByBranch + getLatestByBranch */
     getByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
     listByBranch: (projectId: string, branch: string) => Promise<AgentSession[]>;
@@ -1151,6 +1178,8 @@ export interface Storage {
     getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
     /** Project-scoped, SQL-bounded task lookup for read-only assistant tools. */
     queryByProject: (projectId: string, opts: { query?: string; status?: TaskStatus; limit: number }) => Promise<Task[]>;
+    /** Active overview tasks ordered by in-progress, urgent, then high priority. */
+    listPriorityByProject: (projectId: string, limit: number) => Promise<Task[]>;
     getById: (id: string) => Promise<Task | undefined>;
     update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => Promise<Task | undefined>;
     archive: (id: string) => Promise<Task | undefined>;

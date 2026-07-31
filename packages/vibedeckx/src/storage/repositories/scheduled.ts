@@ -194,6 +194,55 @@ export const createScheduledRepos = (
         .limit(limit).execute();
       return rows.map(mapRun);
     },
+    getRecentByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("scheduled_task_runs as run")
+        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+        .select([
+          "run.id", "run.schedule_id", "run.status", "run.exit_code", "run.process_id",
+          "run.started_at", "run.finished_at", "schedule.name as scheduleName",
+          "schedule.branch", "schedule.target",
+          sql<string | null>`case when run.report is null then null else substr(run.report, 1, 500) end`.as("reportPreview"),
+        ])
+        .where("schedule.project_id", "=", projectId)
+        .orderBy("run.started_at", "desc")
+        .orderBy(h.rowIdDesc("run"))
+        .limit(limit)
+        .execute();
+      return rows.map((row) => ({
+        ...row,
+        status: row.status as ScheduledTaskRunStatus,
+      }));
+    },
+    getAttentionByProject: async (projectId, limit) => {
+      const rows = await kdb.selectFrom("scheduled_task_runs as run")
+        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+        .select([
+          "run.id", "run.schedule_id", "run.status", "run.exit_code", "run.process_id",
+          "run.started_at", "run.finished_at", "schedule.name as scheduleName",
+          "schedule.branch", "schedule.target",
+          sql<string | null>`case when run.report is null then null else substr(run.report, 1, 500) end`.as("reportPreview"),
+        ])
+        .where("schedule.project_id", "=", projectId)
+        .where("run.status", "in", ["failed", "timeout"])
+        .orderBy(sql<string>`coalesce(run.finished_at, run.started_at)`, "desc")
+        .orderBy(h.rowIdDesc("run"))
+        .limit(limit)
+        .execute();
+      return rows.map((row) => ({
+        ...row,
+        status: row.status as ScheduledTaskRunStatus,
+      }));
+    },
+    countByProjectStatuses: async (projectId, statuses) => {
+      if (statuses.length === 0) return 0;
+      const row = await kdb.selectFrom("scheduled_task_runs as run")
+        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
+        .select(kdb.fn.countAll<number>().as("count"))
+        .where("schedule.project_id", "=", projectId)
+        .where("run.status", "in", statuses)
+        .executeTakeFirstOrThrow();
+      return Number(row.count);
+    },
     getByScheduleId: async (scheduleId, limit = 50) => {
       const rows = await kdb.selectFrom("scheduled_task_runs")
         .select(["id", "schedule_id", "project_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
