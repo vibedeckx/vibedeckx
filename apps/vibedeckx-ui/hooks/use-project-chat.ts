@@ -6,6 +6,7 @@ import {
   getFreshToken,
   getWebSocketUrl,
   type ProjectChatMessage,
+  type ProjectChatContextRef,
   type ProjectChatSnapshot,
   type ProjectChatStatus,
   type ProjectChatThread,
@@ -17,7 +18,8 @@ type ProjectChatPatch = {
   value:
     | { type: "ENTRY"; content: ProjectChatMessage }
     | { type: "STATUS"; content: ProjectChatStatus }
-    | { type: "QUEUE"; content: number };
+    | { type: "QUEUE"; content: number }
+    | { type: "CONTEXT"; content: ProjectChatContextRef[] };
 };
 
 interface ProjectChatStreamState {
@@ -25,6 +27,7 @@ interface ProjectChatStreamState {
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
   queueLength: number;
+  contextRefs: ProjectChatContextRef[];
 }
 
 export const PROJECT_CHAT_CONNECT_TIMEOUT_MS = 10_000;
@@ -56,6 +59,7 @@ const emptyStreamState = (): ProjectChatStreamState => ({
   messages: [],
   status: "idle",
   queueLength: 0,
+  contextRefs: [],
 });
 
 function cacheSnapshot(cache: Map<string, ProjectChatSnapshot>, snapshot: ProjectChatSnapshot): void {
@@ -88,9 +92,18 @@ function isProjectChatMessage(value: unknown): value is ProjectChatMessage {
     && typeof value.created_at === "string";
 }
 
+function isProjectChatContextRef(value: unknown): value is ProjectChatContextRef {
+  return isRecord(value)
+    && typeof value.thread_id === "string"
+    && ["task", "workspace", "agent_session", "schedule", "schedule_run"].includes(String(value.entity_type))
+    && typeof value.entity_id === "string"
+    && typeof value.last_referenced_at === "string"
+    && typeof value.deleted === "boolean";
+}
+
 function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
   if (!isRecord(value) || !isRecord(value.identity) || !isRecord(value.thread)
-    || !Array.isArray(value.messages)) return false;
+    || !Array.isArray(value.messages) || !Array.isArray(value.contextRefs)) return false;
   return typeof value.identity.projectId === "string"
     && typeof value.identity.threadId === "string"
     && typeof value.identity.userId === "string"
@@ -98,6 +111,7 @@ function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
     && typeof value.thread.project_id === "string"
     && typeof value.thread.user_id === "string"
     && value.messages.every(isProjectChatMessage)
+    && value.contextRefs.every(isProjectChatContextRef)
     && (value.status === "idle" || value.status === "running")
     && Number.isSafeInteger(value.queueLength)
     && (value.queueLength as number) >= 0;
@@ -130,6 +144,10 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
     } else if (patch.path === "/queueLength" && patch.value.type === "QUEUE"
       && Number.isSafeInteger(patch.value.content) && patch.value.content >= 0) {
       next = { ...next, queueLength: patch.value.content };
+    } else if (patch.path === "/contextRefs" && patch.value.type === "CONTEXT"
+      && Array.isArray(patch.value.content) && patch.value.content.every(isProjectChatContextRef)
+      && patch.value.content.every((ref) => next.thread === null || ref.thread_id === next.thread.id)) {
+      next = { ...next, contextRefs: patch.value.content };
     } else {
       return null;
     }
@@ -287,6 +305,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
         messages: cached.messages,
         status: cached.status,
         queueLength: cached.queueLength,
+        contextRefs: cached.contextRefs,
       });
     } else {
       snapshotCacheRef.current.delete(threadId);
@@ -378,11 +397,12 @@ export function useProjectChat(projectId: string | null, threadId: string | null
         scheduleReconnect();
       }, PROJECT_CHAT_CONNECT_TIMEOUT_MS);
       try {
-        const [ownedThread, token] = await Promise.all([
+        const [ownedDetail, token] = await Promise.all([
           api.getProjectChatThread(activeThreadId, { signal: attempt.controller.signal }),
           getFreshToken(forceRefresh ? { skipCache: true } : undefined),
         ]);
         if (!isActiveAttempt(attempt)) return;
+        const { thread: ownedThread, contextRefs } = ownedDetail;
         if (ownedThread.project_id !== activeProjectId || ownedThread.id !== activeThreadId) {
           fatal = true;
           cancelAttempt(attempt);
@@ -390,7 +410,11 @@ export function useProjectChat(projectId: string | null, threadId: string | null
           setThreadLoading(false);
           return;
         }
-        publishStreamState({ ...streamStateRef.current, thread: ownedThread });
+        if (!Array.isArray(contextRefs) || !contextRefs.every(isProjectChatContextRef)
+          || contextRefs.some((ref) => ref.thread_id !== activeThreadId)) {
+          throw new Error("Invalid Project Chat thread context");
+        }
+        publishStreamState({ ...streamStateRef.current, thread: ownedThread, contextRefs });
         const socket = new WebSocket(getWebSocketUrl(`/api/project-chat/threads/${activeThreadId}/stream`, token));
         attempt.socket = socket;
         socketRef.current = socket;
@@ -435,6 +459,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                 messages: snapshot.messages,
                 status: snapshot.status,
                 queueLength: snapshot.queueLength,
+                contextRefs: snapshot.contextRefs,
               });
               setThreadLoading(false);
             } else if ("JsonPatch" in message) {
@@ -455,6 +480,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                   messages: next.messages,
                   status: next.status,
                   queueLength: next.queueLength,
+                  contextRefs: next.contextRefs,
                 });
               }
               publishStreamState(next);

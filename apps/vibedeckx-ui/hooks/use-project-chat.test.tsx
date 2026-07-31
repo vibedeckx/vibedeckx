@@ -15,13 +15,17 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api", () => mocks);
 
 import { useProjectChat, type UseProjectChatResult } from "./use-project-chat";
-import type { ProjectChatSnapshot, ProjectChatThread } from "@/lib/api";
+import type { ProjectChatSnapshot, ProjectChatThread, ProjectChatThreadDetail } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const thread = (id: string, projectId = "p1", title: string | null = id): ProjectChatThread => ({
   id, project_id: projectId, user_id: "user", title,
   created_at: "2026-07-31 00:00:00", updated_at: "2026-07-31 00:00:00", archived_at: null,
+});
+
+const detail = (id: string, projectId = "p1", title: string | null = id): ProjectChatThreadDetail => ({
+  thread: thread(id, projectId, title), contextRefs: [],
 });
 
 const snapshot = (id: string, projectId = "p1"): ProjectChatSnapshot => ({
@@ -33,6 +37,7 @@ const snapshot = (id: string, projectId = "p1"): ProjectChatSnapshot => ({
   }],
   status: "idle",
   queueLength: 0,
+  contextRefs: [],
 });
 
 const deferred = <T,>() => {
@@ -111,7 +116,7 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", FakeWebSocket);
   mocks.getFreshToken.mockResolvedValue("token");
   mocks.api.listProjectChatThreads.mockResolvedValue([]);
-  mocks.api.getProjectChatThread.mockImplementation(async (id: string) => thread(id));
+  mocks.api.getProjectChatThread.mockImplementation(async (id: string) => detail(id));
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -175,10 +180,19 @@ describe("useProjectChat", () => {
 
     act(() => {
       socket.open();
-      socket.message({ type: "project_chat_snapshot", snapshot: snapshot("t1") });
+      socket.message({ type: "project_chat_snapshot", snapshot: {
+        ...snapshot("t1"),
+        contextRefs: [{
+          thread_id: "t1", entity_type: "task", entity_id: "task-1",
+          last_referenced_at: "2026-07-31 00:00:00", deleted: false,
+        }],
+      } });
     });
     expect(latest).toMatchObject({ isConnected: true, status: "idle", queueLength: 0 });
     expect(latest.messages.map((message) => message.content)).toEqual(["hello"]);
+    expect(latest.contextRefs).toEqual([
+      expect.objectContaining({ entity_id: "task-1", deleted: false }),
+    ]);
 
     const assistant = {
       id: "m2", thread_id: "t1", sequence: 2, type: "assistant" as const, content: "world",
@@ -188,9 +202,16 @@ describe("useProjectChat", () => {
       { op: "add", path: "/messages/1", value: { type: "ENTRY", content: assistant } },
       { op: "replace", path: "/status", value: { type: "STATUS", content: "running" } },
       { op: "replace", path: "/queueLength", value: { type: "QUEUE", content: 2 } },
+      { op: "replace", path: "/contextRefs", value: { type: "CONTEXT", content: [{
+        thread_id: "t1", entity_type: "schedule", entity_id: "schedule-1",
+        last_referenced_at: "2026-07-31 00:00:01", deleted: false,
+      }] } },
     ] }));
     expect(latest.messages).toEqual([snapshot("t1").messages[0], assistant]);
     expect(latest).toMatchObject({ status: "running", queueLength: 2 });
+    expect(latest.contextRefs).toEqual([
+      expect.objectContaining({ entity_type: "schedule", entity_id: "schedule-1" }),
+    ]);
   });
 
   it("closes the old socket and reconnects with isolated state when the thread changes", async () => {
@@ -206,10 +227,12 @@ describe("useProjectChat", () => {
     expect(FakeWebSocket.instances[1].url).toContain("/t2/stream");
     expect(latest.thread?.id).toBe("t2");
     expect(latest.messages).toEqual([]);
+    expect(latest.contextRefs).toEqual([]);
 
     act(() => first.message({ type: "project_chat_snapshot", snapshot: snapshot("t1") }));
     expect(latest.thread?.id).toBe("t2");
     expect(latest.messages).toEqual([]);
+    expect(latest.contextRefs).toEqual([]);
   });
 
   it("sends and stops turns only for the selected thread", async () => {
@@ -363,7 +386,7 @@ describe("useProjectChat", () => {
     act(() => first.open());
     mocks.api.getProjectChatThread
       .mockRejectedValueOnce(new Error("preflight unavailable"))
-      .mockResolvedValue(thread("t1"));
+      .mockResolvedValue(detail("t1"));
     FakeWebSocket.constructionFailures = 1;
 
     act(() => first.disconnect());
@@ -418,21 +441,21 @@ describe("useProjectChat", () => {
   });
 
   it("times out and aborts a hung REST preflight before retrying", async () => {
-    const firstPreflight = deferred<ProjectChatThread>();
+    const firstPreflight = deferred<ProjectChatThreadDetail>();
     let firstSignal!: AbortSignal;
     mocks.api.getProjectChatThread
       .mockImplementationOnce((_id: string, opts: { signal: AbortSignal }) => {
         firstSignal = opts.signal;
         return firstPreflight.promise;
       })
-      .mockResolvedValue(thread("t1"));
+      .mockResolvedValue(detail("t1"));
     render("p1", "t1");
     await flush();
 
     act(() => vi.advanceTimersByTime(10_000));
     expect(firstSignal.aborted).toBe(true);
     expect(latest.error).toBe("Project Chat connection timed out");
-    await act(async () => firstPreflight.resolve(thread("t1")));
+    await act(async () => firstPreflight.resolve(detail("t1")));
     expect(FakeWebSocket.instances).toHaveLength(0);
 
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
@@ -460,14 +483,14 @@ describe("useProjectChat", () => {
   });
 
   it("aborts a hung connect attempt and starts one fresh attempt when coming online", async () => {
-    const stalePreflight = deferred<ProjectChatThread>();
+    const stalePreflight = deferred<ProjectChatThreadDetail>();
     let staleSignal!: AbortSignal;
     mocks.api.getProjectChatThread
       .mockImplementationOnce((_id: string, opts: { signal: AbortSignal }) => {
         staleSignal = opts.signal;
         return stalePreflight.promise;
       })
-      .mockResolvedValue(thread("t1"));
+      .mockResolvedValue(detail("t1"));
     render("p1", "t1");
     await flush();
 
@@ -477,7 +500,7 @@ describe("useProjectChat", () => {
     expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(2);
     expect(FakeWebSocket.instances).toHaveLength(1);
 
-    await act(async () => stalePreflight.resolve(thread("t1")));
+    await act(async () => stalePreflight.resolve(detail("t1")));
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
@@ -630,7 +653,7 @@ describe("useProjectChat", () => {
 
   it("clears cached snapshots from other projects", async () => {
     mocks.api.getProjectChatThread.mockImplementation(async (id: string) =>
-      thread(id, id === "p2-thread" ? "p2" : "p1"));
+      detail(id, id === "p2-thread" ? "p2" : "p1"));
     render("p1", "p1-thread");
     await flush();
     act(() => FakeWebSocket.instances.at(-1)?.message({

@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { ProjectChatThread } from "../storage/types.js";
+import { listProjectChatPublicContextRefs } from "../project-chat-context.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
@@ -137,15 +138,28 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const userId = resolveUserId(authResult);
     const threadId = randomUUID();
-    const thread = await fastify.storage.projectChatThreads.createWithInitialMessage({
+    const thread = await fastify.storage.projectChatThreads.createWithInitialTurn({
       id: threadId,
       project_id: projectId,
       user_id: userId,
       title: null,
       ...(body.message !== undefined
-        ? { initialMessage: { id: randomUUID(), content: body.message } }
+        ? { initialTurn: {
+          messageId: randomUUID(), workItemId: randomUUID(), content: body.message,
+        } }
         : {}),
     });
+    if (body.message !== undefined) {
+      try {
+        await fastify.projectChatManager.startAcceptedThread(thread.id, userId);
+      } catch (error) {
+        // Acceptance is already durable. A later stream open (or a process
+        // restart) reloads this exact journal row, so returning the created
+        // Thread is safer than inviting a client retry that creates a second
+        // Thread and duplicates the user's intent.
+        req.log.warn({ err: error, threadId: thread.id }, "Project Chat initial turn will resume later");
+      }
+    }
 
     return reply.code(201).send({ thread });
   });
@@ -155,7 +169,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const owned = await getOwnedThread(req, reply, req.params.threadId);
       if (!owned) return;
-      return reply.code(200).send({ thread: owned.thread });
+      const contextRefs = await listProjectChatPublicContextRefs(fastify.storage, owned.thread);
+      return reply.code(200).send({ thread: owned.thread, contextRefs });
     },
   );
 

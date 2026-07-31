@@ -569,6 +569,12 @@ export interface ProjectChatContextRef {
   entity_type: ProjectChatContextEntityType;
   entity_id: string;
   last_referenced_at: string;
+  deleted: boolean;
+}
+
+export interface ProjectChatThreadDetail {
+  thread: ProjectChatThread;
+  contextRefs: ProjectChatContextRef[];
 }
 
 export type ProjectChatOperationKind =
@@ -674,6 +680,7 @@ export interface ProjectChatSnapshot {
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
   queueLength: number;
+  contextRefs: ProjectChatContextRef[];
 }
 
 export interface ProjectAgentSessionActivity {
@@ -2032,7 +2039,7 @@ export const api = {
   async getProjectChatThread(
     threadId: string,
     opts?: { signal?: AbortSignal },
-  ): Promise<ProjectChatThread> {
+  ): Promise<ProjectChatThreadDetail> {
     const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`, {
       signal: opts?.signal,
     });
@@ -2043,7 +2050,7 @@ export const api = {
         { status: res.status },
       );
     }
-    return (await res.json()).thread;
+    return res.json();
   },
 
   async updateProjectChatThread(

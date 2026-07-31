@@ -20,6 +20,7 @@ describe("project chat thread routes", () => {
   let storage: Storage;
   let dir: string;
   let projectChatManager: {
+    startAcceptedThread: ReturnType<typeof vi.fn>;
     sendMessage: ReturnType<typeof vi.fn>;
     stopGeneration: ReturnType<typeof vi.fn>;
     resolveToolApproval: ReturnType<typeof vi.fn>;
@@ -50,6 +51,7 @@ describe("project chat thread routes", () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-project-chat-routes-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     projectChatManager = {
+      startAcceptedThread: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       stopGeneration: vi.fn().mockResolvedValue(true),
       resolveToolApproval: vi.fn().mockResolvedValue(true),
@@ -110,7 +112,7 @@ describe("project chat thread routes", () => {
   });
 
   describe("POST /api/projects/:projectId/project-chat/threads", () => {
-    it("creates a UUID thread and a trimmed first user message at sequence 1", async () => {
+    it("atomically accepts and starts a trimmed first turn exactly once", async () => {
       const response = await app.inject({
         method: "POST",
         url: "/api/projects/project-1/project-chat/threads",
@@ -125,6 +127,10 @@ describe("project chat thread routes", () => {
       expect(thread).not.toHaveProperty("workspace");
       expect(await storage.projectChatMessages.listByThread(thread.id, "project-1", "user-1"))
         .toEqual([expect.objectContaining({ sequence: 1, type: "user", content: "What changed?" })]);
+      expect(await storage.projectChatWorkItems.listNonterminal(thread.id, "project-1", "user-1"))
+        .toEqual([expect.objectContaining({ status: "accepted", content: "What changed?" })]);
+      expect(projectChatManager.startAcceptedThread).toHaveBeenCalledOnce();
+      expect(projectChatManager.startAcceptedThread).toHaveBeenCalledWith(thread.id, "user-1");
     });
 
     it("creates an empty thread when message is omitted", async () => {
@@ -136,6 +142,8 @@ describe("project chat thread routes", () => {
       expect(response.statusCode).toBe(201);
       const { thread } = response.json() as { thread: ProjectChatThread };
       expect(await storage.projectChatMessages.listByThread(thread.id, "project-1", "user-1")).toEqual([]);
+      expect(await storage.projectChatWorkItems.listNonterminal(thread.id, "project-1", "user-1")).toEqual([]);
+      expect(projectChatManager.startAcceptedThread).not.toHaveBeenCalled();
     });
 
     it("rejects malformed create payloads", async () => {
@@ -157,11 +165,11 @@ describe("project chat thread routes", () => {
       expect(await storage.projectChatThreads.listByProject("project-1", "user-1", 100)).toEqual([]);
     });
 
-    it("delegates initial-message persistence to the atomic thread create operation", async () => {
-      const createWithInitialMessage = vi.fn().mockRejectedValue(new Error("write failed"));
+    it("delegates initial-turn persistence to the atomic thread create operation", async () => {
+      const createWithInitialTurn = vi.fn().mockRejectedValue(new Error("write failed"));
       (storage.projectChatThreads as typeof storage.projectChatThreads & {
-        createWithInitialMessage: typeof createWithInitialMessage;
-      }).createWithInitialMessage = createWithInitialMessage;
+        createWithInitialTurn: typeof createWithInitialTurn;
+      }).createWithInitialTurn = createWithInitialTurn;
 
       const response = await app.inject({
         method: "POST",
@@ -170,8 +178,26 @@ describe("project chat thread routes", () => {
       });
 
       expect(response.statusCode).toBe(500);
-      expect(createWithInitialMessage).toHaveBeenCalledOnce();
+      expect(createWithInitialTurn).toHaveBeenCalledOnce();
       expect(await storage.projectChatThreads.listByProject("project-1", "user-1", 100)).toEqual([]);
+      expect(projectChatManager.startAcceptedThread).not.toHaveBeenCalled();
+    });
+
+    it("returns the durably accepted thread when immediate runtime startup fails", async () => {
+      projectChatManager.startAcceptedThread.mockRejectedValueOnce(new Error("runtime unavailable"));
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/projects/project-1/project-chat/threads",
+        payload: { message: "recover after restart" },
+      });
+
+      expect(response.statusCode).toBe(201);
+      const { thread } = response.json() as { thread: ProjectChatThread };
+      expect(await storage.projectChatMessages.listByThread(thread.id, "project-1", "user-1"))
+        .toHaveLength(1);
+      expect(await storage.projectChatWorkItems.listNonterminal(thread.id, "project-1", "user-1"))
+        .toHaveLength(1);
     });
 
     it("returns 404 for nonexistent and foreign projects", async () => {
@@ -187,13 +213,22 @@ describe("project chat thread routes", () => {
   });
 
   describe("thread routes by id", () => {
-    it("gets an owned thread", async () => {
+    it("gets an owned thread with bounded deterministic context references", async () => {
       await createThread({ title: "Status" });
+      await storage.tasks.create({ id: "a-task", project_id: "project-1", title: "One" });
+      await storage.projectChatContextRefs.touch("thread-1", "project-1", "user-1", "task", "z-deleted-task");
+      await storage.projectChatContextRefs.touch("thread-1", "project-1", "user-1", "task", "a-task");
 
       const response = await app.inject({ method: "GET", url: "/api/project-chat/threads/thread-1" });
 
       expect(response.statusCode).toBe(200);
       expect(response.json().thread).toMatchObject({ id: "thread-1", title: "Status" });
+      expect(response.json().contextRefs).toEqual([
+        expect.objectContaining({ entity_type: "task", entity_id: "a-task", deleted: false }),
+        expect.objectContaining({ entity_type: "task", entity_id: "z-deleted-task", deleted: true }),
+      ]);
+      expect(response.json().contextRefs[0]).not.toHaveProperty("user_id");
+      expect(response.json().contextRefs[0]).not.toHaveProperty("project_id");
     });
 
     it("returns the same 404 for missing, another user's, and another project's threads", async () => {

@@ -11,6 +11,10 @@ import type {
 } from "./storage/types.js";
 import { resolveChatModel } from "./utils/chat-model.js";
 import {
+  listProjectChatPublicContextRefs,
+  type ProjectChatPublicContextRef,
+} from "./project-chat-context.js";
+import {
   createProjectChatTools,
   type CreateProjectChatToolsOptions,
   type ProjectChatTool,
@@ -42,6 +46,7 @@ export interface ProjectChatSnapshot {
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
   queueLength: number;
+  contextRefs: ProjectChatPublicContextRef[];
 }
 
 export type ProjectChatStreamEvent = {
@@ -95,7 +100,8 @@ export type ProjectChatWsMessage =
       value:
         | { type: "ENTRY"; content: ProjectChatMessage }
         | { type: "STATUS"; content: ProjectChatStatus }
-        | { type: "QUEUE"; content: number };
+        | { type: "QUEUE"; content: number }
+        | { type: "CONTEXT"; content: ProjectChatPublicContextRef[] };
     }>;
   };
 
@@ -113,6 +119,7 @@ interface LiveThread {
   nextSequence: number;
   status: ProjectChatStatus;
   queue: QueuedTurn[];
+  contextRefs: ProjectChatPublicContextRef[];
   subscribers: Set<WebSocket>;
   abortController: AbortController | null;
   activeWork: Promise<void> | null;
@@ -358,9 +365,30 @@ export class ProjectChatManager {
     const live = await this.loadLiveThread(thread, generation);
     this.assertLifecycle(threadId, generation, existingAtStart);
     live.thread = thread;
+    await this.refreshContextRefs(live, false);
     const snapshot = this.snapshot(live);
     this.scheduleEviction(live);
     return snapshot;
+  }
+
+  /**
+   * Starts work that was durably accepted in the same transaction that
+   * created a Thread. Repeated calls only reload the journal and never append
+   * another user message or work item.
+   */
+  startAcceptedThread(threadId: string, userId: string): Promise<void> {
+    return this.trackOperation(this.startAcceptedThreadInternal(threadId, userId));
+  }
+
+  private async startAcceptedThreadInternal(threadId: string, userId: string): Promise<void> {
+    if (this.shuttingDown) throw new Error("Project Chat manager is shutting down");
+    const generation = this.lifecycle(threadId).generation;
+    const thread = await this.authorize(threadId, userId);
+    this.assertLifecycle(threadId, generation);
+    const live = await this.loadLiveThread(thread, generation);
+    this.assertLifecycle(threadId, generation);
+    this.cancelEviction(live);
+    this.pump(live);
   }
 
   sendMessage(threadId: string, userId: string, content: string): Promise<void> {
@@ -566,6 +594,7 @@ export class ProjectChatManager {
       if (live && live.thread.project_id === operation.project_id
         && live.thread.user_id === operation.user_id) {
         this.publishMessage(live, transitioned.message);
+        await this.refreshContextRefsBestEffort(live);
       }
     }
   }
@@ -1043,8 +1072,9 @@ export class ProjectChatManager {
     promise = Promise.all([
       this.storage.projectChatMessages.listByThread(thread.id, thread.project_id, thread.user_id),
       this.storage.projectChatWorkItems.listNonterminal(thread.id, thread.project_id, thread.user_id),
+      listProjectChatPublicContextRefs(this.storage, thread),
     ])
-      .then(([messages, workItems]): LiveThread => {
+      .then(([messages, workItems, contextRefs]): LiveThread => {
         this.assertLifecycle(thread.id, generation);
         const live: LiveThread = {
           thread,
@@ -1052,6 +1082,7 @@ export class ProjectChatManager {
           nextSequence: (messages.at(-1)?.sequence ?? 0) + 1,
           status: "idle",
           queue: workItems.map((work) => this.queueFromWorkItem(work)),
+          contextRefs,
           subscribers: new Set(),
           abortController: null,
           activeWork: null,
@@ -1459,6 +1490,7 @@ export class ProjectChatManager {
       if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
       beforeBroadcast?.(message);
       this.publishMessage(live, message);
+      await this.refreshContextRefsBestEffort(live);
       return message;
     } finally {
       release();
@@ -1491,7 +1523,33 @@ export class ProjectChatManager {
       messages: [...live.messages],
       status: live.status,
       queueLength: live.queue.length,
+      contextRefs: [...live.contextRefs],
     };
+  }
+
+  private async refreshContextRefs(live: LiveThread, broadcast = true): Promise<void> {
+    const next = await listProjectChatPublicContextRefs(this.storage, live.thread);
+    if (JSON.stringify(next) === JSON.stringify(live.contextRefs)) return;
+    live.contextRefs = next;
+    if (!broadcast) return;
+    this.broadcast(live, {
+      JsonPatch: [{
+        op: "replace",
+        path: "/contextRefs",
+        value: { type: "CONTEXT", content: [...next] },
+      }],
+    });
+  }
+
+  private async refreshContextRefsBestEffort(live: LiveThread): Promise<void> {
+    try {
+      await this.refreshContextRefs(live);
+    } catch {
+      // Context is a recoverable projection of already-durable references.
+      // A transient projection read must not turn a successfully persisted
+      // conversation event into a failed commander turn; reconnect/open will
+      // send a fresh authoritative snapshot.
+    }
   }
 
   private broadcastStatus(live: LiveThread): void {

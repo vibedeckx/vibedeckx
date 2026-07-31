@@ -1070,12 +1070,12 @@ export interface Storage {
   };
   projectChatThreads: {
     create: (opts: { id: string; project_id: string; user_id: string; title: string | null }) => Promise<ProjectChatThread>;
-    createWithInitialMessage: (opts: {
+    createWithInitialTurn: (opts: {
       id: string;
       project_id: string;
       user_id: string;
       title: string | null;
-      initialMessage?: { id: string; content: string };
+      initialTurn?: { messageId: string; workItemId: string; content: string };
     }) => Promise<ProjectChatThread>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
     /**
@@ -1158,7 +1158,7 @@ export interface Storage {
       userId: string,
       refs: Array<{ entityType: ProjectChatContextEntityType; entityId: string }>,
     ) => Promise<ProjectChatContextRef[] | undefined>;
-    listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatContextRef[]>;
+    listByThread: (threadId: string, projectId: string, userId: string, limit?: number) => Promise<ProjectChatContextRef[]>;
   };
   projectChatOperations: {
     create: (opts: {

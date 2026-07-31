@@ -111,6 +111,70 @@ describe("ProjectChatManager", () => {
     expect(snapshot).toMatchObject({ status: "idle", queueLength: 0 });
   });
 
+  it("starts an atomically accepted initial turn once and does not duplicate it on reopen", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "initial-thread", project_id: "project-1", user_id: "user-1", title: null,
+      initialTurn: { messageId: "initial-user", workItemId: "initial-work", content: "begin" },
+    });
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "started" };
+    });
+    const manager = new ProjectChatManager(storage, { run });
+
+    await manager.startAcceptedThread("initial-thread", "user-1");
+    await waitFor(async () => (await manager.openThread("initial-thread", "user-1")).status === "idle");
+    await manager.startAcceptedThread("initial-thread", "user-1");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(run).toHaveBeenCalledOnce();
+    expect((await storage.projectChatMessages.listByThread(
+      "initial-thread", "project-1", "user-1",
+    )).filter(({ type }) => type === "user")).toEqual([
+      expect.objectContaining({ id: "initial-user", content: "begin" }),
+    ]);
+    expect(await storage.projectChatWorkItems.listNonterminal(
+      "initial-thread", "project-1", "user-1",
+    )).toEqual([]);
+  });
+
+  it("resumes an accepted initial turn after manager restart without duplicating acceptance", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "restart-thread", project_id: "project-1", user_id: "user-1", title: null,
+      initialTurn: { messageId: "restart-user", workItemId: "restart-work", content: "resume" },
+    });
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "recovered" };
+    });
+    const restarted = new ProjectChatManager(storage, { run });
+
+    await restarted.openThread("restart-thread", "user-1");
+    await waitFor(async () => (await restarted.openThread("restart-thread", "user-1")).status === "idle");
+
+    expect(run).toHaveBeenCalledOnce();
+    expect((await storage.projectChatMessages.listByThread(
+      "restart-thread", "project-1", "user-1",
+    )).filter(({ type }) => type === "user")).toHaveLength(1);
+  });
+
+  it("loads authorized context refs into snapshots with deleted markers", async () => {
+    await createThread("context-thread");
+    await storage.tasks.create({ id: "task-live", project_id: "project-1", title: "Live" });
+    await storage.tasks.create({ id: "task-foreign", project_id: "project-2", title: "Foreign" });
+    await storage.projectChatContextRefs.touch("context-thread", "project-1", "user-1", "task", "task-live");
+    await storage.projectChatContextRefs.touch("context-thread", "project-1", "user-1", "task", "task-deleted");
+    await storage.projectChatContextRefs.touch("context-thread", "project-1", "user-1", "task", "task-foreign");
+    const manager = new ProjectChatManager(storage, reply("unused"));
+
+    const snapshot = await manager.openThread("context-thread", "user-1");
+
+    expect(snapshot.contextRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entity_id: "task-live", deleted: false }),
+      expect.objectContaining({ entity_id: "task-deleted", deleted: true }),
+      expect.objectContaining({ entity_id: "task-foreign", deleted: true }),
+    ]));
+    expect(snapshot.contextRefs).toHaveLength(3);
+  });
+
   it("describes Project Chat as project-scoped and independent of branches or workspaces", () => {
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("project-scoped");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("multiple workspaces");
@@ -912,6 +976,13 @@ describe("ProjectChatManager", () => {
         },
       },
     });
+    await manager.openThread("thread-1", "user-1");
+    const frames: Array<{ JsonPatch?: Array<{ path: string; value?: { content?: unknown } }> }> = [];
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1,
+      send(raw: string) { frames.push(JSON.parse(raw)); },
+    } as never);
+    frames.length = 0;
 
     await manager.sendMessage("thread-1", "user-1", "inspect task");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
@@ -920,6 +991,32 @@ describe("ProjectChatManager", () => {
     expect(messages.map((message) => message.type)).toEqual(["user", "tool_use", "tool_result", "assistant", "turn_end"]);
     expect(await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1"))
       .toContainEqual(expect.objectContaining({ entity_type: "task", entity_id: "task-1" }));
+    expect(frames.flatMap(({ JsonPatch }) => JsonPatch ?? [])).toContainEqual(expect.objectContaining({
+      op: "replace", path: "/contextRefs",
+      value: expect.objectContaining({ type: "CONTEXT" }),
+    }));
+  });
+
+  it("does not fail an accepted turn when the live Context projection temporarily cannot refresh", async () => {
+    await createThread("thread-context-failure");
+    const manager = new ProjectChatManager(storage, reply("reply survived"));
+    await manager.openThread("thread-context-failure", "user-1");
+    vi.spyOn(storage.projectChatContextRefs, "listByThread")
+      .mockRejectedValue(new Error("context read unavailable"));
+
+    await manager.sendMessage("thread-context-failure", "user-1", "continue");
+    await waitFor(async () => (await storage.projectChatWorkItems.listNonterminal(
+      "thread-context-failure", "project-1", "user-1",
+    )).length === 0);
+
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-context-failure", "project-1", "user-1",
+    )).map(({ type, content }) => ({ type, content }))).toEqual([
+      { type: "user", content: "continue" },
+      { type: "assistant", content: "reply survived" },
+      { type: "turn_end", content: JSON.stringify({ status: "completed" }) },
+    ]);
+    await manager.shutdown();
   });
 
   it("persists user, assistant, tool, and turn-end items monotonically before broadcasting", async () => {

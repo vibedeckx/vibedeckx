@@ -83,23 +83,59 @@ describe("project chat storage", () => {
     expect(threads.every((thread) => !("branch" in thread))).toBe(true);
   });
 
-  it("rolls back thread creation when the initial message insert violates a constraint", async () => {
+  it("atomically creates a thread, its initial user message, and accepted work item", async () => {
+    const thread = await storage.projectChatThreads.createWithInitialTurn({
+      id: "new-thread",
+      project_id: "p1",
+      user_id: "u1",
+      title: null,
+      initialTurn: {
+        messageId: "initial-message",
+        workItemId: "initial-work",
+        content: "start here",
+      },
+    });
+
+    expect(thread.id).toBe("new-thread");
+    expect(await storage.projectChatMessages.listByThread("new-thread", "p1", "u1"))
+      .toEqual([expect.objectContaining({
+        id: "initial-message", sequence: 1, type: "user", content: "start here",
+      })]);
+    expect(await storage.projectChatWorkItems.listNonterminal("new-thread", "p1", "u1"))
+      .toEqual([expect.objectContaining({
+        id: "initial-work", user_message_id: "initial-message", content: "start here", status: "accepted",
+      })]);
+  });
+
+  it("creates only the thread when no initial turn is supplied", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "empty-thread", project_id: "p1", user_id: "u1", title: null,
+    });
+
+    expect(await storage.projectChatMessages.listByThread("empty-thread", "p1", "u1")).toEqual([]);
+    expect(await storage.projectChatWorkItems.listNonterminal("empty-thread", "p1", "u1")).toEqual([]);
+  });
+
+  it("rolls back thread creation when the initial turn insert violates a constraint", async () => {
     await storage.projectChatThreads.create({ id: "existing", project_id: "p1", user_id: "u1", title: null });
     await storage.projectChatMessages.append({
       id: "duplicate-message", thread_id: "existing", project_id: "p1", user_id: "u1",
       sequence: 1, type: "user", content: "existing",
     });
 
-    await expect(storage.projectChatThreads.createWithInitialMessage({
+    await expect(storage.projectChatThreads.createWithInitialTurn({
       id: "rolled-back",
       project_id: "p1",
       user_id: "u1",
       title: null,
-      initialMessage: { id: "duplicate-message", content: "must fail" },
+      initialTurn: {
+        messageId: "duplicate-message", workItemId: "initial-work", content: "must fail",
+      },
     })).rejects.toThrow();
 
     expect(await storage.projectChatThreads.getById("rolled-back", "p1", "u1")).toBeUndefined();
     expect(await storage.projectChatMessages.listByThread("rolled-back", "p1", "u1")).toEqual([]);
+    expect(await storage.projectChatWorkItems.listNonterminal("rolled-back", "p1", "u1")).toEqual([]);
   });
 
   it("orders threads deterministically by updated_at DESC then id DESC", async () => {

@@ -124,19 +124,29 @@ export const createProjectChatRepos = (
       return mapThread(row);
     },
 
-    createWithInitialMessage: async ({ id, project_id, user_id, title, initialMessage }) => {
+    createWithInitialTurn: async ({ id, project_id, user_id, title, initialTurn }) => {
       return kdb.transaction().execute(async (trx) => {
         await trx.insertInto("project_chat_threads")
           .values({ id, project_id, user_id, title, archived_at: null })
           .execute();
-        if (initialMessage) {
+        if (initialTurn) {
           await trx.insertInto("project_chat_messages")
             .values({
-              id: initialMessage.id,
+              id: initialTurn.messageId,
               thread_id: id,
               sequence: 1,
               type: "user",
-              content: initialMessage.content,
+              content: initialTurn.content,
+            })
+            .execute();
+          await trx.insertInto("project_chat_work_items")
+            .values({
+              id: initialTurn.workItemId,
+              thread_id: id,
+              user_message_id: initialTurn.messageId,
+              content: initialTurn.content,
+              status: "accepted",
+              error: null,
             })
             .execute();
         }
@@ -588,8 +598,8 @@ export const createProjectChatRepos = (
       });
     },
 
-    listByThread: async (threadId, projectId, userId) => {
-      const rows = await kdb.selectFrom("project_chat_context_refs as ref")
+    listByThread: async (threadId, projectId, userId, limit) => {
+      let query = kdb.selectFrom("project_chat_context_refs as ref")
         .innerJoin("project_chat_threads as thread", "thread.id", "ref.thread_id")
         .selectAll("ref")
         .where("ref.thread_id", "=", threadId)
@@ -597,8 +607,9 @@ export const createProjectChatRepos = (
         .where("thread.user_id", "=", userId)
         .orderBy("ref.last_referenced_at", "desc")
         .orderBy("ref.entity_type", "asc")
-        .orderBy("ref.entity_id", "asc")
-        .execute();
+        .orderBy("ref.entity_id", "asc");
+      if (limit !== undefined) query = query.limit(Math.max(0, limit));
+      const rows = await query.execute();
       return rows.map(mapContextRef);
     },
   },
