@@ -509,6 +509,9 @@ export class ProjectChatManager {
     );
     for (const operation of operations) {
       if (operation.kind !== expectedKind) continue;
+      if (expectedKind === "agent_session_create"
+        && (operation.payload.kind !== "agent_session_create"
+          || operation.payload.initialInstructionDelivery !== "confirmed")) continue;
       if (expectedKind === "schedule_run") {
         if (operation.payload.kind !== "schedule_run"
           || operation.payload.scheduleId !== (event as { scheduleId: string }).scheduleId) continue;
@@ -569,30 +572,53 @@ export class ProjectChatManager {
     if (operation.kind === "agent_session_create" && operation.payload.kind === "agent_session_create") {
       const sessionId = operation.entity_id ?? operation.payload.sessionId;
       if (!operation.entity_id) return; // unresolved user selection
+      const payload = operation.payload;
+      if (payload.workspaceId && payload.target
+        && payload.workspaceId !== JSON.stringify([payload.target, payload.branch ?? null])) {
+        await this.transitionOperation(operation, "failed", {}, "Workspace is no longer authorized");
+        return;
+      }
       const local = await this.storage.agentSessions.getById(sessionId);
-      if (local?.project_id === operation.project_id && operation.status === "running") {
+      if (local?.project_id === operation.project_id && operation.status === "running"
+        && operation.payload.initialInstructionDelivery === "confirmed") {
         const status = local.status === "error" ? "failed"
           : local.status === "stopped" && local.last_completed_at ? "completed"
             : local.status === "stopped" ? "failed" : "running";
+        if (!(await this.restoreOperationContext(operation, [
+          { entityType: "workspace", entityId: operation.payload.workspaceId },
+          { entityType: "agent_session", entityId: sessionId },
+        ]))) return;
         await this.transitionOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
         return;
       }
       const remote = await this.toolDependencies?.remoteSessions?.getMapping(sessionId);
-      if (remote?.projectId === operation.project_id && operation.status === "running") {
+      if (remote?.projectId === operation.project_id && operation.status === "running"
+        && operation.payload.initialInstructionDelivery === "confirmed"
+        && remote.remoteServerId === payload.target
+        && await this.storage.projectRemotes.getByProjectAndServer(operation.project_id, remote.remoteServerId)) {
         const detail = await this.toolDependencies?.remoteSessions?.getDetail(remote, {
           maxEntries: 1, maxChars: 256,
         });
         const status = detail?.status === "error" ? "failed"
           : detail?.status === "stopped" ? "completed" : "running";
+        if (!(await this.restoreOperationContext(operation, [
+          { entityType: "workspace", entityId: operation.payload.workspaceId },
+          { entityType: "agent_session", entityId: sessionId },
+        ]))) return;
         await this.transitionOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
         return;
       }
       const service = this.toolDependencies?.mutationServices;
-      const payload = operation.payload;
       if (!service || !payload.workspaceId || !payload.target || payload.instruction === undefined
         || !payload.permissionMode || !payload.agentType) return;
+      if (payload.target !== "local" && !(await this.storage.projectRemotes.getByProjectAndServer(
+        operation.project_id, payload.target,
+      ))) {
+        await this.transitionOperation(operation, "failed", {}, "Workspace is no longer authorized");
+        return;
+      }
       try {
-        await service.createAgentSession({
+        const created = await service.createAgentSession({
           sessionId, idempotencyKey: operation.idempotency_key,
           projectId: operation.project_id, userId: operation.user_id,
           target: payload.target, branch: payload.branch ?? null,
@@ -601,9 +627,25 @@ export class ProjectChatManager {
           agentType: payload.agentType as "claude-code" | "codex",
           model: payload.model ?? null,
         });
-        await this.transitionOperation(operation, "running", { sessionId });
+        if (created.sessionId !== sessionId) throw new Error("Session identity mismatch");
+        if (!(await this.restoreOperationContext(operation, [
+          { entityType: "workspace", entityId: payload.workspaceId },
+          { entityType: "agent_session", entityId: sessionId },
+        ]))) return;
+        await this.transitionOperation(operation, "running", {
+          sessionId, initialInstructionDelivery: "confirmed",
+        });
       } catch (error) {
-        await this.transitionOperation(operation, "failed", { sessionId }, boundedStreamError(error).message);
+        const currentRemote = await this.toolDependencies?.remoteSessions?.getMapping(sessionId);
+        const exists = (await this.storage.agentSessions.getById(sessionId))?.project_id === operation.project_id
+          || (currentRemote?.projectId === operation.project_id
+            && currentRemote.remoteServerId === payload.target
+            && Boolean(await this.storage.projectRemotes.getByProjectAndServer(
+              operation.project_id, currentRemote.remoteServerId,
+            )));
+        if (!exists) {
+          await this.transitionOperation(operation, "failed", { sessionId }, boundedStreamError(error).message);
+        }
       }
       return;
     }
@@ -634,6 +676,9 @@ export class ProjectChatManager {
           target: operation.payload.target, idempotencyKey: operation.idempotency_key,
         });
         if (!sent) throw new Error("Agent session did not accept the instruction");
+        if (!(await this.restoreOperationContext(operation, [
+          { entityType: "agent_session", entityId: operation.payload.sessionId },
+        ]))) return;
         await this.transitionOperation(operation, "completed", { delivery: "confirmed" });
       } catch (error) {
         await this.transitionOperation(operation, "failed", { delivery: "pending" }, boundedStreamError(error).message);
@@ -647,9 +692,13 @@ export class ProjectChatManager {
         return;
       }
       const run = await this.storage.scheduledTaskRuns.getById(operation.payload.runId);
-      if (run?.project_id === operation.project_id) {
+      if (run?.project_id === operation.project_id && run.schedule_id === operation.payload.scheduleId) {
         const status = run.status === "running" ? "running"
           : run.status === "completed" || run.status === "skipped" ? "completed" : "failed";
+        if (!(await this.restoreOperationContext(operation, [
+          { entityType: "schedule", entityId: operation.payload.scheduleId },
+          { entityType: "schedule_run", entityId: operation.payload.runId },
+        ]))) return;
         await this.transitionOperation(operation, status, {
           scheduleId: operation.payload.scheduleId, runId: operation.payload.runId,
         }, status === "failed" ? "Schedule run failed" : null);
@@ -661,10 +710,31 @@ export class ProjectChatManager {
         );
         if ("error" in result) {
           await this.transitionOperation(operation, "failed", {}, boundedStreamError(result.error).message);
+        } else if (result.runId !== operation.payload.runId) {
+          await this.transitionOperation(operation, "failed", {}, "Schedule run identity mismatch");
         } else {
+          if (!(await this.restoreOperationContext(operation, [
+            { entityType: "schedule", entityId: operation.payload.scheduleId },
+            { entityType: "schedule_run", entityId: operation.payload.runId },
+          ]))) return;
           await this.transitionOperation(operation, "running", {});
         }
       }
+    }
+  }
+
+  private async restoreOperationContext(
+    operation: import("./storage/types.js").ProjectChatOperation,
+    refs: Array<{ entityType: import("./storage/types.js").ProjectChatContextEntityType; entityId?: string }>,
+  ): Promise<boolean> {
+    if (refs.some(({ entityId }) => !entityId)) return false;
+    try {
+      return Boolean(await this.storage.projectChatContextRefs.touchMany(
+        operation.thread_id, operation.project_id, operation.user_id,
+        refs as Array<{ entityType: import("./storage/types.js").ProjectChatContextEntityType; entityId: string }>,
+      ));
+    } catch {
+      return false;
     }
   }
 

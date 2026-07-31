@@ -433,6 +433,26 @@ describe("createProjectChatTools", () => {
       .filter((ref) => ref.entity_type === "workspace")).toHaveLength(2);
   });
 
+  it("filters a retained remote workspace cache entry after project access is revoked", async () => {
+    const serverId = await linkedRemoteServer();
+    await storage.searchCache.applyCatalogSnapshot("project-1", serverId, {
+      workspaces: [{ branch: "revoked" }], sessions: [],
+    });
+    const link = await storage.projectRemotes.getByProjectAndServer("project-1", serverId);
+    expect(link).toBeDefined();
+    await storage.projectRemotes.remove(link!.id);
+    const createOperation = vi.spyOn(storage.projectChatOperations, "create");
+    const touch = vi.spyOn(storage.projectChatContextRefs, "touchMany");
+    const surface = await tools();
+
+    await expect(surface.list_workspaces.execute({})).resolves.toEqual({ items: [], truncated: false });
+    await expect(surface.create_task.execute({ title: "No", assignedBranch: "revoked" }))
+      .rejects.toThrow("Assigned branch is not an available workspace");
+
+    expect(createOperation).not.toHaveBeenCalled();
+    expect(touch).not.toHaveBeenCalled();
+  });
+
   it("lists local and mapped remote sessions and bounds detailed transcript previews", async () => {
     await storage.agentSessions.create({ id: "local-session", project_id: "project-1", branch: "dev" });
     await storage.agentSessions.create({ id: "foreign-session", project_id: "project-2", branch: "secret" });
@@ -695,11 +715,13 @@ describe("createProjectChatTools", () => {
   });
 
   it("uses injective round-trippable workspace selectors", async () => {
+    const firstRemote = await linkedRemoteServer();
+    const secondRemote = await linkedRemoteServer();
     const pairs = [
-      { target: "same", branch: null },
-      { target: "same", branch: "main" },
-      { target: "a:b", branch: "c" },
-      { target: "a", branch: "b:c" },
+      { target: "local", branch: null },
+      { target: "local", branch: "main" },
+      { target: firstRemote, branch: "c" },
+      { target: secondRemote, branch: "b:c" },
     ];
     for (const target of new Set(pairs.map((pair) => pair.target))) {
       await storage.searchCache.applyCatalogSnapshot("project-1", target, {
@@ -834,7 +856,7 @@ describe("createProjectChatTools", () => {
       id: "task-id", project_id: "project-1", title: huge, description: huge,
       status: huge as never, priority: huge as never, assigned_branch: huge,
     });
-    await storage.searchCache.applyCatalogSnapshot("project-1", "target", {
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
       workspaces: [{ branch: "branch" }], sessions: [],
     });
     await storage.agentSessions.create({

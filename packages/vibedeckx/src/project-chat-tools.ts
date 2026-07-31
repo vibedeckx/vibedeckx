@@ -262,6 +262,7 @@ const pendingSessionOperationSchema = z.object({
   permissionMode: z.enum(["plan", "edit"]),
   agentType: z.enum(["claude-code", "codex"]),
   model: z.string().max(MODEL_CHAR_LIMIT).nullable(),
+  initialInstructionDelivery: z.literal("pending"),
   candidates: z.array(z.object({
     id: selectorSchema, target: z.string().min(1).max(TARGET_CHAR_LIMIT),
     branch: z.string().max(BRANCH_CHAR_LIMIT).nullable(),
@@ -271,6 +272,7 @@ const activeSessionOperationSchema = z.object({
   version: z.literal(1), kind: z.literal("agent_session_create"),
   operationId: selectorSchema, status: z.enum(["running", "completed"]),
   sessionId: selectorSchema, workspaceId: selectorSchema,
+  initialInstructionDelivery: z.literal("confirmed"),
 }).strict();
 const preview = (value: unknown, limit: number): string => {
   if (typeof value !== "string" || !value) return "";
@@ -495,6 +497,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
   if (!thread) throw new Error("Project Chat thread not found");
 
   const touchAll = async (entityType: ProjectChatContextEntityType, ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
     const tracked = await storage.projectChatContextRefs.touchMany(
       threadId,
       projectId,
@@ -575,13 +578,22 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     return finishOperation(current, "running", details);
   };
   const workspaceCandidates = async () => {
+    const project = userId === "local"
+      ? await storage.projects.getById(projectId)
+      : await storage.projects.getById(projectId, userId);
+    if (!project) throw new Error("Project is no longer authorized");
     const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
-    return rows.flatMap((row) => {
+    const candidates = rows.flatMap((row) => {
       if (typeof row.targetId !== "string" || !isNullableString(row.branch)) return [];
+      if (row.targetId.length > TARGET_CHAR_LIMIT || (row.branch?.length ?? 0) > BRANCH_CHAR_LIMIT) return [];
       const id = JSON.stringify([row.targetId, row.branch]);
       if (!isToolSelectorId(id)) return [];
       return [{ id, target: row.targetId, branch: row.branch }];
     });
+    const authorized = await Promise.all(candidates.map(async (candidate) => candidate.target === "local"
+      ? candidate
+      : (await storage.projectRemotes.getByProjectAndServer(projectId, candidate.target)) ? candidate : undefined));
+    return authorized.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
   };
   const validateAssignedBranch = async (branch: string | null | undefined): Promise<void> => {
     if (branch === null || branch === undefined) return;
@@ -687,6 +699,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           const operation = await beginOperation("agent_session_create", null, null, {
             phase: "workspace_selection", requestId: operationId, sessionId: sessionSeed, instruction,
             permissionMode, agentType, model,
+            initialInstructionDelivery: "pending",
             candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
           }, { operationId, idempotencyKey: `session:${sessionSeed}` });
           const selectionContent = JSON.stringify(operationPayload(
@@ -709,6 +722,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const operation = await beginOperation("agent_session_create", "agent_session", sessionId, {
           sessionId, workspaceId, target: workspace.target, branch: workspace.branch,
           instruction, permissionMode, agentType, model,
+          initialInstructionDelivery: "pending",
         }, { operationId, idempotencyKey: `session:${sessionId}` });
         try {
           await revalidateScope();
@@ -721,7 +735,9 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           if (created.sessionId !== sessionId) throw new Error("Session identity mismatch");
           await touchAll("workspace", [workspaceId]);
           await touch("agent_session", sessionId);
-          const running = await markOperationRunning(operation, { sessionId, workspaceId });
+          const running = await markOperationRunning(operation, {
+            sessionId, workspaceId, initialInstructionDelivery: "confirmed",
+          });
           return { ok: true, operationId: operation.id, sessionId, status: running.status };
         } catch (error) {
           if (await sessionExistsInScope(sessionId)) {
@@ -799,6 +815,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             ...pending.data, version: 1, kind: "agent_session_create", operationId: operation.id,
             status: "resolving", sessionId, workspaceId, selectedWorkspaceId: workspaceId,
             claimToken, target: workspace.target, branch: workspace.branch,
+            initialInstructionDelivery: "pending",
           },
         });
         if (!claim) throw new Error("Workspace selection request not found");
@@ -853,7 +870,9 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         }
         await touchAll("workspace", [workspaceId]);
         await touch("agent_session", sessionId);
-        const running = await markOperationRunning(correlated, { sessionId, workspaceId });
+        const running = await markOperationRunning(correlated, {
+          sessionId, workspaceId, initialInstructionDelivery: "confirmed",
+        });
         return { ok: true, operationId: operation.id, sessionId, status: running.status };
       },
     },
@@ -1003,14 +1022,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       description: "List known local and remote workspaces for this project.",
       inputSchema: emptySchema,
       execute: async () => {
-        const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
-        const entries = rows.flatMap((row) => {
-          if (typeof row.targetId !== "string" || !isNullableString(row.branch)) return [];
-          if (row.targetId.length > TARGET_CHAR_LIMIT || (row.branch?.length ?? 0) > BRANCH_CHAR_LIMIT) return [];
-          const canonicalId = JSON.stringify([row.targetId, row.branch]);
-          if (!isToolSelectorId(canonicalId)) return [];
-          const target = preview(row.targetId, TARGET_CHAR_LIMIT);
-          const branch = nullablePreview(row.branch, BRANCH_CHAR_LIMIT);
+        const candidates = await workspaceCandidates();
+        const entries = candidates.map(({ id: canonicalId, target: rawTarget, branch: rawBranch }) => {
+          const target = preview(rawTarget, TARGET_CHAR_LIMIT);
+          const branch = nullablePreview(rawBranch, BRANCH_CHAR_LIMIT);
           return [{
             canonicalId,
             item: {
@@ -1019,9 +1034,9 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
               branch,
             },
           }];
-        });
+        }).flat();
         await touchAll("workspace", entries.map((entry) => entry.canonicalId));
-        return { items: entries.map((entry) => entry.item), truncated: rows.length === LIST_LIMIT };
+        return { items: entries.map((entry) => entry.item), truncated: candidates.length === LIST_LIMIT };
       },
     },
     list_agent_sessions: {
