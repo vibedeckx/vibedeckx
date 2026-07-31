@@ -164,6 +164,15 @@ describe("project chat storage", () => {
 
   it("reopens the same database idempotently with the full thread ordering index", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    const legacyDb = new Database(dbPath);
+    try {
+      legacyDb.exec(`
+        CREATE INDEX idx_project_chat_threads_project_user_updated
+          ON project_chat_threads(project_id, user_id, updated_at DESC)
+      `);
+    } finally {
+      legacyDb.close();
+    }
     await storage.close();
     storage = await createSqliteStorage(dbPath);
 
@@ -175,6 +184,14 @@ describe("project chat storage", () => {
         "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_chat_threads_project_user_updated_id'",
       ).get() as { sql: string } | undefined;
       expect(index?.sql.replace(/\s+/g, " ")).toContain("project_id, user_id, updated_at DESC, id DESC");
+      const orderingIndexes = db.prepare(`
+        SELECT name FROM pragma_index_list('project_chat_threads')
+        WHERE name LIKE 'idx_project_chat_threads_project_user_updated%'
+        ORDER BY name
+      `).all() as { name: string }[];
+      expect(orderingIndexes.map(({ name }) => name)).toEqual([
+        "idx_project_chat_threads_project_user_updated_id",
+      ]);
     } finally {
       db.close();
     }

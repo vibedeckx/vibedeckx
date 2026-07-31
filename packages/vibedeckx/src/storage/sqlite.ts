@@ -55,6 +55,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE INDEX IF NOT EXISTS idx_project_chat_threads_project_user_updated_id
       ON project_chat_threads(project_id, user_id, updated_at DESC, id DESC);
 
+    DROP INDEX IF EXISTS idx_project_chat_threads_project_user_updated;
+
     CREATE TABLE IF NOT EXISTS project_chat_messages (
       id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
