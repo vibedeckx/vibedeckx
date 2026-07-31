@@ -256,6 +256,64 @@ describe("useProjectChat", () => {
     expect(latest.error).toBe("Project Chat stream identity mismatch");
   });
 
+  it.each([
+    ["cross-thread Context ref", (valid: ProjectChatSnapshot): ProjectChatSnapshot => ({
+      ...valid,
+      contextRefs: [{
+        thread_id: "other-thread", entity_type: "task", entity_id: "private-task",
+        last_referenced_at: "2026-07-31 00:00:01", deleted: false,
+      }],
+    })],
+    ["cross-thread message", (valid: ProjectChatSnapshot): ProjectChatSnapshot => ({
+      ...valid,
+      messages: valid.messages.map((message) => ({ ...message, thread_id: "other-thread" })),
+    })],
+    ["identity user mismatch", (valid: ProjectChatSnapshot): ProjectChatSnapshot => ({
+      ...valid,
+      identity: { ...valid.identity, userId: "other-user" },
+    })],
+  ] as const)("rejects a %s snapshot without contaminating current or cached state", async (_label, corrupt) => {
+    const valid = {
+      ...snapshot("t1"),
+      contextRefs: [{
+        thread_id: "t1", entity_type: "task" as const, entity_id: "task-1",
+        last_referenced_at: "2026-07-31 00:00:00", deleted: false,
+      }],
+    };
+    mocks.api.getProjectChatThread.mockResolvedValue({
+      thread: valid.thread, contextRefs: valid.contextRefs,
+    });
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.message({ type: "project_chat_snapshot", snapshot: valid }));
+
+    act(() => socket.message({ type: "project_chat_snapshot", snapshot: corrupt(valid) }));
+
+    expect(latest.messages).toEqual(valid.messages);
+    expect(latest.contextRefs).toEqual(valid.contextRefs);
+    expect(latest.thread).toEqual(valid.thread);
+    expect(latest.error).toBe("Invalid Project Chat stream message");
+    expect(socket.close).toHaveBeenCalledOnce();
+
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    // The reconnect keeps rendering only the last validated cache entry until
+    // the replacement socket supplies an authoritative snapshot.
+    expect(latest.messages).toEqual(valid.messages);
+    expect(latest.contextRefs).toEqual(valid.contextRefs);
+
+    const authoritative = {
+      ...snapshot("t1"),
+      messages: [{ ...snapshot("t1").messages[0], content: "authoritative" }],
+    };
+    act(() => FakeWebSocket.instances[1].message({
+      type: "project_chat_snapshot", snapshot: authoritative,
+    }));
+    expect(latest.messages[0].content).toBe("authoritative");
+    expect(latest.contextRefs).toEqual([]);
+  });
+
   it("does not let a late thread-list success clear a stream identity error", async () => {
     const list = deferred<ProjectChatThread[]>();
     mocks.api.listProjectChatThreads.mockReturnValue(list.promise);

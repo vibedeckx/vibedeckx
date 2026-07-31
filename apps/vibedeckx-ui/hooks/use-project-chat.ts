@@ -104,14 +104,20 @@ function isProjectChatContextRef(value: unknown): value is ProjectChatContextRef
 function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
   if (!isRecord(value) || !isRecord(value.identity) || !isRecord(value.thread)
     || !Array.isArray(value.messages) || !Array.isArray(value.contextRefs)) return false;
-  return typeof value.identity.projectId === "string"
+  const threadId = value.thread.id;
+  const projectId = value.thread.project_id;
+  const userId = value.thread.user_id;
+  return typeof threadId === "string"
+    && typeof projectId === "string"
+    && typeof userId === "string"
+    && typeof value.identity.projectId === "string"
     && typeof value.identity.threadId === "string"
     && typeof value.identity.userId === "string"
-    && typeof value.thread.id === "string"
-    && typeof value.thread.project_id === "string"
-    && typeof value.thread.user_id === "string"
-    && value.messages.every(isProjectChatMessage)
-    && value.contextRefs.every(isProjectChatContextRef)
+    && value.identity.threadId === threadId
+    && value.identity.projectId === projectId
+    && value.identity.userId === userId
+    && value.messages.every((message) => isProjectChatMessage(message) && message.thread_id === threadId)
+    && value.contextRefs.every((ref) => isProjectChatContextRef(ref) && ref.thread_id === threadId)
     && (value.status === "idle" || value.status === "running")
     && Number.isSafeInteger(value.queueLength)
     && (value.queueLength as number) >= 0;
