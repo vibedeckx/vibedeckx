@@ -112,11 +112,22 @@ describe("Project Chat WebSocket route", () => {
     socket.on("message", (raw) => liveFrames.push(JSON.parse(raw.toString())));
     await manager.sendMessage("thread-1", "user-1", "new question");
     await vi.waitFor(() => {
-      expect(liveFrames.filter((frame) => frame.type === "project_chat_message")).toHaveLength(3);
+      const messagePatches = liveFrames.flatMap((frame) =>
+        ((frame.JsonPatch as Array<{ path: string }> | undefined) ?? [])
+          .filter((patch) => patch.path.startsWith("/messages/")));
+      expect(messagePatches).toHaveLength(3);
     });
 
-    for (const frame of liveFrames.filter((item) => item.type === "project_chat_message")) {
-      const message = frame.message as { sequence: number };
+    expect(liveFrames.every((frame) => Array.isArray(frame.JsonPatch))).toBe(true);
+    const patches = liveFrames.flatMap((frame) => frame.JsonPatch as Array<{
+      op: string;
+      path: string;
+      value?: { content?: unknown };
+    }>);
+    expect(patches).toContainEqual(expect.objectContaining({ op: "replace", path: "/status" }));
+    expect(patches).toContainEqual(expect.objectContaining({ op: "replace", path: "/queueLength" }));
+    for (const patch of patches.filter((item) => item.path.startsWith("/messages/"))) {
+      const message = patch.value?.content as { sequence: number };
       const persisted = await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1");
       expect(persisted.some((item) => item.sequence === message.sequence)).toBe(true);
     }

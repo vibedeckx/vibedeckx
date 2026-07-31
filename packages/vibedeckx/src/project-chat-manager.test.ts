@@ -95,10 +95,15 @@ describe("ProjectChatManager", () => {
       projectChatUserId: "user-1",
       readyState: 1,
       send(raw: string) {
-        const frame = JSON.parse(raw) as { message?: { sequence: number } };
-        if (frame.message) {
+        const frame = JSON.parse(raw) as {
+          JsonPatch?: Array<{ path: string; value?: { content?: { sequence?: number } } }>;
+        };
+        const message = frame.JsonPatch
+          ?.find((entry) => entry.path.startsWith("/messages/"))
+          ?.value?.content;
+        if (typeof message?.sequence === "number") {
           const persisted = storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1");
-          frames.push(persisted.then((messages) => messages.some((message) => message.sequence === frame.message!.sequence)));
+          frames.push(persisted.then((messages) => messages.some((item) => item.sequence === message.sequence)));
         }
       },
     };
@@ -112,6 +117,7 @@ describe("ProjectChatManager", () => {
       "user", "assistant", "tool_use", "tool_result", "turn_end",
     ]);
     expect(messages.map((message) => message.sequence)).toEqual([1, 2, 3, 4, 5]);
+    expect(frames).toHaveLength(5);
     await expect(Promise.all(frames)).resolves.not.toContain(false);
   });
 
@@ -282,6 +288,83 @@ describe("ProjectChatManager", () => {
       .toEqual(["first", "second"]);
   });
 
+  it.each([
+    { name: "after the queue marker", extra: [] },
+    { name: "after the user message", extra: [{ type: "user" as const, content: "recover me" }] },
+    {
+      name: "after the start marker",
+      extra: [
+        { type: "user" as const, content: "recover me" },
+        {
+          type: "operation" as const,
+          content: JSON.stringify({ kind: "queued_user_started", queueId: "queue-crash" }),
+        },
+      ],
+    },
+  ])("resumes unfinished durable work $name without duplicating its user message", async ({ extra }) => {
+    await createThread("thread-1");
+    const persisted = [
+      {
+        type: "operation" as const,
+        content: JSON.stringify({ kind: "queued_user", queueId: "queue-crash", content: "recover me" }),
+      },
+      ...extra,
+    ];
+    for (const [index, message] of persisted.entries()) {
+      await storage.projectChatMessages.append({
+        id: `crash-${index}`,
+        thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+        sequence: index + 1, type: message.type, content: message.content,
+      });
+    }
+    const starts: string[] = [];
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        starts.push(input.messages.at(-1)?.content ?? "");
+        yield { type: "assistant", content: "recovered reply" };
+      },
+    });
+
+    await manager.openThread("thread-1", "user-1");
+    await waitFor(() => starts.length === 1);
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    const messages = await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1");
+    expect(starts).toEqual(["recover me"]);
+    expect(messages.filter((message) => message.type === "user" && message.content === "recover me")).toHaveLength(1);
+    expect(messages).toContainEqual(expect.objectContaining({ type: "assistant", content: "recovered reply" }));
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "turn_end",
+      content: JSON.stringify({ status: "completed", queueId: "queue-crash" }),
+    }));
+  });
+
+  it("does not rerun durable work that has a terminal turn end", async () => {
+    await createThread("thread-1");
+    const persisted = [
+      { type: "operation" as const, content: JSON.stringify({ kind: "queued_user", queueId: "queue-done", content: "done" }) },
+      { type: "user" as const, content: "done" },
+      { type: "operation" as const, content: JSON.stringify({ kind: "queued_user_started", queueId: "queue-done" }) },
+      { type: "assistant" as const, content: "finished" },
+      { type: "turn_end" as const, content: JSON.stringify({ status: "completed", queueId: "queue-done" }) },
+    ];
+    for (const [index, message] of persisted.entries()) {
+      await storage.projectChatMessages.append({
+        id: `done-${index}`,
+        thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+        sequence: index + 1, type: message.type, content: message.content,
+      });
+    }
+    const run = vi.fn(async function* () { yield { type: "assistant" as const, content: "duplicate" }; });
+    const manager = new ProjectChatManager(storage, { run });
+
+    const snapshot = await manager.openThread("thread-1", "user-1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(run).not.toHaveBeenCalled();
+    expect(snapshot.messages).toHaveLength(5);
+  });
+
   it("delivers an approval decision back to the pending model turn", async () => {
     await createThread("thread-1");
     let decide!: (approved: boolean) => void;
@@ -307,6 +390,247 @@ describe("ProjectChatManager", () => {
     expect((await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .some((message) => message.type === "assistant" && message.content === "denied")).toBe(true);
   });
+
+  it("registers an explicit approval id before broadcasting arbitrary request content", async () => {
+    await createThread("thread-1");
+    let decide!: (approved: boolean) => void;
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        const decision = new Promise<boolean>((resolve) => { decide = resolve; });
+        yield {
+          type: "tool_approval_request",
+          content: "Allow this action?",
+          approvalId: "explicit-approval",
+          resolveApproval: decide,
+        };
+        yield { type: "assistant", content: (await decision) ? "approved" : "denied" };
+      },
+    });
+    await manager.openThread("thread-1", "user-1");
+    let immediateResolution: Promise<boolean> | undefined;
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1",
+      readyState: 1,
+      send(raw: string) {
+        if (raw.includes("Allow this action?")) {
+          immediateResolution = manager.resolveToolApproval(
+            "thread-1", "user-1", "explicit-approval", true,
+          );
+        }
+      },
+    } as never);
+
+    await manager.sendMessage("thread-1", "user-1", "do it");
+    await waitFor(() => immediateResolution !== undefined);
+    await expect(immediateResolution).resolves.toBe(true);
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    expect((await manager.openThread("thread-1", "user-1")).messages)
+      .toContainEqual(expect.objectContaining({ type: "assistant", content: "approved" }));
+  });
+
+  it("settles and invalidates a pending approval when generation is stopped", async () => {
+    await createThread("thread-1");
+    let decide!: (approved: boolean) => void;
+    let observedDecision: boolean | undefined;
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        const decision = new Promise<boolean>((resolve) => { decide = resolve; });
+        yield {
+          type: "tool_approval_request", content: JSON.stringify({ approvalId: "stop-approval" }),
+          approvalId: "stop-approval", resolveApproval: decide,
+        };
+        observedDecision = await decision;
+      },
+    });
+    await manager.sendMessage("thread-1", "user-1", "do it");
+    await waitFor(async () => (await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
+      .some((message) => message.type === "tool_approval_request"));
+
+    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    const firstResult = await Promise.race([
+      waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle")
+        .then(() => "settled" as const),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+    if (firstResult === "timeout") {
+      await manager.resolveToolApproval("thread-1", "user-1", "stop-approval", false);
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    }
+
+    expect(firstResult).toBe("settled");
+    expect(observedDecision).toBe(false);
+    await expect(manager.resolveToolApproval("thread-1", "user-1", "stop-approval", true)).resolves.toBe(false);
+  });
+
+  it("settles an approval stopped after persistence but before resolver registration", async () => {
+    await createThread("thread-1");
+    const approvalPersisted = deferred();
+    const releaseAppend = deferred();
+    const originalAppend = storage.projectChatMessages.append.bind(storage.projectChatMessages);
+    vi.spyOn(storage.projectChatMessages, "append").mockImplementation(async (opts) => {
+      const result = await originalAppend(opts);
+      if (opts.type === "tool_approval_request") {
+        approvalPersisted.resolve();
+        await releaseAppend.promise;
+      }
+      return result;
+    });
+    let decide!: (approved: boolean) => void;
+    let observedDecision: boolean | undefined;
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        const decision = new Promise<boolean>((resolve) => { decide = resolve; });
+        yield {
+          type: "tool_approval_request", content: "persisting",
+          approvalId: "persisting-approval", resolveApproval: decide,
+        };
+        observedDecision = await decision;
+      },
+    });
+    await manager.sendMessage("thread-1", "user-1", "do it");
+    await approvalPersisted.promise;
+
+    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    releaseAppend.resolve();
+    const settled = await Promise.race([
+      waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle")
+        .then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+    if (!settled) {
+      await manager.resolveToolApproval("thread-1", "user-1", "persisting-approval", false);
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    }
+
+    expect(settled).toBe(true);
+    expect(observedDecision).toBe(false);
+  });
+
+  it("settles an approval that arrives after its turn was aborted", async () => {
+    await createThread("thread-1");
+    const releaseApproval = deferred();
+    let observedDecision: boolean | undefined;
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        await releaseApproval.promise;
+        yield {
+          type: "tool_approval_request", content: "late approval",
+          approvalId: "late-approval", resolveApproval: (decision) => { observedDecision = decision; },
+        };
+      },
+    });
+    await manager.sendMessage("thread-1", "user-1", "do it");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+
+    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    releaseApproval.resolve();
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+    expect(observedDecision).toBe(false);
+  });
+
+  it.each(["append", "touch"] as const)(
+    "settles an approval when %s persistence fails before resolver registration",
+    async (failurePoint) => {
+      await createThread("thread-1");
+      let approvalAppended = false;
+      if (failurePoint === "append") {
+        const originalAppend = storage.projectChatMessages.append.bind(storage.projectChatMessages);
+        vi.spyOn(storage.projectChatMessages, "append").mockImplementation(async (opts) => {
+          if (opts.type === "tool_approval_request") throw new Error("approval append failed");
+          return originalAppend(opts);
+        });
+      } else {
+        const originalAppend = storage.projectChatMessages.append.bind(storage.projectChatMessages);
+        vi.spyOn(storage.projectChatMessages, "append").mockImplementation(async (opts) => {
+          const result = await originalAppend(opts);
+          approvalAppended = opts.type === "tool_approval_request";
+          return result;
+        });
+        const originalTouch = storage.projectChatThreads.touchUpdatedAt.bind(storage.projectChatThreads);
+        vi.spyOn(storage.projectChatThreads, "touchUpdatedAt").mockImplementation(async (...args) => {
+          if (approvalAppended) {
+            approvalAppended = false;
+            throw new Error("approval touch failed");
+          }
+          return originalTouch(...args);
+        });
+      }
+      let observedDecision: boolean | undefined;
+      const manager = new ProjectChatManager(storage, {
+        async *run() {
+          yield {
+            type: "tool_approval_request", content: "failing approval",
+            approvalId: "failing-approval", resolveApproval: (decision) => { observedDecision = decision; },
+          };
+        },
+      });
+
+      await manager.sendMessage("thread-1", "user-1", "do it");
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+      expect(observedDecision).toBe(false);
+    },
+  );
+
+  it("settles pending approvals so shutdown cannot hang", async () => {
+    await createThread("thread-1");
+    let decide!: (approved: boolean) => void;
+    let observedDecision: boolean | undefined;
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        const decision = new Promise<boolean>((resolve) => { decide = resolve; });
+        yield {
+          type: "tool_approval_request", content: JSON.stringify({ approvalId: "shutdown-approval" }),
+          approvalId: "shutdown-approval", resolveApproval: decide,
+        };
+        observedDecision = await decision;
+      },
+    });
+    await manager.sendMessage("thread-1", "user-1", "do it");
+    await waitFor(async () => (await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
+      .some((message) => message.type === "tool_approval_request"));
+
+    const shutdown = manager.shutdown();
+    const firstResult = await Promise.race([
+      shutdown.then(() => "settled" as const),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+    if (firstResult === "timeout") {
+      await manager.resolveToolApproval("thread-1", "user-1", "shutdown-approval", false);
+      await shutdown;
+    }
+
+    expect(firstResult).toBe("settled");
+    expect(observedDecision).toBe(false);
+    await expect(manager.resolveToolApproval("thread-1", "user-1", "shutdown-approval", true)).resolves.toBe(false);
+  });
+
+  it.each(["completed", "error"] as const)(
+    "clears stale approvals after a turn ends as %s",
+    async (outcome) => {
+      await createThread("thread-1");
+      const observedDecisions: boolean[] = [];
+      const manager = new ProjectChatManager(storage, {
+        async *run() {
+          yield {
+            type: "tool_approval_request", content: "terminal",
+            approvalId: "terminal-approval",
+            resolveApproval: (decision) => { observedDecisions.push(decision); },
+          };
+          if (outcome === "error") throw new Error("model failed");
+          yield { type: "assistant", content: "done" };
+        },
+      });
+      await manager.sendMessage("thread-1", "user-1", "do it");
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+
+      await expect(manager.resolveToolApproval(
+        "thread-1", "user-1", "terminal-approval", true,
+      )).resolves.toBe(false);
+      expect(observedDecisions).toEqual([false]);
+    },
+  );
 
   it("closes subscribers and aborts live work before a thread is deleted", async () => {
     await createThread("thread-1");
