@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScheduleFormDialog } from "./schedule-form-dialog";
 
@@ -84,7 +84,10 @@ export function SchedulesView({
 
   const [runs, setRuns] = useState<ScheduleRun[]>([]);
   const [editOpen, setEditOpen] = useState(false);
-  const [viewRun, setViewRun] = useState<ScheduleRun | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRun, setSelectedRun] = useState<ScheduleRun | null>(null);
+  const [runLoading, setRunLoading] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Schedule awaiting delete confirmation. Held as the full object (not a
   // boolean on `selected`) so the dialog text stays stable even if the
@@ -108,12 +111,56 @@ export function SchedulesView({
     const scheduleId = selected?.id;
     let stale = false;
     void (scheduleId ? refetchRuns(scheduleId) : Promise.resolve([])).then((result) => {
-      if (!stale) setRuns(result ?? []);
+      if (stale) return;
+      const nextRuns = result ?? [];
+      setRuns(nextRuns);
+      setSelectedRunId((current) => {
+        if (current && nextRuns.some((run) => run.id === current && run.status !== "skipped")) {
+          return current;
+        }
+        return nextRuns.find((run) => run.status !== "skipped")?.id ?? null;
+      });
     });
     return () => {
       stale = true;
     };
   }, [selected?.id, schedules, refetchRuns]);
+
+  useEffect(() => {
+    setSelectedRunId(null);
+    setSelectedRun(null);
+    setRunError(null);
+  }, [selected?.id]);
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setSelectedRun(null);
+      setRunLoading(false);
+      setRunError(null);
+      return;
+    }
+
+    let stale = false;
+    setSelectedRun(null);
+    setRunLoading(true);
+    setRunError(null);
+    void api.getScheduleRun(selectedRunId).then(
+      (run) => {
+        if (stale) return;
+        setSelectedRun(run);
+        setRunLoading(false);
+      },
+      (err: unknown) => {
+        if (stale) return;
+        setRunError(err instanceof Error ? err.message : "Failed to load run output");
+        setRunLoading(false);
+      },
+    );
+
+    return () => {
+      stale = true;
+    };
+  }, [selectedRunId]);
 
   const handleRunNow = async () => {
     if (!selected) return;
@@ -130,33 +177,19 @@ export function SchedulesView({
     setPendingDelete(selected);
   };
 
-  const openRun = async (run: ScheduleRun) => {
+  const openRun = (run: ScheduleRun) => {
     if (run.status === "skipped") return;
-    try {
-      setViewRun(await api.getScheduleRun(run.id));
-    } catch (err) {
-      console.error("Failed to fetch run output:", err);
-    }
+    setSelectedRunId(run.id);
   };
 
   // Project Overview can deep-open a run from the project-wide activity list.
-  // Keep the report/output treatment here so dashboard cards remain pure
+  // Reuse the split-view selection path so dashboard cards remain pure
   // navigation controls and never fetch or render raw output themselves.
   useEffect(() => {
     if (!openRunId) return;
-    let stale = false;
     const requestedRunId = openRunId;
-    void api.getScheduleRun(requestedRunId).then((run) => {
-      if (stale) return;
-      setViewRun(run);
-      setActionError(null);
-      onOpenRunHandled?.(requestedRunId);
-    }).catch((err) => {
-      if (stale) return;
-      setActionError(err instanceof Error ? err.message : "Failed to load run output");
-      onOpenRunHandled?.(requestedRunId);
-    });
-    return () => { stale = true; };
+    setSelectedRunId(requestedRunId);
+    onOpenRunHandled?.(requestedRunId);
   }, [openRunId, onOpenRunHandled]);
 
   if (!loading && schedules.length === 0) {
@@ -229,36 +262,89 @@ export function SchedulesView({
 
           {actionError && <div className="mx-5 mt-3 text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">{actionError}</div>}
 
-          <div className="flex-1 overflow-auto px-5 py-3">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Started</TableHead>
-                  <TableHead>Duration</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Exit code</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {runs.map((run) => (
-                  <TableRow key={run.id} onClick={() => void openRun(run)} className={cn(run.status !== "skipped" && "cursor-pointer")}>
-                    <TableCell>{fmtTs(run.started_at)}</TableCell>
-                    <TableCell>{run.status === "skipped" ? "—" : fmtDuration(run)}</TableCell>
-                    <TableCell>
-                      <span className={cn("px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[run.status])}>{run.status}</span>
-                    </TableCell>
-                    <TableCell>{run.exit_code ?? "—"}</TableCell>
-                  </TableRow>
-                ))}
-                {runs.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={4} className="text-center text-muted-foreground">
-                      No runs yet — click “Run now” to try it
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+          <div className="flex-1 min-h-0">
+            <ResizablePanelGroup direction="horizontal" autoSaveId="schedule-run-panels">
+              <ResizablePanel defaultSize={33} minSize={25}>
+                <div className="h-full overflow-auto px-5 py-3">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Started</TableHead>
+                        <TableHead>Duration</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Exit code</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {runs.map((run) => (
+                        <TableRow
+                          key={run.id}
+                          onClick={() => openRun(run)}
+                          aria-selected={run.id === selectedRunId}
+                          className={cn(
+                            run.status !== "skipped" && "cursor-pointer",
+                            run.id === selectedRunId && "bg-muted/50",
+                          )}
+                        >
+                          <TableCell>{fmtTs(run.started_at)}</TableCell>
+                          <TableCell>{run.status === "skipped" ? "—" : fmtDuration(run)}</TableCell>
+                          <TableCell>
+                            <span className={cn("px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[run.status])}>{run.status}</span>
+                          </TableCell>
+                          <TableCell>{run.exit_code ?? "—"}</TableCell>
+                        </TableRow>
+                      ))}
+                      {runs.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={4} className="text-center text-muted-foreground">
+                            No runs yet — click “Run now” to try it
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </ResizablePanel>
+
+              <ResizableHandle withHandle />
+
+              <ResizablePanel defaultSize={67} minSize={25}>
+                <div className="h-full overflow-auto px-5 py-4">
+                  {runLoading ? (
+                    <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                      Loading run output…
+                    </div>
+                  ) : runError ? (
+                    <div className="text-sm text-destructive">{runError}</div>
+                  ) : selectedRun ? (
+                    <>
+                      <div className="mb-3 text-sm font-medium">Run output — {fmtTs(selectedRun.started_at)}</div>
+                      {selectedRun.report ? (
+                        <>
+                          <div className="rounded-md border border-border/50 p-3 text-sm">
+                            <Streamdown className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">{selectedRun.report}</Streamdown>
+                          </div>
+                          <details className="mt-3">
+                            <summary className="text-xs text-muted-foreground cursor-pointer select-none">Raw output</summary>
+                            <pre className="mt-2 overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
+                              {selectedRun.output ? cleanOutput(selectedRun.output) : "(no output captured)"}
+                            </pre>
+                          </details>
+                        </>
+                      ) : (
+                        <pre className="overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
+                          {selectedRun.output ? cleanOutput(selectedRun.output) : "(no output captured)"}
+                        </pre>
+                      )}
+                    </>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                      Select a run to view its output
+                    </div>
+                  )}
+                </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
           </div>
 
           <ScheduleFormDialog
@@ -324,36 +410,6 @@ export function SchedulesView({
         </AlertDialogContent>
       </AlertDialog>
 
-      <Dialog open={viewRun !== null} onOpenChange={(o) => !o && setViewRun(null)}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>
-              {viewRun?.report ? "Run report" : "Run output"} — {viewRun ? fmtTs(viewRun.started_at) : ""}{" "}
-              {viewRun && <span className={cn("ml-2 px-1.5 py-0.5 rounded text-[11px] font-medium", STATUS_STYLES[viewRun.status])}>{viewRun.status}</span>}
-            </DialogTitle>
-            <DialogDescription>
-              Full report and captured output for this schedule run.
-            </DialogDescription>
-          </DialogHeader>
-          {viewRun?.report ? (
-            <>
-              <div className="max-h-[50vh] overflow-auto rounded-md border border-border/50 p-3 text-sm">
-                <Streamdown className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">{viewRun.report}</Streamdown>
-              </div>
-              <details>
-                <summary className="text-xs text-muted-foreground cursor-pointer select-none">Raw output</summary>
-                <pre className="mt-2 max-h-[30vh] overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
-                  {viewRun.output ? cleanOutput(viewRun.output) : "(no output captured)"}
-                </pre>
-              </details>
-            </>
-          ) : (
-            <pre className="max-h-[60vh] overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap">
-              {viewRun?.output ? cleanOutput(viewRun.output) : "(no output captured)"}
-            </pre>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

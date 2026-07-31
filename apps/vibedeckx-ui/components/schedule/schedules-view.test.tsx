@@ -1,0 +1,155 @@
+// @vitest-environment jsdom
+
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Schedule, ScheduleRun } from "@/lib/api";
+
+vi.mock("@/lib/api", () => ({
+  api: {
+    getScheduleRuns: vi.fn(),
+    getScheduleRun: vi.fn(),
+  },
+}));
+
+vi.mock("./schedule-form-dialog", () => ({
+  ScheduleFormDialog: () => null,
+}));
+
+vi.mock("streamdown", () => ({
+  Streamdown: ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="report">{children}</div>
+  ),
+}));
+
+vi.mock("@/components/ui/resizable", () => {
+  type Kids = { children?: React.ReactNode };
+  return {
+    ResizablePanelGroup: ({ children, direction }: Kids & { direction?: string }) => (
+      <div data-panel-group-direction={direction}>{children}</div>
+    ),
+    ResizablePanel: ({ children }: Kids) => <section data-testid="resizable-panel">{children}</section>,
+    ResizableHandle: () => <div data-testid="resizable-handle" />,
+  };
+});
+
+import { api } from "@/lib/api";
+import { SchedulesView } from "./schedules-view";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const getScheduleRuns = api.getScheduleRuns as unknown as ReturnType<typeof vi.fn>;
+const getScheduleRun = api.getScheduleRun as unknown as ReturnType<typeof vi.fn>;
+
+const schedule: Schedule = {
+  id: "schedule-1",
+  project_id: "project-1",
+  name: "Nightly check",
+  cron_expr: "0 2 * * *",
+  timezone: "UTC",
+  target: "local",
+  enabled: true,
+  run_type: "command",
+  prompt_provider: null,
+  content: "pnpm test",
+  cwd_mode: "branch",
+  branch: "main",
+  directory: null,
+  timeout_seconds: 600,
+  created_at: "2026-07-30 00:00:00",
+  updated_at: "2026-07-30 00:00:00",
+};
+
+const makeRun = (id: string, startedAt: string, output?: string): ScheduleRun => ({
+  id,
+  schedule_id: schedule.id,
+  status: "completed",
+  exit_code: 0,
+  output,
+  report: null,
+  process_id: `process-${id}`,
+  started_at: startedAt,
+  finished_at: "2026-07-31 02:01:00",
+});
+
+const newest = makeRun("run-new", "2026-07-31 02:00:00");
+const older = makeRun("run-old", "2026-07-30 02:00:00");
+
+let container: HTMLDivElement;
+let root: Root;
+
+const flush = () => act(async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+});
+
+const click = async (element: Element | null) => {
+  if (!element) throw new Error("element not found");
+  await act(async () => {
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+};
+
+function renderView() {
+  root.render(
+    <SchedulesView
+      projectId="project-1"
+      schedules={[schedule]}
+      loading={false}
+      selectedId={schedule.id}
+      onSelect={vi.fn()}
+      worktrees={[]}
+      onCreate={vi.fn()}
+      onUpdate={vi.fn()}
+      onDelete={vi.fn()}
+      onRunNow={vi.fn()}
+      createOpen={false}
+      onCreateOpenChange={vi.fn()}
+    />,
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  getScheduleRuns.mockResolvedValue([newest, older]);
+  getScheduleRun.mockImplementation(async (id: string) =>
+    id === newest.id
+      ? makeRun(newest.id, newest.started_at, "new output")
+      : makeRun(older.id, older.started_at, "old output"),
+  );
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+describe("schedule run split view", () => {
+  it("selects the newest run and renders its output in a horizontal split view", async () => {
+    await act(async () => renderView());
+    await flush();
+
+    expect(container.querySelector("[data-panel-group-direction='horizontal']")).not.toBeNull();
+    expect(getScheduleRun).toHaveBeenCalledWith("run-new");
+    expect(container.textContent).toContain("new output");
+    expect(document.querySelector("[role='dialog']")).toBeNull();
+  });
+
+  it("loads an older run into the right panel when its row is selected", async () => {
+    await act(async () => renderView());
+    await flush();
+
+    const oldRow = Array.from(container.querySelectorAll("tbody tr")).find((row) =>
+      row.textContent?.includes("7/30/2026"),
+    );
+    await click(oldRow ?? null);
+    await flush();
+
+    expect(getScheduleRun).toHaveBeenLastCalledWith("run-old");
+    expect(container.textContent).toContain("old output");
+    expect(container.textContent).not.toContain("new output");
+  });
+});
