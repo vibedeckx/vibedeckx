@@ -137,7 +137,9 @@ describe("useProjectChat", () => {
 
     render("p1", null);
     await flush();
-    expect(mocks.api.listProjectChatThreads).toHaveBeenCalledWith("p1", false);
+    expect(mocks.api.listProjectChatThreads).toHaveBeenCalledWith(
+      "p1", false, expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(latest.threads).toEqual([first]);
 
     await act(async () => { await latest.createThread("first question"); });
@@ -244,6 +246,30 @@ describe("useProjectChat", () => {
     expect(latest.error).toBe("Project Chat stream identity mismatch");
   });
 
+  it("keeps the newest same-project thread-list mode when an older request resolves last", async () => {
+    const activeOnly = deferred<ProjectChatThread[]>();
+    const withArchived = deferred<ProjectChatThread[]>();
+    mocks.api.listProjectChatThreads
+      .mockReturnValueOnce(activeOnly.promise)
+      .mockReturnValueOnce(withArchived.promise);
+    render("p1", null);
+
+    let refetch!: Promise<void>;
+    act(() => { refetch = latest.refetchThreads(true); });
+    await act(async () => withArchived.resolve([
+      thread("active"),
+      { ...thread("archived"), archived_at: 1 },
+    ]));
+    await refetch;
+    expect(latest.threads.map((item) => item.id)).toEqual(["active", "archived"]);
+
+    await act(async () => activeOnly.resolve([thread("stale-active")]));
+    expect(latest.threads.map((item) => item.id)).toEqual(["active", "archived"]);
+    expect(mocks.api.listProjectChatThreads).toHaveBeenNthCalledWith(
+      2, "p1", true, expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
   it("keeps backing off after reconnect preflight and socket-construction failures until it succeeds", async () => {
     render("p1", "t1");
     await flush();
@@ -271,6 +297,90 @@ describe("useProjectChat", () => {
     expect(FakeWebSocket.instances[1].url).toContain("/t1/stream");
   });
 
+  it("resets reconnect backoff only after a valid snapshot, not merely on open", async () => {
+    render("p1", "t1");
+    await flush();
+    const first = FakeWebSocket.instances[0];
+    act(() => {
+      first.open();
+      first.message({ type: "project_chat_snapshot", snapshot: snapshot("t1") });
+      first.disconnect();
+    });
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    const second = FakeWebSocket.instances[1];
+    act(() => {
+      second.open();
+      second.disconnect();
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
+
+  it("times out a connection that never receives its initial snapshot and retries", async () => {
+    render("p1", "t1");
+    await flush();
+    const first = FakeWebSocket.instances[0];
+    act(() => first.open());
+
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(latest.error).toBe("Project Chat snapshot timed out");
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("treats Thread not found as terminal and never reconnects", async () => {
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.message({ error: "Thread not found" }));
+
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect((latest as UseProjectChatResult & { terminalError: string | null }).terminalError)
+      .toBe("thread_not_found");
+    expect(latest.error).toBe("Thread not found");
+    await act(async () => { vi.advanceTimersByTime(60_000); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("does not retry a REST 404 while opening a Thread", async () => {
+    mocks.api.getProjectChatThread.mockRejectedValue(
+      Object.assign(new Error("Thread not found"), { status: 404 }),
+    );
+    render("p1", "missing");
+    await flush();
+    expect((latest as UseProjectChatResult & { terminalError: string | null }).terminalError)
+      .toBe("thread_not_found");
+    await act(async () => { vi.advanceTimersByTime(60_000); await Promise.resolve(); });
+    expect(mocks.api.getProjectChatThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a stale open socket when the page becomes visible and removes listeners on cleanup", async () => {
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    render("p1", "t1");
+    await flush();
+    const first = FakeWebSocket.instances[0];
+    act(() => {
+      first.open();
+      first.message({ type: "project_chat_snapshot", snapshot: snapshot("t1") });
+      vi.advanceTimersByTime(40_001);
+    });
+
+    visibility.mockReturnValue("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(first.close).toHaveBeenCalledOnce();
+    await act(async () => { vi.runOnlyPendingTimers(); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    act(() => root.unmount());
+    act(() => window.dispatchEvent(new Event("online")));
+    await act(async () => { vi.runOnlyPendingTimers(); await Promise.resolve(); });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    visibility.mockRestore();
+  });
+
   it("cancels pending reconnects on a thread switch and on unmount", async () => {
     render("p1", "t1");
     await flush();
@@ -279,6 +389,9 @@ describe("useProjectChat", () => {
     render("p1", "t2");
     await flush();
     expect(FakeWebSocket.instances).toHaveLength(2);
+    act(() => FakeWebSocket.instances[1].message({
+      type: "project_chat_snapshot", snapshot: snapshot("t2"),
+    }));
     act(() => vi.advanceTimersByTime(30_000));
     expect(mocks.api.getProjectChatThread.mock.calls.filter(([id]) => id === "t1")).toHaveLength(1);
 
@@ -299,6 +412,9 @@ describe("useProjectChat", () => {
 
     act(() => {
       FakeWebSocket.instances[1].open();
+      FakeWebSocket.instances[1].message({
+        type: "project_chat_snapshot", snapshot: snapshot("t1"),
+      });
       first.disconnect();
     });
     await act(async () => { vi.advanceTimersByTime(30_000); await Promise.resolve(); });
@@ -360,5 +476,58 @@ describe("useProjectChat", () => {
     await deletePromise;
 
     expect(latest.threads).toEqual([thread("same-visible-id", "p2")]);
+  });
+
+  it("clears cached snapshots from other projects", async () => {
+    mocks.api.getProjectChatThread.mockImplementation(async (id: string) =>
+      thread(id, id === "p2-thread" ? "p2" : "p1"));
+    render("p1", "p1-thread");
+    await flush();
+    act(() => FakeWebSocket.instances.at(-1)?.message({
+      type: "project_chat_snapshot", snapshot: snapshot("p1-thread", "p1"),
+    }));
+    expect(latest.messages).toHaveLength(1);
+
+    render("p2", "p2-thread");
+    await flush();
+    render("p1", "p1-thread");
+    await flush();
+    expect(latest.messages).toEqual([]);
+  });
+
+  it("bounds the per-project snapshot cache with LRU eviction", async () => {
+    for (let index = 1; index <= 6; index += 1) {
+      render("p1", `t${index}`);
+      await flush();
+      act(() => FakeWebSocket.instances.at(-1)?.message({
+        type: "project_chat_snapshot", snapshot: snapshot(`t${index}`),
+      }));
+    }
+    render("p1", "t1");
+    await flush();
+    expect(latest.messages).toEqual([]);
+  });
+
+  it("rejects malformed, out-of-range, and duplicate message patches", async () => {
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket.message({ type: "project_chat_snapshot", snapshot: snapshot("t1") }));
+    const duplicate = snapshot("t1").messages[0];
+    const extra = { ...duplicate, id: "m2", sequence: 2, content: "extra" };
+
+    act(() => socket.message({ JsonPatch: [
+      { op: "add", path: "/messages/1junk", value: { type: "ENTRY", content: extra } },
+      { op: "add", path: "/messages/99", value: { type: "ENTRY", content: extra } },
+      { op: "add", path: "/messages/1", value: { type: "ENTRY", content: duplicate } },
+      { op: "replace", path: "/status", value: { type: "STATUS", content: "unknown" } },
+      { op: "replace", path: "/queueLength", value: { type: "QUEUE", content: -1 } },
+    ] }));
+    expect(latest.messages).toEqual([duplicate]);
+    expect(latest).toMatchObject({ status: "idle", queueLength: 0 });
+
+    act(() => socket.message({ JsonPatch: "not-an-array" }));
+    expect(latest.messages).toEqual([duplicate]);
+    expect(latest.error).toBe("Invalid Project Chat stream message");
   });
 });

@@ -1989,8 +1989,10 @@ export const api = {
     return data.run;
   },
 
-  async getProjectActivity(projectId: string): Promise<ProjectActivity> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/activity`);
+  async getProjectActivity(projectId: string, opts?: { signal?: AbortSignal }): Promise<ProjectActivity> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/activity`, {
+      signal: opts?.signal,
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error ?? `Failed to fetch project activity: ${res.status}`);
@@ -2001,9 +2003,12 @@ export const api = {
   async listProjectChatThreads(
     projectId: string,
     includeArchived = false,
+    opts?: { signal?: AbortSignal },
   ): Promise<ProjectChatThread[]> {
     const query = includeArchived ? "?includeArchived=true" : "";
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/project-chat/threads${query}`);
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/project-chat/threads${query}`, {
+      signal: opts?.signal,
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error ?? `Failed to list Project Chat threads: ${res.status}`);
@@ -2028,7 +2033,10 @@ export const api = {
     const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}`);
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error ?? `Failed to fetch Project Chat thread: ${res.status}`);
+      throw Object.assign(
+        new Error(body.error ?? `Failed to fetch Project Chat thread: ${res.status}`),
+        { status: res.status },
+      );
     }
     return (await res.json()).thread;
   },

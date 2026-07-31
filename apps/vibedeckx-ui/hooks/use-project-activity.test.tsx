@@ -83,6 +83,24 @@ describe("useProjectActivity", () => {
     expect(latest.loading).toBe(false);
   });
 
+  it("keeps the newest same-project refetch when an older request resolves last", async () => {
+    const older = deferred<ProjectActivity>();
+    const newer = deferred<ProjectActivity>();
+    api.getProjectActivity
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    render("p1");
+
+    let refetch!: Promise<void>;
+    act(() => { refetch = latest.refetch(); });
+    await act(async () => newer.resolve(activity("newer")));
+    await refetch;
+    expect(latest.activity?.recentThreads[0].title).toBe("newer");
+
+    await act(async () => older.resolve(activity("older")));
+    expect(latest.activity?.recentThreads[0].title).toBe("newer");
+  });
+
   it("clears the previous project immediately when no project is selected", async () => {
     api.getProjectActivity.mockResolvedValue(activity("p1"));
     render("p1");
@@ -116,6 +134,39 @@ describe("useProjectActivity", () => {
       vi.advanceTimersByTime(100);
     });
     expect(api.getProjectActivity).toHaveBeenCalledTimes(2);
+  });
+
+  it("queues exactly one event refresh while a request is in flight", async () => {
+    const initial = deferred<ProjectActivity>();
+    const pending = deferred<ProjectActivity>();
+    api.getProjectActivity
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(activity("latest"));
+    render("p1");
+
+    act(() => {
+      stream.listener?.({ type: "session:updated", projectId: "p1" });
+      stream.listener?.({ type: "schedule:run-finished", projectId: "p1" });
+      vi.advanceTimersByTime(100);
+      stream.listener?.({ type: "task:updated", projectId: "p1" });
+      vi.advanceTimersByTime(100);
+    });
+    expect(api.getProjectActivity).toHaveBeenCalledTimes(1);
+
+    await act(async () => initial.resolve(activity("initial")));
+    expect(api.getProjectActivity).toHaveBeenCalledTimes(2);
+    act(() => {
+      stream.listener?.({ type: "task:updated", projectId: "p1" });
+      stream.listener?.({ type: "session:updated", projectId: "p1" });
+      vi.advanceTimersByTime(100);
+    });
+    expect(api.getProjectActivity).toHaveBeenCalledTimes(2);
+
+    await act(async () => pending.resolve(activity("pending")));
+    // Events that occurred after the pending request began produce one more
+    // refresh, never concurrent requests or one request per event.
+    expect(api.getProjectActivity).toHaveBeenCalledTimes(3);
   });
 
   it("cancels a queued event refresh on project switch and unmount", async () => {
