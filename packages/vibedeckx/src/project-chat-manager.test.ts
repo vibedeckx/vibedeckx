@@ -68,6 +68,7 @@ describe("ProjectChatManager", () => {
         ...(kind === "agent_session_create" ? {
           workspaceId: JSON.stringify(["local", "dev"]), target: "local", branch: "dev",
         } : {}),
+        ...(kind === "schedule_run" ? { contextConfirmed: true } : {}),
         ...details,
       } as never,
       error: null,
@@ -229,7 +230,12 @@ describe("ProjectChatManager", () => {
     await storage.scheduledTaskRuns.create({ id: "run-1", schedule_id: "schedule-1", status: "running" });
     await storage.scheduledTaskRuns.finish("run-1", { status: "completed", exit_code: 0 });
     await correlate("thread-1", "session-op", "agent_session_create", "agent_session", "session-1", { sessionId: "session-1" });
-    await correlate("thread-1", "run-op", "schedule_run", "schedule_run", "run-1", { scheduleId: "schedule-1", runId: "run-1" });
+    await storage.projectChatOperations.create({
+      id: "run-op", thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+      kind: "schedule_run", status: "pending", entity_type: "schedule_run", entity_id: "run-1",
+      idempotency_key: "run-op", payload: { version: 1, kind: "schedule_run", operationId: "run-op",
+        status: "pending", scheduleId: "schedule-1", runId: "run-1", contextConfirmed: false }, error: null,
+    });
 
     const manager = new ProjectChatManager(storage, reply("unused"), { eventBus: new EventBus() });
     await manager.ready();
@@ -237,6 +243,8 @@ describe("ProjectChatManager", () => {
       .toBe("failed");
     expect((await storage.projectChatOperations.getById("run-op", "thread-1", "project-1", "user-1"))?.status)
       .toBe("completed");
+    expect((await storage.projectChatOperations.getById("run-op", "thread-1", "project-1", "user-1"))?.payload)
+      .toMatchObject({ contextConfirmed: true });
     expect((await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .filter(({ type }) => type === "operation")).toHaveLength(2);
     await manager.shutdown();
@@ -523,6 +531,53 @@ describe("ProjectChatManager", () => {
     await manager.ready();
     expect(touch).not.toHaveBeenCalled();
     expect(createAgentSession).not.toHaveBeenCalled();
+    await manager.shutdown();
+  });
+
+  it("defers raced schedule events until context is confirmed, then applies current and later status", async () => {
+    await createThread("thread-schedule-gate");
+    await storage.scheduledTasks.create({
+      id: "gated-schedule", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project",
+    });
+    await storage.projectChatOperations.create({
+      id: "gated-op", thread_id: "thread-schedule-gate", project_id: "project-1", user_id: "user-1",
+      kind: "schedule_run", status: "pending", entity_type: "schedule_run", entity_id: "gated-run",
+      idempotency_key: "gated-run", payload: { version: 1, kind: "schedule_run", operationId: "gated-op",
+        status: "pending", scheduleId: "gated-schedule", runId: "gated-run", contextConfirmed: false }, error: null,
+    });
+    const eventBus = new EventBus();
+    const runScheduleNow = vi.fn(async (scheduleId, runId) => {
+      await storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "running" });
+      eventBus.emit({ type: "schedule:run-started", projectId: "project-1", scheduleId, runId });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((await storage.projectChatOperations.getById(
+        "gated-op", "thread-schedule-gate", "project-1", "user-1",
+      ))?.status).toBe("pending");
+      return { runId, skipped: false } as const;
+    });
+    const manager = new ProjectChatManager(storage, reply("unused"), {
+      eventBus, toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => false },
+        mutationServices: { createAgentSession: async ({ sessionId }) => ({ sessionId }), sendAgentInstruction: async () => true, runScheduleNow },
+      },
+    });
+
+    await manager.ready();
+    expect(await storage.projectChatOperations.getById(
+      "gated-op", "thread-schedule-gate", "project-1", "user-1",
+    )).toMatchObject({ status: "running", payload: { contextConfirmed: true } });
+    await storage.scheduledTaskRuns.finish("gated-run", { status: "completed", exit_code: 0 });
+    eventBus.emit({
+      type: "schedule:run-finished", projectId: "project-1", scheduleId: "gated-schedule",
+      runId: "gated-run", status: "completed", exitCode: 0,
+    });
+    await waitFor(async () => (await storage.projectChatOperations.getById(
+      "gated-op", "thread-schedule-gate", "project-1", "user-1",
+    ))?.status === "completed");
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-schedule-gate", "project-1", "user-1",
+    )).filter(({ type }) => type === "operation")).toHaveLength(2);
     await manager.shutdown();
   });
 

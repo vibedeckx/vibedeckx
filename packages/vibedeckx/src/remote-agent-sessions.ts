@@ -137,6 +137,44 @@ export async function createRemoteAgentSession(
   return { ok: true, localSessionId, remoteSession: remoteData.session, messages: remoteData.messages };
 }
 
+export async function createRemoteProjectChatSessionWithInstruction(
+  deps: RemoteAgentSessionDeps,
+  params: {
+    projectId: string; userId: string; remoteServerId: string;
+    remoteConfig: { remote_path?: string | null }; sessionId: string;
+    branch: string | null; permissionMode: "plan" | "edit"; agentType: string;
+    model: string | null; instruction: string; idempotencyKey: string;
+  },
+): Promise<{ sessionId: string }> {
+  let mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);
+  if (mapping && (mapping.project_id !== params.projectId
+    || mapping.remote_server_id !== params.remoteServerId
+    || mapping.remote_session_id !== params.sessionId
+    || (mapping.branch ?? null) !== params.branch)) {
+    throw new Error("Session identity is already in use");
+  }
+  if (!mapping) {
+    const created = await createRemoteAgentSession(deps, {
+      projectId: params.projectId, agentMode: params.remoteServerId,
+      remoteConfig: params.remoteConfig, branch: params.branch,
+      permissionMode: params.permissionMode, agentType: params.agentType,
+      model: params.model, userId: params.userId,
+      remoteSessionId: params.sessionId, localSessionId: params.sessionId,
+    });
+    if (!created.ok) throw new Error("Remote agent session creation failed");
+    mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);
+  }
+  if (!mapping) throw new Error("Remote session mapping was not persisted");
+  const sent = await proxyToRemoteAuto(
+    mapping.remote_server_id, "POST",
+    `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
+    { content: params.instruction, idempotencyKey: params.idempotencyKey },
+    { reverseConnectManager: deps.reverseConnectManager ?? undefined },
+  );
+  if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
+  return { sessionId: params.sessionId };
+}
+
 // ---- Remote reconnection constants ----
 const REMOTE_RECONNECT_MAX_ATTEMPTS = 10;
 const REMOTE_RECONNECT_BASE_DELAY_MS = 1000;

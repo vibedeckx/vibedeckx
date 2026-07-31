@@ -948,7 +948,9 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         if (!schedule) throw new Error("Schedule not found");
         if (schedule.project_id !== projectId) throw new Error("Object is not part of this project");
         const runId = randomUUID();
-        const operation = await beginOperation("schedule_run", "schedule_run", runId, { scheduleId, runId });
+        const operation = await beginOperation("schedule_run", "schedule_run", runId, {
+          scheduleId, runId, contextConfirmed: false,
+        });
         try {
           await revalidateScope();
           const current = await storage.scheduledTasks.getById(scheduleId);
@@ -956,11 +958,32 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           const result = await service.runScheduleNow(scheduleId, runId);
           if ("error" in result) throw new Error(result.error);
           if (result.runId !== runId) throw new Error("Schedule run identity mismatch");
-          await touchAll("schedule", [scheduleId]);
-          await touch("schedule_run", runId);
-          const running = await markOperationRunning(operation, { scheduleId, runId });
-          return { ok: true, operationId: operation.id, scheduleId, runId, status: running.status, skipped: result.skipped };
+          const tracked = await storage.projectChatContextRefs.touchMany(
+            threadId, projectId, userId, [
+              { entityType: "schedule", entityId: scheduleId },
+              { entityType: "schedule_run", entityId: runId },
+            ],
+          );
+          if (!tracked) throw new Error("Failed to track Project Chat context");
+          const persisted = await storage.scheduledTaskRuns.getById(runId);
+          if (!persisted || persisted.project_id !== projectId || persisted.schedule_id !== scheduleId) {
+            throw new Error("Schedule run identity mismatch");
+          }
+          const status = persisted.status === "running" ? "running"
+            : persisted.status === "completed" || persisted.status === "skipped" ? "completed" : "failed";
+          const transitioned = status === "running"
+            ? await markOperationRunning(operation, { scheduleId, runId, contextConfirmed: true, skipped: result.skipped })
+            : await finishOperation(operation, status, { scheduleId, runId, contextConfirmed: true, skipped: result.skipped },
+              status === "failed" ? "Schedule run failed" : null);
+          return { ok: status !== "failed", operationId: operation.id, scheduleId, runId, status: transitioned.status, skipped: result.skipped };
         } catch (error) {
+          const persisted = await storage.scheduledTaskRuns.getById(runId);
+          if (persisted?.project_id === projectId && persisted.schedule_id === scheduleId) {
+            return {
+              ok: false, operationId: operation.id, scheduleId, runId, status: "pending",
+              error: "Schedule run is awaiting context confirmation",
+            };
+          }
           const message = boundedError(error);
           await finishOperation(operation, "failed", { scheduleId, runId }, message);
           return { ok: false, operationId: operation.id, status: "failed", error: message };

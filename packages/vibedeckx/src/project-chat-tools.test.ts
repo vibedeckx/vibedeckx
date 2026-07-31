@@ -350,6 +350,25 @@ describe("createProjectChatTools", () => {
     expect(JSON.stringify(failed)).not.toContain("x".repeat(600));
   });
 
+  it("keeps a started schedule run pending when atomic context confirmation fails", async () => {
+    await storage.scheduledTasks.create({
+      id: "schedule-context", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project",
+    });
+    runScheduleNow.mockImplementationOnce(async (scheduleId: string, runId: string) => {
+      await storage.scheduledTaskRuns.create({ id: runId, schedule_id: scheduleId, status: "running" });
+      return { runId, skipped: false } as const;
+    });
+    vi.spyOn(storage.projectChatContextRefs, "touchMany").mockResolvedValue(undefined);
+
+    const result = await (await tools()).run_schedule_now.execute({ scheduleId: "schedule-context" });
+
+    expect(result).toMatchObject({ ok: false, status: "pending", runId: expect.any(String) });
+    expect(await storage.projectChatOperations.getById(
+      result.operationId as string, "thread-1", "project-1", "user-1",
+    )).toMatchObject({ status: "pending", payload: { contextConfirmed: false } });
+  });
+
   it("revalidates a session target immediately before sending the instruction", async () => {
     const local = await storage.agentSessions.create({
       id: "local-session", project_id: "project-1", branch: "dev",

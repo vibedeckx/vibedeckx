@@ -326,6 +326,45 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
+      if (sessionId) {
+        const [stored, active] = await Promise.all([
+          fastify.storage.agentSessions.getById(sessionId),
+          Promise.resolve(fastify.agentSessionManager.getSession(sessionId)),
+        ]);
+        if (stored || active) {
+          const requestedBranch = branch ?? null;
+          const requestedPermission = permissionMode || "edit";
+          const requestedAgentType = (agentType as AgentType) || "claude-code";
+          const requestedModel = model?.trim() ? model.trim() : null;
+          const sameScope = Boolean(stored && active)
+            && stored!.project_id === pseudoProjectId
+            && (stored!.branch || null) === requestedBranch
+            && stored!.permission_mode === requestedPermission
+            && stored!.agent_type === requestedAgentType
+            && (stored!.model ?? null) === requestedModel
+            && active!.projectId === pseudoProjectId
+            && active!.branch === requestedBranch
+            && active!.permissionMode === requestedPermission
+            && active!.agentType === requestedAgentType
+            && (active!.model ?? null) === requestedModel;
+          if (!sameScope) {
+            return reply.code(409).send({ error: "Session identity is already in use" });
+          }
+          return reply.code(200).send({
+            session: {
+              id: sessionId,
+              projectId: pseudoProjectId,
+              branch: requestedBranch,
+              status: active!.status,
+              permissionMode: active!.permissionMode,
+              agentType: active!.agentType,
+              model: active!.model ?? null,
+              processAlive: fastify.agentSessionManager.getSessionProcessAlive(sessionId),
+            },
+            messages: fastify.agentSessionManager.getMessages(sessionId),
+          });
+        }
+      }
       const createdSessionId = await fastify.agentSessionManager.createNewSession(
         pseudoProjectId,
         branch ?? null,

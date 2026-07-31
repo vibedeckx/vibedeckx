@@ -42,7 +42,7 @@ const operationPayloadSchema = z.discriminatedUnion("kind", [
     selectedWorkspaceId: z.string().min(1).max(512).optional(), claimToken: z.string().min(1).max(512).optional(),
   }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("agent_instruction"), operationId: z.string().min(1).max(512), status: operationStatusSchema, sessionId: z.string().min(1).max(512), instruction: z.string().max(8_000).optional(), target: z.union([z.literal("local"), z.object({ remoteServerId: z.string().min(1).max(512), remoteSessionId: z.string().min(1).max(512) }).strict()]).optional(), delivery: z.enum(["pending", "confirmed"]).optional() }).strict(),
-  z.object({ version: z.literal(1), kind: z.literal("schedule_run"), operationId: z.string().min(1).max(512), status: operationStatusSchema, scheduleId: z.string().min(1).max(512), runId: z.string().min(1).max(512), skipped: z.boolean().optional() }).strict(),
+  z.object({ version: z.literal(1), kind: z.literal("schedule_run"), operationId: z.string().min(1).max(512), status: operationStatusSchema, scheduleId: z.string().min(1).max(512), runId: z.string().min(1).max(512), contextConfirmed: z.boolean().optional(), skipped: z.boolean().optional() }).strict(),
   z.object({ version: z.literal(1), kind: z.literal("workspace_selection"), operationId: z.string().min(1).max(512), status: operationStatusSchema, requestId: z.string().min(1).max(512), candidates: z.array(z.object({ id: z.string().min(1).max(512), target: z.string().min(1).max(512), branch: z.string().max(512).nullable() }).strict()).max(20) }).strict(),
 ]);
 

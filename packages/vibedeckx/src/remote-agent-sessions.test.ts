@@ -14,7 +14,10 @@ vi.mock("./utils/remote-proxy.js", () => ({
 }));
 
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
-import { createRemoteAgentSession, type RemoteAgentSessionDeps } from "./remote-agent-sessions.js";
+import {
+  createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction,
+  type RemoteAgentSessionDeps,
+} from "./remote-agent-sessions.js";
 
 describe("createRemoteAgentSession", () => {
   let dir: string;
@@ -23,6 +26,7 @@ describe("createRemoteAgentSession", () => {
   let upsert: ReturnType<typeof vi.fn>;
   let extendNotificationWatch: ReturnType<typeof vi.fn>;
   let emitBranchActivityIfChanged: ReturnType<typeof vi.fn>;
+  let mapping: Record<string, unknown> | undefined;
 
   const agentMode = "srv-source";
   const projectId = "proj-1";
@@ -30,7 +34,7 @@ describe("createRemoteAgentSession", () => {
   const makeDeps = (): RemoteAgentSessionDeps => ({
     remoteSessionMap,
     remoteSessionMappings: {
-      upsert, extendNotificationWatch,
+      upsert, extendNotificationWatch, getByLocal: async () => mapping,
     } as unknown as Storage["remoteSessionMappings"],
     remotePatchCache: new RemotePatchCache(),
     agentSessionManager: { emitBranchActivityIfChanged } as never,
@@ -54,7 +58,16 @@ describe("createRemoteAgentSession", () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-ras-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     remoteSessionMap = new Map();
-    upsert = vi.fn().mockResolvedValue(undefined);
+    mapping = undefined;
+    upsert = vi.fn(async (
+      localSessionId: string, mappedProjectId: string, remoteServerId: string,
+      remoteSessionId: string, branch: string | null,
+    ) => {
+      mapping = {
+        local_session_id: localSessionId, project_id: mappedProjectId,
+        remote_server_id: remoteServerId, remote_session_id: remoteSessionId, branch,
+      };
+    });
     extendNotificationWatch = vi.fn().mockResolvedValue(undefined);
     emitBranchActivityIfChanged = vi.fn();
 
@@ -149,6 +162,77 @@ describe("createRemoteAgentSession", () => {
 
     await expect(createRemoteAgentSession(makeDeps(), params())).rejects.toThrow("db write failed");
     expect(remoteSessionMap.size).toBe(0);
+  });
+
+  it("retries the same worker identity after a create response was lost before mapping persistence", async () => {
+    proxyToRemoteAuto.mockImplementation(async (...args: unknown[]) => {
+      const body = args[3] as { sessionId: string };
+      return { ok: true, status: 200, data: { session: { id: body.sessionId, status: "running" }, messages: [] } };
+    });
+    upsert.mockRejectedValueOnce(new Error("frontend crashed before mapping"));
+    const identity = { remoteSessionId: "worker-preallocated", localSessionId: "front-preallocated" };
+
+    await expect(createRemoteAgentSession(makeDeps(), { ...params(), ...identity }))
+      .rejects.toThrow("frontend crashed before mapping");
+    expect(remoteSessionMap.has(identity.localSessionId)).toBe(false);
+
+    const retried = await createRemoteAgentSession(makeDeps(), { ...params(), ...identity });
+
+    expect(retried).toMatchObject({ ok: true, localSessionId: identity.localSessionId,
+      remoteSession: { id: identity.remoteSessionId } });
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(2);
+    expect(proxyToRemoteAuto.mock.calls.map((call) => (call[3] as { sessionId: string }).sessionId))
+      .toEqual([identity.remoteSessionId, identity.remoteSessionId]);
+    expect(upsert).toHaveBeenLastCalledWith(
+      identity.localSessionId, projectId, agentMode, identity.remoteSessionId, "main", "from_start",
+    );
+    expect(remoteSessionMap.get(identity.localSessionId)?.remoteSessionId).toBe(identity.remoteSessionId);
+  });
+
+  it("recreates a lost frontend mapping and only then delivers the initial instruction with the stable key", async () => {
+    proxyToRemoteAuto.mockImplementation(async (
+      _serverId: string, _method: string, apiPath: string, body: Record<string, unknown>,
+    ) => apiPath === "/api/path/agent-sessions/new"
+      ? { ok: true, status: 200, data: { session: { id: body.sessionId, status: "running" }, messages: [] } }
+      : { ok: true, status: 200, data: { accepted: true } });
+    upsert.mockRejectedValueOnce(new Error("frontend crashed before mapping"));
+    const input = {
+      projectId, userId: "user-1", remoteServerId: agentMode,
+      remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
+      branch: "main", permissionMode: "edit" as const, agentType: "claude-code", model: null,
+      instruction: "Implement", idempotencyKey: "stable-delivery-key",
+    };
+
+    await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), input))
+      .rejects.toThrow("frontend crashed before mapping");
+    await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), input))
+      .resolves.toEqual({ sessionId: "preallocated" });
+
+    expect(upsert).toHaveBeenLastCalledWith(
+      "preallocated", projectId, agentMode, "preallocated", "main", "from_start",
+    );
+    expect(proxyToRemoteAuto.mock.calls.filter((call) => call[2] === "/api/path/agent-sessions/new"))
+      .toHaveLength(2);
+    expect(proxyToRemoteAuto).toHaveBeenLastCalledWith(
+      agentMode, "POST", "/api/agent-sessions/preallocated/message",
+      { content: "Implement", idempotencyKey: "stable-delivery-key" },
+      expect.objectContaining({ reverseConnectManager: undefined }),
+    );
+  });
+
+  it("rejects an existing frontend mapping whose branch does not match the requested scope", async () => {
+    mapping = {
+      local_session_id: "preallocated", project_id: projectId, remote_server_id: agentMode,
+      remote_session_id: "preallocated", branch: "other",
+    };
+
+    await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), {
+      projectId, userId: "user-1", remoteServerId: agentMode,
+      remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
+      branch: "main", permissionMode: "edit", agentType: "claude-code", model: null,
+      instruction: "No", idempotencyKey: "key",
+    })).rejects.toThrow("Session identity is already in use");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
 
   it("id-echo mismatch: deletes the entry, does NOT upsert, returns status 409", async () => {

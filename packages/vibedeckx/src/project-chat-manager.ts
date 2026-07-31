@@ -514,7 +514,8 @@ export class ProjectChatManager {
           || operation.payload.initialInstructionDelivery !== "confirmed")) continue;
       if (expectedKind === "schedule_run") {
         if (operation.payload.kind !== "schedule_run"
-          || operation.payload.scheduleId !== (event as { scheduleId: string }).scheduleId) continue;
+          || operation.payload.scheduleId !== (event as { scheduleId: string }).scheduleId
+          || operation.payload.contextConfirmed !== true) continue;
       }
       const details = expectedKind === "agent_session_create"
         ? { sessionId: entityId }
@@ -700,7 +701,7 @@ export class ProjectChatManager {
           { entityType: "schedule_run", entityId: operation.payload.runId },
         ]))) return;
         await this.transitionOperation(operation, status, {
-          scheduleId: operation.payload.scheduleId, runId: operation.payload.runId,
+          scheduleId: operation.payload.scheduleId, runId: operation.payload.runId, contextConfirmed: true,
         }, status === "failed" ? "Schedule run failed" : null);
         return;
       }
@@ -708,16 +709,21 @@ export class ProjectChatManager {
         const result = await this.toolDependencies.mutationServices.runScheduleNow(
           operation.payload.scheduleId, operation.payload.runId,
         );
-        if ("error" in result) {
-          await this.transitionOperation(operation, "failed", {}, boundedStreamError(result.error).message);
-        } else if (result.runId !== operation.payload.runId) {
-          await this.transitionOperation(operation, "failed", {}, "Schedule run identity mismatch");
-        } else {
+        const persisted = await this.storage.scheduledTaskRuns.getById(operation.payload.runId);
+        if (persisted?.project_id === operation.project_id
+          && persisted.schedule_id === operation.payload.scheduleId) {
           if (!(await this.restoreOperationContext(operation, [
             { entityType: "schedule", entityId: operation.payload.scheduleId },
             { entityType: "schedule_run", entityId: operation.payload.runId },
           ]))) return;
-          await this.transitionOperation(operation, "running", {});
+          const status = persisted.status === "running" ? "running"
+            : persisted.status === "completed" || persisted.status === "skipped" ? "completed" : "failed";
+          await this.transitionOperation(operation, status, { contextConfirmed: true },
+            status === "failed" ? "Schedule run failed" : null);
+        } else if ("error" in result) {
+          await this.transitionOperation(operation, "failed", {}, boundedStreamError(result.error).message);
+        } else if (result.runId !== operation.payload.runId) {
+          await this.transitionOperation(operation, "failed", {}, "Schedule run identity mismatch");
         }
       }
     }

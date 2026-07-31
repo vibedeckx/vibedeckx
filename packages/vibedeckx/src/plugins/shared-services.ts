@@ -18,7 +18,7 @@ import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
 import { RemoteNotificationSync } from "../remote-notification-sync.js";
-import { createRemoteAgentSession } from "../remote-agent-sessions.js";
+import { createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction } from "../remote-agent-sessions.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -140,31 +140,15 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             input.projectId, input.target,
           );
           if (!association) throw new Error("Remote workspace is no longer authorized");
-          let mapping = await opts.storage.remoteSessionMappings.getByLocal(input.sessionId);
-          if (mapping && (mapping.project_id !== input.projectId || mapping.remote_server_id !== input.target)) {
-            throw new Error("Session identity is already in use");
-          }
-          if (!mapping) {
-            const created = await createRemoteAgentSession({
-              remoteSessionMap, remoteSessionMappings: opts.storage.remoteSessionMappings,
-              remotePatchCache, agentSessionManager, reverseConnectManager, storage: opts.storage,
-            }, {
-              projectId: input.projectId, agentMode: input.target, remoteConfig: association,
-              branch: input.branch, permissionMode: input.permissionMode,
-              agentType: input.agentType, model: input.model, userId: input.userId,
-              remoteSessionId: input.sessionId, localSessionId: input.sessionId,
-            });
-            if (!created.ok) throw new Error("Remote agent session creation failed");
-            mapping = await opts.storage.remoteSessionMappings.getByLocal(input.sessionId);
-          }
-          if (!mapping) throw new Error("Remote session mapping was not persisted");
-          const sent = await proxyToRemoteAuto(
-            mapping.remote_server_id, "POST",
-            `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
-            { content: input.instruction, idempotencyKey: input.idempotencyKey }, { reverseConnectManager },
-          );
-          if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
-          return { sessionId: input.sessionId };
+          return createRemoteProjectChatSessionWithInstruction({
+            remoteSessionMap, remoteSessionMappings: opts.storage.remoteSessionMappings,
+            remotePatchCache, agentSessionManager, reverseConnectManager, storage: opts.storage,
+          }, {
+            projectId: input.projectId, userId: input.userId, remoteServerId: input.target,
+            remoteConfig: association, sessionId: input.sessionId, branch: input.branch,
+            permissionMode: input.permissionMode, agentType: input.agentType, model: input.model,
+            instruction: input.instruction, idempotencyKey: input.idempotencyKey,
+          });
         },
         sendAgentInstruction: async (input) => {
           if (input.target === "local") {
