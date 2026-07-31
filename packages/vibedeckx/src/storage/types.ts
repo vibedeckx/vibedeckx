@@ -1062,6 +1062,21 @@ export interface Storage {
       entityId: string,
       limit: number,
     ) => Promise<Array<ProjectChatOperation & { project_id: string; user_id: string }>>;
+    announce: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      message: { id: string; content: string };
+    }) => Promise<ProjectChatMessage | undefined>;
+    bindCorrelation: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      entity_type: ProjectChatContextEntityType;
+      entity_id: string;
+    }) => Promise<ProjectChatOperation | undefined>;
     transition: (opts: {
       id: string;
       thread_id: string;

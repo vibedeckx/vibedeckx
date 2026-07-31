@@ -586,6 +586,59 @@ export const createProjectChatRepos = (
       return rows.map((row) => ({ ...mapOperation(row), project_id: row.project_id, user_id: row.user_id }));
     },
 
+    announce: async (opts) => kdb.transaction().execute(async (trx) => {
+      const operation = await trx.selectFrom("project_chat_operations as operation")
+        .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+        .select("operation.id")
+        .where("operation.id", "=", opts.id)
+        .where("operation.thread_id", "=", opts.thread_id)
+        .where("thread.project_id", "=", opts.project_id)
+        .where("thread.user_id", "=", opts.user_id)
+        .executeTakeFirst();
+      if (!operation) return undefined;
+      const existing = await trx.selectFrom("project_chat_messages")
+        .selectAll().where("id", "=", opts.message.id)
+        .where("thread_id", "=", opts.thread_id).executeTakeFirst();
+      if (existing) return mapMessage(existing);
+      const sequenceRow = await trx.selectFrom("project_chat_messages")
+        .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+        .where("thread_id", "=", opts.thread_id).executeTakeFirstOrThrow();
+      await trx.insertInto("project_chat_messages").values({
+        id: opts.message.id,
+        thread_id: opts.thread_id,
+        sequence: Number(sequenceRow.sequence) + 1,
+        type: "operation",
+        content: opts.message.content,
+      }).execute();
+      await trx.updateTable("project_chat_threads").set({ updated_at: now() })
+        .where("id", "=", opts.thread_id).execute();
+      const message = await trx.selectFrom("project_chat_messages")
+        .selectAll().where("id", "=", opts.message.id).executeTakeFirstOrThrow();
+      return mapMessage(message);
+    }),
+
+    bindCorrelation: async (opts) => {
+      const owned = await kdb.selectFrom("project_chat_operations as operation")
+        .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")
+        .select(["operation.entity_type", "operation.entity_id"])
+        .where("operation.id", "=", opts.id)
+        .where("operation.thread_id", "=", opts.thread_id)
+        .where("thread.project_id", "=", opts.project_id)
+        .where("thread.user_id", "=", opts.user_id)
+        .where("operation.status", "=", "pending")
+        .executeTakeFirst();
+      if (!owned) return undefined;
+      if (owned.entity_type !== null
+        && (owned.entity_type !== opts.entity_type || owned.entity_id !== opts.entity_id)) return undefined;
+      const row = await kdb.updateTable("project_chat_operations")
+        .set({ entity_type: opts.entity_type, entity_id: opts.entity_id, updated_at: now() })
+        .where("id", "=", opts.id)
+        .where("thread_id", "=", opts.thread_id)
+        .where("status", "=", "pending")
+        .returningAll().executeTakeFirst();
+      return row ? mapOperation(row) : undefined;
+    },
+
     transition: async (opts) => kdb.transaction().execute(async (trx) => {
       const row = await trx.selectFrom("project_chat_operations as operation")
         .innerJoin("project_chat_threads as thread", "thread.id", "operation.thread_id")

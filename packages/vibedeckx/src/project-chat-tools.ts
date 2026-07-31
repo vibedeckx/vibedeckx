@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import type { ProjectChatContextEntityType, Storage } from "./storage/types.js";
 
@@ -170,7 +171,38 @@ export type ProjectChatTools = {
   list_schedules: ProjectChatTool<Record<string, never>, ListResult<Record<string, unknown>>>;
   list_schedule_runs: ProjectChatTool<Record<string, never>, ListResult<Record<string, unknown>>>;
   get_schedule_run: ProjectChatTool<{ runId: string }, Record<string, unknown> & { outputPreview: string; reportPreview: string }>;
+  create_task: ProjectChatTool<{
+    title: string; description?: string | null; status?: "todo" | "in_progress" | "done" | "cancelled";
+    priority?: "low" | "medium" | "high" | "urgent"; assignedBranch?: string | null;
+  }, Record<string, unknown>>;
+  update_task: ProjectChatTool<{
+    taskId: string; title?: string; description?: string | null;
+    status?: "todo" | "in_progress" | "done" | "cancelled";
+    priority?: "low" | "medium" | "high" | "urgent"; assignedBranch?: string | null;
+  }, Record<string, unknown>>;
+  create_agent_session: ProjectChatTool<{
+    workspaceId?: string; instruction: string; permissionMode?: "plan" | "edit";
+    agentType?: "claude-code" | "codex"; model?: string | null;
+  }, Record<string, unknown>>;
+  select_workspace: ProjectChatTool<{ requestId: string; workspaceId: string }, Record<string, unknown>>;
+  send_agent_instruction: ProjectChatTool<{ sessionId: string; instruction: string }, Record<string, unknown>>;
+  run_schedule_now: ProjectChatTool<{ scheduleId: string }, Record<string, unknown>>;
 };
+
+export interface ProjectChatMutationServices {
+  createAgentSession(input: {
+    sessionId: string; idempotencyKey: string; projectId: string; userId: string;
+    target: string; branch: string | null; instruction: string;
+    permissionMode: "plan" | "edit"; agentType: "claude-code" | "codex"; model: string | null;
+  }): Promise<{ sessionId: string }>;
+  sendAgentInstruction(input: {
+    projectId: string; userId: string; sessionId: string; instruction: string;
+    target: "local" | { remoteServerId: string; remoteSessionId: string };
+  }): Promise<boolean>;
+  runScheduleNow(scheduleId: string, runId: string): Promise<
+    { runId: string; skipped: boolean } | { error: string }
+  >;
+}
 
 export interface CreateProjectChatToolsOptions {
   projectId: string;
@@ -179,9 +211,60 @@ export interface CreateProjectChatToolsOptions {
   storage: Storage;
   agentSessionManager: ProjectAgentSessionReader;
   remoteSessions?: RemoteProjectSessionReader;
+  mutationServices?: ProjectChatMutationServices;
 }
 
 const emptySchema = z.object({}).strict();
+const selectorSchema = z.string().min(1).max(MAX_TOOL_SELECTOR_ID);
+const taskStatusSchema = z.enum(["todo", "in_progress", "done", "cancelled"]);
+const taskPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
+const createTaskSchema = z.object({
+  title: z.string().trim().min(1).max(NAME_CHAR_LIMIT),
+  description: z.string().max(DESCRIPTION_CHAR_LIMIT).nullable().optional(),
+  status: taskStatusSchema.optional(),
+  priority: taskPrioritySchema.optional(),
+  assignedBranch: z.string().max(BRANCH_CHAR_LIMIT).nullable().optional(),
+}).strict();
+const updateTaskSchema = z.object({
+  taskId: selectorSchema,
+  title: z.string().trim().min(1).max(NAME_CHAR_LIMIT).optional(),
+  description: z.string().max(DESCRIPTION_CHAR_LIMIT).nullable().optional(),
+  status: taskStatusSchema.optional(),
+  priority: taskPrioritySchema.optional(),
+  assignedBranch: z.string().max(BRANCH_CHAR_LIMIT).nullable().optional(),
+}).strict().refine(({ taskId: _taskId, ...patch }) => Object.values(patch).some((value) => value !== undefined), {
+  message: "At least one task field is required",
+});
+const instructionSchema = z.string().trim().min(1).max(8_000);
+const createSessionSchema = z.object({
+  workspaceId: selectorSchema.optional(),
+  instruction: instructionSchema,
+  permissionMode: z.enum(["plan", "edit"]).optional(),
+  agentType: z.enum(["claude-code", "codex"]).optional(),
+  model: z.string().trim().min(1).max(MODEL_CHAR_LIMIT).nullable().optional(),
+}).strict();
+const pendingSessionOperationSchema = z.object({
+  version: z.literal(1),
+  kind: z.literal("agent_session_create"),
+  operationId: selectorSchema,
+  status: z.literal("pending"),
+  phase: z.literal("workspace_selection"),
+  requestId: selectorSchema,
+  sessionId: selectorSchema,
+  instruction: instructionSchema,
+  permissionMode: z.enum(["plan", "edit"]),
+  agentType: z.enum(["claude-code", "codex"]),
+  model: z.string().max(MODEL_CHAR_LIMIT).nullable(),
+  candidates: z.array(z.object({
+    id: selectorSchema, target: z.string().min(1).max(TARGET_CHAR_LIMIT),
+    branch: z.string().max(BRANCH_CHAR_LIMIT).nullable(),
+  }).strict()).max(LIST_LIMIT),
+}).strict();
+const completedSessionOperationSchema = z.object({
+  version: z.literal(1), kind: z.literal("agent_session_create"),
+  operationId: selectorSchema, status: z.literal("completed"),
+  sessionId: selectorSchema, workspaceId: selectorSchema,
+}).strict();
 const preview = (value: unknown, limit: number): string => {
   if (typeof value !== "string" || !value) return "";
   return value.length <= limit ? value : `${value.slice(0, limit)}…`;
@@ -398,7 +481,7 @@ function transcriptPreview(entries: unknown): unknown[] {
 }
 
 export async function createProjectChatTools(options: CreateProjectChatToolsOptions): Promise<ProjectChatTools> {
-  const { projectId, threadId, userId, storage, agentSessionManager, remoteSessions } = options;
+  const { projectId, threadId, userId, storage, agentSessionManager, remoteSessions, mutationServices } = options;
   const project = await storage.projects.getById(projectId, userId);
   if (!project) throw new Error("Project not found");
   const thread = await storage.projectChatThreads.getById(threadId, projectId, userId);
@@ -416,7 +499,347 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
   const touch = async (entityType: ProjectChatContextEntityType, entityId: string): Promise<void> =>
     touchAll(entityType, [entityId]);
 
+  const mutationService = (): ProjectChatMutationServices => {
+    if (!mutationServices) throw new Error("Project Chat mutations are not configured");
+    return mutationServices;
+  };
+  const revalidateScope = async (): Promise<void> => {
+    const [ownedProject, ownedThread] = await Promise.all([
+      storage.projects.getById(projectId, userId),
+      storage.projectChatThreads.getById(threadId, projectId, userId),
+    ]);
+    if (!ownedProject || !ownedThread) throw new Error("Project Chat scope is no longer authorized");
+  };
+  const boundedError = (error: unknown): string => {
+    const message = error instanceof Error ? error.message : String(error);
+    return preview(message || "Mutation failed", 512);
+  };
+  const operationPayload = (kind: string, operationId: string, status: string, details: Record<string, unknown>) =>
+    JSON.stringify({ version: 1, kind, operationId, status, ...details });
+  const beginOperation = async (
+    kind: Parameters<Storage["projectChatOperations"]["create"]>[0]["kind"],
+    entityType: ProjectChatContextEntityType | null,
+    entityId: string | null,
+    details: Record<string, unknown>,
+    ids: { operationId?: string; idempotencyKey?: string } = {},
+  ) => {
+    const operationId = ids.operationId ?? randomUUID();
+    const idempotencyKey = ids.idempotencyKey ?? operationId;
+    const row = await storage.projectChatOperations.create({
+      id: operationId, thread_id: threadId, project_id: projectId, user_id: userId,
+      kind, status: "pending", entity_type: entityType, entity_id: entityId,
+      idempotency_key: idempotencyKey,
+      payload: operationPayload(kind, operationId, "pending", details), error: null,
+    });
+    if (!row) throw new Error("Failed to record Project Chat operation");
+    return row;
+  };
+  const finishOperation = async (
+    operation: Awaited<ReturnType<typeof beginOperation>>,
+    status: "completed" | "failed",
+    details: Record<string, unknown>,
+    error: string | null = null,
+  ) => {
+    const content = operationPayload(operation.kind, operation.id, status, details);
+    const result = await storage.projectChatOperations.transition({
+      id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
+      status, payload: content, error,
+      message: { id: `operation:${operation.id}:${status}`, content },
+    });
+    if (!result) throw new Error("Failed to update Project Chat operation");
+    return result.operation;
+  };
+  const workspaceCandidates = async () => {
+    const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
+    return rows.flatMap((row) => {
+      if (typeof row.targetId !== "string" || !isNullableString(row.branch)) return [];
+      const id = JSON.stringify([row.targetId, row.branch]);
+      if (!isToolSelectorId(id)) return [];
+      return [{ id, target: row.targetId, branch: row.branch }];
+    });
+  };
+  const resolveWorkspace = async (workspaceId: string) => {
+    const candidate = (await workspaceCandidates()).find(({ id }) => id === workspaceId);
+    if (!candidate) throw new Error("Workspace is no longer available in this project");
+    if (candidate.target !== "local") {
+      const association = await storage.projectRemotes.getByProjectAndServer(projectId, candidate.target);
+      if (!association) throw new Error("Workspace is no longer available in this project");
+    }
+    return candidate;
+  };
+
   return {
+    create_task: {
+      description: "Create a task in this project.",
+      inputSchema: createTaskSchema,
+      execute: async ({ title, description, status, priority, assignedBranch }) => {
+        mutationService();
+        await revalidateScope();
+        const taskId = randomUUID();
+        const operation = await beginOperation("task_create", "task", taskId, { taskId, title });
+        try {
+          await revalidateScope();
+          const task = await storage.tasks.create({
+            id: taskId, project_id: projectId, title, description, status, priority,
+            assigned_branch: assignedBranch,
+          });
+          await touch("task", task.id);
+          await finishOperation(operation, "completed", { taskId: task.id, title: task.title });
+          return { ok: true, operationId: operation.id, taskId: task.id, status: "completed" };
+        } catch (error) {
+          const message = boundedError(error);
+          await finishOperation(operation, "failed", { taskId }, message);
+          return { ok: false, operationId: operation.id, status: "failed", error: message };
+        }
+      },
+    },
+    update_task: {
+      description: "Update an existing task in this project.",
+      inputSchema: updateTaskSchema,
+      execute: async ({ taskId, assignedBranch, ...patch }) => {
+        mutationService();
+        await revalidateScope();
+        const target = await storage.tasks.getById(taskId);
+        if (!target) throw new Error("Task not found");
+        if (target.project_id !== projectId) throw new Error("Object is not part of this project");
+        const operation = await beginOperation("task_update", "task", taskId, { taskId });
+        try {
+          await revalidateScope();
+          const current = await storage.tasks.getById(taskId);
+          if (!current || current.project_id !== projectId) throw new Error("Task is no longer authorized");
+          const updated = await storage.tasks.update(taskId, {
+            ...patch, ...(assignedBranch !== undefined ? { assigned_branch: assignedBranch } : {}),
+          });
+          if (!updated) throw new Error("Task update failed");
+          await touch("task", taskId);
+          await finishOperation(operation, "completed", { taskId, title: updated.title });
+          return { ok: true, operationId: operation.id, taskId, status: "completed" };
+        } catch (error) {
+          const message = boundedError(error);
+          await finishOperation(operation, "failed", { taskId }, message);
+          return { ok: false, operationId: operation.id, status: "failed", error: message };
+        }
+      },
+    },
+    create_agent_session: {
+      description: "Create an agent session in an explicitly selected existing workspace.",
+      inputSchema: createSessionSchema,
+      execute: async ({ workspaceId, instruction, permissionMode = "edit", agentType = "claude-code", model = null }) => {
+        const service = mutationService();
+        await revalidateScope();
+        const operationId = randomUUID();
+        const sessionId = randomUUID();
+        const candidates = await workspaceCandidates();
+        if (!workspaceId) {
+          const operation = await beginOperation("agent_session_create", null, null, {
+            phase: "workspace_selection", requestId: operationId, sessionId, instruction,
+            permissionMode, agentType, model,
+            candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
+          }, { operationId, idempotencyKey: `session:${sessionId}` });
+          const selectionContent = operationPayload(
+            "workspace_selection", operation.id, "pending",
+            { requestId: operation.id, candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })) },
+          );
+          const announced = await storage.projectChatOperations.announce({
+            id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
+            message: { id: `operation:${operation.id}:workspace_selection`, content: selectionContent },
+          });
+          if (!announced) throw new Error("Failed to publish workspace selection request");
+          return {
+            ok: false, status: "workspace_selection_required", operationId: operation.id,
+            requestId: operation.id,
+            candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
+          };
+        }
+        const workspace = await resolveWorkspace(workspaceId);
+        const operation = await beginOperation("agent_session_create", "agent_session", sessionId, {
+          sessionId, workspaceId, target: workspace.target, branch: workspace.branch,
+        }, { operationId, idempotencyKey: `session:${sessionId}` });
+        try {
+          await revalidateScope();
+          await resolveWorkspace(workspaceId);
+          const created = await service.createAgentSession({
+            sessionId, idempotencyKey: operation.idempotency_key, projectId, userId,
+            target: workspace.target, branch: workspace.branch, instruction,
+            permissionMode, agentType, model,
+          });
+          if (created.sessionId !== sessionId) throw new Error("Session identity mismatch");
+          await touchAll("workspace", [workspaceId]);
+          await touch("agent_session", sessionId);
+          await finishOperation(operation, "completed", { sessionId, workspaceId });
+          return { ok: true, operationId: operation.id, sessionId, status: "completed" };
+        } catch (error) {
+          const message = boundedError(error);
+          await finishOperation(operation, "failed", { sessionId, workspaceId }, message);
+          return { ok: false, operationId: operation.id, status: "failed", error: message };
+        }
+      },
+    },
+    select_workspace: {
+      description: "Resolve a pending agent-session workspace selection request.",
+      inputSchema: z.object({ requestId: selectorSchema, workspaceId: selectorSchema }).strict(),
+      execute: async ({ requestId, workspaceId }) => {
+        const service = mutationService();
+        await revalidateScope();
+        const operation = await storage.projectChatOperations.getById(
+          requestId, threadId, projectId, userId,
+        );
+        if (!operation || operation.kind !== "agent_session_create") {
+          throw new Error("Workspace selection request not found");
+        }
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(operation.payload);
+        } catch {
+          throw new Error("Workspace selection request is invalid");
+        }
+        if (operation.status === "completed") {
+          const completed = completedSessionOperationSchema.safeParse(decoded);
+          if (!completed.success || completed.data.workspaceId !== workspaceId) {
+            throw new Error("Workspace selection request is already resolved");
+          }
+          return {
+            ok: true, operationId: operation.id, sessionId: completed.data.sessionId,
+            status: "completed",
+          };
+        }
+        if (operation.status !== "pending") {
+          throw new Error("Workspace selection request is already resolved");
+        }
+        const pending = pendingSessionOperationSchema.safeParse(decoded);
+        if (!pending.success || pending.data.requestId !== requestId) {
+          throw new Error("Workspace selection request is invalid");
+        }
+        if (!pending.data.candidates.some(({ id }) => id === workspaceId)) {
+          throw new Error("Workspace was not offered by this selection request");
+        }
+        const workspace = await resolveWorkspace(workspaceId);
+        const sessionId = pending.data.sessionId;
+        const correlated = await storage.projectChatOperations.bindCorrelation({
+          id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
+          entity_type: "agent_session", entity_id: sessionId,
+        });
+        if (!correlated) throw new Error("Workspace selection request is already resolved");
+        let created = false;
+        let failure: unknown;
+        try {
+          await revalidateScope();
+          await resolveWorkspace(workspaceId);
+          const result = await service.createAgentSession({
+            sessionId, idempotencyKey: operation.idempotency_key, projectId, userId,
+            target: workspace.target, branch: workspace.branch,
+            instruction: pending.data.instruction,
+            permissionMode: pending.data.permissionMode,
+            agentType: pending.data.agentType,
+            model: pending.data.model,
+          });
+          created = result.sessionId === sessionId;
+          if (!created) failure = new Error("Session identity mismatch");
+        } catch (error) {
+          failure = error;
+          const local = await storage.agentSessions.getById(sessionId);
+          if (local?.project_id === projectId) {
+            created = true;
+          } else {
+            const mapping = await remoteSessions?.getMapping(sessionId);
+            if (mapping?.projectId === projectId) {
+              const association = await storage.projectRemotes.getByProjectAndServer(
+                projectId, mapping.remoteServerId,
+              );
+              created = Boolean(association);
+            }
+          }
+        }
+        if (!created) {
+          const message = boundedError(failure ?? new Error("Agent session creation failed"));
+          await finishOperation(correlated, "failed", { sessionId, workspaceId }, message);
+          return { ok: false, operationId: operation.id, status: "failed", error: message };
+        }
+        await touchAll("workspace", [workspaceId]);
+        await touch("agent_session", sessionId);
+        await finishOperation(correlated, "completed", { sessionId, workspaceId });
+        return { ok: true, operationId: operation.id, sessionId, status: "completed" };
+      },
+    },
+    send_agent_instruction: {
+      description: "Send a supplemental instruction to an existing agent session in this project.",
+      inputSchema: z.object({ sessionId: selectorSchema, instruction: instructionSchema }).strict(),
+      execute: async ({ sessionId, instruction }) => {
+        const service = mutationService();
+        await revalidateScope();
+        const local = await storage.agentSessions.getById(sessionId);
+        let target: "local" | { remoteServerId: string; remoteSessionId: string };
+        if (local) {
+          if (local.project_id !== projectId) throw new Error("Object is not part of this project");
+          target = "local";
+        } else {
+          const mapping = await remoteSessions?.getMapping(sessionId);
+          if (!mapping) throw new Error("Agent session not found");
+          if (mapping.projectId !== projectId) throw new Error("Object is not part of this project");
+          const association = await storage.projectRemotes.getByProjectAndServer(projectId, mapping.remoteServerId);
+          if (!association) throw new Error("Agent session not found");
+          target = { remoteServerId: mapping.remoteServerId, remoteSessionId: mapping.remoteSessionId };
+        }
+        const operation = await beginOperation("agent_instruction", "agent_session", sessionId, { sessionId });
+        try {
+          await revalidateScope();
+          if (target === "local") {
+            const current = await storage.agentSessions.getById(sessionId);
+            if (!current || current.project_id !== projectId) {
+              throw new Error("Agent session is no longer authorized");
+            }
+          } else {
+            const current = await remoteSessions?.getMapping(sessionId);
+            if (!current || current.projectId !== projectId
+              || current.remoteServerId !== target.remoteServerId
+              || current.remoteSessionId !== target.remoteSessionId) {
+              throw new Error("Agent session is no longer authorized");
+            }
+            const association = await storage.projectRemotes.getByProjectAndServer(
+              projectId, current.remoteServerId,
+            );
+            if (!association) throw new Error("Agent session is no longer authorized");
+          }
+          const sent = await service.sendAgentInstruction({ projectId, userId, sessionId, instruction, target });
+          if (!sent) throw new Error("Agent session did not accept the instruction");
+          await touch("agent_session", sessionId);
+          await finishOperation(operation, "completed", { sessionId });
+          return { ok: true, operationId: operation.id, sessionId, status: "completed" };
+        } catch (error) {
+          const message = boundedError(error);
+          await finishOperation(operation, "failed", { sessionId }, message);
+          return { ok: false, operationId: operation.id, status: "failed", error: message };
+        }
+      },
+    },
+    run_schedule_now: {
+      description: "Run an existing schedule in this project now without changing its configuration.",
+      inputSchema: z.object({ scheduleId: selectorSchema }).strict(),
+      execute: async ({ scheduleId }) => {
+        const service = mutationService();
+        await revalidateScope();
+        const schedule = await storage.scheduledTasks.getById(scheduleId);
+        if (!schedule) throw new Error("Schedule not found");
+        if (schedule.project_id !== projectId) throw new Error("Object is not part of this project");
+        const runId = randomUUID();
+        const operation = await beginOperation("schedule_run", "schedule_run", runId, { scheduleId, runId });
+        try {
+          await revalidateScope();
+          const current = await storage.scheduledTasks.getById(scheduleId);
+          if (!current || current.project_id !== projectId) throw new Error("Schedule is no longer authorized");
+          const result = await service.runScheduleNow(scheduleId, runId);
+          if ("error" in result) throw new Error(result.error);
+          if (result.runId !== runId) throw new Error("Schedule run identity mismatch");
+          await touchAll("schedule", [scheduleId]);
+          await touch("schedule_run", runId);
+          return { ok: true, operationId: operation.id, scheduleId, runId, status: "running", skipped: result.skipped };
+        } catch (error) {
+          const message = boundedError(error);
+          await finishOperation(operation, "failed", { scheduleId, runId }, message);
+          return { ok: false, operationId: operation.id, status: "failed", error: message };
+        }
+      },
+    },
     get_project_summary: {
       description: "Return a safe summary of the current Project Chat project.",
       inputSchema: emptySchema,
