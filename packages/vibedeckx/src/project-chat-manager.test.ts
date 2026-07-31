@@ -6,12 +6,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
 import {
+  adaptProjectChatFullStream,
   PROJECT_CHAT_SYSTEM_PROMPT,
   ProjectChatManager,
+  projectChatAiTools,
   type ProjectChatModelRunner,
   type ProjectChatRunInput,
   type ProjectChatStreamEvent,
 } from "./project-chat-manager.js";
+
+async function* streamParts(parts: unknown[]): AsyncGenerator<unknown> {
+  for (const part of parts) yield part;
+}
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -85,6 +91,87 @@ describe("ProjectChatManager", () => {
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("project-scoped");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("multiple workspaces");
     expect(PROJECT_CHAT_SYSTEM_PROMPT).toContain("does not belong to a branch or workspace");
+  });
+
+  it("fails the turn when the production fullStream adapter receives an error part", async () => {
+    await createThread("thread-stream-error");
+    const runner: ProjectChatModelRunner = {
+      run: (input) => adaptProjectChatFullStream(streamParts([
+        { type: "text-delta", text: "partial" },
+        { type: "error", error: new Error(`provider-${"x".repeat(2_000)}`) },
+      ]), input.signal),
+    };
+    const manager = new ProjectChatManager(storage, runner);
+
+    await manager.sendMessage("thread-stream-error", "user-1", "go");
+    await waitFor(async () => (await manager.openThread("thread-stream-error", "user-1")).status === "idle");
+    const messages = await storage.projectChatMessages.listByThread(
+      "thread-stream-error", "project-1", "user-1",
+    );
+
+    expect(messages.map((message) => message.type)).toEqual(["user", "assistant", "error", "turn_end"]);
+    expect(messages.find((message) => message.type === "error")!.content.length).toBeLessThanOrEqual(513);
+    expect(JSON.parse(messages.at(-1)!.content)).toEqual(expect.objectContaining({ status: "error" }));
+  });
+
+  it("preserves provider order and handles explicit abort parts", async () => {
+    const signal = new AbortController().signal;
+    const ordered: ProjectChatStreamEvent[] = [];
+    for await (const event of adaptProjectChatFullStream(streamParts([
+      { type: "text-delta", text: "before" },
+      { type: "tool-call", toolCallId: "call-1", toolName: "inspect", input: {} },
+      { type: "tool-result", toolCallId: "call-1", toolName: "inspect", output: { ok: true } },
+      { type: "text-delta", text: "after" },
+    ]), signal)) ordered.push(event);
+    expect(ordered.map((event) => [event.type, event.content.includes("before") ? "before" : event.content.includes("after") ? "after" : "tool"]))
+      .toEqual([
+        ["assistant", "before"], ["tool_use", "tool"], ["tool_result", "tool"], ["assistant", "after"],
+      ]);
+
+    const controller = new AbortController();
+    controller.abort();
+    const aborted: ProjectChatStreamEvent[] = [];
+    for await (const event of adaptProjectChatFullStream(streamParts([{ type: "abort" }]), controller.signal)) {
+      aborted.push(event);
+    }
+    expect(aborted).toEqual([]);
+  });
+
+  it("enforces one race-safe call budget across parallel adapted tools", async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    const domain = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`tool_${index}`, {
+      description: "bounded",
+      inputSchema: { parse: (value: unknown) => value },
+      execute,
+    }])) as never;
+    const adapted = projectChatAiTools(domain);
+
+    const settled = await Promise.allSettled(Object.values(adapted).map((entry, index) =>
+      (entry as unknown as { execute: (input: unknown, options: unknown) => Promise<unknown> })
+        .execute({}, { toolCallId: `call-${index}`, messages: [] })));
+
+    expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(8);
+    expect(settled.filter((result) => result.status === "rejected")).toHaveLength(2);
+    expect(execute).toHaveBeenCalledTimes(8);
+  });
+
+  it("rejects cumulative adapted tool results beyond the turn byte budget", async () => {
+    const result = { payload: "x".repeat(40_000) };
+    const domain = Object.fromEntries(["one", "two"].map((name) => [name, {
+      description: "large",
+      inputSchema: { parse: (value: unknown) => value },
+      execute: async () => result,
+    }])) as never;
+    const adapted = projectChatAiTools(domain);
+    const calls = Object.values(adapted).map((entry, index) =>
+      (entry as unknown as { execute: (input: unknown, options: unknown) => Promise<unknown> })
+        .execute({}, { toolCallId: `large-${index}`, messages: [] }));
+
+    const settled = await Promise.allSettled(calls);
+    expect(settled.filter((entry) => entry.status === "fulfilled")).toHaveLength(1);
+    const rejected = settled.find((entry) => entry.status === "rejected") as PromiseRejectedResult;
+    expect(String(rejected.reason)).toContain("result byte budget");
+    expect(String(rejected.reason).length).toBeLessThan(200);
   });
 
   it("binds authorized read tools to the production runner input without changing the fake runner seam", async () => {

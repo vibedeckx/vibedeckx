@@ -2,17 +2,20 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
 
 describe("scheduledTasks storage", () => {
   let dir: string;
+  let dbPath: string;
   let storage: Storage;
   const projectId = "proj-1";
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-sched-"));
-    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    dbPath = path.join(dir, "test.sqlite");
+    storage = await createSqliteStorage(dbPath);
     await storage.projects.create({ id: projectId, name: "p", path: "/tmp/p" });
   });
 
@@ -32,6 +35,55 @@ describe("scheduledTasks storage", () => {
       content: "echo hi",
       cwd_mode: "branch",
     });
+
+  it("creates composite indexes for bounded Project Commander lists", () => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const names = new Set((db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index'",
+      ).all() as Array<{ name: string }>).map((row) => row.name));
+      for (const name of [
+        "idx_agent_sessions_project_updated_id",
+        "idx_remote_session_mappings_project_local",
+        "idx_workspace_search_cache_project_target_branch",
+        "idx_scheduled_tasks_project_created_id",
+        "idx_scheduled_task_runs_schedule_started_id",
+      ]) expect(names.has(name), name).toBe(true);
+      const plan = (db.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT run.id
+        FROM scheduled_task_runs AS run
+        JOIN scheduled_tasks AS schedule ON schedule.id = run.schedule_id
+        WHERE schedule.project_id = ?
+        ORDER BY run.started_at DESC, run.id DESC
+        LIMIT ?
+      `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+      expect(plan).toContain("idx_scheduled_tasks_project_created_id");
+      expect(plan).toContain("idx_scheduled_task_runs_schedule_started_id");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("lists recent project runs with a SQL limit and stable global tie-breaker", async () => {
+    await createTask("s1");
+    await createTask("s2");
+    await storage.projects.create({ id: "foreign", name: "foreign", path: "/tmp/foreign" });
+    await storage.scheduledTasks.create({
+      id: "foreign-schedule", project_id: "foreign", name: "foreign", cron_expr: "0 0 * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "branch",
+    });
+    for (const [id, scheduleId] of [
+      ["run-a", "s1"], ["run-c", "s2"], ["run-b", "s1"], ["run-z", "foreign-schedule"],
+    ] as const) await storage.scheduledTaskRuns.create({ id, schedule_id: scheduleId, status: "completed" });
+    const db = new Database(dbPath);
+    db.prepare("UPDATE scheduled_task_runs SET started_at = ?").run("2026-01-01 00:00:00");
+    db.close();
+
+    const rows = await storage.scheduledTaskRuns.listRecentByProject(projectId, 2);
+    expect(rows.map((row) => row.id)).toEqual(["run-c", "run-b"]);
+    expect(rows).toHaveLength(2);
+  });
 
   it("creates and reads back a scheduled task with defaults", async () => {
     const t = await createTask();

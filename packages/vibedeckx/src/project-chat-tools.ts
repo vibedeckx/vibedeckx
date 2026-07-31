@@ -1,11 +1,12 @@
 import { z } from "zod";
 import type { ProjectChatContextEntityType, Storage } from "./storage/types.js";
 
-const LIST_LIMIT = 50;
+const LIST_LIMIT = 20;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
 const TRANSCRIPT_CHAR_LIMIT = 6_000;
 const RUN_PREVIEW_CHAR_LIMIT = 4_000;
 const ID_CHAR_LIMIT = 512;
+export const MAX_TOOL_SELECTOR_ID = 512;
 const CANONICAL_ID_CHAR_LIMIT = 65_536;
 const NAME_CHAR_LIMIT = 512;
 const DESCRIPTION_CHAR_LIMIT = 2_000;
@@ -22,6 +23,11 @@ const STRUCTURAL_ENTRY_LIMIT = 20;
 const STRUCTURAL_NODE_LIMIT = 100;
 const STRUCTURAL_KEY_CHAR_LIMIT = 128;
 const STRUCTURAL_STRING_CHAR_LIMIT = 1_000;
+const LIST_NAME_CHAR_LIMIT = 256;
+const LIST_DESCRIPTION_CHAR_LIMIT = 512;
+const LIST_BRANCH_CHAR_LIMIT = 256;
+const LIST_TARGET_CHAR_LIMIT = 256;
+const LIST_MODEL_CHAR_LIMIT = 128;
 
 export interface ProjectAgentSessionReader {
   getMessages(sessionId: string): unknown[];
@@ -88,7 +94,9 @@ export function createRemoteProjectSessionReader(options: {
       }));
     },
     getMapping: async (sessionId) => {
-      const row = await options.storage.remoteSessionMappings.getByLocal(sessionId);
+      const unscoped = await options.storage.remoteSessionMappings.getByLocal(sessionId);
+      if (!unscoped) return undefined;
+      const row = await options.storage.remoteSessionMappings.getAuthorizedByLocal(sessionId, unscoped.project_id);
       return row ? {
         id: row.local_session_id,
         projectId: row.project_id,
@@ -98,6 +106,11 @@ export function createRemoteProjectSessionReader(options: {
       } : undefined;
     },
     getDetail: async (mapping, limits) => {
+      const association = await options.storage.projectRemotes.getByProjectAndServer(
+        mapping.projectId,
+        mapping.remoteServerId,
+      );
+      if (!association) return undefined;
       const result = await options.proxy(
         mapping.remoteServerId,
         "GET",
@@ -225,6 +238,10 @@ function normalizeCollectionLimit(value: unknown): number {
 function isCanonicalId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0
     && value.length <= CANONICAL_ID_CHAR_LIMIT && !value.includes("\0");
+}
+
+function isToolSelectorId(value: unknown): value is string {
+  return isCanonicalId(value) && value.length <= MAX_TOOL_SELECTOR_ID;
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -387,13 +404,17 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
   const thread = await storage.projectChatThreads.getById(threadId, projectId, userId);
   if (!thread) throw new Error("Project Chat thread not found");
 
-  const touch = async (entityType: ProjectChatContextEntityType, entityId: string): Promise<void> => {
-    const tracked = await storage.projectChatContextRefs.touch(threadId, projectId, userId, entityType, entityId);
+  const touchAll = async (entityType: ProjectChatContextEntityType, ids: string[]): Promise<void> => {
+    const tracked = await storage.projectChatContextRefs.touchMany(
+      threadId,
+      projectId,
+      userId,
+      ids.map((entityId) => ({ entityType, entityId })),
+    );
     if (!tracked) throw new Error("Failed to track Project Chat context");
   };
-  const touchAll = async (entityType: ProjectChatContextEntityType, ids: string[]): Promise<void> => {
-    for (const id of ids) await touch(entityType, id);
-  };
+  const touch = async (entityType: ProjectChatContextEntityType, entityId: string): Promise<void> =>
+    touchAll(entityType, [entityId]);
 
   return {
     get_project_summary: {
@@ -413,16 +434,16 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       }).strict(),
       execute: async ({ query, status }) => {
         const rows = await storage.tasks.queryByProject(projectId, { query, status, limit: LIST_LIMIT });
-        const validRows = rows.filter((row) => isCanonicalId(row.id));
+        const validRows = rows.filter((row) => isToolSelectorId(row.id));
         await touchAll("task", validRows.map((row) => row.id));
         return {
           items: validRows.map((row) => ({
             id: preview(row.id, ID_CHAR_LIMIT),
-            title: preview(row.title, NAME_CHAR_LIMIT),
-            description: nullablePreview(row.description, DESCRIPTION_CHAR_LIMIT),
+            title: preview(row.title, LIST_NAME_CHAR_LIMIT),
+            description: nullablePreview(row.description, LIST_DESCRIPTION_CHAR_LIMIT),
             status: preview(row.status, ENUM_CHAR_LIMIT),
             priority: preview(row.priority, ENUM_CHAR_LIMIT),
-            assignedBranch: nullablePreview(row.assigned_branch, BRANCH_CHAR_LIMIT),
+            assignedBranch: nullablePreview(row.assigned_branch, LIST_BRANCH_CHAR_LIMIT),
           })),
           truncated: rows.length === LIST_LIMIT,
         };
@@ -430,12 +451,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     },
     get_task: {
       description: "Inspect one task by id, only if it belongs to this project.",
-      inputSchema: z.object({ taskId: z.string().min(1).max(256) }).strict(),
+      inputSchema: z.object({ taskId: z.string().min(1).max(MAX_TOOL_SELECTOR_ID) }).strict(),
       execute: async ({ taskId }) => {
         const row = await storage.tasks.getById(taskId);
         if (!row) throw new Error("Task not found");
         if (row.project_id !== projectId) throw new Error("Object is not part of this project");
-        if (!isCanonicalId(row.id)) throw new Error("Task not found");
+        if (!isToolSelectorId(row.id)) throw new Error("Task not found");
         await touch("task", row.id);
         return {
           id: preview(row.id, ID_CHAR_LIMIT),
@@ -454,14 +475,15 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT);
         const entries = rows.flatMap((row) => {
           if (typeof row.targetId !== "string" || !isNullableString(row.branch)) return [];
-          const canonicalId = `${row.targetId}:${row.branch ?? "main"}`;
-          if (!isCanonicalId(canonicalId)) return [];
+          if (row.targetId.length > TARGET_CHAR_LIMIT || (row.branch?.length ?? 0) > BRANCH_CHAR_LIMIT) return [];
+          const canonicalId = JSON.stringify([row.targetId, row.branch]);
+          if (!isToolSelectorId(canonicalId)) return [];
           const target = preview(row.targetId, TARGET_CHAR_LIMIT);
           const branch = nullablePreview(row.branch, BRANCH_CHAR_LIMIT);
           return [{
             canonicalId,
             item: {
-              id: preview(`${target}:${branch ?? "main"}`, ID_CHAR_LIMIT * 2),
+              id: canonicalId,
               target,
               branch,
             },
@@ -480,17 +502,17 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
         ]);
         const remoteRows = safeArrayPrefix(untrustedRemoteRows, LIST_LIMIT / 2);
-        const local = localRows.flatMap((row) => isCanonicalId(row.id) ? [{
+        const local = localRows.flatMap((row) => isToolSelectorId(row.id) ? [{
           canonicalId: row.id,
           item: {
             id: preview(row.id, ID_CHAR_LIMIT),
             projectId: preview(row.project_id, ID_CHAR_LIMIT),
-            branch: nullablePreview(row.branch || null, BRANCH_CHAR_LIMIT),
-            title: nullablePreview(row.title, NAME_CHAR_LIMIT),
+            branch: nullablePreview(row.branch || null, LIST_BRANCH_CHAR_LIMIT),
+            title: nullablePreview(row.title, LIST_NAME_CHAR_LIMIT),
             status: preview(row.status, ENUM_CHAR_LIMIT),
             target: "local",
             agentType: nullablePreview(row.agent_type, ENUM_CHAR_LIMIT),
-            model: nullablePreview(row.model, MODEL_CHAR_LIMIT),
+            model: nullablePreview(row.model, LIST_MODEL_CHAR_LIMIT),
           } satisfies ProjectSessionSummary,
         }] : []);
         const authorizedRemote: Array<{ canonicalId: string; item: ProjectSessionSummary }> = [];
@@ -517,7 +539,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           const rowTitle = titleRead.value;
           const rowAgentType = agentTypeRead.value;
           const rowModel = modelRead.value;
-          if (!isCanonicalId(rowId) || !isCanonicalId(rowProjectId)
+          if (!isToolSelectorId(rowId) || !isCanonicalId(rowProjectId)
             || typeof rowStatus !== "string" || typeof rowTarget !== "string"
             || !isNullableString(rowBranch) || !isNullableString(rowTitle)
             || !isOptionalNullableString(rowAgentType) || !isOptionalNullableString(rowModel)) continue;
@@ -526,12 +548,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             item: {
               id: preview(rowId, ID_CHAR_LIMIT),
               projectId: preview(rowProjectId, ID_CHAR_LIMIT),
-              branch: nullablePreview(rowBranch, BRANCH_CHAR_LIMIT),
-              title: nullablePreview(rowTitle, NAME_CHAR_LIMIT),
+              branch: nullablePreview(rowBranch, LIST_BRANCH_CHAR_LIMIT),
+              title: nullablePreview(rowTitle, LIST_NAME_CHAR_LIMIT),
               status: preview(rowStatus, ENUM_CHAR_LIMIT),
-              target: preview(rowTarget, TARGET_CHAR_LIMIT),
+              target: preview(rowTarget, LIST_TARGET_CHAR_LIMIT),
               agentType: nullablePreview(rowAgentType, ENUM_CHAR_LIMIT),
-              model: nullablePreview(rowModel, MODEL_CHAR_LIMIT),
+              model: nullablePreview(rowModel, LIST_MODEL_CHAR_LIMIT),
             },
           });
         }
@@ -545,12 +567,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     },
     get_agent_session: {
       description: "Return status and a server-bounded recent transcript for one project agent session.",
-      inputSchema: z.object({ sessionId: z.string().min(1).max(512) }).strict(),
+      inputSchema: z.object({ sessionId: z.string().min(1).max(MAX_TOOL_SELECTOR_ID) }).strict(),
       execute: async ({ sessionId }) => {
         const local = await storage.agentSessions.getById(sessionId);
         if (local) {
           if (local.project_id !== projectId) throw new Error("Object is not part of this project");
-          if (!isCanonicalId(local.id)) throw new Error("Agent session not found");
+          if (!isToolSelectorId(local.id)) throw new Error("Agent session not found");
           const detail: ProjectSessionDetail = {
             id: preview(local.id, ID_CHAR_LIMIT),
             projectId: preview(local.project_id, ID_CHAR_LIMIT),
@@ -574,7 +596,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const mappingRemoteServerId = safeProperty(mappingRecord, "remoteServerId");
         const mappingRemoteSessionId = safeProperty(mappingRecord, "remoteSessionId");
         const mappingBranch = safeProperty(mappingRecord, "branch");
-        if (!isCanonicalId(mappingId) || !isCanonicalId(mappingProjectId)
+        if (!isToolSelectorId(mappingId) || !isCanonicalId(mappingProjectId)
           || typeof mappingRemoteServerId !== "string" || typeof mappingRemoteSessionId !== "string") {
           throw new Error("Agent session not found");
         }
@@ -622,7 +644,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: async () => {
         const rows = await storage.scheduledTasks.listByProject(projectId, LIST_LIMIT);
-        const validRows = rows.filter((row) => isCanonicalId(row.id));
+        const validRows = rows.filter((row) => isToolSelectorId(row.id));
         await touchAll("schedule", validRows.map((row) => row.id));
         return {
           items: validRows.map((row) => ({
@@ -644,7 +666,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: async () => {
         const rows = await storage.scheduledTaskRuns.listRecentByProject(projectId, LIST_LIMIT);
-        const validRows = rows.filter((row) => isCanonicalId(row.id));
+        const validRows = rows.filter((row) => isToolSelectorId(row.id));
         await touchAll("schedule_run", validRows.map((row) => row.id));
         return {
           items: validRows.map((row) => ({
@@ -661,14 +683,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     },
     get_schedule_run: {
       description: "Inspect one project schedule run with server-bounded output and report previews.",
-      inputSchema: z.object({ runId: z.string().min(1).max(256) }).strict(),
+      inputSchema: z.object({ runId: z.string().min(1).max(MAX_TOOL_SELECTOR_ID) }).strict(),
       execute: async ({ runId }) => {
         const run = await storage.scheduledTaskRuns.getById(runId);
         if (!run) throw new Error("Schedule run not found");
         const schedule = await storage.scheduledTasks.getById(run.schedule_id);
         if (!schedule) throw new Error("Schedule run not found");
         if (schedule.project_id !== projectId) throw new Error("Object is not part of this project");
-        if (!isCanonicalId(run.id)) throw new Error("Schedule run not found");
+        if (!isToolSelectorId(run.id)) throw new Error("Schedule run not found");
         await touch("schedule_run", run.id);
         return {
           id: preview(run.id, ID_CHAR_LIMIT),

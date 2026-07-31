@@ -281,9 +281,13 @@ export const createAgentSessionRepos = (
     },
 
     listByProject: async (projectId, limit) => {
-      const rows = await kdb.selectFrom("remote_session_mappings").selectAll()
-        .where("project_id", "=", projectId)
-        .orderBy("local_session_id", "asc")
+      const rows = await kdb.selectFrom("remote_session_mappings as mapping")
+        .innerJoin("project_remotes as association", (join) => join
+          .onRef("association.project_id", "=", "mapping.project_id")
+          .onRef("association.remote_server_id", "=", "mapping.remote_server_id"))
+        .selectAll("mapping")
+        .where("mapping.project_id", "=", projectId)
+        .orderBy("mapping.local_session_id", "asc")
         .limit(limit)
         .execute();
       return rows.map(mapRemoteSessionMapping);
@@ -292,6 +296,18 @@ export const createAgentSessionRepos = (
     getByLocal: async (localSessionId) => {
       const row = await kdb.selectFrom("remote_session_mappings").selectAll()
         .where("local_session_id", "=", localSessionId)
+        .executeTakeFirst();
+      return row ? mapRemoteSessionMapping(row) : undefined;
+    },
+
+    getAuthorizedByLocal: async (localSessionId, projectId) => {
+      const row = await kdb.selectFrom("remote_session_mappings as mapping")
+        .innerJoin("project_remotes as association", (join) => join
+          .onRef("association.project_id", "=", "mapping.project_id")
+          .onRef("association.remote_server_id", "=", "mapping.remote_server_id"))
+        .selectAll("mapping")
+        .where("mapping.local_session_id", "=", localSessionId)
+        .where("mapping.project_id", "=", projectId)
         .executeTakeFirst();
       return row ? mapRemoteSessionMapping(row) : undefined;
     },

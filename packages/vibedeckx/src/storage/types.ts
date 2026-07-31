@@ -756,6 +756,8 @@ export interface Storage {
     /** Persisted remote mappings for exactly one project, capped in SQL. */
     listByProject: (projectId: string, limit: number) => Promise<RemoteSessionMapping[]>;
     getByLocal: (localSessionId: string) => Promise<RemoteSessionMapping | undefined>;
+    /** Mapping only while its exact project-to-remote association still exists. */
+    getAuthorizedByLocal: (localSessionId: string, projectId: string) => Promise<RemoteSessionMapping | undefined>;
     /** Resolve the local target of a milestone the worker reported. */
     getByRemote: (remoteServerId: string, remoteSessionId: string) => Promise<RemoteSessionMapping | undefined>;
     /** Move `notification_watch_until` forward (never backward). */
@@ -1003,6 +1005,12 @@ export interface Storage {
   };
   projectChatContextRefs: {
     touch: (threadId: string, projectId: string, userId: string, entityType: ProjectChatContextEntityType, entityId: string) => Promise<ProjectChatContextRef | undefined>;
+    touchMany: (
+      threadId: string,
+      projectId: string,
+      userId: string,
+      refs: Array<{ entityType: ProjectChatContextEntityType; entityId: string }>,
+    ) => Promise<ProjectChatContextRef[] | undefined>;
     listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatContextRef[]>;
   };
   tasks: {

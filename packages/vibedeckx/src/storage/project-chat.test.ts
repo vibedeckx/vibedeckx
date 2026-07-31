@@ -177,6 +177,30 @@ describe("project chat storage", () => {
     expect(refs[0]).toMatchObject({ thread_id: "t1", entity_type: "agent_session", entity_id: "s1" });
   });
 
+  it("touches context references as one scoped all-or-nothing batch", async () => {
+    await storage.projectChatThreads.create({ id: "batch-thread", project_id: "p1", user_id: "u1", title: null });
+
+    await expect(storage.projectChatContextRefs.touchMany(
+      "batch-thread", "p1", "u1", [
+        { entityType: "task", entityId: "task-1" },
+        { entityType: "invalid" as never, entityId: "must-roll-back" },
+      ],
+    )).rejects.toThrow();
+    expect(await storage.projectChatContextRefs.listByThread("batch-thread", "p1", "u1")).toEqual([]);
+
+    await expect(storage.projectChatContextRefs.touchMany(
+      "batch-thread", "p1", "u1", [
+        { entityType: "task", entityId: "task-1" },
+        { entityType: "agent_session", entityId: "session-1" },
+      ],
+    )).resolves.toHaveLength(2);
+    await expect(storage.projectChatContextRefs.touchMany(
+      "batch-thread", "p2", "u1", [{ entityType: "task", entityId: "foreign" }],
+    )).resolves.toBeUndefined();
+    expect((await storage.projectChatContextRefs.listByThread("batch-thread", "p1", "u1")).map((ref) => ref.entity_id).sort())
+      .toEqual(["session-1", "task-1"]);
+  });
+
   it("does not touch or list context references through a different project scope for the same user", async () => {
     await storage.projectChatThreads.create({ id: "t2", project_id: "p2", user_id: "u1", title: null });
 

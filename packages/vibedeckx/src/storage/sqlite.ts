@@ -977,6 +977,20 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     );
   `);
 
+  // Composite access paths used by bounded, deterministic Project Commander lists.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_updated_id
+      ON agent_sessions(project_id, updated_at DESC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_remote_session_mappings_project_local
+      ON remote_session_mappings(project_id, local_session_id ASC);
+    CREATE INDEX IF NOT EXISTS idx_workspace_search_cache_project_target_branch
+      ON workspace_search_cache(project_id, deleted_at, target_id ASC, branch ASC);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project_created_id
+      ON scheduled_tasks(project_id, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_schedule_started_id
+      ON scheduled_task_runs(schedule_id, started_at DESC, id DESC);
+  `);
+
   // Migration: per-mapping notification sync provenance + watch window.
   // Existing mappings default to 'from_now' ON PURPOSE — an upgrade (or a
   // rebuilt front database attached to a long-lived worker) must not backfill

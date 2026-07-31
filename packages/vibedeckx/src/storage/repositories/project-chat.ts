@@ -474,6 +474,39 @@ export const createProjectChatRepos = (
       return row ? mapContextRef(row) : undefined;
     },
 
+    touchMany: async (threadId, projectId, userId, refs) => {
+      return kdb.transaction().execute(async (trx) => {
+        const thread = await trx.selectFrom("project_chat_threads")
+          .select("id")
+          .where("id", "=", threadId)
+          .where("project_id", "=", projectId)
+          .where("user_id", "=", userId)
+          .executeTakeFirst();
+        if (!thread) return undefined;
+        if (refs.length === 0) return [];
+
+        await trx.insertInto("project_chat_context_refs")
+          .values(refs.map((ref) => ({
+            thread_id: threadId,
+            entity_type: ref.entityType,
+            entity_id: ref.entityId,
+          })))
+          .onConflict((conflict) => conflict
+            .columns(["thread_id", "entity_type", "entity_id"])
+            .doUpdateSet({ last_referenced_at: now() }))
+          .execute();
+
+        const keys = new Set(refs.map((ref) => `${ref.entityType}\0${ref.entityId}`));
+        const rows = await trx.selectFrom("project_chat_context_refs")
+          .selectAll()
+          .where("thread_id", "=", threadId)
+          .execute();
+        return rows
+          .filter((row) => keys.has(`${row.entity_type}\0${row.entity_id}`))
+          .map(mapContextRef);
+      });
+    },
+
     listByThread: async (threadId, projectId, userId) => {
       const rows = await kdb.selectFrom("project_chat_context_refs as ref")
         .innerJoin("project_chat_threads as thread", "thread.id", "ref.thread_id")

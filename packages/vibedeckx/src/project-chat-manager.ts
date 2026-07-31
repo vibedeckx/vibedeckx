@@ -22,6 +22,8 @@ export const PROJECT_CHAT_SYSTEM_PROMPT = [
   "Project Chat does not belong to a branch or workspace; never assume one workspace is the whole project.",
   "Use the supplied read tools when factual project context is needed. Never claim to have changed project state.",
 ].join(" ");
+export const PROJECT_CHAT_TOOL_CALL_LIMIT = 8;
+export const PROJECT_CHAT_TOOL_RESULT_BYTE_LIMIT = 64 * 1024;
 
 export type ProjectChatStatus = "idle" | "running";
 
@@ -119,6 +121,76 @@ export class ProjectChatNotFoundError extends Error {
   }
 }
 
+const PROJECT_CHAT_STREAM_ERROR_LIMIT = 512;
+
+function boundedStreamError(error: unknown): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw.length <= PROJECT_CHAT_STREAM_ERROR_LIMIT
+    ? raw
+    : `${raw.slice(0, PROJECT_CHAT_STREAM_ERROR_LIMIT)}…`;
+  return new Error(message || "Project Chat model stream failed");
+}
+
+export async function* adaptProjectChatFullStream(
+  fullStream: AsyncIterable<unknown>,
+  signal: AbortSignal,
+): AsyncGenerator<ProjectChatStreamEvent> {
+  let content = "";
+  const flush = (): ProjectChatStreamEvent | undefined => {
+    if (!content) return undefined;
+    const event: ProjectChatStreamEvent = { type: "assistant", content };
+    content = "";
+    return event;
+  };
+
+  for await (const rawPart of fullStream) {
+    if (!rawPart || typeof rawPart !== "object") continue;
+    const part = rawPart as Record<string, unknown>;
+    if (part.type === "text-delta" && typeof part.text === "string") {
+      content += part.text;
+      continue;
+    }
+    const pending = flush();
+    if (pending) yield pending;
+    if (part.type === "tool-call") {
+      yield {
+        type: "tool_use",
+        content: JSON.stringify({
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          input: part.input,
+        }),
+      };
+    } else if (part.type === "tool-result") {
+      yield {
+        type: "tool_result",
+        content: JSON.stringify({
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          output: part.output,
+        }),
+      };
+    } else if (part.type === "tool-error") {
+      const error = boundedStreamError(part.error);
+      yield {
+        type: "tool_result",
+        content: JSON.stringify({
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          error: error.message,
+        }),
+      };
+    } else if (part.type === "error") {
+      throw boundedStreamError(part.error);
+    } else if (part.type === "abort") {
+      if (signal.aborted) return;
+      throw new Error("Project Chat model stream aborted unexpectedly");
+    }
+  }
+  const pending = flush();
+  if (pending) yield pending;
+}
+
 class DefaultProjectChatModelRunner implements ProjectChatModelRunner {
   constructor(private readonly storage: Storage) {}
 
@@ -148,51 +220,38 @@ class DefaultProjectChatModelRunner implements ProjectChatModelRunner {
       },
     });
 
-    let content = "";
-    for await (const part of result.fullStream) {
-      if (part.type === "text-delta") {
-        content += part.text;
-      } else if (part.type === "tool-call") {
-        yield {
-          type: "tool_use",
-          content: JSON.stringify({
-            toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            input: part.input,
-          }),
-        };
-      } else if (part.type === "tool-result") {
-        yield {
-          type: "tool_result",
-          content: JSON.stringify({
-            toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            output: part.output,
-          }),
-        };
-      } else if (part.type === "tool-error") {
-        yield {
-          type: "tool_result",
-          content: JSON.stringify({
-            toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            error: part.error instanceof Error ? part.error.message : String(part.error),
-          }),
-        };
-      }
-    }
-    if (content) yield { type: "assistant", content };
+    yield* adaptProjectChatFullStream(result.fullStream, input.signal);
   }
 }
 
 export function projectChatAiTools(domainTools: ProjectChatTools): ToolSet {
   const adapted: ToolSet = {};
+  let reservedCalls = 0;
+  let resultBytes = 0;
   for (const [name, entry] of Object.entries(domainTools)) {
     const generic = entry as ProjectChatTool<unknown, unknown>;
     adapted[name] = tool({
       description: generic.description,
       inputSchema: generic.inputSchema,
-      execute: generic.execute,
+      execute: async (args) => {
+        if (reservedCalls >= PROJECT_CHAT_TOOL_CALL_LIMIT) {
+          throw new Error(`Project Chat tool call budget exceeded (${PROJECT_CHAT_TOOL_CALL_LIMIT} per turn)`);
+        }
+        reservedCalls++;
+        const result = await generic.execute(args);
+        let serialized: string;
+        try {
+          serialized = JSON.stringify(result) ?? "null";
+        } catch {
+          throw new Error("Project Chat tool result could not be serialized");
+        }
+        const bytes = Buffer.byteLength(serialized, "utf8");
+        if (resultBytes + bytes > PROJECT_CHAT_TOOL_RESULT_BYTE_LIMIT) {
+          throw new Error(`Project Chat tool result byte budget exceeded (${PROJECT_CHAT_TOOL_RESULT_BYTE_LIMIT} per turn)`);
+        }
+        resultBytes += bytes;
+        return result;
+      },
     }) as ToolSet[string];
   }
   return adapted;
