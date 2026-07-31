@@ -35,6 +35,25 @@ describe("project chat storage", () => {
     expect(threads.every((thread) => !("branch" in thread))).toBe(true);
   });
 
+  it("rolls back thread creation when the initial message insert violates a constraint", async () => {
+    await storage.projectChatThreads.create({ id: "existing", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatMessages.append({
+      id: "duplicate-message", thread_id: "existing", project_id: "p1", user_id: "u1",
+      sequence: 1, type: "user", content: "existing",
+    });
+
+    await expect(storage.projectChatThreads.createWithInitialMessage({
+      id: "rolled-back",
+      project_id: "p1",
+      user_id: "u1",
+      title: null,
+      initialMessage: { id: "duplicate-message", content: "must fail" },
+    })).rejects.toThrow();
+
+    expect(await storage.projectChatThreads.getById("rolled-back", "p1", "u1")).toBeUndefined();
+    expect(await storage.projectChatMessages.listByThread("rolled-back", "p1", "u1")).toEqual([]);
+  });
+
   it("orders threads deterministically by updated_at DESC then id DESC", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
     await storage.projectChatThreads.create({ id: "t2", project_id: "p1", user_id: "u1", title: null });
@@ -56,6 +75,19 @@ describe("project chat storage", () => {
     const updated = await storage.projectChatThreads.updateTitle("t1", "p1", "u1", "Project status");
     expect(updated?.title).toBe("Project status");
     expect(await storage.projectChatThreads.updateTitle("t1", "p1", "u2", "Not allowed")).toBeUndefined();
+  });
+
+  it("updates title and archive state together within the full thread scope", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+
+    const updated = await storage.projectChatThreads.update("t1", "p1", "u1", {
+      title: "Project status",
+      archived: true,
+    });
+
+    expect(updated).toMatchObject({ title: "Project status" });
+    expect(updated?.archived_at).not.toBeNull();
+    expect(await storage.projectChatThreads.update("t1", "p2", "u1", { archived: false })).toBeUndefined();
   });
 
   it("discovers an owned thread by id without exposing another user's row", async () => {

@@ -897,9 +897,25 @@ export interface Storage {
   };
   projectChatThreads: {
     create: (opts: { id: string; project_id: string; user_id: string; title: string | null }) => Promise<ProjectChatThread>;
+    createWithInitialMessage: (opts: {
+      id: string;
+      project_id: string;
+      user_id: string;
+      title: string | null;
+      initialMessage?: { id: string; content: string };
+    }) => Promise<ProjectChatThread>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
+    /**
+     * Discovery-only lookup for routes that receive no project id. Callers
+     * must immediately authorize the returned project before reading or
+     * mutating the thread, and mutations must use the full project/user scope.
+     */
     getOwnedById: (id: string, userId: string) => Promise<ProjectChatThread | undefined>;
     getById: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
+    update: (id: string, projectId: string, userId: string, patch: {
+      title?: string | null;
+      archived?: boolean;
+    }) => Promise<ProjectChatThread | undefined>;
     updateTitle: (id: string, projectId: string, userId: string, title: string | null) => Promise<ProjectChatThread | undefined>;
     archive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
     unarchive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;

@@ -32,6 +32,32 @@ export const createProjectChatRepos = (
       return mapThread(row);
     },
 
+    createWithInitialMessage: async ({ id, project_id, user_id, title, initialMessage }) => {
+      return kdb.transaction().execute(async (trx) => {
+        await trx.insertInto("project_chat_threads")
+          .values({ id, project_id, user_id, title, archived_at: null })
+          .execute();
+        if (initialMessage) {
+          await trx.insertInto("project_chat_messages")
+            .values({
+              id: initialMessage.id,
+              thread_id: id,
+              sequence: 1,
+              type: "user",
+              content: initialMessage.content,
+            })
+            .execute();
+        }
+        const row = await trx.selectFrom("project_chat_threads")
+          .selectAll()
+          .where("id", "=", id)
+          .where("project_id", "=", project_id)
+          .where("user_id", "=", user_id)
+          .executeTakeFirstOrThrow();
+        return mapThread(row);
+      });
+    },
+
     listByProject: async (projectId, userId, limit, opts) => {
       let query = kdb.selectFrom("project_chat_threads")
         .selectAll()
@@ -63,6 +89,23 @@ export const createProjectChatRepos = (
         .where("id", "=", id)
         .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
+        .executeTakeFirst();
+      return row ? mapThread(row) : undefined;
+    },
+
+    update: async (id, projectId, userId, patch) => {
+      const row = await kdb.updateTable("project_chat_threads")
+        .set({
+          updated_at: now(),
+          ...(patch.title !== undefined ? { title: patch.title } : {}),
+          ...(patch.archived !== undefined
+            ? { archived_at: patch.archived ? Date.now() : null }
+            : {}),
+        })
+        .where("id", "=", id)
+        .where("project_id", "=", projectId)
+        .where("user_id", "=", userId)
+        .returningAll()
         .executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },

@@ -138,8 +138,11 @@ describe("project chat thread routes", () => {
       expect(await storage.projectChatThreads.listByProject("project-1", "user-1", 100)).toEqual([]);
     });
 
-    it("does not leave an empty thread behind when first-message persistence fails", async () => {
-      storage.projectChatMessages.append = vi.fn().mockRejectedValue(new Error("write failed"));
+    it("delegates initial-message persistence to the atomic thread create operation", async () => {
+      const createWithInitialMessage = vi.fn().mockRejectedValue(new Error("write failed"));
+      (storage.projectChatThreads as typeof storage.projectChatThreads & {
+        createWithInitialMessage: typeof createWithInitialMessage;
+      }).createWithInitialMessage = createWithInitialMessage;
 
       const response = await app.inject({
         method: "POST",
@@ -148,6 +151,7 @@ describe("project chat thread routes", () => {
       });
 
       expect(response.statusCode).toBe(500);
+      expect(createWithInitialMessage).toHaveBeenCalledOnce();
       expect(await storage.projectChatThreads.listByProject("project-1", "user-1", 100)).toEqual([]);
     });
 
@@ -214,6 +218,27 @@ describe("project chat thread routes", () => {
       });
       expect(cleared.statusCode).toBe(200);
       expect(cleared.json().thread).toMatchObject({ title: null, archived_at: null });
+    });
+
+    it("returns a non-disclosing 404 when the thread disappears before its atomic update", async () => {
+      await createThread();
+      const update = vi.fn().mockResolvedValue(undefined);
+      (storage.projectChatThreads as typeof storage.projectChatThreads & {
+        update: typeof update;
+      }).update = update;
+
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/project-chat/threads/thread-1",
+        payload: { title: "Project status", archived: true },
+      });
+
+      expect(update).toHaveBeenCalledWith("thread-1", "project-1", "user-1", {
+        title: "Project status",
+        archived: true,
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: "Thread not found" });
     });
 
     it("accepts each exact patch field independently", async () => {

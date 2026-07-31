@@ -118,30 +118,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const userId = resolveUserId(authResult);
     const threadId = randomUUID();
-    const thread = await fastify.storage.projectChatThreads.create({
+    const thread = await fastify.storage.projectChatThreads.createWithInitialMessage({
       id: threadId,
       project_id: projectId,
       user_id: userId,
       title: null,
+      ...(body.message !== undefined
+        ? { initialMessage: { id: randomUUID(), content: body.message } }
+        : {}),
     });
-
-    if (body.message !== undefined) {
-      try {
-        const message = await fastify.storage.projectChatMessages.append({
-          id: randomUUID(),
-          thread_id: threadId,
-          project_id: projectId,
-          user_id: userId,
-          sequence: 1,
-          type: "user",
-          content: body.message,
-        });
-        if (!message) throw new Error("Failed to persist initial project chat message");
-      } catch (error) {
-        await fastify.storage.projectChatThreads.delete(threadId, projectId, userId);
-        throw error;
-      }
-    }
 
     return reply.code(201).send({ thread });
   });
@@ -166,20 +151,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Body must contain only title and/or archived" });
     }
 
-    let thread = owned.thread;
-    if ("title" in patch) {
-      thread = (await fastify.storage.projectChatThreads.updateTitle(
-        thread.id,
-        thread.project_id,
-        owned.userId,
-        patch.title!,
-      ))!;
-    }
-    if (patch.archived !== undefined) {
-      const updateArchived = patch.archived
-        ? fastify.storage.projectChatThreads.archive
-        : fastify.storage.projectChatThreads.unarchive;
-      thread = (await updateArchived(thread.id, thread.project_id, owned.userId))!;
+    const thread = await fastify.storage.projectChatThreads.update(
+      owned.thread.id,
+      owned.thread.project_id,
+      owned.userId,
+      patch,
+    );
+    if (!thread) {
+      return reply.code(404).send({ error: "Thread not found" });
     }
     return reply.code(200).send({ thread });
   });
