@@ -13,6 +13,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean; processId?: string };
   }>("/api/path/execute", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
     const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty, processId: requestedProcessId } = req.body;
     if (!projectPath || !command) {
       return reply.code(400).send({ error: "Path and command are required" });
@@ -22,12 +24,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "processId must contain 1-512 characters" });
     }
 
+    // A path string is not authority to start an OS process. Resolve it to an
+    // existing project, then enforce its owner before touching process state.
+    const pathProject = await fastify.storage.projects.getByPath(projectPath);
+    const project = pathProject
+      ? await fastify.storage.projects.getById(pathProject.id, userId)
+      : undefined;
+    if (!project) return reply.code(404).send({ error: "Project not found" });
+
     const resolvedBase = resolveWorktreePath(projectPath, branch ?? null);
     const resolvedCwd = cwd ? path.join(resolvedBase, cwd) : null;
 
     const tempExecutor = {
       id: randomUUID(),
-      project_id: "remote",
+      project_id: project.id,
       group_id: "",
       name: "remote-command",
       command,

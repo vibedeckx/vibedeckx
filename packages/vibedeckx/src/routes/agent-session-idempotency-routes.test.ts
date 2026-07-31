@@ -179,6 +179,26 @@ describe("path agent session preallocated identity", () => {
     expect(createNewSession).not.toHaveBeenCalled();
   });
 
+  it("does not deliver a local message to another user's stored session", async () => {
+    auth.userId = "user-1";
+    const { sendUserMessage, projects, setStored } = makeApp(true);
+    projects.set("foreign", { id: "foreign", path: "/other", user_id: "user-2" });
+    setStored(
+      { id: "foreign-session", project_id: "foreign", branch: "main", status: "running" },
+      { id: "foreign-session", projectId: "foreign", branch: "main", status: "running" },
+    );
+    await app.register(agentSessionRoutes);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/agent-sessions/foreign-session/message",
+      payload: { content: "do not deliver" },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Session not found or not running" });
+    expect(sendUserMessage).not.toHaveBeenCalled();
+  });
+
   it("rehydrates a matching stored-only preallocated session", async () => {
     auth.userId = "user-1";
     const { createNewSession, setStored } = makeApp(true);

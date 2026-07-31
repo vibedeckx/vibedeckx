@@ -961,6 +961,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
+    // The resident map is not an authorization boundary. Resolve the durable
+    // session and project under the caller's raw auth scope before any workflow
+    // mutation, delivery-ledger write, wake-up, or stdin write.
+    const storedSession = await fastify.storage.agentSessions.getById(req.params.sessionId);
+    if (!storedSession
+      || !(await fastify.storage.projects.getById(storedSession.project_id, authResult))) {
+      return reply.code(404).send({ error: "Session not found or not running" });
+    }
+
     // For dormant sessions, we need projectPath to spawn the process
     const session = fastify.agentSessionManager.getSession(req.params.sessionId);
     let projectPathForWake: string | undefined;
