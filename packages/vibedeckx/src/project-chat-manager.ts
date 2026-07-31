@@ -539,7 +539,10 @@ export class ProjectChatManager {
     error: string | null = null,
   ) {
     const payload = { ...operation.payload, status, ...details } as import("./storage/types.js").ProjectChatOperationPayload;
-    const content = JSON.stringify(payload);
+    const { initialInstructionDelivery: _delivery, contextConfirmed: _context, ...publicPayload } = payload as typeof payload & {
+      initialInstructionDelivery?: unknown; contextConfirmed?: unknown;
+    };
+    const content = JSON.stringify(publicPayload);
     return this.storage.projectChatOperations.transition({
       id: operation.id, thread_id: operation.thread_id,
       project_id: operation.project_id, user_id: operation.user_id,
@@ -709,8 +712,15 @@ export class ProjectChatManager {
         const result = await this.toolDependencies.mutationServices.runScheduleNow(
           operation.payload.scheduleId, operation.payload.runId,
         );
-        const persisted = await this.storage.scheduledTaskRuns.getById(operation.payload.runId);
-        if (persisted?.project_id === operation.project_id
+        const [persisted, authorizedSchedule] = await Promise.all([
+          this.storage.scheduledTaskRuns.getById(operation.payload.runId),
+          this.storage.scheduledTasks.getById(operation.payload.scheduleId),
+        ]);
+        if (!authorizedSchedule || authorizedSchedule.project_id !== operation.project_id) {
+          await this.transitionOperation(operation, "failed", {}, "Schedule is no longer authorized");
+        } else if (!("error" in result) && result.runId !== operation.payload.runId) {
+          await this.transitionOperation(operation, "failed", {}, "Schedule run identity mismatch");
+        } else if (persisted?.project_id === operation.project_id
           && persisted.schedule_id === operation.payload.scheduleId) {
           if (!(await this.restoreOperationContext(operation, [
             { entityType: "schedule", entityId: operation.payload.scheduleId },
@@ -722,8 +732,6 @@ export class ProjectChatManager {
             status === "failed" ? "Schedule run failed" : null);
         } else if ("error" in result) {
           await this.transitionOperation(operation, "failed", {}, boundedStreamError(result.error).message);
-        } else if (result.runId !== operation.payload.runId) {
-          await this.transitionOperation(operation, "failed", {}, "Schedule run identity mismatch");
         }
       }
     }

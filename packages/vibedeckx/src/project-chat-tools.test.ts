@@ -369,6 +369,40 @@ describe("createProjectChatTools", () => {
     )).toMatchObject({ status: "pending", payload: { contextConfirmed: false } });
   });
 
+  it.each(["foreign", "wrong-schedule", "missing", "valid"] as const)(
+    "validates a %s persisted schedule run before adding context",
+    async (scenario) => {
+      await storage.scheduledTasks.create({
+        id: "schedule-validate", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+        timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project",
+      });
+      await storage.scheduledTasks.create({
+        id: "other-schedule", project_id: scenario === "foreign" ? "project-2" : "project-1",
+        name: "Other", cron_expr: "0 * * * *", timezone: "UTC", run_type: "command",
+        content: "true", cwd_mode: "project",
+      });
+      runScheduleNow.mockImplementationOnce(async (_scheduleId: string, runId: string) => {
+        if (scenario !== "missing") {
+          await storage.scheduledTaskRuns.create({
+            id: runId, schedule_id: scenario === "valid" ? "schedule-validate" : "other-schedule", status: "running",
+          });
+        }
+        return { runId, skipped: false } as const;
+      });
+
+      const result = await (await tools()).run_schedule_now.execute({ scheduleId: "schedule-validate" });
+      const refs = await storage.projectChatContextRefs.listByThread("thread-1", "project-1", "user-1");
+
+      if (scenario === "valid") {
+        expect(result).toMatchObject({ ok: true, status: "running" });
+        expect(refs.map(({ entity_type }) => entity_type).sort()).toEqual(["schedule", "schedule_run"]);
+      } else {
+        expect(result).toMatchObject({ ok: false });
+        expect(refs).toEqual([]);
+      }
+    },
+  );
+
   it("revalidates a session target immediately before sending the instruction", async () => {
     const local = await storage.agentSessions.create({
       id: "local-session", project_id: "project-1", branch: "dev",

@@ -512,6 +512,56 @@ describe("project chat storage", () => {
       .filter(({ type }) => type === "operation")).toHaveLength(1);
   });
 
+  it("persists monotonic same-status confirmation without duplicating its public message", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatOperations.create({
+      id: "run-confirm", thread_id: "t1", project_id: "p1", user_id: "u1",
+      kind: "schedule_run", status: "pending", entity_type: "schedule_run", entity_id: "run1",
+      idempotency_key: "run1", error: null,
+      payload: { version: 1, kind: "schedule_run", operationId: "run-confirm", status: "pending",
+        scheduleId: "schedule1", runId: "run1", contextConfirmed: false },
+    });
+    const running = await storage.projectChatOperations.transition({
+      id: "run-confirm", thread_id: "t1", project_id: "p1", user_id: "u1", status: "running",
+      payload: { version: 1, kind: "schedule_run", operationId: "run-confirm", status: "running",
+        scheduleId: "schedule1", runId: "run1", contextConfirmed: false }, error: null,
+      message: { id: "operation:run-confirm:running", content: JSON.stringify({ status: "running" }) },
+    });
+    expect(running?.changed).toBe(true);
+
+    const [first, stale] = await Promise.all([
+      storage.projectChatOperations.transition({
+        id: "run-confirm", thread_id: "t1", project_id: "p1", user_id: "u1", status: "running",
+        payload: { ...running!.operation.payload, contextConfirmed: true, skipped: false }, error: null,
+        message: { id: "operation:run-confirm:running", content: running!.message.content },
+      }),
+      storage.projectChatOperations.transition({
+        id: "run-confirm", thread_id: "t1", project_id: "p1", user_id: "u1", status: "running",
+        payload: { ...running!.operation.payload, contextConfirmed: true, skipped: true }, error: null,
+        message: { id: "operation:run-confirm:running", content: running!.message.content },
+      }),
+    ]);
+
+    expect([first, stale].filter(Boolean)).toHaveLength(1);
+    expect([first, stale].filter(Boolean)[0]?.changed).toBe(false);
+    const persisted = await storage.projectChatOperations.getById("run-confirm", "t1", "p1", "u1");
+    expect(persisted?.payload).toMatchObject({ contextConfirmed: true, skipped: expect.any(Boolean) });
+    const duplicate = await storage.projectChatOperations.transition({
+      id: "run-confirm", thread_id: "t1", project_id: "p1", user_id: "u1", status: "running",
+      payload: persisted!.payload, error: null,
+      message: { id: "operation:run-confirm:running", content: running!.message.content },
+    });
+    expect(duplicate?.changed).toBe(false);
+    const publicUpdate = await storage.projectChatOperations.transition({
+      id: "run-confirm", thread_id: "t1", project_id: "p1", user_id: "u1", status: "running",
+      payload: persisted!.payload, error: null,
+      message: { id: "operation:run-confirm:running", content: JSON.stringify({ status: "running", skipped: true }) },
+    });
+    expect(publicUpdate).toMatchObject({ changed: true, message: { content: JSON.stringify({ status: "running", skipped: true }) } });
+    expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1"))
+      .filter(({ type }) => type === "operation")).toHaveLength(1);
+  });
+
   it("accepts public operation messages while rejecting invalid SQL-boundary types", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
     await expect(storage.projectChatMessages.append({

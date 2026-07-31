@@ -1,4 +1,5 @@
 import { sql, type Kysely, type Selectable } from "kysely";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type {
   DB,
@@ -58,6 +59,26 @@ const serializeOperationPayload = (
   const serialized = JSON.stringify(parsed.data);
   if (Buffer.byteLength(serialized, "utf8") > 32_768) throw new Error("Project Chat operation payload is too large");
   return serialized;
+};
+
+const allowsSameStatusPayloadAdvance = (
+  current: ProjectChatOperation["payload"], next: ProjectChatOperation["payload"],
+): boolean => {
+  if (current.kind !== next.kind) return false;
+  if (current.kind === "agent_session_create" && next.kind === "agent_session_create") {
+    const { initialInstructionDelivery: currentDelivery, ...currentRest } = current;
+    const { initialInstructionDelivery: nextDelivery, ...nextRest } = next;
+    return isDeepStrictEqual(currentRest, nextRest)
+      && currentDelivery !== "confirmed" && nextDelivery === "confirmed";
+  }
+  if (current.kind === "schedule_run" && next.kind === "schedule_run") {
+    const { contextConfirmed: currentContext, skipped: currentSkipped, ...currentRest } = current;
+    const { contextConfirmed: nextContext, skipped: nextSkipped, ...nextRest } = next;
+    return isDeepStrictEqual(currentRest, nextRest)
+      && currentContext !== true && nextContext === true
+      && (currentSkipped === undefined || currentSkipped === nextSkipped);
+  }
+  return false;
 };
 
 const mapOperation = (row: Selectable<ProjectChatOperationsTable>): ProjectChatOperation => {
@@ -760,11 +781,44 @@ export const createProjectChatRepos = (
       const terminal = row.status === "completed" || row.status === "failed";
       if (terminal && row.status !== opts.status) return undefined;
       if (row.status === opts.status) {
+        const serializedPayload = serializeOperationPayload(opts.payload, {
+          id: opts.id, kind: row.kind, status: opts.status,
+        });
         const existingMessage = await trx.selectFrom("project_chat_messages")
           .selectAll().where("id", "=", opts.message.id)
           .where("thread_id", "=", opts.thread_id).executeTakeFirst();
         if (!existingMessage) return undefined;
-        return { operation: mapOperation(row), message: mapMessage(existingMessage), changed: false };
+        if (serializedPayload === row.payload && opts.error === row.error) {
+          if (opts.message.content === existingMessage.content) {
+            return { operation: mapOperation(row), message: mapMessage(existingMessage), changed: false };
+          }
+          const updatedMessage = await trx.updateTable("project_chat_messages")
+            .set({ content: opts.message.content })
+            .where("id", "=", opts.message.id).where("thread_id", "=", opts.thread_id)
+            .where("content", "=", existingMessage.content)
+            .returningAll().executeTakeFirst();
+          if (!updatedMessage) return undefined;
+          return { operation: mapOperation(row), message: mapMessage(updatedMessage), changed: true };
+        }
+        const currentPayload = operationPayloadSchema.parse(JSON.parse(row.payload));
+        if (opts.error !== row.error || !allowsSameStatusPayloadAdvance(currentPayload, opts.payload)) {
+          return undefined;
+        }
+        const updated = await trx.updateTable("project_chat_operations")
+          .set({ payload: serializedPayload, updated_at: now() })
+          .where("id", "=", opts.id).where("thread_id", "=", opts.thread_id)
+          .where("status", "=", row.status).where("payload", "=", row.payload)
+          .returningAll().executeTakeFirst();
+        if (!updated) return undefined;
+        let message = existingMessage;
+        const publicChanged = existingMessage.content !== opts.message.content;
+        if (publicChanged) {
+          message = await trx.updateTable("project_chat_messages")
+            .set({ content: opts.message.content })
+            .where("id", "=", opts.message.id).where("thread_id", "=", opts.thread_id)
+            .returningAll().executeTakeFirstOrThrow();
+        }
+        return { operation: mapOperation(updated), message: mapMessage(message), changed: publicChanged };
       }
 
       const allowed = (row.status === "pending" && ["running", "completed", "failed"].includes(opts.status))

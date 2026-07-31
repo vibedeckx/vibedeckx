@@ -581,6 +581,89 @@ describe("ProjectChatManager", () => {
     await manager.shutdown();
   });
 
+  it("persists same-running session delivery confirmation and does not resend after restart", async () => {
+    await createThread("thread-running-confirm");
+    await storage.agentSessions.create({ id: "running-confirm-session", project_id: "project-1", branch: "dev" });
+    const payload = {
+      version: 1 as const, kind: "agent_session_create" as const, operationId: "running-confirm-op",
+      status: "pending" as const, sessionId: "running-confirm-session",
+      workspaceId: JSON.stringify(["local", "dev"]), target: "local", branch: "dev",
+      instruction: "Deliver", permissionMode: "edit", agentType: "claude-code", model: null,
+      initialInstructionDelivery: "pending" as const,
+    };
+    const operation = await storage.projectChatOperations.create({
+      id: "running-confirm-op", thread_id: "thread-running-confirm", project_id: "project-1", user_id: "user-1",
+      kind: "agent_session_create", status: "pending", entity_type: "agent_session",
+      entity_id: "running-confirm-session", idempotency_key: "running-confirm-key", payload, error: null,
+    });
+    await storage.projectChatOperations.transition({
+      id: operation!.id, thread_id: "thread-running-confirm", project_id: "project-1", user_id: "user-1",
+      status: "running", payload: { ...payload, status: "running" }, error: null,
+      message: { id: "operation:running-confirm-op:running", content: JSON.stringify({ status: "running" }) },
+    });
+    const createAgentSession = vi.fn(async ({ sessionId }) => ({ sessionId }));
+    const dependencies = {
+      agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => true },
+      mutationServices: { createAgentSession, sendAgentInstruction: async () => true,
+        runScheduleNow: async (_id: string, runId: string) => ({ runId, skipped: false } as const) },
+    };
+    const first = new ProjectChatManager(storage, reply("unused"), {
+      eventBus: new EventBus(), toolDependencies: dependencies,
+    });
+    await first.ready();
+    expect(createAgentSession).toHaveBeenCalledTimes(1);
+    expect(await storage.projectChatOperations.getById(
+      "running-confirm-op", "thread-running-confirm", "project-1", "user-1",
+    )).toMatchObject({ status: "running", payload: { initialInstructionDelivery: "confirmed" } });
+    await first.shutdown();
+
+    createAgentSession.mockClear();
+    const restarted = new ProjectChatManager(storage, reply("unused"), {
+      eventBus: new EventBus(), toolDependencies: dependencies,
+    });
+    await restarted.ready();
+    expect(createAgentSession).not.toHaveBeenCalled();
+    expect((await storage.projectChatMessages.listByThread(
+      "thread-running-confirm", "project-1", "user-1",
+    )).filter(({ type }) => type === "operation")).toHaveLength(1);
+    await restarted.shutdown();
+  });
+
+  it("confirms context on an already-running schedule operation before accepting its terminal event", async () => {
+    await createThread("thread-running-schedule");
+    await storage.scheduledTasks.create({
+      id: "running-schedule", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project",
+    });
+    await storage.scheduledTaskRuns.create({ id: "running-run", schedule_id: "running-schedule", status: "running" });
+    const pendingPayload = { version: 1 as const, kind: "schedule_run" as const, operationId: "running-run-op",
+      status: "pending" as const, scheduleId: "running-schedule", runId: "running-run", contextConfirmed: false };
+    await storage.projectChatOperations.create({
+      id: "running-run-op", thread_id: "thread-running-schedule", project_id: "project-1", user_id: "user-1",
+      kind: "schedule_run", status: "pending", entity_type: "schedule_run", entity_id: "running-run",
+      idempotency_key: "running-run", payload: pendingPayload, error: null,
+    });
+    await storage.projectChatOperations.transition({
+      id: "running-run-op", thread_id: "thread-running-schedule", project_id: "project-1", user_id: "user-1",
+      status: "running", payload: { ...pendingPayload, status: "running" }, error: null,
+      message: { id: "operation:running-run-op:running", content: JSON.stringify({ status: "running" }) },
+    });
+    const eventBus = new EventBus();
+    const manager = new ProjectChatManager(storage, reply("unused"), { eventBus });
+    await manager.ready();
+    expect(await storage.projectChatOperations.getById(
+      "running-run-op", "thread-running-schedule", "project-1", "user-1",
+    )).toMatchObject({ status: "running", payload: { contextConfirmed: true } });
+
+    await storage.scheduledTaskRuns.finish("running-run", { status: "completed", exit_code: 0 });
+    eventBus.emit({ type: "schedule:run-finished", projectId: "project-1", scheduleId: "running-schedule",
+      runId: "running-run", status: "completed", exitCode: 0 });
+    await waitFor(async () => (await storage.projectChatOperations.getById(
+      "running-run-op", "thread-running-schedule", "project-1", "user-1",
+    ))?.status === "completed");
+    await manager.shutdown();
+  });
+
   it("fails the turn when the production fullStream adapter receives an error part", async () => {
     await createThread("thread-stream-error");
     const runner: ProjectChatModelRunner = {
