@@ -122,13 +122,16 @@ describe("SchedulerService.runNow", () => {
     expect(pm.started).toHaveLength(1);
   });
 
-  it("does not respawn a protected terminal result after pruning and restart", async () => {
+  it("preserves a compact manual outcome when its completed bulky result is pruned", async () => {
     await storage.scheduledTaskRuns.create({ id: "source-run", schedule_id: "s1", status: "failed" });
     await storage.scheduledTaskRuns.claimManualRequest({
-      requestId: "request-terminal", runId: "protected-terminal", projectId: "proj-1",
+      requestId: "request-terminal", runId: "manual-terminal", projectId: "proj-1",
       scheduleId: "s1", sourceRunId: "source-run",
     });
-    await storage.scheduledTaskRuns.create({ id: "protected-terminal", schedule_id: "s1", status: "completed" });
+    const result = await scheduler.runNow("s1", "manual-terminal");
+    expect(result).toEqual({ runId: "manual-terminal", skipped: false });
+    pm.emit(pm.started[0].processId!, { type: "finished", exitCode: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
     for (let index = 0; index < 55; index += 1) {
       await storage.scheduledTaskRuns.create({ id: `new-terminal-${index}`, schedule_id: "s1", status: "completed" });
     }
@@ -139,11 +142,10 @@ describe("SchedulerService.runNow", () => {
     pm = makeFakeProcessManager();
     scheduler = new SchedulerService(storage, pm as unknown as ProcessManager);
 
-    await expect(scheduler.runNow("s1", "protected-terminal"))
-      .resolves.toEqual({ runId: "protected-terminal", skipped: false });
+    expect(await storage.scheduledTaskRuns.getById("manual-terminal")).toBeUndefined();
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-terminal"))
+      .toMatchObject({ terminalStatus: "completed", terminalResponseStatus: 200 });
     expect(pm.started).toHaveLength(0);
-    expect(await storage.scheduledTaskRuns.getById("protected-terminal"))
-      .toMatchObject({ status: "completed" });
   });
 
   it("persists a starting claim and deterministic process id before local spawn", async () => {
@@ -237,6 +239,21 @@ describe("SchedulerService.runNow", () => {
       .toMatchObject({ status: "starting", output: null });
     await expect(storage.scheduledTaskRuns.heartbeat("spawn-race", "new-owner"))
       .resolves.toBe(true);
+  });
+
+  it("records a claimed pre-spawn failure as a durable 400 manual outcome", async () => {
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-spawn-failure", runId: "spawn-failure", projectId: "proj-1", scheduleId: "s1",
+    });
+    pm.start = vi.fn(async () => { throw new Error("native spawn denied"); });
+
+    await expect(scheduler.runNow("s1", "spawn-failure"))
+      .resolves.toEqual({ error: "Failed to spawn: native spawn denied" });
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-spawn-failure"))
+      .toMatchObject({
+        terminalStatus: "failed", terminalResponseStatus: 400,
+        terminalError: "Failed to spawn: native spawn denied",
+      });
   });
 
   it("does not let a concurrent retry of the same starting run stop its process", async () => {

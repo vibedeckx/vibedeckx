@@ -164,6 +164,12 @@ export interface ScheduledTaskRunRequest {
   scheduleId: string;
   sourceRunId: string | null;
   createdAt: string;
+  terminalStatus: ScheduledTaskRunStatus | null;
+  terminalFinishedAt: string | null;
+  terminalExitCode: number | null;
+  /** Bounded replay error for durable non-2xx outcomes; never raw run output/report. */
+  terminalError: string | null;
+  terminalResponseStatus: number | null;
 }
 
 /** Bounded Project Overview projection. Full report/output stay on getById(). */
@@ -726,6 +732,8 @@ export interface Storage {
     >;
     claimManualRequest: (opts: { requestId: string; runId: string; projectId: string; scheduleId: string; sourceRunId?: string | null }) => Promise<"claimed" | "existing" | "conflict">;
     getManualRequest: (requestId: string) => Promise<ScheduledTaskRunRequest | undefined>;
+    /** Fill a legacy request's immutable outcome from its terminal run, if one still exists. */
+    backfillManualRequestOutcome: (requestId: string) => Promise<ScheduledTaskRunRequest | undefined>;
     heartbeat: (id: string, ownerToken: string, leaseMs?: number) => Promise<boolean>;
     markRunning: (id: string, claimedProcessId: string, processId?: string, ownerToken?: string) => Promise<boolean>;
     /** Insert a terminal pre-start failure only if the run identity is still unused. */
@@ -742,9 +750,9 @@ export interface Storage {
     getByScheduleId: (scheduleId: string, limit?: number) => Promise<ScheduledTaskRun[]>;
     /** Most recent run per schedule for the given IDs (output omitted). */
     getLastByScheduleIds: (scheduleIds: string[]) => Promise<Record<string, ScheduledTaskRun>>;
-    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null }) => Promise<void>;
+    finish: (id: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null; responseStatus?: number; responseError?: string | null }) => Promise<void>;
     /** Atomically terminalize and release a claim only for its current owner. */
-    finishOwned: (id: string, ownerToken: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null }) => Promise<boolean>;
+    finishOwned: (id: string, ownerToken: string, opts: { status: ScheduledTaskRunStatus; exit_code?: number | null; output?: string | null; report?: string | null; responseStatus?: number; responseError?: string | null }) => Promise<boolean>;
     /** Delete all but the newest `keep` terminal runs for a schedule. */
     prune: (scheduleId: string, keep: number) => Promise<void>;
   };

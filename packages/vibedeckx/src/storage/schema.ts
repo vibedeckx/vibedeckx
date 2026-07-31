@@ -406,6 +406,11 @@ export interface ScheduledTaskRunRequestsTable {
   schedule_id: string;
   source_run_id: string | null;
   created_at: Generated<string>;
+  terminal_status: string | null;
+  terminal_finished_at: string | null;
+  terminal_exit_code: number | null;
+  terminal_error: string | null;
+  terminal_response_status: number | null;
 }
 
 export interface WorkflowRunsTable {

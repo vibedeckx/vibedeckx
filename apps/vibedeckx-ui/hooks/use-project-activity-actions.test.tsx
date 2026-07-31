@@ -40,7 +40,7 @@ function setup(projectId = "project-1", overrides: Partial<ProjectActivityAction
     runScheduleNow: vi.fn(async (_id, request) => ({ runId: request.runId })),
     selectAgentSession: vi.fn(),
     openScheduleRun: vi.fn(),
-    onRerunStarted: vi.fn(),
+    onRerunResult: vi.fn(),
     onError: vi.fn(),
     ...overrides,
     projectId,
@@ -101,7 +101,7 @@ describe("useProjectActivityActions", () => {
       await promise;
     });
     expect(first.runScheduleNow).not.toHaveBeenCalled();
-    expect(first.onRerunStarted).not.toHaveBeenCalled();
+    expect(first.onRerunResult).not.toHaveBeenCalled();
   });
 
   it("retains one rerun identity after a recoverable failure, clears it on conflict, and rethrows", async () => {
@@ -123,7 +123,7 @@ describe("useProjectActivityActions", () => {
     expect(afterConflict.requestId).not.toBe(first.requestId);
     expect(first).toMatchObject({ sourceRunId: "source-run", requestId: expect.any(String), runId: expect.any(String) });
     expect(options.onError).toHaveBeenCalledTimes(2);
-    expect(options.onRerunStarted).toHaveBeenCalledOnce();
+    expect(options.onRerunResult).toHaveBeenCalledWith({ runId: "eventual" });
   });
 
   it("retries a stored rerun intent without requiring deleted source history", async () => {
@@ -182,5 +182,23 @@ describe("useProjectActivityActions", () => {
     expect(runScheduleNow).toHaveBeenCalledOnce();
     await act(async () => resolve({ runId: "run-1" }));
     await expect(Promise.all([first, duplicate])).resolves.toEqual([undefined, undefined]);
+  });
+
+  it("clears an immutable durable failure but preserves and reports completed replay details", async () => {
+    const durable = Object.assign(new Error("Project has no local path"), { status: 400, durable: true });
+    const runScheduleNow = vi.fn()
+      .mockRejectedValueOnce(durable)
+      .mockResolvedValueOnce({ runId: "new-run", replay: true, status: "completed" });
+    const options = setup("project-1", { runScheduleNow });
+
+    await expect(actions.runScheduleAgain("source-run")).rejects.toThrow("Project has no local path");
+    await expect(actions.runScheduleAgain("source-run")).resolves.toBeUndefined();
+
+    expect(runScheduleNow.mock.calls[1][1].requestId)
+      .not.toBe(runScheduleNow.mock.calls[0][1].requestId);
+    expect(options.onError).toHaveBeenCalledWith("schedule-rerun", durable);
+    expect(options.onRerunResult).toHaveBeenCalledWith({
+      runId: "new-run", replay: true, status: "completed",
+    });
   });
 });

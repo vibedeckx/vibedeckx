@@ -1971,7 +1971,7 @@ export const api = {
   async runScheduleNow(
     id: string,
     request: { requestId: string; runId: string; sourceRunId?: string },
-  ): Promise<{ runId: string }> {
+  ): Promise<{ runId: string; replay?: boolean; status?: ScheduleRun["status"] }> {
     const res = await authFetch(`${getApiBase()}/api/schedules/${id}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1979,7 +1979,12 @@ export const api = {
     });
     if (!res.ok) {
       const error = await res.json();
-      throw Object.assign(new Error(error.error), { status: res.status });
+      throw Object.assign(new Error(error.error), {
+        status: res.status,
+        durable: error.durable === true,
+        runId: error.runId,
+        runStatus: error.status,
+      });
     }
     return res.json();
   },

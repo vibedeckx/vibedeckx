@@ -172,7 +172,9 @@ export class SchedulerService {
   ): Promise<RunNowResult> {
     const recorded = claimed
       ? await this.storage.scheduledTaskRuns.finishOwned(
-        runId, this.ownerToken, { status: "failed", output: message },
+        runId, this.ownerToken, {
+          status: "failed", output: message, responseStatus: 400, responseError: message,
+        },
       )
       : await this.storage.scheduledTaskRuns.failBeforeStart({ id: runId, scheduleId: task.id, output: message });
     if (!recorded) return { error: claimed

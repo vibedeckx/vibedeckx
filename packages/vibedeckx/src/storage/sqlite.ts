@@ -1041,6 +1041,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       project_id TEXT NOT NULL,
       schedule_id TEXT NOT NULL,
       source_run_id TEXT,
+      terminal_status TEXT,
+      terminal_finished_at TIMESTAMP,
+      terminal_exit_code INTEGER,
+      terminal_error TEXT,
+      terminal_response_status INTEGER,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
@@ -1049,6 +1054,19 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_run_requests_schedule
       ON scheduled_task_run_requests(schedule_id, created_at DESC);
   `);
+
+  const scheduleRequestCols = db.prepare("PRAGMA table_info(scheduled_task_run_requests)").all() as { name: string }[];
+  for (const [name, declaration] of [
+    ["terminal_status", "TEXT"],
+    ["terminal_finished_at", "TIMESTAMP"],
+    ["terminal_exit_code", "INTEGER"],
+    ["terminal_error", "TEXT"],
+    ["terminal_response_status", "INTEGER"],
+  ] as const) {
+    if (!scheduleRequestCols.some((column) => column.name === name)) {
+      db.exec(`ALTER TABLE scheduled_task_run_requests ADD COLUMN ${name} ${declaration}`);
+    }
+  }
 
   db.exec(`
     DROP TRIGGER IF EXISTS trg_scheduled_task_run_requests_validate_scope;
@@ -1064,6 +1082,20 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     END;
     CREATE TRIGGER trg_scheduled_task_run_requests_immutable
     BEFORE UPDATE ON scheduled_task_run_requests
+    WHEN OLD.request_id IS NOT NEW.request_id
+      OR OLD.run_id IS NOT NEW.run_id
+      OR OLD.project_id IS NOT NEW.project_id
+      OR OLD.schedule_id IS NOT NEW.schedule_id
+      OR OLD.source_run_id IS NOT NEW.source_run_id
+      OR OLD.created_at IS NOT NEW.created_at
+      OR OLD.terminal_status IS NOT NULL
+      OR NEW.terminal_status IS NULL
+      OR NEW.terminal_status NOT IN ('completed', 'failed', 'timeout', 'killed', 'skipped')
+      OR NEW.terminal_finished_at IS NULL
+      OR NEW.terminal_response_status IS NULL
+      OR NEW.terminal_response_status < 200
+      OR NEW.terminal_response_status > 599
+      OR LENGTH(COALESCE(NEW.terminal_error, '')) > 1000
     BEGIN
       SELECT RAISE(ABORT, 'manual run request is immutable');
     END;
@@ -1084,6 +1116,26 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   // opening another connection must not mutate a live owner's running row.
   db.exec(`UPDATE scheduled_task_runs SET status = 'killed', finished_at = CURRENT_TIMESTAMP
     WHERE status = 'running' AND id NOT IN (SELECT run_id FROM scheduled_task_execution_claims)`);
+  // Compactly preserve any legacy/manual result that terminalized before the
+  // outcome columns existed (including orphaned runs killed by startup fixup).
+  // The immutable trigger permits this single NULL -> terminal transition.
+  db.exec(`UPDATE scheduled_task_run_requests AS request SET
+      terminal_status = (SELECT status FROM scheduled_task_runs WHERE id = request.run_id),
+      terminal_finished_at = (SELECT COALESCE(finished_at, CURRENT_TIMESTAMP) FROM scheduled_task_runs WHERE id = request.run_id),
+      terminal_exit_code = (SELECT exit_code FROM scheduled_task_runs WHERE id = request.run_id),
+      terminal_error = (SELECT CASE
+        WHEN status = 'skipped' THEN 'A run is already in progress'
+        WHEN status = 'failed' AND process_id IS NULL AND exit_code IS NULL
+          THEN SUBSTR(COALESCE(output, 'Schedule run failed to start'), 1, 1000)
+        ELSE NULL END FROM scheduled_task_runs WHERE id = request.run_id),
+      terminal_response_status = (SELECT CASE
+        WHEN status = 'skipped' THEN 409
+        WHEN status = 'failed' AND process_id IS NULL AND exit_code IS NULL THEN 400
+        ELSE 200 END FROM scheduled_task_runs WHERE id = request.run_id)
+    WHERE terminal_status IS NULL AND EXISTS (
+      SELECT 1 FROM scheduled_task_runs
+      WHERE id = request.run_id AND status NOT IN ('starting', 'running')
+    )`);
   db.exec(`DELETE FROM scheduled_task_execution_claims
     WHERE run_id IN (SELECT id FROM scheduled_task_runs WHERE status NOT IN ('starting', 'running'))`);
 

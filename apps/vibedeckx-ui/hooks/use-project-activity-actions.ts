@@ -9,6 +9,12 @@ export interface ManualScheduleRunRequest {
   sourceRunId: string;
 }
 
+export interface ManualScheduleRunResult {
+  runId: string;
+  replay?: boolean;
+  status?: ScheduleRun["status"];
+}
+
 interface StoredRerunIntent extends ManualScheduleRunRequest {
   projectId: string;
   scheduleId: string;
@@ -19,10 +25,10 @@ export interface ProjectActivityActionsOptions {
   resolveProjectForTarget: (projectId: string, target: string) => Promise<Project | null>;
   getScheduleRun: (runId: string) => Promise<ScheduleRun>;
   getSchedules: (projectId: string) => Promise<Schedule[]>;
-  runScheduleNow: (scheduleId: string, request: ManualScheduleRunRequest) => Promise<{ runId: string }>;
+  runScheduleNow: (scheduleId: string, request: ManualScheduleRunRequest) => Promise<ManualScheduleRunResult>;
   selectAgentSession: (branch: string | null, sessionId: string, projectId: string) => void;
   openScheduleRun: (scheduleId: string, runId: string) => void;
-  onRerunStarted: () => void;
+  onRerunResult: (result: ManualScheduleRunResult) => void;
   onError: (kind: "session-navigation" | "schedule-navigation" | "schedule-rerun", error: unknown) => void;
 }
 
@@ -60,6 +66,11 @@ function clearIntent(key: string): void {
 function hasStatus(error: unknown, status: number): boolean {
   return typeof error === "object" && error !== null && "status" in error
     && (error as { status?: unknown }).status === status;
+}
+
+function isDurableError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "durable" in error
+    && (error as { durable?: unknown }).durable === true;
 }
 
 export function useProjectActivityActions(options: ProjectActivityActionsOptions) {
@@ -157,13 +168,13 @@ export function useProjectActivityActions(options: ProjectActivityActionsOptions
           runId: intent.runId,
           sourceRunId: intent.sourceRunId,
         };
-        await optionsRef.current.runScheduleNow(schedule.id, request);
+        const result = await optionsRef.current.runScheduleNow(schedule.id, request);
         intentsRef.current.delete(key);
         clearIntent(key);
         if (!isCurrent(scope)) return;
-        optionsRef.current.onRerunStarted();
+        optionsRef.current.onRerunResult(result);
       } catch (error) {
-        if (scope.projectId && hasStatus(error, 409)) {
+        if (scope.projectId && (hasStatus(error, 409) || isDurableError(error))) {
           const key = intentKey(scope.projectId, sourceRunId);
           intentsRef.current.delete(key);
           clearIntent(key);

@@ -1,8 +1,10 @@
-import { sql, type Kysely, type Selectable } from "kysely";
+import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
 import { Cron } from "croner";
-import type { DB, ScheduledTasksTable, ScheduledTaskRunsTable } from "../schema.js";
+import type { DB, ScheduledTasksTable, ScheduledTaskRunsTable, ScheduledTaskRunRequestsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
-import type { Storage, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus, PromptProvider } from "../types.js";
+import type { Storage, ScheduledTask, ScheduledTaskRun, ScheduledTaskRunRequest, ScheduledTaskRunType, ScheduledTaskCwdMode, ScheduledTaskRunStatus, PromptProvider } from "../types.js";
+
+const TERMINAL_ERROR_CAP = 1_000;
 
 const mapTask = (row: Selectable<ScheduledTasksTable>): ScheduledTask => ({
   ...row,
@@ -16,6 +18,52 @@ const mapRun = (row: Selectable<ScheduledTaskRunsTable>): ScheduledTaskRun => ({
   ...row,
   status: row.status as ScheduledTaskRunStatus,
 });
+
+const mapManualRequest = (row: Selectable<ScheduledTaskRunRequestsTable>): ScheduledTaskRunRequest => ({
+  requestId: row.request_id,
+  runId: row.run_id,
+  projectId: row.project_id,
+  scheduleId: row.schedule_id,
+  sourceRunId: row.source_run_id,
+  createdAt: row.created_at,
+  terminalStatus: row.terminal_status as ScheduledTaskRunStatus | null,
+  terminalFinishedAt: row.terminal_finished_at,
+  terminalExitCode: row.terminal_exit_code,
+  terminalError: row.terminal_error,
+  terminalResponseStatus: row.terminal_response_status,
+});
+
+const isTerminal = (status: string) => status !== "starting" && status !== "running";
+
+function defaultOutcome(run: Selectable<ScheduledTaskRunsTable>) {
+  if (run.status === "skipped") {
+    return { responseStatus: 409, error: "A run is already in progress" };
+  }
+  // Legacy pre-spawn failures have no process identity or exit code. New
+  // writes pass the same classification explicitly through failBeforeStart.
+  if (run.status === "failed" && run.process_id === null && run.exit_code === null) {
+    return { responseStatus: 400, error: run.output?.slice(0, TERMINAL_ERROR_CAP) ?? "Schedule run failed to start" };
+  }
+  return { responseStatus: 200, error: null };
+}
+
+async function recordManualOutcome(
+  trx: Transaction<DB>,
+  run: Selectable<ScheduledTaskRunsTable>,
+  override?: { responseStatus: number; error?: string | null },
+): Promise<void> {
+  if (!isTerminal(run.status)) return;
+  const outcome = override ?? defaultOutcome(run);
+  // Immutable compare-and-set: only the first terminal observer wins. The DB
+  // trigger rejects all later changes, including direct accidental writes.
+  await trx.updateTable("scheduled_task_run_requests").set({
+    terminal_status: run.status,
+    terminal_finished_at: run.finished_at ?? sql<string>`CURRENT_TIMESTAMP`,
+    terminal_exit_code: run.exit_code,
+    terminal_error: outcome.error?.slice(0, TERMINAL_ERROR_CAP) ?? null,
+    terminal_response_status: outcome.responseStatus,
+  }).where("run_id", "=", run.id).where("terminal_status", "is", null).execute();
+}
 
 const computeNextRunAt = (cronExpr: string, timezone: string, enabled: boolean): string | null => {
   if (!enabled) return null;
@@ -134,9 +182,9 @@ export const createScheduledRepos = (
     },
   },
   scheduledTaskRuns: {
-    create: async ({ id, schedule_id, status, process_id }) => {
+    create: async ({ id, schedule_id, status, process_id }) => kdb.transaction().execute(async (trx) => {
       const st = status ?? "running";
-      await kdb.insertInto("scheduled_task_runs").values((eb) => ({
+      await trx.insertInto("scheduled_task_runs").values((eb) => ({
         id, schedule_id, status: st,
         project_id: eb.selectFrom("scheduled_tasks")
           .select("project_id")
@@ -147,9 +195,10 @@ export const createScheduledRepos = (
         report: null,
         finished_at: st === "running" ? null : sql<string>`CURRENT_TIMESTAMP`,
       })).execute();
-      const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      const row = await trx.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      await recordManualOutcome(trx, row);
       return mapRun(row);
-    },
+    }),
     claimManualRequest: async ({ requestId, runId, projectId, scheduleId, sourceRunId = null }) => kdb.transaction().execute(async (trx) => {
       const inserted = await trx.insertInto("scheduled_task_run_requests").values({
         request_id: requestId,
@@ -169,20 +218,31 @@ export const createScheduledRepos = (
       const duplicateRunId = await trx.selectFrom("scheduled_task_run_requests")
         .select("request_id").where("run_id", "=", runId).executeTakeFirst();
       if (duplicateRunId?.request_id !== requestId) return "conflict" as const;
+      if (row.terminal_status === null) {
+        const terminalRun = await trx.selectFrom("scheduled_task_runs")
+          .selectAll().where("id", "=", runId).executeTakeFirst();
+        if (terminalRun && isTerminal(terminalRun.status)) await recordManualOutcome(trx, terminalRun);
+      }
       return (inserted.numInsertedOrUpdatedRows ?? 0n) === 1n ? "claimed" as const : "existing" as const;
     }),
     getManualRequest: async (requestId) => {
       const row = await kdb.selectFrom("scheduled_task_run_requests")
         .selectAll().where("request_id", "=", requestId).executeTakeFirst();
-      return row ? {
-        requestId: row.request_id,
-        runId: row.run_id,
-        projectId: row.project_id,
-        scheduleId: row.schedule_id,
-        sourceRunId: row.source_run_id,
-        createdAt: row.created_at,
-      } : undefined;
+      return row ? mapManualRequest(row) : undefined;
     },
+    backfillManualRequestOutcome: async (requestId) => kdb.transaction().execute(async (trx) => {
+      let request = await trx.selectFrom("scheduled_task_run_requests")
+        .selectAll().where("request_id", "=", requestId).executeTakeFirst();
+      if (!request || request.terminal_status !== null) return request ? mapManualRequest(request) : undefined;
+      const run = await trx.selectFrom("scheduled_task_runs")
+        .selectAll().where("id", "=", request.run_id).executeTakeFirst();
+      if (run && isTerminal(run.status)) {
+        await recordManualOutcome(trx, run);
+        request = await trx.selectFrom("scheduled_task_run_requests")
+          .selectAll().where("request_id", "=", requestId).executeTakeFirstOrThrow();
+      }
+      return mapManualRequest(request);
+    }),
     claimStart: async ({ id, scheduleId, processId, ownerToken, effectFingerprint, leaseMs = 30_000 }) => kdb.transaction().execute(async (trx) => {
       const nowMs = Date.now();
       const existing = await trx.selectFrom("scheduled_task_runs")
@@ -249,16 +309,19 @@ export const createScheduledRepos = (
         .executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
     },
-    failBeforeStart: async ({ id, scheduleId, output }) => {
-      const result = await kdb.insertInto("scheduled_task_runs").values((eb) => ({
+    failBeforeStart: async ({ id, scheduleId, output }) => kdb.transaction().execute(async (trx) => {
+      const result = await trx.insertInto("scheduled_task_runs").values((eb) => ({
         id, schedule_id: scheduleId, status: "failed",
         project_id: eb.selectFrom("scheduled_tasks")
           .select("project_id").where("id", "=", scheduleId),
         process_id: null, exit_code: null, output, report: null,
         finished_at: sql<string>`CURRENT_TIMESTAMP`,
       })).onConflict((oc) => oc.column("id").doNothing()).executeTakeFirst();
-      return (result.numInsertedOrUpdatedRows ?? 0n) === 1n;
-    },
+      if ((result.numInsertedOrUpdatedRows ?? 0n) !== 1n) return false;
+      const row = await trx.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      await recordManualOutcome(trx, row, { responseStatus: 400, error: output });
+      return true;
+    }),
     getById: async (id) => {
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? mapRun(row) : undefined;
@@ -363,13 +426,19 @@ export const createScheduledRepos = (
     },
     finish: async (id, opts) => {
       await kdb.transaction().execute(async (trx) => {
-        await trx.updateTable("scheduled_task_runs").set({
+        const result = await trx.updateTable("scheduled_task_runs").set({
           status: opts.status,
           exit_code: opts.exit_code ?? null,
           output: opts.output ?? null,
           report: opts.report ?? null,
           finished_at: sql<string>`CURRENT_TIMESTAMP`,
-        }).where("id", "=", id).execute();
+        }).where("id", "=", id).executeTakeFirst();
+        if (Number(result.numUpdatedRows) === 1) {
+          const row = await trx.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+          await recordManualOutcome(trx, row, opts.responseStatus === undefined ? undefined : {
+            responseStatus: opts.responseStatus, error: opts.responseError,
+          });
+        }
         await trx.deleteFrom("scheduled_task_execution_claims").where("run_id", "=", id).execute();
       });
     },
@@ -386,6 +455,10 @@ export const createScheduledRepos = (
           .select("run_id").where("owner_token", "=", ownerToken))
         .executeTakeFirst();
       if (Number(result.numUpdatedRows) !== 1) return false;
+      const row = await trx.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+      await recordManualOutcome(trx, row, opts.responseStatus === undefined ? undefined : {
+        responseStatus: opts.responseStatus, error: opts.responseError,
+      });
       const deleted = await trx.deleteFrom("scheduled_task_execution_claims")
         .where("run_id", "=", id).where("owner_token", "=", ownerToken).executeTakeFirst();
       if (Number(deleted.numDeletedRows) !== 1) {
@@ -394,17 +467,12 @@ export const createScheduledRepos = (
       return true;
     }),
     prune: async (scheduleId, keep) => {
-      // Never delete a claimed/running row or the result identity of a live
-      // manual request. Manual requests intentionally live for the lifetime of
-      // their schedule (schedule deletion cascades both records), which is the
-      // idempotency horizon: as long as a request can be retried, its terminal
-      // result must remain available so SchedulerService returns it instead of
-      // executing the same effect again.
+      // Terminal manual outcomes are compactly preserved on the immutable
+      // request row, so bulky output/report rows use the normal retention cap.
+      // Active rows remain protected independently of recency.
       await kdb.deleteFrom("scheduled_task_runs")
         .where("schedule_id", "=", scheduleId)
         .where("status", "not in", ["starting", "running"])
-        .where("id", "not in", kdb.selectFrom("scheduled_task_run_requests")
-          .select("run_id").where("schedule_id", "=", scheduleId))
         .where("id", "not in", kdb.selectFrom("scheduled_task_runs").select("id")
           .where("schedule_id", "=", scheduleId)
           .orderBy("started_at", "desc").orderBy(h.rowIdDesc())

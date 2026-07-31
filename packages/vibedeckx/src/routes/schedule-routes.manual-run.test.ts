@@ -23,6 +23,15 @@ describe("manual schedule run route", () => {
   let dbPath: string;
   const runNow = vi.fn(async (_scheduleId: string, runId?: string) => ({ runId: runId!, skipped: false }));
 
+  const startApp = async () => {
+    app = Fastify({ logger: false });
+    app.decorate("authEnabled", true);
+    app.decorate("storage", storage);
+    app.decorate("scheduler", { runNow } as unknown as SchedulerService);
+    await app.register(scheduleRoutes);
+    await app.ready();
+  };
+
   beforeEach(async () => {
     auth.currentUserId = "user-1";
     runNow.mockClear();
@@ -39,12 +48,7 @@ describe("manual schedule run route", () => {
     }
     await storage.scheduledTaskRuns.create({ id: "source-1", schedule_id: "schedule-1", status: "failed" });
 
-    app = Fastify({ logger: false });
-    app.decorate("authEnabled", true);
-    app.decorate("storage", storage);
-    app.decorate("scheduler", { runNow } as unknown as SchedulerService);
-    await app.register(scheduleRoutes);
-    await app.ready();
+    await startApp();
   });
 
   afterEach(async () => {
@@ -72,6 +76,81 @@ describe("manual schedule run route", () => {
     expect(runNow).toHaveBeenNthCalledWith(2, "schedule-1", "run-1");
     expect(mismatch.statusCode).toBe(409);
     expect(runNow).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays a pruned completed result from the compact request outcome without scheduling", async () => {
+    const payload = { requestId: "request-complete", runId: "run-complete", sourceRunId: "source-1" };
+    await storage.scheduledTaskRuns.claimManualRequest({
+      ...payload, projectId: "project-1", scheduleId: "schedule-1",
+    });
+    await storage.scheduledTaskRuns.create({ id: payload.runId, schedule_id: "schedule-1", status: "completed" });
+    for (let index = 0; index < 55; index += 1) {
+      await storage.scheduledTaskRuns.create({ id: `later-${index}`, schedule_id: "schedule-1", status: "completed" });
+    }
+    await storage.scheduledTaskRuns.prune("schedule-1", 50);
+    expect(await storage.scheduledTaskRuns.getById(payload.runId)).toBeUndefined();
+    await app.close();
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    await startApp();
+
+    const replay = await app.inject({ method: "POST", url: "/api/schedules/schedule-1/run", payload });
+
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json()).toEqual({
+      runId: payload.runId, durable: true, replay: true, status: "completed",
+    });
+    expect(runNow).not.toHaveBeenCalled();
+  });
+
+  it("durably replays a pruned pre-spawn failure with the original HTTP semantics", async () => {
+    const payload = { requestId: "request-failure", runId: "run-failure", sourceRunId: "source-1" };
+    runNow.mockImplementationOnce(async (_scheduleId, runId) => {
+      await storage.scheduledTaskRuns.failBeforeStart({
+        id: runId!, scheduleId: "schedule-1", output: "Project has no local path",
+      });
+      return { error: "Project has no local path" };
+    });
+    const first = await app.inject({ method: "POST", url: "/api/schedules/schedule-1/run", payload });
+    for (let index = 0; index < 55; index += 1) {
+      await storage.scheduledTaskRuns.create({ id: `failure-later-${index}`, schedule_id: "schedule-1", status: "completed" });
+    }
+    await storage.scheduledTaskRuns.prune("schedule-1", 50);
+    expect(await storage.scheduledTaskRuns.getById(payload.runId)).toBeUndefined();
+    await app.close();
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    await startApp();
+    const retry = await app.inject({ method: "POST", url: "/api/schedules/schedule-1/run", payload });
+
+    expect(first.statusCode, first.body).toBe(400);
+    expect(first.json()).toMatchObject({ error: "Project has no local path", durable: true, status: "failed" });
+    expect(retry.statusCode, retry.body).toBe(400);
+    expect(retry.json()).toMatchObject({
+      error: "Project has no local path", durable: true, replay: true, status: "failed",
+    });
+    expect(runNow).toHaveBeenCalledOnce();
+  });
+
+  it("replays an asynchronously failed run as the accepted 200 outcome rather than a start error", async () => {
+    const payload = { requestId: "request-async-failure", runId: "run-async-failure", sourceRunId: "source-1" };
+    await storage.scheduledTaskRuns.claimManualRequest({
+      ...payload, projectId: "project-1", scheduleId: "schedule-1",
+    });
+    await storage.scheduledTaskRuns.create({
+      id: payload.runId, schedule_id: "schedule-1", process_id: "process-1",
+    });
+    await storage.scheduledTaskRuns.finish(payload.runId, {
+      status: "failed", exit_code: 2, output: "large failure output",
+    });
+
+    const replay = await app.inject({ method: "POST", url: "/api/schedules/schedule-1/run", payload });
+
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json()).toEqual({
+      runId: payload.runId, durable: true, replay: true, status: "failed",
+    });
+    expect(runNow).not.toHaveBeenCalled();
   });
 
   it("validates source scope, request shape, and schedule ownership before claiming", async () => {

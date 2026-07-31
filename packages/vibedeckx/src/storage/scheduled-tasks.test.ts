@@ -64,6 +64,43 @@ describe("scheduledTasks storage", () => {
     await expect(storage.scheduledTaskRuns.getManualRequest("request-1")).resolves.toMatchObject(claim);
   });
 
+  it("captures a terminal result that wins the race before its manual request claim", async () => {
+    await createTask("schedule-race");
+    await storage.scheduledTaskRuns.create({
+      id: "race-result", schedule_id: "schedule-race", status: "completed",
+    });
+
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-race", runId: "race-result", projectId,
+      scheduleId: "schedule-race", sourceRunId: null,
+    });
+
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-race"))
+      .toMatchObject({ terminalStatus: "completed", terminalResponseStatus: 200 });
+  });
+
+  it("records startup-killed orphaned manual runs while leaving request-only crashes resumable", async () => {
+    await createTask("schedule-restart");
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-orphan", runId: "run-orphan", projectId,
+      scheduleId: "schedule-restart", sourceRunId: null,
+    });
+    await storage.scheduledTaskRuns.create({
+      id: "run-orphan", schedule_id: "schedule-restart", status: "running",
+    });
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-only", runId: "run-not-created", projectId,
+      scheduleId: "schedule-restart", sourceRunId: null,
+    });
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-orphan"))
+      .toMatchObject({ terminalStatus: "killed", terminalResponseStatus: 200 });
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-only"))
+      .toMatchObject({ terminalStatus: null, terminalResponseStatus: null });
+  });
+
   it("binds an empty legacy execution fingerprint exactly once", async () => {
     await createTask("legacy-fingerprint");
     await storage.scheduledTaskRuns.claimStart({ id: "legacy-run", scheduleId: "legacy-fingerprint",
@@ -419,28 +456,58 @@ describe("scheduledTasks storage", () => {
     expect(remaining.map((r) => r.id)).toEqual(["r4", "r3"]);
   });
 
-  it("prune retains terminal result runs protected by durable manual requests", async () => {
+  it("prunes bulky manual result rows after compact immutable outcomes are recorded", async () => {
     await createTask();
     await storage.scheduledTaskRuns.create({ id: "source", schedule_id: "s1", status: "failed" });
-    await storage.scheduledTaskRuns.claimManualRequest({
-      requestId: "request-protected",
-      runId: "result-protected",
-      projectId,
-      scheduleId: "s1",
-      sourceRunId: "source",
-    });
-    await storage.scheduledTaskRuns.create({ id: "result-protected", schedule_id: "s1", status: "completed" });
     for (let index = 0; index < 55; index += 1) {
-      await storage.scheduledTaskRuns.create({ id: `newer-${index}`, schedule_id: "s1", status: "completed" });
+      await storage.scheduledTaskRuns.claimManualRequest({
+        requestId: `request-${index}`, runId: `result-${index}`, projectId,
+        scheduleId: "s1", sourceRunId: "source",
+      });
+      await storage.scheduledTaskRuns.create({ id: `result-${index}`, schedule_id: "s1" });
+      await storage.scheduledTaskRuns.finish(`result-${index}`, {
+        status: "completed", exit_code: 0, output: "bulky".repeat(400), report: "report".repeat(400),
+      });
     }
 
     await storage.scheduledTaskRuns.prune("s1", 50);
 
-    expect(await storage.scheduledTaskRuns.getById("result-protected"))
-      .toMatchObject({ status: "completed", schedule_id: "s1" });
-    expect(await storage.scheduledTaskRuns.getById("newer-0")).toBeUndefined();
-    expect(await storage.scheduledTaskRuns.getManualRequest("request-protected"))
-      .toMatchObject({ runId: "result-protected", sourceRunId: "source" });
+    expect(await storage.scheduledTaskRuns.getById("result-0")).toBeUndefined();
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-0"))
+      .toMatchObject({
+        runId: "result-0", sourceRunId: "source",
+        terminalStatus: "completed", terminalResponseStatus: 200,
+        terminalFinishedAt: expect.any(String), terminalError: null,
+      });
+    const raw = new Database(dbPath, { readonly: true });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM scheduled_task_run_requests")
+      .get()).toEqual({ count: 55 });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM scheduled_task_runs WHERE id LIKE 'result-%'")
+      .get()).toEqual({ count: 50 });
+    raw.close();
+  });
+
+  it("records a bounded terminal failure outcome exactly once", async () => {
+    await createTask();
+    await storage.scheduledTaskRuns.claimManualRequest({
+      requestId: "request-failed", runId: "result-failed", projectId,
+      scheduleId: "s1", sourceRunId: null,
+    });
+    await storage.scheduledTaskRuns.failBeforeStart({
+      id: "result-failed", scheduleId: "s1", output: "x".repeat(5_000),
+    });
+
+    expect(await storage.scheduledTaskRuns.getManualRequest("request-failed"))
+      .toMatchObject({
+        terminalStatus: "failed", terminalResponseStatus: 400,
+        terminalError: "x".repeat(1_000), terminalExitCode: null,
+      });
+
+    const raw = new Database(dbPath);
+    expect(() => raw.prepare(`UPDATE scheduled_task_run_requests
+      SET terminal_status = 'completed' WHERE request_id = ?`).run("request-failed"))
+      .toThrow(/immutable/);
+    raw.close();
   });
 
   it("prune never deletes a 'running' row, even when it falls outside the keep-newest-N window", async () => {

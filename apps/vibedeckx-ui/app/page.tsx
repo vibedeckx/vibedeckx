@@ -531,7 +531,15 @@ export default function Home() {
       setSelectedScheduleRunId(runId);
       setActiveView("schedules");
     },
-    onRerunStarted: () => toast.success("Schedule run started"),
+    onRerunResult: (result) => {
+      if (!result.replay || !result.status || result.status === "starting" || result.status === "running") {
+        toast.success("Schedule run started");
+      } else if (result.status === "completed") {
+        toast.success("Schedule run already completed");
+      } else {
+        toast.error(`Schedule run already ${result.status}`);
+      }
+    },
     onError: (kind, error) => {
       console.error(`Project activity ${kind} failed:`, error);
       if (kind === "session-navigation") toast.error("Failed to open agent session");

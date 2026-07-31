@@ -2,7 +2,7 @@ import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import path from "path";
-import type { PromptProvider, ScheduledTask, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
+import type { PromptProvider, ScheduledTask, ScheduledTaskRunRequest, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
 import { requireAuth } from "../server.js";
 import { validateCron } from "../scheduler.js";
 import "../server-types.js";
@@ -49,6 +49,20 @@ function validateResolved(b: { cron_expr: string; timezone: string; run_type: st
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  const sendTerminalManualOutcome = (
+    reply: FastifyReply, request: ScheduledTaskRunRequest, replay: boolean,
+  ): FastifyReply | null => {
+    if (!request.terminalStatus || request.terminalResponseStatus === null) return null;
+    const common = { runId: request.runId, status: request.terminalStatus, durable: true, replay };
+    if (request.terminalResponseStatus >= 400) {
+      return reply.code(request.terminalResponseStatus).send({
+        ...common,
+        error: request.terminalError ?? "Schedule run failed",
+      });
+    }
+    return reply.code(request.terminalResponseStatus).send(common);
+  };
+
   // Resolve a schedule by id and enforce project ownership (same idiom as
   // command-routes PUT/DELETE: child fetched unscoped, parent project scoped
   // by userId). Sends the 404 itself and returns null when not accessible.
@@ -231,6 +245,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
         || priorRequest.sourceRunId !== (sourceRunId ?? null))) {
         return reply.code(409).send({ error: "Manual run request identity payload mismatch" });
       }
+      if (priorRequest) {
+        const replayRequest = priorRequest.terminalStatus
+          ? priorRequest
+          : await fastify.storage.scheduledTaskRuns.backfillManualRequestOutcome(requestId);
+        if (replayRequest) {
+          const terminalReply = sendTerminalManualOutcome(reply, replayRequest, true);
+          if (terminalReply) return terminalReply;
+        }
+      }
       if (!priorRequest && sourceRunId !== undefined) {
         const source = await fastify.storage.scheduledTaskRuns.getById(sourceRunId);
         if (!source || source.schedule_id !== existing.id || source.project_id !== existing.project_id) {
@@ -252,7 +275,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(409).send({ error: "Manual run request identity payload mismatch" });
       }
 
+      // A concurrent owner may have terminalized this request between our
+      // initial read and claim. Observe the immutable outcome before invoking
+      // the scheduler so a replay can never repeat the effect.
+      const claimedRequest = await fastify.storage.scheduledTaskRuns.backfillManualRequestOutcome(requestId);
+      if (claimedRequest) {
+        const terminalReply = sendTerminalManualOutcome(reply, claimedRequest, requestClaim === "existing");
+        if (terminalReply) return terminalReply;
+      }
+
       const result = await fastify.scheduler.runNow(req.params.id, runId);
+      // Pre-spawn failures, overlap skips, and unusually fast completions write
+      // the compact outcome atomically with terminalizing the run.
+      const finalRequest = await fastify.storage.scheduledTaskRuns.backfillManualRequestOutcome(requestId);
+      if (finalRequest) {
+        const terminalReply = sendTerminalManualOutcome(reply, finalRequest, requestClaim === "existing");
+        if (terminalReply) return terminalReply;
+      }
       if ("error" in result) {
         const status = result.error === "Run identity is already in use" ? 409 : 400;
         return reply.code(status).send({ error: result.error });
