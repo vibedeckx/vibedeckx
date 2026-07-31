@@ -137,6 +137,8 @@ export interface AgentInstructionDeliveriesTable {
   content_hash: string;
   status: "pending" | "sent";
   claim_token: string | null;
+  owner_token: string | null;
+  lease_expires_at: number | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

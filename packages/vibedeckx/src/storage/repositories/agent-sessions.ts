@@ -247,8 +247,9 @@ export const createAgentSessionRepos = (
   },
 
   agentInstructionDeliveries: {
-    claim: async ({ sessionId, idempotencyKey, contentHash, claimToken }) => kdb.transaction()
+    claim: async ({ sessionId, idempotencyKey, contentHash, claimToken, leaseMs = 30_000 }) => kdb.transaction()
       .execute(async (trx) => {
+        const leaseExpiresAt = Date.now() + leaseMs;
         const existing = await trx.selectFrom("agent_instruction_deliveries")
           .selectAll()
           .where("session_id", "=", sessionId)
@@ -258,24 +259,32 @@ export const createAgentSessionRepos = (
           await trx.insertInto("agent_instruction_deliveries").values({
             session_id: sessionId, idempotency_key: idempotencyKey,
             content_hash: contentHash, status: "pending", claim_token: claimToken,
+            owner_token: claimToken, lease_expires_at: leaseExpiresAt,
             updated_at: h.nowMs(),
           }).execute();
           return "claimed" as const;
         }
         if (existing.content_hash !== contentHash) return "conflict" as const;
         if (existing.status === "sent") return "sent" as const;
-        if (existing.claim_token === claimToken) return "busy" as const;
-        await trx.updateTable("agent_instruction_deliveries")
-          .set({ claim_token: claimToken, updated_at: h.nowMs() })
+        if (existing.owner_token !== claimToken
+          && existing.lease_expires_at !== null && existing.lease_expires_at > Date.now()) {
+          return "busy" as const;
+        }
+        const result = await trx.updateTable("agent_instruction_deliveries")
+          .set({ claim_token: claimToken, owner_token: claimToken, lease_expires_at: leaseExpiresAt, updated_at: h.nowMs() })
           .where("session_id", "=", sessionId)
           .where("idempotency_key", "=", idempotencyKey)
           .where("status", "=", "pending")
-          .execute();
-        return "claimed" as const;
+          .where((eb) => eb.or([
+            eb("owner_token", "=", claimToken), eb("lease_expires_at", "is", null),
+            eb("lease_expires_at", "<=", Date.now()),
+          ]))
+          .executeTakeFirst();
+        return Number(result.numUpdatedRows) === 1 ? "claimed" as const : "busy" as const;
       }),
     markSent: async ({ sessionId, idempotencyKey, claimToken }) => {
       const result = await kdb.updateTable("agent_instruction_deliveries")
-        .set({ status: "sent", claim_token: null, updated_at: h.nowMs() })
+        .set({ status: "sent", claim_token: null, owner_token: null, lease_expires_at: null, updated_at: h.nowMs() })
         .where("session_id", "=", sessionId)
         .where("idempotency_key", "=", idempotencyKey)
         .where("status", "=", "pending")
@@ -285,7 +294,7 @@ export const createAgentSessionRepos = (
     },
     release: async ({ sessionId, idempotencyKey, claimToken }) => {
       await kdb.updateTable("agent_instruction_deliveries")
-        .set({ claim_token: null, updated_at: h.nowMs() })
+        .set({ claim_token: null, owner_token: null, lease_expires_at: null, updated_at: h.nowMs() })
         .where("session_id", "=", sessionId)
         .where("idempotency_key", "=", idempotencyKey)
         .where("status", "=", "pending")

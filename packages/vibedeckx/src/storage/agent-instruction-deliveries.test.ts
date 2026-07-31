@@ -23,18 +23,19 @@ describe("agent instruction delivery claims", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("claims once, rejects hash reuse, supports restart takeover, and replays sent", async () => {
+  it("leases a claim, rejects live takeover, permits same-owner retry and expired takeover", async () => {
     const input = { sessionId: "s1", idempotencyKey: "delivery-1", contentHash: "hash-a" };
 
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a" }))
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 10 }))
       .resolves.toBe("claimed");
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a" }))
-      .resolves.toBe("busy");
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 10 }))
+      .resolves.toBe("claimed");
     await expect(storage.agentInstructionDeliveries.claim({ ...input, contentHash: "hash-b", claimToken: "instance-a" }))
       .resolves.toBe("conflict");
-    await storage.close();
-    storage = await createSqliteStorage(dbPath);
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b" }))
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
+      .resolves.toBe("busy");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
       .resolves.toBe("claimed");
     await expect(storage.agentInstructionDeliveries.markSent({
       sessionId: "s1", idempotencyKey: "delivery-1", claimToken: "instance-b",

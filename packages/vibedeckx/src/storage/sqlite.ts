@@ -224,6 +224,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       content_hash TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('pending', 'sent')),
       claim_token TEXT,
+      owner_token TEXT,
+      lease_expires_at INTEGER,
       created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       PRIMARY KEY (session_id, idempotency_key),
@@ -332,6 +334,14 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
   `);
+
+  const instructionDeliveryCols = db.prepare("PRAGMA table_info(agent_instruction_deliveries)").all() as { name: string }[];
+  if (!instructionDeliveryCols.some((c) => c.name === "owner_token")) {
+    db.exec("ALTER TABLE agent_instruction_deliveries ADD COLUMN owner_token TEXT");
+  }
+  if (!instructionDeliveryCols.some((c) => c.name === "lease_expires_at")) {
+    db.exec("ALTER TABLE agent_instruction_deliveries ADD COLUMN lease_expires_at INTEGER");
+  }
 
   // Project Chat mutation journal v2: persist immutable scope and an
   // independently constrained payload version. Task 5 intermediate databases

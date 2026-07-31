@@ -785,7 +785,7 @@ export interface Storage {
   };
   agentInstructionDeliveries: {
     claim: (opts: {
-      sessionId: string; idempotencyKey: string; contentHash: string; claimToken: string;
+      sessionId: string; idempotencyKey: string; contentHash: string; claimToken: string; leaseMs?: number;
     }) => Promise<"claimed" | "sent" | "busy" | "conflict">;
     markSent: (opts: {
       sessionId: string; idempotencyKey: string; claimToken: string;
