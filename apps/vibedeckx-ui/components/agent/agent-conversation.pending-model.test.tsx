@@ -177,7 +177,27 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
   };
 });
 
-vi.mock("./session-history-dropdown", () => ({ SessionHistoryDropdown: () => null }));
+vi.mock("./session-history-dropdown", () => ({
+  SessionHistoryDropdown: ({
+    onSwitch,
+    onDelete,
+  }: {
+    onSwitch: (id: string) => void;
+    onDelete?: (id: string, remaining: Array<{ id: string }>) => void;
+  }) => (
+    <div>
+      <button data-testid="session-history-switch" onClick={() => onSwitch("selected-session")}>
+        switch session
+      </button>
+      <button
+        data-testid="session-history-delete"
+        onClick={() => onDelete?.("current-session", [{ id: "fallback-session" }])}
+      >
+        delete session
+      </button>
+    </div>
+  ),
+}));
 vi.mock("./review-dialog", () => ({ ReviewDialog: () => null }));
 vi.mock("./agent-message", () => ({ AgentMessageItem: () => null }));
 vi.mock("./user-input-markers", () => ({ UserInputMarkers: () => null }));
@@ -238,6 +258,39 @@ describe("AgentConversation pendingModel", () => {
     const icon = (testid: string) => q(container, testid)!.querySelector("svg")?.getAttribute("class");
     expect(icon("agent-claude-code")).toContain("text-violet-500");
     expect(icon("agent-codex")).toContain("text-green-500");
+  });
+
+  it("records explicit Session History switches but not deletion fallback navigation", async () => {
+    hookState.session = { id: "current-session" };
+    const setSessionUrlParam = vi.fn();
+    const onSessionSelected = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <AgentConversation
+          projectId="pA"
+          branch="featA"
+          project={{ id: "pA", name: "pA", path: "/tmp/pA" } as never}
+          setSessionUrlParam={setSessionUrlParam}
+          onSessionSelected={onSessionSelected}
+        />,
+      );
+    });
+
+    await act(async () => {
+      q(container, "session-history-switch")!.click();
+    });
+    expect(onSessionSelected).toHaveBeenCalledOnce();
+    expect(onSessionSelected).toHaveBeenCalledWith("selected-session");
+    expect(setSessionUrlParam).toHaveBeenCalledWith("selected-session");
+
+    onSessionSelected.mockClear();
+    setSessionUrlParam.mockClear();
+    await act(async () => {
+      q(container, "session-history-delete")!.click();
+    });
+    expect(onSessionSelected).not.toHaveBeenCalled();
+    expect(setSessionUrlParam).toHaveBeenCalledWith("fallback-session");
   });
 
   it("holds the picked model while the workspace is unchanged", async () => {

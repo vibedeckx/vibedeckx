@@ -116,6 +116,8 @@ interface AgentConversationProps {
    */
   onActiveSessionChange?: (sessionId: string | null) => void;
   onSessionTitleUpdated?: (sessionId: string, title: string) => void;
+  /** Called only when the user explicitly selects a Session History row. */
+  onSessionSelected?: (sessionId: string) => void;
   onStatusChange?: () => void;
   onNewConversation?: () => void;
 }
@@ -149,7 +151,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -883,6 +885,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               pendingTitleSessionId={pendingTitleSessionId}
               aiTitleOverride={aiTitleOverride}
               onSwitch={(id) => {
+                onSessionSelected?.(id);
                 setSessionUrlParam?.(id);
               }}
               onDelete={(id, remaining) => {

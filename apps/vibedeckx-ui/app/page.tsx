@@ -884,6 +884,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         onTaskCompleted={handleTaskCompleted}
                         onSessionStarted={handleSessionStarted}
                         onSessionTitleUpdated={handleSessionTitleUpdated}
+                        onSessionSelected={touchRecentSessionOpen}
                         onStatusChange={handleStatusChange}
                         onNewConversation={handleNewConversation}
                       />
