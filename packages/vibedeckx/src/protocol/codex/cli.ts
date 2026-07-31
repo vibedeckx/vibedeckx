@@ -29,7 +29,7 @@ export function buildCodexAppServerSpawnConfig(
   if (crossRemoteMcp) {
     args.push(
       "-c",
-      `mcp_servers.cross-remote={ url = ${JSON.stringify(crossRemoteMcp.url)}, bearer_token_env_var = ${JSON.stringify(CROSS_REMOTE_MCP_TOKEN_ENV)} }`,
+      `mcp_servers.cross-remote={ url = ${JSON.stringify(crossRemoteMcp.url)}, bearer_token_env_var = ${JSON.stringify(CROSS_REMOTE_MCP_TOKEN_ENV)}, default_tools_approval_mode = "approve" }`,
     );
   }
 

@@ -29,12 +29,21 @@ describe("codex CLI builders", () => {
       args: [
         "app-server",
         "-c",
-        'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN" }',
+        'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN", default_tools_approval_mode = "approve" }',
       ],
       env: { VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" },
       shell: false,
     });
     expect(JSON.stringify(config.args)).not.toContain("secret-token");
+  });
+
+  it("pre-approves cross-remote MCP tools so plan-mode sessions do not wait for approval", () => {
+    const config = buildCodexAppServerSpawnConfig("/usr/local/bin/codex", {
+      url: "https://app.example.com/api/cross-remote-mcp",
+      token: "secret-token",
+    });
+
+    expect(config.args.join(" ")).toContain('default_tools_approval_mode = "approve"');
   });
 
   it("injects cross-remote MCP into the npx app-server fallback", () => {
@@ -48,7 +57,7 @@ describe("codex CLI builders", () => {
       "@openai/codex",
       "app-server",
       "-c",
-      'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN" }',
+      'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN", default_tools_approval_mode = "approve" }',
     ]);
     expect(config.env).toEqual({ VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" });
   });
@@ -96,7 +105,7 @@ describe("codex CLI builders", () => {
       "-c",
       'model="opus"',
       "-c",
-      'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN" }',
+      'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN", default_tools_approval_mode = "approve" }',
     ]);
     expect(config.env).toEqual({ VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" });
   });
