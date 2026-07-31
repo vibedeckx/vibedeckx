@@ -71,6 +71,24 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS project_chat_work_items (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_message_id TEXT NOT NULL UNIQUE,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN (
+        'accepted', 'running', 'completed', 'stopped', 'failed'
+      )),
+      error TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (thread_id) REFERENCES project_chat_threads(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_message_id) REFERENCES project_chat_messages(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_chat_work_items_thread_status_created_id
+      ON project_chat_work_items(thread_id, status, created_at, id);
+
     CREATE TABLE IF NOT EXISTS project_chat_context_refs (
       thread_id TEXT NOT NULL,
       entity_type TEXT NOT NULL CHECK (entity_type IN (

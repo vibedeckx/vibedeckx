@@ -240,6 +240,19 @@ export interface ProjectChatMessage {
   created_at: string;
 }
 
+export type ProjectChatWorkStatus = "accepted" | "running" | "completed" | "stopped" | "failed";
+
+export interface ProjectChatWorkItem {
+  id: string;
+  thread_id: string;
+  user_message_id: string;
+  content: string;
+  status: ProjectChatWorkStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProjectChatContextRef {
   thread_id: string;
   entity_type: ProjectChatContextEntityType;
@@ -925,6 +938,37 @@ export interface Storage {
   projectChatMessages: {
     append: (opts: { id: string; thread_id: string; project_id: string; user_id: string; sequence: number; type: ProjectChatMessageType; content: string }) => Promise<ProjectChatMessage | undefined>;
     listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatMessage[]>;
+  };
+  projectChatWorkItems: {
+    accept: (opts: {
+      id: string;
+      user_message_id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      content: string;
+    }) => Promise<{ workItem: ProjectChatWorkItem; userMessage: ProjectChatMessage }>;
+    listNonterminal: (
+      threadId: string,
+      projectId: string,
+      userId: string,
+    ) => Promise<ProjectChatWorkItem[]>;
+    markRunning: (
+      id: string,
+      threadId: string,
+      projectId: string,
+      userId: string,
+    ) => Promise<ProjectChatWorkItem | undefined>;
+    finish: (opts: {
+      id: string;
+      thread_id: string;
+      project_id: string;
+      user_id: string;
+      status: Extract<ProjectChatWorkStatus, "completed" | "stopped" | "failed">;
+      error: string | null;
+      turn_end_id: string;
+      turn_end_content: string;
+    }) => Promise<{ workItem: ProjectChatWorkItem; turnEnd: ProjectChatMessage }>;
   };
   projectChatContextRefs: {
     touch: (threadId: string, projectId: string, userId: string, entityType: ProjectChatContextEntityType, entityId: string) => Promise<ProjectChatContextRef | undefined>;

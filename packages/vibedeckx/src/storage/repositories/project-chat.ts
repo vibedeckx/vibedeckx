@@ -4,11 +4,13 @@ import type {
   ProjectChatContextRefsTable,
   ProjectChatMessagesTable,
   ProjectChatThreadsTable,
+  ProjectChatWorkItemsTable,
 } from "../schema.js";
 import type {
   ProjectChatContextRef,
   ProjectChatMessage,
   ProjectChatThread,
+  ProjectChatWorkItem,
   Storage,
 } from "../types.js";
 
@@ -18,11 +20,13 @@ const mapThread = (row: Selectable<ProjectChatThreadsTable>): ProjectChatThread 
 
 const mapMessage = (row: Selectable<ProjectChatMessagesTable>): ProjectChatMessage => row;
 
+const mapWorkItem = (row: Selectable<ProjectChatWorkItemsTable>): ProjectChatWorkItem => row;
+
 const mapContextRef = (row: Selectable<ProjectChatContextRefsTable>): ProjectChatContextRef => row;
 
 export const createProjectChatRepos = (
   kdb: Kysely<DB>,
-): Pick<Storage, "projectChatThreads" | "projectChatMessages" | "projectChatContextRefs"> => ({
+): Pick<Storage, "projectChatThreads" | "projectChatMessages" | "projectChatWorkItems" | "projectChatContextRefs"> => ({
   projectChatThreads: {
     create: async ({ id, project_id, user_id, title }) => {
       await kdb.insertInto("project_chat_threads")
@@ -204,6 +208,137 @@ export const createProjectChatRepos = (
         .orderBy("message.sequence", "asc")
         .execute();
       return rows.map(mapMessage);
+    },
+  },
+
+  projectChatWorkItems: {
+    accept: async ({ id, user_message_id, thread_id, project_id, user_id, content }) => {
+      return kdb.transaction().execute(async (trx) => {
+        const thread = await trx.selectFrom("project_chat_threads")
+          .select("id")
+          .where("id", "=", thread_id)
+          .where("project_id", "=", project_id)
+          .where("user_id", "=", user_id)
+          .executeTakeFirst();
+        if (!thread) throw new Error("Project Chat thread not found");
+
+        const sequenceRow = await trx.selectFrom("project_chat_messages")
+          .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+          .where("thread_id", "=", thread_id)
+          .executeTakeFirstOrThrow();
+        const sequence = Number(sequenceRow.sequence) + 1;
+        await trx.insertInto("project_chat_messages")
+          .values({ id: user_message_id, thread_id, sequence, type: "user", content })
+          .execute();
+        await trx.insertInto("project_chat_work_items")
+          .values({
+            id,
+            thread_id,
+            user_message_id,
+            content,
+            status: "accepted",
+            error: null,
+          })
+          .execute();
+        const touched = await trx.updateTable("project_chat_threads")
+          .set({ updated_at: now() })
+          .where("id", "=", thread_id)
+          .where("project_id", "=", project_id)
+          .where("user_id", "=", user_id)
+          .executeTakeFirst();
+        if (touched.numUpdatedRows !== 1n) throw new Error("Project Chat thread not found");
+
+        const [message, work] = await Promise.all([
+          trx.selectFrom("project_chat_messages").selectAll()
+            .where("id", "=", user_message_id).executeTakeFirstOrThrow(),
+          trx.selectFrom("project_chat_work_items").selectAll()
+            .where("id", "=", id).executeTakeFirstOrThrow(),
+        ]);
+        return { userMessage: mapMessage(message), workItem: mapWorkItem(work) };
+      });
+    },
+
+    listNonterminal: async (threadId, projectId, userId) => {
+      const rows = await kdb.selectFrom("project_chat_work_items as work")
+        .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+        .selectAll("work")
+        .where("work.thread_id", "=", threadId)
+        .where("thread.project_id", "=", projectId)
+        .where("thread.user_id", "=", userId)
+        .where("work.status", "in", ["accepted", "running"])
+        .orderBy("work.created_at", "asc")
+        .orderBy("work.id", "asc")
+        .execute();
+      return rows.map(mapWorkItem);
+    },
+
+    markRunning: async (id, threadId, projectId, userId) => {
+      return kdb.transaction().execute(async (trx) => {
+        const owned = await trx.selectFrom("project_chat_work_items as work")
+          .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+          .select("work.id")
+          .where("work.id", "=", id)
+          .where("work.thread_id", "=", threadId)
+          .where("thread.project_id", "=", projectId)
+          .where("thread.user_id", "=", userId)
+          .where("work.status", "in", ["accepted", "running"])
+          .executeTakeFirst();
+        if (!owned) return undefined;
+        const row = await trx.updateTable("project_chat_work_items")
+          .set({ status: "running", updated_at: now() })
+          .where("id", "=", id)
+          .where("thread_id", "=", threadId)
+          .returningAll()
+          .executeTakeFirst();
+        return row ? mapWorkItem(row) : undefined;
+      });
+    },
+
+    finish: async ({
+      id, thread_id, project_id, user_id, status, error, turn_end_id, turn_end_content,
+    }) => {
+      return kdb.transaction().execute(async (trx) => {
+        const work = await trx.selectFrom("project_chat_work_items as work")
+          .innerJoin("project_chat_threads as thread", "thread.id", "work.thread_id")
+          .selectAll("work")
+          .where("work.id", "=", id)
+          .where("work.thread_id", "=", thread_id)
+          .where("thread.project_id", "=", project_id)
+          .where("thread.user_id", "=", user_id)
+          .where("work.status", "in", ["accepted", "running"])
+          .executeTakeFirst();
+        if (!work) throw new Error("Project Chat work item not found or already terminal");
+        const sequenceRow = await trx.selectFrom("project_chat_messages")
+          .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+          .where("thread_id", "=", thread_id)
+          .executeTakeFirstOrThrow();
+        const sequence = Number(sequenceRow.sequence) + 1;
+        await trx.insertInto("project_chat_messages")
+          .values({
+            id: turn_end_id,
+            thread_id,
+            sequence,
+            type: "turn_end",
+            content: turn_end_content,
+          })
+          .execute();
+        const terminalWork = await trx.updateTable("project_chat_work_items")
+          .set({ status, error, updated_at: now() })
+          .where("id", "=", id)
+          .where("thread_id", "=", thread_id)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        const touched = await trx.updateTable("project_chat_threads")
+          .set({ updated_at: now() })
+          .where("id", "=", thread_id)
+          .where("project_id", "=", project_id)
+          .where("user_id", "=", user_id)
+          .executeTakeFirst();
+        if (touched.numUpdatedRows !== 1n) throw new Error("Project Chat thread not found");
+        const turnEnd = await trx.selectFrom("project_chat_messages")
+          .selectAll().where("id", "=", turn_end_id).executeTakeFirstOrThrow();
+        return { workItem: mapWorkItem(terminalWork), turnEnd: mapMessage(turnEnd) };
+      });
     },
   },
 

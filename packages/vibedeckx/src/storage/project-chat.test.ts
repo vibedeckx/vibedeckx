@@ -279,4 +279,100 @@ describe("project chat storage", () => {
       db.close();
     }
   });
+
+  it("stores internal work items with constrained status, recovery index, and thread cascade", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatWorkItems.accept({
+      id: "w1", user_message_id: "m1", thread_id: "t1",
+      project_id: "p1", user_id: "u1", content: "status?",
+    });
+
+    const db = new Database(dbPath);
+    try {
+      expect(() => db.prepare(
+        "UPDATE project_chat_work_items SET status = 'invalid' WHERE id = 'w1'",
+      ).run()).toThrow(/CHECK constraint failed/);
+      const index = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_chat_work_items_thread_status_created_id'",
+      ).get() as { sql: string } | undefined;
+      expect(index?.sql.replace(/\s+/g, " "))
+        .toContain("thread_id, status, created_at, id");
+    } finally {
+      db.close();
+    }
+
+    await storage.projectChatThreads.delete("t1", "p1", "u1");
+    const verify = new Database(dbPath, { readonly: true });
+    try {
+      expect(verify.prepare("SELECT count(*) AS count FROM project_chat_work_items").get())
+        .toEqual({ count: 0 });
+    } finally {
+      verify.close();
+    }
+  });
+
+  it("atomically accepts work with an in-transaction message sequence", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+
+    const [first, second] = await Promise.all([
+      storage.projectChatWorkItems.accept({
+        id: "w1", user_message_id: "m1", thread_id: "t1",
+        project_id: "p1", user_id: "u1", content: "first",
+      }),
+      storage.projectChatWorkItems.accept({
+        id: "w2", user_message_id: "m2", thread_id: "t1",
+        project_id: "p1", user_id: "u1", content: "second",
+      }),
+    ]);
+
+    expect([first.userMessage.sequence, second.userMessage.sequence].sort()).toEqual([1, 2]);
+    expect((await storage.projectChatMessages.listByThread("t1", "p1", "u1"))
+      .map(({ type, content }) => ({ type, content })))
+      .toEqual([
+        { type: "user", content: "first" },
+        { type: "user", content: "second" },
+      ]);
+    expect((await storage.projectChatWorkItems.listNonterminal("t1", "p1", "u1"))
+      .map((work) => work.id)).toEqual(["w1", "w2"]);
+  });
+
+  it("rolls back both journal and user message when acceptance touch fails", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    const db = new Database(dbPath);
+    try {
+      db.exec(`
+        CREATE TRIGGER fail_project_chat_touch BEFORE UPDATE OF updated_at ON project_chat_threads
+        BEGIN SELECT RAISE(ABORT, 'touch failed'); END
+      `);
+    } finally {
+      db.close();
+    }
+
+    await expect(storage.projectChatWorkItems.accept({
+      id: "w1", user_message_id: "m1", thread_id: "t1",
+      project_id: "p1", user_id: "u1", content: "must roll back",
+    })).rejects.toThrow(/touch failed/);
+
+    expect(await storage.projectChatMessages.listByThread("t1", "p1", "u1")).toEqual([]);
+    expect(await storage.projectChatWorkItems.listNonterminal("t1", "p1", "u1")).toEqual([]);
+  });
+
+  it("atomically appends terminal turn_end and completes its work item", async () => {
+    await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatWorkItems.accept({
+      id: "w1", user_message_id: "m1", thread_id: "t1",
+      project_id: "p1", user_id: "u1", content: "status?",
+    });
+    await storage.projectChatWorkItems.markRunning("w1", "t1", "p1", "u1");
+
+    const terminal = await storage.projectChatWorkItems.finish({
+      id: "w1", thread_id: "t1", project_id: "p1", user_id: "u1",
+      status: "completed", error: null, turn_end_id: "end1",
+      turn_end_content: JSON.stringify({ status: "completed", workId: "w1" }),
+    });
+
+    expect(terminal.workItem.status).toBe("completed");
+    expect(terminal.turnEnd).toMatchObject({ id: "end1", sequence: 2, type: "turn_end" });
+    expect(await storage.projectChatWorkItems.listNonterminal("t1", "p1", "u1")).toEqual([]);
+  });
 });
