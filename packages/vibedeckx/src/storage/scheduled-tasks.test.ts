@@ -36,9 +36,91 @@ describe("scheduledTasks storage", () => {
       cwd_mode: "branch",
     });
 
-  it("creates composite indexes for bounded Project Commander lists", () => {
-    const db = new Database(dbPath, { readonly: true });
+  it("migrates and backfills project scope for old scheduled runs and derives it for new writes", async () => {
+    await createTask("legacy-schedule");
+    await storage.scheduledTaskRuns.create({
+      id: "legacy-run", schedule_id: "legacy-schedule", status: "completed",
+    });
+    await storage.close();
+
+    const legacy = new Database(dbPath);
     try {
+      const columns = legacy.prepare("PRAGMA table_info(scheduled_task_runs)").all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === "project_id")) {
+        legacy.exec(`
+          PRAGMA foreign_keys = OFF;
+          ALTER TABLE scheduled_task_runs RENAME TO scheduled_task_runs_current;
+          CREATE TABLE scheduled_task_runs (
+            id TEXT PRIMARY KEY,
+            schedule_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            exit_code INTEGER,
+            output TEXT,
+            report TEXT,
+            process_id TEXT,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP,
+            FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+          );
+          INSERT INTO scheduled_task_runs
+            (id, schedule_id, status, exit_code, output, report, process_id, started_at, finished_at)
+          SELECT id, schedule_id, status, exit_code, output, report, process_id, started_at, finished_at
+          FROM scheduled_task_runs_current;
+          DROP TABLE scheduled_task_runs_current;
+        `);
+      }
+    } finally {
+      legacy.close();
+    }
+
+    storage = await createSqliteStorage(dbPath);
+    await storage.scheduledTaskRuns.create({
+      id: "new-run", schedule_id: "legacy-schedule", status: "completed",
+    });
+    const check = new Database(dbPath, { readonly: true });
+    try {
+      const rows = check.prepare(
+        "SELECT id, project_id FROM scheduled_task_runs ORDER BY id",
+      ).all() as Array<{ id: string; project_id: string | null }>;
+      expect(rows).toEqual([
+        { id: "legacy-run", project_id: projectId },
+        { id: "new-run", project_id: projectId },
+      ]);
+    } finally {
+      check.close();
+    }
+
+    const consistency = new Database(dbPath);
+    try {
+      consistency.pragma("foreign_keys = ON");
+      expect(() => consistency.prepare(
+        "UPDATE scheduled_task_runs SET project_id = 'wrong-project' WHERE id = 'new-run'",
+      ).run()).toThrow(/scope is immutable/);
+      expect(() => consistency.prepare(
+        "UPDATE scheduled_tasks SET project_id = 'wrong-project' WHERE id = 'legacy-schedule'",
+      ).run()).toThrow(/project is immutable/);
+    } finally {
+      consistency.close();
+    }
+
+    await storage.close();
+    storage = await createSqliteStorage(dbPath);
+    expect((await storage.scheduledTaskRuns.listRecentByProject(projectId, 10)).map((run) => run.id).sort())
+      .toEqual(["legacy-run", "new-run"]);
+  });
+
+  it("creates composite indexes for bounded Project Commander lists", async () => {
+    await createTask("plan-schedule");
+    for (let i = 0; i < 200; i++) {
+      await storage.scheduledTaskRuns.create({
+        id: `plan-run-${i.toString().padStart(3, "0")}`,
+        schedule_id: "plan-schedule",
+        status: "completed",
+      });
+    }
+    const db = new Database(dbPath);
+    try {
+      db.exec("ANALYZE");
       const names = new Set((db.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'index'",
       ).all() as Array<{ name: string }>).map((row) => row.name));
@@ -47,19 +129,19 @@ describe("scheduledTasks storage", () => {
         "idx_remote_session_mappings_project_local",
         "idx_workspace_search_cache_project_target_branch",
         "idx_scheduled_tasks_project_created_id",
-        "idx_scheduled_task_runs_schedule_started_id",
+        "idx_scheduled_task_runs_project_started_id",
       ]) expect(names.has(name), name).toBe(true);
       const plan = (db.prepare(`
         EXPLAIN QUERY PLAN
-        SELECT run.id
+        SELECT run.id, run.schedule_id, run.project_id, run.status, run.exit_code,
+               NULL AS output, NULL AS report, run.process_id, run.started_at, run.finished_at
         FROM scheduled_task_runs AS run
-        JOIN scheduled_tasks AS schedule ON schedule.id = run.schedule_id
-        WHERE schedule.project_id = ?
+        WHERE run.project_id = ?
         ORDER BY run.started_at DESC, run.id DESC
         LIMIT ?
       `).all(projectId, 20) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
-      expect(plan).toContain("idx_scheduled_tasks_project_created_id");
-      expect(plan).toContain("idx_scheduled_task_runs_schedule_started_id");
+      expect(plan).not.toMatch(/\bSCAN run\b/);
+      expect(plan).not.toContain("USE TEMP B-TREE FOR ORDER BY");
     } finally {
       db.close();
     }

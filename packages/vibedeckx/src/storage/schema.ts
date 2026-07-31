@@ -337,6 +337,7 @@ export interface ScheduledTasksTable {
 export interface ScheduledTaskRunsTable {
   id: string;
   schedule_id: string;
+  project_id: string | null;
   status: Generated<string>;
   exit_code: number | null;
   output: string | null;

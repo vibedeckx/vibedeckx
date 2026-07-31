@@ -69,7 +69,7 @@ export const createWorkspaceRepos = (
           sql<boolean>`lower(coalesce(description, '')) like ${pattern} escape '\\'`,
         ]));
       }
-      const rows = await query.orderBy("position", "asc").limit(opts.limit).execute();
+      const rows = await query.orderBy("position", "asc").orderBy("id", "asc").limit(opts.limit).execute();
       return rows.map(mapTask);
     },
 

@@ -2,16 +2,19 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
 
 describe("tasks/rules/commands storage", () => {
   let dir: string;
+  let dbPath: string;
   let storage: Storage;
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-ws-"));
-    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    dbPath = path.join(dir, "test.sqlite");
+    storage = await createSqliteStorage(dbPath);
     await storage.projects.create({ id: "p1", name: "p", path: "/tmp/p" });
   });
   afterEach(async () => {
@@ -20,6 +23,51 @@ describe("tasks/rules/commands storage", () => {
   });
 
   describe("tasks", () => {
+    it("uses ordered project indexes for every bounded Project Commander task query variant", async () => {
+      for (let i = 0; i < 200; i++) {
+        await storage.tasks.create({
+          id: `task-${i.toString().padStart(3, "0")}`,
+          project_id: "p1",
+          title: i % 2 === 0 ? `needle ${i}` : `other ${i}`,
+          status: i % 3 === 0 ? "done" : "todo",
+        });
+      }
+      const db = new Database(dbPath);
+      try {
+        db.exec("ANALYZE");
+        const variants = [
+          { suffix: "", args: ["p1", 20] },
+          { suffix: "AND status = ?", args: ["p1", "todo", 20] },
+          {
+            suffix: "AND (lower(title) LIKE ? ESCAPE '\\\\' OR lower(coalesce(description, '')) LIKE ? ESCAPE '\\\\')",
+            args: ["p1", "%needle%", "%needle%", 20],
+          },
+          {
+            suffix: "AND status = ? AND (lower(title) LIKE ? ESCAPE '\\\\' OR lower(coalesce(description, '')) LIKE ? ESCAPE '\\\\')",
+            args: ["p1", "todo", "%needle%", "%needle%", 20],
+          },
+        ] as const;
+        for (const variant of variants) {
+          const plan = (db.prepare(`
+            EXPLAIN QUERY PLAN
+            SELECT * FROM tasks
+            WHERE project_id = ? AND archived_at IS NULL ${variant.suffix}
+            ORDER BY position ASC, id ASC
+            LIMIT ?
+          `).all(...variant.args) as Array<{ detail: string }>).map((row) => row.detail).join("\n");
+          expect(plan, plan).not.toMatch(/\bSCAN tasks\b/);
+          expect(plan, plan).not.toContain("USE TEMP B-TREE FOR ORDER BY");
+        }
+      } finally {
+        db.close();
+      }
+
+      await storage.tasks.update("task-002", { position: 0 });
+      await storage.tasks.update("task-001", { position: 0 });
+      expect((await storage.tasks.queryByProject("p1", { limit: 3 })).map((task) => task.id))
+        .toEqual(["task-000", "task-001", "task-002"]);
+    });
+
     it("create: defaults status='todo', priority='medium', description/assigned_branch null, position starts at 0", async () => {
       const t = await storage.tasks.create({ id: "t1", project_id: "p1", title: "T" });
       expect(t.status).toBe("todo");

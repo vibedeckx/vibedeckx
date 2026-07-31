@@ -485,7 +485,7 @@ export const createProjectChatRepos = (
         if (!thread) return undefined;
         if (refs.length === 0) return [];
 
-        await trx.insertInto("project_chat_context_refs")
+        const rows = await trx.insertInto("project_chat_context_refs")
           .values(refs.map((ref) => ({
             thread_id: threadId,
             entity_type: ref.entityType,
@@ -494,16 +494,9 @@ export const createProjectChatRepos = (
           .onConflict((conflict) => conflict
             .columns(["thread_id", "entity_type", "entity_id"])
             .doUpdateSet({ last_referenced_at: now() }))
+          .returningAll()
           .execute();
-
-        const keys = new Set(refs.map((ref) => `${ref.entityType}\0${ref.entityId}`));
-        const rows = await trx.selectFrom("project_chat_context_refs")
-          .selectAll()
-          .where("thread_id", "=", threadId)
-          .execute();
-        return rows
-          .filter((row) => keys.has(`${row.entity_type}\0${row.entity_id}`))
-          .map(mapContextRef);
+        return rows.map(mapContextRef);
       });
     },
 

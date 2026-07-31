@@ -92,14 +92,17 @@ export const createScheduledRepos = (
   scheduledTaskRuns: {
     create: async ({ id, schedule_id, status, process_id }) => {
       const st = status ?? "running";
-      await kdb.insertInto("scheduled_task_runs").values({
+      await kdb.insertInto("scheduled_task_runs").values((eb) => ({
         id, schedule_id, status: st,
+        project_id: eb.selectFrom("scheduled_tasks")
+          .select("project_id")
+          .where("id", "=", schedule_id),
         process_id: process_id ?? null,
         exit_code: null,
         output: null,
         report: null,
         finished_at: st === "running" ? null : sql<string>`CURRENT_TIMESTAMP`,
-      }).execute();
+      })).execute();
       const row = await kdb.selectFrom("scheduled_task_runs").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       return mapRun(row);
     },
@@ -109,20 +112,19 @@ export const createScheduledRepos = (
     },
     listRecentByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("scheduled_task_runs as run")
-        .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
         .select([
-          "run.id", "run.schedule_id", "run.status", "run.exit_code",
+          "run.id", "run.schedule_id", "run.project_id", "run.status", "run.exit_code",
           sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"),
           "run.process_id", "run.started_at", "run.finished_at",
         ])
-        .where("schedule.project_id", "=", projectId)
+        .where("run.project_id", "=", projectId)
         .orderBy("run.started_at", "desc").orderBy("run.id", "desc")
         .limit(limit).execute();
       return rows.map(mapRun);
     },
     getByScheduleId: async (scheduleId, limit = 50) => {
       const rows = await kdb.selectFrom("scheduled_task_runs")
-        .select(["id", "schedule_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
+        .select(["id", "schedule_id", "project_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
         .where("schedule_id", "=", scheduleId)
         .orderBy("started_at", "desc").orderBy(h.rowIdDesc())
         .limit(limit).execute();
@@ -132,7 +134,7 @@ export const createScheduledRepos = (
       const result: Record<string, ScheduledTaskRun> = {};
       for (const sid of scheduleIds) {
         const row = await kdb.selectFrom("scheduled_task_runs")
-          .select(["id", "schedule_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
+          .select(["id", "schedule_id", "project_id", "status", "exit_code", sql<string | null>`NULL`.as("output"), sql<string | null>`NULL`.as("report"), "process_id", "started_at", "finished_at"])
           .where("schedule_id", "=", sid)
           .orderBy("started_at", "desc").orderBy(h.rowIdDesc())
           .limit(1).executeTakeFirst();

@@ -815,6 +815,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE TABLE IF NOT EXISTS scheduled_task_runs (
       id TEXT PRIMARY KEY,
       schedule_id TEXT NOT NULL,
+      project_id TEXT,
       status TEXT NOT NULL DEFAULT 'running',
       exit_code INTEGER,
       output TEXT,
@@ -822,7 +823,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       process_id TEXT,
       started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       finished_at TIMESTAMP,
-      FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+      FOREIGN KEY (schedule_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_schedule ON scheduled_task_runs(schedule_id);
@@ -846,6 +848,58 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!scheduledRunCols.some((c) => c.name === "report")) {
     db.exec("ALTER TABLE scheduled_task_runs ADD COLUMN report TEXT DEFAULT NULL");
   }
+  if (!scheduledRunCols.some((c) => c.name === "project_id")) {
+    db.exec("ALTER TABLE scheduled_task_runs ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE");
+  }
+  db.exec(`
+    UPDATE scheduled_task_runs
+    SET project_id = (
+      SELECT scheduled_tasks.project_id
+      FROM scheduled_tasks
+      WHERE scheduled_tasks.id = scheduled_task_runs.schedule_id
+    )
+    WHERE project_id IS NULL;
+
+    DROP TRIGGER IF EXISTS trg_scheduled_task_runs_validate_project_insert;
+    DROP TRIGGER IF EXISTS trg_scheduled_task_runs_fill_project_insert;
+    DROP TRIGGER IF EXISTS trg_scheduled_task_runs_immutable_scope;
+    DROP TRIGGER IF EXISTS trg_scheduled_tasks_project_immutable_with_runs;
+
+    CREATE TRIGGER trg_scheduled_task_runs_validate_project_insert
+    BEFORE INSERT ON scheduled_task_runs
+    WHEN NEW.project_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM scheduled_tasks
+      WHERE id = NEW.schedule_id AND project_id = NEW.project_id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'scheduled run project does not match schedule');
+    END;
+
+    CREATE TRIGGER trg_scheduled_task_runs_fill_project_insert
+    AFTER INSERT ON scheduled_task_runs
+    WHEN NEW.project_id IS NULL
+    BEGIN
+      UPDATE scheduled_task_runs
+      SET project_id = (SELECT project_id FROM scheduled_tasks WHERE id = NEW.schedule_id)
+      WHERE id = NEW.id;
+    END;
+
+    CREATE TRIGGER trg_scheduled_task_runs_immutable_scope
+    BEFORE UPDATE OF schedule_id, project_id ON scheduled_task_runs
+    WHEN NEW.schedule_id IS NOT OLD.schedule_id
+      OR (OLD.project_id IS NOT NULL AND NEW.project_id IS NOT OLD.project_id)
+    BEGIN
+      SELECT RAISE(ABORT, 'scheduled run scope is immutable');
+    END;
+
+    CREATE TRIGGER trg_scheduled_tasks_project_immutable_with_runs
+    BEFORE UPDATE OF project_id ON scheduled_tasks
+    WHEN NEW.project_id IS NOT OLD.project_id
+      AND EXISTS (SELECT 1 FROM scheduled_task_runs WHERE schedule_id = OLD.id)
+    BEGIN
+      SELECT RAISE(ABORT, 'schedule project is immutable after runs exist');
+    END;
+  `);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS branch_merge_targets (
@@ -979,6 +1033,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
   // Composite access paths used by bounded, deterministic Project Commander lists.
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_position_id
+      ON tasks(project_id, archived_at, position ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_status_position_id
+      ON tasks(project_id, archived_at, status, position ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_updated_id
       ON agent_sessions(project_id, updated_at DESC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_remote_session_mappings_project_local
@@ -989,6 +1047,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       ON scheduled_tasks(project_id, created_at ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_schedule_started_id
       ON scheduled_task_runs(schedule_id, started_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_project_started_id
+      ON scheduled_task_runs(project_id, started_at DESC, id DESC);
   `);
 
   // Migration: per-mapping notification sync provenance + watch window.

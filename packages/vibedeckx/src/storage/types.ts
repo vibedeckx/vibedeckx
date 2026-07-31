@@ -142,6 +142,8 @@ export interface ScheduledTask {
 export interface ScheduledTaskRun {
   id: string;
   schedule_id: string;
+  /** Denormalized from the immutable parent schedule for bounded project lists. */
+  project_id: string | null;
   status: ScheduledTaskRunStatus;
   exit_code: number | null;
   /** Captured output (ANSI included), capped. Omitted (null) by list queries. */

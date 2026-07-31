@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -199,6 +199,41 @@ describe("project chat storage", () => {
     )).resolves.toBeUndefined();
     expect((await storage.projectChatContextRefs.listByThread("batch-thread", "p1", "u1")).map((ref) => ref.entity_id).sort())
       .toEqual(["session-1", "task-1"]);
+  });
+
+  it("touchMany does not read thousands of unrelated historical references", async () => {
+    await storage.projectChatThreads.create({ id: "large-thread", project_id: "p1", user_id: "u1", title: null });
+    const raw = new Database(dbPath);
+    try {
+      const insert = raw.prepare(`
+        INSERT INTO project_chat_context_refs (thread_id, entity_type, entity_id)
+        VALUES ('large-thread', 'task', ?)
+      `);
+      raw.transaction(() => {
+        for (let i = 0; i < 3_000; i++) insert.run(`historical-${i}`);
+      })();
+    } finally {
+      raw.close();
+    }
+
+    const prepare = vi.spyOn(Database.prototype, "prepare");
+    try {
+      const touched = await storage.projectChatContextRefs.touchMany(
+        "large-thread", "p1", "u1", [
+          { entityType: "task", entityId: "requested-task" },
+          { entityType: "agent_session", entityId: "requested-session" },
+        ],
+      );
+      expect(touched?.map((ref) => ref.entity_id).sort())
+        .toEqual(["requested-session", "requested-task"]);
+
+      const issuedSql = prepare.mock.calls.map(([statement]) => String(statement)).join("\n");
+      expect(issuedSql).not.toMatch(
+        /select \* from "project_chat_context_refs" where "thread_id" = \?/i,
+      );
+    } finally {
+      prepare.mockRestore();
+    }
   });
 
   it("does not touch or list context references through a different project scope for the same user", async () => {
