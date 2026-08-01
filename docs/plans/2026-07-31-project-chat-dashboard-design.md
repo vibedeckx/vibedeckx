@@ -39,6 +39,18 @@ approved Project Chat behavior:
 - Commander read and mutation tools revalidate live project, workspace, remote,
   and entity scope immediately before use. Cached or model-supplied identifiers
   are never sufficient authorization.
+- Public runner, provider, tool, and operation errors pass through one bounded
+  sanitizer before persistence or broadcast; credentials, internal locations,
+  and transport details remain server-only.
+- The durable transcript remains complete, while live/WS and model context use
+  independent message-count and UTF-8 byte budgets. Older UI messages remain
+  available through authorized sequence-cursor pagination.
+- Project Chat history uses project/user-scoped stable cursor pagination and
+  database-backed title search, so threads beyond the recent window remain
+  discoverable without changing the Overview's Recent five.
+- Approval actions are driven by the server's current pending-ID set and expire
+  on resolution, stop, terminal state, restart, or deletion while their history
+  remains readable.
 
 Detailed work-journal, mutation, lifecycle, and durable-effect protocols are
 recorded in the companion `2026-07-31-project-chat-*` design and implementation

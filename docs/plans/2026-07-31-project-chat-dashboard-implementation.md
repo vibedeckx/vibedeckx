@@ -910,10 +910,11 @@ branch-scoped, and V1 did not gain destructive commander tools.
 
 ### Final verification evidence
 
-- `pnpm --filter vibedeckx test`: exit 0; 1,590 tests passed, 11 skipped after
+- `pnpm --filter vibedeckx test`: exit 0; 1,612 tests passed, 11 skipped after
   the local ownership, child-route scope, tool revalidation, project-remote,
-  remote-server, and machine-identity security fixes.
-- `pnpm --filter vibedeckx-ui test`: exit 0; 61 test files and 494 tests passed.
+  remote-server, machine-identity, public-error, transcript-budget, and history
+  pagination hardening.
+- `pnpm --filter vibedeckx-ui test`: exit 0; 62 test files and 503 tests passed.
 - `pnpm --filter vibedeckx exec tsc --noEmit`: exit 0.
 - `pnpm --filter vibedeckx-ui exec tsc --noEmit`: exit 0.
 - `pnpm build:main`: exit 0.
@@ -949,6 +950,9 @@ Automated acceptance was verified through executable tests and code inspection:
   user-facing child-route scope, live Commander tool revalidation,
   project-remote association scope, remote-server ownership, and legacy machine
   identity migration.
+- Transcript and history tests verify independent live/model UTF-8 budgets,
+  sequence-cursor message pagination, server-side Thread search beyond 100
+  records, sanitized public errors, and expiry of stale approval actions.
 
 ### Real-browser smoke evidence
 
