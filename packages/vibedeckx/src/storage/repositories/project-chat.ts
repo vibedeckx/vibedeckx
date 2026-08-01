@@ -19,6 +19,7 @@ import type {
   Storage,
 } from "../types.js";
 import { projectChatPublicOperationContent } from "../../project-chat-public-operation.js";
+import { assertProjectChatMessageWithinByteLimit } from "../../project-chat-message-limits.js";
 
 const now = () => sql<string>`strftime('%Y-%m-%d %H:%M:%f', 'now')`;
 
@@ -356,6 +357,7 @@ export const createProjectChatRepos = (
 
   projectChatMessages: {
     append: async ({ id, thread_id, project_id, user_id, sequence, type, content }) => {
+      assertProjectChatMessageWithinByteLimit(type, content);
       const result = await kdb.insertInto("project_chat_messages")
         .columns(["id", "thread_id", "sequence", "type", "content"])
         .expression((eb) => eb.selectFrom("project_chat_threads")
@@ -412,9 +414,21 @@ export const createProjectChatRepos = (
       const rows = await query.execute();
       const selected: typeof rows = [];
       let utf8Bytes = 0;
+      let scanned = 0;
+      let skippedOversizedSequence: number | null = null;
       for (const row of rows.slice(0, limit)) {
         const bytes = Buffer.byteLength(row.content, "utf8");
-        if (utf8Bytes + bytes > maxUtf8Bytes) break;
+        if (utf8Bytes + bytes > maxUtf8Bytes) {
+          // A single legacy row may predate the write-side hard limit. Consume
+          // it only when it cannot fit an empty page; otherwise leave it for
+          // the next page, where the full byte budget is available.
+          if (selected.length === 0) {
+            scanned += 1;
+            skippedOversizedSequence = row.sequence;
+          }
+          break;
+        }
+        scanned += 1;
         selected.push(row);
         utf8Bytes += bytes;
       }
@@ -424,11 +438,13 @@ export const createProjectChatRepos = (
         .orderBy("sequence", "desc")
         .executeTakeFirst();
       const messages = selected.reverse().map(mapMessage);
-      const hasMore = selected.length < rows.length;
+      const hasMore = scanned < rows.length;
       return {
         messages,
         hasMore,
-        nextCursor: hasMore && messages.length > 0 ? messages[0].sequence : null,
+        nextCursor: hasMore
+          ? skippedOversizedSequence ?? messages[0]?.sequence ?? null
+          : null,
         newestSequence: newest?.sequence ?? 0,
       };
     },
@@ -618,6 +634,7 @@ export const createProjectChatRepos = (
       id, thread_id, project_id, user_id, attempt, is_current, message_id, type, content,
     }) => {
       if (is_current && !is_current()) return undefined;
+      assertProjectChatMessageWithinByteLimit(type, content);
       return kdb.transaction().execute(async (trx) => {
         if (is_current && !is_current()) return undefined;
         const running = await trx.selectFrom("project_chat_work_items as work")

@@ -185,6 +185,24 @@ function boundedRecentMessages(
   return selected.reverse();
 }
 
+function boundedRecentMessagesKeeping(
+  messages: ProjectChatMessage[],
+  pinned: ProjectChatMessage,
+  limit: number,
+  maxUtf8Bytes: number,
+): ProjectChatMessage[] {
+  const pinnedBytes = Buffer.byteLength(pinned.content, "utf8");
+  if (limit <= 1 || pinnedBytes >= maxUtf8Bytes) return [pinned];
+  const others = messages.filter((message) => message.id !== pinned.id);
+  const selectedOthers = boundedRecentMessages(
+    others,
+    limit - 1,
+    maxUtf8Bytes - pinnedBytes,
+  );
+  const selectedIds = new Set(selectedOthers.map((message) => message.id));
+  return messages.filter((message) => message.id === pinned.id || selectedIds.has(message.id));
+}
+
 function splitUtf8Content(content: string, maxUtf8Bytes: number): string[] {
   if (Buffer.byteLength(content, "utf8") <= maxUtf8Bytes) return [content];
   const chunks: string[] = [];
@@ -1610,17 +1628,25 @@ export class ProjectChatManager {
       };
       const transcript = live.messages.filter((message) =>
         message.type !== "turn_end" && !futureUserMessages.has(message.id));
+      const currentIsInTranscript = transcript.some((message) => message.id === queued.userMessageId);
       const history = transcript.filter((message) => message.id !== queued.userMessageId);
+      // The live transcript is bounded and may no longer contain the user
+      // message for a recovered running work item. A recovered running turn's
+      // partial output follows that instruction, while a not-yet-started turn
+      // belongs after prior history. Preserve an in-window copy in place and
+      // synthesize the missing copy at the corresponding logical boundary.
       const completeInput = queued.wasRunning
-        ? transcript
+        ? currentIsInTranscript ? transcript : [currentUserMessage, ...transcript]
         : [...history, currentUserMessage];
+      const conversationalInput = completeInput.filter((message) => message.type === "user"
+        || message.type === "assistant" || message.type === "system");
       const input: ProjectChatRunInput = {
         projectId: live.thread.project_id,
         threadId: live.thread.id,
         userId: live.thread.user_id,
-        messages: boundedRecentMessages(
-          completeInput.filter((message) => message.type === "user"
-            || message.type === "assistant" || message.type === "system"),
+        messages: boundedRecentMessagesKeeping(
+          conversationalInput,
+          currentUserMessage,
           PROJECT_CHAT_MODEL_MESSAGE_LIMIT,
           PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT,
         ),

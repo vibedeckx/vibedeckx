@@ -1060,4 +1060,36 @@ describe("project chat storage", () => {
       "paged", "p1", "u2", { beforeSequence: null, limit: 3, maxUtf8Bytes: 100 },
     )).resolves.toBeUndefined();
   });
+
+  it("rejects oversized structured messages and advances past a legacy oversized row", async () => {
+    await storage.projectChatThreads.create({
+      id: "structured-limit", project_id: "p1", user_id: "u1", title: null,
+    });
+    const oversized = JSON.stringify({ input: "界🙂".repeat(80_000) });
+    for (const type of ["tool_use", "tool_approval_request"] as const) {
+      await expect(storage.projectChatMessages.append({
+        id: `oversized-${type}`, thread_id: "structured-limit", project_id: "p1", user_id: "u1",
+        sequence: 1, type, content: oversized,
+      })).rejects.toThrow(/UTF-8 byte limit/i);
+    }
+    await storage.projectChatMessages.append({
+      id: "older", thread_id: "structured-limit", project_id: "p1", user_id: "u1",
+      sequence: 1, type: "assistant", content: "older safe message",
+    });
+    const raw = new Database(dbPath);
+    raw.prepare(`INSERT INTO project_chat_messages (id, thread_id, sequence, type, content)
+      VALUES (?, ?, ?, ?, ?)`).run("legacy-oversized", "structured-limit", 2, "tool_use", oversized);
+    raw.close();
+
+    const first = await storage.projectChatMessages.listPageBefore(
+      "structured-limit", "p1", "u1", { beforeSequence: null, limit: 10, maxUtf8Bytes: 1024 },
+    );
+    expect(first).toMatchObject({ messages: [], hasMore: true, nextCursor: 2 });
+    const second = await storage.projectChatMessages.listPageBefore(
+      "structured-limit", "p1", "u1", { beforeSequence: first!.nextCursor, limit: 10, maxUtf8Bytes: 1024 },
+    );
+    expect(second).toMatchObject({
+      messages: [expect.objectContaining({ id: "older" })], hasMore: false, nextCursor: null,
+    });
+  });
 });

@@ -20,6 +20,16 @@ const SECRET_NAME = [
 ].join("|");
 const SECRET_KEY = new RegExp(`^(?:${SECRET_NAME})$`, "i");
 const ERROR_KEY = /^(?:error|message|reason|detail|details|cause)$/i;
+const VENDOR_SECRET_NAME = [
+  "api_key",
+  "token",
+  "secret_access_key",
+  "secret_key",
+  "secret",
+  "password",
+  "private_key",
+  "credentials?",
+].join("|");
 
 function rawErrorMessage(error: unknown, fallback: string): string {
   try {
@@ -53,6 +63,17 @@ export function redactProjectChatSensitiveText(value: string): string {
     `Authorization: ${REDACTED}`,
   );
   redacted = redacted.replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/giu, `Bearer ${REDACTED}`);
+  // Provider-specific environment variables (OPENAI_API_KEY,
+  // GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY, etc.) are secrets even though the
+  // complete key is not in the small canonical-name list above.
+  redacted = redacted.replace(
+    new RegExp(`(\\b[A-Z][A-Z0-9_]*(?:_(?:${VENDOR_SECRET_NAME}))\\b\\s*[:=]\\s*)(["'])(.*?)\\2`, "giu"),
+    (_match, prefix: string, quote: string) => `${prefix}${quote}${REDACTED}${quote}`,
+  );
+  redacted = redacted.replace(
+    new RegExp(`(\\b[A-Z][A-Z0-9_]*(?:_(?:${VENDOR_SECRET_NAME}))\\b\\s*[:=]\\s*)([^\\s,;&]+)`, "giu"),
+    `$1${REDACTED}`,
+  );
   redacted = redacted.replace(
     new RegExp(`(["']?(?:${SECRET_NAME})["']?\\s*[:=]\\s*)(["'])(.*?)\\2`, "giu"),
     (_match, prefix: string, quote: string) => `${prefix}${quote}${REDACTED}${quote}`,
@@ -66,8 +87,12 @@ export function redactProjectChatSensitiveText(value: string): string {
     `$1${REDACTED}`,
   );
   redacted = redacted.replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b/giu, REDACTED);
-  redacted = redacted.replace(/(?:^|\s)(?:\/(?:home|var|tmp|etc|Users)\/[^\s,;]+)/gu, (path) =>
-    `${path.startsWith(" ") ? " " : ""}[redacted path]`);
+  redacted = redacted.replace(
+    /(^|[\s"'(=:])\/(?:home|Users|var|tmp|etc|root|opt|srv|mnt|workspace)\/[^\s,;"'()\[\]{}]+/gmu,
+    `$1[redacted path]`,
+  );
+  redacted = redacted.replace(/\b[A-Za-z]:\\[^\s,;"'()\[\]{}]+/gu, "[redacted path]");
+  redacted = redacted.replace(/\\\\[^\s\\,;"'()\[\]{}]+\\[^\s,;"'()\[\]{}]+/gu, "[redacted path]");
   redacted = redacted.replace(/\r?\n\s*at\s+[^\r\n]*/gu, "");
   return redacted;
 }

@@ -554,6 +554,46 @@ describe("ProjectChatManager", () => {
     )).filter(({ type }) => type === "user")).toHaveLength(1);
   });
 
+  it.each([0, PROJECT_CHAT_LIVE_MESSAGE_LIMIT + 5])(
+    "restores a running work's original instruction exactly once with %i later queued messages",
+    async (queuedCount) => {
+      await createThread("running-window-recovery");
+      await storage.projectChatWorkItems.accept({
+        id: "original-work", user_message_id: "original-user", thread_id: "running-window-recovery",
+        project_id: "project-1", user_id: "user-1", content: "ORIGINAL RECOVERY INSTRUCTION",
+      });
+      await storage.projectChatWorkItems.markRunning(
+        "original-work", "running-window-recovery", "project-1", "user-1",
+      );
+      for (let index = 0; index < queuedCount; index += 1) {
+        await storage.projectChatWorkItems.accept({
+          id: `queued-work-${index}`, user_message_id: `queued-user-${index}`,
+          thread_id: "running-window-recovery", project_id: "project-1", user_id: "user-1",
+          content: `queued instruction ${index}`,
+        });
+      }
+      const gate = deferred();
+      const inputs: ProjectChatMessage[][] = [];
+      const restarted = new ProjectChatManager(storage, {
+        async *run(input) {
+          inputs.push(input.messages);
+          await gate.promise;
+          yield { type: "assistant", content: "recovered" };
+        },
+      }, { drainTimeoutMs: 50 });
+
+      await restarted.openThread("running-window-recovery", "user-1");
+      await waitFor(() => inputs.length === 1);
+      expect(inputs[0].filter(({ content }) => content === "ORIGINAL RECOVERY INSTRUCTION"))
+        .toHaveLength(1);
+
+      const deleting = restarted.deleteThread("running-window-recovery", "user-1");
+      gate.resolve();
+      await deleting;
+      await restarted.shutdown();
+    },
+  );
+
   it("loads authorized context refs into snapshots with deleted markers", async () => {
     await createThread("context-thread");
     await storage.tasks.create({ id: "task-live", project_id: "project-1", title: "Live" });
@@ -3462,4 +3502,45 @@ describe("ProjectChatManager", () => {
       .toBeLessThanOrEqual(PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT);
     await manager.shutdown();
   });
+
+  it.each(["tool_use", "tool_approval_request"] as const)(
+    "rejects oversized Unicode %s content before persistence or streaming",
+    async (type) => {
+      await createThread(`oversized-${type}`);
+      const decisions: boolean[] = [];
+      const oversized = JSON.stringify({
+        approvalId: "large-approval",
+        toolName: "inspect",
+        input: { text: "密🙂".repeat(40_000) },
+      });
+      const manager = new ProjectChatManager(storage, {
+        async *run() {
+          yield type === "tool_approval_request"
+            ? {
+              type,
+              content: oversized,
+              approvalId: "large-approval",
+              resolveApproval: (decision: boolean) => { decisions.push(decision); },
+            }
+            : { type, content: oversized };
+        },
+      });
+      const frames: string[] = [];
+      await manager.openThread(`oversized-${type}`, "user-1");
+      manager.subscribe(`oversized-${type}`, {
+        projectChatUserId: "user-1", readyState: 1,
+        send: (raw: string) => { frames.push(raw); },
+      } as never);
+
+      await manager.sendMessage(`oversized-${type}`, "user-1", "go");
+      await waitFor(async () => (await manager.openThread(`oversized-${type}`, "user-1")).status === "idle");
+      const messages = await storage.projectChatMessages.listByThread(
+        `oversized-${type}`, "project-1", "user-1",
+      );
+      expect(messages.some((message) => message.type === type)).toBe(false);
+      expect(JSON.stringify(frames)).not.toContain("密🙂密🙂");
+      if (type === "tool_approval_request") expect(decisions).toEqual([false]);
+      await manager.shutdown();
+    },
+  );
 });
