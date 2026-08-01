@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check, Loader2, Search, Square, X } from "lucide-react";
+import { AlertTriangle, Check, Clock, Loader2, Search, Square, X } from "lucide-react";
 
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import {
@@ -425,6 +425,12 @@ export function ProjectChatConversation({
             <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
               <span>{queueLength > 0 ? `${queueLength} queued` : "Project Chat is working"}</span>
               <Button type="button" variant="outline" size="sm" aria-label="Stop generating" disabled={!activeTurnId || stoppingTurnId !== null} onClick={() => void stop()}><Square className="size-3" />{stoppingTurnId ? "Stopping…" : "Stop generating"}</Button>
+            </div>
+          ) : null}
+          {status === "queued" ? (
+            <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground" role="status">
+              <Clock className="size-3.5" />
+              <span>Waiting to start…</span>
             </div>
           ) : null}
           <div className="relative">

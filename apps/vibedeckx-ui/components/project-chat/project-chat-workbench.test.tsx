@@ -194,6 +194,17 @@ describe("ProjectChatWorkbench", () => {
     expect([...document.querySelectorAll("button")]
       .some((button) => button.getAttribute("aria-label") === "Approve run_schedule_now")).toBe(false);
   });
+  it("tells the user a queued turn is waiting for a free slot", () => {
+    hook.value.status = "queued";
+    hook.value.activeTurnId = null;
+    render();
+
+    expect(container.textContent).toContain("Waiting to start…");
+    expect(container.textContent).not.toContain("Project Chat is working");
+    expect([...document.querySelectorAll("button")]
+      .some((button) => button.getAttribute("aria-label") === "Stop generating")).toBe(false);
+  });
+
   it("offers authorized loading of earlier transcript pages", async () => {
     hook.value.hasEarlierMessages = true;
     render();

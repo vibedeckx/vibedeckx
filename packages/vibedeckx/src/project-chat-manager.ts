@@ -43,7 +43,7 @@ export const PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT = 256 * 1024;
 export const PROJECT_CHAT_MODEL_MESSAGE_LIMIT = 80;
 export const PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT = 128 * 1024;
 
-export type ProjectChatStatus = "idle" | "running";
+export type ProjectChatStatus = "idle" | "running" | "queued";
 
 export interface ProjectChatIdentity {
   projectId: string;
@@ -96,6 +96,7 @@ export interface ProjectChatManagerOptions {
   reconciliationOperationTimeoutMs?: number;
   recoveryPageSize?: number;
   maxConcurrentTurns?: number;
+  maxConcurrentTurnsPerUser?: number;
   toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
   eventBus?: EventBus;
 }
@@ -163,6 +164,7 @@ interface LiveThread {
   }>;
   writeTail: Promise<void>;
   evictionTimer: ReturnType<typeof setTimeout> | null;
+  queuedAt: number | null;
   contextRefreshGeneration: number;
   contextRefreshFlight: Promise<void> | null;
   contextRefreshBroadcast: boolean;
@@ -224,6 +226,7 @@ function splitUtf8Content(content: string, maxUtf8Bytes: number): string[] {
 
 interface TurnSlot {
   released: boolean;
+  userId: string;
 }
 
 type RecoveryCandidateOutcome = "processed" | "retry";
@@ -421,6 +424,7 @@ export class ProjectChatManager {
   private readonly reconciliationOperationTimeoutMs: number;
   private readonly recoveryPageSize: number;
   private readonly maxConcurrentTurns: number;
+  private readonly maxConcurrentTurnsPerUser: number;
   private readonly toolDependencies?: ProjectChatManagerOptions["toolDependencies"];
   private readonly unsubscribeEvents?: () => void;
   private readonly startupReconciliation: Promise<ProjectChatReconciliationReport>;
@@ -434,6 +438,7 @@ export class ProjectChatManager {
   private readonly pendingPumps: LiveThread[] = [];
   private readonly pendingPumpIds = new Set<string>();
   private activeTurnCount = 0;
+  private readonly activeTurnsByUser = new Map<string, number>();
   private reconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private reconciliationDelayMs = 100;
   private shuttingDown = false;
@@ -453,7 +458,11 @@ export class ProjectChatManager {
     this.startupReconciliationDeadlineMs = Math.max(10, options.startupReconciliationDeadlineMs ?? 1_000);
     this.reconciliationOperationTimeoutMs = Math.max(10, options.reconciliationOperationTimeoutMs ?? 250);
     this.recoveryPageSize = Math.max(1, Math.min(100, options.recoveryPageSize ?? 25));
-    this.maxConcurrentTurns = Math.max(1, options.maxConcurrentTurns ?? 4);
+    // Two tiers: the global cap is a runaway backstop that normal traffic
+    // should never reach, while the per-user cap is the fairness policy that
+    // keeps one tenant from starving the others.
+    this.maxConcurrentTurns = Math.max(1, options.maxConcurrentTurns ?? 50);
+    this.maxConcurrentTurnsPerUser = Math.max(1, options.maxConcurrentTurnsPerUser ?? 4);
     this.reconciliationDelayMs = Math.min(100, this.reconciliationIntervalMs);
     this.toolDependencies = options.toolDependencies;
     this.unsubscribeEvents = options.eventBus?.subscribe((event) => {
@@ -1384,6 +1393,7 @@ export class ProjectChatManager {
           pendingApprovals: new Map(),
           writeTail: Promise.resolve(),
           evictionTimer: null,
+          queuedAt: null,
           contextRefreshGeneration: 0,
           contextRefreshFlight: null,
           contextRefreshBroadcast: false,
@@ -1531,14 +1541,43 @@ export class ProjectChatManager {
   private pump(live: LiveThread): void {
     if (live.activeWork || this.shuttingDown || this.closingThreads.has(live.thread.id)) return;
     if (live.queue.length === 0) return;
-    if (this.activeTurnCount >= this.maxConcurrentTurns) {
-      if (!this.pendingPumpIds.has(live.thread.id)) {
-        this.pendingPumpIds.add(live.thread.id);
-        this.pendingPumps.push(live);
-      }
+    if (!this.canStartTurn(live)) {
+      this.enqueuePump(live);
       return;
     }
     this.startPump(live);
+  }
+
+  /**
+   * Park a thread that has work but no slot. Queueing is invisible to the
+   * caller and only shows up as latency, so every entry into this state is
+   * logged once with the cap that caused it.
+   */
+  private enqueuePump(live: LiveThread): void {
+    if (!this.pendingPumpIds.has(live.thread.id)) {
+      this.pendingPumpIds.add(live.thread.id);
+      this.pendingPumps.push(live);
+    }
+    if (live.queuedAt === null) {
+      live.queuedAt = Date.now();
+      const reason = this.activeTurnCount >= this.maxConcurrentTurns ? "global" : "per-user";
+      console.warn(`[ProjectChat] turn queued (thread=${live.thread.id} `
+        + `user=${live.thread.user_id} reason=${reason} `
+        + `active=${this.activeTurnCount}/${this.maxConcurrentTurns} `
+        + `userActive=${this.activeTurnsByUser.get(live.thread.user_id) ?? 0}`
+        + `/${this.maxConcurrentTurnsPerUser} waiting=${this.pendingPumps.length})`);
+    }
+    if (live.status !== "queued") {
+      live.status = "queued";
+      this.broadcastStatus(live);
+    }
+  }
+
+  /** A turn may start only when both the global and the per-user cap allow it. */
+  private canStartTurn(live: LiveThread): boolean {
+    if (this.activeTurnCount >= this.maxConcurrentTurns) return false;
+    const active = this.activeTurnsByUser.get(live.thread.user_id) ?? 0;
+    return active < this.maxConcurrentTurnsPerUser;
   }
 
   private startPump(live: LiveThread): void {
@@ -1546,8 +1585,15 @@ export class ProjectChatManager {
     const queued = live.queue.shift();
     if (!queued) return;
     this.pendingPumpIds.delete(live.thread.id);
-    const slot: TurnSlot = { released: false };
+    const userId = live.thread.user_id;
+    if (live.queuedAt !== null) {
+      console.warn(`[ProjectChat] queued turn started after ${Date.now() - live.queuedAt}ms `
+        + `(thread=${live.thread.id} user=${userId})`);
+      live.queuedAt = null;
+    }
+    const slot: TurnSlot = { released: false, userId };
     this.activeTurnCount++;
+    this.activeTurnsByUser.set(userId, (this.activeTurnsByUser.get(userId) ?? 0) + 1);
     live.activeSlot = slot;
     this.cancelEviction(live);
     let work!: Promise<void>;
@@ -1562,10 +1608,7 @@ export class ProjectChatManager {
           live.abortController = null;
           if (live.queue.length > 0 && !this.shuttingDown && !this.closingThreads.has(live.thread.id)) {
             if (this.pendingPumps.length > 0) {
-              if (!this.pendingPumpIds.has(live.thread.id)) {
-                this.pendingPumpIds.add(live.thread.id);
-                this.pendingPumps.push(live);
-              }
+              this.enqueuePump(live);
             } else {
               this.pump(live);
             }
@@ -1584,16 +1627,29 @@ export class ProjectChatManager {
     if (slot.released) return;
     slot.released = true;
     this.activeTurnCount = Math.max(0, this.activeTurnCount - 1);
+    const remaining = (this.activeTurnsByUser.get(slot.userId) ?? 0) - 1;
+    if (remaining > 0) this.activeTurnsByUser.set(slot.userId, remaining);
+    else this.activeTurnsByUser.delete(slot.userId);
     this.drainPendingPumps();
   }
 
   private drainPendingPumps(): void {
-    while (!this.shuttingDown && this.activeTurnCount < this.maxConcurrentTurns) {
-      const live = this.pendingPumps.shift();
-      if (!live) return;
+    // Entries that lost their work are dropped up front: with a per-user cap a
+    // blind shift can no longer be relied on to reach and discard them.
+    for (let index = this.pendingPumps.length - 1; index >= 0; index -= 1) {
+      const live = this.pendingPumps[index];
+      if (!live.activeWork && live.queue.length > 0 && !this.closingThreads.has(live.thread.id)
+        && this.liveThreads.get(live.thread.id) === live) continue;
+      this.pendingPumps.splice(index, 1);
       this.pendingPumpIds.delete(live.thread.id);
-      if (live.activeWork || live.queue.length === 0 || this.closingThreads.has(live.thread.id)
-        || this.liveThreads.get(live.thread.id) !== live) continue;
+    }
+    while (!this.shuttingDown && this.activeTurnCount < this.maxConcurrentTurns) {
+      // Skip past users already at their cap so they cannot hold the head of
+      // the queue against another tenant waiting behind them.
+      const index = this.pendingPumps.findIndex((live) => this.canStartTurn(live));
+      if (index < 0) return;
+      const [live] = this.pendingPumps.splice(index, 1);
+      this.pendingPumpIds.delete(live.thread.id);
       this.startPump(live);
     }
   }

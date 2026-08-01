@@ -287,6 +287,32 @@ describe("useProjectChat", () => {
     ]);
   });
 
+  it("accepts a queued status from the snapshot and from a patch", async () => {
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+
+    act(() => {
+      socket.open();
+      socket.message({
+        type: "project_chat_snapshot",
+        snapshot: { ...snapshot("t1"), status: "queued" },
+      });
+    });
+    expect(latest).toMatchObject({ status: "queued" });
+
+    act(() => socket.message({ JsonPatch: [
+      { op: "replace", path: "/status", value: { type: "STATUS", content: "running" } },
+    ] }));
+    expect(latest).toMatchObject({ status: "running" });
+
+    act(() => socket.message({ JsonPatch: [
+      { op: "replace", path: "/status", value: { type: "STATUS", content: "queued" } },
+    ] }));
+    expect(latest).toMatchObject({ status: "queued" });
+    expect(latest.error).toBeNull();
+  });
+
   it("closes the old socket and reconnects with isolated state when the thread changes", async () => {
     render("p1", "t1");
     await flush();

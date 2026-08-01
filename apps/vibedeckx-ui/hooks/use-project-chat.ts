@@ -142,6 +142,10 @@ function isProjectChatContextRef(value: unknown): value is ProjectChatContextRef
     && typeof value.navigation.runId === "string";
 }
 
+function isProjectChatStatus(value: unknown): value is ProjectChatStatus {
+  return value === "idle" || value === "running" || value === "queued";
+}
+
 function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
   if (!isRecord(value) || !isRecord(value.identity) || !isRecord(value.thread)
     || !Array.isArray(value.messages) || !Array.isArray(value.contextRefs)) return false;
@@ -161,7 +165,7 @@ function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
     && typeof value.hasEarlierMessages === "boolean"
     && (value.earliestSequence === null || Number.isSafeInteger(value.earliestSequence))
     && value.contextRefs.every((ref) => isProjectChatContextRef(ref) && ref.thread_id === threadId)
-    && (value.status === "idle" || value.status === "running")
+    && isProjectChatStatus(value.status)
     && (value.activeTurnId === null || typeof value.activeTurnId === "string")
     && Array.isArray(value.pendingApprovalIds)
     && value.pendingApprovalIds.every((id) => typeof id === "string" && id.length > 0)
@@ -209,7 +213,7 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
         hasEarlierMessages: retainedOlder ? next.hasEarlierMessages : patch.value.hasEarlierMessages,
       };
     } else if (patch.path === "/status" && patch.value.type === "STATUS"
-      && (patch.value.content === "idle" || patch.value.content === "running")) {
+      && isProjectChatStatus(patch.value.content)) {
       next = { ...next, status: patch.value.content };
     } else if (patch.path === "/activeTurnId" && patch.value.type === "ACTIVE_TURN"
       && (patch.value.content === null || typeof patch.value.content === "string")) {

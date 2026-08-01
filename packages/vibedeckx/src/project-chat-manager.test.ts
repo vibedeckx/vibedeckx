@@ -2193,6 +2193,181 @@ describe("ProjectChatManager", () => {
     await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "idle");
   });
 
+  it("reports queued status while a turn waits for a free global slot", async () => {
+    await createThread("thread-1");
+    await createThread("thread-2");
+    const gate = deferred();
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        if (input.threadId === "thread-1") await gate.promise;
+        yield { type: "assistant" as const, content: "done" };
+      },
+    }, { maxConcurrentTurns: 1 });
+
+    await manager.sendMessage("thread-1", "user-1", "first");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+    await manager.sendMessage("thread-2", "user-1", "second");
+
+    expect((await manager.openThread("thread-2", "user-1")).status).toBe("queued");
+    gate.resolve();
+    await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "idle");
+    await manager.shutdown();
+  });
+
+  it("reports queued status when a finished turn's backlog loses the slot to another thread", async () => {
+    await createThread("thread-1");
+    await createThread("thread-2");
+    const first = deferred();
+    const second = deferred();
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        if (input.threadId === "thread-1") await first.promise;
+        if (input.threadId === "thread-2") await second.promise;
+        yield { type: "assistant" as const, content: "done" };
+      },
+    }, { maxConcurrentTurns: 1 });
+
+    await manager.sendMessage("thread-1", "user-1", "first");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+    await manager.sendMessage("thread-1", "user-1", "backlog");
+    await manager.sendMessage("thread-2", "user-1", "other thread");
+    first.resolve();
+    await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "running");
+
+    expect((await manager.openThread("thread-1", "user-1")).status).toBe("queued");
+    second.resolve();
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    await manager.shutdown();
+  });
+
+  it("limits one user's concurrent turns below the global cap", async () => {
+    await createThread("thread-1", "user-1");
+    await createThread("thread-2", "user-1");
+    let active = 0;
+    let maximumActive = 0;
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        active++;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        yield { type: "assistant" as const, content: "done" };
+      },
+    }, { maxConcurrentTurns: 10, maxConcurrentTurnsPerUser: 1 });
+
+    await manager.sendMessage("thread-1", "user-1", "one");
+    await manager.sendMessage("thread-2", "user-1", "two");
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle"
+      && (await manager.openThread("thread-2", "user-1")).status === "idle");
+
+    expect(maximumActive).toBe(1);
+    await manager.shutdown();
+  });
+
+  it("skips a capped user at the queue head instead of blocking another user behind them", async () => {
+    await createThread("thread-1", "user-1");
+    await createThread("thread-2", "user-1");
+    await storage.projects.create({ id: "tenant-2", name: "Tenant Two", path: "/tmp/tenant-two" }, "user-2");
+    await createThread("thread-3", "user-2", "tenant-2");
+    await createThread("thread-4", "user-2", "tenant-2");
+    const gates = new Map([["thread-1", deferred()], ["thread-3", deferred()]]);
+    const started: string[] = [];
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        started.push(input.threadId);
+        await gates.get(input.threadId)?.promise;
+        yield { type: "assistant" as const, content: "done" };
+      },
+    }, { maxConcurrentTurns: 2, maxConcurrentTurnsPerUser: 1 });
+
+    await manager.sendMessage("thread-1", "user-1", "holds the user-1 cap");
+    await waitFor(() => started.includes("thread-1"));
+    await manager.sendMessage("thread-3", "user-2", "holds the user-2 cap");
+    await waitFor(() => started.includes("thread-3"));
+    await manager.sendMessage("thread-2", "user-1", "queued at the head");
+    await manager.sendMessage("thread-4", "user-2", "queued behind the head");
+
+    gates.get("thread-3")!.resolve();
+    await waitFor(() => started.includes("thread-4"));
+
+    expect(started).toEqual(["thread-1", "thread-3", "thread-4"]);
+    expect((await manager.openThread("thread-2", "user-1")).status).toBe("queued");
+    gates.get("thread-1")!.resolve();
+    await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "idle");
+    await manager.shutdown();
+  });
+
+  it("logs why a turn was queued and how long it waited for a slot", async () => {
+    await createThread("thread-1", "user-1");
+    await createThread("thread-2", "user-1");
+    const gate = deferred();
+    const warnings: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(" "));
+    });
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        if (input.threadId === "thread-1") await gate.promise;
+        yield { type: "assistant" as const, content: "done" };
+      },
+    }, { maxConcurrentTurnsPerUser: 1 });
+
+    try {
+      await manager.sendMessage("thread-1", "user-1", "first");
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+      await manager.sendMessage("thread-2", "user-1", "second");
+      await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "queued");
+
+      expect(warnings.join("\n")).toContain("turn queued");
+      expect(warnings.join("\n")).toContain("reason=per-user");
+      expect(warnings.join("\n")).toContain("thread=thread-2");
+
+      gate.resolve();
+      await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "idle");
+      expect(warnings.join("\n")).toMatch(/queued turn started after \d+ms/);
+    } finally {
+      warn.mockRestore();
+      await manager.shutdown();
+    }
+  });
+
+  it("logs a queued turn when a finished turn's backlog goes back to the queue", async () => {
+    await createThread("thread-1", "user-1");
+    await createThread("thread-2", "user-1");
+    const first = deferred();
+    const second = deferred();
+    const warnings: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(" "));
+    });
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        if (input.threadId === "thread-1") await first.promise;
+        if (input.threadId === "thread-2") await second.promise;
+        yield { type: "assistant" as const, content: "done" };
+      },
+    }, { maxConcurrentTurns: 1 });
+
+    try {
+      await manager.sendMessage("thread-1", "user-1", "first");
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
+      await manager.sendMessage("thread-1", "user-1", "backlog");
+      await manager.sendMessage("thread-2", "user-1", "other thread");
+      first.resolve();
+      // Observe thread-2 only: opening thread-1 would itself re-pump and log.
+      await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "running");
+
+      expect(warnings.filter((line) => line.includes("turn queued") && line.includes("thread=thread-1")))
+        .toHaveLength(1);
+
+      second.resolve();
+      await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    } finally {
+      warn.mockRestore();
+      await manager.shutdown();
+    }
+  });
+
   it("restores the complete transcript after a simulated process restart", async () => {
     await createThread("thread-1");
     const firstManager = new ProjectChatManager(storage, reply("persisted reply"));

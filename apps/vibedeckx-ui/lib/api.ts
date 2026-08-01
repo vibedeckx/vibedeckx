@@ -741,7 +741,7 @@ export interface ProjectChatToolApprovalMessage {
   [key: string]: unknown;
 }
 
-export type ProjectChatStatus = "idle" | "running";
+export type ProjectChatStatus = "idle" | "running" | "queued";
 
 export interface ProjectChatSnapshot {
   identity: { projectId: string; threadId: string; userId: string };
