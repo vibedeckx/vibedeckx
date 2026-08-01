@@ -277,9 +277,11 @@ export const createRemoteServerRepos = (
       });
     },
 
-    update: async (id, opts) => {
+    update: async (id, opts, projectId) => {
       return kdb.transaction().execute(async (trx) => {
-        const existing = await trx.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirst();
+        let existingQuery = trx.selectFrom("project_remotes").selectAll().where("id", "=", id);
+        if (projectId) existingQuery = existingQuery.where("project_id", "=", projectId);
+        const existing = await existingQuery.executeTakeFirst();
         if (!existing) return undefined;
 
         const sets: Record<string, unknown> = {};
@@ -291,7 +293,8 @@ export const createRemoteServerRepos = (
           sets.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
         }
         if (Object.keys(sets).length > 0) {
-          await trx.updateTable("project_remotes").set(sets).where("id", "=", id).execute();
+          await trx.updateTable("project_remotes").set(sets)
+            .where("id", "=", id).where("project_id", "=", existing.project_id).execute();
         }
 
         if (opts.sort_order !== undefined) {
@@ -301,7 +304,8 @@ export const createRemoteServerRepos = (
           await renumberProjectRemotes(trx, existing.project_id, orderedIds);
         }
 
-        const row = await trx.selectFrom("project_remotes").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+        const row = await trx.selectFrom("project_remotes").selectAll()
+          .where("id", "=", id).where("project_id", "=", existing.project_id).executeTakeFirstOrThrow();
         return mapProjectRemote(row);
       });
     },
@@ -317,14 +321,16 @@ export const createRemoteServerRepos = (
       return true;
     }),
 
-    remove: async (id) => kdb.transaction().execute(async (trx) => {
-      const existing = await trx.selectFrom("project_remotes")
+    remove: async (id, projectId) => kdb.transaction().execute(async (trx) => {
+      let existingQuery = trx.selectFrom("project_remotes")
         .select(["id", "project_id"])
-        .where("id", "=", id)
-        .executeTakeFirst();
+        .where("id", "=", id);
+      if (projectId) existingQuery = existingQuery.where("project_id", "=", projectId);
+      const existing = await existingQuery.executeTakeFirst();
       if (!existing) return false;
 
-      await trx.deleteFrom("project_remotes").where("id", "=", id).execute();
+      await trx.deleteFrom("project_remotes")
+        .where("id", "=", id).where("project_id", "=", existing.project_id).execute();
       const orderedIds = await orderedProjectRemoteIds(trx, existing.project_id);
       await renumberProjectRemotes(trx, existing.project_id, orderedIds);
       return true;

@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+
+const auth = vi.hoisted(() => ({ userId: "user-1" as string | null }));
+vi.mock("@clerk/fastify", () => ({
+  getAuth: () => ({ userId: auth.userId }),
+  clerkClient: {},
+}));
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { ProjectRemote, Storage } from "../storage/types.js";
 import projectRemoteRoutes from "./project-remote-routes.js";
@@ -14,16 +20,20 @@ describe("POST /api/projects/:id/remotes/:rid/primary", () => {
   let p1Remote1: ProjectRemote;
   let p1Remote2: ProjectRemote;
   let p2Remote: ProjectRemote;
+  let authenticatedForeignRemote: ProjectRemote;
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-project-remote-routes-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "p1", name: "project 1", path: null });
     await storage.projects.create({ id: "p2", name: "project 2", path: null });
+    await storage.projects.create({ id: "auth-p1", name: "auth project 1", path: null }, "user-1");
+    await storage.projects.create({ id: "auth-p2", name: "auth project 2", path: null }, "user-2");
 
     const server1 = await storage.remoteServers.create({ name: "Remote A", url: "http://a" });
     const server2 = await storage.remoteServers.create({ name: "Remote B", url: "http://b" });
     const server3 = await storage.remoteServers.create({ name: "Remote C", url: "http://c" });
+    const server4 = await storage.remoteServers.create({ name: "Remote D" }, "user-2");
     p1Remote1 = await storage.projectRemotes.add({
       project_id: "p1",
       remote_server_id: server1.id,
@@ -38,6 +48,11 @@ describe("POST /api/projects/:id/remotes/:rid/primary", () => {
       project_id: "p2",
       remote_server_id: server3.id,
       remote_path: "/repo-c",
+    });
+    authenticatedForeignRemote = await storage.projectRemotes.add({
+      project_id: "auth-p2",
+      remote_server_id: server4.id,
+      remote_path: "/repo-d",
     });
 
     app = Fastify();
@@ -73,5 +88,52 @@ describe("POST /api/projects/:id/remotes/:rid/primary", () => {
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: "Project remote not found" });
     expect((await storage.projectRemotes.getByProject("p1"))[0].id).toBe(p1Remote1.id);
+  });
+
+  it("does not update an association that belongs to another project", async () => {
+    const response = await app.inject({
+      method: "PUT",
+      url: `/api/projects/p1/remotes/${p2Remote.id}`,
+      payload: { remotePath: "/stolen" },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Project remote not found" });
+    expect((await storage.projectRemotes.getByProject("p2"))[0].remote_path).toBe("/repo-c");
+  });
+
+  it("does not delete an association that belongs to another project", async () => {
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/api/projects/p1/remotes/${p2Remote.id}`,
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Project remote not found" });
+    expect((await storage.projectRemotes.getByProject("p2")).map(({ id }) => id))
+      .toContain(p2Remote.id);
+  });
+
+  it("does not mutate another user's association through an owned project", async () => {
+    await app.close();
+    app = Fastify();
+    app.decorate("authEnabled", true);
+    app.decorate("storage", storage);
+    await app.register(projectRemoteRoutes);
+    await app.ready();
+
+    const update = await app.inject({
+      method: "PUT",
+      url: `/api/projects/auth-p1/remotes/${authenticatedForeignRemote.id}`,
+      payload: { remotePath: "/stolen" },
+    });
+    const remove = await app.inject({
+      method: "DELETE",
+      url: `/api/projects/auth-p1/remotes/${authenticatedForeignRemote.id}`,
+    });
+
+    expect(update.statusCode).toBe(404);
+    expect(remove.statusCode).toBe(404);
+    expect((await storage.projectRemotes.getByProject("auth-p2"))[0].remote_path).toBe("/repo-d");
   });
 });

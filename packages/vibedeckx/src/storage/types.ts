@@ -665,9 +665,9 @@ export interface Storage {
       sort_order?: number;
       sync_up_config?: SyncButtonConfig | null;
       sync_down_config?: SyncButtonConfig | null;
-    }): Promise<ProjectRemote | undefined>;
+    }, projectId?: string): Promise<ProjectRemote | undefined>;
     setPrimary(projectId: string, remoteId: string): Promise<boolean>;
-    remove(id: string): Promise<boolean>;
+    remove(id: string, projectId?: string): Promise<boolean>;
   };
   executorGroups: {
     create: (opts: { id: string; project_id: string; name: string; branch: string }) => Promise<ExecutorGroup>;

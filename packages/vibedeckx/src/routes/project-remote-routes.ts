@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { ProjectRemoteWithServer, SyncButtonConfig } from "../storage/types.js";
 import { requireAuth } from "../server.js";
+import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 
 function sanitizeProjectRemote(pr: ProjectRemoteWithServer) {
@@ -13,8 +14,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>(
     "/api/projects/:id/remotes",
     async (request, reply) => {
-      const userId = requireAuth(request, reply);
-      if (userId === null) return;
+      const authResult = requireAuth(request, reply);
+      if (authResult === null) return;
+      const userId = resolveUserId(authResult);
 
       const { id } = request.params;
       const project = await fastify.storage.projects.getById(id, userId);
@@ -29,8 +31,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Params: { id: string } }>(
     "/api/projects/:id/remotes",
     async (request, reply) => {
-      const userId = requireAuth(request, reply);
-      if (userId === null) return;
+      const authResult = requireAuth(request, reply);
+      if (authResult === null) return;
+      const userId = resolveUserId(authResult);
 
       const { id } = request.params;
       const { remoteServerId, remotePath, sortOrder, syncUpConfig, syncDownConfig } =
@@ -80,8 +83,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.put<{ Params: { id: string; rid: string } }>(
     "/api/projects/:id/remotes/:rid",
     async (request, reply) => {
-      const userId = requireAuth(request, reply);
-      if (userId === null) return;
+      const authResult = requireAuth(request, reply);
+      if (authResult === null) return;
+      const userId = resolveUserId(authResult);
+
+      const project = await fastify.storage.projects.getById(request.params.id, userId);
+      if (!project)
+        return reply.code(404).send({ error: "Project not found" });
 
       const { rid } = request.params;
       const { remotePath, sortOrder, syncUpConfig, syncDownConfig } =
@@ -97,7 +105,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         sort_order: sortOrder,
         sync_up_config: syncUpConfig,
         sync_down_config: syncDownConfig,
-      });
+      }, project.id);
       if (!updated)
         return reply.code(404).send({ error: "Project remote not found" });
       return reply.send(updated);
@@ -108,8 +116,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Params: { id: string; rid: string } }>(
     "/api/projects/:id/remotes/:rid/primary",
     async (request, reply) => {
-      const userId = requireAuth(request, reply);
-      if (userId === null) return;
+      const authResult = requireAuth(request, reply);
+      if (authResult === null) return;
+      const userId = resolveUserId(authResult);
 
       const project = await fastify.storage.projects.getById(request.params.id, userId);
       if (!project)
@@ -129,11 +138,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string; rid: string } }>(
     "/api/projects/:id/remotes/:rid",
     async (request, reply) => {
-      const userId = requireAuth(request, reply);
-      if (userId === null) return;
+      const authResult = requireAuth(request, reply);
+      if (authResult === null) return;
+      const userId = resolveUserId(authResult);
+
+      const project = await fastify.storage.projects.getById(request.params.id, userId);
+      if (!project)
+        return reply.code(404).send({ error: "Project not found" });
 
       const { rid } = request.params;
-      const removed = await fastify.storage.projectRemotes.remove(rid);
+      const removed = await fastify.storage.projectRemotes.remove(rid, project.id);
       if (!removed)
         return reply.code(404).send({ error: "Project remote not found" });
       return reply.send({ success: true });
