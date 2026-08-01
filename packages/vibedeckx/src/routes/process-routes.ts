@@ -7,7 +7,10 @@ import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { ProcessEffectConflictError } from "../process-manager.js";
 import { requireAuth as requireRawAuth } from "../server.js";
-import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
+import {
+  requireUserFacingOrTrustedProxyUserId,
+  requireUserFacingUserId as requireAuth,
+} from "./user-facing-auth.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -236,7 +239,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // 获取所有运行中的进程
   fastify.get("/api/executor-processes/running", async (req, reply) => {
-    const userId = requireAuth(req, reply);
+    const userId = requireUserFacingOrTrustedProxyUserId(req, reply);
     if (userId === null) return;
 
     // A process is visible to the caller only if its owning project belongs to
@@ -260,9 +263,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!(await ownsProject(executor?.project_id))) continue;
         processes.push({ ...dbProcess, target: "local" });
       } else {
-        // Temp process with no DB record and thus no owner attribution. Only
-        // surfaced when no auth scope is in effect.
-        if (userId !== undefined) continue;
+        // skipDb processes have no executor_process row, but ProcessManager
+        // retains the project from the temporary executor used to start them.
+        // Scope that project for browser/solo callers; a validated proxy API
+        // key intentionally retains the trusted unscoped transport semantics.
+        const liveProjectId = fastify.processManager.getProcessProjectId(id);
+        if (!(await ownsProject(liveProjectId))) continue;
         processes.push({ id, executor_id: "", status: "running", exit_code: null, started_at: null, finished_at: null, target: "local" });
       }
     }

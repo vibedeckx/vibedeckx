@@ -910,10 +910,11 @@ branch-scoped, and V1 did not gain destructive commander tools.
 
 ### Final verification evidence
 
-- `pnpm --filter vibedeckx test`: exit 0; 1,612 tests passed, 11 skipped after
+- `pnpm --filter vibedeckx test`: exit 0; 1,615 tests passed, 11 skipped after
   the local ownership, child-route scope, tool revalidation, project-remote,
   remote-server, machine-identity, public-error, transcript-budget, and history
-  pagination hardening.
+  pagination hardening, including scoped recovery of live skip-DB executor
+  processes.
 - `pnpm --filter vibedeckx-ui test`: exit 0; 62 test files and 503 tests passed.
 - `pnpm --filter vibedeckx exec tsc --noEmit`: exit 0.
 - `pnpm --filter vibedeckx-ui exec tsc --noEmit`: exit 0.

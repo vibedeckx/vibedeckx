@@ -10,16 +10,27 @@ describe("POST /api/path/execute authorization", () => {
   let app: FastifyInstance;
   const start = vi.fn(async () => "pid");
 
-  async function makeApp(project?: { id: string; path: string; user_id: string }) {
+  async function makeApp(
+    project?: { id: string; path: string; user_id: string },
+    options: { authEnabled?: boolean; runningProcessIds?: string[]; liveProjectId?: string | null } = {},
+  ) {
     app = Fastify();
-    app.decorate("authEnabled", true);
+    app.decorate("authEnabled", options.authEnabled ?? true);
     app.decorate("storage", {
       projects: {
         getByPath: async (value: string) => project?.path === value ? project : undefined,
         getById: async (id: string, userId?: string) => project?.id === id && project.user_id === userId ? project : undefined,
       },
+      executorProcesses: { getById: vi.fn(async () => undefined) },
+      executors: { getById: vi.fn(async () => undefined) },
     });
-    app.decorate("processManager", { start, get: vi.fn(), stop: vi.fn() });
+    app.decorate("processManager", {
+      start,
+      get: vi.fn(),
+      stop: vi.fn(),
+      getRunningProcessIds: vi.fn(() => options.runningProcessIds ?? []),
+      getProcessProjectId: vi.fn(() => options.liveProjectId ?? null),
+    });
     app.decorate("reverseConnectManager", { isConnected: () => false });
     app.decorate("remoteExecutorMap", new Map());
     app.decorate("remoteExecutorMonitor", { watch: vi.fn() });
@@ -49,5 +60,44 @@ describe("POST /api/path/execute authorization", () => {
     const response = await app.inject({ method: "POST", url: "/api/path/execute", payload: { path: "/repo", command: "echo ok", processId: "schedule-run-1" } });
     expect(response.statusCode).toBe(200);
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ project_id: "p", command: "echo ok" }), "/repo", true, "schedule-run-1", undefined);
+  });
+
+  it("returns a live skipDb process owned by the local project", async () => {
+    auth.userId = null;
+    await makeApp(
+      { id: "p", path: "/repo", user_id: "local" },
+      { authEnabled: false, runningProcessIds: ["temp-process"], liveProjectId: "p" },
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/executor-processes/running" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().processes).toEqual([
+      expect.objectContaining({ id: "temp-process", status: "running", target: "local" }),
+    ]);
+  });
+
+  it("returns an authenticated caller's live skipDb process", async () => {
+    await makeApp(
+      { id: "p", path: "/repo", user_id: "owner" },
+      { runningProcessIds: ["temp-process"], liveProjectId: "p" },
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/executor-processes/running" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().processes).toHaveLength(1);
+  });
+
+  it("does not return another user's live skipDb process", async () => {
+    await makeApp(
+      { id: "p", path: "/repo", user_id: "other" },
+      { runningProcessIds: ["temp-process"], liveProjectId: "p" },
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/executor-processes/running" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().processes).toEqual([]);
   });
 });
