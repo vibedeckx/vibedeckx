@@ -900,3 +900,51 @@ git add docs/plans/2026-07-31-project-chat-dashboard-design.md docs/plans/2026-0
 git commit -m "docs: reconcile project chat implementation"
 ```
 
+## Implementation result
+
+Completed 2026-08-01. The twelve planned stages were implemented, with the
+intentional durability and safety refinements summarized in the design's
+Implementation reconciliation section. No Mission entity was added, Project
+Chat remained project-scoped rather than branch-scoped, and V1 did not gain
+destructive commander tools.
+
+### Final verification evidence
+
+- `pnpm --filter vibedeckx test`: exit 0; 101 test files passed, 2 skipped;
+  1,565 tests passed, 11 skipped.
+- `pnpm --filter vibedeckx-ui test`: exit 0; 61 test files and 494 tests passed.
+- `pnpm --filter vibedeckx exec tsc --noEmit`: exit 0.
+- `pnpm --filter vibedeckx-ui exec tsc --noEmit`: exit 0.
+- `pnpm build:main`: exit 0.
+- `pnpm build:ui`: exit 0, including static-page generation.
+- Feature-scope ESLint for Project Chat, Project Activity, their hooks/API/URL
+  state, and `app/page.tsx`: exit 0 with no errors (seven existing warnings in
+  `app/page.tsx`).
+- Full `pnpm --filter vibedeckx-ui lint`: exit 1 with the repository's existing
+  broad lint debt (75 errors and 32 warnings across 29 error-bearing files in
+  unrelated agent, AI-elements, auth, hooks, and file-ref areas). None of the
+  error-bearing files are Project Chat or Project Activity implementation
+  files. This was recorded rather than expanding Task 12 into a cross-codebase
+  lint refactor. Tests, type-checks, and production builds are green.
+
+Acceptance was verified through executable tests and code inspection, not an
+unrecorded browser claim:
+
+- `project-activity-view.test.tsx` verifies the Project Chat, Recent Agent
+  Sessions, Schedule Results, Priority Tasks, and Attention Required cards and
+  the absence of a standalone Workspaces card.
+- `project-chat-workbench.test.tsx` verifies the two-column layout, Threads and
+  Context in one rail, persistent/live operation cards, and that Back to
+  Overview does not call Stop.
+- `project-chat-responsive.test.tsx` verifies a single combined mobile drawer
+  without duplicating the Chat tree and preserves per-thread drafts.
+- `project-chat.integration.test.ts` drives authenticated Thread creation,
+  ambiguous Workspace selection, Agent Session creation and completion,
+  cross-thread/cross-project isolation, database reopen, and Manager
+  reconstruction with transcript and Context intact.
+- Storage and manager tests verify that Thread identity contains project/user
+  scope but no branch/workspace ownership and that operation state survives
+  reload.
+
+A manual browser smoke was not claimed because this verification environment
+did not provide a configured authenticated interactive runtime fixture.

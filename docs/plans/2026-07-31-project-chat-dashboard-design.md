@@ -2,7 +2,36 @@
 
 ## Status
 
-Approved design, 2026-07-31.
+Implemented and acceptance-verified, 2026-08-01. The approved product model and
+information architecture remain unchanged.
+
+## Implementation reconciliation
+
+Production hardening added the following internal details without changing the
+approved Project Chat behavior:
+
+- Accepted turns use a private durable work journal, separate from the public
+  transcript, with bounded recovery and global concurrency backpressure.
+- State-changing tools use scoped, typed, idempotent operation records. Agent
+  Session and Schedule Run updates are correlated only to the originating
+  threads, and public operation messages are produced from per-kind DTO
+  allowlists rather than exposing internal delivery or transport state.
+- Stop uses an ephemeral `activeTurnId` compare-and-stop contract so a delayed
+  request cannot stop the next queued turn.
+- Manual schedule reruns keep compact immutable outcomes after bulky historical
+  run rows are pruned, preserving idempotency without unbounded output storage.
+- Remote Agent Sessions are represented in Project Activity by an authorized
+  local projection, updated before global refresh events and repaired by a
+  bounded catalog refresh. The dashboard still performs one local aggregate
+  read rather than browser or server N+1 fan-out.
+- Context refs are projected with authorized, discriminated navigation metadata;
+  deleted or no-longer-authorized targets remain readable but non-actionable.
+- The workbench keeps unsent drafts per project/thread while it remains mounted,
+  so thread switches and responsive drawer transitions do not erase input.
+
+Detailed work-journal, mutation, lifecycle, and durable-effect protocols are
+recorded in the companion `2026-07-31-project-chat-*` design and implementation
+documents.
 
 ## Goal
 
@@ -368,4 +397,3 @@ components should be extracted only when more than one surface needs them.
 - Replacing the concrete Agent Session UI with Project Chat.
 - Unrestricted autonomous destructive operations.
 - A fully configurable dashboard/card layout.
-
