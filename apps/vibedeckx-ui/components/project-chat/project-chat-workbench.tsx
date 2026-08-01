@@ -190,6 +190,11 @@ export function ProjectChatWorkbench({
                 if (draft) draftsRef.current.set(scopeKey, draft);
                 else draftsRef.current.delete(scopeKey);
               }}
+              onDraftSent={(submittedDraft) => {
+                if (draftsRef.current.get(scopeKey) === submittedDraft) {
+                  draftsRef.current.delete(scopeKey);
+                }
+              }}
               onSend={chat.sendMessage}
               onStop={chat.stopTurn}
               onResolveApproval={chat.resolveToolApproval}

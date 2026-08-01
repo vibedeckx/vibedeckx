@@ -59,6 +59,7 @@ interface ProjectChatConversationProps {
   error: string | null;
   initialDraft?: string;
   onDraftChange?: (draft: string) => void;
+  onDraftSent?: (submittedDraft: string) => void;
   onSend: (content: string) => Promise<void>;
   onStop: (expectedActiveTurnId: string) => Promise<boolean>;
   onResolveApproval: (approvalId: string, approved: boolean) => Promise<void>;
@@ -123,6 +124,7 @@ export function ProjectChatConversation({
   error,
   initialDraft = "",
   onDraftChange,
+  onDraftSent,
   onSend,
   onStop,
   onResolveApproval,
@@ -188,7 +190,8 @@ export function ProjectChatConversation({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const content = input.trim();
+    const submittedDraft = input;
+    const content = submittedDraft.trim();
     if (!content || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     setSubmitting(true);
@@ -196,7 +199,7 @@ export function ProjectChatConversation({
     try {
       await onSend(content);
       setInput("");
-      onDraftChange?.("");
+      onDraftSent?.(submittedDraft);
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "Failed to send message");
     } finally {

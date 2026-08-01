@@ -87,6 +87,20 @@ function typeIn(element: HTMLTextAreaElement, value: string) {
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function waitForCondition(predicate: () => boolean) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (predicate()) return;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  }
+  throw new Error("Condition was not reached");
+}
+
 describe("Project Chat responsive workbench", () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -129,12 +143,58 @@ describe("Project Chat responsive workbench", () => {
     expect(document.querySelectorAll('textarea[aria-label="Message Project Chat"]')).toHaveLength(1);
     expect(drawer!.contains(document.activeElement)).toBe(true);
 
-    await act(async () => {
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    });
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    await waitForCondition(() => (
+      document.querySelector('[data-testid="project-chat-mobile-drawer"]') === null
+      && document.activeElement === button("Open threads and context")
+    ));
     expect(document.querySelector('[data-testid="project-chat-mobile-drawer"]')).toBeNull();
     expect(document.activeElement).toBe(button("Open threads and context"));
+  });
+
+  it("does not let an older successful send erase a newer draft for the same thread", async () => {
+    const sendGate = deferred();
+    state.chat.sendMessage = vi.fn(() => sendGate.promise);
+    function StatefulWorkbench() {
+      const [threadId, setThreadId] = useState("thread-1");
+      return <ProjectChatWorkbench
+        projectId="project-1"
+        threadId={threadId}
+        projectName="VibeDeckX"
+        onBack={vi.fn()}
+        onSelectThread={setThreadId}
+      />;
+    }
+    const switchThread = async (label: string) => {
+      act(() => button("Open threads and context").click());
+      await act(async () => {
+        button(`Open thread: ${label}`).click();
+        await Promise.resolve();
+      });
+    };
+
+    act(() => root.render(<StatefulWorkbench />));
+    const firstComposer = document.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
+    act(() => typeIn(firstComposer, "Original A draft"));
+    act(() => button("Send message").click());
+    expect(state.chat.sendMessage).toHaveBeenCalledWith("Original A draft");
+
+    await switchThread("Login refactor");
+    await switchThread("Release plan");
+    const replacementComposer = document.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
+    expect(replacementComposer.value).toBe("Original A draft");
+    act(() => typeIn(replacementComposer, "Newer A draft"));
+
+    await act(async () => {
+      sendGate.resolve();
+      await sendGate.promise;
+      await Promise.resolve();
+    });
+
+    await switchThread("Login refactor");
+    await switchThread("Release plan");
+    expect((document.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement).value)
+      .toBe("Newer A draft");
   });
 
   it("closes the drawer on thread switch while preserving the live Chat draft", async () => {
