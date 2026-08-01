@@ -43,11 +43,19 @@ export function ProjectChatWorkbench({
   const [newThreadPending, setNewThreadPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const newThreadInFlightRef = useRef(false);
+  const mobileRailTriggerRef = useRef<HTMLButtonElement | null>(null);
   const scopeGenerationRef = useRef(0);
   const title = projectChatThreadTitle(chat.thread);
   const activeThreads = chat.threads.filter((item) => item.archived_at === null);
   const scopeKey = `${projectId}:${threadId}`;
   const isMobile = useIsMobile();
+
+  const setMobileRailVisibility = (open: boolean) => {
+    setMobileRailOpen(open);
+    if (!open) {
+      requestAnimationFrame(() => mobileRailTriggerRef.current?.focus());
+    }
+  };
 
   useEffect(() => {
     scopeGenerationRef.current += 1;
@@ -144,6 +152,7 @@ export function ProjectChatWorkbench({
           </div>
         </div>
         <Button
+          ref={mobileRailTriggerRef}
           type="button"
           variant="ghost"
           size="icon-sm"
@@ -203,8 +212,17 @@ export function ProjectChatWorkbench({
         ) : null}
       </div>
       {isMobile ? (
-        <Sheet open={mobileRailOpen} onOpenChange={setMobileRailOpen}>
-          <SheetContent side="right" className="w-[min(90vw,360px)] gap-0 p-0" aria-label="Project Chat threads and context">
+        <Sheet open={mobileRailOpen} onOpenChange={setMobileRailVisibility}>
+          <SheetContent
+            side="right"
+            data-testid="project-chat-mobile-drawer"
+            className="w-[min(90vw,360px)] gap-0 p-0"
+            aria-label="Project Chat threads and context"
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              mobileRailTriggerRef.current?.focus();
+            }}
+          >
             <SheetHeader className="shrink-0 border-b px-4 py-3 pr-14 text-left">
               <SheetTitle className="text-sm">Threads and context</SheetTitle>
               <SheetDescription className="text-xs">Switch conversations and open referenced project items.</SheetDescription>
@@ -216,12 +234,12 @@ export function ProjectChatWorkbench({
               threads={chat.threads}
               contextRefs={chat.contextRefs}
               onNewThread={newThread}
-              onSelectThread={(id) => { setMobileRailOpen(false); onSelectThread(id); }}
+              onSelectThread={(id) => { setMobileRailVisibility(false); onSelectThread(id); }}
               onRenameThread={async (id, nextTitle) => { await chat.renameThread(id, nextTitle); }}
               onArchiveThread={archiveThread}
               onDeleteThread={deleteThread}
               onLoadArchived={() => chat.refetchThreads(true)}
-              onOpenContext={onOpenContext ? (ref) => { setMobileRailOpen(false); onOpenContext(ref); } : undefined}
+              onOpenContext={onOpenContext ? (ref) => { setMobileRailVisibility(false); onOpenContext(ref); } : undefined}
               newThreadPending={newThreadPending}
             />
           </SheetContent>
