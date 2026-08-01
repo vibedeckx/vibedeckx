@@ -2,6 +2,7 @@
 
 import { Bot, GitBranch } from "lucide-react";
 import type { ProjectAgentSessionActivity } from "@/lib/api";
+import { workspaceLabel } from "@/lib/workspace-label";
 import {
   ActivityCard,
   ActivityCardCount,
@@ -14,6 +15,8 @@ import {
 
 interface RecentAgentSessionsCardProps {
   sessions: ProjectAgentSessionActivity[];
+  /** Remote server id → name, so a session's workspace reads as "gpu-01 · main". */
+  remoteNames: Map<string, string>;
   onOpenSession: (sessionId: string, target: string, branch: string | null) => void;
 }
 
@@ -39,12 +42,7 @@ function sessionTitle(session: ProjectAgentSessionActivity): string {
   return session.title?.trim() || session.branch || "Main workspace session";
 }
 
-function workspaceLabel(session: ProjectAgentSessionActivity): string {
-  const branch = session.workspace.branch || "main";
-  return session.workspace.target === "local" ? branch : `${session.workspace.target} · ${branch}`;
-}
-
-export function RecentAgentSessionsCard({ sessions, onOpenSession }: RecentAgentSessionsCardProps) {
+export function RecentAgentSessionsCard({ sessions, remoteNames, onOpenSession }: RecentAgentSessionsCardProps) {
   const visible = sessions.slice(0, 8);
   return (
     <ActivityCard>
@@ -77,7 +75,7 @@ export function RecentAgentSessionsCard({ sessions, onOpenSession }: RecentAgent
                 <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10.5px] text-muted-foreground">
                   <span className="inline-flex min-w-0 max-w-50 items-center gap-1">
                     <GitBranch className="size-2.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
-                    <span className="truncate">{workspaceLabel(session)}</span>
+                    <span className="truncate">{workspaceLabel(session.workspace, remoteNames)}</span>
                   </span>
                   {session.model ? <span className="truncate">{session.model}</span> : null}
                   <span>{relativeTime(session.lastActiveAt)}</span>

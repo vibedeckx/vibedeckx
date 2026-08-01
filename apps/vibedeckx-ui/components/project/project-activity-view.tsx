@@ -1,11 +1,13 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { AlertCircle, Bot, CalendarClock, Inbox, Loader2 } from "lucide-react";
 import type { ProjectActivity, ProjectChatThread, Task } from "@/lib/api";
 import { useProjectActivity } from "@/hooks/use-project-activity";
+import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { remoteNameMap, workspaceLabel } from "@/lib/workspace-label";
 import { ProjectChatCard } from "./project-chat-card";
 import { RecentAgentSessionsCard } from "./recent-agent-sessions-card";
 import { ScheduleResultsCard } from "./schedule-results-card";
@@ -57,14 +59,11 @@ function untilNextSchedule(value: string | null): string {
   return `in ${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
-/** Where the currently-running sessions are, e.g. "feat/streams · gpu-01 · main". */
-function runningWhere(activity: ProjectActivity): string {
+/** Where the currently-running sessions are, e.g. "feat/streams · gpu-01 · main · +2". */
+function runningWhere(activity: ProjectActivity, remoteNames: Map<string, string>): string {
   const labels = activity.recentAgentSessions
     .filter((session) => session.status === "running")
-    .map((session) => {
-      const branch = session.workspace.branch || "main";
-      return session.workspace.target === "local" ? branch : `${session.workspace.target} · ${branch}`;
-    });
+    .map((session) => workspaceLabel(session.workspace, remoteNames));
   if (labels.length === 0) return "Nothing running right now";
   return labels.slice(0, 2).join(" · ") + (labels.length > 2 ? ` +${labels.length - 2}` : "");
 }
@@ -116,6 +115,10 @@ export function ProjectActivityView({
   onViewAllTasks,
 }: ProjectActivityViewProps) {
   const { activity, loading, error, refetch } = useProjectActivity(projectId);
+  // Activity rows only carry remote *server ids*; the project's remotes are
+  // what turn those uuids into the names the user gave each machine.
+  const { remotes } = useProjectRemotes(projectId);
+  const remoteNames = useMemo(() => remoteNameMap(remotes), [remotes]);
 
   if (loading && !activity) {
     return (
@@ -149,7 +152,7 @@ export function ProjectActivityView({
         <Stat
           label="Running"
           icon={<Bot className="size-[11px]" aria-hidden="true" />}
-          detail={runningWhere(activity)}
+          detail={runningWhere(activity, remoteNames)}
         >
           <StatValue unit="agent sessions">
             <span className="text-blue-600 dark:text-blue-400">{activity.summary.running}</span>
@@ -203,8 +206,16 @@ export function ProjectActivityView({
       />
 
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
-        <RecentAgentSessionsCard sessions={activity.recentAgentSessions} onOpenSession={onOpenAgentSession} />
-        <ScheduleResultsCard runs={activity.recentScheduleRuns} onOpenRun={onOpenScheduleRun} />
+        <RecentAgentSessionsCard
+          sessions={activity.recentAgentSessions}
+          remoteNames={remoteNames}
+          onOpenSession={onOpenAgentSession}
+        />
+        <ScheduleResultsCard
+          runs={activity.recentScheduleRuns}
+          remoteNames={remoteNames}
+          onOpenRun={onOpenScheduleRun}
+        />
       </div>
 
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">

@@ -16,11 +16,20 @@ vi.mock("@/hooks/use-project-activity", () => ({
   useProjectActivity: () => activityHook.value,
 }));
 
+const remotesHook = vi.hoisted(() => ({
+  value: [] as import("@/lib/api").ProjectRemote[],
+}));
+
+vi.mock("@/hooks/use-project-remotes", () => ({
+  useProjectRemotes: () => ({ remotes: remotesHook.value, loading: false, refresh: vi.fn() }),
+}));
+
 import { ProjectActivityView } from "./project-activity-view";
 import type {
   ProjectActivity,
   ProjectAgentSessionActivity,
   ProjectChatThread,
+  ProjectRemote,
   ProjectScheduleRunActivity,
   Task,
 } from "@/lib/api";
@@ -69,6 +78,15 @@ const run = (index: number): ProjectScheduleRunActivity => ({
   branch: index === 1 ? null : `feature-${index}`,
   target: index === 4 ? "remote-server-4" : "local",
   reportPreview: `Report preview ${index}`,
+});
+
+const remote = (serverId: string, name: string): ProjectRemote => ({
+  id: `association-${serverId}`,
+  project_id: "project-1",
+  remote_server_id: serverId,
+  remote_path: "/srv/project-1",
+  sort_order: 0,
+  server_name: name,
 });
 
 const task = (
@@ -160,6 +178,7 @@ function render(overrides: Partial<React.ComponentProps<typeof ProjectActivityVi
 
 beforeEach(() => {
   vi.clearAllMocks();
+  remotesHook.value = [remote("remote-server-3", "gpu-01"), remote("remote-server-4", "builder-02")];
   activityHook.value = {
     activity: populatedActivity(),
     loading: false,
@@ -193,8 +212,7 @@ describe("ProjectActivityView", () => {
     expect(container.querySelectorAll('[data-testid="priority-task"]')).toHaveLength(5);
     expect(container.textContent).toContain("Report preview 1");
     expect(container.textContent).not.toContain("Raw output");
-    expect(container.textContent).toContain("remote-server-3");
-    expect(container.textContent).toContain("feature-3");
+    expect(container.textContent).toContain("feature-3 · gpu-01");
     expect(container.textContent).toContain("main");
 
     const taskRows = [...container.querySelectorAll('[data-testid="priority-task"]')];
@@ -205,6 +223,38 @@ describe("ProjectActivityView", () => {
       expect.stringContaining("Task high-new"),
       expect.stringContaining("Task high-old"),
     ]);
+  });
+
+  it("labels remote workspaces with the remote's name, never its server id", () => {
+    render();
+
+    const rows = [...container.querySelectorAll('[data-testid="recent-session"]')];
+    const remoteRow = rows.find((row) => row.getAttribute("aria-label") === "Open agent session: Session 3");
+    expect(remoteRow?.textContent).toContain("feature-3 · gpu-01");
+    expect(container.textContent).not.toContain("remote-server-3");
+    expect(container.textContent).toContain("feature-4 · builder-02");
+    expect(container.textContent).not.toContain("remote-server-4");
+  });
+
+  it("says where a remote session is running in the Running tile", () => {
+    activityHook.value = {
+      ...activityHook.value,
+      activity: {
+        ...populatedActivity(),
+        recentAgentSessions: [{ ...session(3), status: "running" }],
+      },
+    };
+    render();
+
+    // The tile's detail line and the session row both name the remote.
+    expect(container.textContent?.split("feature-3 · gpu-01")).toHaveLength(3);
+  });
+
+  it("falls back to the target id once a remote is detached from the project", () => {
+    remotesHook.value = [];
+    render();
+
+    expect(container.textContent).toContain("feature-3 · remote-server-3");
   });
 
   it("routes each row and attention action through app-owned callbacks", async () => {

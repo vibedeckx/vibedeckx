@@ -2,6 +2,7 @@
 
 import { CalendarCheck, GitBranch } from "lucide-react";
 import type { ProjectScheduleRunActivity, ScheduleRunStatus } from "@/lib/api";
+import { workspaceLabel } from "@/lib/workspace-label";
 import {
   ActivityCard,
   ActivityCardCount,
@@ -14,6 +15,8 @@ import {
 
 interface ScheduleResultsCardProps {
   runs: ProjectScheduleRunActivity[];
+  /** Remote server id → name, so a run's workspace reads as "gpu-01 · main". */
+  remoteNames: Map<string, string>;
   onOpenRun: (runId: string, scheduleId: string) => void;
 }
 
@@ -47,7 +50,7 @@ function completedTime(run: ProjectScheduleRunActivity): string {
   return Number.isNaN(timestamp) ? "Unknown time" : new Date(timestamp).toLocaleString();
 }
 
-export function ScheduleResultsCard({ runs, onOpenRun }: ScheduleResultsCardProps) {
+export function ScheduleResultsCard({ runs, remoteNames, onOpenRun }: ScheduleResultsCardProps) {
   const visible = runs.slice(0, 5);
   return (
     <ActivityCard>
@@ -83,7 +86,7 @@ export function ScheduleResultsCard({ runs, onOpenRun }: ScheduleResultsCardProp
                 <span className="inline-flex min-w-0 max-w-50 items-center gap-1">
                   <GitBranch className="size-2.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
                   <span className="truncate">
-                    {run.target === "local" ? (run.branch || "main") : `${run.target} · ${run.branch || "main"}`}
+                    {workspaceLabel({ target: run.target, branch: run.branch }, remoteNames)}
                   </span>
                 </span>
               </span>
