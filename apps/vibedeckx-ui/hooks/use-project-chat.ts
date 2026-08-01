@@ -94,12 +94,23 @@ function isProjectChatMessage(value: unknown): value is ProjectChatMessage {
 }
 
 function isProjectChatContextRef(value: unknown): value is ProjectChatContextRef {
-  return isRecord(value)
-    && typeof value.thread_id === "string"
-    && ["task", "workspace", "agent_session", "schedule", "schedule_run"].includes(String(value.entity_type))
-    && typeof value.entity_id === "string"
-    && typeof value.last_referenced_at === "string"
-    && typeof value.deleted === "boolean";
+  if (!isRecord(value) || typeof value.thread_id !== "string") return false;
+  if (!["task", "workspace", "agent_session", "schedule", "schedule_run"].includes(String(value.entity_type))
+    || typeof value.entity_id !== "string" || typeof value.last_referenced_at !== "string"
+    || typeof value.deleted !== "boolean") return false;
+  if (value.navigation === null) return true;
+  if (value.deleted) return false;
+  if (!isRecord(value.navigation) || value.navigation.kind !== value.entity_type
+    || typeof value.navigation.label !== "string") return false;
+  if (value.navigation.kind === "task") return typeof value.navigation.taskId === "string";
+  if (value.navigation.kind === "workspace") return typeof value.navigation.target === "string"
+    && (value.navigation.branch === null || typeof value.navigation.branch === "string");
+  if (value.navigation.kind === "agent_session") return typeof value.navigation.sessionId === "string"
+    && typeof value.navigation.target === "string"
+    && (value.navigation.branch === null || typeof value.navigation.branch === "string");
+  if (value.navigation.kind === "schedule") return typeof value.navigation.scheduleId === "string";
+  return value.navigation.kind === "schedule_run" && typeof value.navigation.scheduleId === "string"
+    && typeof value.navigation.runId === "string";
 }
 
 function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {

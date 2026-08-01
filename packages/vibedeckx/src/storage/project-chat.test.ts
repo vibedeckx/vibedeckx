@@ -83,6 +83,47 @@ describe("project chat storage", () => {
     expect(threads.every((thread) => !("branch" in thread))).toBe(true);
   });
 
+  it("resolves authorized Context targets with typed navigation metadata", async () => {
+    await storage.tasks.create({ id: "task-1", project_id: "p1", title: "Fix login" });
+    await storage.agentSessions.create({ id: "local-session", project_id: "p1", branch: "feature/auth" });
+    const remote = await storage.remoteServers.create({ name: "worker" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: remote.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert("remote-session", "p1", remote.id, "worker-session", "remote/dev");
+    await storage.searchCache.applyCatalogSnapshot("p1", "local", {
+      workspaces: [{ branch: null }, { branch: "feature/auth" }], sessions: [],
+    });
+    await storage.scheduledTasks.create({
+      id: "schedule-1", project_id: "p1", name: "Nightly tests", cron_expr: "0 0 * * *",
+      timezone: "UTC", run_type: "command", content: "pnpm test", cwd_mode: "branch",
+    });
+    await storage.scheduledTaskRuns.create({ id: "run-1", schedule_id: "schedule-1" });
+    await storage.tasks.create({ id: "foreign-task", project_id: "p2", title: "Secret" });
+
+    const workspaceId = JSON.stringify(["local", "feature/auth"]);
+    const refs = [
+      { entity_type: "task" as const, entity_id: "task-1" },
+      { entity_type: "workspace" as const, entity_id: workspaceId },
+      { entity_type: "agent_session" as const, entity_id: "local-session" },
+      { entity_type: "agent_session" as const, entity_id: "remote-session" },
+      { entity_type: "schedule" as const, entity_id: "schedule-1" },
+      { entity_type: "schedule_run" as const, entity_id: "run-1" },
+      { entity_type: "task" as const, entity_id: "foreign-task" },
+    ];
+
+    await expect(storage.projectChatContextRefs.resolveExisting("p1", refs)).resolves.toEqual(
+      expect.arrayContaining([
+        { entity_type: "task", entity_id: "task-1", navigation: { kind: "task", taskId: "task-1", label: "Fix login" } },
+        { entity_type: "workspace", entity_id: workspaceId, navigation: { kind: "workspace", target: "local", branch: "feature/auth", label: "feature/auth" } },
+        { entity_type: "agent_session", entity_id: "local-session", navigation: { kind: "agent_session", sessionId: "local-session", target: "local", branch: "feature/auth", label: "feature/auth" } },
+        { entity_type: "agent_session", entity_id: "remote-session", navigation: { kind: "agent_session", sessionId: "remote-session", target: remote.id, branch: "remote/dev", label: "remote/dev" } },
+        { entity_type: "schedule", entity_id: "schedule-1", navigation: { kind: "schedule", scheduleId: "schedule-1", label: "Nightly tests" } },
+        { entity_type: "schedule_run", entity_id: "run-1", navigation: { kind: "schedule_run", scheduleId: "schedule-1", runId: "run-1", label: "Nightly tests" } },
+      ]),
+    );
+    const resolved = await storage.projectChatContextRefs.resolveExisting("p1", refs);
+    expect(resolved).not.toContainEqual(expect.objectContaining({ entity_id: "foreign-task" }));
+  });
+
   it("atomically creates a thread, its initial user message, and accepted work item", async () => {
     const thread = await storage.projectChatThreads.createWithInitialTurn({
       id: "new-thread",

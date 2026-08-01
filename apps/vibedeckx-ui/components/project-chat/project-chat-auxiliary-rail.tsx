@@ -66,7 +66,9 @@ export function ProjectChatAuxiliaryRail({
   const [actionsFor, setActionsFor] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<ProjectChatThread | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [archiveTarget, setArchiveTarget] = useState<ProjectChatThread | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectChatThread | null>(null);
+  const activeThreads = threads.filter((thread) => thread.archived_at === null);
 
   return (
     <aside
@@ -92,7 +94,7 @@ export function ProjectChatAuxiliaryRail({
         </div>
         {threadsOpen ? (
           <div className="space-y-1 px-2 pb-3">
-            {threads.slice(0, 5).map((thread) => {
+            {activeThreads.slice(0, 5).map((thread) => {
               const title = projectChatThreadTitle(thread);
               const selected = thread.id === currentThreadId;
               return (
@@ -138,7 +140,7 @@ export function ProjectChatAuxiliaryRail({
                         className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
                         onClick={() => {
                           setActionsFor(null);
-                          void onArchiveThread(thread.id);
+                          setArchiveTarget(thread);
                         }}
                       >
                         <Archive className="size-3.5" /> Archive thread
@@ -181,17 +183,30 @@ export function ProjectChatAuxiliaryRail({
               <p className="px-2 py-4 text-xs text-muted-foreground">Referenced project items appear here.</p>
             ) : contextRefs.map((ref) => {
               const label = contextLabels[ref.entity_type];
+              const unavailable = !ref.deleted && (!ref.navigation || !onOpenContext);
+              const disabled = ref.deleted || unavailable;
+              const unavailableReason = !ref.navigation
+                ? "Navigation details are unavailable; refresh the thread and try again."
+                : "Navigation is unavailable in this view.";
               return (
                 <button
                   key={`${ref.entity_type}:${ref.entity_id}`}
                   type="button"
-                  disabled={ref.deleted}
-                  aria-label={ref.deleted ? `Deleted ${label.toLocaleLowerCase()}` : `Open ${label}: ${ref.entity_id}`}
+                  disabled={disabled}
+                  aria-label={ref.deleted
+                    ? `Deleted ${label.toLocaleLowerCase()}`
+                    : unavailable ? `Unavailable ${label.toLocaleLowerCase()}`
+                      : `Open ${label}: ${ref.navigation!.label}`}
+                  title={unavailable ? unavailableReason : undefined}
                   onClick={() => onOpenContext?.(ref)}
                   className="flex w-full flex-col rounded-md px-2 py-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-55"
                 >
-                  <span className="text-sm">{ref.deleted ? `Deleted ${label.toLocaleLowerCase()}` : `${label} · ${ref.entity_id}`}</span>
+                  <span className="text-sm">{ref.deleted
+                    ? `Deleted ${label.toLocaleLowerCase()}`
+                    : unavailable ? `Unavailable ${label.toLocaleLowerCase()}`
+                      : `${label} · ${ref.navigation!.label}`}</span>
                   {ref.deleted ? <span className="text-xs text-muted-foreground">Deleted</span> : null}
+                  {unavailable ? <span className="text-xs text-muted-foreground">{unavailableReason}</span> : null}
                 </button>
               );
             })}
@@ -256,6 +271,26 @@ export function ProjectChatAuxiliaryRail({
               }}
             >
               Confirm delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={archiveTarget !== null} onOpenChange={(open) => { if (!open) setArchiveTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive this Project Chat thread?</AlertDialogTitle>
+            <AlertDialogDescription>The conversation leaves recent selectors but remains available in thread history.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!archiveTarget) return;
+                void onArchiveThread(archiveTarget.id).then(() => setArchiveTarget(null));
+              }}
+            >
+              Confirm archive
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

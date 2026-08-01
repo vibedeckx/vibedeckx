@@ -1,9 +1,15 @@
-import type { ProjectChatContextRef, ProjectChatThread, Storage } from "./storage/types.js";
+import type {
+  ProjectChatContextNavigation,
+  ProjectChatContextRef,
+  ProjectChatThread,
+  Storage,
+} from "./storage/types.js";
 
 export const PROJECT_CHAT_CONTEXT_REF_LIMIT = 100;
 
 export interface ProjectChatPublicContextRef extends ProjectChatContextRef {
   deleted: boolean;
+  navigation: ProjectChatContextNavigation | null;
 }
 
 /**
@@ -21,12 +27,12 @@ export async function listProjectChatPublicContextRefs(
     thread.user_id,
     PROJECT_CHAT_CONTEXT_REF_LIMIT,
   );
-  const existing = new Set((await storage.projectChatContextRefs.resolveExisting(
+  const existing = new Map((await storage.projectChatContextRefs.resolveExisting(
     thread.project_id,
     refs.map(({ entity_type, entity_id }) => ({ entity_type, entity_id })),
-  )).map(({ entity_type, entity_id }) => `${entity_type}\0${entity_id}`));
-  return refs.map((ref) => ({
-    ...ref,
-    deleted: !existing.has(`${ref.entity_type}\0${ref.entity_id}`),
-  }));
+  )).map((resolved) => [`${resolved.entity_type}\0${resolved.entity_id}`, resolved.navigation]));
+  return refs.map((ref) => {
+    const navigation = existing.get(`${ref.entity_type}\0${ref.entity_id}`) ?? null;
+    return { ...ref, deleted: navigation === null, navigation };
+  });
 }

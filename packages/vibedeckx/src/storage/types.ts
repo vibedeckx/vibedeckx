@@ -309,6 +309,19 @@ export interface ProjectChatContextRef {
   last_referenced_at: string;
 }
 
+export type ProjectChatContextNavigation =
+  | { kind: "task"; taskId: string; label: string }
+  | { kind: "workspace"; target: string; branch: string | null; label: string }
+  | { kind: "agent_session"; sessionId: string; target: string; branch: string | null; label: string }
+  | { kind: "schedule"; scheduleId: string; label: string }
+  | { kind: "schedule_run"; scheduleId: string; runId: string; label: string };
+
+export interface ResolvedProjectChatContextRef {
+  entity_type: ProjectChatContextEntityType;
+  entity_id: string;
+  navigation: ProjectChatContextNavigation;
+}
+
 export type ProjectChatOperationKind =
   | "task_create"
   | "task_update"
@@ -1213,7 +1226,7 @@ export interface Storage {
     resolveExisting: (
       projectId: string,
       refs: Array<{ entity_type: ProjectChatContextEntityType; entity_id: string }>,
-    ) => Promise<Array<{ entity_type: ProjectChatContextEntityType; entity_id: string }>>;
+    ) => Promise<ResolvedProjectChatContextRef[]>;
   };
   projectChatOperations: {
     create: (opts: {

@@ -10,7 +10,11 @@ describe("Project Chat Context projection", () => {
     }));
     const listByThread = vi.fn().mockResolvedValue(refs);
     const resolveExisting = vi.fn().mockResolvedValue(
-      refs.filter((_, index) => index % 2 === 0).map(({ entity_type, entity_id }) => ({ entity_type, entity_id })),
+      refs.filter((_, index) => index % 2 === 0).map(({ entity_type, entity_id }) => ({
+        entity_type,
+        entity_id,
+        navigation: { kind: "task", taskId: entity_id, label: `Task ${entity_id}` },
+      })),
     );
     const storage = { projectChatContextRefs: { listByThread, resolveExisting } } as unknown as Storage;
     const thread = {
@@ -24,5 +28,10 @@ describe("Project Chat Context projection", () => {
     expect(resolveExisting).toHaveBeenCalledOnce();
     expect(projected.filter((ref) => !ref.deleted)).toHaveLength(50);
     expect(projected.filter((ref) => ref.deleted)).toHaveLength(50);
+    expect(projected[0]).toMatchObject({
+      deleted: false,
+      navigation: { kind: "task", taskId: "task-0", label: "Task task-0" },
+    });
+    expect(projected[1]).toMatchObject({ deleted: true, navigation: null });
   });
 });

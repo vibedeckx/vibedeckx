@@ -260,8 +260,13 @@ describe("project chat thread routes", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json().thread).toMatchObject({ id: "thread-1", title: "Status" });
       expect(response.json().contextRefs).toEqual([
-        expect.objectContaining({ entity_type: "task", entity_id: "a-task", deleted: false }),
-        expect.objectContaining({ entity_type: "task", entity_id: "z-deleted-task", deleted: true }),
+        expect.objectContaining({
+          entity_type: "task", entity_id: "a-task", deleted: false,
+          navigation: { kind: "task", taskId: "a-task", label: "One" },
+        }),
+        expect.objectContaining({
+          entity_type: "task", entity_id: "z-deleted-task", deleted: true, navigation: null,
+        }),
       ]);
       expect(response.json().contextRefs[0]).not.toHaveProperty("user_id");
       expect(response.json().contextRefs[0]).not.toHaveProperty("project_id");

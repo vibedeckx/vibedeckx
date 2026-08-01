@@ -15,6 +15,7 @@ import {
 import { useTasks } from '@/hooks/use-tasks';
 import { useSchedules } from '@/hooks/use-schedules';
 import { useProjectActivityActions } from '@/hooks/use-project-activity-actions';
+import { useProjectChatContextNavigation } from '@/hooks/use-project-chat-context-navigation';
 import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
@@ -36,6 +37,7 @@ import { MainConversation, type MainConversationHandle } from '@/components/conv
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
+import { TaskDetailDialog } from '@/components/task/task-detail-dialog';
 import { api, type ExecutionMode, type Task, type Worktree, type SearchResultWorkspace, type SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
 import { touchRecentSessionOpen, touchSessionStarted, updateCachedSessionTitle } from '@/lib/quick-switcher-cache';
@@ -176,6 +178,7 @@ export default function Home() {
   const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
   const [selectedScheduleRunId, setSelectedScheduleRunId] = useState<string | null>(null);
   const [scheduleCreateOpen, setScheduleCreateOpen] = useState(false);
+  const [projectChatContextTask, setProjectChatContextTask] = useState<Task | null>(null);
 
   const {
     activity: branchActivity,
@@ -547,6 +550,31 @@ export default function Home() {
       if (kind === "session-navigation") toast.error("Failed to open agent session");
       else if (kind === "schedule-navigation") toast.error("Failed to open schedule run");
       else toast.error(error instanceof Error ? error.message : "Failed to start schedule run");
+    },
+  });
+
+  const projectChatContextNavigation = useProjectChatContextNavigation({
+    projectId: currentProject?.id ?? null,
+    schedules,
+    getTasks: api.getTasks,
+    resolveProjectForTarget,
+    openTask: setProjectChatContextTask,
+    selectAgentSession: (branch, sessionId, projectId) => {
+      setActiveView("workspace");
+      selectBranchSession(branch, sessionId, projectId);
+    },
+    selectWorkspace: (branch) => {
+      setSessionUrlParam(null);
+      setSelectedBranch(branch);
+      setActiveView("workspace");
+    },
+    selectSchedule: (scheduleId) => {
+      setSelectedScheduleId(scheduleId);
+      setActiveView("schedules");
+    },
+    openScheduleRun: projectActivityActions.openScheduleRun,
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to open Context item");
     },
   });
 
@@ -1006,6 +1034,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 projectName={currentProject.name}
                 onBack={showProjectOverview}
                 onSelectThread={openProjectChatThread}
+                onOpenContext={(ref) => { void projectChatContextNavigation.open(ref); }}
               />
             </div>
           )}
@@ -1065,6 +1094,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
             onWorktreeCreated={handleWorktreeCreated}
           />
         )}
+        <TaskDetailDialog
+          task={projectChatContextTask}
+          open={projectChatContextTask !== null}
+          onOpenChange={(open) => { if (!open) setProjectChatContextTask(null); }}
+        />
         <CreateProjectDialog
           open={createDialogOpen}
           onOpenChange={setCreateDialogOpen}

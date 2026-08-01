@@ -70,8 +70,9 @@ function setupHook() {
     status: "running",
     queueLength: 1,
     contextRefs: [
-      { thread_id: "thread-7", entity_type: "task", entity_id: "task-1", last_referenced_at: "2026-07-20T12:00:00Z", deleted: false },
-      { thread_id: "thread-7", entity_type: "schedule_run", entity_id: "run-gone", last_referenced_at: "2026-07-20T12:00:00Z", deleted: true },
+      { thread_id: "thread-7", entity_type: "task", entity_id: "task-1", last_referenced_at: "2026-07-20T12:00:00Z", deleted: false, navigation: { kind: "task", taskId: "task-1", label: "Task one" } },
+      { thread_id: "thread-7", entity_type: "schedule_run", entity_id: "run-gone", last_referenced_at: "2026-07-20T12:00:00Z", deleted: true, navigation: null },
+      { thread_id: "thread-7", entity_type: "workspace", entity_id: "legacy", last_referenced_at: "2026-07-20T12:00:00Z", deleted: false, navigation: null },
     ],
     loading: false,
     threadsLoading: false,
@@ -150,7 +151,7 @@ describe("ProjectChatWorkbench", () => {
   });
 
   it("renames, archives, and deletes only after confirmation", async () => {
-    render();
+    const props = render();
 
     act(() => getButton("Thread actions: Thread 7").click());
     act(() => getButton("Rename thread").click());
@@ -160,14 +161,38 @@ describe("ProjectChatWorkbench", () => {
     expect(hook.value.renameThread).toHaveBeenCalledWith("thread-7", "Release review");
 
     act(() => getButton("Thread actions: Thread 7").click());
-    await act(async () => getButton("Archive thread").click());
+    act(() => getButton("Archive thread").click());
+    expect(hook.value.archiveThread).not.toHaveBeenCalled();
+    act(() => getButton("Cancel").click());
+    expect(hook.value.archiveThread).not.toHaveBeenCalled();
+
+    act(() => getButton("Thread actions: Thread 7").click());
+    act(() => getButton("Archive thread").click());
+    await act(async () => getButton("Confirm archive").click());
     expect(hook.value.archiveThread).toHaveBeenCalledWith("thread-7", true);
+    expect(props.onSelectThread).toHaveBeenCalledWith("thread-6");
 
     act(() => getButton("Thread actions: Thread 7").click());
     act(() => getButton("Delete thread").click());
     expect(hook.value.deleteThread).not.toHaveBeenCalled();
     await act(async () => getButton("Confirm delete").click());
     expect(hook.value.deleteThread).toHaveBeenCalledWith("thread-7");
+  });
+
+  it("keeps archived threads out of recent and header selectors after View All loads them", async () => {
+    hook.value.threads = [
+      { ...thread(9), archived_at: Date.now() },
+      thread(7), thread(6), thread(5), thread(4), thread(3), thread(2),
+    ];
+    render();
+
+    expect(container.querySelectorAll('[data-testid="thread-row"]')).toHaveLength(5);
+    expect(container.textContent).not.toContain("Thread 9");
+    act(() => getButton("Current thread: Thread 7").click());
+    expect(document.querySelector('button[aria-label="Switch to thread: Thread 9"]')).toBeNull();
+
+    act(() => getButton("View all threads").click());
+    expect(document.querySelector('button[aria-label="Open history thread: Thread 9"]')).not.toBeNull();
   });
 
   it("keeps thread switching in the header when the shared rail is collapsed", () => {
@@ -182,12 +207,36 @@ describe("ProjectChatWorkbench", () => {
   });
 
   it("shows final Context refs and disables deleted targets", () => {
-    render();
+    render({ onOpenContext: vi.fn() });
 
-    expect(container.textContent).toContain("Task · task-1");
+    expect(container.textContent).toContain("Task · Task one");
     const deleted = getButton("Deleted schedule run");
     expect(deleted.disabled).toBe(true);
     expect(deleted.textContent).toContain("Deleted");
+    const unavailable = getButton("Unavailable workspace");
+    expect(unavailable.disabled).toBe(true);
+    expect(unavailable.textContent).toContain("Navigation details are unavailable");
+  });
+
+  it("routes every resolved Context kind through the app-owned navigation seam", () => {
+    hook.value.contextRefs = [
+      { thread_id: "thread-7", entity_type: "task", entity_id: "task-1", last_referenced_at: "", deleted: false, navigation: { kind: "task", taskId: "task-1", label: "Fix login" } },
+      { thread_id: "thread-7", entity_type: "workspace", entity_id: "workspace-1", last_referenced_at: "", deleted: false, navigation: { kind: "workspace", target: "local", branch: "dev", label: "dev" } },
+      { thread_id: "thread-7", entity_type: "agent_session", entity_id: "session-1", last_referenced_at: "", deleted: false, navigation: { kind: "agent_session", sessionId: "session-1", target: "remote-1", branch: "dev", label: "Agent dev" } },
+      { thread_id: "thread-7", entity_type: "schedule", entity_id: "schedule-1", last_referenced_at: "", deleted: false, navigation: { kind: "schedule", scheduleId: "schedule-1", label: "Nightly" } },
+      { thread_id: "thread-7", entity_type: "schedule_run", entity_id: "run-1", last_referenced_at: "", deleted: false, navigation: { kind: "schedule_run", scheduleId: "schedule-1", runId: "run-1", label: "Nightly run" } },
+    ];
+    const onOpenContext = vi.fn();
+    render({ onOpenContext });
+
+    for (const label of [
+      "Open Task: Fix login", "Open Workspace: dev", "Open Agent session: Agent dev",
+      "Open Schedule: Nightly", "Open Schedule run: Nightly run",
+    ]) act(() => getButton(label).click());
+
+    expect(onOpenContext).toHaveBeenCalledTimes(5);
+    expect(onOpenContext.mock.calls.map(([value]) => value.navigation.kind))
+      .toEqual(["task", "workspace", "agent_session", "schedule", "schedule_run"]);
   });
 
   it("sends, stops, and resolves approvals through the project hook", async () => {

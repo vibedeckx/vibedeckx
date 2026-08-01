@@ -565,12 +565,20 @@ export type ProjectChatContextEntityType =
   | "schedule"
   | "schedule_run";
 
+export type ProjectChatContextNavigation =
+  | { kind: "task"; taskId: string; label: string }
+  | { kind: "workspace"; target: string; branch: string | null; label: string }
+  | { kind: "agent_session"; sessionId: string; target: string; branch: string | null; label: string }
+  | { kind: "schedule"; scheduleId: string; label: string }
+  | { kind: "schedule_run"; scheduleId: string; runId: string; label: string };
+
 export interface ProjectChatContextRef {
   thread_id: string;
   entity_type: ProjectChatContextEntityType;
   entity_id: string;
   last_referenced_at: string;
   deleted: boolean;
+  navigation: ProjectChatContextNavigation | null;
 }
 
 export interface ProjectChatThreadDetail {

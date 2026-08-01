@@ -11,6 +11,7 @@ import type {
 } from "../schema.js";
 import type {
   ProjectChatContextRef,
+  ProjectChatContextNavigation,
   ProjectChatMessage,
   ProjectChatOperation,
   ProjectChatThread,
@@ -738,43 +739,69 @@ export const createProjectChatRepos = (
     },
 
     resolveExisting: async (projectId, refs) => {
-      const found = new Map<string, { entity_type: ProjectChatContextRef["entity_type"]; entity_id: string }>();
-      const add = (entity_type: ProjectChatContextRef["entity_type"], entity_id: string) => {
-        found.set(`${entity_type}\0${entity_id}`, { entity_type, entity_id });
+      const found = new Map<string, {
+        entity_type: ProjectChatContextRef["entity_type"];
+        entity_id: string;
+        navigation: ProjectChatContextNavigation;
+      }>();
+      const add = (
+        entity_type: ProjectChatContextRef["entity_type"],
+        entity_id: string,
+        navigation: ProjectChatContextNavigation,
+      ) => {
+        found.set(`${entity_type}\0${entity_id}`, { entity_type, entity_id, navigation });
       };
       const ids = (type: ProjectChatContextRef["entity_type"]) =>
         [...new Set(refs.filter((ref) => ref.entity_type === type).map((ref) => ref.entity_id))];
 
       const taskIds = ids("task");
       if (taskIds.length) {
-        for (const row of await kdb.selectFrom("tasks").select("id")
-          .where("project_id", "=", projectId).where("id", "in", taskIds).execute()) add("task", row.id);
+        for (const row of await kdb.selectFrom("tasks").select(["id", "title"])
+          .where("project_id", "=", projectId).where("id", "in", taskIds).execute()) {
+          add("task", row.id, { kind: "task", taskId: row.id, label: row.title });
+        }
       }
       const sessionIds = ids("agent_session");
       if (sessionIds.length) {
-        for (const row of await kdb.selectFrom("agent_sessions").select("id")
-          .where("project_id", "=", projectId).where("id", "in", sessionIds).execute()) add("agent_session", row.id);
+        for (const row of await kdb.selectFrom("agent_sessions").select(["id", "branch", "title"])
+          .where("project_id", "=", projectId).where("id", "in", sessionIds).execute()) {
+          const branch = row.branch || null;
+          add("agent_session", row.id, {
+            kind: "agent_session", sessionId: row.id, target: "local", branch,
+            label: row.title?.trim() || branch || "main",
+          });
+        }
         for (const row of await kdb.selectFrom("remote_session_mappings as mapping")
           .innerJoin("project_remotes as remote", (join) => join
             .onRef("remote.project_id", "=", "mapping.project_id")
             .onRef("remote.remote_server_id", "=", "mapping.remote_server_id"))
-          .select("mapping.local_session_id")
+          .select(["mapping.local_session_id", "mapping.remote_server_id", "mapping.branch"])
           .where("mapping.project_id", "=", projectId)
           .where("mapping.local_session_id", "in", sessionIds).execute()) {
-          add("agent_session", row.local_session_id);
+          add("agent_session", row.local_session_id, {
+            kind: "agent_session", sessionId: row.local_session_id,
+            target: row.remote_server_id, branch: row.branch,
+            label: row.branch || "main",
+          });
         }
       }
       const scheduleIds = ids("schedule");
       if (scheduleIds.length) {
-        for (const row of await kdb.selectFrom("scheduled_tasks").select("id")
-          .where("project_id", "=", projectId).where("id", "in", scheduleIds).execute()) add("schedule", row.id);
+        for (const row of await kdb.selectFrom("scheduled_tasks").select(["id", "name"])
+          .where("project_id", "=", projectId).where("id", "in", scheduleIds).execute()) {
+          add("schedule", row.id, { kind: "schedule", scheduleId: row.id, label: row.name });
+        }
       }
       const runIds = ids("schedule_run");
       if (runIds.length) {
         for (const row of await kdb.selectFrom("scheduled_task_runs as run")
           .innerJoin("scheduled_tasks as schedule", "schedule.id", "run.schedule_id")
-          .select("run.id")
-          .where("schedule.project_id", "=", projectId).where("run.id", "in", runIds).execute()) add("schedule_run", row.id);
+          .select(["run.id", "run.schedule_id", "schedule.name"])
+          .where("schedule.project_id", "=", projectId).where("run.id", "in", runIds).execute()) {
+          add("schedule_run", row.id, {
+            kind: "schedule_run", scheduleId: row.schedule_id, runId: row.id, label: row.name,
+          });
+        }
       }
 
       const workspaceRefs = refs.flatMap((ref) => {
@@ -804,7 +831,12 @@ export const createProjectChatRepos = (
         const available = new Set(rows
           .map(({ target_id, branch }) => `${target_id}\0${branch}`));
         for (const ref of workspaceRefs) {
-          if (available.has(`${ref.target}\0${ref.branch}`)) add("workspace", ref.entityId);
+          if (available.has(`${ref.target}\0${ref.branch}`)) {
+            add("workspace", ref.entityId, {
+              kind: "workspace", target: ref.target, branch: ref.branch || null,
+              label: ref.branch || "main",
+            });
+          }
         }
       }
       return [...found.values()];

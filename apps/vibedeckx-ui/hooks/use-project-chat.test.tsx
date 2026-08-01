@@ -238,6 +238,7 @@ describe("useProjectChat", () => {
         contextRefs: [{
           thread_id: "t1", entity_type: "task", entity_id: "task-1",
           last_referenced_at: "2026-07-31 00:00:00", deleted: false,
+          navigation: { kind: "task", taskId: "task-1", label: "Task one" },
         }],
       } });
     });
@@ -258,6 +259,7 @@ describe("useProjectChat", () => {
       { op: "replace", path: "/contextRefs", value: { type: "CONTEXT", content: [{
         thread_id: "t1", entity_type: "schedule", entity_id: "schedule-1",
         last_referenced_at: "2026-07-31 00:00:01", deleted: false,
+        navigation: { kind: "schedule", scheduleId: "schedule-1", label: "Schedule one" },
       }] } },
     ] }));
     expect(latest.messages).toEqual([snapshot("t1").messages[0], assistant]);
@@ -315,6 +317,7 @@ describe("useProjectChat", () => {
       contextRefs: [{
         thread_id: "other-thread", entity_type: "task", entity_id: "private-task",
         last_referenced_at: "2026-07-31 00:00:01", deleted: false,
+        navigation: { kind: "task", taskId: "private-task", label: "Private" },
       }],
     })],
     ["cross-thread message", (valid: ProjectChatSnapshot): ProjectChatSnapshot => ({
@@ -331,6 +334,7 @@ describe("useProjectChat", () => {
       contextRefs: [{
         thread_id: "t1", entity_type: "task" as const, entity_id: "task-1",
         last_referenced_at: "2026-07-31 00:00:00", deleted: false,
+        navigation: { kind: "task" as const, taskId: "task-1", label: "Task one" },
       }],
     };
     mocks.api.getProjectChatThread.mockResolvedValue({

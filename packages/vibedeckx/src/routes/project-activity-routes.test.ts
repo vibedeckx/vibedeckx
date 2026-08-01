@@ -225,7 +225,7 @@ describe("project activity route", () => {
         id: `padding-${index}`, project_id: "project-1", branch: `padding-${index}`,
       });
     }
-    const completedAt = Date.parse("2026-08-01T00:00:00.000Z");
+    const completedAt = vi.getRealSystemTime() + 60_000;
     await storage.agentSessions.markCompleted("long-task", completedAt);
 
     const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
@@ -261,6 +261,8 @@ describe("project activity route", () => {
   });
 
   it("globally merges authorized remote cached sessions with target context and summary state", async () => {
+    const remoteRunningAt = vi.getRealSystemTime() + 120_000;
+    const remoteErrorAt = vi.getRealSystemTime() + 60_000;
     await storage.agentSessions.create({ id: "local-session", project_id: "project-1", branch: "local" });
     await storage.agentSessions.markUserMessage("local-session", 100);
 
@@ -273,15 +275,15 @@ describe("project activity route", () => {
       sessions: [
         {
           id: "remote-running", branch: "feature", title: "Remote running",
-          lastActiveAt: Date.parse("2026-08-02T00:00:00.000Z"), favoritedAt: null, entryCount: 2,
+          lastActiveAt: remoteRunningAt, favoritedAt: null, entryCount: 2,
           status: "running", agentType: "codex", model: "gpt-5",
-          lastUserMessageAt: Date.parse("2026-08-02T00:00:00.000Z"), lastCompletedAt: null,
+          lastUserMessageAt: remoteRunningAt, lastCompletedAt: null,
         },
         {
           id: "remote-error", branch: "broken", title: "Remote error",
-          lastActiveAt: Date.parse("2026-08-01T00:00:00.000Z"), favoritedAt: null, entryCount: 2,
+          lastActiveAt: remoteErrorAt, favoritedAt: null, entryCount: 2,
           status: "error", agentType: "claude-code", model: "opus",
-          lastUserMessageAt: Date.parse("2026-08-01T00:00:00.000Z"), lastCompletedAt: null,
+          lastUserMessageAt: remoteErrorAt, lastCompletedAt: null,
         },
       ],
     } as unknown as SearchCatalogSnapshot);

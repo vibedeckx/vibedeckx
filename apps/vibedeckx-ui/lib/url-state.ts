@@ -3,6 +3,12 @@ import type { ActiveView } from "@/components/layout";
 const VALID_TABS = new Set<ActiveView>(["workspace", "tasks", "schedules", "remote-servers", "settings", "project-info", "project-chat"]);
 const DEFAULT_TAB: ActiveView = "tasks";
 
+function isSafeThreadId(value: string): boolean {
+  return value.length > 0
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f/\\]/.test(value);
+}
+
 export interface UrlState {
   projectId: string | null;
   tab: ActiveView;
@@ -52,10 +58,15 @@ export function parseUrlState(): UrlState {
   if (segments[0] === "p" && segments[1]) {
     projectId = segments[1];
     const maybeTab = segments[2];
-    if (maybeTab === "chat" && segments[3]) {
+    if (maybeTab === "chat" && segments.length === 4 && segments[3]) {
       try {
-        threadId = decodeURIComponent(segments[3]);
-        tab = "project-chat";
+        const decoded = decodeURIComponent(segments[3]);
+        if (isSafeThreadId(decoded)) {
+          threadId = decoded;
+          tab = "project-chat";
+        } else {
+          tab = "project-info";
+        }
       } catch {
         tab = "project-info";
         threadId = null;
@@ -85,7 +96,7 @@ export function buildUrl(state: { projectId?: string | null; tab?: ActiveView; b
   }
 
   if (tab === "project-chat") {
-    return threadId
+    return threadId && isSafeThreadId(threadId)
       ? `/p/${projectId}/chat/${encodeURIComponent(threadId)}`
       : `/p/${projectId}/project-info`;
   }

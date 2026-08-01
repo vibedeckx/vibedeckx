@@ -31,6 +31,7 @@ export function ProjectChatWorkbench({
   const [railVisible, setRailVisible] = useState(true);
   const [headerThreadsOpen, setHeaderThreadsOpen] = useState(false);
   const title = projectChatThreadTitle(chat.thread);
+  const activeThreads = chat.threads.filter((item) => item.archived_at === null);
 
   const newThread = async () => {
     const created = await chat.createThread();
@@ -39,7 +40,7 @@ export function ProjectChatWorkbench({
 
   const leaveRemovedThread = (removedId: string) => {
     if (removedId !== threadId) return;
-    const next = chat.threads.find((item) => item.id !== removedId && item.archived_at === null);
+    const next = activeThreads.find((item) => item.id !== removedId);
     if (next) onSelectThread(next.id);
     else onBack();
   };
@@ -66,7 +67,7 @@ export function ProjectChatWorkbench({
               </button>
               {headerThreadsOpen ? (
                 <div className="absolute left-0 top-7 z-30 w-64 rounded-md border bg-popover p-1 shadow-md">
-                  {chat.threads.slice(0, 5).map((item) => {
+                  {activeThreads.slice(0, 5).map((item) => {
                     const itemTitle = projectChatThreadTitle(item);
                     return (
                       <button
