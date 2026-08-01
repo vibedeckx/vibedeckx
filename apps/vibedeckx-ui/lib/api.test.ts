@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, createNewAgentSession, getFreshToken, setAuthToken, setTokenGetter } from "@/lib/api";
+import {
+  api,
+  createNewAgentSession,
+  getFreshToken,
+  parseProjectChatOperationMessage,
+  setAuthToken,
+  setTokenGetter,
+} from "@/lib/api";
 
 // Build a JWT whose `exp` is `secondsFromNow` away (negative = already expired).
 function makeJwt(secondsFromNow: number): string {
@@ -255,6 +262,40 @@ describe("manual schedule run", () => {
     } finally {
       global.fetch = originalFetch;
     }
+  });
+});
+
+describe("Project Chat workspace confirmation", () => {
+  it("posts the exact request and candidate identity", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ status: "resolving" }),
+    } as Response);
+    global.fetch = fetchMock;
+    try {
+      await api.selectProjectChatWorkspace("thread-1", "request-1", '["remote-1","dev"]');
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/project-chat/threads/thread-1/workspace-selection",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ requestId: "request-1", workspaceId: '["remote-1","dev"]' }),
+        }),
+      );
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
+describe("Project Chat public operation parsing", () => {
+  it("accepts only the structured versioned union and never infers state from prose", () => {
+    expect(parseProjectChatOperationMessage(
+      'Schedule says {"kind":"schedule_run","status":"completed"} in its prose',
+    )).toBeNull();
+    expect(parseProjectChatOperationMessage(JSON.stringify({
+      version: 1, operationId: "operation-1", kind: "schedule_run", status: "completed",
+      scheduleId: "schedule-1", runId: "run-1",
+    }))).toMatchObject({ kind: "schedule_run", status: "completed", runId: "run-1" });
   });
 });
 

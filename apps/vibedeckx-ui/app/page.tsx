@@ -1062,6 +1062,13 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 onBack={showProjectOverview}
                 onSelectThread={openProjectChatThread}
                 onOpenContext={(ref) => { void projectChatContextNavigation.open(ref); }}
+                onOpenAgentSession={(sessionId, target, branch) => (
+                  projectActivityActions.openAgentSession(sessionId, target, branch)
+                )}
+                onOpenScheduleRun={(runId, scheduleId) => (
+                  projectActivityActions.openScheduleRun(runId, scheduleId)
+                )}
+                onRunScheduleAgain={projectActivityActions.runScheduleAgain}
               />
             </div>
           )}

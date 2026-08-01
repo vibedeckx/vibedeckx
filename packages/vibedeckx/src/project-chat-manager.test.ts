@@ -10,6 +10,7 @@ import {
   adaptProjectChatFullStream,
   PROJECT_CHAT_SYSTEM_PROMPT,
   ProjectChatManager,
+  ProjectChatWorkspaceSelectionConflictError,
   projectChatAiTools,
   type ProjectChatModelRunner,
   type ProjectChatRunInput,
@@ -546,6 +547,35 @@ describe("ProjectChatManager", () => {
     await secondManager.shutdown();
   });
 
+  it("persists schedule timeouts as a structured timeout failure", async () => {
+    await createThread("thread-timeout");
+    await correlate("thread-timeout", "timeout-op", "schedule_run", "schedule_run", "run-timeout", {
+      scheduleId: "schedule-1", runId: "run-timeout",
+    });
+    const eventBus = new EventBus();
+    const manager = new ProjectChatManager(storage, reply("unused"), { eventBus });
+
+    eventBus.emit({
+      type: "schedule:run-finished", projectId: "project-1", scheduleId: "schedule-1",
+      runId: "run-timeout", status: "timeout", exitCode: null,
+    });
+    await waitFor(async () => (await storage.projectChatMessages.listByThread(
+      "thread-timeout", "project-1", "user-1",
+    )).some(({ type }) => type === "operation"));
+
+    const messages = await storage.projectChatMessages.listByThread(
+      "thread-timeout", "project-1", "user-1",
+    );
+    expect(JSON.parse(messages.find(({ type }) => type === "operation")!.content)).toMatchObject({
+      version: 1,
+      kind: "schedule_run",
+      operationId: "timeout-op",
+      status: "failed",
+      failure: { code: "timeout" },
+    });
+    await manager.shutdown();
+  });
+
   it("subscribes to global events once, persists before websocket delivery, and unsubscribes on shutdown", async () => {
     await createThread("thread-1");
     await correlate("thread-1", "op-1", "agent_session_create", "agent_session", "session-1", { sessionId: "session-1" });
@@ -673,6 +703,82 @@ describe("ProjectChatManager", () => {
         "schedule_run:run-1",
         `workspace:${JSON.stringify(["local", "dev"])}`,
       ].sort());
+    await manager.shutdown();
+  });
+
+  it("resolves an offered workspace through the durable tool protocol and publishes its live operation and Context", async () => {
+    await createThread("selection-thread");
+    const workspaceId = JSON.stringify(["local", "dev"]);
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "dev" }], sessions: [],
+    });
+    await storage.projectChatOperations.create({
+      id: "selection-op", thread_id: "selection-thread", project_id: "project-1", user_id: "user-1",
+      kind: "agent_session_create", status: "pending", entity_type: null, entity_id: null,
+      idempotency_key: "session:seed-1", payload: {
+        version: 1, kind: "agent_session_create", operationId: "selection-op", status: "pending",
+        phase: "workspace_selection", requestId: "selection-op", sessionId: "seed-1", workerSessionId: "seed-1",
+        instruction: "Implement cards", permissionMode: "edit", agentType: "claude-code", model: null,
+        initialInstructionDelivery: "pending", candidates: [{ id: workspaceId, target: "local", branch: "dev" }],
+      }, error: null,
+    });
+    await storage.projectChatOperations.announce({
+      id: "selection-op", thread_id: "selection-thread", project_id: "project-1", user_id: "user-1",
+      message: { id: "operation:selection-op:workspace_selection", content: JSON.stringify({
+        version: 1, kind: "workspace_selection", operationId: "selection-op", status: "pending",
+        requestId: "selection-op", candidates: [{ id: workspaceId, target: "local", branch: "dev" }],
+      }) },
+    });
+    const createAgentSession = vi.fn(async ({ sessionId }) => ({ sessionId }));
+    const manager = new ProjectChatManager(storage, reply("unused"), {
+      eventBus: new EventBus(),
+      toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => true },
+        mutationServices: {
+          createAgentSession, sendAgentInstruction: async () => true,
+          runScheduleNow: async (_id, runId) => ({ runId, skipped: false }),
+        },
+      },
+    });
+    await manager.openThread("selection-thread", "user-1");
+    const frames: string[] = [];
+    const socket = {
+      projectChatUserId: "user-1",
+      readyState: 1,
+      OPEN: 1,
+      send: (frame: string) => frames.push(frame),
+    };
+    expect(manager.subscribe("selection-thread", socket as never)).not.toBeNull();
+    frames.length = 0;
+
+    const result = await manager.selectWorkspace(
+      "selection-thread", "user-1", "selection-op", workspaceId,
+    );
+
+    expect(result).toMatchObject({ status: "running", sessionId: expect.any(String) });
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      target: "local", branch: "dev", instruction: "Implement cards",
+    }));
+    const liveEntries = frames.flatMap((frame) => {
+      const parsed = JSON.parse(frame) as { JsonPatch?: Array<{ value?: { type?: string; content?: unknown } }> };
+      return (parsed.JsonPatch ?? []).flatMap((patch) => patch.value?.type === "ENTRY"
+        ? [patch.value.content as { type?: string; content?: string }] : []);
+    });
+    expect(liveEntries.some((entry) => {
+      if (entry.type !== "operation" || typeof entry.content !== "string") return false;
+      return JSON.parse(entry.content).kind === "agent_session_create"
+        && JSON.parse(entry.content).status === "running";
+    })).toBe(true);
+    expect(frames.some((frame) => frame.includes('"type":"CONTEXT"')
+      && frame.includes('"entity_type":"agent_session"'))).toBe(true);
+    const reloaded = await manager.openThread("selection-thread", "user-1");
+    expect(reloaded.messages.filter(({ type }) => type === "operation")).toHaveLength(2);
+    expect(JSON.parse(reloaded.messages.at(-1)!.content)).toMatchObject({
+      kind: "agent_session_create", status: "running",
+    });
+    await expect(manager.selectWorkspace(
+      "selection-thread", "user-1", "selection-op", JSON.stringify(["local", "other"]),
+    )).rejects.toBeInstanceOf(ProjectChatWorkspaceSelectionConflictError);
     await manager.shutdown();
   });
 
@@ -1445,6 +1551,44 @@ describe("ProjectChatManager", () => {
     expect(frames.some((frame) => frame.includes('"operation"'))).toBe(true);
     for (const workId of workIds) expect(publicSurfaces).not.toContain(workId);
     expect(publicSurfaces).not.toContain("workId");
+  });
+
+  it("broadcasts mutation-tool operation and Context writes during the active turn", async () => {
+    await createThread("live-tool-thread");
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        await input.tools!.create_task.execute({ title: "Live task" });
+        yield { type: "assistant", content: "created" };
+      },
+    }, {
+      eventBus: new EventBus(),
+      toolDependencies: {
+        agentSessionManager: { getMessages: () => [], getSessionProcessAlive: () => false },
+        mutationServices: {
+          createAgentSession: async ({ sessionId }) => ({ sessionId }),
+          sendAgentInstruction: async () => true,
+          runScheduleNow: async (_id, runId) => ({ runId, skipped: false }),
+        },
+      },
+    });
+    await manager.openThread("live-tool-thread", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("live-tool-thread", {
+      projectChatUserId: "user-1", readyState: 1,
+      send: (raw: string) => { frames.push(raw); },
+    } as never);
+
+    await manager.sendMessage("live-tool-thread", "user-1", "create it");
+    await waitFor(async () => (await manager.openThread("live-tool-thread", "user-1")).status === "idle");
+
+    expect(frames.some((frame) => frame.includes('"type":"ENTRY"')
+      && frame.includes('\\"kind\\":\\"task_create\\"'))).toBe(true);
+    expect(frames.some((frame) => frame.includes('"type":"CONTEXT"')
+      && frame.includes('"entity_type":"task"'))).toBe(true);
+    const snapshot = await manager.openThread("live-tool-thread", "user-1");
+    expect(snapshot.messages.some(({ type, content }) => type === "operation"
+      && JSON.parse(content).kind === "task_create")).toBe(true);
+    await manager.shutdown();
   });
 
   it("runs one turn at a time per thread and drains queued messages in order", async () => {

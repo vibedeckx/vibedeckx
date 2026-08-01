@@ -219,6 +219,42 @@ export interface CreateProjectChatToolsOptions {
   agentSessionManager: ProjectAgentSessionReader;
   remoteSessions?: RemoteProjectSessionReader;
   mutationServices?: ProjectChatMutationServices;
+  /** Best-effort live projection after the operation message is durable. */
+  onOperationMessage?: (message: import("./storage/types.js").ProjectChatMessage) => Promise<void> | void;
+}
+
+type PublicProjectChatFailureCode = "failed" | "timeout" | "remote_offline" | "deleted_target";
+
+function publicFailureCode(error: string): PublicProjectChatFailureCode {
+  const normalized = error.toLowerCase();
+  if (/\btimeout\b|\btimed\s+out\b/.test(normalized)) return "timeout";
+  if (/\boffline\b|\bdisconnected\b/.test(normalized)
+    || (/\bremote\b/.test(normalized) && /\bunavailable\b/.test(normalized))) return "remote_offline";
+  if (/\bno longer\b|\bnot found\b|\bdeleted\b/.test(normalized)) return "deleted_target";
+  return "failed";
+}
+
+/** Creates the versioned public envelope without internal delivery/claim data. */
+export function projectChatPublicOperationContent(
+  payload: ProjectChatOperationPayload,
+  error: string | null = null,
+): string {
+  const {
+    initialInstructionDelivery: _delivery,
+    contextConfirmed: _context,
+    claimToken: _claimToken,
+    ...publicPayload
+  } = payload as ProjectChatOperationPayload & {
+    initialInstructionDelivery?: unknown;
+    contextConfirmed?: unknown;
+    claimToken?: unknown;
+  };
+  return JSON.stringify({
+    ...publicPayload,
+    ...(payload.status === "failed"
+      ? { failure: { code: publicFailureCode(error ?? "") } }
+      : {}),
+  });
 }
 
 const emptySchema = z.object({}).strict();
@@ -491,7 +527,10 @@ function transcriptPreview(entries: unknown): unknown[] {
 }
 
 export async function createProjectChatTools(options: CreateProjectChatToolsOptions): Promise<ProjectChatTools> {
-  const { projectId, threadId, userId, storage, agentSessionManager, remoteSessions, mutationServices } = options;
+  const {
+    projectId, threadId, userId, storage, agentSessionManager, remoteSessions, mutationServices,
+    onOperationMessage,
+  } = options;
   const project = await storage.projects.getById(projectId, userId);
   if (!project) throw new Error("Project not found");
   const thread = await storage.projectChatThreads.getById(threadId, projectId, userId);
@@ -531,12 +570,6 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     status: Parameters<Storage["projectChatOperations"]["transition"]>[0]["status"],
     details: Record<string, unknown>,
   ) => ({ version: 1 as const, kind, operationId, status, ...details }) as Parameters<Storage["projectChatOperations"]["create"]>[0]["payload"];
-  const publicOperationContent = (payload: Parameters<Storage["projectChatOperations"]["create"]>[0]["payload"]): string => {
-    const { initialInstructionDelivery: _delivery, contextConfirmed: _context, ...publicPayload } = payload as typeof payload & {
-      initialInstructionDelivery?: unknown; contextConfirmed?: unknown;
-    };
-    return JSON.stringify(publicPayload);
-  };
   const beginOperation = async (
     kind: Parameters<Storage["projectChatOperations"]["create"]>[0]["kind"],
     entityType: ProjectChatContextEntityType | null,
@@ -566,13 +599,16 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     );
     if (!current) throw new Error("Project Chat operation not found");
     const payload = { ...current.payload, status, ...details } as ProjectChatOperationPayload;
-    const content = publicOperationContent(payload);
+    const content = projectChatPublicOperationContent(payload, error);
     const result = await storage.projectChatOperations.transition({
       id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
       status, payload, error,
       message: { id: `operation:${operation.id}:${status}`, content },
     });
     if (!result) throw new Error("Failed to update Project Chat operation");
+    if (result.changed && onOperationMessage) {
+      try { await onOperationMessage(result.message); } catch { /* durable state remains authoritative */ }
+    }
     return result.operation;
   };
   const markOperationRunning = async (
@@ -769,6 +805,9 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             message: { id: `operation:${operation.id}:workspace_selection`, content: selectionContent },
           });
           if (!announced) throw new Error("Failed to publish workspace selection request");
+          if (onOperationMessage) {
+            try { await onOperationMessage(announced); } catch { /* snapshot/reconnect recovers it */ }
+          }
           return {
             ok: false, status: "workspace_selection_required", operationId: operation.id,
             requestId: operation.id,

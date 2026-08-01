@@ -11,7 +11,10 @@ vi.mock("@clerk/fastify", () => ({
 }));
 
 import projectChatRoutes from "./project-chat-routes.js";
-import { ProjectChatManager } from "../project-chat-manager.js";
+import {
+  ProjectChatManager,
+  ProjectChatWorkspaceSelectionConflictError,
+} from "../project-chat-manager.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { ProjectChatThread, Storage } from "../storage/types.js";
 
@@ -24,6 +27,7 @@ describe("project chat thread routes", () => {
     sendMessage: ReturnType<typeof vi.fn>;
     stopGeneration: ReturnType<typeof vi.fn>;
     resolveToolApproval: ReturnType<typeof vi.fn>;
+    selectWorkspace: ReturnType<typeof vi.fn>;
     deleteThread: ReturnType<typeof vi.fn>;
   };
 
@@ -55,6 +59,7 @@ describe("project chat thread routes", () => {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       stopGeneration: vi.fn().mockResolvedValue(true),
       resolveToolApproval: vi.fn().mockResolvedValue(true),
+      selectWorkspace: vi.fn().mockResolvedValue({ status: "running", sessionId: "session-1" }),
       deleteThread: vi.fn(async (threadId: string, userId: string) => {
         const thread = await storage.projectChatThreads.getOwnedById(threadId, userId);
         if (!thread) return false;
@@ -570,12 +575,76 @@ describe("project chat thread routes", () => {
       expect(projectChatManager.resolveToolApproval).not.toHaveBeenCalled();
     });
 
+    it("confirms an exact offered workspace through the authorized manager protocol", async () => {
+      await createThread();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/workspace-selection",
+        payload: { requestId: "request-1", workspaceId: '["remote-1","dev"]' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ status: "running", sessionId: "session-1" });
+      expect(projectChatManager.selectWorkspace).toHaveBeenCalledWith(
+        "thread-1", "user-1", "request-1", '["remote-1","dev"]',
+      );
+    });
+
+    it("returns a bounded workspace conflict without exposing unexpected server failures", async () => {
+      await createThread();
+      projectChatManager.selectWorkspace.mockRejectedValueOnce(
+        new ProjectChatWorkspaceSelectionConflictError("Workspace was not offered by this selection request"),
+      );
+      const conflict = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/workspace-selection",
+        payload: { requestId: "request-1", workspaceId: "workspace-1" },
+      });
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.json()).toEqual({ error: "Workspace was not offered by this selection request" });
+
+      projectChatManager.selectWorkspace.mockRejectedValueOnce(
+        new Error("database password was rejected"),
+      );
+      const unexpected = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/workspace-selection",
+        payload: { requestId: "request-1", workspaceId: "workspace-1" },
+      });
+      expect(unexpected.statusCode).toBe(500);
+      expect(unexpected.body).not.toContain("database password");
+    });
+
+    it("rejects malformed workspace confirmations and does not disclose foreign threads", async () => {
+      await createThread();
+      await createThread({ id: "theirs", user_id: "user-2" });
+      for (const payload of [
+        {}, { requestId: "", workspaceId: "workspace" },
+        { requestId: "request", workspaceId: "" },
+        { requestId: 1, workspaceId: "workspace" },
+        { requestId: "request", workspaceId: "workspace", extra: true },
+      ]) {
+        const response = await app.inject({
+          method: "POST", url: "/api/project-chat/threads/thread-1/workspace-selection", payload,
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      const foreign = await app.inject({
+        method: "POST", url: "/api/project-chat/threads/theirs/workspace-selection",
+        payload: { requestId: "request", workspaceId: "workspace" },
+      });
+      expect(foreign.statusCode).toBe(404);
+      expect(projectChatManager.selectWorkspace).not.toHaveBeenCalled();
+    });
+
     it("returns the same 404 for foreign runtime operations without invoking the manager", async () => {
       await createThread({ id: "theirs", user_id: "user-2" });
       for (const request of [
         { url: "/api/project-chat/threads/theirs/messages", payload: { content: "steal" } },
         { url: "/api/project-chat/threads/theirs/stop", payload: undefined },
         { url: "/api/project-chat/threads/theirs/tool-approval", payload: { approvalId: "a", approved: true } },
+        { url: "/api/project-chat/threads/theirs/workspace-selection", payload: { requestId: "a", workspaceId: "b" } },
       ]) {
         const response = await app.inject({ method: "POST", ...request });
         expect(response.statusCode).toBe(404);
@@ -598,6 +667,7 @@ describe("project chat thread routes", () => {
       { method: "POST", url: "/api/project-chat/threads/thread-1/messages", payload: { content: "Nope" } },
       { method: "POST", url: "/api/project-chat/threads/thread-1/stop" },
       { method: "POST", url: "/api/project-chat/threads/thread-1/tool-approval", payload: { approvalId: "a", approved: true } },
+      { method: "POST", url: "/api/project-chat/threads/thread-1/workspace-selection", payload: { requestId: "a", workspaceId: "b" } },
     ];
 
     for (const request of requests) {

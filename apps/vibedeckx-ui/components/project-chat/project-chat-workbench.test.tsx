@@ -129,6 +129,7 @@ function setupHook() {
     sendMessage: vi.fn(async () => {}),
     stopTurn: vi.fn(async () => true),
     resolveToolApproval: vi.fn(async () => {}),
+    selectWorkspace: vi.fn(async () => {}),
   };
 }
 
@@ -180,6 +181,94 @@ describe("ProjectChatWorkbench", () => {
     expect(container.textContent).toContain("2 schedules");
     expect(container.querySelector('[data-testid="turn-boundary"]')).not.toBeNull();
     expect(container.textContent).toContain("Schedule run");
+  });
+
+  it("coalesces persisted operation history into one live card and keeps its final state after reload", () => {
+    hook.value.status = "idle";
+    hook.value.activeTurnId = null;
+    hook.value.messages = [
+      message(1, "operation", JSON.stringify({
+        version: 1, operationId: "same-operation", kind: "schedule_run", status: "pending",
+        scheduleId: "schedule-1", runId: "run-1",
+      })),
+      message(2, "operation", JSON.stringify({
+        version: 1, operationId: "same-operation", kind: "schedule_run", status: "running",
+        scheduleId: "schedule-1", runId: "run-1",
+      })),
+      message(3, "operation", JSON.stringify({
+        version: 1, operationId: "same-operation", kind: "schedule_run", status: "completed",
+        scheduleId: "schedule-1", runId: "run-1",
+      })),
+    ];
+
+    render();
+
+    expect(container.querySelectorAll('[data-operation-id="same-operation"]')).toHaveLength(1);
+    expect(container.textContent).toContain("Completed");
+    expect(container.textContent).not.toContain("Queued");
+  });
+
+  it("routes safe operation actions, guards reruns, and reports action failures", async () => {
+    hook.value.status = "idle";
+    hook.value.activeTurnId = null;
+    hook.value.messages = [
+      message(1, "operation", JSON.stringify({
+        version: 1, operationId: "session-operation", kind: "agent_session_create", status: "completed",
+        sessionId: "session-1", target: "remote-1", branch: "dev",
+      })),
+      message(2, "operation", JSON.stringify({
+        version: 1, operationId: "schedule-operation", kind: "schedule_run", status: "failed",
+        scheduleId: "schedule-1", runId: "run-1", failure: { code: "timeout" },
+      })),
+    ];
+    const rerun = deferred<void>();
+    const onOpenAgentSession = vi.fn();
+    const onOpenScheduleRun = vi.fn();
+    const onRunScheduleAgain = vi.fn(() => rerun.promise);
+    render({ onOpenAgentSession, onOpenScheduleRun, onRunScheduleAgain });
+
+    await act(async () => {
+      getButton("Open Session").click();
+      getButton("View Output").click();
+      await Promise.resolve();
+    });
+    const rerunButton = getButton("Run Again");
+    act(() => {
+      rerunButton.click();
+      rerunButton.click();
+    });
+    expect(onOpenAgentSession).toHaveBeenCalledWith("session-1", "remote-1", "dev");
+    expect(onOpenScheduleRun).toHaveBeenCalledWith("run-1", "schedule-1");
+    expect(onRunScheduleAgain).toHaveBeenCalledTimes(1);
+    expect(onRunScheduleAgain).toHaveBeenCalledWith("run-1");
+    expect(getButton("Running again…").disabled).toBe(true);
+
+    await act(async () => rerun.reject(new Error("Remote scheduler unavailable")));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Remote scheduler unavailable");
+    expect(getButton("Run Again").disabled).toBe(false);
+  });
+
+  it("confirms only an offered workspace identity and fences stale completion after thread navigation", async () => {
+    hook.value.status = "idle";
+    hook.value.activeTurnId = null;
+    hook.value.messages = [message(1, "operation", JSON.stringify({
+      version: 1, operationId: "selection-operation", kind: "workspace_selection", status: "pending",
+      requestId: "request-1", candidates: [
+        { id: '["local","dev"]', target: "local", branch: "dev" },
+        { id: '["remote-1","release"]', target: "remote-1", branch: "release" },
+      ],
+    }))];
+    const selection = deferred<void>();
+    hook.value.selectWorkspace = vi.fn(() => selection.promise);
+    render();
+
+    act(() => getButton("Select workspace: remote-1 / release").click());
+    expect(hook.value.selectWorkspace).toHaveBeenCalledWith("request-1", '["remote-1","release"]');
+    expect(getButton("Select workspace: local / dev").disabled).toBe(true);
+
+    render({ threadId: "thread-6" });
+    await act(async () => selection.reject(new Error("stale selection failed")));
+    expect(container.textContent).not.toContain("stale selection failed");
   });
 
   it("opens restored history at the bottom and preserves user scroll-up during streaming", async () => {

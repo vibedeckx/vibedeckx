@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, Loader2, Search, Square, X } from "lucide-react";
 
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
@@ -11,12 +11,16 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { parseProjectChatOperationMessage } from "@/lib/api";
 import type {
   ProjectChatMessage,
+  ProjectChatContextRef,
   ProjectChatOperationMessage,
   ProjectChatStatus,
   ProjectChatToolApprovalMessage,
 } from "@/lib/api";
+import { ProjectOperationCard, type ProjectOperationPendingAction } from "./project-operation-card";
+import { WorkspaceSelectionCard } from "./workspace-selection-card";
 
 function parseObject(content: string): Record<string, unknown> | null {
   try {
@@ -44,23 +48,9 @@ function toolOutput(content: string): string {
   return content;
 }
 
-function operationLabel(content: string): string {
-  const parsed = parseObject(content) as ProjectChatOperationMessage | null;
-  const labels: Record<string, string> = {
-    task_create: "Task creation",
-    task_update: "Task update",
-    agent_session_create: "Agent session",
-    agent_instruction: "Agent instruction",
-    schedule_run: "Schedule run",
-    workspace_selection: "Workspace selection",
-  };
-  return parsed && typeof parsed.kind === "string"
-    ? `${labels[parsed.kind] ?? "Project operation"} · ${parsed.status}`
-    : "Project operation";
-}
-
 interface ProjectChatConversationProps {
   messages: ProjectChatMessage[];
+  contextRefs: ProjectChatContextRef[];
   status: ProjectChatStatus;
   activeTurnId: string | null;
   queueLength: number;
@@ -70,10 +60,34 @@ interface ProjectChatConversationProps {
   onSend: (content: string) => Promise<void>;
   onStop: (expectedActiveTurnId: string) => Promise<boolean>;
   onResolveApproval: (approvalId: string, approved: boolean) => Promise<void>;
+  onSelectWorkspace: (requestId: string, workspaceId: string) => Promise<void>;
+  onOpenAgentSession?: (sessionId: string, target: string, branch: string | null) => Promise<void> | void;
+  onOpenScheduleRun?: (runId: string, scheduleId: string) => Promise<void> | void;
+  onRunScheduleAgain?: (runId: string) => Promise<void>;
+}
+
+function operationHasDeletedTarget(
+  operation: ProjectChatOperationMessage,
+  contextRefs: ProjectChatContextRef[],
+): boolean {
+  const deleted = (entityType: ProjectChatContextRef["entity_type"], entityId: string) => contextRefs.some(
+    (ref) => ref.entity_type === entityType && ref.entity_id === entityId && ref.deleted,
+  );
+  if (operation.kind === "task_create" || operation.kind === "task_update") {
+    return deleted("task", operation.taskId);
+  }
+  if (operation.kind === "agent_session_create" || operation.kind === "agent_instruction") {
+    return deleted("agent_session", operation.sessionId);
+  }
+  if (operation.kind === "schedule_run") {
+    return deleted("schedule", operation.scheduleId) || deleted("schedule_run", operation.runId);
+  }
+  return false;
 }
 
 export function ProjectChatConversation({
   messages,
+  contextRefs,
   status,
   activeTurnId,
   queueLength,
@@ -83,6 +97,10 @@ export function ProjectChatConversation({
   onSend,
   onStop,
   onResolveApproval,
+  onSelectWorkspace,
+  onOpenAgentSession,
+  onOpenScheduleRun,
+  onRunScheduleAgain,
 }: ProjectChatConversationProps) {
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -92,6 +110,52 @@ export function ProjectChatConversation({
   const sendInFlightRef = useRef(false);
   const stopInFlightRef = useRef<string | null>(null);
   const approvalInFlightRef = useRef<Set<string>>(new Set());
+  const operationInFlightRef = useRef<Set<string>>(new Set());
+  const [pendingOperationActions, setPendingOperationActions] = useState<Map<string, string>>(new Map());
+  const [operationErrors, setOperationErrors] = useState<Map<string, string>>(new Map());
+
+  const parsedOperations = useMemo(() => {
+    const byMessageId = new Map<string, ProjectChatOperationMessage>();
+    const latestMessageIdByOperation = new Map<string, string>();
+    for (const message of messages) {
+      if (message.type !== "operation") continue;
+      const operation = parseProjectChatOperationMessage(message.content);
+      if (!operation) continue;
+      byMessageId.set(message.id, operation);
+      latestMessageIdByOperation.set(operation.operationId, message.id);
+    }
+    return { byMessageId, latestMessageIdByOperation };
+  }, [messages]);
+
+  const runOperationAction = async (
+    operationId: string,
+    action: ProjectOperationPendingAction | "select_workspace",
+    work: () => Promise<void> | void,
+  ) => {
+    if (operationInFlightRef.current.has(operationId)) return;
+    operationInFlightRef.current.add(operationId);
+    setPendingOperationActions((current) => new Map(current).set(operationId, action));
+    setOperationErrors((current) => {
+      const next = new Map(current);
+      next.delete(operationId);
+      return next;
+    });
+    try {
+      await work();
+    } catch (reason) {
+      setOperationErrors((current) => new Map(current).set(
+        operationId,
+        reason instanceof Error ? reason.message : "Project operation failed",
+      ));
+    } finally {
+      operationInFlightRef.current.delete(operationId);
+      setPendingOperationActions((current) => {
+        const next = new Map(current);
+        next.delete(operationId);
+        return next;
+      });
+    }
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -201,7 +265,60 @@ export function ProjectChatConversation({
               );
             }
             if (message.type === "operation") {
-              return <div key={message.id} className="rounded-md border bg-card px-3 py-2 text-sm" data-testid="project-operation-summary">{operationLabel(message.content)}</div>;
+              const parsed = parsedOperations.byMessageId.get(message.id);
+              if (!parsed) {
+                return <div key={message.id} className="rounded-md border bg-card px-3 py-2 text-sm text-muted-foreground">Project operation unavailable</div>;
+              }
+              if (parsedOperations.latestMessageIdByOperation.get(parsed.operationId) !== message.id) return null;
+              const operation = operationHasDeletedTarget(parsed, contextRefs)
+                ? { ...parsed, failure: { code: "deleted_target" as const } }
+                : parsed;
+              const pendingAction = pendingOperationActions.get(operation.operationId);
+              const operationError = operationErrors.get(operation.operationId);
+              if (operation.kind === "workspace_selection") {
+                const pendingWorkspaceId = pendingAction?.startsWith("workspace:")
+                  ? pendingAction.slice("workspace:".length)
+                  : null;
+                return (
+                  <WorkspaceSelectionCard
+                    key={message.id}
+                    operation={operation}
+                    pendingWorkspaceId={pendingWorkspaceId}
+                    actionError={operationError}
+                    onSelect={({ requestId, workspaceId }) => {
+                      void runOperationAction(operation.operationId, "select_workspace", async () => {
+                        setPendingOperationActions((current) => new Map(current).set(
+                          operation.operationId, `workspace:${workspaceId}`,
+                        ));
+                        await onSelectWorkspace(requestId, workspaceId);
+                      });
+                    }}
+                  />
+                );
+              }
+              return (
+                <ProjectOperationCard
+                  key={message.id}
+                  operation={operation}
+                  pendingAction={pendingAction as ProjectOperationPendingAction | undefined}
+                  actionError={operationError}
+                  onOpenSession={operation.kind === "agent_session_create" && onOpenAgentSession
+                    ? (selected) => { void runOperationAction(selected.operationId, "open_session", () => (
+                      onOpenAgentSession(selected.sessionId, selected.target ?? "local", selected.branch ?? null)
+                    )); }
+                    : undefined}
+                  onViewOutput={operation.kind === "schedule_run" && onOpenScheduleRun
+                    ? (selected) => { void runOperationAction(selected.operationId, "view_output", () => (
+                      onOpenScheduleRun(selected.runId, selected.scheduleId)
+                    )); }
+                    : undefined}
+                  onRunAgain={operation.kind === "schedule_run" && onRunScheduleAgain
+                    ? (selected) => { void runOperationAction(selected.operationId, "run_again", () => (
+                      onRunScheduleAgain(selected.runId)
+                    )); }
+                    : undefined}
+                />
+              );
             }
             if (message.type === "error") {
               const parsed = parseObject(message.content);

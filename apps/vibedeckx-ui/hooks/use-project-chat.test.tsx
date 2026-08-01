@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     listProjectChatThreads: vi.fn(), createProjectChatThread: vi.fn(), getProjectChatThread: vi.fn(),
     updateProjectChatThread: vi.fn(), deleteProjectChatThread: vi.fn(),
     sendProjectChatMessage: vi.fn(), stopProjectChatTurn: vi.fn(), approveProjectChatTool: vi.fn(),
+    selectProjectChatWorkspace: vi.fn(),
   },
   getFreshToken: vi.fn(),
   getWebSocketUrl: vi.fn((path: string) => `ws://example.test${path}`),
@@ -175,6 +176,17 @@ describe("useProjectChat", () => {
     );
     expect(FakeWebSocket.instances[0].url).toContain("/api/project-chat/threads/t1/stream");
     expect(mocks.getWebSocketUrl).not.toHaveBeenCalledWith(expect.stringContaining("/chat-sessions/"));
+  });
+
+  it("sends the exact pending request and offered workspace identities", async () => {
+    render("p1", "t1");
+    await flush();
+    mocks.api.selectProjectChatWorkspace.mockResolvedValue({ status: "resolving" });
+
+    await act(async () => latest.selectWorkspace("request-1", '["remote-1","dev"]'));
+
+    expect(mocks.api.selectProjectChatWorkspace)
+      .toHaveBeenCalledWith("t1", "request-1", '["remote-1","dev"]');
   });
 
   it("reuses one create request id after a lost response and hook remount, then rotates after success", async () => {

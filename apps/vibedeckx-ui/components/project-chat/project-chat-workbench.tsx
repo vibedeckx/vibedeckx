@@ -20,6 +20,9 @@ interface ProjectChatWorkbenchProps {
   onBack: () => void;
   onSelectThread: (threadId: string) => void;
   onOpenContext?: (ref: ProjectChatContextRef) => void;
+  onOpenAgentSession?: (sessionId: string, target: string, branch: string | null) => Promise<void> | void;
+  onOpenScheduleRun?: (runId: string, scheduleId: string) => Promise<void> | void;
+  onRunScheduleAgain?: (runId: string) => Promise<void>;
 }
 
 export function ProjectChatWorkbench({
@@ -29,6 +32,9 @@ export function ProjectChatWorkbench({
   onBack,
   onSelectThread,
   onOpenContext,
+  onOpenAgentSession,
+  onOpenScheduleRun,
+  onRunScheduleAgain,
 }: ProjectChatWorkbenchProps) {
   const chat = useProjectChat(projectId, threadId);
   const [railVisible, setRailVisible] = useState(true);
@@ -162,6 +168,7 @@ export function ProjectChatWorkbench({
             <ProjectChatConversation
               key={scopeKey}
               messages={chat.messages}
+              contextRefs={chat.contextRefs}
               status={chat.status}
               activeTurnId={chat.activeTurnId}
               queueLength={chat.queueLength}
@@ -171,6 +178,10 @@ export function ProjectChatWorkbench({
               onSend={chat.sendMessage}
               onStop={chat.stopTurn}
               onResolveApproval={chat.resolveToolApproval}
+              onSelectWorkspace={chat.selectWorkspace}
+              onOpenAgentSession={onOpenAgentSession}
+              onOpenScheduleRun={onOpenScheduleRun}
+              onRunScheduleAgain={onRunScheduleAgain}
             />
           )}
         </main>

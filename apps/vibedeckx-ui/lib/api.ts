@@ -596,10 +596,22 @@ export type ProjectChatOperationKind =
 
 export type ProjectChatOperationStatus = "pending" | "resolving" | "running" | "completed" | "failed";
 
+export type ProjectChatOperationFailureCode =
+  | "failed"
+  | "timeout"
+  | "remote_offline"
+  | "deleted_target";
+
+export interface ProjectChatOperationFailure {
+  code: ProjectChatOperationFailureCode;
+  message?: string;
+}
+
 interface ProjectChatOperationMessageBase {
   version: 1;
   operationId: string;
   status: ProjectChatOperationStatus;
+  failure?: ProjectChatOperationFailure;
 }
 
 export type ProjectChatOperationMessage = ProjectChatOperationMessageBase & (
@@ -672,6 +684,46 @@ export interface ProjectChatWorkspaceCandidate {
   id: string;
   target: string;
   branch: string | null;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parses the versioned public operation envelope. This deliberately validates
+ * the JSON shape and never derives operation state or identities from prose.
+ */
+export function parseProjectChatOperationMessage(content: string): ProjectChatOperationMessage | null {
+  let value: unknown;
+  try { value = JSON.parse(content); } catch { return null; }
+  if (!isRecordValue(value) || value.version !== 1
+    || typeof value.operationId !== "string" || value.operationId.length === 0
+    || !["pending", "resolving", "running", "completed", "failed"].includes(String(value.status))
+    || !["task_create", "task_update", "agent_session_create", "agent_instruction", "schedule_run", "workspace_selection"]
+      .includes(String(value.kind))) return null;
+  if (value.failure !== undefined) {
+    if (!isRecordValue(value.failure)
+      || !["failed", "timeout", "remote_offline", "deleted_target"].includes(String(value.failure.code))
+      || (value.failure.message !== undefined && typeof value.failure.message !== "string")) return null;
+  }
+  if ((value.kind === "task_create" || value.kind === "task_update")
+    && typeof value.taskId !== "string") return null;
+  if ((value.kind === "agent_session_create" || value.kind === "agent_instruction")
+    && typeof value.sessionId !== "string") return null;
+  if (value.kind === "agent_session_create"
+    && (value.target !== undefined && typeof value.target !== "string"
+      || value.branch !== undefined && value.branch !== null && typeof value.branch !== "string")) return null;
+  if (value.kind === "schedule_run"
+    && (typeof value.scheduleId !== "string" || typeof value.runId !== "string")) return null;
+  if (value.kind === "workspace_selection") {
+    if (typeof value.requestId !== "string" || !Array.isArray(value.candidates)) return null;
+    if (!value.candidates.every((candidate) => isRecordValue(candidate)
+      && typeof candidate.id === "string" && candidate.id.length > 0
+      && typeof candidate.target === "string"
+      && (candidate.branch === null || typeof candidate.branch === "string"))) return null;
+  }
+  return value as unknown as ProjectChatOperationMessage;
 }
 
 export interface ProjectChatToolApprovalMessage {
@@ -2153,6 +2205,26 @@ export const api = {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error ?? `Failed to resolve Project Chat tool approval: ${res.status}`);
     }
+  },
+
+  async selectProjectChatWorkspace(
+    threadId: string,
+    requestId: string,
+    workspaceId: string,
+  ): Promise<{ status: ProjectChatOperationStatus; sessionId?: string }> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/workspace-selection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, workspaceId }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw Object.assign(
+        new Error(body.error ?? `Failed to select Project Chat workspace: ${res.status}`),
+        { status: res.status },
+      );
+    }
+    return res.json();
   },
 
   // File Browser API

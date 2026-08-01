@@ -18,6 +18,7 @@ import {
 } from "./project-chat-context.js";
 import {
   createProjectChatTools,
+  projectChatPublicOperationContent,
   type CreateProjectChatToolsOptions,
   type ProjectChatTool,
   type ProjectChatTools,
@@ -169,6 +170,21 @@ export class ProjectChatActiveTurnConflictError extends Error {
   constructor() {
     super("Active Project Chat turn changed");
   }
+}
+
+export class ProjectChatWorkspaceSelectionConflictError extends Error {
+  readonly code = "PROJECT_CHAT_WORKSPACE_SELECTION_CONFLICT";
+
+  constructor(message: string) {
+    super(message.slice(0, 512));
+  }
+}
+
+function isWorkspaceSelectionConflictMessage(message: string): boolean {
+  return message === "Workspace selection request is invalid"
+    || message === "Workspace was not offered by this selection request"
+    || message.startsWith("Workspace selection request is already resolved")
+    || message.startsWith("Workspace is no longer available");
 }
 
 const PROJECT_CHAT_STREAM_ERROR_LIMIT = 512;
@@ -606,6 +622,44 @@ export class ProjectChatManager {
     return true;
   }
 
+  /** Resolve an exact candidate from a persisted workspace-selection request. */
+  async selectWorkspace(
+    threadId: string,
+    userId: string,
+    requestId: string,
+    workspaceId: string,
+  ): Promise<{ status: import("./storage/types.js").ProjectChatOperationStatus; sessionId?: string } | null> {
+    const thread = await this.findAuthorized(threadId, userId);
+    if (!thread) return null;
+    if (!this.toolDependencies) throw new Error("Project Chat mutations are not configured");
+    const tools = await createProjectChatTools({
+      projectId: thread.project_id,
+      threadId: thread.id,
+      userId: thread.user_id,
+      storage: this.storage,
+      ...this.toolDependencies,
+    });
+    try {
+      await tools.select_workspace.execute({ requestId, workspaceId });
+    } catch (error) {
+      if (error instanceof Error && error.message === "Workspace selection request not found") return null;
+      if (error instanceof Error && isWorkspaceSelectionConflictMessage(error.message)) {
+        throw new ProjectChatWorkspaceSelectionConflictError(error.message);
+      }
+      throw error;
+    }
+    const operation = await this.storage.projectChatOperations.getById(
+      requestId, thread.id, thread.project_id, thread.user_id,
+    );
+    if (!operation || operation.kind !== "agent_session_create"
+      || operation.payload.kind !== "agent_session_create") return null;
+    await this.publishPersistedThreadProjection(thread);
+    return {
+      status: operation.status,
+      ...(operation.payload.sessionId ? { sessionId: operation.payload.sessionId } : {}),
+    };
+  }
+
   async deleteThread(threadId: string, userId: string): Promise<boolean> {
     const pendingAtStart = this.deletingThreads.get(threadId);
     if (pendingAtStart) {
@@ -731,8 +785,13 @@ export class ProjectChatManager {
       const details = expectedKind === "agent_session_create"
         ? { sessionId: entityId }
         : { scheduleId: (event as { scheduleId: string }).scheduleId, runId: entityId };
+      const error = status !== "failed"
+        ? null
+        : event.type === "schedule:run-finished" && event.status === "timeout"
+          ? "Operation timed out"
+          : "Operation failed";
       const transitioned = await this.transitionOperation(
-        operation, status, details, status === "failed" ? "Operation failed" : null,
+        operation, status, details, error,
       );
       if (!transitioned?.changed) continue;
       const live = this.liveThreads.get(operation.thread_id);
@@ -751,10 +810,7 @@ export class ProjectChatManager {
     error: string | null = null,
   ) {
     const payload = { ...operation.payload, status, ...details } as import("./storage/types.js").ProjectChatOperationPayload;
-    const { initialInstructionDelivery: _delivery, contextConfirmed: _context, ...publicPayload } = payload as typeof payload & {
-      initialInstructionDelivery?: unknown; contextConfirmed?: unknown;
-    };
-    const content = JSON.stringify(publicPayload);
+    const content = projectChatPublicOperationContent(payload, error);
     return this.storage.projectChatOperations.transition({
       id: operation.id, thread_id: operation.thread_id,
       project_id: operation.project_id, user_id: operation.user_id,
@@ -1494,6 +1550,9 @@ export class ProjectChatManager {
             userId: live.thread.user_id,
             storage: this.storage,
             ...this.toolDependencies,
+            onOperationMessage: async () => {
+              await this.publishPersistedThreadProjection(live.thread);
+            },
           })
           : undefined,
       };
@@ -1711,6 +1770,17 @@ export class ProjectChatManager {
         value: { type: "ENTRY", content: message },
       }],
     });
+  }
+
+  private async publishPersistedThreadProjection(thread: ProjectChatThread): Promise<void> {
+    const messages = await this.storage.projectChatMessages.listByThread(
+      thread.id, thread.project_id, thread.user_id,
+    );
+    const live = this.liveThreads.get(thread.id);
+    if (!live || live.thread.project_id !== thread.project_id || live.thread.user_id !== thread.user_id
+      || this.lifecycle(thread.id).deleted || this.closingThreads.has(thread.id)) return;
+    for (const message of messages) this.publishMessage(live, message);
+    await this.refreshContextRefsBestEffort(live);
   }
 
   private snapshot(live: LiveThread): ProjectChatSnapshot {

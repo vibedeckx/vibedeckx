@@ -2,7 +2,11 @@ import { createHash, randomUUID } from "crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { ProjectChatThread } from "../storage/types.js";
-import { ProjectChatActiveTurnConflictError } from "../project-chat-manager.js";
+import {
+  ProjectChatActiveTurnConflictError,
+  ProjectChatWorkspaceSelectionConflictError,
+} from "../project-chat-manager.js";
+import { MAX_TOOL_SELECTOR_ID } from "../project-chat-tools.js";
 import { listProjectChatPublicContextRefs } from "../project-chat-context.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
@@ -16,6 +20,7 @@ type PatchBody = { title?: string | null; archived?: boolean };
 type MessageBody = { content: string };
 type ToolApprovalBody = { approvalId: string; approved: boolean };
 type StopBody = { expectedActiveTurnId: string };
+type WorkspaceSelectionBody = { requestId: string; workspaceId: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -84,6 +89,17 @@ function parseStopBody(body: unknown): StopBody | null {
     || typeof body.expectedActiveTurnId !== "string") return null;
   const expectedActiveTurnId = body.expectedActiveTurnId.trim();
   return expectedActiveTurnId ? { expectedActiveTurnId } : null;
+}
+
+function parseWorkspaceSelectionBody(body: unknown): WorkspaceSelectionBody | null {
+  if (!isRecord(body) || Object.keys(body).length !== 2
+    || Object.keys(body).some((key) => key !== "requestId" && key !== "workspaceId")) return null;
+  if (typeof body.requestId !== "string" || typeof body.workspaceId !== "string") return null;
+  const requestId = body.requestId.trim();
+  const workspaceId = body.workspaceId.trim();
+  if (!requestId || requestId.length > MAX_TOOL_SELECTOR_ID
+    || !workspaceId || workspaceId.length > MAX_TOOL_SELECTOR_ID) return null;
+  return { requestId, workspaceId };
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -289,6 +305,33 @@ const routes: FastifyPluginAsync = async (fastify) => {
     );
     if (!resolved) return reply.code(404).send({ error: "Tool approval not found" });
     return reply.code(200).send({ resolved: true });
+  });
+
+  fastify.post<{
+    Params: { threadId: string };
+    Body: unknown;
+  }>("/api/project-chat/threads/:threadId/workspace-selection", async (req, reply) => {
+    const owned = await getOwnedThread(req, reply, req.params.threadId);
+    if (!owned) return;
+    const body = parseWorkspaceSelectionBody(req.body);
+    if (!body) {
+      return reply.code(400).send({ error: "requestId and workspaceId are required" });
+    }
+    try {
+      const result = await fastify.projectChatManager.selectWorkspace(
+        owned.thread.id, owned.userId, body.requestId, body.workspaceId,
+      );
+      if (!result) return reply.code(404).send({ error: "Workspace selection not found" });
+      return reply.code(200).send(result);
+    } catch (error) {
+      if (error instanceof ProjectChatWorkspaceSelectionConflictError
+        || (isRecord(error) && error.code === "PROJECT_CHAT_WORKSPACE_SELECTION_CONFLICT")) {
+        const message = error instanceof Error ? error.message : "Workspace selection conflict";
+        return reply.code(409).send({ error: message.slice(0, 512) });
+      }
+      req.log.error({ err: error }, "Project Chat workspace selection failed");
+      return reply.code(500).send({ error: "Workspace selection failed" });
+    }
   });
 };
 

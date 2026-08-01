@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createProjectChatTools,
   createRemoteProjectSessionReader,
+  projectChatPublicOperationContent,
   type RemoteProjectSessionReader,
 } from "./project-chat-tools.js";
 import { createSqliteStorage } from "./storage/sqlite.js";
@@ -72,6 +73,23 @@ describe("createProjectChatTools", () => {
   it("authorizes the bound project, user, and thread before exposing tools", async () => {
     await expect(tools({ projectId: "project-2" })).rejects.toThrow("Project Chat thread not found");
     await expect(tools({ userId: "user-2" })).rejects.toThrow("Project not found");
+  });
+
+  it.each([
+    ["remote execution timed out", "timeout"],
+    ["remote server is offline", "remote_offline"],
+    ["Schedule is no longer authorized", "deleted_target"],
+    ["executor failed", "failed"],
+  ] as const)("publishes a structured %s failure code instead of requiring prose parsing", (error, code) => {
+    const content = projectChatPublicOperationContent({
+      version: 1, kind: "schedule_run", operationId: "operation-1", status: "failed",
+      scheduleId: "schedule-1", runId: "run-1",
+    }, error);
+
+    expect(JSON.parse(content)).toMatchObject({
+      version: 1, kind: "schedule_run", operationId: "operation-1", status: "failed",
+      failure: { code },
+    });
   });
 
   it("exposes only the five V1 mutations and workspace resolution alongside read tools", async () => {

@@ -55,6 +55,7 @@ export interface UseProjectChatResult extends ProjectChatStreamState {
   sendMessage: (content: string) => Promise<void>;
   stopTurn: (expectedActiveTurnId: string) => Promise<boolean>;
   resolveToolApproval: (approvalId: string, approved: boolean) => Promise<void>;
+  selectWorkspace: (requestId: string, workspaceId: string) => Promise<void>;
 }
 
 const emptyStreamState = (): ProjectChatStreamState => ({
@@ -688,6 +689,12 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     await api.approveProjectChatTool(targetThreadId, approvalId, approved);
   }, []);
 
+  const selectWorkspace = useCallback(async (requestId: string, workspaceId: string) => {
+    const targetThreadId = selectedThreadIdRef.current;
+    if (!targetThreadId) throw new Error("No Project Chat thread selected");
+    await api.selectProjectChatWorkspace(targetThreadId, requestId, workspaceId);
+  }, []);
+
   return {
     ...streamState,
     threads,
@@ -705,5 +712,6 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     sendMessage,
     stopTurn,
     resolveToolApproval,
+    selectWorkspace,
   };
 }
