@@ -145,6 +145,21 @@ describe("Project Chat WebSocket route", () => {
     await new Promise<void>((resolve) => socket.once("close", () => resolve()));
   });
 
+  it("does not snapshot a local thread that references an authenticated project", async () => {
+    await storage.projectChatThreads.create({
+      id: "local-cross-tenant",
+      project_id: "project-1",
+      user_id: "local",
+      title: "Must stay private",
+    });
+    auth.userId = null;
+
+    const { socket, firstMessage } = await connect("local-cross-tenant");
+
+    await expect(firstMessage).resolves.toEqual({ error: "Thread not found" });
+    await new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  });
+
   it("distinguishes retryable open infrastructure failures from terminal not-found", async () => {
     const infrastructureManager = {
       openThread: vi.fn().mockRejectedValue(new Error("context storage unavailable")),

@@ -1260,9 +1260,7 @@ export class ProjectChatManager {
     if (!userId || this.closingThreads.has(threadId) || this.lifecycle(threadId).deleted) return undefined;
     const thread = await this.storage.projectChatThreads.getOwnedById(threadId, userId);
     if (!thread) return undefined;
-    const project = userId === "local"
-      ? await this.storage.projects.getById(thread.project_id)
-      : await this.storage.projects.getById(thread.project_id, userId);
+    const project = await this.storage.projects.getById(thread.project_id, userId);
     if (!project) return undefined;
     return this.storage.projectChatThreads.getById(thread.id, thread.project_id, userId);
   }

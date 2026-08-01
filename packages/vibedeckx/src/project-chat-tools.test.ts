@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createProjectChatTools,
@@ -73,6 +74,35 @@ describe("createProjectChatTools", () => {
   it("authorizes the bound project, user, and thread before exposing tools", async () => {
     await expect(tools({ projectId: "project-2" })).rejects.toThrow("Project Chat thread not found");
     await expect(tools({ userId: "user-2" })).rejects.toThrow("Project not found");
+    await storage.projectChatThreads.create({
+      id: "local-foreign-thread", project_id: "project-1", user_id: "local", title: null,
+    });
+    await expect(tools({ threadId: "local-foreign-thread", userId: "local" }))
+      .rejects.toThrow("Project not found");
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("revokes local workspace tools when the project owner changes", async () => {
+    await storage.projects.create({ id: "local-project", name: "Local", path: "/tmp/local" });
+    await storage.projectChatThreads.create({
+      id: "local-thread", project_id: "local-project", user_id: "local", title: null,
+    });
+    await storage.searchCache.applyCatalogSnapshot("local-project", "local", {
+      workspaces: [{ branch: "main" }], sessions: [],
+    });
+    const surface = await tools({
+      projectId: "local-project", threadId: "local-thread", userId: "local",
+    });
+    const database = new Database(path.join(dir, "test.sqlite"));
+    database.prepare("UPDATE projects SET user_id = ? WHERE id = ?")
+      .run("authenticated-user", "local-project");
+    database.close();
+
+    await expect(surface.list_workspaces.execute({}))
+      .rejects.toThrow("Project is no longer authorized");
+    expect(await storage.projectChatContextRefs.listByThread(
+      "local-thread", "local-project", "local", 20,
+    )).toEqual([]);
   });
 
   it.each([

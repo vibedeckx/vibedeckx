@@ -427,6 +427,21 @@ describe("ProjectChatManager", () => {
     await manager.shutdown();
   });
 
+  it("does not open a local thread that references an authenticated project", async () => {
+    await storage.projectChatThreads.create({
+      id: "local-open-cross-tenant",
+      project_id: "project-1",
+      user_id: "local",
+      title: null,
+    });
+    const manager = new ProjectChatManager(storage, reply("unsafe"));
+
+    await expect(manager.openThread("local-open-cross-tenant", "local"))
+      .rejects.toMatchObject({ code: "PROJECT_CHAT_NOT_FOUND" });
+
+    await manager.shutdown();
+  });
+
   it("bounds startup recovery and fairly drains a large backlog under the global turn cap", async () => {
     for (let index = 0; index < 12; index++) {
       const id = `backlog-${String(index).padStart(2, "0")}`;

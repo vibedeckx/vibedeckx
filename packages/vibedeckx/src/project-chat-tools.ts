@@ -597,9 +597,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     return finishOperation(current, "running", details);
   };
   const workspaceCandidates = async () => {
-    const project = userId === "local"
-      ? await storage.projects.getById(projectId)
-      : await storage.projects.getById(projectId, userId);
+    const project = await storage.projects.getById(projectId, userId);
     if (!project) throw new Error("Project is no longer authorized");
     const rows = await storage.searchCache.listWorkspacesByProject(projectId, LIST_LIMIT + 1);
     const candidates = rows.flatMap((row) => {
