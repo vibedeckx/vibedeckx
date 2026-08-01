@@ -633,10 +633,12 @@ export interface Storage {
     create(server: { name: string }, userId?: string): Promise<RemoteServer>;
     getAll(userId?: string): Promise<RemoteServer[]>;
     getById(id: string, userId?: string): Promise<RemoteServer | undefined>;
+    /** Trusted connect/provider lookup. Deliberately unscoped: the token is the credential. */
     getByToken(token: string): Promise<RemoteServer | undefined>;
     /** Owner user_id of a server, unscoped — for ownership checks without a request context. */
     getOwnerId(id: string): Promise<string | undefined>;
     update(id: string, opts: { name?: string; cross_remote_access?: CrossRemoteAccess }, userId?: string): Promise<RemoteServer | undefined>;
+    /** Trusted connection-manager update, not a user-facing mutation API. */
     updateStatus(id: string, status: RemoteServerStatus): Promise<void>;
     /** Current connect token, minting one on first use. Idempotent — never invalidates a token in use. */
     generateToken(id: string, userId?: string): Promise<string | undefined>;

@@ -73,7 +73,7 @@ async function renumberProjectRemotes(
 /** Owner-scoped row read — undefined when the row is missing or belongs to someone else. */
 function readRemoteServerRow(kdb: Kysely<DB>, id: string, userId?: string) {
   let query = kdb.selectFrom("remote_servers").selectAll().where("id", "=", id);
-  if (userId) query = query.where("user_id", "=", userId);
+  if (userId !== undefined) query = query.where("user_id", "=", userId);
   return query.executeTakeFirst();
 }
 
@@ -95,7 +95,7 @@ async function mintConnectToken(
     connect_token_created_at: sql`datetime('now')`,
     updated_at: sql`datetime('now')`,
   }).where("id", "=", id);
-  if (userId) query = query.where("user_id", "=", userId);
+  if (userId !== undefined) query = query.where("user_id", "=", userId);
   if (opts.onlyIfAbsent) query = query.where("connect_token", "is", null);
   const result = await query.executeTakeFirst();
   if (opts.onlyIfAbsent && (result?.numUpdatedRows ?? 0n) === 0n) return undefined;
@@ -118,7 +118,7 @@ export const createRemoteServerRepos = (
         connect_token: null,
         connect_token_created_at: null,
         last_connected_at: null,
-        user_id: userId ?? "",
+        user_id: userId ?? "local",
       }).execute();
 
       const row = await kdb.selectFrom("remote_servers").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
@@ -127,14 +127,14 @@ export const createRemoteServerRepos = (
 
     getAll: async (userId) => {
       let query = kdb.selectFrom("remote_servers").selectAll();
-      if (userId) query = query.where("user_id", "=", userId);
+      if (userId !== undefined) query = query.where("user_id", "=", userId);
       const rows = await query.orderBy("created_at", "desc").execute();
       return rows.map(mapRemoteServer);
     },
 
     getById: async (id, userId) => {
       let query = kdb.selectFrom("remote_servers").selectAll().where("id", "=", id);
-      if (userId) query = query.where("user_id", "=", userId);
+      if (userId !== undefined) query = query.where("user_id", "=", userId);
       const row = await query.executeTakeFirst();
       return row ? mapRemoteServer(row) : undefined;
     },
@@ -157,12 +157,12 @@ export const createRemoteServerRepos = (
       if (Object.keys(sets).length > 0) {
         sets.updated_at = sql`datetime('now')`;
         let query = kdb.updateTable("remote_servers").set(sets).where("id", "=", id);
-        if (userId) query = query.where("user_id", "=", userId);
+        if (userId !== undefined) query = query.where("user_id", "=", userId);
         await query.execute();
       }
 
       let readQuery = kdb.selectFrom("remote_servers").selectAll().where("id", "=", id);
-      if (userId) readQuery = readQuery.where("user_id", "=", userId);
+      if (userId !== undefined) readQuery = readQuery.where("user_id", "=", userId);
       const row = await readQuery.executeTakeFirst();
       return row ? mapRemoteServer(row) : undefined;
     },
@@ -200,14 +200,14 @@ export const createRemoteServerRepos = (
         connect_token_created_at: null,
         updated_at: sql`datetime('now')`,
       }).where("id", "=", id);
-      if (userId) query = query.where("user_id", "=", userId);
+      if (userId !== undefined) query = query.where("user_id", "=", userId);
       const result = await query.executeTakeFirst();
       return (result?.numUpdatedRows ?? 0n) > 0n;
     },
 
     delete: async (id, userId) => {
       let query = kdb.deleteFrom("remote_servers").where("id", "=", id);
-      if (userId) query = query.where("user_id", "=", userId);
+      if (userId !== undefined) query = query.where("user_id", "=", userId);
       const result = await query.executeTakeFirst();
       return (result?.numDeletedRows ?? 0n) > 0n;
     },

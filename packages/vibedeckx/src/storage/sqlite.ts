@@ -869,7 +869,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!remoteServerTableInfoV2.some(col => col.name === "user_id")) {
     db.exec(`
       BEGIN;
-      ALTER TABLE remote_servers ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE remote_servers ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local';
       CREATE TABLE remote_servers_new (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -880,7 +880,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         connect_token_created_at TEXT,
         status TEXT NOT NULL DEFAULT 'unknown',
         last_connected_at TEXT,
-        user_id TEXT NOT NULL DEFAULT '',
+        user_id TEXT NOT NULL DEFAULT 'local',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE(url, user_id)
@@ -913,7 +913,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
           connect_token_created_at TEXT,
           status TEXT NOT NULL DEFAULT 'unknown',
           last_connected_at TEXT,
-          user_id TEXT NOT NULL DEFAULT '',
+          user_id TEXT NOT NULL DEFAULT 'local',
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at TEXT NOT NULL DEFAULT (datetime('now')),
           UNIQUE(url, user_id)
@@ -941,6 +941,58 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const remoteServerAccessInfo = db.prepare("PRAGMA table_info(remote_servers)").all() as { name: string }[];
   if (!remoteServerAccessInfo.some(col => col.name === "cross_remote_access")) {
     db.exec("ALTER TABLE remote_servers ADD COLUMN cross_remote_access TEXT NOT NULL DEFAULT 'off'");
+  }
+
+  // Canonicalize solo-mode ownership. Older schemas defaulted user_id to the
+  // empty string, which both made browser routes accidentally unscoped and
+  // prevented a local project from associating its local remote server. Rebuild
+  // transactionally so the column default is fixed as well as existing rows;
+  // the PRAGMA/data predicate makes this safe to run on every open.
+  {
+    const ownerInfo = db.prepare("PRAGMA table_info(remote_servers)").all() as {
+      name: string;
+      dflt_value: string | null;
+    }[];
+    const ownerColumn = ownerInfo.find((column) => column.name === "user_id");
+    const hasBlankOwner = !!db.prepare(
+      "SELECT 1 FROM remote_servers WHERE user_id = '' LIMIT 1",
+    ).get();
+    if (ownerColumn?.dflt_value !== "'local'" || hasBlankOwner) {
+      db.exec(`
+        BEGIN;
+        CREATE TABLE remote_servers_local_owner (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          url TEXT,
+          api_key TEXT,
+          connection_mode TEXT NOT NULL DEFAULT 'outbound',
+          connect_token TEXT,
+          connect_token_created_at TEXT,
+          status TEXT NOT NULL DEFAULT 'unknown',
+          last_connected_at TEXT,
+          user_id TEXT NOT NULL DEFAULT 'local',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          cross_remote_access TEXT NOT NULL DEFAULT 'off',
+          UNIQUE(url, user_id)
+        );
+        INSERT INTO remote_servers_local_owner (
+          id, name, url, api_key, connection_mode, connect_token,
+          connect_token_created_at, status, last_connected_at, user_id,
+          created_at, updated_at, cross_remote_access
+        )
+        SELECT
+          id, name, url, api_key, connection_mode, connect_token,
+          connect_token_created_at, status, last_connected_at,
+          CASE WHEN user_id = '' THEN 'local' ELSE user_id END,
+          created_at, updated_at, cross_remote_access
+        FROM remote_servers;
+        DROP TABLE remote_servers;
+        ALTER TABLE remote_servers_local_owner RENAME TO remote_servers;
+        CREATE INDEX IF NOT EXISTS idx_remote_servers_user_id ON remote_servers(user_id);
+        COMMIT;
+      `);
+    }
   }
 
   // Reset stale 'online' status for inbound remote_servers from previous server instances.

@@ -2,7 +2,7 @@ import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { RemoteServer, CrossRemoteAccess } from "../storage/types.js";
 import { proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
 function sanitizeServer(server: RemoteServer) {
