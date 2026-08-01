@@ -2,8 +2,10 @@
 
 ## Status
 
-Implemented and acceptance-verified, 2026-08-01. The approved product model and
-information architecture remain unchanged.
+Implemented with automated acceptance and a partial real-browser smoke,
+2026-08-01. The approved product model and information architecture remain
+unchanged. Live model-driven browser acceptance remains incomplete because the
+available DeepSeek credential returns 401.
 
 ## Implementation reconciliation
 
@@ -28,6 +30,15 @@ approved Project Chat behavior:
   deleted or no-longer-authorized targets remain readable but non-actionable.
 - The workbench keeps unsent drafts per project/thread while it remains mounted,
   so thread switches and responsive drawer transitions do not erase input.
+- Local no-auth data uses a canonical local owner across projects, remote
+  servers, and machine identity. Idempotent migrations normalize legacy blank
+  or machine-scoped ownership before scoped reads and writes.
+- User-facing project child routes authorize the current principal against the
+  parent project, including no-auth local mode. Project-remote mutations require
+  both project ownership and association membership.
+- Commander read and mutation tools revalidate live project, workspace, remote,
+  and entity scope immediately before use. Cached or model-supplied identifiers
+  are never sufficient authorization.
 
 Detailed work-journal, mutation, lifecycle, and durable-effect protocols are
 recorded in the companion `2026-07-31-project-chat-*` design and implementation

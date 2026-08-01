@@ -902,16 +902,17 @@ git commit -m "docs: reconcile project chat implementation"
 
 ## Implementation result
 
-Completed 2026-08-01. The twelve planned stages were implemented, with the
-intentional durability and safety refinements summarized in the design's
-Implementation reconciliation section. No Mission entity was added, Project
-Chat remained project-scoped rather than branch-scoped, and V1 did not gain
-destructive commander tools.
+Implemented and automatically verified 2026-08-01, with a partial real-browser
+smoke. The intentional durability, ownership, and scope refinements are
+summarized in the design's Implementation reconciliation section. No Mission
+entity was added, Project Chat remained project-scoped rather than
+branch-scoped, and V1 did not gain destructive commander tools.
 
 ### Final verification evidence
 
-- `pnpm --filter vibedeckx test`: exit 0; 101 test files passed, 2 skipped;
-  1,565 tests passed, 11 skipped.
+- `pnpm --filter vibedeckx test`: exit 0; 1,590 tests passed, 11 skipped after
+  the local ownership, child-route scope, tool revalidation, project-remote,
+  remote-server, and machine-identity security fixes.
 - `pnpm --filter vibedeckx-ui test`: exit 0; 61 test files and 494 tests passed.
 - `pnpm --filter vibedeckx exec tsc --noEmit`: exit 0.
 - `pnpm --filter vibedeckx-ui exec tsc --noEmit`: exit 0.
@@ -927,8 +928,7 @@ destructive commander tools.
   files. This was recorded rather than expanding Task 12 into a cross-codebase
   lint refactor. Tests, type-checks, and production builds are green.
 
-Acceptance was verified through executable tests and code inspection, not an
-unrecorded browser claim:
+Automated acceptance was verified through executable tests and code inspection:
 
 - `project-activity-view.test.tsx` verifies the Project Chat, Recent Agent
   Sessions, Schedule Results, Priority Tasks, and Attention Required cards and
@@ -945,6 +945,28 @@ unrecorded browser claim:
 - Storage and manager tests verify that Thread identity contains project/user
   scope but no branch/workspace ownership and that operation state survives
   reload.
+- Security integration tests verify canonical local ownership and migration,
+  user-facing child-route scope, live Commander tool revalidation,
+  project-remote association scope, remote-server ownership, and legacy machine
+  identity migration.
 
-A manual browser smoke was not claimed because this verification environment
-did not provide a configured authenticated interactive runtime fixture.
+### Real-browser smoke evidence
+
+A fresh no-auth local server and data directory were used for a real-browser
+smoke. It confirmed:
+
+- the Project dashboard renders against fresh local data;
+- the composer creates a Thread and navigates to its canonical Chat URL;
+- the workbench has one conversation column and one shared Threads/Context rail;
+- Back returns to Project Overview; and
+- the narrow layout moves Threads and Context into one combined drawer.
+
+The first smoke exposed a real `Project not found` ownership defect. The local
+ownership and scope fixes above were applied, and a second fresh smoke confirmed
+that error no longer occurs.
+
+The external model turn then stopped at a DeepSeek 401 caused by the missing or
+invalid API key. Therefore the ambiguous Workspace selection and full live
+operation-card lifecycle were not completed manually in the browser. Those
+scenarios remain covered by the real backend integration tracer and focused UI
+tests; this document does not claim complete manual acceptance.
