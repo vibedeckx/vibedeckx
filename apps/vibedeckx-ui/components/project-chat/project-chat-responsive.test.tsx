@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,7 +10,13 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => state.mobile }));
-vi.mock("@/hooks/use-project-chat", () => ({ useProjectChat: () => state.chat }));
+vi.mock("@/hooks/use-project-chat", () => ({
+  useProjectChat: (_projectId: string, threadId: string) => ({
+    ...state.chat,
+    thread: thread(threadId),
+    contextRefs: state.chat.contextRefs.map((ref) => ({ ...ref, thread_id: threadId })),
+  }),
+}));
 
 import { ProjectChatWorkbench } from "./project-chat-workbench";
 import type { ProjectChatThread } from "@/lib/api";
@@ -132,14 +138,17 @@ describe("Project Chat responsive workbench", () => {
   });
 
   it("closes the drawer on thread switch while preserving the live Chat draft", async () => {
-    const onSelectThread = vi.fn();
-    act(() => root.render(<ProjectChatWorkbench
-      projectId="project-1"
-      threadId="thread-1"
-      projectName="VibeDeckX"
-      onBack={vi.fn()}
-      onSelectThread={onSelectThread}
-    />));
+    function StatefulWorkbench() {
+      const [threadId, setThreadId] = useState("thread-1");
+      return <ProjectChatWorkbench
+        projectId="project-1"
+        threadId={threadId}
+        projectName="VibeDeckX"
+        onBack={vi.fn()}
+        onSelectThread={setThreadId}
+      />;
+    }
+    act(() => root.render(<StatefulWorkbench />));
     const composer = document.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
     act(() => typeIn(composer, "Keep this draft"));
     act(() => button("Open threads and context").click());
@@ -149,10 +158,23 @@ describe("Project Chat responsive workbench", () => {
       await Promise.resolve();
     });
 
-    expect(onSelectThread).toHaveBeenCalledWith("thread-2");
     expect(document.querySelector('[data-testid="project-chat-mobile-drawer"]')).toBeNull();
-    expect(document.querySelector('textarea[aria-label="Message Project Chat"]')).toBe(composer);
-    expect(composer.value).toBe("Keep this draft");
+    expect(button("Current thread: Login refactor")).toBeTruthy();
+    expect(document.activeElement).toBe(button("Open threads and context"));
+    expect(document.querySelectorAll('[data-testid="project-chat-main"]')).toHaveLength(1);
+    expect(document.querySelectorAll('textarea[aria-label="Message Project Chat"]')).toHaveLength(1);
+    const secondComposer = document.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
+    expect(secondComposer).not.toBe(composer);
+    expect(secondComposer.value).toBe("");
+
+    act(() => button("Open threads and context").click());
+    await act(async () => {
+      button("Open thread: Release plan").click();
+      await Promise.resolve();
+    });
+    expect(button("Current thread: Release plan")).toBeTruthy();
+    expect((document.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement).value)
+      .toBe("Keep this draft");
   });
 
   it("renders the auxiliary rail only on desktop and never mounts a mobile drawer", () => {

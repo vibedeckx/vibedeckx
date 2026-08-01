@@ -57,6 +57,8 @@ interface ProjectChatConversationProps {
   loading: boolean;
   connected: boolean;
   error: string | null;
+  initialDraft?: string;
+  onDraftChange?: (draft: string) => void;
   onSend: (content: string) => Promise<void>;
   onStop: (expectedActiveTurnId: string) => Promise<boolean>;
   onResolveApproval: (approvalId: string, approved: boolean) => Promise<void>;
@@ -119,6 +121,8 @@ export function ProjectChatConversation({
   loading,
   connected,
   error,
+  initialDraft = "",
+  onDraftChange,
   onSend,
   onStop,
   onResolveApproval,
@@ -127,7 +131,7 @@ export function ProjectChatConversation({
   onOpenScheduleRun,
   onRunScheduleAgain,
 }: ProjectChatConversationProps) {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(initialDraft);
   const [submitting, setSubmitting] = useState(false);
   const [stoppingTurnId, setStoppingTurnId] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<Set<string>>(new Set());
@@ -192,6 +196,7 @@ export function ProjectChatConversation({
     try {
       await onSend(content);
       setInput("");
+      onDraftChange?.("");
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "Failed to send message");
     } finally {
@@ -390,7 +395,10 @@ export function ProjectChatConversation({
             <Textarea
               aria-label="Message Project Chat"
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              onChange={(event) => {
+                setInput(event.target.value);
+                onDraftChange?.(event.target.value);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();

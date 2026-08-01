@@ -43,6 +43,7 @@ export function ProjectChatWorkbench({
   const [newThreadPending, setNewThreadPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const newThreadInFlightRef = useRef(false);
+  const draftsRef = useRef(new Map<string, string>());
   const mobileRailTriggerRef = useRef<HTMLButtonElement | null>(null);
   const scopeGenerationRef = useRef(0);
   const title = projectChatThreadTitle(chat.thread);
@@ -184,6 +185,11 @@ export function ProjectChatWorkbench({
               loading={chat.threadLoading}
               connected={chat.isConnected}
               error={chat.error}
+              initialDraft={draftsRef.current.get(scopeKey) ?? ""}
+              onDraftChange={(draft) => {
+                if (draft) draftsRef.current.set(scopeKey, draft);
+                else draftsRef.current.delete(scopeKey);
+              }}
               onSend={chat.sendMessage}
               onStop={chat.stopTurn}
               onResolveApproval={chat.resolveToolApproval}
