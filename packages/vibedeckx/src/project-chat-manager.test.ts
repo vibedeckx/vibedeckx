@@ -380,8 +380,11 @@ describe("ProjectChatManager", () => {
   });
 
   it("preserves local-sentinel project authorization during autonomous recovery", async () => {
+    await storage.projects.create({
+      id: "local-project", name: "Local", path: "/tmp/local-project",
+    });
     await storage.projectChatThreads.createWithInitialTurn({
-      id: "local-owner", project_id: "project-1", user_id: "local", title: null,
+      id: "local-owner", project_id: "local-project", user_id: "local", title: null,
       initialTurn: { messageId: "local-message", workItemId: "local-work", content: "run locally" },
     });
     const run = vi.fn(async function* () {
@@ -393,6 +396,34 @@ describe("ProjectChatManager", () => {
     await waitFor(() => run.mock.calls.length === 1);
 
     expect(run).toHaveBeenCalledOnce();
+    await manager.shutdown();
+  });
+
+  it("does not let the local sentinel recover work for an authenticated project", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "local-cross-tenant", project_id: "project-1", user_id: "local", title: null,
+      initialTurn: {
+        messageId: "local-cross-tenant-message",
+        workItemId: "local-cross-tenant-work",
+        content: "must not run",
+      },
+    });
+    const run = vi.fn(async function* () {
+      yield { type: "assistant" as const, content: "unsafe" };
+    });
+    const manager = new ProjectChatManager(storage, { run });
+
+    await manager.ready();
+
+    expect(run).not.toHaveBeenCalled();
+    const verify = new Database(dbPath, { readonly: true });
+    try {
+      expect(verify.prepare(
+        "SELECT status FROM project_chat_work_items WHERE id = 'local-cross-tenant-work'",
+      ).get()).toEqual({ status: "failed" });
+    } finally {
+      verify.close();
+    }
     await manager.shutdown();
   });
 

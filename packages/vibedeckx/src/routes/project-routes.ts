@@ -9,6 +9,7 @@ import { selectFolder } from "../dialog.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
+import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 
 function sanitizeProject(project: Project) {
@@ -19,16 +20,18 @@ function sanitizeProject(project: Project) {
 const routes: FastifyPluginAsync = async (fastify) => {
   // 获取所有项目
   fastify.get("/api/projects", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const projects = (await fastify.storage.projects.getAll(userId)).map(sanitizeProject);
     return reply.code(200).send({ projects });
   });
 
   // 获取单个项目
   fastify.get<{ Params: { id: string } }>("/api/projects/:id", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
@@ -109,8 +112,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       executorMode?: 'local' | 'remote';
     };
   }>("/api/projects", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const { name, path: projectPath, remotePath, agentMode, executorMode } = req.body;
 
     if (!name) {
@@ -154,8 +158,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       syncDownConfig?: SyncButtonConfig | null;
     };
   }>("/api/projects/:id", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
@@ -215,8 +220,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // 删除项目
   fastify.delete<{ Params: { id: string } }>("/api/projects/:id", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
@@ -231,8 +237,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string };
     Body: { syncType: 'up' | 'down'; branch?: string | null; remoteServerId?: string };
   }>("/api/projects/:id/execute-sync", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
@@ -336,8 +343,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // 获取项目目录文件列表
   fastify.get<{ Params: { id: string } }>("/api/projects/:id/files", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
+    const authResult = requireAuth(req, reply);
+    if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const project = await fastify.storage.projects.getById(req.params.id, userId);
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });

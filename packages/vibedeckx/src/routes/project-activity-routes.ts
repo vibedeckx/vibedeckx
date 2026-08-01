@@ -11,12 +11,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     async (req, reply) => {
       const authResult = requireAuth(req, reply);
       if (authResult === null) return;
+      const userId = resolveUserId(authResult);
       const { projectId } = req.params;
-      const project = await fastify.storage.projects.getById(projectId, authResult);
+      const project = await fastify.storage.projects.getById(projectId, userId);
       if (!project) return reply.code(404).send({ error: "Project not found" });
 
       return reply.code(200).send(
-        await getProjectActivity(fastify.storage, projectId, resolveUserId(authResult)),
+        await getProjectActivity(fastify.storage, projectId, userId),
       );
     },
   );

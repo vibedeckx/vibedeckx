@@ -150,8 +150,8 @@ export class NotificationService {
 
     const notification = await this.buildNotification(event, {
       id: event.id,
-      // "" is the solo-mode column default; the browser routes read the
-      // "local" sentinel, so normalize here rather than in every query.
+      // Legacy blank owners are normalized to "local" when storage opens;
+      // keep the fallback for compatibility with injected/custom storage.
       userId: ownerId || "local",
       sessionId: event.session_id,
       projectId: event.project_id,

@@ -376,7 +376,7 @@ export const createProjectChatRepos = (
           "work.status as recovery_status",
           "work.created_at as recovery_created_at",
           sql<number>`case when project.id is not null and
-            (thread.user_id = 'local' or project.user_id = thread.user_id)
+            project.user_id = thread.user_id
             then 1 else 0 end`.as("recovery_authorized"),
         ])
         .where("work.status", "in", ["accepted", "running"]);

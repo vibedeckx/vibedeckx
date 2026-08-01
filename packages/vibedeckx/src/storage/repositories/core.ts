@@ -39,7 +39,7 @@ export const createCoreRepos = (
         executor_mode: opts.executor_mode ?? "local",
         sync_up_config: opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null,
         sync_down_config: opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null,
-        user_id: userId ?? "",
+        user_id: userId ?? "local",
       }).execute();
 
       const row = await kdb.selectFrom("projects").selectAll().where("id", "=", opts.id).executeTakeFirstOrThrow();
@@ -104,8 +104,8 @@ export const createCoreRepos = (
 
     // Deliberately unscoped: the notification importer runs without a request
     // context and must DERIVE ownership from the mapped local project rather
-    // than trust any worker-supplied tenant id. Returns "" for solo-mode rows
-    // (the column's default), which callers map to the "local" sentinel.
+    // than trust any worker-supplied tenant id. Legacy blank solo-mode rows are
+    // normalized to the canonical "local" owner when storage opens.
     getOwnerId: async (projectId) => {
       const row = await kdb.selectFrom("projects").select("user_id").where("id", "=", projectId).executeTakeFirst();
       return row?.user_id;

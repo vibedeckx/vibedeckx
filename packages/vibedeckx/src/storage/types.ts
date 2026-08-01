@@ -619,7 +619,7 @@ export interface Storage {
      * so the importer needs this lookup without a request context.
      * `remoteServers.getOwnerId` is not a substitute: a project can be owned by
      * a different user than the remote server it executes on.
-     * Returns the `""` sentinel for solo-mode rows, undefined if absent.
+     * Returns the `"local"` sentinel for solo-mode rows, undefined if absent.
      */
     getOwnerId: (projectId: string) => Promise<string | undefined>;
   };

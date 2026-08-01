@@ -329,9 +329,9 @@ describe("notification storage", () => {
       expect(await storage.projects.getOwnerId("nope")).toBeUndefined();
     });
 
-    it("returns the empty-string sentinel for solo-mode projects", async () => {
+    it("returns the canonical local sentinel for solo-mode projects", async () => {
       await storage.projects.create({ id: "p2", name: "solo", path: "/tmp/solo" });
-      expect(await storage.projects.getOwnerId("p2")).toBe("");
+      expect(await storage.projects.getOwnerId("p2")).toBe("local");
     });
   });
 });

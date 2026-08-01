@@ -117,7 +117,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return null;
     }
 
-    const project = await fastify.storage.projects.getById(discovered.project_id, authResult);
+    const project = await fastify.storage.projects.getById(discovered.project_id, userId);
     if (!project) {
       reply.code(404).send({ error: "Thread not found" });
       return null;
@@ -141,13 +141,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/project-chat/threads", async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const { projectId } = req.params;
-    const project = await fastify.storage.projects.getById(projectId, authResult);
+    const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return reply.code(404).send({ error: "Project not found" });
 
     const threads = await fastify.storage.projectChatThreads.listByProject(
       projectId,
-      resolveUserId(authResult),
+      userId,
       LIST_LIMIT,
       { includeArchived: req.query.includeArchived === "true" },
     );
@@ -160,14 +161,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/projects/:projectId/project-chat/threads", async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
+    const userId = resolveUserId(authResult);
     const { projectId } = req.params;
-    const project = await fastify.storage.projects.getById(projectId, authResult);
+    const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return reply.code(404).send({ error: "Project not found" });
 
     const body = parseCreateBody(req.body);
     if (!body) return reply.code(400).send({ error: "Body must contain only an optional non-empty message" });
 
-    const userId = resolveUserId(authResult);
     const createRequestId = body.createRequestId ?? randomUUID();
     const createPayloadHash = createHash("sha256")
       .update(JSON.stringify({ message: body.message ?? null }))

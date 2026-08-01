@@ -93,11 +93,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
    * authorizes by ID-presence alone — which is an unauth/IDOR hole on the direct
    * control routes. Gate every remote branch through here.
    *
-   * `userId` is the raw `requireAuth` result: `undefined` in no-auth/solo mode,
-   * where `projects.getById(id, undefined)` skips the owner filter (one-user
-   * deployment), and the Clerk user id under `--auth`, where it enforces
-   * per-user ownership. Do NOT pass `resolveUserId(...)` here — that collapses
-   * `undefined` to `"local"`, which would not match solo projects (user_id="").
+   * `userId` is intentionally the raw `requireAuth` result. `undefined` keeps
+   * the trusted no-auth / worker API-key path-provider flow unscoped (including
+   * custom storage and old pseudo-project catalogs); a Clerk id still enforces
+   * tenant ownership. User-facing Project routes use the canonical `"local"`
+   * scope instead.
    */
   async function getAuthorizedRemoteSessionInfo(
     sessionId: string,
@@ -978,7 +978,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // The resident map is not an authorization boundary. Resolve the durable
-    // session and project under the caller's raw auth scope before any workflow
+    // session and project under the caller's intentional path-provider auth
+    // scope before any workflow
     // mutation, delivery-ledger write, wake-up, or stdin write.
     const storedSession = await fastify.storage.agentSessions.getById(req.params.sessionId);
     if (!storedSession

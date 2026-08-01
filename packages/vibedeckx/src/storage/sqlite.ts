@@ -37,7 +37,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       remote_url TEXT,
       remote_api_key TEXT,
       remote_project_id TEXT,
-      user_id TEXT NOT NULL DEFAULT '',
+      user_id TEXT NOT NULL DEFAULT 'local',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -548,9 +548,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   // Migration: add user_id column for Clerk authentication
   const hasUserIdColumn = projectTableInfo.some((col) => col.name === "user_id");
   if (!hasUserIdColumn) {
-    db.exec("ALTER TABLE projects ADD COLUMN user_id TEXT NOT NULL DEFAULT ''");
+    db.exec("ALTER TABLE projects ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'");
     db.exec("CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id)");
   }
+  // Solo-mode projects created before Project Chat used the empty-string owner
+  // sentinel. Project Chat uses the non-empty "local" principal, so normalize
+  // those legacy rows once at open rather than weakening scoped authorization.
+  db.exec("UPDATE projects SET user_id = 'local' WHERE user_id = ''");
 
   // Migration: add executor_groups table and group_id column to executors
   const hasGroupIdColumn = tableInfo.some((col) => col.name === "group_id");
@@ -964,7 +968,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
           remote_url TEXT,
           remote_api_key TEXT,
           remote_project_id TEXT,
-          user_id TEXT NOT NULL DEFAULT '',
+          user_id TEXT NOT NULL DEFAULT 'local',
           agent_mode TEXT DEFAULT 'local',
           executor_mode TEXT DEFAULT 'local',
           sync_up_config TEXT,
