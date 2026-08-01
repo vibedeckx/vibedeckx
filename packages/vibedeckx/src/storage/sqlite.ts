@@ -199,7 +199,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE TABLE IF NOT EXISTS machine_identity (
       machine_id TEXT PRIMARY KEY,
       public_key TEXT NOT NULL,
-      user_id TEXT NOT NULL DEFAULT '',
+      user_id TEXT NOT NULL DEFAULT 'local',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       last_seen_at TIMESTAMP
     );
@@ -990,6 +990,45 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         DROP TABLE remote_servers;
         ALTER TABLE remote_servers_local_owner RENAME TO remote_servers;
         CREATE INDEX IF NOT EXISTS idx_remote_servers_user_id ON remote_servers(user_id);
+        COMMIT;
+      `);
+    }
+  }
+
+  // Machine identity ownership must use the same solo sentinel as the remote
+  // server token that authenticates the connection. A legacy blank pin paired
+  // with a migrated local server would otherwise fail the signed ownership
+  // challenge. Rebuild fixes both existing data and the column default; the
+  // predicate plus transaction makes repeated opens a no-op.
+  {
+    const ownerInfo = db.prepare("PRAGMA table_info(machine_identity)").all() as {
+      name: string;
+      dflt_value: string | null;
+    }[];
+    const ownerColumn = ownerInfo.find((column) => column.name === "user_id");
+    const hasBlankOwner = !!db.prepare(
+      "SELECT 1 FROM machine_identity WHERE user_id = '' LIMIT 1",
+    ).get();
+    if (ownerColumn?.dflt_value !== "'local'" || hasBlankOwner) {
+      db.exec(`
+        BEGIN;
+        CREATE TABLE machine_identity_local_owner (
+          machine_id TEXT PRIMARY KEY,
+          public_key TEXT NOT NULL,
+          user_id TEXT NOT NULL DEFAULT 'local',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at TIMESTAMP
+        );
+        INSERT INTO machine_identity_local_owner (
+          machine_id, public_key, user_id, created_at, last_seen_at
+        )
+        SELECT
+          machine_id, public_key,
+          CASE WHEN user_id = '' THEN 'local' ELSE user_id END,
+          created_at, last_seen_at
+        FROM machine_identity;
+        DROP TABLE machine_identity;
+        ALTER TABLE machine_identity_local_owner RENAME TO machine_identity;
         COMMIT;
       `);
     }

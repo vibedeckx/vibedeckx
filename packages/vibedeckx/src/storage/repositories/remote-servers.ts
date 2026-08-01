@@ -345,7 +345,7 @@ export const createRemoteServerRepos = (
 
     pin: async (machineId, publicKey, userId) => {
       await kdb.insertInto("machine_identity")
-        .values({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "", last_seen_at: null })
+        .values({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "local", last_seen_at: null })
         .onConflict((oc) => oc.column("machine_id").doNothing())
         .execute();
     },
@@ -359,11 +359,11 @@ export const createRemoteServerRepos = (
 
     claimOrVerify: async (machineId, publicKey, userId) => {
       const insertResult = await kdb.insertInto("machine_identity")
-        .values({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "", last_seen_at: null })
+        .values({ machine_id: machineId, public_key: publicKey, user_id: userId ?? "local", last_seen_at: null })
         .onConflict((oc) => oc.column("machine_id").doNothing())
         .executeTakeFirst();
       const row = await kdb.selectFrom("machine_identity").selectAll().where("machine_id", "=", machineId).executeTakeFirstOrThrow();
-      const owned = row.user_id === (userId ?? "");
+      const owned = row.user_id === (userId ?? "local");
       // Only bump last_seen_at for the verified owner — a rejected
       // owner-mismatch claim must not update the machine's liveness
       // timestamp (the pre-push-down code only called touch() after the
