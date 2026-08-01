@@ -107,6 +107,8 @@ function setupHook() {
       message(7, "tool_approval_request", JSON.stringify({ approvalId: "approval-1", tool: "run_schedule_now", input: { scheduleId: "s1" } })),
       message(8, "operation", JSON.stringify({ version: 1, operationId: "op-1", kind: "schedule_run", status: "running", scheduleId: "s1", runId: "r1", runAvailable: true })),
     ],
+    hasEarlierMessages: false,
+    earliestSequence: 1,
     status: "running",
     activeTurnId: "turn-7",
     queueLength: 1,
@@ -118,6 +120,7 @@ function setupHook() {
     loading: false,
     threadsLoading: false,
     threadLoading: false,
+    loadingEarlierMessages: false,
     isConnected: true,
     error: null,
     terminalError: null,
@@ -130,6 +133,7 @@ function setupHook() {
     stopTurn: vi.fn(async () => true),
     resolveToolApproval: vi.fn(async () => {}),
     selectWorkspace: vi.fn(async () => {}),
+    loadEarlierMessages: vi.fn(async () => {}),
   };
 }
 
@@ -163,6 +167,14 @@ afterEach(() => {
 });
 
 describe("ProjectChatWorkbench", () => {
+  it("offers authorized loading of earlier transcript pages", async () => {
+    hook.value.hasEarlierMessages = true;
+    render();
+
+    await act(async () => { getButton("Load earlier messages").click(); });
+
+    expect(hook.value.loadEarlierMessages).toHaveBeenCalledOnce();
+  });
   it("uses one conversation column and one rail with Threads above Context", () => {
     render();
 

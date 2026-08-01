@@ -183,6 +183,8 @@ export function ProjectChatWorkbench({
               activeTurnId={chat.activeTurnId}
               queueLength={chat.queueLength}
               loading={chat.threadLoading}
+              hasEarlierMessages={chat.hasEarlierMessages}
+              loadingEarlierMessages={chat.loadingEarlierMessages}
               connected={chat.isConnected}
               error={chat.error}
               initialDraft={draftsRef.current.get(scopeKey) ?? ""}
@@ -196,6 +198,7 @@ export function ProjectChatWorkbench({
                 }
               }}
               onSend={chat.sendMessage}
+              onLoadEarlierMessages={chat.loadEarlierMessages}
               onStop={chat.stopTurn}
               onResolveApproval={chat.resolveToolApproval}
               onSelectWorkspace={chat.selectWorkspace}

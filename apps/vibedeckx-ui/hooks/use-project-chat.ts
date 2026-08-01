@@ -6,6 +6,7 @@ import {
   getFreshToken,
   getWebSocketUrl,
   type ProjectChatMessage,
+  type ProjectChatMessagePage,
   type ProjectChatContextRef,
   type ProjectChatSnapshot,
   type ProjectChatStatus,
@@ -18,6 +19,12 @@ type ProjectChatPatch = {
   path: string;
   value:
     | { type: "ENTRY"; content: ProjectChatMessage }
+    | {
+      type: "MESSAGES";
+      content: ProjectChatMessage[];
+      hasEarlierMessages: boolean;
+      earliestSequence: number | null;
+    }
     | { type: "STATUS"; content: ProjectChatStatus }
     | { type: "ACTIVE_TURN"; content: string | null }
     | { type: "QUEUE"; content: number }
@@ -27,6 +34,8 @@ type ProjectChatPatch = {
 interface ProjectChatStreamState {
   thread: ProjectChatThread | null;
   messages: ProjectChatMessage[];
+  hasEarlierMessages: boolean;
+  earliestSequence: number | null;
   status: ProjectChatStatus;
   activeTurnId: string | null;
   queueLength: number;
@@ -44,6 +53,7 @@ export interface UseProjectChatResult extends ProjectChatStreamState {
   loading: boolean;
   threadsLoading: boolean;
   threadLoading: boolean;
+  loadingEarlierMessages: boolean;
   isConnected: boolean;
   error: string | null;
   terminalError: ProjectChatTerminalError | null;
@@ -56,11 +66,14 @@ export interface UseProjectChatResult extends ProjectChatStreamState {
   stopTurn: (expectedActiveTurnId: string) => Promise<boolean>;
   resolveToolApproval: (approvalId: string, approved: boolean) => Promise<void>;
   selectWorkspace: (requestId: string, workspaceId: string) => Promise<void>;
+  loadEarlierMessages: () => Promise<void>;
 }
 
 const emptyStreamState = (): ProjectChatStreamState => ({
   thread: null,
   messages: [],
+  hasEarlierMessages: false,
+  earliestSequence: null,
   status: "idle",
   activeTurnId: null,
   queueLength: 0,
@@ -75,6 +88,15 @@ function cacheSnapshot(cache: Map<string, ProjectChatSnapshot>, snapshot: Projec
     if (oldest === undefined) break;
     cache.delete(oldest);
   }
+}
+
+function mergeProjectChatMessages(
+  current: ProjectChatMessage[],
+  incoming: ProjectChatMessage[],
+): ProjectChatMessage[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) byId.set(message.id, message);
+  return [...byId.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -133,6 +155,8 @@ function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
     && value.identity.projectId === projectId
     && value.identity.userId === userId
     && value.messages.every((message) => isProjectChatMessage(message) && message.thread_id === threadId)
+    && typeof value.hasEarlierMessages === "boolean"
+    && (value.earliestSequence === null || Number.isSafeInteger(value.earliestSequence))
     && value.contextRefs.every((ref) => isProjectChatContextRef(ref) && ref.thread_id === threadId)
     && (value.status === "idle" || value.status === "running")
     && (value.activeTurnId === null || typeof value.activeTurnId === "string")
@@ -155,12 +179,30 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
       const messages = [...next.messages];
       if (patch.op === "add") {
         if (index > messages.length || messages.some((existing) => existing.id === message.id)) return null;
-        messages.splice(index, 0, message);
+        messages.push(message);
+        messages.sort((left, right) => left.sequence - right.sequence);
       } else {
-        if (index >= messages.length || messages[index].id !== message.id) return null;
-        messages[index] = message;
+        const existingIndex = messages.findIndex((existing) => existing.id === message.id);
+        if (existingIndex < 0) return null;
+        messages[existingIndex] = message;
       }
-      next = { ...next, messages };
+      next = { ...next, messages, earliestSequence: messages[0]?.sequence ?? null };
+    } else if (patch.path === "/messages" && patch.value.type === "MESSAGES"
+      && Array.isArray(patch.value.content) && patch.value.content.every(isProjectChatMessage)
+      && typeof patch.value.hasEarlierMessages === "boolean"
+      && (patch.value.earliestSequence === null || Number.isSafeInteger(patch.value.earliestSequence))
+      && patch.value.content.every((message) => next.thread === null || message.thread_id === next.thread.id)) {
+      const retainedOlder = next.earliestSequence !== null && patch.value.earliestSequence !== null
+        && next.earliestSequence < patch.value.earliestSequence;
+      const messages = retainedOlder
+        ? mergeProjectChatMessages(next.messages, patch.value.content)
+        : patch.value.content;
+      next = {
+        ...next,
+        messages,
+        earliestSequence: messages[0]?.sequence ?? null,
+        hasEarlierMessages: retainedOlder ? next.hasEarlierMessages : patch.value.hasEarlierMessages,
+      };
     } else if (patch.path === "/status" && patch.value.type === "STATUS"
       && (patch.value.content === "idle" || patch.value.content === "running")) {
       next = { ...next, status: patch.value.content };
@@ -186,6 +228,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
   const [threads, setThreads] = useState<ProjectChatThread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [threadLoading, setThreadLoading] = useState(false);
+  const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
   const [streamState, setStreamState] = useState<ProjectChatStreamState>(emptyStreamState);
   const [isConnected, setIsConnected] = useState(false);
   const [threadsError, setThreadsError] = useState<string | null>(null);
@@ -313,6 +356,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     socketRef.current?.close();
     socketRef.current = null;
     setIsConnected(false);
+    setLoadingEarlierMessages(false);
     setThreadError(null);
     setTerminalError(null);
 
@@ -330,6 +374,8 @@ export function useProjectChat(projectId: string | null, threadId: string | null
       publishStreamState({
         thread: cached.thread,
         messages: cached.messages,
+        hasEarlierMessages: cached.hasEarlierMessages,
+        earliestSequence: cached.earliestSequence,
         status: cached.status,
         activeTurnId: cached.activeTurnId,
         queueLength: cached.queueLength,
@@ -486,7 +532,24 @@ export function useProjectChat(projectId: string | null, threadId: string | null
               cacheSnapshot(snapshotCacheRef.current, snapshot);
               publishStreamState({
                 thread: snapshot.thread,
-                messages: snapshot.messages,
+                messages: streamStateRef.current.thread?.id === activeThreadId
+                  && streamStateRef.current.earliestSequence !== null
+                  && snapshot.earliestSequence !== null
+                  && streamStateRef.current.earliestSequence < snapshot.earliestSequence
+                  ? mergeProjectChatMessages(streamStateRef.current.messages, snapshot.messages)
+                  : snapshot.messages,
+                hasEarlierMessages: streamStateRef.current.thread?.id === activeThreadId
+                  && streamStateRef.current.earliestSequence !== null
+                  && snapshot.earliestSequence !== null
+                  && streamStateRef.current.earliestSequence < snapshot.earliestSequence
+                  ? streamStateRef.current.hasEarlierMessages
+                  : snapshot.hasEarlierMessages,
+                earliestSequence: streamStateRef.current.thread?.id === activeThreadId
+                  && streamStateRef.current.earliestSequence !== null
+                  && snapshot.earliestSequence !== null
+                  && streamStateRef.current.earliestSequence < snapshot.earliestSequence
+                  ? streamStateRef.current.earliestSequence
+                  : snapshot.earliestSequence,
                 status: snapshot.status,
                 activeTurnId: snapshot.activeTurnId,
                 queueLength: snapshot.queueLength,
@@ -509,6 +572,8 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                   },
                   thread: next.thread,
                   messages: next.messages,
+                  hasEarlierMessages: next.hasEarlierMessages,
+                  earliestSequence: next.earliestSequence,
                   status: next.status,
                   activeTurnId: next.activeTurnId,
                   queueLength: next.queueLength,
@@ -695,12 +760,43 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     await api.selectProjectChatWorkspace(targetThreadId, requestId, workspaceId);
   }, []);
 
+  const loadEarlierMessages = useCallback(async () => {
+    const targetThreadId = selectedThreadIdRef.current;
+    const state = streamStateRef.current;
+    if (!targetThreadId || !state.hasEarlierMessages || state.earliestSequence === null) return;
+    setLoadingEarlierMessages(true);
+    try {
+      const page: ProjectChatMessagePage = await api.listProjectChatMessages(targetThreadId, {
+        beforeSequence: state.earliestSequence,
+      });
+      if (selectedThreadIdRef.current !== targetThreadId
+        || streamStateRef.current.thread?.id !== targetThreadId) return;
+      const messages = mergeProjectChatMessages(streamStateRef.current.messages, page.messages);
+      const next = {
+        ...streamStateRef.current,
+        messages,
+        hasEarlierMessages: page.hasMore,
+        earliestSequence: messages[0]?.sequence ?? null,
+      };
+      streamStateRef.current = next;
+      setStreamState(next);
+      setThreadError(null);
+    } catch (reason) {
+      if (selectedThreadIdRef.current === targetThreadId) {
+        setThreadError(reason instanceof Error ? reason.message : "Failed to load earlier messages");
+      }
+    } finally {
+      if (selectedThreadIdRef.current === targetThreadId) setLoadingEarlierMessages(false);
+    }
+  }, []);
+
   return {
     ...streamState,
     threads,
     loading: threadsLoading || threadLoading,
     threadsLoading,
     threadLoading,
+    loadingEarlierMessages,
     isConnected,
     error: threadError ?? threadsError,
     terminalError,
@@ -713,5 +809,6 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     stopTurn,
     resolveToolApproval,
     selectWorkspace,
+    loadEarlierMessages,
   };
 }

@@ -742,10 +742,18 @@ export interface ProjectChatSnapshot {
   identity: { projectId: string; threadId: string; userId: string };
   thread: ProjectChatThread;
   messages: ProjectChatMessage[];
+  hasEarlierMessages: boolean;
+  earliestSequence: number | null;
   status: ProjectChatStatus;
   activeTurnId: string | null;
   queueLength: number;
   contextRefs: ProjectChatContextRef[];
+}
+
+export interface ProjectChatMessagePage {
+  messages: ProjectChatMessage[];
+  hasMore: boolean;
+  nextCursor: number | null;
 }
 
 export interface ProjectAgentSessionActivity {
@@ -2143,6 +2151,22 @@ export const api = {
       const body = await res.json().catch(() => ({}));
       throw Object.assign(
         new Error(body.error ?? `Failed to fetch Project Chat thread: ${res.status}`),
+        { status: res.status },
+      );
+    }
+    return res.json();
+  },
+
+  async listProjectChatMessages(
+    threadId: string,
+    opts: { beforeSequence: number },
+  ): Promise<ProjectChatMessagePage> {
+    const query = new URLSearchParams({ beforeSequence: String(opts.beforeSequence) });
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/messages?${query}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw Object.assign(
+        new Error(body.error ?? `Failed to fetch Project Chat messages: ${res.status}`),
         { status: res.status },
       );
     }

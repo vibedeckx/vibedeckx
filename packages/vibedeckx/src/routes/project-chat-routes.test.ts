@@ -254,6 +254,29 @@ describe("project chat thread routes", () => {
   });
 
   describe("thread routes by id", () => {
+    it("pages earlier messages with a stable sequence cursor and hides foreign threads", async () => {
+      await createThread();
+      await createThread({ id: "theirs", user_id: "user-2" });
+      for (let sequence = 1; sequence <= 5; sequence += 1) {
+        await storage.projectChatMessages.append({
+          id: `m${sequence}`, thread_id: "thread-1", project_id: "project-1", user_id: "user-1",
+          sequence, type: "user", content: `message-${sequence}`,
+        });
+      }
+      const first = await app.inject({
+        method: "GET", url: "/api/project-chat/threads/thread-1/messages?beforeSequence=5&limit=2",
+      });
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toMatchObject({ hasMore: true, nextCursor: 3 });
+      expect(first.json().messages.map((message: { sequence: number }) => message.sequence)).toEqual([3, 4]);
+
+      const foreign = await app.inject({
+        method: "GET", url: "/api/project-chat/threads/theirs/messages?limit=2",
+      });
+      expect(foreign.statusCode).toBe(404);
+      expect(foreign.json()).toEqual({ error: "Thread not found" });
+    });
+
     it("gets an owned thread with bounded deterministic context references", async () => {
       await createThread({ title: "Status" });
       await storage.tasks.create({ id: "a-task", project_id: "project-1", title: "One" });
@@ -497,6 +520,18 @@ describe("project chat thread routes", () => {
       expect(projectChatManager.sendMessage).not.toHaveBeenCalled();
     });
 
+    it("rejects a Unicode message that exceeds the model UTF-8 context budget", async () => {
+      await createThread();
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/project-chat/threads/thread-1/messages",
+        payload: { content: "🙂".repeat(33_000) },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(projectChatManager.sendMessage).not.toHaveBeenCalled();
+    });
+
     it("requires an active turn identity and stops only that owned turn", async () => {
       await createThread();
       projectChatManager.stopGeneration.mockResolvedValue(false);
@@ -662,6 +697,7 @@ describe("project chat thread routes", () => {
       { method: "GET", url: "/api/projects/project-1/project-chat/threads" },
       { method: "POST", url: "/api/projects/project-1/project-chat/threads", payload: {} },
       { method: "GET", url: "/api/project-chat/threads/thread-1" },
+      { method: "GET", url: "/api/project-chat/threads/thread-1/messages?limit=2" },
       { method: "PATCH", url: "/api/project-chat/threads/thread-1", payload: { title: "Nope" } },
       { method: "DELETE", url: "/api/project-chat/threads/thread-1" },
       { method: "POST", url: "/api/project-chat/threads/thread-1/messages", payload: { content: "Nope" } },

@@ -55,12 +55,15 @@ interface ProjectChatConversationProps {
   activeTurnId: string | null;
   queueLength: number;
   loading: boolean;
+  hasEarlierMessages: boolean;
+  loadingEarlierMessages: boolean;
   connected: boolean;
   error: string | null;
   initialDraft?: string;
   onDraftChange?: (draft: string) => void;
   onDraftSent?: (submittedDraft: string) => void;
   onSend: (content: string) => Promise<void>;
+  onLoadEarlierMessages: () => Promise<void>;
   onStop: (expectedActiveTurnId: string) => Promise<boolean>;
   onResolveApproval: (approvalId: string, approved: boolean) => Promise<void>;
   onSelectWorkspace: (requestId: string, workspaceId: string) => Promise<void>;
@@ -120,12 +123,15 @@ export function ProjectChatConversation({
   activeTurnId,
   queueLength,
   loading,
+  hasEarlierMessages,
+  loadingEarlierMessages,
   connected,
   error,
   initialDraft = "",
   onDraftChange,
   onDraftSent,
   onSend,
+  onLoadEarlierMessages,
   onStop,
   onResolveApproval,
   onSelectWorkspace,
@@ -253,6 +259,20 @@ export function ProjectChatConversation({
     <div className="flex h-full min-h-0 flex-col">
       <Conversation className="min-h-0" initial="instant" resize="smooth" data-testid="project-chat-scroll">
         <ConversationContent className="mx-auto w-full max-w-3xl gap-4 px-4 py-5 sm:px-6">
+        {hasEarlierMessages ? (
+          <div className="flex justify-center">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={loadingEarlierMessages}
+              onClick={() => void onLoadEarlierMessages()}
+            >
+              {loadingEarlierMessages ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              Load earlier messages
+            </Button>
+          </div>
+        ) : null}
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-12"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
         ) : null}

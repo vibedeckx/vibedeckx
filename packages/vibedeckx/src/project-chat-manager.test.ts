@@ -8,6 +8,10 @@ import type { Storage } from "./storage/types.js";
 import { EventBus } from "./event-bus.js";
 import {
   adaptProjectChatFullStream,
+  PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT,
+  PROJECT_CHAT_LIVE_MESSAGE_LIMIT,
+  PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT,
+  PROJECT_CHAT_MODEL_MESSAGE_LIMIT,
   PROJECT_CHAT_SYSTEM_PROMPT,
   ProjectChatManager,
   ProjectChatWorkspaceSelectionConflictError,
@@ -296,8 +300,8 @@ describe("ProjectChatManager", () => {
           return original(...args);
         });
       } else if (phase === "hydration") {
-        const original = storage.projectChatMessages.listByThread.bind(storage.projectChatMessages);
-        vi.spyOn(storage.projectChatMessages, "listByThread").mockImplementation(async (...args) => {
+        const original = storage.projectChatMessages.listPageBefore.bind(storage.projectChatMessages);
+        vi.spyOn(storage.projectChatMessages, "listPageBefore").mockImplementation(async (...args) => {
           if (args[0] === "stalled-recovery" && stalledCalls++ === 0) {
             started.resolve();
             await release.promise;
@@ -3121,7 +3125,7 @@ describe("ProjectChatManager", () => {
 
   it("hydrates a live thread only once while messages are being appended", async () => {
     await createThread("thread-1");
-    const listByThread = vi.spyOn(storage.projectChatMessages, "listByThread");
+    const listByThread = vi.spyOn(storage.projectChatMessages, "listPageBefore");
     const manager = new ProjectChatManager(storage, reply("reply"));
     await manager.openThread("thread-1", "user-1");
     await manager.sendMessage("thread-1", "user-1", "question");
@@ -3138,7 +3142,7 @@ describe("ProjectChatManager", () => {
 
   it("evicts an idle unsubscribed thread and rehydrates it on the next open", async () => {
     await createThread("thread-1");
-    const listMessages = vi.spyOn(storage.projectChatMessages, "listByThread");
+    const listMessages = vi.spyOn(storage.projectChatMessages, "listPageBefore");
     const manager = new ProjectChatManager(storage, reply("unused"), { idleEvictionMs: 5 });
 
     await manager.openThread("thread-1", "user-1");
@@ -3151,7 +3155,7 @@ describe("ProjectChatManager", () => {
   it("does not evict active or subscribed threads", async () => {
     await createThread("thread-1");
     const gate = deferred();
-    const listMessages = vi.spyOn(storage.projectChatMessages, "listByThread");
+    const listMessages = vi.spyOn(storage.projectChatMessages, "listPageBefore");
     const manager = new ProjectChatManager(storage, {
       async *run() {
         await gate.promise;
@@ -3184,8 +3188,8 @@ describe("ProjectChatManager", () => {
     await createThread("thread-1");
     const hydrationStarted = deferred();
     const allowHydration = deferred();
-    const originalList = storage.projectChatMessages.listByThread.bind(storage.projectChatMessages);
-    vi.spyOn(storage.projectChatMessages, "listByThread").mockImplementation(async (...args) => {
+    const originalList = storage.projectChatMessages.listPageBefore.bind(storage.projectChatMessages);
+    vi.spyOn(storage.projectChatMessages, "listPageBefore").mockImplementation(async (...args) => {
       hydrationStarted.resolve();
       await allowHydration.promise;
       return originalList(...args);
@@ -3219,8 +3223,8 @@ describe("ProjectChatManager", () => {
           return originalGetOwned(...args);
         });
       } else {
-        const originalList = storage.projectChatMessages.listByThread.bind(storage.projectChatMessages);
-        vi.spyOn(storage.projectChatMessages, "listByThread").mockImplementation(async (...args) => {
+        const originalList = storage.projectChatMessages.listPageBefore.bind(storage.projectChatMessages);
+        vi.spyOn(storage.projectChatMessages, "listPageBefore").mockImplementation(async (...args) => {
           phaseStarted.resolve();
           await allowPhase.promise;
           return originalList(...args);
@@ -3361,5 +3365,82 @@ describe("ProjectChatManager", () => {
     await deleting;
     activeGate.resolve();
     expect(frames.some((frame) => frame.includes("second"))).toBe(false);
+  });
+
+  it("bounds snapshots and live memory by message count and UTF-8 bytes while history stays durable", async () => {
+    await createThread("bounded-thread");
+    for (let sequence = 1; sequence <= PROJECT_CHAT_LIVE_MESSAGE_LIMIT + 20; sequence += 1) {
+      await storage.projectChatMessages.append({
+        id: `history-${sequence}`, thread_id: "bounded-thread", project_id: "project-1", user_id: "user-1",
+        sequence, type: "assistant", content: `历史🙂-${sequence}`,
+      });
+    }
+    const manager = new ProjectChatManager(storage, reply("new reply"));
+    const snapshot = await manager.openThread("bounded-thread", "user-1");
+
+    expect(snapshot.messages.length).toBeLessThanOrEqual(PROJECT_CHAT_LIVE_MESSAGE_LIMIT);
+    expect(snapshot.messages.reduce((total, message) => total + Buffer.byteLength(message.content, "utf8"), 0))
+      .toBeLessThanOrEqual(PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT);
+    expect(snapshot.hasEarlierMessages).toBe(true);
+    expect(snapshot.earliestSequence).toBe(snapshot.messages[0].sequence);
+    expect(await storage.projectChatMessages.listByThread("bounded-thread", "project-1", "user-1"))
+      .toHaveLength(PROJECT_CHAT_LIVE_MESSAGE_LIMIT + 20);
+
+    await manager.sendMessage("bounded-thread", "user-1", "current");
+    await waitFor(async () => (await manager.openThread("bounded-thread", "user-1")).status === "idle");
+    const after = await manager.openThread("bounded-thread", "user-1");
+    expect(after.messages.length).toBeLessThanOrEqual(PROJECT_CHAT_LIVE_MESSAGE_LIMIT);
+    expect(after.messages.some(({ content }) => content === "current")).toBe(true);
+    expect(after.messages.reduce((total, message) => total + Buffer.byteLength(message.content, "utf8"), 0))
+      .toBeLessThanOrEqual(PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT);
+    await manager.shutdown();
+  });
+
+  it("sends only bounded recent conversational context to the model and retains the current user message", async () => {
+    await createThread("model-window");
+    for (let sequence = 1; sequence <= PROJECT_CHAT_MODEL_MESSAGE_LIMIT + 25; sequence += 1) {
+      await storage.projectChatMessages.append({
+        id: `old-${sequence}`, thread_id: "model-window", project_id: "project-1", user_id: "user-1",
+        sequence, type: sequence % 2 ? "user" : "assistant", content: `旧🙂-${sequence}`,
+      });
+    }
+    const inputs: ProjectChatMessage[][] = [];
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        inputs.push(input.messages);
+        yield { type: "assistant", content: "done" };
+      },
+    });
+
+    await manager.sendMessage("model-window", "user-1", "CURRENT USER INTENT");
+    await waitFor(() => inputs.length === 1);
+    expect(inputs[0].length).toBeLessThanOrEqual(PROJECT_CHAT_MODEL_MESSAGE_LIMIT);
+    expect(inputs[0].reduce((total, message) => total + Buffer.byteLength(message.content, "utf8"), 0))
+      .toBeLessThanOrEqual(PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT);
+    expect(inputs[0].at(-1)).toMatchObject({ type: "user", content: "CURRENT USER INTENT" });
+    await manager.shutdown();
+  });
+
+  it("chunks an oversized Unicode runner event so live and paged history retain all content within hard budgets", async () => {
+    await createThread("large-output");
+    const output = "答🙂".repeat(70_000);
+    const manager = new ProjectChatManager(storage, {
+      async *run() { yield { type: "assistant", content: output }; },
+    });
+
+    await manager.sendMessage("large-output", "user-1", "produce output");
+    await waitFor(async () => (await manager.openThread("large-output", "user-1")).status === "idle");
+    const persisted = await storage.projectChatMessages.listByThread(
+      "large-output", "project-1", "user-1",
+    );
+    const assistant = persisted.filter(({ type }) => type === "assistant");
+    expect(assistant.length).toBeGreaterThan(1);
+    expect(assistant.every(({ content }) => Buffer.byteLength(content, "utf8")
+      <= PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT)).toBe(true);
+    expect(assistant.map(({ content }) => content).join("")).toBe(output);
+    const snapshot = await manager.openThread("large-output", "user-1");
+    expect(snapshot.messages.reduce((total, message) => total + Buffer.byteLength(message.content, "utf8"), 0))
+      .toBeLessThanOrEqual(PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT);
+    await manager.shutdown();
   });
 });

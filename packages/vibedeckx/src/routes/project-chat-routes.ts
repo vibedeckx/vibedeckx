@@ -4,6 +4,8 @@ import fp from "fastify-plugin";
 import type { ProjectChatThread } from "../storage/types.js";
 import {
   ProjectChatActiveTurnConflictError,
+  PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT,
+  PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT,
   ProjectChatWorkspaceSelectionConflictError,
 } from "../project-chat-manager.js";
 import { MAX_TOOL_SELECTOR_ID } from "../project-chat-tools.js";
@@ -15,6 +17,8 @@ import "../server-types.js";
 const MAX_TITLE_LENGTH = 200;
 const MAX_MESSAGE_LENGTH = 100_000;
 const LIST_LIMIT = 100;
+const MESSAGE_PAGE_LIMIT = 100;
+const MESSAGE_PAGE_BYTE_LIMIT = PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT;
 
 type PatchBody = { title?: string | null; archived?: boolean };
 type MessageBody = { content: string };
@@ -40,7 +44,8 @@ function parseCreateBody(body: unknown): { message?: string; createRequestId?: s
   if (!("message" in body)) return createRequestId ? { createRequestId } : {};
   if (typeof body.message !== "string") return null;
   const message = body.message.trim();
-  if (!message || message.length > MAX_MESSAGE_LENGTH) return null;
+  if (!message || message.length > MAX_MESSAGE_LENGTH
+    || Buffer.byteLength(message, "utf8") > PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT) return null;
   return { message, ...(createRequestId ? { createRequestId } : {}) };
 }
 
@@ -71,7 +76,8 @@ function parseMessageBody(body: unknown): MessageBody | null {
   if (!isRecord(body) || Object.keys(body).some((key) => key !== "content")) return null;
   if (typeof body.content !== "string") return null;
   const content = body.content.trim();
-  if (!content || content.length > MAX_MESSAGE_LENGTH) return null;
+  if (!content || content.length > MAX_MESSAGE_LENGTH
+    || Buffer.byteLength(content, "utf8") > PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT) return null;
   return { content };
 }
 
@@ -215,6 +221,34 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(200).send({ thread: owned.thread, contextRefs });
     },
   );
+
+  fastify.get<{
+    Params: { threadId: string };
+    Querystring: { beforeSequence?: string; limit?: string };
+  }>("/api/project-chat/threads/:threadId/messages", async (req, reply) => {
+    const owned = await getOwnedThread(req, reply, req.params.threadId);
+    if (!owned) return;
+    const beforeSequence = req.query.beforeSequence === undefined
+      ? null
+      : Number(req.query.beforeSequence);
+    const requestedLimit = req.query.limit === undefined ? MESSAGE_PAGE_LIMIT : Number(req.query.limit);
+    if ((beforeSequence !== null && (!Number.isSafeInteger(beforeSequence) || beforeSequence <= 0))
+      || !Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
+      return reply.code(400).send({ error: "Invalid message cursor or limit" });
+    }
+    const page = await fastify.storage.projectChatMessages.listPageBefore(
+      owned.thread.id,
+      owned.thread.project_id,
+      owned.userId,
+      {
+        beforeSequence,
+        limit: Math.min(requestedLimit, MESSAGE_PAGE_LIMIT),
+        maxUtf8Bytes: MESSAGE_PAGE_BYTE_LIMIT,
+      },
+    );
+    if (!page) return reply.code(404).send({ error: "Thread not found" });
+    return reply.code(200).send(page);
+  });
 
   fastify.patch<{
     Params: { threadId: string };

@@ -362,6 +362,46 @@ export const createProjectChatRepos = (
         .execute();
       return rows.map(mapMessage);
     },
+
+    listPageBefore: async (threadId, projectId, userId, opts) => {
+      const thread = await kdb.selectFrom("project_chat_threads")
+        .select("id")
+        .where("id", "=", threadId)
+        .where("project_id", "=", projectId)
+        .where("user_id", "=", userId)
+        .executeTakeFirst();
+      if (!thread) return undefined;
+      const limit = Math.max(1, Math.floor(opts.limit));
+      const maxUtf8Bytes = Math.max(1, Math.floor(opts.maxUtf8Bytes));
+      let query = kdb.selectFrom("project_chat_messages")
+        .selectAll()
+        .where("thread_id", "=", threadId)
+        .orderBy("sequence", "desc")
+        .limit(limit + 1);
+      if (opts.beforeSequence !== null) query = query.where("sequence", "<", opts.beforeSequence);
+      const rows = await query.execute();
+      const selected: typeof rows = [];
+      let utf8Bytes = 0;
+      for (const row of rows.slice(0, limit)) {
+        const bytes = Buffer.byteLength(row.content, "utf8");
+        if (utf8Bytes + bytes > maxUtf8Bytes) break;
+        selected.push(row);
+        utf8Bytes += bytes;
+      }
+      const newest = await kdb.selectFrom("project_chat_messages")
+        .select("sequence")
+        .where("thread_id", "=", threadId)
+        .orderBy("sequence", "desc")
+        .executeTakeFirst();
+      const messages = selected.reverse().map(mapMessage);
+      const hasMore = selected.length < rows.length;
+      return {
+        messages,
+        hasMore,
+        nextCursor: hasMore && messages.length > 0 ? messages[0].sequence : null,
+        newestSequence: newest?.sequence ?? 0,
+      };
+    },
   },
 
   projectChatWorkItems: {

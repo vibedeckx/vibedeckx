@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     updateProjectChatThread: vi.fn(), deleteProjectChatThread: vi.fn(),
     sendProjectChatMessage: vi.fn(), stopProjectChatTurn: vi.fn(), approveProjectChatTool: vi.fn(),
     selectProjectChatWorkspace: vi.fn(),
+    listProjectChatMessages: vi.fn(),
   },
   getFreshToken: vi.fn(),
   getWebSocketUrl: vi.fn((path: string) => `ws://example.test${path}`),
@@ -36,6 +37,8 @@ const snapshot = (id: string, projectId = "p1"): ProjectChatSnapshot => ({
     id: "m1", thread_id: id, sequence: 1, type: "user", content: "hello",
     created_at: "2026-07-31 00:00:00",
   }],
+  hasEarlierMessages: false,
+  earliestSequence: 1,
   status: "idle",
   activeTurnId: null,
   queueLength: 0,
@@ -873,5 +876,31 @@ describe("useProjectChat", () => {
     expect(replacement.close).toHaveBeenCalledOnce();
     act(() => vi.advanceTimersByTime(999));
     expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("loads earlier messages by sequence cursor and merges without duplicates", async () => {
+    const recent = snapshot("t1");
+    recent.messages = [
+      { ...recent.messages[0], id: "m3", sequence: 3, content: "recent" },
+      { ...recent.messages[0], id: "m4", sequence: 4, content: "latest" },
+    ];
+    recent.hasEarlierMessages = true;
+    recent.earliestSequence = 3;
+    mocks.api.listProjectChatMessages.mockResolvedValue({
+      messages: [
+        { ...recent.messages[0], id: "m1", sequence: 1, content: "oldest" },
+        { ...recent.messages[0], id: "m3", sequence: 3, content: "recent" },
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    render("p1", "t1");
+    await flush();
+    act(() => FakeWebSocket.instances[0].message({ type: "project_chat_snapshot", snapshot: recent }));
+
+    await act(async () => { await latest.loadEarlierMessages(); });
+    expect(mocks.api.listProjectChatMessages).toHaveBeenCalledWith("t1", { beforeSequence: 3 });
+    expect(latest.messages.map(({ sequence }) => sequence)).toEqual([1, 3, 4]);
+    expect(latest.hasEarlierMessages).toBe(false);
   });
 });

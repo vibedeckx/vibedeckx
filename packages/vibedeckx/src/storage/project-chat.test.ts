@@ -1000,4 +1000,32 @@ describe("project chat storage", () => {
       attempt: second!.attempt, message_id: "assistant-current", type: "assistant", content: "current",
     })).resolves.toMatchObject({ id: "assistant-current" });
   });
+
+  it("pages older messages by stable sequence with a UTF-8 byte budget and tenant scope", async () => {
+    await storage.projectChatThreads.create({ id: "paged", project_id: "p1", user_id: "u1", title: null });
+    await storage.projectChatThreads.create({ id: "foreign", project_id: "p1", user_id: "u2", title: null });
+    for (let sequence = 1; sequence <= 6; sequence += 1) {
+      await storage.projectChatMessages.append({
+        id: `m${sequence}`, thread_id: "paged", project_id: "p1", user_id: "u1",
+        sequence, type: "user", content: sequence === 3 ? "你🙂" : `message-${sequence}`,
+      });
+    }
+
+    const newest = await storage.projectChatMessages.listPageBefore(
+      "paged", "p1", "u1", { beforeSequence: null, limit: 3, maxUtf8Bytes: 100 },
+    );
+    expect(newest.messages.map(({ sequence }) => sequence)).toEqual([4, 5, 6]);
+    expect(newest).toMatchObject({ hasMore: true, nextCursor: 4, newestSequence: 6 });
+
+    const older = await storage.projectChatMessages.listPageBefore(
+      "paged", "p1", "u1", { beforeSequence: newest.nextCursor, limit: 3, maxUtf8Bytes: 8 },
+    );
+    expect(older.messages.map(({ sequence }) => sequence)).toEqual([3]);
+    expect(Buffer.byteLength(older.messages[0].content, "utf8")).toBe(7);
+    expect(older).toMatchObject({ hasMore: true, nextCursor: 3, newestSequence: 6 });
+
+    await expect(storage.projectChatMessages.listPageBefore(
+      "paged", "p1", "u2", { beforeSequence: null, limit: 3, maxUtf8Bytes: 100 },
+    )).resolves.toBeUndefined();
+  });
 });

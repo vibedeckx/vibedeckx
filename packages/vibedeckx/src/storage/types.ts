@@ -1155,6 +1155,17 @@ export interface Storage {
   projectChatMessages: {
     append: (opts: { id: string; thread_id: string; project_id: string; user_id: string; sequence: number; type: ProjectChatMessageType; content: string }) => Promise<ProjectChatMessage | undefined>;
     listByThread: (threadId: string, projectId: string, userId: string) => Promise<ProjectChatMessage[]>;
+    listPageBefore: (
+      threadId: string,
+      projectId: string,
+      userId: string,
+      opts: { beforeSequence: number | null; limit: number; maxUtf8Bytes: number },
+    ) => Promise<{
+      messages: ProjectChatMessage[];
+      hasMore: boolean;
+      nextCursor: number | null;
+      newestSequence: number;
+    } | undefined>;
   };
   projectChatWorkItems: {
     listRecoveryPage: (

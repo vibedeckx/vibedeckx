@@ -38,6 +38,10 @@ export const PROJECT_CHAT_SYSTEM_PROMPT = [
 ].join(" ");
 export const PROJECT_CHAT_TOOL_CALL_LIMIT = 8;
 export const PROJECT_CHAT_TOOL_RESULT_BYTE_LIMIT = 64 * 1024;
+export const PROJECT_CHAT_LIVE_MESSAGE_LIMIT = 200;
+export const PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT = 256 * 1024;
+export const PROJECT_CHAT_MODEL_MESSAGE_LIMIT = 80;
+export const PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT = 128 * 1024;
 
 export type ProjectChatStatus = "idle" | "running";
 
@@ -51,6 +55,8 @@ export interface ProjectChatSnapshot {
   identity: ProjectChatIdentity;
   thread: ProjectChatThread;
   messages: ProjectChatMessage[];
+  hasEarlierMessages: boolean;
+  earliestSequence: number | null;
   status: ProjectChatStatus;
   activeTurnId: string | null;
   queueLength: number;
@@ -113,6 +119,12 @@ export type ProjectChatWsMessage =
       path: string;
       value:
         | { type: "ENTRY"; content: ProjectChatMessage }
+        | {
+          type: "MESSAGES";
+          content: ProjectChatMessage[];
+          hasEarlierMessages: boolean;
+          earliestSequence: number | null;
+        }
         | { type: "STATUS"; content: ProjectChatStatus }
         | { type: "ACTIVE_TURN"; content: string | null }
         | { type: "QUEUE"; content: number }
@@ -131,6 +143,7 @@ interface QueuedTurn {
 interface LiveThread {
   thread: ProjectChatThread;
   messages: ProjectChatMessage[];
+  hasEarlierMessages: boolean;
   nextSequence: number;
   status: ProjectChatStatus;
   queue: QueuedTurn[];
@@ -151,6 +164,42 @@ interface LiveThread {
   contextRefreshGeneration: number;
   contextRefreshFlight: Promise<void> | null;
   contextRefreshBroadcast: boolean;
+}
+
+function boundedRecentMessages(
+  messages: ProjectChatMessage[],
+  limit: number,
+  maxUtf8Bytes: number,
+): ProjectChatMessage[] {
+  const selected: ProjectChatMessage[] = [];
+  let bytes = 0;
+  for (let index = messages.length - 1; index >= 0 && selected.length < limit; index -= 1) {
+    const message = messages[index];
+    const nextBytes = Buffer.byteLength(message.content, "utf8");
+    if (bytes + nextBytes > maxUtf8Bytes) break;
+    selected.push(message);
+    bytes += nextBytes;
+  }
+  return selected.reverse();
+}
+
+function splitUtf8Content(content: string, maxUtf8Bytes: number): string[] {
+  if (Buffer.byteLength(content, "utf8") <= maxUtf8Bytes) return [content];
+  const chunks: string[] = [];
+  let chunk = "";
+  let bytes = 0;
+  for (const character of content) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxUtf8Bytes && chunk) {
+      chunks.push(chunk);
+      chunk = "";
+      bytes = 0;
+    }
+    chunk += character;
+    bytes += characterBytes;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
 }
 
 interface TurnSlot {
@@ -1279,16 +1328,28 @@ export class ProjectChatManager {
 
     let promise!: Promise<LiveThread>;
     promise = Promise.all([
-      this.storage.projectChatMessages.listByThread(thread.id, thread.project_id, thread.user_id),
+      this.storage.projectChatMessages.listPageBefore(
+        thread.id,
+        thread.project_id,
+        thread.user_id,
+        {
+          beforeSequence: null,
+          limit: PROJECT_CHAT_LIVE_MESSAGE_LIMIT,
+          maxUtf8Bytes: PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT,
+        },
+      ),
       this.storage.projectChatWorkItems.listNonterminal(thread.id, thread.project_id, thread.user_id),
     ])
-      .then(async ([messages, workItems]): Promise<LiveThread> => {
+      .then(async ([messagePage, workItems]): Promise<LiveThread> => {
+        if (!messagePage) throw new ProjectChatNotFoundError();
+        const messages = messagePage.messages;
         const contextRefs = await listProjectChatPublicContextRefs(this.storage, thread).catch(() => []);
         this.assertLifecycle(thread.id, generation);
         const live: LiveThread = {
           thread,
           messages,
-          nextSequence: (messages.at(-1)?.sequence ?? 0) + 1,
+          hasEarlierMessages: messagePage.hasMore,
+          nextSequence: messagePage.newestSequence + 1,
           status: "idle",
           queue: workItems.map((work) => this.queueFromWorkItem(work)),
           contextRefs,
@@ -1536,17 +1597,30 @@ export class ProjectChatManager {
       live.status = "running";
       this.broadcastStatus(live);
       const futureUserMessages = new Set(live.queue.map((item) => item.userMessageId));
-      const currentUserMessage = live.messages.find((message) => message.id === queued.userMessageId);
+      const currentUserMessage = live.messages.find((message) => message.id === queued.userMessageId) ?? {
+        id: queued.userMessageId,
+        thread_id: live.thread.id,
+        sequence: 0,
+        type: "user" as const,
+        content: queued.content,
+        created_at: live.thread.updated_at,
+      };
       const transcript = live.messages.filter((message) =>
         message.type !== "turn_end" && !futureUserMessages.has(message.id));
       const history = transcript.filter((message) => message.id !== queued.userMessageId);
+      const completeInput = queued.wasRunning
+        ? transcript
+        : [...history, currentUserMessage];
       const input: ProjectChatRunInput = {
         projectId: live.thread.project_id,
         threadId: live.thread.id,
         userId: live.thread.user_id,
-        messages: queued.wasRunning
-          ? transcript
-          : currentUserMessage ? [...history, currentUserMessage] : history,
+        messages: boundedRecentMessages(
+          completeInput.filter((message) => message.type === "user"
+            || message.type === "assistant" || message.type === "system"),
+          PROJECT_CHAT_MODEL_MESSAGE_LIMIT,
+          PROJECT_CHAT_MODEL_MESSAGE_BYTE_LIMIT,
+        ),
         signal: abortController.signal,
         tools: this.toolDependencies
           ? await createProjectChatTools({
@@ -1599,7 +1673,12 @@ export class ProjectChatManager {
             throw error;
           }
         } else {
-          await this.append(live, queued, turnId, attempt, event.type, event.content);
+          const contents = event.type === "assistant"
+            ? splitUtf8Content(event.content, PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT)
+            : [event.content];
+          for (const content of contents) {
+            await this.append(live, queued, turnId, attempt, event.type, content);
+          }
         }
       }
       if (!this.canPersistTurn(live, turnId)) return;
@@ -1782,6 +1861,15 @@ export class ProjectChatManager {
       if (existing.content === message.content) return;
       live.messages[existingIndex] = message;
       live.nextSequence = Math.max(live.nextSequence, message.sequence + 1);
+      const bounded = boundedRecentMessages(
+        live.messages, PROJECT_CHAT_LIVE_MESSAGE_LIMIT, PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT,
+      );
+      if (bounded.length !== live.messages.length) {
+        live.messages = bounded;
+        live.hasEarlierMessages = true;
+        this.broadcastMessages(live);
+        return;
+      }
       this.broadcast(live, {
         JsonPatch: [{
           op: "replace",
@@ -1794,6 +1882,15 @@ export class ProjectChatManager {
     live.messages.push(message);
     live.messages.sort((left, right) => left.sequence - right.sequence);
     live.nextSequence = Math.max(live.nextSequence, message.sequence + 1);
+    const bounded = boundedRecentMessages(
+      live.messages, PROJECT_CHAT_LIVE_MESSAGE_LIMIT, PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT,
+    );
+    if (bounded.length !== live.messages.length) {
+      live.messages = bounded;
+      live.hasEarlierMessages = true;
+      this.broadcastMessages(live);
+      return;
+    }
     const index = live.messages.findIndex((existing) => existing.id === message.id);
     this.broadcast(live, {
       JsonPatch: [{
@@ -1805,13 +1902,20 @@ export class ProjectChatManager {
   }
 
   private async publishPersistedThreadProjection(thread: ProjectChatThread): Promise<void> {
-    const messages = await this.storage.projectChatMessages.listByThread(
+    const page = await this.storage.projectChatMessages.listPageBefore(
       thread.id, thread.project_id, thread.user_id,
+      {
+        beforeSequence: null,
+        limit: PROJECT_CHAT_LIVE_MESSAGE_LIMIT,
+        maxUtf8Bytes: PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT,
+      },
     );
     const live = this.liveThreads.get(thread.id);
     if (!live || live.thread.project_id !== thread.project_id || live.thread.user_id !== thread.user_id
       || this.lifecycle(thread.id).deleted || this.closingThreads.has(thread.id)) return;
-    for (const message of messages) this.publishMessage(live, message);
+    if (!page) return;
+    live.hasEarlierMessages ||= page.hasMore;
+    for (const message of page.messages) this.publishMessage(live, message);
     await this.refreshContextRefsBestEffort(live);
   }
 
@@ -1824,11 +1928,28 @@ export class ProjectChatManager {
       },
       thread: live.thread,
       messages: [...live.messages],
+      hasEarlierMessages: live.hasEarlierMessages,
+      earliestSequence: live.messages[0]?.sequence ?? null,
       status: live.status,
       activeTurnId: live.activeTurnId,
       queueLength: live.queue.length,
       contextRefs: [...live.contextRefs],
     };
+  }
+
+  private broadcastMessages(live: LiveThread): void {
+    this.broadcast(live, {
+      JsonPatch: [{
+        op: "replace",
+        path: "/messages",
+        value: {
+          type: "MESSAGES",
+          content: [...live.messages],
+          hasEarlierMessages: live.hasEarlierMessages,
+          earliestSequence: live.messages[0]?.sequence ?? null,
+        },
+      }],
+    });
   }
 
   private async refreshContextRefs(live: LiveThread, broadcast = true): Promise<void> {

@@ -46,6 +46,8 @@ function setupChat() {
     thread: thread("thread-1"),
     threads: [thread("thread-1"), thread("thread-2")],
     messages: [],
+    hasEarlierMessages: false,
+    earliestSequence: null,
     status: "idle",
     activeTurnId: null,
     queueLength: 0,
@@ -60,6 +62,7 @@ function setupChat() {
     loading: false,
     threadsLoading: false,
     threadLoading: false,
+    loadingEarlierMessages: false,
     isConnected: true,
     error: null,
     terminalError: null,
@@ -72,6 +75,7 @@ function setupChat() {
     stopTurn: vi.fn(async () => true),
     resolveToolApproval: vi.fn(async () => undefined),
     selectWorkspace: vi.fn(async () => undefined),
+    loadEarlierMessages: vi.fn(async () => undefined),
   };
 }
 
