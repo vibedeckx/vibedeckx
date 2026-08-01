@@ -19,7 +19,7 @@ import { useProjectChatContextNavigation } from '@/hooks/use-project-chat-contex
 import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
-import { Plus, Search } from 'lucide-react';
+import { AlertTriangle, Plus, Search } from 'lucide-react';
 import { useAppConfig } from '@/hooks/use-app-config';
 import { DiscordButton } from '@/components/layout/discord-button';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
@@ -140,6 +140,8 @@ export default function Home() {
     updateProject,
     deleteProject,
     selectProject,
+    routeProjectPending,
+    routeProjectNotFound,
   } = useProjects(urlProject);
 
   // Reset the selected branch the instant the project changes — DURING render,
@@ -556,7 +558,7 @@ export default function Home() {
   const projectChatContextNavigation = useProjectChatContextNavigation({
     projectId: currentProject?.id ?? null,
     schedules,
-    getTasks: api.getTasks,
+    getTask: api.getTask,
     resolveProjectForTarget,
     openTask: setProjectChatContextTask,
     selectAgentSession: (branch, sessionId, projectId) => {
@@ -693,7 +695,7 @@ export default function Home() {
 
   // Sync state to URL
   useEffect(() => {
-    if (projectsLoading) return;
+    if (projectsLoading || routeProjectPending || routeProjectNotFound) return;
 
     const isInitial = !hasInitializedUrlSyncRef.current;
     const branchChanged = !isInitial && prevBranchRef.current !== selectedBranch;
@@ -744,7 +746,7 @@ export default function Home() {
     } else {
       window.history.replaceState(null, '', url);
     }
-  }, [currentProject?.id, activeView, selectedBranch, selectedProjectChatThreadId, projectsLoading, urlSessionId, setSessionUrlParam]);
+  }, [currentProject?.id, activeView, selectedBranch, selectedProjectChatThreadId, projectsLoading, routeProjectPending, routeProjectNotFound, urlSessionId, setSessionUrlParam]);
 
   const handleWorktreeCreated = useCallback((branch: string) => {
     refetchWorktrees();
@@ -898,16 +900,41 @@ Please proceed step by step and let me know if there are any issues or conflicts
             <div className="h-full flex items-center justify-center bg-background">
               <div className="text-center space-y-6">
                 <div className="mx-auto w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
-                  <Plus className="h-8 w-8 text-primary" />
+                  {routeProjectNotFound
+                    ? <AlertTriangle className="h-8 w-8 text-destructive" />
+                    : <Plus className="h-8 w-8 text-primary" />}
                 </div>
-                <h1 className="text-3xl font-bold tracking-tight text-foreground">Welcome to VibeDeckX</h1>
-                <p className="text-muted-foreground max-w-sm mx-auto leading-relaxed">
-                  Create your first project to get started with AI-powered development.
+                <h1 className="text-3xl font-bold tracking-tight text-foreground">
+                  {routeProjectNotFound ? "Project not found" : "Welcome to VibeDeckX"}
+                </h1>
+                <p className="text-muted-foreground max-w-sm mx-auto leading-relaxed" role={routeProjectNotFound ? "alert" : undefined}>
+                  {routeProjectNotFound
+                    ? "This project does not exist or you do not have access to it."
+                    : "Create your first project to get started with AI-powered development."}
                 </p>
-                <Button variant="accent" size="lg" onClick={() => setCreateDialogOpen(true)} className="shadow-md">
-                  <Plus className="h-5 w-5 mr-2" />
-                  Create Project
-                </Button>
+                {routeProjectNotFound ? (
+                  <Button variant="outline" size="lg" onClick={() => {
+                    const fallback = projects[0];
+                    if (fallback) {
+                      selectProject(fallback);
+                    }
+                    window.history.replaceState(
+                      null,
+                      "",
+                      fallback ? buildUrl({ projectId: fallback.id, tab: "project-info" }) : "/",
+                    );
+                    window.dispatchEvent(new PopStateEvent("popstate"));
+                    setActiveView("project-info");
+                    setSelectedProjectChatThreadId(null);
+                  }}>
+                    Back to projects
+                  </Button>
+                ) : (
+                  <Button variant="accent" size="lg" onClick={() => setCreateDialogOpen(true)} className="shadow-md">
+                    <Plus className="h-5 w-5 mr-2" />
+                    Create Project
+                  </Button>
+                )}
               </div>
             </div>
           </div>

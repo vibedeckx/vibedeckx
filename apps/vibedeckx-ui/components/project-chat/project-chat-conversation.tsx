@@ -1,9 +1,14 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import { AlertTriangle, Check, Loader2, Search, Square, X } from "lucide-react";
 
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton,
+} from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type {
@@ -79,23 +84,69 @@ export function ProjectChatConversation({
 }: ProjectChatConversationProps) {
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState<Set<string>>(new Set());
+  const [actionError, setActionError] = useState<string | null>(null);
+  const sendInFlightRef = useRef(false);
+  const stopInFlightRef = useRef(false);
+  const approvalInFlightRef = useRef<Set<string>>(new Set());
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const content = input.trim();
-    if (!content || submitting) return;
+    if (!content || sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
     setSubmitting(true);
+    setActionError(null);
     try {
       await onSend(content);
       setInput("");
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Failed to send message");
     } finally {
+      sendInFlightRef.current = false;
       setSubmitting(false);
+    }
+  };
+
+  const stop = async () => {
+    if (stopInFlightRef.current) return;
+    stopInFlightRef.current = true;
+    setStopping(true);
+    setActionError(null);
+    try {
+      await onStop();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Failed to stop generation");
+    } finally {
+      stopInFlightRef.current = false;
+      setStopping(false);
+    }
+  };
+
+  const resolveApproval = async (approvalId: string, approved: boolean) => {
+    if (approvalInFlightRef.current.has(approvalId)) return;
+    approvalInFlightRef.current.add(approvalId);
+    setPendingApprovals((current) => new Set(current).add(approvalId));
+    setActionError(null);
+    try {
+      await onResolveApproval(approvalId, approved);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Failed to resolve approval");
+    } finally {
+      approvalInFlightRef.current.delete(approvalId);
+      setPendingApprovals((current) => {
+        const next = new Set(current);
+        next.delete(approvalId);
+        return next;
+      });
     }
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6" aria-live="polite">
+      <Conversation className="min-h-0" initial="instant" resize="smooth" data-testid="project-chat-scroll">
+        <ConversationContent className="mx-auto w-full max-w-3xl gap-4 px-4 py-5 sm:px-6">
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-12"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
         ) : null}
@@ -105,7 +156,7 @@ export function ProjectChatConversation({
             <p className="mt-1 text-sm text-muted-foreground">Discuss tasks, schedules, sessions, and work across the whole project.</p>
           </div>
         ) : null}
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+        <div className="flex w-full flex-col gap-4">
           {messages.map((message) => {
             if (message.type === "turn_end") {
               return <div key={message.id} data-testid="turn-boundary" className="my-2 flex items-center gap-2" aria-label="Turn complete"><span className="h-px flex-1 bg-border" /><span className="size-1 rounded-full bg-border" /><span className="h-px flex-1 bg-border" /></div>;
@@ -134,8 +185,8 @@ export function ProjectChatConversation({
                   <div className="font-medium">Approve {tool.replaceAll("_", " ")}?</div>
                   <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-muted-foreground">{JSON.stringify(approval.input ?? {}, null, 2)}</pre>
                   <div className="mt-3 flex gap-2">
-                    <Button size="sm" aria-label={`Approve ${tool}`} onClick={() => void onResolveApproval(approval.approvalId, true)}><Check className="size-3.5" />Approve</Button>
-                    <Button size="sm" variant="outline" aria-label={`Deny ${tool}`} onClick={() => void onResolveApproval(approval.approvalId, false)}><X className="size-3.5" />Deny</Button>
+                    <Button size="sm" aria-label={`Approve ${tool}`} disabled={pendingApprovals.has(approval.approvalId)} onClick={() => void resolveApproval(approval.approvalId, true)}><Check className="size-3.5" />Approve</Button>
+                    <Button size="sm" variant="outline" aria-label={`Deny ${tool}`} disabled={pendingApprovals.has(approval.approvalId)} onClick={() => void resolveApproval(approval.approvalId, false)}><X className="size-3.5" />Deny</Button>
                   </div>
                 </div>
               );
@@ -151,15 +202,18 @@ export function ProjectChatConversation({
             return <div key={message.id} className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">{message.content}</div>;
           })}
           {error ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div> : null}
+          {actionError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{actionError}</div> : null}
         </div>
-      </div>
+        </ConversationContent>
+        <ConversationScrollButton aria-label="Jump to latest message" />
+      </Conversation>
 
       <div className="shrink-0 border-t bg-background p-3 sm:px-6">
         <form onSubmit={(event) => void submit(event)} className="mx-auto max-w-3xl">
           {status === "running" ? (
             <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
               <span>{queueLength > 0 ? `${queueLength} queued` : "Project Chat is working"}</span>
-              <Button type="button" variant="outline" size="sm" aria-label="Stop generating" onClick={() => void onStop()}><Square className="size-3" />Stop generating</Button>
+              <Button type="button" variant="outline" size="sm" aria-label="Stop generating" disabled={stopping} onClick={() => void stop()}><Square className="size-3" />{stopping ? "Stopping…" : "Stop generating"}</Button>
             </div>
           ) : null}
           <div className="relative">

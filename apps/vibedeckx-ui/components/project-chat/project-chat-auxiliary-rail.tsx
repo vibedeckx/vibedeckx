@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Archive, ChevronDown, ChevronRight, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
@@ -46,6 +46,8 @@ interface ProjectChatAuxiliaryRailProps {
   onDeleteThread: (threadId: string) => Promise<void>;
   onLoadArchived: () => Promise<void>;
   onOpenContext?: (ref: ProjectChatContextRef) => void;
+  newThreadPending?: boolean;
+  className?: string;
 }
 
 export function ProjectChatAuxiliaryRail({
@@ -59,6 +61,8 @@ export function ProjectChatAuxiliaryRail({
   onDeleteThread,
   onLoadArchived,
   onOpenContext,
+  newThreadPending = false,
+  className,
 }: ProjectChatAuxiliaryRailProps) {
   const [threadsOpen, setThreadsOpen] = useState(true);
   const [contextOpen, setContextOpen] = useState(true);
@@ -68,13 +72,57 @@ export function ProjectChatAuxiliaryRail({
   const [renameValue, setRenameValue] = useState("");
   const [archiveTarget, setArchiveTarget] = useState<ProjectChatThread | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectChatThread | null>(null);
+  const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
+  const [actionError, setActionError] = useState<string | null>(null);
+  const pendingActionsRef = useRef<Set<string>>(new Set());
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const activeThreads = threads.filter((thread) => thread.archived_at === null);
+  const renamePending = renameTarget ? pendingActions.has(`rename:${renameTarget.id}`) : false;
+  const deletePending = deleteTarget ? pendingActions.has(`delete:${deleteTarget.id}`) : false;
+  const archivePending = archiveTarget ? pendingActions.has(`archive:${archiveTarget.id}`) : false;
+
+  useEffect(() => {
+    if (!actionsFor) return;
+    actionsMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActionsFor(null);
+    };
+    const closeOutside = (event: PointerEvent) => {
+      if (!actionsMenuRef.current?.contains(event.target as Node)) setActionsFor(null);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("pointerdown", closeOutside);
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("pointerdown", closeOutside);
+    };
+  }, [actionsFor]);
+
+  const runAction = async (key: string, action: () => Promise<void>, onSuccess: () => void) => {
+    if (pendingActionsRef.current.has(key)) return;
+    pendingActionsRef.current.add(key);
+    setPendingActions((current) => new Set(current).add(key));
+    setActionError(null);
+    try {
+      await action();
+      onSuccess();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Project Chat action failed");
+    } finally {
+      pendingActionsRef.current.delete(key);
+      setPendingActions((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
 
   return (
     <aside
       data-testid="project-chat-rail"
       data-project-chat-column
-      className="flex h-full w-[300px] shrink-0 flex-col overflow-hidden border-l border-border bg-muted/10"
+      className={cn("flex h-full w-[300px] shrink-0 flex-col overflow-hidden border-l border-border bg-muted/10", className)}
       aria-label="Project Chat threads and context"
     >
       <section className="flex min-h-0 flex-col border-b border-border/70">
@@ -88,7 +136,7 @@ export function ProjectChatAuxiliaryRail({
             {threadsOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
             <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Chat Threads</h2>
           </button>
-          <Button type="button" variant="ghost" size="icon-sm" aria-label="New thread" onClick={() => void onNewThread()}>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="New thread" disabled={newThreadPending} onClick={() => void onNewThread()}>
             <Plus className="size-4" aria-hidden="true" />
           </Button>
         </div>
@@ -118,17 +166,21 @@ export function ProjectChatAuxiliaryRail({
                     size="icon-sm"
                     aria-label={`Thread actions: ${title}`}
                     aria-expanded={actionsFor === thread.id}
+                    aria-haspopup="menu"
+                    aria-controls={actionsFor === thread.id ? `thread-actions-${thread.id}` : undefined}
                     onClick={() => setActionsFor((value) => value === thread.id ? null : thread.id)}
                   >
                     <MoreHorizontal className="size-4" aria-hidden="true" />
                   </Button>
                   {actionsFor === thread.id ? (
-                    <div className="absolute right-1 top-9 z-20 w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+                    <div ref={actionsMenuRef} id={`thread-actions-${thread.id}`} role="menu" aria-label={`Actions for ${title}`} className="absolute right-1 top-9 z-20 w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
                       <button
                         type="button"
+                        role="menuitem"
                         className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
                         onClick={() => {
                           setActionsFor(null);
+                          setActionError(null);
                           setRenameTarget(thread);
                           setRenameValue(title);
                         }}
@@ -137,9 +189,11 @@ export function ProjectChatAuxiliaryRail({
                       </button>
                       <button
                         type="button"
+                        role="menuitem"
                         className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
                         onClick={() => {
                           setActionsFor(null);
+                          setActionError(null);
                           setArchiveTarget(thread);
                         }}
                       >
@@ -147,9 +201,11 @@ export function ProjectChatAuxiliaryRail({
                       </button>
                       <button
                         type="button"
+                        role="menuitem"
                         className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10"
                         onClick={() => {
                           setActionsFor(null);
+                          setActionError(null);
                           setDeleteTarget(thread);
                         }}
                       >
@@ -222,7 +278,12 @@ export function ProjectChatAuxiliaryRail({
         onLoadArchived={onLoadArchived}
       />
 
-      <Dialog open={renameTarget !== null} onOpenChange={(open) => { if (!open) setRenameTarget(null); }}>
+      <Dialog open={renameTarget !== null} onOpenChange={(open) => {
+        if (!open && !renamePending) {
+          setRenameTarget(null);
+          setActionError(null);
+        }
+      }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Rename Project Chat thread</DialogTitle>
@@ -235,18 +296,27 @@ export function ProjectChatAuxiliaryRail({
             onChange={(event) => setRenameValue(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && renameTarget && renameValue.trim()) {
-                void onRenameThread(renameTarget.id, renameValue.trim()).then(() => setRenameTarget(null));
+                void runAction(
+                  `rename:${renameTarget.id}`,
+                  () => onRenameThread(renameTarget.id, renameValue.trim()),
+                  () => setRenameTarget(null),
+                );
               }
             }}
           />
+          {actionError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{actionError}</div> : null}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button>
+            <Button type="button" variant="outline" disabled={renamePending} onClick={() => { setRenameTarget(null); setActionError(null); }}>Cancel</Button>
             <Button
               type="button"
-              disabled={!renameValue.trim()}
+              disabled={!renameValue.trim() || renamePending}
               onClick={() => {
                 if (!renameTarget) return;
-                void onRenameThread(renameTarget.id, renameValue.trim()).then(() => setRenameTarget(null));
+                void runAction(
+                  `rename:${renameTarget.id}`,
+                  () => onRenameThread(renameTarget.id, renameValue.trim()),
+                  () => setRenameTarget(null),
+                );
               }}
             >
               Save title
@@ -255,19 +325,31 @@ export function ProjectChatAuxiliaryRail({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => {
+        if (!open && !deletePending) {
+          setDeleteTarget(null);
+          setActionError(null);
+        }
+      }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this Project Chat thread?</AlertDialogTitle>
             <AlertDialogDescription>This permanently removes the thread and its persisted conversation.</AlertDialogDescription>
           </AlertDialogHeader>
+          {actionError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{actionError}</div> : null}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={deletePending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => {
+              disabled={deletePending}
+              onClick={(event) => {
+                event.preventDefault();
                 if (!deleteTarget) return;
-                void onDeleteThread(deleteTarget.id).then(() => setDeleteTarget(null));
+                void runAction(
+                  `delete:${deleteTarget.id}`,
+                  () => onDeleteThread(deleteTarget.id),
+                  () => setDeleteTarget(null),
+                );
               }}
             >
               Confirm delete
@@ -276,18 +358,30 @@ export function ProjectChatAuxiliaryRail({
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={archiveTarget !== null} onOpenChange={(open) => { if (!open) setArchiveTarget(null); }}>
+      <AlertDialog open={archiveTarget !== null} onOpenChange={(open) => {
+        if (!open && !archivePending) {
+          setArchiveTarget(null);
+          setActionError(null);
+        }
+      }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Archive this Project Chat thread?</AlertDialogTitle>
             <AlertDialogDescription>The conversation leaves recent selectors but remains available in thread history.</AlertDialogDescription>
           </AlertDialogHeader>
+          {actionError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{actionError}</div> : null}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={archivePending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => {
+              disabled={archivePending}
+              onClick={(event) => {
+                event.preventDefault();
                 if (!archiveTarget) return;
-                void onArchiveThread(archiveTarget.id).then(() => setArchiveTarget(null));
+                void runAction(
+                  `archive:${archiveTarget.id}`,
+                  () => onArchiveThread(archiveTarget.id),
+                  () => setArchiveTarget(null),
+                );
               }}
             >
               Confirm archive

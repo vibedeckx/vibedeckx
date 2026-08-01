@@ -1,9 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ChevronDown, MessageSquare, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { useProjectChat } from "@/hooks/use-project-chat";
 import type { ProjectChatContextRef } from "@/lib/api";
 import { ProjectChatAuxiliaryRail } from "./project-chat-auxiliary-rail";
@@ -29,13 +32,47 @@ export function ProjectChatWorkbench({
 }: ProjectChatWorkbenchProps) {
   const chat = useProjectChat(projectId, threadId);
   const [railVisible, setRailVisible] = useState(true);
+  const [mobileRailOpen, setMobileRailOpen] = useState(false);
   const [headerThreadsOpen, setHeaderThreadsOpen] = useState(false);
+  const [newThreadPending, setNewThreadPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const newThreadInFlightRef = useRef(false);
+  const scopeGenerationRef = useRef(0);
   const title = projectChatThreadTitle(chat.thread);
   const activeThreads = chat.threads.filter((item) => item.archived_at === null);
+  const scopeKey = `${projectId}:${threadId}`;
+  const isMobile = useIsMobile();
+
+  useEffect(() => {
+    scopeGenerationRef.current += 1;
+    newThreadInFlightRef.current = false;
+    setNewThreadPending(false);
+    setActionError(null);
+    setHeaderThreadsOpen(false);
+    setMobileRailOpen(false);
+  }, [scopeKey]);
 
   const newThread = async () => {
-    const created = await chat.createThread();
-    onSelectThread(created.id);
+    if (newThreadInFlightRef.current) return;
+    const generation = scopeGenerationRef.current;
+    newThreadInFlightRef.current = true;
+    setNewThreadPending(true);
+    setActionError(null);
+    try {
+      const created = await chat.createThread();
+      if (generation === scopeGenerationRef.current && created.project_id === projectId) {
+        onSelectThread(created.id);
+      }
+    } catch (reason) {
+      if (generation === scopeGenerationRef.current) {
+        setActionError(reason instanceof Error ? reason.message : "Failed to create thread");
+      }
+    } finally {
+      if (generation === scopeGenerationRef.current) {
+        newThreadInFlightRef.current = false;
+        setNewThreadPending(false);
+      }
+    }
   };
 
   const leaveRemovedThread = (removedId: string) => {
@@ -43,6 +80,18 @@ export function ProjectChatWorkbench({
     const next = activeThreads.find((item) => item.id !== removedId);
     if (next) onSelectThread(next.id);
     else onBack();
+  };
+
+  const archiveThread = async (id: string) => {
+    const generation = scopeGenerationRef.current;
+    await chat.archiveThread(id, true);
+    if (generation === scopeGenerationRef.current) leaveRemovedThread(id);
+  };
+
+  const deleteThread = async (id: string) => {
+    const generation = scopeGenerationRef.current;
+    await chat.deleteThread(id);
+    if (generation === scopeGenerationRef.current) leaveRemovedThread(id);
   };
 
   return (
@@ -55,51 +104,53 @@ export function ProjectChatWorkbench({
           <MessageSquare className="size-4 shrink-0 text-primary" aria-hidden="true" />
           <div className="min-w-0">
             <div className="truncate text-[11px] text-muted-foreground">{projectName} / Project Chat</div>
-            <div className="relative">
-              <button
-                type="button"
-                aria-label={`Current thread: ${title}`}
-                aria-expanded={headerThreadsOpen}
-                onClick={() => setHeaderThreadsOpen((value) => !value)}
-                className="flex max-w-[50vw] items-center gap-1 truncate text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="truncate">{title}</span><ChevronDown className="size-3.5 shrink-0" />
-              </button>
-              {headerThreadsOpen ? (
-                <div className="absolute left-0 top-7 z-30 w-64 rounded-md border bg-popover p-1 shadow-md">
-                  {activeThreads.slice(0, 5).map((item) => {
-                    const itemTitle = projectChatThreadTitle(item);
-                    return (
+            <DropdownMenu open={headerThreadsOpen} onOpenChange={setHeaderThreadsOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`Current thread: ${title}`}
+                  className="flex max-w-[50vw] items-center gap-1 truncate text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className="truncate">{title}</span><ChevronDown className="size-3.5 shrink-0" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                {activeThreads.slice(0, 5).map((item) => {
+                  const itemTitle = projectChatThreadTitle(item);
+                  return (
+                    <DropdownMenuItem key={item.id} asChild>
                       <button
-                        key={item.id}
                         type="button"
                         aria-label={`Switch to thread: ${itemTitle}`}
-                        onClick={() => {
-                          setHeaderThreadsOpen(false);
-                          onSelectThread(item.id);
-                        }}
-                        className="block w-full truncate rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                        onClick={() => onSelectThread(item.id)}
+                        className="w-full truncate text-left"
                       >
                         {itemTitle}
                       </button>
-                    );
-                  })}
-                  <button type="button" onClick={() => void newThread()} className="mt-1 flex w-full items-center gap-2 border-t px-2 py-2 text-sm hover:bg-muted"><Plus className="size-3.5" />New thread</button>
-                </div>
-              ) : null}
-            </div>
+                    </DropdownMenuItem>
+                  );
+                })}
+                <DropdownMenuItem asChild>
+                  <button type="button" disabled={newThreadPending} onClick={() => void newThread()} className="w-full border-t"><Plus className="size-3.5" />New thread</button>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
         <Button
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label={railVisible ? "Hide threads and context" : "Show threads and context"}
-          onClick={() => setRailVisible((value) => !value)}
+          aria-label={isMobile
+            ? "Open threads and context"
+            : railVisible ? "Hide threads and context" : "Show threads and context"}
+          onClick={() => isMobile ? setMobileRailOpen(true) : setRailVisible((value) => !value)}
         >
-          {railVisible ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
+          {isMobile ? <PanelRightOpen className="size-4" />
+            : railVisible ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
         </Button>
       </header>
+      {actionError ? <div role="alert" className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">{actionError}</div> : null}
 
       <div className="flex min-h-0 flex-1" data-testid="project-chat-workbench-columns">
         <main data-testid="project-chat-main" data-project-chat-column className="min-w-0 flex-1">
@@ -109,6 +160,7 @@ export function ProjectChatWorkbench({
             </div>
           ) : (
             <ProjectChatConversation
+              key={scopeKey}
               messages={chat.messages}
               status={chat.status}
               queueLength={chat.queueLength}
@@ -121,21 +173,48 @@ export function ProjectChatWorkbench({
             />
           )}
         </main>
-        {railVisible ? (
+        {!isMobile && railVisible ? (
           <ProjectChatAuxiliaryRail
+            key={scopeKey}
             currentThreadId={threadId}
             threads={chat.threads}
             contextRefs={chat.contextRefs}
             onNewThread={newThread}
             onSelectThread={onSelectThread}
             onRenameThread={async (id, nextTitle) => { await chat.renameThread(id, nextTitle); }}
-            onArchiveThread={async (id) => { await chat.archiveThread(id, true); leaveRemovedThread(id); }}
-            onDeleteThread={async (id) => { await chat.deleteThread(id); leaveRemovedThread(id); }}
+            onArchiveThread={archiveThread}
+            onDeleteThread={deleteThread}
             onLoadArchived={() => chat.refetchThreads(true)}
             onOpenContext={onOpenContext}
+            newThreadPending={newThreadPending}
           />
         ) : null}
       </div>
+      {isMobile ? (
+        <Sheet open={mobileRailOpen} onOpenChange={setMobileRailOpen}>
+          <SheetContent side="right" className="w-[min(90vw,360px)] gap-0 p-0" aria-label="Project Chat threads and context">
+            <SheetHeader className="sr-only">
+              <SheetTitle>Project Chat threads and context</SheetTitle>
+              <SheetDescription>Switch conversations and open items referenced by this thread.</SheetDescription>
+            </SheetHeader>
+            <ProjectChatAuxiliaryRail
+              key={scopeKey}
+              className="w-full border-l-0"
+              currentThreadId={threadId}
+              threads={chat.threads}
+              contextRefs={chat.contextRefs}
+              onNewThread={newThread}
+              onSelectThread={(id) => { setMobileRailOpen(false); onSelectThread(id); }}
+              onRenameThread={async (id, nextTitle) => { await chat.renameThread(id, nextTitle); }}
+              onArchiveThread={archiveThread}
+              onDeleteThread={deleteThread}
+              onLoadArchived={() => chat.refetchThreads(true)}
+              onOpenContext={onOpenContext ? (ref) => { setMobileRailOpen(false); onOpenContext(ref); } : undefined}
+              newThreadPending={newThreadPending}
+            />
+          </SheetContent>
+        </Sheet>
+      ) : null}
     </div>
   );
 }

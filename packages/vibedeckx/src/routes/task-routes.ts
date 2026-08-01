@@ -25,6 +25,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Read one task without loading the project's full task board. Keep project
+  // ownership and task/project membership in the same authorization boundary.
+  fastify.get<{ Params: { projectId: string; taskId: string } }>(
+    "/api/projects/:projectId/tasks/:taskId",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
+      if (!project) return reply.code(404).send({ error: "Task not found" });
+      const task = await fastify.storage.tasks.getById(req.params.taskId);
+      if (!task || task.project_id !== project.id) {
+        return reply.code(404).send({ error: "Task not found" });
+      }
+      return reply.code(200).send({ task });
+    },
+  );
+
   // Create task
   fastify.post<{
     Params: { projectId: string };

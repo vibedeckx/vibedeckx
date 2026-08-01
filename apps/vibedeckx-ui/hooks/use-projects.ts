@@ -1,32 +1,50 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type Project, type SyncButtonConfig, type ExecutionMode } from "@/lib/api";
 
 export function useProjects(initialProjectId?: string | null) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
+  const [restoredRouteProjectId, setRestoredRouteProjectId] = useState(initialProjectId);
+  const currentProjectRef = useRef(currentProject);
+  const initialProjectIdRef = useRef(initialProjectId);
+  currentProjectRef.current = currentProject;
+  initialProjectIdRef.current = initialProjectId;
+  const routeProjectChanged = restoredRouteProjectId !== initialProjectId;
+  const routeProjectPending = loading || routeProjectChanged;
+  const routeProjectNotFound = !routeProjectPending
+    && Boolean(initialProjectId)
+    && !projects.some((project) => project.id === initialProjectId);
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api.getProjects();
       setProjects(data);
-      if (data.length > 0 && !currentProject) {
-        const preferred = initialProjectId
-          ? data.find((p) => p.id === initialProjectId)
-          : null;
-        setCurrentProject(preferred ?? data[0]);
+      if (data.length > 0 && !currentProjectRef.current) {
+        const preferred = initialProjectIdRef.current
+          ? data.find((p) => p.id === initialProjectIdRef.current)
+          : data[0];
+        setCurrentProject(preferred ?? null);
       }
     } finally {
       setLoading(false);
     }
-  }, [currentProject, initialProjectId]);
+  }, []);
 
   useEffect(() => {
     fetchProjects();
-  }, []);
+  }, [fetchProjects]);
+
+  useEffect(() => {
+    if (!routeProjectChanged || loading) return;
+    setRestoredRouteProjectId(initialProjectId);
+    setCurrentProject(initialProjectId
+      ? projects.find((project) => project.id === initialProjectId) ?? null
+      : projects[0] ?? null);
+  }, [initialProjectId, loading, projects, routeProjectChanged]);
 
   const createProject = async (opts: {
     name: string;
@@ -75,7 +93,9 @@ export function useProjects(initialProjectId?: string | null) {
 
   return {
     projects,
-    currentProject,
+    currentProject: routeProjectChanged ? null : currentProject,
+    routeProjectPending,
+    routeProjectNotFound,
     loading,
     addProject,
     createProject,

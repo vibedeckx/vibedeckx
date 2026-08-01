@@ -1740,6 +1740,15 @@ export const api = {
     return data.tasks;
   },
 
+  async getTask(projectId: string, taskId: string): Promise<Task> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks/${taskId}`);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error ?? `Failed to fetch task: ${res.status}`);
+    }
+    return (await res.json()).task;
+  },
+
   async createTask(
     projectId: string,
     opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority }

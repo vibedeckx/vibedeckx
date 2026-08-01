@@ -34,7 +34,7 @@ function options(overrides: Partial<ProjectChatContextNavigationOptions> = {}): 
   return {
     projectId: "project-1",
     schedules: [{ id: "schedule-1", project_id: "project-1" } as ProjectChatContextNavigationOptions["schedules"][number]],
-    getTasks: vi.fn(async () => [task]),
+    getTask: vi.fn(async () => task),
     resolveProjectForTarget: vi.fn(async (projectId) => ({ id: projectId } as Project)),
     openTask: vi.fn(),
     selectAgentSession: vi.fn(),
@@ -63,7 +63,7 @@ describe("useProjectChatContextNavigation", () => {
     act(() => root.render(<Harness {...opts} />));
 
     await act(async () => latest.open(ref({ kind: "task", taskId: "task-1", label: "Fix login" })));
-    expect(opts.getTasks).toHaveBeenCalledWith("project-1", { includeArchived: true });
+    expect(opts.getTask).toHaveBeenCalledWith("project-1", "task-1");
     expect(opts.openTask).toHaveBeenCalledWith(task);
 
     await act(async () => latest.open(ref({ kind: "agent_session", sessionId: "session-1", target: "remote-1", branch: "dev", label: "Dev" })));
@@ -81,23 +81,23 @@ describe("useProjectChatContextNavigation", () => {
   });
 
   it("drops stale asynchronous navigation after the selected project changes", async () => {
-    let resolveTasks!: (tasks: Task[]) => void;
-    const getTasks = vi.fn(() => new Promise<Task[]>((resolve) => { resolveTasks = resolve; }));
-    const first = options({ getTasks });
+    let resolveTask!: (task: Task) => void;
+    const getTask = vi.fn(() => new Promise<Task>((resolve) => { resolveTask = resolve; }));
+    const first = options({ getTask });
     act(() => root.render(<Harness {...first} />));
 
     let pending!: Promise<void>;
     act(() => { pending = latest.open(ref({ kind: "task", taskId: "task-1", label: "Fix login" })); });
-    const second = options({ projectId: "project-2", getTasks: vi.fn(async () => []) });
+    const second = options({ projectId: "project-2", getTask: vi.fn(async () => task) });
     act(() => root.render(<Harness {...second} />));
-    await act(async () => { resolveTasks([task]); await pending; });
+    await act(async () => { resolveTask(task); await pending; });
 
     expect(first.openTask).not.toHaveBeenCalled();
     expect(first.onError).not.toHaveBeenCalled();
   });
 
   it("reports missing or mismatched selectors instead of performing a no-op", async () => {
-    const opts = options({ getTasks: vi.fn(async () => []) });
+    const opts = options({ getTask: vi.fn(async () => ({ ...task, project_id: "project-2" })) });
     act(() => root.render(<Harness {...opts} />));
 
     await act(async () => latest.open(ref({ kind: "task", taskId: "missing", label: "Missing" })));

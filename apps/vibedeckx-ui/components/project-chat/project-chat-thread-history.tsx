@@ -35,6 +35,7 @@ export function ProjectChatThreadHistory({
 }: ProjectChatThreadHistoryProps) {
   const [query, setQuery] = useState("");
   const [loadingArchived, setLoadingArchived] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized) return threads;
@@ -48,34 +49,40 @@ export function ProjectChatThreadHistory({
           <DialogTitle>All Project Chat threads</DialogTitle>
           <DialogDescription>Search, reopen, or include archived project conversations.</DialogDescription>
         </DialogHeader>
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-            <Input
-              autoFocus
-              aria-label="Search threads"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="pl-8"
-            />
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+              <Input
+                autoFocus
+                aria-label="Search threads"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="pl-8"
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={loadingArchived}
+              onClick={async () => {
+                setLoadingArchived(true);
+                setLoadError(null);
+                try {
+                  await onLoadArchived();
+                } catch (reason) {
+                  setLoadError(reason instanceof Error ? reason.message : "Failed to load archived threads");
+                } finally {
+                  setLoadingArchived(false);
+                }
+              }}
+            >
+              <Archive className="size-4" aria-hidden="true" />
+              {loadingArchived ? "Loading…" : "Show archived threads"}
+            </Button>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={loadingArchived}
-            onClick={async () => {
-              setLoadingArchived(true);
-              try {
-                await onLoadArchived();
-              } finally {
-                setLoadingArchived(false);
-              }
-            }}
-          >
-            <Archive className="size-4" aria-hidden="true" />
-            {loadingArchived ? "Loading…" : "Show archived threads"}
-          </Button>
+          {loadError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{loadError}</div> : null}
         </div>
         <div className="min-h-0 space-y-1 overflow-y-auto" role="list">
           {filtered.length === 0 ? (
@@ -83,23 +90,23 @@ export function ProjectChatThreadHistory({
           ) : filtered.map((thread) => {
             const title = projectChatThreadTitle(thread);
             return (
-              <button
-                key={thread.id}
-                type="button"
-                role="listitem"
-                data-testid="history-thread-row"
-                aria-label={`Open history thread: ${title}`}
-                onClick={() => {
-                  onSelectThread(thread.id);
-                  onOpenChange(false);
-                }}
-                className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="min-w-0 truncate text-sm font-medium">{title}</span>
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {thread.archived_at ? "Archived" : new Date(thread.updated_at).toLocaleDateString()}
-                </span>
-              </button>
+              <div key={thread.id} role="listitem">
+                <button
+                  type="button"
+                  data-testid="history-thread-row"
+                  aria-label={`Open history thread: ${title}`}
+                  onClick={() => {
+                    onSelectThread(thread.id);
+                    onOpenChange(false);
+                  }}
+                  className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className="min-w-0 truncate text-sm font-medium">{title}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {thread.archived_at ? "Archived" : new Date(thread.updated_at).toLocaleDateString()}
+                  </span>
+                </button>
+              </div>
             );
           })}
         </div>

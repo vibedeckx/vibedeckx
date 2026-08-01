@@ -16,6 +16,31 @@ import { ProjectChatWorkbench } from "./project-chat-workbench";
 import type { ProjectChatMessage, ProjectChatThread } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+const resizeObservers: Array<{ callback: ResizeObserverCallback; target: Element | null }> = [];
+(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = class {
+  callback: ResizeObserverCallback;
+  target: Element | null = null;
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    resizeObservers.push(this);
+  }
+  observe(target: Element) { this.target = target; }
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+(globalThis as unknown as { matchMedia: typeof window.matchMedia }).matchMedia = vi.fn((query: string) => ({
+  matches: window.innerWidth < 768,
+  media: query,
+  onchange: null,
+  addListener: vi.fn(),
+  removeListener: vi.fn(),
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  dispatchEvent: vi.fn(),
+}));
+(globalThis as unknown as { requestAnimationFrame: typeof requestAnimationFrame }).requestAnimationFrame = ((callback: FrameRequestCallback) => (
+  window.setTimeout(() => callback(performance.now()), 0)
+)) as typeof requestAnimationFrame;
 
 const thread = (index: number): ProjectChatThread => ({
   id: `thread-${index}`,
@@ -47,10 +72,25 @@ function getButton(name: string): HTMLButtonElement {
   return result as HTMLButtonElement;
 }
 
+function openHeaderThreadMenu() {
+  const trigger = getButton("Current thread: Thread 7");
+  trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+}
+
 function setInput(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function setupHook() {
@@ -106,6 +146,8 @@ function render(overrides: Partial<React.ComponentProps<typeof ProjectChatWorkbe
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resizeObservers.length = 0;
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
   setupHook();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -139,6 +181,34 @@ describe("ProjectChatWorkbench", () => {
     expect(container.textContent).toContain("Schedule run");
   });
 
+  it("opens restored history at the bottom and preserves user scroll-up during streaming", async () => {
+    render();
+    const scrollRoot = container.querySelector('[data-testid="project-chat-scroll"]') as HTMLElement;
+    const scroll = scrollRoot.firstElementChild as HTMLElement;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 200 },
+      scrollTop: { configurable: true, value: 0, writable: true },
+    });
+    const observer = resizeObservers.find((item) => item.target !== null)!;
+    await act(async () => {
+      observer.callback([{ contentRect: { height: 800 } } as ResizeObserverEntry], observer as unknown as ResizeObserver);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(scroll.scrollTop).toBe(799);
+
+    scroll.scrollTop = 300;
+    scroll.style.overflow = "auto";
+    act(() => scroll.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -10 })));
+    await act(async () => {});
+    await act(async () => {
+      observer.callback([{ contentRect: { height: 900 } } as ResizeObserverEntry], observer as unknown as ResizeObserver);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(scroll.scrollTop).toBe(300);
+    expect(getButton("Jump to latest message")).toBeTruthy();
+  });
+
   it("switches and creates threads through app-owned navigation", async () => {
     const props = render();
 
@@ -148,6 +218,23 @@ describe("ProjectChatWorkbench", () => {
     await act(async () => getButton("New thread").click());
     expect(hook.value.createThread).toHaveBeenCalledWith();
     expect(props.onSelectThread).toHaveBeenCalledWith("thread-8");
+  });
+
+  it("guards new-thread creation and reports failure without navigation", async () => {
+    const pending = deferred<ProjectChatThread>();
+    const props = render();
+    hook.value.createThread = vi.fn(() => pending.promise);
+
+    act(() => {
+      getButton("New thread").click();
+      getButton("New thread").click();
+    });
+    expect(hook.value.createThread).toHaveBeenCalledTimes(1);
+    expect(getButton("New thread").disabled).toBe(true);
+    await act(async () => pending.reject(new Error("Create unavailable")));
+
+    expect(props.onSelectThread).not.toHaveBeenCalled();
+    expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Create unavailable"))).toBe(true);
   });
 
   it("renames, archives, and deletes only after confirmation", async () => {
@@ -179,6 +266,100 @@ describe("ProjectChatWorkbench", () => {
     expect(hook.value.deleteThread).toHaveBeenCalledWith("thread-7");
   });
 
+  it("guards message actions and keeps the draft with an accessible error when send fails", async () => {
+    const pending = deferred<void>();
+    hook.value.sendMessage = vi.fn(() => pending.promise);
+    render();
+    const composer = container.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
+    act(() => setInput(composer, "Keep this draft"));
+
+    act(() => {
+      getButton("Send message").click();
+      getButton("Send message").click();
+    });
+    expect(hook.value.sendMessage).toHaveBeenCalledTimes(1);
+    expect(getButton("Send message").disabled).toBe(true);
+
+    await act(async () => pending.reject(new Error("Send unavailable")));
+    expect(composer.value).toBe("Keep this draft");
+    expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Send unavailable"))).toBe(true);
+  });
+
+  it("guards stop and approval actions independently", async () => {
+    const stop = deferred<boolean>();
+    const approval = deferred<void>();
+    hook.value.stopTurn = vi.fn(() => stop.promise);
+    hook.value.resolveToolApproval = vi.fn(() => approval.promise);
+    render();
+
+    act(() => {
+      getButton("Stop generating").click();
+      getButton("Stop generating").click();
+      getButton("Approve run_schedule_now").click();
+      getButton("Approve run_schedule_now").click();
+    });
+    expect(hook.value.stopTurn).toHaveBeenCalledTimes(1);
+    expect(hook.value.resolveToolApproval).toHaveBeenCalledTimes(1);
+    expect(getButton("Stop generating").disabled).toBe(true);
+    expect(getButton("Approve run_schedule_now").disabled).toBe(true);
+
+    await act(async () => { stop.reject(new Error("Stop unavailable")); approval.resolve(); });
+    expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Stop unavailable"))).toBe(true);
+  });
+
+  it("retains a destructive dialog and rename input when a thread mutation fails", async () => {
+    hook.value.renameThread = vi.fn(async () => { throw new Error("Rename unavailable"); });
+    hook.value.archiveThread = vi.fn(async () => { throw new Error("Archive unavailable"); });
+    render();
+
+    act(() => getButton("Thread actions: Thread 7").click());
+    act(() => getButton("Rename thread").click());
+    const renameInput = document.querySelector('input[aria-label="Thread title"]') as HTMLInputElement;
+    act(() => setInput(renameInput, "Retain me"));
+    await act(async () => getButton("Save title").click());
+    expect(renameInput.isConnected).toBe(true);
+    expect(renameInput.value).toBe("Retain me");
+    expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Rename unavailable"))).toBe(true);
+
+    act(() => getButton("Cancel").click());
+    act(() => getButton("Thread actions: Thread 7").click());
+    act(() => getButton("Archive thread").click());
+    await act(async () => getButton("Confirm archive").click());
+    expect(document.body.textContent).toContain("Archive this Project Chat thread?");
+    expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Archive unavailable"))).toBe(true);
+  });
+
+  it("drops completion from an old thread action after navigation", async () => {
+    const pending = deferred<void>();
+    hook.value.sendMessage = vi.fn(() => pending.promise);
+    render();
+    const oldComposer = container.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
+    act(() => setInput(oldComposer, "Old thread"));
+    act(() => getButton("Send message").click());
+
+    render({ threadId: "thread-6" });
+    const newComposer = container.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;
+    act(() => setInput(newComposer, "New thread draft"));
+    await act(async () => pending.resolve());
+
+    expect(newComposer.value).toBe("New thread draft");
+  });
+
+  it("does not navigate from a destructive action completed after scope changed", async () => {
+    const pending = deferred<ProjectChatThread>();
+    const onSelectThread = vi.fn();
+    hook.value.archiveThread = vi.fn(() => pending.promise);
+    render({ onSelectThread });
+    act(() => getButton("Thread actions: Thread 7").click());
+    act(() => getButton("Archive thread").click());
+    act(() => getButton("Confirm archive").click());
+
+    render({ threadId: "thread-6", onSelectThread });
+    await act(async () => pending.resolve({ ...thread(7), archived_at: Date.now() }));
+
+    expect(onSelectThread).not.toHaveBeenCalled();
+  });
+
   it("keeps archived threads out of recent and header selectors after View All loads them", async () => {
     hook.value.threads = [
       { ...thread(9), archived_at: Date.now() },
@@ -188,7 +369,7 @@ describe("ProjectChatWorkbench", () => {
 
     expect(container.querySelectorAll('[data-testid="thread-row"]')).toHaveLength(5);
     expect(container.textContent).not.toContain("Thread 9");
-    act(() => getButton("Current thread: Thread 7").click());
+    act(() => openHeaderThreadMenu());
     expect(document.querySelector('button[aria-label="Switch to thread: Thread 9"]')).toBeNull();
 
     act(() => getButton("View all threads").click());
@@ -201,9 +382,42 @@ describe("ProjectChatWorkbench", () => {
 
     expect(container.querySelector('[data-testid="project-chat-rail"]')).toBeNull();
     expect(getButton("Current thread: Thread 7")).toBeTruthy();
-    act(() => getButton("Current thread: Thread 7").click());
+    act(() => openHeaderThreadMenu());
     act(() => getButton("Switch to thread: Thread 6").click());
     expect(props.onSelectThread).toHaveBeenCalledWith("thread-6");
+  });
+
+  it("closes thread menus with Escape and keeps list semantics off buttons", async () => {
+    render();
+    act(() => getButton("Thread actions: Thread 7").click());
+    expect(document.querySelector('[role="menu"][aria-label="Actions for Thread 7"]')).not.toBeNull();
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.querySelector('[role="menu"][aria-label="Actions for Thread 7"]')).toBeNull();
+
+    act(() => openHeaderThreadMenu());
+    expect(getButton("Switch to thread: Thread 6")).toBeTruthy();
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.querySelector('button[aria-label="Switch to thread: Thread 6"]')).toBeNull();
+
+    act(() => getButton("View all threads").click());
+    const listItem = document.querySelector('[role="listitem"]');
+    expect(listItem?.tagName).not.toBe("BUTTON");
+    expect(listItem?.querySelector("button")).not.toBeNull();
+  });
+
+  it("uses one combined modal auxiliary surface instead of a fixed mobile sibling", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 600 });
+    render();
+    await act(async () => {});
+
+    expect(container.querySelector('[data-testid="project-chat-rail"]')).toBeNull();
+    expect(container.querySelectorAll("[data-project-chat-column]")).toHaveLength(1);
+    act(() => getButton("Open threads and context").click());
+    expect(document.querySelector('[data-slot="sheet-content"] [data-testid="project-chat-rail"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="project-chat-rail"]')).toBeNull();
+
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.querySelector('[data-slot="sheet-content"] [data-testid="project-chat-rail"]')).toBeNull();
   });
 
   it("shows final Context refs and disables deleted targets", () => {

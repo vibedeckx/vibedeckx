@@ -7,7 +7,7 @@ import type { Project, ProjectChatContextRef, Schedule, Task } from "@/lib/api";
 export interface ProjectChatContextNavigationOptions {
   projectId: string | null;
   schedules: Schedule[];
-  getTasks: (projectId: string, opts: { includeArchived: boolean }) => Promise<Task[]>;
+  getTask: (projectId: string, taskId: string) => Promise<Task>;
   resolveProjectForTarget: (projectId: string, target: string) => Promise<Project | null>;
   openTask: (task: Task) => void;
   selectAgentSession: (branch: string | null, sessionId: string, projectId: string) => void;
@@ -39,11 +39,11 @@ export function useProjectChatContextNavigation(options: ProjectChatContextNavig
     }
     try {
       if (navigation.kind === "task") {
-        const tasks = await optionsRef.current.getTasks(scope.projectId, { includeArchived: true });
+        const task = await optionsRef.current.getTask(scope.projectId, navigation.taskId);
         if (!isCurrent(scope)) return;
-        const task = tasks.find((candidate) => candidate.id === navigation.taskId
-          && candidate.project_id === scope.projectId);
-        if (!task) throw new Error("Task is no longer available in this project");
+        if (task.id !== navigation.taskId || task.project_id !== scope.projectId) {
+          throw new Error("Task is no longer available in this project");
+        }
         optionsRef.current.openTask(task);
         return;
       }

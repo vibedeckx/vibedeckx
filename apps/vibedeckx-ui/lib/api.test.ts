@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, createNewAgentSession, getFreshToken, ResidentLimitError, setAuthToken, setTokenGetter } from "@/lib/api";
+import { api, createNewAgentSession, getFreshToken, setAuthToken, setTokenGetter } from "@/lib/api";
 
 // Build a JWT whose `exp` is `secondsFromNow` away (negative = already expired).
 function makeJwt(secondsFromNow: number): string {
@@ -175,6 +175,26 @@ describe("Project Chat create", () => {
     try {
       await expect(api.createProjectChatThread("p1", "hello", "stable-create-key"))
         .rejects.toMatchObject({ message: "payload mismatch", status: 409 });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
+describe("single task read", () => {
+  it("uses the bounded project-scoped task endpoint", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ task: { id: "task-1", project_id: "project-1" } }),
+    } as Response);
+    global.fetch = fetchMock;
+    try {
+      await expect(api.getTask("project-1", "task-1")).resolves.toMatchObject({ id: "task-1" });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project-1/tasks/task-1",
+        expect.objectContaining({ headers: expect.any(Headers) }),
+      );
     } finally {
       global.fetch = originalFetch;
     }
