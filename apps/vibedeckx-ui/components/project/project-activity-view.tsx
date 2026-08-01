@@ -1,9 +1,11 @@
 "use client";
 
-import { AlertCircle, CalendarClock, Loader2 } from "lucide-react";
-import type { ProjectChatThread, Task } from "@/lib/api";
+import type { ReactNode } from "react";
+import { AlertCircle, Bot, CalendarClock, Inbox, Loader2 } from "lucide-react";
+import type { ProjectActivity, ProjectChatThread, Task } from "@/lib/api";
 import { useProjectActivity } from "@/hooks/use-project-activity";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { ProjectChatCard } from "./project-chat-card";
 import { RecentAgentSessionsCard } from "./recent-agent-sessions-card";
 import { ScheduleResultsCard } from "./schedule-results-card";
@@ -30,10 +32,76 @@ export interface ProjectActivityViewProps {
   onViewAllTasks: () => void;
 }
 
-function nextScheduleLabel(value: string | null): string {
+function nextScheduleTime(value: string | null): string {
   if (!value) return "None scheduled";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  const clock = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const days = Math.round(
+    (new Date(date).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000,
+  );
+  if (days === 0) return `Today · ${clock}`;
+  if (days === 1) return `Tomorrow · ${clock}`;
+  return `${date.toLocaleDateString()} · ${clock}`;
+}
+
+function untilNextSchedule(value: string | null): string {
+  if (!value) return "No upcoming runs";
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return "Unrecognised schedule time";
+  const minutes = Math.round((timestamp - Date.now()) / 60_000);
+  if (minutes <= 0) return "Due now";
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h ${minutes % 60}m`;
+  return `in ${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+/** Where the currently-running sessions are, e.g. "feat/streams · gpu-01 · main". */
+function runningWhere(activity: ProjectActivity): string {
+  const labels = activity.recentAgentSessions
+    .filter((session) => session.status === "running")
+    .map((session) => {
+      const branch = session.workspace.branch || "main";
+      return session.workspace.target === "local" ? branch : `${session.workspace.target} · ${branch}`;
+    });
+  if (labels.length === 0) return "Nothing running right now";
+  return labels.slice(0, 2).join(" · ") + (labels.length > 2 ? ` +${labels.length - 2}` : "");
+}
+
+interface StatProps {
+  label: string;
+  icon: ReactNode;
+  children: ReactNode;
+  detail: string;
+}
+
+/**
+ * One cell of the summary strip: uppercase key, oversized mono value, and a
+ * mono detail line that says *which* thing the number is about. Cells divide
+ * vertically once they stack and horizontally once they sit side by side.
+ */
+function Stat({ label, icon, children, detail }: StatProps) {
+  return (
+    <div className="min-w-0 border-b border-border/60 py-3.5 last:border-b-0 sm:border-b-0 sm:border-r sm:px-6 sm:first:pl-0 sm:last:border-r-0 sm:last:pr-0">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground/70">
+        <span className="flex items-center">{icon}</span>
+        {label}
+      </div>
+      {children}
+      <p className="mt-1.5 truncate font-mono text-[10.5px] text-muted-foreground">{detail}</p>
+    </div>
+  );
+}
+
+/** Big mono number plus its unit, shared by the two counting tiles. */
+function StatValue({ unit, children }: { unit: string; children: ReactNode }) {
+  return (
+    <p className="flex items-baseline gap-1.5 font-mono text-[22px] font-medium leading-[1.1] tracking-[-0.03em]">
+      {children}
+      <span className="text-[11.5px] font-normal tracking-normal text-muted-foreground/70">{unit}</span>
+    </p>
+  );
 }
 
 export function ProjectActivityView({
@@ -77,29 +145,43 @@ export function ProjectActivityView({
 
   return (
     <section aria-label="Project activity dashboard" className="space-y-4">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        <div className="rounded-lg border bg-card px-3 py-2">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Running</p>
-          <p className="text-lg font-semibold text-blue-600">{activity.summary.running}</p>
-        </div>
-        <div className="rounded-lg border bg-card px-3 py-2" title="Unread updates waiting for you">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Waiting</p>
-          {/* Amber, never destructive: something waiting on you is not something broken. */}
-          <p
-            data-testid="waiting-count"
-            aria-label={`${waitingCount} unread updates waiting for you`}
-            className={waitingCount > 0 ? "text-lg font-semibold text-amber-600" : "text-lg font-semibold"}
-          >
-            {waitingCount}
+      <div className="grid grid-cols-1 border-t border-border/60 sm:grid-cols-3">
+        <Stat
+          label="Running"
+          icon={<Bot className="size-[11px]" aria-hidden="true" />}
+          detail={runningWhere(activity)}
+        >
+          <StatValue unit="agent sessions">
+            <span className="text-blue-600 dark:text-blue-400">{activity.summary.running}</span>
+          </StatValue>
+        </Stat>
+
+        <Stat
+          label="Waiting"
+          icon={<Inbox className="size-[11px]" aria-hidden="true" />}
+          detail={waitingCount > 0 ? "Unread attention milestones" : "You're all caught up"}
+        >
+          <StatValue unit="updates for you">
+            {/* Amber, never destructive: something waiting on you is not something broken. */}
+            <span
+              data-testid="waiting-count"
+              aria-label={`${waitingCount} unread updates waiting for you`}
+              className={waitingCount > 0 ? "text-amber-600 dark:text-amber-400" : undefined}
+            >
+              {waitingCount}
+            </span>
+          </StatValue>
+        </Stat>
+
+        <Stat
+          label="Next schedule"
+          icon={<CalendarClock className="size-[11px]" aria-hidden="true" />}
+          detail={untilNextSchedule(activity.summary.nextScheduleAt)}
+        >
+          <p className="truncate font-mono text-[13px] font-medium tracking-[-0.01em]">
+            {nextScheduleTime(activity.summary.nextScheduleAt)}
           </p>
-        </div>
-        <div className="col-span-2 rounded-lg border bg-card px-3 py-2 sm:col-span-1">
-          <p className="flex items-center gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">
-            <CalendarClock className="size-3" aria-hidden="true" />
-            Next schedule
-          </p>
-          <p className="truncate text-sm font-medium">{nextScheduleLabel(activity.summary.nextScheduleAt)}</p>
-        </div>
+        </Stat>
       </div>
 
       {error ? (
@@ -120,12 +202,12 @@ export function ProjectActivityView({
         onOpenThread={onOpenThread}
       />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
         <RecentAgentSessionsCard sessions={activity.recentAgentSessions} onOpenSession={onOpenAgentSession} />
         <ScheduleResultsCard runs={activity.recentScheduleRuns} onOpenRun={onOpenScheduleRun} />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
         <PriorityTasksCard tasks={activity.priorityTasks} onOpenTask={onOpenTask} onViewAll={onViewAllTasks} />
         <AttentionRequiredCard
           scopeKey={projectId}

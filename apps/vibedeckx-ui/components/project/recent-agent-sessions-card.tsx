@@ -1,20 +1,27 @@
 "use client";
 
-import { Bot, Circle, GitBranch } from "lucide-react";
+import { Bot, GitBranch } from "lucide-react";
 import type { ProjectAgentSessionActivity } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+import {
+  ActivityCard,
+  ActivityCardCount,
+  ActivityCardEmpty,
+  ActivityCardTitle,
+  ActivityRow,
+  StatusDot,
+  type DotTone,
+} from "./activity-card";
 
 interface RecentAgentSessionsCardProps {
   sessions: ProjectAgentSessionActivity[];
   onOpenSession: (sessionId: string, target: string, branch: string | null) => void;
 }
 
-const statusClass: Record<ProjectAgentSessionActivity["status"], string> = {
-  running: "text-blue-500 fill-blue-500",
-  stopped: "text-amber-500 fill-amber-500",
-  error: "text-destructive fill-destructive",
-  unknown: "text-muted-foreground fill-muted-foreground",
+const statusTone: Record<ProjectAgentSessionActivity["status"], DotTone> = {
+  running: "blue",
+  stopped: "amber",
+  error: "rose",
+  unknown: "neutral",
 };
 
 function relativeTime(value: number | null): string {
@@ -40,51 +47,49 @@ function workspaceLabel(session: ProjectAgentSessionActivity): string {
 export function RecentAgentSessionsCard({ sessions, onOpenSession }: RecentAgentSessionsCardProps) {
   const visible = sessions.slice(0, 8);
   return (
-    <Card className="h-full">
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center justify-between text-sm">
-          <span className="flex items-center gap-2">
-            <Bot className="size-4 text-muted-foreground" aria-hidden="true" />
-            Recent Agent Sessions
-          </span>
-          <span className="font-normal text-muted-foreground">{visible.length}</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {visible.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No agent sessions yet</p>
-        ) : (
-          <ul className="divide-y divide-border/50">
-            {visible.map((session) => {
-              const title = sessionTitle(session);
-              return (
-                <li key={`${session.target}:${session.id}`} data-testid="recent-session">
-                  <button
-                    type="button"
-                    aria-label={`Open agent session: ${title}`}
-                    onClick={() => onOpenSession(session.id, session.workspace.target, session.workspace.branch)}
-                    className="group flex w-full items-start gap-2 rounded-md px-2 py-2.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <Circle className={cn("mt-1 size-2.5 shrink-0", statusClass[session.status])} aria-hidden="true" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{title}</span>
-                      <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                        <span className="inline-flex min-w-0 items-center gap-1">
-                          <GitBranch className="size-3 shrink-0" aria-hidden="true" />
-                          <span className="truncate">{workspaceLabel(session)}</span>
-                        </span>
-                        {session.model ? <span>{session.model}</span> : null}
-                        <span>{relativeTime(session.lastActiveAt)}</span>
-                      </span>
-                    </span>
-                    <span className="text-[11px] capitalize text-muted-foreground">{session.status}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
+    <ActivityCard>
+      <ActivityCardTitle
+        icon={<Bot className="size-3" aria-hidden="true" />}
+        trailing={<ActivityCardCount>{visible.length}</ActivityCardCount>}
+      >
+        Recent Agent Sessions
+      </ActivityCardTitle>
+
+      {visible.length === 0 ? (
+        <ActivityCardEmpty>No agent sessions yet</ActivityCardEmpty>
+      ) : (
+        visible.map((session) => {
+          const title = sessionTitle(session);
+          return (
+            <ActivityRow
+              key={`${session.target}:${session.id}`}
+              data-testid="recent-session"
+              aria-label={`Open agent session: ${title}`}
+              onClick={() => onOpenSession(session.id, session.workspace.target, session.workspace.branch)}
+            >
+              <StatusDot
+                tone={statusTone[session.status]}
+                pulse={session.status === "running"}
+                className="mt-[5px]"
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[12.5px] font-medium">{title}</span>
+                <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10.5px] text-muted-foreground">
+                  <span className="inline-flex min-w-0 max-w-50 items-center gap-1">
+                    <GitBranch className="size-2.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
+                    <span className="truncate">{workspaceLabel(session)}</span>
+                  </span>
+                  {session.model ? <span className="truncate">{session.model}</span> : null}
+                  <span>{relativeTime(session.lastActiveAt)}</span>
+                </span>
+              </span>
+              <span className="shrink-0 font-mono text-[10.5px] capitalize text-muted-foreground">
+                {session.status}
+              </span>
+            </ActivityRow>
+          );
+        })
+      )}
+    </ActivityCard>
   );
 }

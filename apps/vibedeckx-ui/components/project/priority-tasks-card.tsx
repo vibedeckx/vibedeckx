@@ -1,9 +1,14 @@
 "use client";
 
-import { ArrowRight, CheckCircle2, Circle, ListTodo, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Circle, ListTodo, Loader2, XCircle } from "lucide-react";
 import type { Task, TaskPriority, TaskStatus } from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
+import {
+  ActivityCard,
+  ActivityCardEmpty,
+  ActivityCardTitle,
+  ActivityRow,
+} from "./activity-card";
 
 interface PriorityTasksCardProps {
   tasks: Task[];
@@ -25,11 +30,18 @@ const priorityOrder: Record<TaskPriority, number> = {
   low: 3,
 };
 
+const priorityTone: Record<TaskPriority, string> = {
+  urgent: "text-destructive",
+  high: "text-amber-700 dark:text-amber-500",
+  medium: "text-muted-foreground/70",
+  low: "text-muted-foreground/70",
+};
+
 function StatusIcon({ status }: { status: TaskStatus }) {
-  if (status === "in_progress") return <Loader2 className="size-3.5 text-blue-500" aria-hidden="true" />;
+  if (status === "in_progress") return <Loader2 className="size-3.5 animate-spin text-blue-500" aria-hidden="true" />;
   if (status === "done") return <CheckCircle2 className="size-3.5 text-emerald-500" aria-hidden="true" />;
   if (status === "cancelled") return <XCircle className="size-3.5 text-muted-foreground" aria-hidden="true" />;
-  return <Circle className="size-3.5 text-muted-foreground" aria-hidden="true" />;
+  return <Circle className="size-3.5 text-muted-foreground/70" aria-hidden="true" />;
 }
 
 export function PriorityTasksCard({ tasks, onOpenTask, onViewAll }: PriorityTasksCardProps) {
@@ -45,41 +57,44 @@ export function PriorityTasksCard({ tasks, onOpenTask, onViewAll }: PriorityTask
     .slice(0, 5);
 
   return (
-    <Card className="h-full">
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center justify-between text-sm">
-          <span className="flex items-center gap-2">
-            <ListTodo className="size-4 text-muted-foreground" aria-hidden="true" />
-            Priority Tasks
-          </span>
-          <Button type="button" variant="ghost" size="sm" onClick={onViewAll}>
-            View all tasks
-            <ArrowRight className="size-3.5" aria-hidden="true" />
-          </Button>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {visible.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No priority tasks</p>
-        ) : (
-          <ul className="divide-y divide-border/50">
-            {visible.map((task) => (
-              <li key={task.id} data-testid="priority-task">
-                <button
-                  type="button"
-                  aria-label={`Open task: ${task.title}`}
-                  onClick={() => onOpenTask(task)}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-2.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <StatusIcon status={task.status} />
-                  <span className="min-w-0 flex-1 truncate text-sm">{task.title}</span>
-                  <span className="text-[11px] capitalize text-muted-foreground">{task.priority}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+    <ActivityCard>
+      <ActivityCardTitle
+        icon={<ListTodo className="size-3" aria-hidden="true" />}
+        trailing={(
+          <button
+            type="button"
+            onClick={onViewAll}
+            aria-label="View all tasks"
+            className="rounded-sm text-[11.5px] font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            View all tasks <span aria-hidden="true">→</span>
+          </button>
         )}
-      </CardContent>
-    </Card>
+      >
+        Priority Tasks
+      </ActivityCardTitle>
+
+      {visible.length === 0 ? (
+        <ActivityCardEmpty>No priority tasks</ActivityCardEmpty>
+      ) : (
+        visible.map((task) => (
+          <ActivityRow
+            key={task.id}
+            data-testid="priority-task"
+            aria-label={`Open task: ${task.title}`}
+            onClick={() => onOpenTask(task)}
+            className="items-center"
+          >
+            <span className="flex shrink-0 items-center">
+              <StatusIcon status={task.status} />
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12.5px] text-secondary-foreground">{task.title}</span>
+            <span className={cn("shrink-0 font-mono text-[10.5px] capitalize", priorityTone[task.priority])}>
+              {task.priority}
+            </span>
+          </ActivityRow>
+        ))
+      )}
+    </ActivityCard>
   );
 }

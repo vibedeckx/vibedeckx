@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ExternalLink, RotateCcw } from "lucide-react";
 import type { ProjectActivityAttentionItem } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ActivityCard, ActivityCardCount, ActivityCardTitle } from "./activity-card";
 
 interface AttentionRequiredCardProps {
   scopeKey: string;
@@ -63,9 +63,9 @@ export function AttentionRequiredCard({
     return (
       <div
         data-testid="attention-all-clear"
-        className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300"
+        className="flex flex-wrap items-center gap-2 rounded-[10px] border border-emerald-500/25 bg-emerald-500/5 px-3.5 py-3 text-[12.5px] text-emerald-700 dark:text-emerald-300"
       >
-        <CheckCircle2 className="size-4" aria-hidden="true" />
+        <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
         <span className="font-medium">All clear</span>
         <span className="text-muted-foreground">No failures need attention.</span>
       </div>
@@ -73,68 +73,75 @@ export function AttentionRequiredCard({
   }
 
   return (
-    <Card className="h-full border-destructive/20">
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center justify-between text-sm">
-          <span className="flex items-center gap-2">
-            <AlertTriangle className="size-4 text-destructive" aria-hidden="true" />
-            Attention Required
+    <ActivityCard className="border-destructive/30">
+      <ActivityCardTitle
+        icon={<AlertTriangle className="size-3 text-destructive" aria-hidden="true" />}
+        trailing={<ActivityCardCount className="text-destructive">{items.length}</ActivityCardCount>}
+        className="border-b-destructive/20 bg-destructive/8"
+      >
+        Attention Required
+      </ActivityCardTitle>
+
+      {actionError ? (
+        <p role="alert" className="border-b border-border/60 px-3.5 py-2 text-[12.5px] text-destructive">
+          {actionError}
+        </p>
+      ) : null}
+
+      {items.map((item) => (
+        <div
+          key={`${item.type}:${item.entityId}`}
+          className="flex flex-wrap items-center gap-2.5 border-b border-border/60 px-3.5 py-2.5 last:border-b-0"
+        >
+          <span className="min-w-35 flex-1">
+            <span className="block truncate text-[12.5px] font-medium">{item.title}</span>
+            <span className="mt-0.5 block font-mono text-[10.5px] capitalize text-destructive">
+              {item.status.replaceAll("_", " ")}
+            </span>
           </span>
-          <span className="font-normal text-destructive">{items.length}</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {actionError ? <p role="alert" className="mb-2 text-sm text-destructive">{actionError}</p> : null}
-        <ul className="divide-y divide-border/50">
-          {items.map((item) => (
-            <li key={`${item.type}:${item.entityId}`} className="flex flex-wrap items-center gap-2 px-2 py-2.5">
-              <span className="min-w-0 flex-1 basis-full sm:basis-auto">
-                <span className="block truncate text-sm font-medium">{item.title}</span>
-                <span className="text-xs capitalize text-destructive">{item.status.replaceAll("_", " ")}</span>
-              </span>
-              {item.type === "agent_session" ? (
+          <span className="flex shrink-0 gap-1.5">
+            {item.type === "agent_session" ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-label={`Open agent session: ${item.title}`}
+                onClick={() => onOpenAgentSession(
+                  item.entityId,
+                  item.workspace?.target ?? item.target ?? "local",
+                  item.workspace?.branch ?? null,
+                )}
+              >
+                <ExternalLink className="size-3" aria-hidden="true" />
+                Open session
+              </Button>
+            ) : (
+              <>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  aria-label={`Open agent session: ${item.title}`}
-                  onClick={() => onOpenAgentSession(
-                    item.entityId,
-                    item.workspace?.target ?? item.target ?? "local",
-                    item.workspace?.branch ?? null,
-                  )}
+                  aria-label={`View output: ${item.title}`}
+                  onClick={() => onOpenScheduleRun(item.entityId, undefined)}
                 >
-                  <ExternalLink className="size-3.5" aria-hidden="true" />
-                  Open session
+                  View output
                 </Button>
-              ) : (
-                <>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    aria-label={`View output: ${item.title}`}
-                    onClick={() => onOpenScheduleRun(item.entityId, undefined)}
-                  >
-                    View output
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    aria-label={`Run again: ${item.title}`}
-                    disabled={running.has(item.entityId)}
-                    onClick={() => void runAgain(item.entityId)}
-                  >
-                    <RotateCcw className="size-3.5" aria-hidden="true" />
-                    {running.has(item.entityId) ? "Starting…" : "Run again"}
-                  </Button>
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
-      </CardContent>
-    </Card>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Run again: ${item.title}`}
+                  disabled={running.has(item.entityId)}
+                  onClick={() => void runAgain(item.entityId)}
+                >
+                  <RotateCcw className="size-3" aria-hidden="true" />
+                  {running.has(item.entityId) ? "Starting…" : "Run again"}
+                </Button>
+              </>
+            )}
+          </span>
+        </div>
+      ))}
+    </ActivityCard>
   );
 }
