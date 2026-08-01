@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
-import { requireAuth } from "../server.js";
+import { requireAuth as requireRawAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { REVIEWER_AGENT_TYPES, WorkflowError } from "../workflow-engine.js";
 import { generateIntentBrief } from "../utils/review-brief.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
@@ -582,7 +583,7 @@ async function routes(fastify: FastifyInstance) {
   fastify.post<{
     Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
-    const userId = requireAuth(req, reply);
+    const userId = requireRawAuth(req, reply);
     if (userId === null) return;
     const { sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
@@ -632,7 +633,7 @@ async function routes(fastify: FastifyInstance) {
   fastify.get<{
     Querystring: { sourceSessionId?: string };
   }>("/api/path/workflow-runs/reviewer-candidate", async (req, reply) => {
-    const userId = requireAuth(req, reply);
+    const userId = requireRawAuth(req, reply);
     if (userId === null) return;
     const { sourceSessionId } = req.query;
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
@@ -645,7 +646,7 @@ async function routes(fastify: FastifyInstance) {
   fastify.get<{
     Querystring: { path?: string; branch?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
-    const userId = requireAuth(req, reply);
+    const userId = requireRawAuth(req, reply);
     if (userId === null) return;
     const { path: projectPath, branch } = req.query;
     if (!projectPath) return reply.code(400).send({ error: "path is required" });

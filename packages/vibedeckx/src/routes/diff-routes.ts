@@ -6,7 +6,7 @@ import { execFileSync } from "child_process";
 import { parseDiffOutput, type DiffFile, type DiffLine } from "../utils/diff-parser.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 import { validateBranchExists } from "../merge-status.js";

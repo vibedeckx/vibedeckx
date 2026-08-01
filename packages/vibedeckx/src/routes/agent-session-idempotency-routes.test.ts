@@ -39,7 +39,7 @@ describe("path agent session preallocated identity", () => {
         },
         getByPath: async (path: string) => [...projects.values()].find((project) => project.path === path),
         create: async (project: Record<string, unknown>, userId?: string) => {
-          const stored = { ...project, user_id: userId ?? "" };
+          const stored = { ...project, user_id: userId ?? "local" };
           projects.set(project.id as string, stored);
           return stored;
         },

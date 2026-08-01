@@ -5,7 +5,8 @@ import { ConversationPatch } from "../conversation-patch.js";
 import { getAllProviders } from "../providers/index.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
-import { requireAuth } from "../server.js";
+import { requireAuth as requireRawAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
 import { extractUserText } from "../utils/session-title.js";
@@ -332,7 +333,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
   Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null };
   }>("/api/path/agent-sessions/new", async (req, reply) => {
-    const authResult = requireAuth(req, reply);
+    const authResult = requireRawAuth(req, reply);
     if (authResult === null) return;
     const { path: projectPath, branch, permissionMode, agentType, force, sessionId, crossRemoteMcp, model } = req.body;
     if (!projectPath) {
@@ -1266,8 +1267,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       // Ownership gate for the local path, the same shape performLocalBranch
-      // uses: a session id is a bearer token otherwise. `userId` stays the raw
-      // requireAuth result so solo mode (undefined) reads unscoped.
+      // uses: a session id is a bearer token otherwise. User-facing auth maps
+      // solo mode to the canonical local tenant before this lookup.
       const row = await fastify.storage.agentSessions.getById(req.params.sessionId);
       if (!row || !(await fastify.storage.projects.getById(row.project_id, userId))) {
         return reply.code(404).send({ error: "Session not found" });
@@ -1445,7 +1446,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (upToEntryIndex !== undefined && (!Number.isInteger(upToEntryIndex) || upToEntryIndex < 0)) {
       return reply.code(400).send({ error: "upToEntryIndex must be a non-negative integer" });
     }
-    const userId = requireAuth(req, reply);
+    const userId = requireRawAuth(req, reply);
     if (userId === null) return;
 
     const branched = await performLocalBranch(req.params.sessionId, userId, {

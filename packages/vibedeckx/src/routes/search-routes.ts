@@ -3,7 +3,7 @@ import { buildSearchCatalog } from "../search/catalog.js";
 import { createSearchRefresher, listSearchTargets, computeCacheState, type SearchTarget } from "../search/refresh.js";
 import type { SearchCatalogSessionEntry } from "../storage/types.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 
 const searchRoutes: FastifyPluginAsync = async (fastify) => {
   // Worker-side (also served locally in solo mode): full project catalog for

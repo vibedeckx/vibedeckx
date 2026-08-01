@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import { generateText } from "ai";
 import { resolveFastChatModel } from "../utils/chat-model.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 

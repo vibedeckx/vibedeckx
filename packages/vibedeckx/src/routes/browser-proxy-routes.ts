@@ -4,7 +4,7 @@ import fp from "fastify-plugin";
 import WsWebSocket from "ws";
 import type { ReverseConnectManager, RawHttpResponse } from "../reverse-connect-manager.js";
 import { VirtualWsAdapter } from "../virtual-ws-adapter.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingOrTrustedProxyUserId as requireAuth } from "./user-facing-auth.js";
 import { authenticateWs } from "./ws-authz.js";
 import {
   assertSchemeAllowed,
@@ -376,7 +376,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const { id: projectId } = req.params;
     // Ownership: the proxy tunnels into the project's reverse-connected remote
     // (reaching 127.0.0.1:<port> on that host), so a caller must own the project.
-    // In solo no-auth mode userId is undefined and getById resolves unscoped.
+    // Solo mode is scoped to the canonical local owner. A validated server API
+    // key remains unscoped because this route also serves the trusted proxy.
     if (!(await fastify.storage.projects.getById(projectId, userId))) {
       return reply.code(404).send({ error: "Project not found" });
     }
@@ -474,7 +475,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // the channel pipes into the project's reverse-connected remote.
     const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
     if (!principal) return;
-    if (principal.userId !== null && !(await fastify.storage.projects.getById(projectId, principal.userId))) {
+    const projectOwner = principal.kind === "api_key"
+      ? undefined
+      : (principal.userId ?? "local");
+    if (!(await fastify.storage.projects.getById(projectId, projectOwner))) {
       try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* closed */ }
       try { socket.close(); } catch { /* already closed */ }
       return;

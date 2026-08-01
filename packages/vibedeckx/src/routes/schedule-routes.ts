@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import path from "path";
 import type { PromptProvider, ScheduledTask, ScheduledTaskRunRequest, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { validateCron } from "../scheduler.js";
 import "../server-types.js";
 

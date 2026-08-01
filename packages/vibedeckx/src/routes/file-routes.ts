@@ -7,7 +7,8 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
-import { requireAuth } from "../server.js";
+import { requireAuth as requireRawAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 
@@ -484,7 +485,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       files: { name: string; contentBase64: string }[];
     };
   }>("/api/path/upload", async (req, reply) => {
-    const userId = requireAuth(req, reply);
+    const userId = requireRawAuth(req, reply);
     if (userId === null) return;
 
     const { path: projectPath, branch, relativePath, files } = req.body;

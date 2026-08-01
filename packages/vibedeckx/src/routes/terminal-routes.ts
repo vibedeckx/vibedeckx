@@ -3,7 +3,7 @@ import fp from "fastify-plugin";
 import path from "path";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 

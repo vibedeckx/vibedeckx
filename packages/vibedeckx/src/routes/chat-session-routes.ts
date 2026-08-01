@@ -4,7 +4,7 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 

@@ -93,13 +93,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
           console.log(`[WebSocket] Auth rejected for process ${processId}`);
           return;
         }
-        // Per-process ownership: a Clerk user may only stream/control processes
-        // belonging to a project (or remote server) they own. Trusted principals
-        // (no-auth / apiKey proxy) carry userId === null and skip this. Gating the
-        // whole connection (not just input) also prevents reading another tenant's
-        // terminal output.
-        if (principal.userId !== null && !(await userOwnsProcess(fastify, processId, principal.userId))) {
-          console.log(`[WebSocket] Ownership denied for process ${processId} (user=${principal.userId})`);
+        // Only a validated API-key proxy is unscoped. Solo mode owns `local`.
+        const ownerUserId = principal.kind === "api_key" ? null : (principal.userId ?? "local");
+        if (ownerUserId !== null && !(await userOwnsProcess(fastify, processId, ownerUserId))) {
+          console.log(`[WebSocket] Ownership denied for process ${processId} (user=${ownerUserId})`);
           try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
           try { socket.close(); } catch { /* already closed */ }
           return;
@@ -172,11 +169,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const subscribeProcess = async (processId: string): Promise<void> => {
           if (subs.has(processId)) return; // 幂等：已订阅则跳过
 
-          // Per-process ownership, checked per subscription (one mux connection
-          // can subscribe to many processIds). Trusted principals (userId === null)
-          // skip this; a Clerk user is refused processes they don't own.
-          if (principal.userId !== null && !(await userOwnsProcess(fastify, processId, principal.userId))) {
-            console.log(`[ExecutorMux] Ownership denied for process ${processId} (user=${principal.userId})`);
+          // Per-process ownership, checked per subscription. Only a validated
+          // API-key proxy is unscoped; solo mode owns `local`.
+          const ownerUserId = principal.kind === "api_key" ? null : (principal.userId ?? "local");
+          if (ownerUserId !== null && !(await userOwnsProcess(fastify, processId, ownerUserId))) {
+            console.log(`[ExecutorMux] Ownership denied for process ${processId} (user=${ownerUserId})`);
             try { socket.send(JSON.stringify({ processId, type: "error", message: "Forbidden" })); } catch { /* closed */ }
             return;
           }
@@ -255,7 +252,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Verify auth token for WebSocket when auth is enabled. `principalUserId`
         // stays null for trusted connections (no-auth, or apiKey server-to-server
         // proxy) and is set to the Clerk user otherwise.
-        let principalUserId: string | null = null;
+        let principalUserId: string | null = fastify.authEnabled ? null : "local";
         if (fastify.authEnabled) {
           const apiKey = req.query.apiKey;
           const token = req.query.token;
@@ -418,7 +415,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // unauthenticated connection would leak another tenant's rule content and
         // burn their LLM budget. `principalUserId` stays null for trusted
         // connections (no-auth, or apiKey server-to-server proxy).
-        let principalUserId: string | null = null;
+        let principalUserId: string | null = fastify.authEnabled ? null : "local";
         if (fastify.authEnabled) {
           const apiKey = req.query.apiKey;
           const token = req.query.token;

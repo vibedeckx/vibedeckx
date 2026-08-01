@@ -3,15 +3,13 @@ import type { FastifyInstance } from "fastify";
 /**
  * The authenticated principal behind a WebSocket connection.
  *
- * `userId === null` means a trusted connection that is NOT a specific end user:
- *   - no-auth (solo) mode — a single trusted operator, no per-user isolation, or
- *   - a server-to-server proxy connection authenticated by VIBEDECKX_API_KEY
- *     (e.g. the central --auth server reverse-connecting into a user's remote).
- * Such connections bypass per-user ownership checks. A non-null `userId` is a
- * Clerk end user and MUST own the target process/session before streaming or
- * sending input.
+ * The explicit kind keeps the canonical local solo tenant separate from a
+ * server-to-server proxy authenticated by VIBEDECKX_API_KEY. Only `api_key`
+ * principals may bypass end-user ownership checks.
  */
-export type WsPrincipal = { userId: string | null };
+export type WsPrincipal =
+  | { userId: string; kind: "user" }
+  | { userId: null; kind: "solo" | "api_key" };
 
 /** Minimal socket surface needed to reject a connection. */
 type RejectableSocket = {
@@ -61,16 +59,16 @@ export async function verifyWsToken(token: string): Promise<string | null> {
  * `apiKey` (already checked against VIBEDECKX_API_KEY by the global API-key
  * onRequest hook) or a valid Clerk session `token`. A present `apiKey` only
  * counts when VIBEDECKX_API_KEY is configured — otherwise it is unvalidated and
- * must NOT bypass Clerk. Trusted principals (no-auth / apiKey proxy) carry
- * `userId === null` and skip per-user ownership checks.
+ * must NOT bypass Clerk. Solo and API-key principals both lack a Clerk user id,
+ * but retain distinct kinds so solo mode can be scoped to `local`.
  */
 export async function authenticateWs(
   authEnabled: boolean,
   query: { apiKey?: string; token?: string },
   socket: RejectableSocket,
 ): Promise<WsPrincipal | null> {
-  if (!authEnabled) return { userId: null };
-  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return { userId: null };
+  if (!authEnabled) return { userId: null, kind: "solo" };
+  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return { userId: null, kind: "api_key" };
 
   const reject = (error: string): null => {
     try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }
@@ -81,7 +79,7 @@ export async function authenticateWs(
   if (!query.token) return reject("Authentication required");
   const userId = await verifyWsToken(query.token);
   if (!userId) return reject("Invalid authentication token");
-  return { userId };
+  return { userId, kind: "user" };
 }
 
 /**

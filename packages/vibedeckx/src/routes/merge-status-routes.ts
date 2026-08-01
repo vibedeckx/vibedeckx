@@ -8,7 +8,7 @@ import {
   type MergeStatusValue,
 } from "../merge-status.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 

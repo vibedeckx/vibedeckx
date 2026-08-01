@@ -6,7 +6,8 @@ import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { ProcessEffectConflictError } from "../process-manager.js";
-import { requireAuth } from "../server.js";
+import { requireAuth as requireRawAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -14,7 +15,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean; processId?: string; effectFingerprint?: string };
   }>("/api/path/execute", async (req, reply) => {
-    const userId = requireAuth(req, reply);
+    const userId = requireRawAuth(req, reply);
     if (userId === null) return;
     const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty, processId: requestedProcessId, effectFingerprint } = req.body;
     if (!projectPath || !command) {

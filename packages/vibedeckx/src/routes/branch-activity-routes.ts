@@ -6,7 +6,7 @@ import {
   type BranchActivityState,
 } from "../branch-activity.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { requireAuth } from "../server.js";
+import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
 /**
