@@ -38,6 +38,8 @@ function StatusBadge({ project }: { project: Project }) {
 
 interface ProjectInfoViewProps {
   project: Project;
+  /** Unread attention milestones for this project — see ProjectActivityViewProps. */
+  waitingCount: number;
   onOpenProjectChatThread?: (threadId: string) => void;
   onOpenAgentSession: (sessionId: string, target: string, branch: string | null) => void;
   onOpenScheduleRun: (runId: string, scheduleId?: string) => void;
@@ -54,6 +56,7 @@ interface ProjectInfoViewProps {
 
 export function ProjectInfoView({
   project,
+  waitingCount,
   onOpenProjectChatThread,
   onOpenAgentSession,
   onOpenScheduleRun,
@@ -113,6 +116,7 @@ export function ProjectInfoView({
 
           <ProjectActivityView
             projectId={project.id}
+            waitingCount={waitingCount}
             onCreateThread={onOpenProjectChatThread ? createThread : undefined}
             onOpenThread={onOpenProjectChatThread}
             onOpenAgentSession={onOpenAgentSession}

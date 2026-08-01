@@ -31,7 +31,6 @@ export interface ProjectActivity {
   attention: ProjectActivityAttentionItem[];
   summary: {
     running: number;
-    failed: number;
     nextScheduleAt: string | null;
   };
 }
@@ -96,8 +95,6 @@ export async function getProjectActivity(
     attentionRuns,
     runningSessions,
     runningRuns,
-    failedSessions,
-    failedRuns,
     remoteCounts,
     nextScheduleAt,
   ] = await Promise.all([
@@ -111,8 +108,6 @@ export async function getProjectActivity(
     storage.scheduledTaskRuns.getAttentionByProject(projectId, ATTENTION_LIMIT),
     storage.agentSessions.countRunningByProject(projectId),
     storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["starting", "running"]),
-    storage.agentSessions.countAttentionByProject(projectId),
-    storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["failed", "timeout"]),
     storage.searchCache.countRemoteSessionActivityByProject(projectId),
     storage.scheduledTasks.getEarliestNextRunAt(projectId),
   ]);
@@ -163,7 +158,6 @@ export async function getProjectActivity(
     attention,
     summary: {
       running: runningSessions + runningRuns + remoteCounts.running,
-      failed: failedSessions + failedRuns + remoteCounts.failed,
       nextScheduleAt,
     },
   };

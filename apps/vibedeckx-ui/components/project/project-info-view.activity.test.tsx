@@ -22,7 +22,7 @@ vi.mock("@/hooks/use-project-activity", () => ({
       recentScheduleRuns: [],
       priorityTasks: [],
       attention: [],
-      summary: { running: 0, failed: 0, nextScheduleAt: null },
+      summary: { running: 0, nextScheduleAt: null },
     },
     loading: false,
     error: null,
@@ -95,6 +95,7 @@ describe("ProjectInfoView Project Chat composer", () => {
       root.render(
         <ProjectInfoView
           project={project}
+          waitingCount={2}
           onOpenAgentSession={vi.fn()}
           onOpenScheduleRun={vi.fn()}
           onRunScheduleAgain={vi.fn()}
@@ -109,6 +110,9 @@ describe("ProjectInfoView Project Chat composer", () => {
     expect(startButton().disabled).toBe(true);
     expect(composer.getAttribute("aria-describedby")).toBe("project-chat-unavailable-project-1");
     expect(container.textContent).toContain("Project Chat workbench is not available yet");
+    // The Waiting tile is owned by the notification hook upstream, not by the
+    // activity aggregate this view fetches.
+    expect(container.querySelector('[data-testid="waiting-count"]')?.textContent).toBe("2");
 
     act(() => setInput(composer, "Must not create"));
     await act(async () => startButton().click());
@@ -121,6 +125,7 @@ describe("ProjectInfoView Project Chat composer", () => {
       root.render(
         <ProjectInfoView
           project={project}
+          waitingCount={2}
           onOpenProjectChatThread={onOpenProjectChatThread}
           onOpenAgentSession={vi.fn()}
           onOpenScheduleRun={vi.fn()}

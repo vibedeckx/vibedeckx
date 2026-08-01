@@ -807,7 +807,7 @@ export interface ProjectActivity {
   recentScheduleRuns: ProjectScheduleRunActivity[];
   priorityTasks: Task[];
   attention: ProjectActivityAttentionItem[];
-  summary: { running: number; failed: number; nextScheduleAt: string | null };
+  summary: { running: number; nextScheduleAt: string | null };
 }
 
 export interface DiffLine {

@@ -157,14 +157,9 @@ export const createSearchCacheRepos = (
       const row = await remoteSessionScope(kdb, projectId)
         .select([
           sql<number>`coalesce(sum(case when c.status = 'running' then 1 else 0 end), 0)`.as("running"),
-          sql<number>`coalesce(sum(case
-            when c.status = 'error' then 1
-            when c.status = 'stopped' and c.last_user_message_at is not null
-              and (c.last_completed_at is null or c.last_completed_at < c.last_user_message_at) then 1
-            else 0 end), 0)`.as("failed"),
         ])
         .executeTakeFirstOrThrow();
-      return { running: Number(row.running), failed: Number(row.failed) };
+      return { running: Number(row.running) };
     },
 
     updateRemoteSessionActivity: async (entry) => {

@@ -270,6 +270,15 @@ export default function Home() {
     clear: clearNotifications,
   } = useCompletionNotifications(activeNotificationSessionId);
 
+  // The project dashboard's Waiting tile. Derived from the bell's own state so
+  // the two can never disagree — including the case that a server-side count
+  // handles worst: reading a notification in the menu drops this immediately,
+  // where the activity aggregate would not refetch at all.
+  const projectWaitingCount = useMemo(
+    () => notifications.filter((n) => n.project_id === currentProject?.id && n.read_at === null).length,
+    [notifications, currentProject?.id],
+  );
+
   // User just hit send → seed "working" into the activity map ahead of the
   // backend's branch:activity event (sub-50ms latency hide). The backend's
   // emit arrives shortly and is a no-op transition (same value).
@@ -1038,6 +1047,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             <div className="flex-1 overflow-hidden">
               <ProjectInfoView
                 project={currentProject}
+                waitingCount={projectWaitingCount}
                 onOpenProjectChatThread={openProjectChatThread}
                 onOpenAgentSession={(sessionId, target, branch) => {
                   void projectActivityActions.openAgentSession(sessionId, target, branch);

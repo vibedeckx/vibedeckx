@@ -27,7 +27,7 @@ const activity = (id: string): ProjectActivity => ({
   recentScheduleRuns: [],
   priorityTasks: [],
   attention: [],
-  summary: { running: 0, failed: 0, nextScheduleAt: null },
+  summary: { running: 0, nextScheduleAt: null },
 });
 
 const deferred = <T,>() => {

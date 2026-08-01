@@ -164,8 +164,12 @@ describe("project activity route", () => {
     expect(body.attention).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: "session-completed" }),
     ]));
-    expect(body.summary).toMatchObject({ running: 2, failed: 2 });
+    expect(body.summary).toMatchObject({ running: 2 });
     expect(body.summary.nextScheduleAt).toBe("2026-07-31T11:00:00.000Z");
+    // The failure count moved to the client-side Waiting tile, which reads the
+    // notification inbox. Attention (above) still carries the same predicate as
+    // a list, so nothing here is left to a number.
+    expect(body.summary).not.toHaveProperty("failed");
   });
 
   it("uses server-owned limits for each dashboard section", async () => {
@@ -214,7 +218,7 @@ describe("project activity route", () => {
     expect(body.attention).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: "run-a-old-failure", status: "timeout" }),
     ]));
-    expect(body.summary).toMatchObject({ running: 10, failed: 1 });
+    expect(body.summary).toMatchObject({ running: 10 });
   });
 
   it("orders a long-running local session by completion rather than its old row update", async () => {
@@ -312,7 +316,7 @@ describe("project activity route", () => {
     expect(body.attention).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "agent_session", entityId: "remote-error", status: "error" }),
     ]));
-    expect(body.summary).toMatchObject({ running: 2, failed: 1 });
+    expect(body.summary).toMatchObject({ running: 2 });
     expect(JSON.stringify(body)).not.toContain("remote-unlinked");
   });
 
@@ -353,14 +357,14 @@ describe("project activity route", () => {
     expect(revived).toBe(true);
     let body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
     expect(body.recentAgentSessions[0]).toMatchObject({ id: liveId, status: "running" });
-    expect(body.summary).toMatchObject({ running: 1, failed: 0 });
+    expect(body.summary).toMatchObject({ running: 1 });
 
     vi.advanceTimersByTime(1_000);
     await persistRemoteSessionActivityFrame(storage, liveId, remoteInfo, {
       JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }],
     });
     body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
-    expect(body.summary).toMatchObject({ running: 0, failed: 1 });
+    expect(body.summary).toMatchObject({ running: 0 });
     expect(body.attention).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: liveId, status: "stopped" }),
     ]));
@@ -370,7 +374,7 @@ describe("project activity route", () => {
     body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
     expect(body.recentAgentSessions[0]).toMatchObject({ id: liveId, status: "stopped" });
     expect(body.recentAgentSessions[0].lastCompletedAt).toBe(Date.now());
-    expect(body.summary).toMatchObject({ running: 0, failed: 0 });
+    expect(body.summary).toMatchObject({ running: 0 });
     expect(body.attention).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: liveId }),
     ]));
@@ -384,7 +388,7 @@ describe("project activity route", () => {
       JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "error" } }],
     });
     body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
-    expect(body.summary).toMatchObject({ running: 0, failed: 1 });
+    expect(body.summary).toMatchObject({ running: 0 });
     expect(body.attention).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: liveId, status: "error" }),
     ]));

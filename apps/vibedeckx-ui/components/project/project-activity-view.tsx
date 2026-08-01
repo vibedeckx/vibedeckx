@@ -12,6 +12,15 @@ import { AttentionRequiredCard } from "./attention-required-card";
 
 export interface ProjectActivityViewProps {
   projectId: string;
+  /**
+   * Unread attention milestones for this project — the bell's own state, scoped
+   * and counted by the owner of the notification hook. Passed in rather than
+   * read from the activity aggregate: marking a notification read emits no
+   * event, so a server-side count would sit stale until unrelated activity
+   * happened to refetch it. See
+   * docs/superpowers/specs/2026-08-01-project-waiting-tile-design.md.
+   */
+  waitingCount: number;
   onCreateThread?: (message: string) => Promise<ProjectChatThread>;
   onOpenThread?: (threadId: string) => void;
   onOpenAgentSession: (sessionId: string, target: string, branch: string | null) => void;
@@ -29,6 +38,7 @@ function nextScheduleLabel(value: string | null): string {
 
 export function ProjectActivityView({
   projectId,
+  waitingCount,
   onCreateThread,
   onOpenThread,
   onOpenAgentSession,
@@ -72,10 +82,15 @@ export function ProjectActivityView({
           <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Running</p>
           <p className="text-lg font-semibold text-blue-600">{activity.summary.running}</p>
         </div>
-        <div className="rounded-lg border bg-card px-3 py-2">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Failed</p>
-          <p className={activity.summary.failed > 0 ? "text-lg font-semibold text-destructive" : "text-lg font-semibold"}>
-            {activity.summary.failed}
+        <div className="rounded-lg border bg-card px-3 py-2" title="Unread updates waiting for you">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Waiting</p>
+          {/* Amber, never destructive: something waiting on you is not something broken. */}
+          <p
+            data-testid="waiting-count"
+            aria-label={`${waitingCount} unread updates waiting for you`}
+            className={waitingCount > 0 ? "text-lg font-semibold text-amber-600" : "text-lg font-semibold"}
+          >
+            {waitingCount}
           </p>
         </div>
         <div className="col-span-2 rounded-lg border bg-card px-3 py-2 sm:col-span-1">

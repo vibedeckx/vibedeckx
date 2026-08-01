@@ -121,7 +121,7 @@ const populatedActivity = (): ProjectActivity => ({
       occurredAt: timestamp(8),
     },
   ],
-  summary: { running: 2, failed: 2, nextScheduleAt: timestamp(10) },
+  summary: { running: 2, nextScheduleAt: timestamp(10) },
 });
 
 let root: Root;
@@ -144,6 +144,7 @@ function setInput(input: HTMLTextAreaElement, value: string) {
 function render(overrides: Partial<React.ComponentProps<typeof ProjectActivityView>> = {}) {
   const props: React.ComponentProps<typeof ProjectActivityView> = {
     projectId: "project-1",
+    waitingCount: 0,
     onCreateThread: vi.fn(async () => thread(9)),
     onOpenThread: vi.fn(),
     onOpenAgentSession: vi.fn(),
@@ -372,7 +373,7 @@ describe("ProjectActivityView", () => {
         recentScheduleRuns: [],
         priorityTasks: [],
         attention: [],
-        summary: { running: 0, failed: 0, nextScheduleAt: null },
+        summary: { running: 0, nextScheduleAt: null },
       },
     };
     render();
@@ -384,6 +385,31 @@ describe("ProjectActivityView", () => {
     const allClear = container.querySelector('[data-testid="attention-all-clear"]');
     expect(allClear?.textContent).toContain("All clear");
     expect(allClear?.closest("div")?.className).toContain("py-3");
+  });
+
+  it("shows unread milestones as Waiting, not the activity aggregate's failures", () => {
+    render({ waitingCount: 3 });
+
+    const waiting = container.querySelector('[data-testid="waiting-count"]') as HTMLElement;
+    expect(waiting.textContent).toBe("3");
+    expect(waiting.getAttribute("aria-label")).toBe("3 unread updates waiting for you");
+    // Attention Required below still lists 2 failed/interrupted items; the tile
+    // deliberately answers a different question and may disagree with it.
+    expect(container.textContent).toContain("Waiting");
+    expect(container.textContent).not.toContain("Failed");
+  });
+
+  it("keeps a zero Waiting count out of alarm colours", () => {
+    render({ waitingCount: 0 });
+    const waiting = container.querySelector('[data-testid="waiting-count"]') as HTMLElement;
+    expect(waiting.textContent).toBe("0");
+    expect(waiting.className).not.toContain("amber");
+    expect(waiting.className).not.toContain("destructive");
+
+    render({ waitingCount: 1 });
+    const raised = container.querySelector('[data-testid="waiting-count"]') as HTMLElement;
+    expect(raised.className).toContain("text-amber-600");
+    expect(raised.className).not.toContain("destructive");
   });
 
   it("does not promote an ordinary todo with medium priority", () => {

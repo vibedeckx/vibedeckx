@@ -427,7 +427,7 @@ describe("searchCache", () => {
       expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10))
         .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: localId })]));
       expect(await storage.searchCache.countRemoteSessionActivityByProject("p1"))
-        .toEqual({ running: 0, failed: 0 });
+        .toEqual({ running: 0 });
 
       const revivedAt = Date.now() + 1;
       await expect(storage.searchCache.updateRemoteSessionActivity({
@@ -439,7 +439,7 @@ describe("searchCache", () => {
         expect.arrayContaining([expect.objectContaining({ id: localId, status: "running" })]),
       );
       expect(await storage.searchCache.countRemoteSessionActivityByProject("p1"))
-        .toEqual({ running: 1, failed: 0 });
+        .toEqual({ running: 1 });
 
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap({ sessions: [] }), revivedAt - 1);
       expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual(

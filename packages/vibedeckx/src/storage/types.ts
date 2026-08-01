@@ -836,8 +836,6 @@ export interface Storage {
     /** Newest stopped/error sessions, independent of the recent-sessions card window. */
     listAttentionByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     countRunningByProject: (projectId: string) => Promise<number>;
-    /** Errors plus stopped sessions whose latest user turn never completed. */
-    countAttentionByProject: (projectId: string) => Promise<number>;
     /** @deprecated — use listByBranch + getLatestByBranch */
     getByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
     listByBranch: (projectId: string, branch: string) => Promise<AgentSession[]>;
@@ -1018,7 +1016,7 @@ export interface Storage {
     listWorkspacesByProject(projectId: string, limit: number): Promise<Array<{ targetId: string; branch: string | null }>>;
     listRemoteSessionActivityByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
     listRemoteSessionAttentionByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
-    countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number; failed: number }>;
+    countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number }>;
     /**
      * Persist one live remote-stream transition only when the exact durable
      * mapping and project↔remote association still agree. Creates the cache

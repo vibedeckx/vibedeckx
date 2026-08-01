@@ -142,25 +142,6 @@ export const createAgentSessionRepos = (
       return Number(row.count);
     },
 
-    countAttentionByProject: async (projectId) => {
-      const row = await kdb.selectFrom("agent_sessions")
-        .select(kdb.fn.countAll<number>().as("count"))
-        .where("project_id", "=", projectId)
-        .where((eb) => eb.or([
-          eb("status", "=", "error"),
-          eb.and([
-            eb("status", "=", "stopped"),
-            eb("last_user_message_at", "is not", null),
-            eb.or([
-              eb("last_completed_at", "is", null),
-              eb("last_completed_at", "<", eb.ref("last_user_message_at")),
-            ]),
-          ]),
-        ]))
-        .executeTakeFirstOrThrow();
-      return Number(row.count);
-    },
-
     getByBranch: async (projectId, branch) => {
       const row = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
