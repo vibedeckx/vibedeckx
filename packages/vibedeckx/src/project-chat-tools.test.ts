@@ -99,9 +99,48 @@ describe("createProjectChatTools", () => {
     database.close();
 
     await expect(surface.list_workspaces.execute({}))
-      .rejects.toThrow("Project is no longer authorized");
+      .rejects.toThrow("Project Chat scope is no longer authorized");
     expect(await storage.projectChatContextRefs.listByThread(
       "local-thread", "local-project", "local", 20,
+    )).toEqual([]);
+  });
+
+  it("revokes every read tool before reading or touching Context when project ownership changes", async () => {
+    await storage.tasks.create({ id: "revoked-task", project_id: "project-1", title: "Private" });
+    await storage.agentSessions.create({ id: "revoked-session", project_id: "project-1", branch: "main" });
+    await storage.scheduledTasks.create({
+      id: "revoked-schedule", project_id: "project-1", name: "Private schedule",
+      cron_expr: "0 * * * *", timezone: "UTC", run_type: "command", content: "true",
+      cwd_mode: "project",
+    });
+    await storage.scheduledTaskRuns.create({
+      id: "revoked-run", schedule_id: "revoked-schedule", status: "completed",
+    });
+    await storage.searchCache.applyCatalogSnapshot("project-1", "local", {
+      workspaces: [{ branch: "main" }], sessions: [],
+    });
+    const surface = await tools();
+    const database = new Database(path.join(dir, "test.sqlite"));
+    database.prepare("UPDATE projects SET user_id = ? WHERE id = ?")
+      .run("new-owner", "project-1");
+    database.close();
+
+    const reads = [
+      () => surface.get_project_summary.execute({}),
+      () => surface.list_tasks.execute({}),
+      () => surface.get_task.execute({ taskId: "revoked-task" }),
+      () => surface.list_workspaces.execute({}),
+      () => surface.list_agent_sessions.execute({}),
+      () => surface.get_agent_session.execute({ sessionId: "revoked-session" }),
+      () => surface.list_schedules.execute({}),
+      () => surface.list_schedule_runs.execute({}),
+      () => surface.get_schedule_run.execute({ runId: "revoked-run" }),
+    ];
+    for (const read of reads) {
+      await expect(read()).rejects.toThrow("Project Chat scope is no longer authorized");
+    }
+    expect(await storage.projectChatContextRefs.listByThread(
+      "thread-1", "project-1", "user-1", 20,
     )).toEqual([]);
   });
 

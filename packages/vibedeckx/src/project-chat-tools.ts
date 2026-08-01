@@ -532,6 +532,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     ]);
     if (!ownedProject || !ownedThread) throw new Error("Project Chat scope is no longer authorized");
   };
+  const readInScope = <Args, Result>(
+    execute: (args: Args) => Promise<Result>,
+  ): ((args: Args) => Promise<Result>) => async (args) => {
+    await revalidateScope();
+    return execute(args);
+  };
   const boundedError = (error: unknown): string => {
     const message = error instanceof Error ? error.message : String(error);
     return preview(message || "Mutation failed", 512);
@@ -1101,11 +1107,11 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     get_project_summary: {
       description: "Return a safe summary of the current Project Chat project.",
       inputSchema: emptySchema,
-      execute: async () => ({
+      execute: readInScope(async () => ({
         id: preview(project.id, ID_CHAR_LIMIT),
         name: preview(project.name, NAME_CHAR_LIMIT),
         executionTarget: preview(project.agent_mode, ENUM_CHAR_LIMIT),
-      }),
+      })),
     },
     list_tasks: {
       description: "List or search tasks in this project. Results are capped by the server.",
@@ -1113,7 +1119,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         query: z.string().max(256).optional(),
         status: z.enum(["todo", "in_progress", "done", "cancelled"]).optional(),
       }).strict(),
-      execute: async ({ query, status }) => {
+      execute: readInScope(async ({ query, status }) => {
         const rows = await storage.tasks.queryByProject(projectId, { query, status, limit: LIST_LIMIT });
         const validRows = rows.filter((row) => isToolSelectorId(row.id));
         await touchAll("task", validRows.map((row) => row.id));
@@ -1128,12 +1134,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           })),
           truncated: rows.length === LIST_LIMIT,
         };
-      },
+      }),
     },
     get_task: {
       description: "Inspect one task by id, only if it belongs to this project.",
       inputSchema: z.object({ taskId: z.string().min(1).max(MAX_TOOL_SELECTOR_ID) }).strict(),
-      execute: async ({ taskId }) => {
+      execute: readInScope(async ({ taskId }) => {
         const row = await storage.tasks.getById(taskId);
         if (!row) throw new Error("Task not found");
         if (row.project_id !== projectId) throw new Error("Object is not part of this project");
@@ -1147,12 +1153,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           priority: preview(row.priority, ENUM_CHAR_LIMIT),
           assignedBranch: nullablePreview(row.assigned_branch, BRANCH_CHAR_LIMIT),
         };
-      },
+      }),
     },
     list_workspaces: {
       description: "List known local and remote workspaces for this project.",
       inputSchema: emptySchema,
-      execute: async () => {
+      execute: readInScope(async () => {
         const { items: candidates, truncated } = await workspaceCandidates();
         const entries = candidates.map(({ id: canonicalId, target: rawTarget, branch: rawBranch }) => {
           const target = preview(rawTarget, TARGET_CHAR_LIMIT);
@@ -1168,12 +1174,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         }).flat();
         await touchAll("workspace", entries.map((entry) => entry.canonicalId));
         return { items: entries.map((entry) => entry.item), truncated };
-      },
+      }),
     },
     list_agent_sessions: {
       description: "List recent agent sessions across local and remote project workspaces.",
       inputSchema: emptySchema,
-      execute: async () => {
+      execute: readInScope(async () => {
         const [localRows, untrustedRemoteRows] = await Promise.all([
           storage.agentSessions.listByProject(projectId, LIST_LIMIT / 2),
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
@@ -1240,12 +1246,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           items: entries.map((entry) => entry.item),
           truncated: localRows.length === LIST_LIMIT / 2 || remoteRows.length === LIST_LIMIT / 2,
         };
-      },
+      }),
     },
     get_agent_session: {
       description: "Return status and a server-bounded recent transcript for one project agent session.",
       inputSchema: z.object({ sessionId: z.string().min(1).max(MAX_TOOL_SELECTOR_ID) }).strict(),
-      execute: async ({ sessionId }) => {
+      execute: readInScope(async ({ sessionId }) => {
         const local = await storage.agentSessions.getById(sessionId);
         if (local) {
           if (local.project_id !== projectId) throw new Error("Object is not part of this project");
@@ -1314,12 +1320,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         };
         await touch("agent_session", mapping.id);
         return detail;
-      },
+      }),
     },
     list_schedules: {
       description: "List schedules configured for this project without commands, prompts, or raw configuration.",
       inputSchema: emptySchema,
-      execute: async () => {
+      execute: readInScope(async () => {
         const rows = await storage.scheduledTasks.listByProject(projectId, LIST_LIMIT);
         const validRows = rows.filter((row) => isToolSelectorId(row.id));
         await touchAll("schedule", validRows.map((row) => row.id));
@@ -1336,12 +1342,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           })),
           truncated: rows.length === LIST_LIMIT,
         };
-      },
+      }),
     },
     list_schedule_runs: {
       description: "List recent runs across this project's schedules without raw output or reports.",
       inputSchema: emptySchema,
-      execute: async () => {
+      execute: readInScope(async () => {
         const rows = await storage.scheduledTaskRuns.listRecentByProject(projectId, LIST_LIMIT);
         const validRows = rows.filter((row) => isToolSelectorId(row.id));
         await touchAll("schedule_run", validRows.map((row) => row.id));
@@ -1356,12 +1362,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           })),
           truncated: rows.length === LIST_LIMIT,
         };
-      },
+      }),
     },
     get_schedule_run: {
       description: "Inspect one project schedule run with server-bounded output and report previews.",
       inputSchema: z.object({ runId: z.string().min(1).max(MAX_TOOL_SELECTOR_ID) }).strict(),
-      execute: async ({ runId }) => {
+      execute: readInScope(async ({ runId }) => {
         const run = await storage.scheduledTaskRuns.getById(runId);
         if (!run) throw new Error("Schedule run not found");
         const schedule = await storage.scheduledTasks.getById(run.schedule_id);
@@ -1379,7 +1385,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           outputPreview: preview(run.output, RUN_PREVIEW_CHAR_LIMIT),
           reportPreview: preview(run.report, RUN_PREVIEW_CHAR_LIMIT),
         };
-      },
+      }),
     },
   };
 }
