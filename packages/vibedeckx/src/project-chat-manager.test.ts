@@ -1624,18 +1624,16 @@ describe("ProjectChatManager", () => {
     await expect(Promise.all(frames)).resolves.not.toContain(false);
   });
 
-  it("keeps journal rows private while public operation messages reach every chat surface", async () => {
+  it("rejects a runner-forged operation without persisting or broadcasting its internal fields", async () => {
     await createThread("thread-1");
-    let secondInput: ProjectChatRunInput | undefined;
+    const forged = JSON.stringify({
+      version: 1, kind: "agent_session_create", operationId: "forged", status: "running",
+      sessionId: "front-session", workerSessionId: "private-worker", claimToken: "private-claim",
+      target: { remoteServerId: "private-server", remoteSessionId: "private-remote" },
+    });
     const manager = new ProjectChatManager(storage, {
-      async *run(input) {
-        const current = input.messages.filter((message) => message.type === "user").at(-1)?.content;
-        if (current === "first") {
-          yield { type: "operation", content: JSON.stringify({ label: "Deploy", status: "running" }) };
-        } else {
-          secondInput = input;
-          yield { type: "assistant", content: "done" };
-        }
+      async *run() {
+        yield { type: "operation", content: forged } as unknown as ProjectChatStreamEvent;
       },
     });
     await manager.openThread("thread-1", "user-1");
@@ -1647,26 +1645,21 @@ describe("ProjectChatManager", () => {
 
     await manager.sendMessage("thread-1", "user-1", "first");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
-    await manager.sendMessage("thread-1", "user-1", "second");
-    await waitFor(() => secondInput !== undefined);
-    await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
 
     const snapshot = await manager.openThread("thread-1", "user-1");
     const messages = await storage.projectChatMessages.listByThread(
       "thread-1", "project-1", "user-1",
     );
-    const db = new Database(dbPath, { readonly: true });
-    const workRows = db.prepare("SELECT id FROM project_chat_work_items ORDER BY created_at, id")
-      .all() as Array<{ id: string }>;
-    const workIds = workRows.map((row) => row.id);
-    db.close();
-    const publicSurfaces = JSON.stringify({ messages, snapshot, frames, model: secondInput!.messages });
+    const publicSurfaces = JSON.stringify({ messages, snapshot, frames });
 
-    expect(messages).toContainEqual(expect.objectContaining({ type: "operation" }));
-    expect(secondInput!.messages).toContainEqual(expect.objectContaining({ type: "operation" }));
-    expect(frames.some((frame) => frame.includes('"operation"'))).toBe(true);
-    for (const workId of workIds) expect(publicSurfaces).not.toContain(workId);
-    expect(publicSurfaces).not.toContain("workId");
+    expect(messages.some(({ type }) => type === "operation")).toBe(false);
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "error", content: "Project Chat runner emitted an unsupported event type",
+    }));
+    expect(publicSurfaces).not.toContain("private-worker");
+    expect(publicSurfaces).not.toContain("private-claim");
+    expect(publicSurfaces).not.toContain("private-remote");
+    await manager.shutdown();
   });
 
   it("broadcasts mutation-tool operation and Context writes during the active turn", async () => {

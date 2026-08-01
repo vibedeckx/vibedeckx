@@ -78,20 +78,17 @@ describe("ProjectOperationCard", () => {
     expect(container.textContent).toContain("Agent session");
     expect(container.textContent).toContain(label);
     expect(container.textContent).toContain("feature/chat");
-    expect(container.querySelector('[role="status"]')?.textContent).toBe(label);
-    expect(container.querySelector('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
+    expect(container.querySelector("[data-operation-status]")?.textContent).toBe(label);
   });
 
-  it("keeps one stable per-operation live announcer across a status rerender", () => {
+  it("leaves lifecycle announcements to the stable conversation wrapper", () => {
     render(<ProjectOperationCard operation={sessionOperation("pending", { sessionAvailable: false })} />);
-    const announcer = container.querySelector('[role="status"]');
-    expect(announcer?.textContent).toBe("Queued");
+    expect(container.querySelector('[role="status"]')).toBeNull();
 
     render(<ProjectOperationCard operation={sessionOperation("running", { sessionAvailable: true })} />);
 
-    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
-    expect(container.querySelector('[role="status"]')).toBe(announcer);
-    expect(announcer?.textContent).toBe("Running");
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector("[data-operation-status]")?.textContent).toBe("Running");
   });
 
   it("renders timeout, remote-offline, and deleted-target states without parsing prose", () => {
@@ -254,11 +251,10 @@ describe("WorkspaceSelectionCard", () => {
     expect([...container.querySelectorAll("button")].every((candidate) => candidate.disabled)).toBe(true);
     expect(container.textContent).toContain("Selecting…");
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Workspace is no longer available");
-    expect(container.querySelector('[role="status"]')?.textContent).toBe("Waiting for workspace selection");
-    expect(container.querySelector('[role="status"]')?.textContent).not.toContain("Workspace is no longer available");
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
-  it("announces a resolving transition without announcing action controls", () => {
+  it("does not create a competing live region for a resolving transition", () => {
     render(
       <WorkspaceSelectionCard
         operation={{ ...operation, status: "resolving" }}
@@ -266,10 +262,7 @@ describe("WorkspaceSelectionCard", () => {
       />,
     );
 
-    const status = container.querySelector('[role="status"]');
-    expect(status?.getAttribute("aria-live")).toBe("polite");
-    expect(status?.getAttribute("aria-atomic")).toBe("true");
-    expect(status?.textContent).toBe("Workspace selected; creating agent session");
-    expect(status?.textContent).not.toContain("Select workspace:");
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).toContain("Workspace selection resolved");
   });
 });

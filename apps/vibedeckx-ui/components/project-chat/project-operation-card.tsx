@@ -112,8 +112,6 @@ export function ProjectOperationCard({
     <section
       className="rounded-lg border bg-card p-3 text-card-foreground"
       aria-label={`${label}: ${state.label}`}
-      data-operation-id={operation.operationId}
-      data-operation-kind={operation.kind}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -121,9 +119,7 @@ export function ProjectOperationCard({
           {detail ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</div> : null}
         </div>
         <div
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
+          data-operation-status={operation.status}
           className={cn("flex shrink-0 items-center gap-1.5 text-xs font-medium", state.className)}
         >
           <StateIcon

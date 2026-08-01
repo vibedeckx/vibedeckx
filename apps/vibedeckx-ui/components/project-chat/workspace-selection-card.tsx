@@ -18,21 +18,6 @@ function workspaceLabel(candidate: WorkspaceSelectionOperation["candidates"][num
   return `${candidate.target} / ${candidate.branch ?? "main"}`;
 }
 
-function selectionStatus(operation: WorkspaceSelectionOperation): string {
-  switch (operation.status) {
-    case "pending":
-      return "Waiting for workspace selection";
-    case "resolving":
-      return "Workspace selected; creating agent session";
-    case "running":
-      return "Agent session running";
-    case "completed":
-      return "Agent session created";
-    case "failed":
-      return "Workspace selection failed";
-  }
-}
-
 export function WorkspaceSelectionCard({
   operation,
   onSelect,
@@ -44,14 +29,9 @@ export function WorkspaceSelectionCard({
     <section
       className="rounded-lg border bg-card p-3 text-card-foreground"
       aria-label="Select a workspace for the agent session"
-      data-operation-id={operation.operationId}
-      data-operation-kind={operation.kind}
     >
       <div className="text-sm font-medium">Choose a workspace</div>
       <p className="mt-0.5 text-xs text-muted-foreground">This agent session needs one of the project&apos;s offered workspaces.</p>
-      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-        {selectionStatus(operation)}
-      </p>
       <div className="mt-3 grid gap-2">
         {operation.candidates.map((candidate) => {
           const selecting = pendingWorkspaceId === candidate.id;

@@ -54,11 +54,15 @@ export interface ProjectChatSnapshot {
 }
 
 export type ProjectChatStreamEvent = {
-  type: Exclude<ProjectChatMessageType, "user" | "system" | "turn_end">;
+  type: Exclude<ProjectChatMessageType, "user" | "system" | "turn_end" | "operation" | "error">;
   content: string;
   approvalId?: string;
   resolveApproval?: (approved: boolean) => void;
 };
+
+const PROJECT_CHAT_RUNNER_EVENT_TYPES = new Set<ProjectChatStreamEvent["type"]>([
+  "assistant", "tool_use", "tool_result", "tool_approval_request",
+]);
 
 export interface ProjectChatRunInput extends ProjectChatIdentity {
   messages: ProjectChatMessage[];
@@ -1560,6 +1564,10 @@ export class ProjectChatManager {
           : undefined,
       };
       for await (const event of this.runner.run(input)) {
+        if (!event || !PROJECT_CHAT_RUNNER_EVENT_TYPES.has(event.type)
+          || typeof event.content !== "string") {
+          throw new Error("Project Chat runner emitted an unsupported event type");
+        }
         if (abortController.signal.aborted) {
           if (event.type === "tool_approval_request" && event.resolveApproval) {
             try { event.resolveApproval(false); } catch { /* runner already settled */ }

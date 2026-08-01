@@ -85,6 +85,31 @@ function operationHasDeletedTarget(
   return false;
 }
 
+function operationAnnouncement(operation: ProjectChatOperationMessage): string {
+  if (operation.kind === "workspace_selection") {
+    switch (operation.status) {
+      case "pending": return "Waiting for workspace selection";
+      case "resolving": return "Creating agent session";
+      case "running": return "Agent session running";
+      case "completed": return "Agent session completed";
+      case "failed": return "Workspace selection failed";
+    }
+  }
+
+  if (operation.kind === "agent_session_create") {
+    if (operation.status === "resolving") return "Creating agent session";
+    if (operation.status === "running") return "Agent session running";
+    if (operation.status === "completed") return "Agent session completed";
+  }
+  switch (operation.status) {
+    case "pending": return "Queued";
+    case "resolving":
+    case "running": return "Running";
+    case "completed": return "Completed";
+    case "failed": return "Failed";
+  }
+}
+
 export function ProjectChatConversation({
   messages,
   contextRefs,
@@ -283,44 +308,60 @@ export function ProjectChatConversation({
                   ? pendingAction.slice("workspace:".length)
                   : null;
                 return (
-                  <WorkspaceSelectionCard
-                    key={message.id}
-                    operation={operation}
-                    pendingWorkspaceId={pendingWorkspaceId}
-                    actionError={operationError}
-                    onSelect={({ requestId, workspaceId }) => {
-                      void runOperationAction(operation.operationId, "select_workspace", async () => {
-                        setPendingOperationActions((current) => new Map(current).set(
-                          operation.operationId, `workspace:${workspaceId}`,
-                        ));
-                        await onSelectWorkspace(requestId, workspaceId);
-                      });
-                    }}
-                  />
+                  <div
+                    key={`operation:${operation.operationId}`}
+                    data-operation-id={operation.operationId}
+                    data-operation-kind={operation.kind}
+                  >
+                    <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+                      {operationAnnouncement(operation)}
+                    </p>
+                    <WorkspaceSelectionCard
+                      operation={operation}
+                      pendingWorkspaceId={pendingWorkspaceId}
+                      actionError={operationError}
+                      onSelect={({ requestId, workspaceId }) => {
+                        void runOperationAction(operation.operationId, "select_workspace", async () => {
+                          setPendingOperationActions((current) => new Map(current).set(
+                            operation.operationId, `workspace:${workspaceId}`,
+                          ));
+                          await onSelectWorkspace(requestId, workspaceId);
+                        });
+                      }}
+                    />
+                  </div>
                 );
               }
               return (
-                <ProjectOperationCard
-                  key={message.id}
-                  operation={operation}
-                  pendingAction={pendingAction as ProjectOperationPendingAction | undefined}
-                  actionError={operationError}
-                  onOpenSession={operation.kind === "agent_session_create" && onOpenAgentSession
-                    ? (selected) => { void runOperationAction(selected.operationId, "open_session", () => (
-                      onOpenAgentSession(selected.sessionId, selected.target ?? "local", selected.branch ?? null)
-                    )); }
-                    : undefined}
-                  onViewOutput={operation.kind === "schedule_run" && onOpenScheduleRun
-                    ? (selected) => { void runOperationAction(selected.operationId, "view_output", () => (
-                      onOpenScheduleRun(selected.runId, selected.scheduleId)
-                    )); }
-                    : undefined}
-                  onRunAgain={operation.kind === "schedule_run" && onRunScheduleAgain
-                    ? (selected) => { void runOperationAction(selected.operationId, "run_again", () => (
-                      onRunScheduleAgain(selected.runId)
-                    )); }
-                    : undefined}
-                />
+                <div
+                  key={`operation:${operation.operationId}`}
+                  data-operation-id={operation.operationId}
+                  data-operation-kind={operation.kind}
+                >
+                  <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+                    {operationAnnouncement(operation)}
+                  </p>
+                  <ProjectOperationCard
+                    operation={operation}
+                    pendingAction={pendingAction as ProjectOperationPendingAction | undefined}
+                    actionError={operationError}
+                    onOpenSession={operation.kind === "agent_session_create" && onOpenAgentSession
+                      ? (selected) => { void runOperationAction(selected.operationId, "open_session", () => (
+                        onOpenAgentSession(selected.sessionId, selected.target ?? "local", selected.branch ?? null)
+                      )); }
+                      : undefined}
+                    onViewOutput={operation.kind === "schedule_run" && onOpenScheduleRun
+                      ? (selected) => { void runOperationAction(selected.operationId, "view_output", () => (
+                        onOpenScheduleRun(selected.runId, selected.scheduleId)
+                      )); }
+                      : undefined}
+                    onRunAgain={operation.kind === "schedule_run" && onRunScheduleAgain
+                      ? (selected) => { void runOperationAction(selected.operationId, "run_again", () => (
+                        onRunScheduleAgain(selected.runId)
+                      )); }
+                      : undefined}
+                  />
+                </div>
               );
             }
             if (message.type === "error") {

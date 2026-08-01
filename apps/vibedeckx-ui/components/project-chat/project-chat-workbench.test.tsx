@@ -232,6 +232,41 @@ describe("ProjectChatWorkbench", () => {
     expect(container.textContent).toContain("View Output");
   });
 
+  it("keeps one stable lifecycle node from workspace selection through session completion", () => {
+    hook.value.status = "idle";
+    hook.value.activeTurnId = null;
+    const pending = message(1, "operation", JSON.stringify({
+      version: 1, operationId: "session-lifecycle", kind: "workspace_selection", status: "pending",
+      requestId: "session-lifecycle", candidates: [
+        { id: '["local","dev"]', target: "local", branch: "dev" },
+      ],
+    }));
+    hook.value.messages = [pending];
+    render();
+    const lifecycle = container.querySelector('[data-operation-id="session-lifecycle"]');
+    const announcer = lifecycle?.querySelector('[role="status"]');
+    expect(announcer?.textContent).toContain("Waiting for workspace selection");
+
+    const sessionState = (sequence: number, status: "resolving" | "running" | "completed", available: boolean) => (
+      message(sequence, "operation", JSON.stringify({
+        version: 1, operationId: "session-lifecycle", kind: "agent_session_create", status,
+        sessionId: "session-1", target: "local", branch: "dev", sessionAvailable: available,
+      }))
+    );
+    for (const [statusMessage, expected] of [
+      [sessionState(2, "resolving", false), "Creating agent session"],
+      [sessionState(3, "running", true), "Agent session running"],
+      [sessionState(4, "completed", true), "Agent session completed"],
+    ] as const) {
+      hook.value.messages = [...hook.value.messages, statusMessage];
+      render();
+      expect(container.querySelectorAll('[data-operation-id="session-lifecycle"]')).toHaveLength(1);
+      expect(container.querySelector('[data-operation-id="session-lifecycle"]')).toBe(lifecycle);
+      expect(lifecycle?.querySelector('[role="status"]')).toBe(announcer);
+      expect(announcer?.textContent).toContain(expected);
+    }
+  });
+
   it("routes safe operation actions, guards reruns, and reports action failures", async () => {
     hook.value.status = "idle";
     hook.value.activeTurnId = null;
