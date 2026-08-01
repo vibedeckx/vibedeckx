@@ -1135,6 +1135,16 @@ export interface Storage {
       initialTurn?: { messageId: string; workItemId: string; content: string };
     }) => Promise<{ thread: ProjectChatThread; created: boolean }>;
     listByProject: (projectId: string, userId: string, limit: number, opts?: { includeArchived?: boolean }) => Promise<ProjectChatThread[]>;
+    listPageByProject: (
+      projectId: string,
+      userId: string,
+      limit: number,
+      opts?: {
+        includeArchived?: boolean;
+        query?: string;
+        cursor?: { updatedAt: string; id: string };
+      },
+    ) => Promise<{ threads: ProjectChatThread[]; hasMore: boolean }>;
     /**
      * Discovery-only lookup for routes that receive no project id. Callers
      * must immediately authorize the returned project before reading or

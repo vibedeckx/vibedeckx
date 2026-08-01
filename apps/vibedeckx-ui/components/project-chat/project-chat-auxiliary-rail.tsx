@@ -36,6 +36,7 @@ const contextLabels: Record<ProjectChatContextRef["entity_type"], string> = {
 };
 
 interface ProjectChatAuxiliaryRailProps {
+  projectId: string;
   currentThreadId: string;
   threads: ProjectChatThread[];
   contextRefs: ProjectChatContextRef[];
@@ -44,13 +45,13 @@ interface ProjectChatAuxiliaryRailProps {
   onRenameThread: (threadId: string, title: string) => Promise<void>;
   onArchiveThread: (threadId: string) => Promise<void>;
   onDeleteThread: (threadId: string) => Promise<void>;
-  onLoadArchived: () => Promise<void>;
   onOpenContext?: (ref: ProjectChatContextRef) => void;
   newThreadPending?: boolean;
   className?: string;
 }
 
 export function ProjectChatAuxiliaryRail({
+  projectId,
   currentThreadId,
   threads,
   contextRefs,
@@ -59,7 +60,6 @@ export function ProjectChatAuxiliaryRail({
   onRenameThread,
   onArchiveThread,
   onDeleteThread,
-  onLoadArchived,
   onOpenContext,
   newThreadPending = false,
   className,
@@ -273,9 +273,8 @@ export function ProjectChatAuxiliaryRail({
       <ProjectChatThreadHistory
         open={historyOpen}
         onOpenChange={setHistoryOpen}
-        threads={threads}
+        projectId={projectId}
         onSelectThread={onSelectThread}
-        onLoadArchived={onLoadArchived}
       />
 
       <Dialog open={renameTarget !== null} onOpenChange={(open) => {

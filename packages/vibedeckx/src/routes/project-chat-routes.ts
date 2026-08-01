@@ -16,7 +16,9 @@ import "../server-types.js";
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_MESSAGE_LENGTH = 100_000;
-const LIST_LIMIT = 100;
+const THREAD_PAGE_LIMIT = 50;
+const MAX_THREAD_SEARCH_LENGTH = 200;
+const MAX_THREAD_CURSOR_LENGTH = 2048;
 const MESSAGE_PAGE_LIMIT = 100;
 const MESSAGE_PAGE_BYTE_LIMIT = PROJECT_CHAT_LIVE_MESSAGE_BYTE_LIMIT;
 
@@ -28,6 +30,54 @@ type WorkspaceSelectionBody = { requestId: string; workspaceId: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type ThreadListQuery = {
+  includeArchived: boolean;
+  query?: string;
+  cursor?: { updatedAt: string; id: string };
+};
+
+function encodeThreadCursor(cursor: { updatedAt: string; id: string }): string {
+  return Buffer.from(JSON.stringify({ v: 1, updatedAt: cursor.updatedAt, id: cursor.id }), "utf8")
+    .toString("base64url");
+}
+
+function decodeThreadCursor(value: string): { updatedAt: string; id: string } | null {
+  if (!value || value.length > MAX_THREAD_CURSOR_LENGTH || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    if (!isRecord(decoded) || Object.keys(decoded).sort().join(",") !== "id,updatedAt,v"
+      || decoded.v !== 1 || typeof decoded.updatedAt !== "string" || !decoded.updatedAt
+      || decoded.updatedAt.length > 100 || typeof decoded.id !== "string" || !decoded.id
+      || decoded.id.length > 512) return null;
+    return { updatedAt: decoded.updatedAt, id: decoded.id };
+  } catch {
+    return null;
+  }
+}
+
+function parseThreadListQuery(value: unknown): ThreadListQuery | null {
+  if (!isRecord(value)) return null;
+  if (Object.keys(value).some((key) => key !== "includeArchived" && key !== "q" && key !== "cursor")) return null;
+  let includeArchived = false;
+  if ("includeArchived" in value) {
+    if (value.includeArchived !== "true" && value.includeArchived !== "false") return null;
+    includeArchived = value.includeArchived === "true";
+  }
+  let query: string | undefined;
+  if ("q" in value) {
+    if (typeof value.q !== "string") return null;
+    query = value.q.trim();
+    if (!query || query.length > MAX_THREAD_SEARCH_LENGTH) return null;
+  }
+  let cursor: { updatedAt: string; id: string } | undefined;
+  if ("cursor" in value) {
+    if (typeof value.cursor !== "string") return null;
+    cursor = decodeThreadCursor(value.cursor) ?? undefined;
+    if (!cursor) return null;
+  }
+  return { includeArchived, ...(query ? { query } : {}), ...(cursor ? { cursor } : {}) };
 }
 
 function parseCreateBody(body: unknown): { message?: string; createRequestId?: string } | null {
@@ -143,7 +193,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   fastify.get<{
     Params: { projectId: string };
-    Querystring: { includeArchived?: string };
+    Querystring: unknown;
   }>("/api/projects/:projectId/project-chat/threads", async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
@@ -152,13 +202,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return reply.code(404).send({ error: "Project not found" });
 
-    const threads = await fastify.storage.projectChatThreads.listByProject(
+    const query = parseThreadListQuery(req.query);
+    if (!query) return reply.code(400).send({ error: "Invalid thread list query" });
+
+    const page = await fastify.storage.projectChatThreads.listPageByProject(
       projectId,
       userId,
-      LIST_LIMIT,
-      { includeArchived: req.query.includeArchived === "true" },
+      THREAD_PAGE_LIMIT,
+      query,
     );
-    return reply.code(200).send({ threads });
+    const last = page.threads.at(-1);
+    return reply.code(200).send({
+      threads: page.threads,
+      nextCursor: page.hasMore && last
+        ? encodeThreadCursor({ updatedAt: last.updated_at, id: last.id })
+        : null,
+    });
   });
 
   fastify.post<{

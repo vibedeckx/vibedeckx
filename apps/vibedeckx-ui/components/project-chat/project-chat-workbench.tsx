@@ -211,6 +211,7 @@ export function ProjectChatWorkbench({
         {!isMobile && railVisible ? (
           <ProjectChatAuxiliaryRail
             key={scopeKey}
+            projectId={projectId}
             currentThreadId={threadId}
             threads={chat.threads}
             contextRefs={chat.contextRefs}
@@ -219,7 +220,6 @@ export function ProjectChatWorkbench({
             onRenameThread={async (id, nextTitle) => { await chat.renameThread(id, nextTitle); }}
             onArchiveThread={archiveThread}
             onDeleteThread={deleteThread}
-            onLoadArchived={() => chat.refetchThreads(true)}
             onOpenContext={onOpenContext}
             newThreadPending={newThreadPending}
           />
@@ -243,6 +243,7 @@ export function ProjectChatWorkbench({
             </SheetHeader>
             <ProjectChatAuxiliaryRail
               key={scopeKey}
+              projectId={projectId}
               className="min-h-0 w-full flex-1 border-l-0"
               currentThreadId={threadId}
               threads={chat.threads}
@@ -252,7 +253,6 @@ export function ProjectChatWorkbench({
               onRenameThread={async (id, nextTitle) => { await chat.renameThread(id, nextTitle); }}
               onArchiveThread={archiveThread}
               onDeleteThread={deleteThread}
-              onLoadArchived={() => chat.refetchThreads(true)}
               onOpenContext={onOpenContext ? (ref) => { setMobileRailVisibility(false); onOpenContext(ref); } : undefined}
               newThreadPending={newThreadPending}
             />

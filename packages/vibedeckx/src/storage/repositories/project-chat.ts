@@ -229,6 +229,36 @@ export const createProjectChatRepos = (
       return rows.map(mapThread);
     },
 
+    listPageByProject: async (projectId, userId, limit, opts) => {
+      let query = kdb.selectFrom("project_chat_threads")
+        .selectAll()
+        .where("project_id", "=", projectId)
+        .where("user_id", "=", userId);
+      if (!opts?.includeArchived) query = query.where("archived_at", "is", null);
+      if (opts?.query) {
+        query = query.where(sql<boolean>`instr(lower(coalesce(title, '')), lower(${opts.query})) > 0`);
+      }
+      if (opts?.cursor) {
+        const cursor = opts.cursor;
+        query = query.where((eb) => eb.or([
+          eb("updated_at", "<", cursor.updatedAt),
+          eb.and([
+            eb("updated_at", "=", cursor.updatedAt),
+            eb("id", "<", cursor.id),
+          ]),
+        ]));
+      }
+      const rows = await query
+        .orderBy("updated_at", "desc")
+        .orderBy("id", "desc")
+        .limit(limit + 1)
+        .execute();
+      return {
+        threads: rows.slice(0, limit).map(mapThread),
+        hasMore: rows.length > limit,
+      };
+    },
+
     getOwnedById: async (id, userId) => {
       if (!userId) return undefined;
       const row = await kdb.selectFrom("project_chat_threads")

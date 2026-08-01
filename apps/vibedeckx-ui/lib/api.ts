@@ -538,6 +538,11 @@ export interface ProjectChatThread {
   archived_at: number | null;
 }
 
+export interface ProjectChatThreadPage {
+  threads: ProjectChatThread[];
+  nextCursor: string | null;
+}
+
 export type ProjectChatMessageType =
   | "user"
   | "assistant"
@@ -2115,6 +2120,34 @@ export const api = {
       throw new Error(body.error ?? `Failed to list Project Chat threads: ${res.status}`);
     }
     return (await res.json()).threads;
+  },
+
+  async listProjectChatThreadPage(
+    projectId: string,
+    opts?: {
+      includeArchived?: boolean;
+      query?: string;
+      cursor?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<ProjectChatThreadPage> {
+    const query = new URLSearchParams();
+    if (opts?.includeArchived) query.set("includeArchived", "true");
+    if (opts?.query?.trim()) query.set("q", opts.query.trim());
+    if (opts?.cursor) query.set("cursor", opts.cursor);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/project-chat/threads${suffix}`, {
+      signal: opts?.signal,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to list Project Chat thread history: ${res.status}`);
+    }
+    const body = await res.json() as Partial<ProjectChatThreadPage>;
+    return {
+      threads: Array.isArray(body.threads) ? body.threads : [],
+      nextCursor: typeof body.nextCursor === "string" ? body.nextCursor : null,
+    };
   },
 
   async createProjectChatThread(

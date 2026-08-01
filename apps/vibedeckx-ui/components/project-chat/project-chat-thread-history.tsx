@@ -1,6 +1,5 @@
 "use client";
 
-import { useMemo, useState } from "react";
 import { Archive, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { ProjectChatThread } from "@/lib/api";
+import { useProjectChatThreadHistory } from "@/hooks/use-project-chat-thread-history";
 
 export function projectChatThreadTitle(thread: ProjectChatThread | null): string {
   return thread?.title?.trim() || "Untitled conversation";
@@ -21,26 +21,17 @@ export function projectChatThreadTitle(thread: ProjectChatThread | null): string
 interface ProjectChatThreadHistoryProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  threads: ProjectChatThread[];
+  projectId: string;
   onSelectThread: (threadId: string) => void;
-  onLoadArchived: () => Promise<void>;
 }
 
 export function ProjectChatThreadHistory({
   open,
   onOpenChange,
-  threads,
+  projectId,
   onSelectThread,
-  onLoadArchived,
 }: ProjectChatThreadHistoryProps) {
-  const [query, setQuery] = useState("");
-  const [loadingArchived, setLoadingArchived] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    if (!normalized) return threads;
-    return threads.filter((thread) => projectChatThreadTitle(thread).toLocaleLowerCase().includes(normalized));
-  }, [query, threads]);
+  const history = useProjectChatThreadHistory(projectId, open);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -56,8 +47,9 @@ export function ProjectChatThreadHistory({
               <Input
                 autoFocus
                 aria-label="Search threads"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                maxLength={200}
+                value={history.query}
+                onChange={(event) => history.setQuery(event.target.value)}
                 className="pl-8"
               />
             </div>
@@ -65,29 +57,21 @@ export function ProjectChatThreadHistory({
               type="button"
               variant="outline"
               size="sm"
-              disabled={loadingArchived}
-              onClick={async () => {
-                setLoadingArchived(true);
-                setLoadError(null);
-                try {
-                  await onLoadArchived();
-                } catch (reason) {
-                  setLoadError(reason instanceof Error ? reason.message : "Failed to load archived threads");
-                } finally {
-                  setLoadingArchived(false);
-                }
-              }}
+              disabled={history.includeArchived || history.loading}
+              onClick={history.showArchived}
             >
               <Archive className="size-4" aria-hidden="true" />
-              {loadingArchived ? "Loading…" : "Show archived threads"}
+              {history.includeArchived ? "Archived included" : "Show archived threads"}
             </Button>
           </div>
-          {loadError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{loadError}</div> : null}
+          {history.error ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{history.error}</div> : null}
         </div>
         <div className="min-h-0 space-y-1 overflow-y-auto" role="list">
-          {filtered.length === 0 ? (
+          {history.loading ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">Loading threads…</p>
+          ) : history.threads.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">No matching threads</p>
-          ) : filtered.map((thread) => {
+          ) : history.threads.map((thread) => {
             const title = projectChatThreadTitle(thread);
             return (
               <div key={thread.id} role="listitem">
@@ -109,6 +93,18 @@ export function ProjectChatThreadHistory({
               </div>
             );
           })}
+          {history.nextCursor ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-2 w-full"
+              disabled={history.loadingMore}
+              onClick={() => void history.loadMore()}
+            >
+              {history.loadingMore ? "Loading more…" : "Load more threads"}
+            </Button>
+          ) : null}
         </div>
       </DialogContent>
     </Dialog>

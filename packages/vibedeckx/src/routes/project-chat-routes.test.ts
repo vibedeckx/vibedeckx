@@ -107,6 +107,87 @@ describe("project chat thread routes", () => {
       expect(response.json().threads.map((thread: ProjectChatThread) => thread.id).sort()).toEqual(["active", "archived"]);
     });
 
+    it("paginates beyond the first 100 threads with a stable opaque cursor", async () => {
+      for (let index = 0; index < 101; index++) {
+        await createThread({ id: `thread-${String(index).padStart(3, "0")}`, title: `Thread ${index}` });
+      }
+
+      const first = await app.inject({ method: "GET", url: "/api/projects/project-1/project-chat/threads" });
+      expect(first.statusCode).toBe(200);
+      expect(first.json().threads).toHaveLength(50);
+      expect(first.json().nextCursor).toEqual(expect.any(String));
+
+      const second = await app.inject({
+        method: "GET",
+        url: `/api/projects/project-1/project-chat/threads?cursor=${encodeURIComponent(first.json().nextCursor)}`,
+      });
+      expect(second.statusCode).toBe(200);
+      expect(second.json().threads).toHaveLength(50);
+
+      const third = await app.inject({
+        method: "GET",
+        url: `/api/projects/project-1/project-chat/threads?cursor=${encodeURIComponent(second.json().nextCursor)}`,
+      });
+      expect(third.statusCode).toBe(200);
+      expect(third.json().threads).toHaveLength(1);
+      expect(third.json().nextCursor).toBeNull();
+      const ids = [...first.json().threads, ...second.json().threads, ...third.json().threads]
+        .map((thread: ProjectChatThread) => thread.id);
+      expect(new Set(ids).size).toBe(101);
+    });
+
+    it("searches titles in storage before pagination without leaking another scope", async () => {
+      for (let index = 0; index < 101; index++) {
+        await createThread({
+          id: `thread-${String(index).padStart(3, "0")}`,
+          title: index === 0 ? "Needle release audit" : `Ordinary thread ${index}`,
+        });
+      }
+      await createThread({ id: "other-project-needle", project_id: "project-2", title: "Needle secret" });
+      await createThread({ id: "other-user-needle", user_id: "user-2", title: "Needle secret" });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/projects/project-1/project-chat/threads?q=needle",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ nextCursor: null });
+      expect(response.json().threads.map((thread: ProjectChatThread) => thread.id)).toEqual(["thread-000"]);
+    });
+
+    it("strictly rejects malformed list queries and cursors", async () => {
+      for (const query of [
+        "includeArchived=1",
+        "includeArchived=true&limit=1000",
+        "q=",
+        `q=${"x".repeat(201)}`,
+        "cursor=not-a-cursor",
+      ]) {
+        const response = await app.inject({
+          method: "GET",
+          url: `/api/projects/project-1/project-chat/threads?${query}`,
+        });
+        expect(response.statusCode, query).toBe(400);
+      }
+    });
+
+    it("never uses a cursor to escape the authorized project scope", async () => {
+      for (let index = 0; index < 51; index++) {
+        await createThread({ id: `mine-${String(index).padStart(2, "0")}`, project_id: "project-1" });
+      }
+      await createThread({ id: "other", project_id: "project-2" });
+      const first = await app.inject({ method: "GET", url: "/api/projects/project-1/project-chat/threads" });
+      const cursor = first.json().nextCursor;
+      expect(cursor).toEqual(expect.any(String));
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/projects/project-2/project-chat/threads?cursor=${encodeURIComponent(cursor)}`,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().threads.every((thread: ProjectChatThread) => thread.project_id === "project-2")).toBe(true);
+    });
+
     it("returns 404 for nonexistent and foreign projects", async () => {
       for (const projectId of ["missing", "foreign-project"]) {
         const response = await app.inject({ method: "GET", url: `/api/projects/${projectId}/project-chat/threads` });

@@ -86,6 +86,38 @@ describe("project chat storage", () => {
     expect(threads.every((thread) => !("branch" in thread))).toBe(true);
   });
 
+  it("pages and searches threads with a stable project/user-scoped cursor", async () => {
+    for (const [id, projectId, userId, title] of [
+      ["a", "p1", "u1", "Old release audit"],
+      ["b", "p1", "u1", "Current work"],
+      ["c", "p1", "u1", "Current work two"],
+      ["foreign-project", "p2", "u1", "Old release audit secret"],
+      ["foreign-user", "p1", "u2", "Old release audit secret"],
+    ] as const) {
+      await storage.projectChatThreads.create({ id, project_id: projectId, user_id: userId, title });
+    }
+    const raw = new Database(dbPath);
+    raw.prepare("UPDATE project_chat_threads SET updated_at = ? WHERE id = ?").run("2026-01-01 00:00:00.000", "a");
+    raw.prepare("UPDATE project_chat_threads SET updated_at = ? WHERE id IN (?, ?)")
+      .run("2026-02-01 00:00:00.000", "b", "c");
+    raw.close();
+
+    const first = await storage.projectChatThreads.listPageByProject("p1", "u1", 2);
+    expect(first.threads.map(({ id }) => id)).toEqual(["c", "b"]);
+    expect(first.hasMore).toBe(true);
+
+    const second = await storage.projectChatThreads.listPageByProject("p1", "u1", 2, {
+      cursor: { updatedAt: first.threads[1].updated_at, id: first.threads[1].id },
+    });
+    expect(second).toMatchObject({ hasMore: false });
+    expect(second.threads.map(({ id }) => id)).toEqual(["a"]);
+
+    const search = await storage.projectChatThreads.listPageByProject("p1", "u1", 2, {
+      query: "RELEASE AUDIT",
+    });
+    expect(search.threads.map(({ id }) => id)).toEqual(["a"]);
+  });
+
   it("resolves authorized Context targets with typed navigation metadata", async () => {
     await storage.tasks.create({ id: "task-1", project_id: "p1", title: "Fix login" });
     await storage.agentSessions.create({ id: "local-session", project_id: "p1", branch: "feature/auth" });

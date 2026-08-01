@@ -7,9 +7,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const hook = vi.hoisted(() => ({
   value: {} as import("@/hooks/use-project-chat").UseProjectChatResult,
 }));
+const historyHook = vi.hoisted(() => ({
+  value: {} as import("@/hooks/use-project-chat-thread-history").UseProjectChatThreadHistoryResult,
+}));
 
 vi.mock("@/hooks/use-project-chat", () => ({
   useProjectChat: () => hook.value,
+}));
+vi.mock("@/hooks/use-project-chat-thread-history", () => ({
+  useProjectChatThreadHistory: () => historyHook.value,
 }));
 
 import { ProjectChatWorkbench } from "./project-chat-workbench";
@@ -134,6 +140,18 @@ function setupHook() {
     resolveToolApproval: vi.fn(async () => {}),
     selectWorkspace: vi.fn(async () => {}),
     loadEarlierMessages: vi.fn(async () => {}),
+  };
+  historyHook.value = {
+    threads: hook.value.threads,
+    loading: false,
+    loadingMore: false,
+    error: null,
+    nextCursor: null,
+    query: "",
+    includeArchived: false,
+    setQuery: vi.fn(),
+    showArchived: vi.fn(),
+    loadMore: vi.fn(async () => {}),
   };
 }
 
@@ -551,6 +569,7 @@ describe("ProjectChatWorkbench", () => {
       { ...thread(9), archived_at: Date.now() },
       thread(7), thread(6), thread(5), thread(4), thread(3), thread(2),
     ];
+    historyHook.value.threads = hook.value.threads;
     render();
 
     expect(container.querySelectorAll('[data-testid="thread-row"]')).toHaveLength(5);
@@ -675,11 +694,26 @@ describe("ProjectChatWorkbench", () => {
     expect(document.body.textContent).toContain("All Project Chat threads");
     const search = document.querySelector('input[aria-label="Search threads"]') as HTMLInputElement;
     act(() => setInput(search, "Thread 1"));
-    expect(document.querySelectorAll('[data-testid="history-thread-row"]')).toHaveLength(1);
+    expect(historyHook.value.setQuery).toHaveBeenCalledWith("Thread 1");
 
     await act(async () => getButton("Show archived threads").click());
-    expect(hook.value.refetchThreads).toHaveBeenCalledWith(true);
+    expect(historyHook.value.showArchived).toHaveBeenCalledOnce();
     act(() => getButton("Open history thread: Thread 1").click());
     expect(props.onSelectThread).toHaveBeenCalledWith("thread-1");
+  });
+
+  it("loads more history without changing the recent five", async () => {
+    historyHook.value.threads = Array.from({ length: 50 }, (_, index) => thread(101 - index));
+    historyHook.value.nextCursor = "page-2";
+    render();
+    const recentBefore = [...container.querySelectorAll('[data-testid="thread-row"]')]
+      .map((row) => row.textContent);
+
+    act(() => getButton("View all threads").click());
+    await act(async () => getButton("Load more threads").click());
+
+    expect(historyHook.value.loadMore).toHaveBeenCalledOnce();
+    expect([...container.querySelectorAll('[data-testid="thread-row"]')].map((row) => row.textContent))
+      .toEqual(recentBefore);
   });
 });
