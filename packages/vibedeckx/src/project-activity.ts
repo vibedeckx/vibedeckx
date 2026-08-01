@@ -7,7 +7,10 @@ import type {
   Task,
 } from "./storage/types.js";
 
-const RECENT_THREAD_LIMIT = 3;
+// Five fills the Project Chat card's thread list without spilling past the
+// Recent Agent Sessions card beside it; anything longer belongs in the history
+// dialog the card's footer opens.
+const RECENT_THREAD_LIMIT = 5;
 const RECENT_SESSION_LIMIT = 8;
 const RECENT_RUN_LIMIT = 5;
 const PRIORITY_TASK_LIMIT = 5;

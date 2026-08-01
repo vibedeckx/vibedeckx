@@ -22,6 +22,8 @@ interface ProjectChatThreadHistoryProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
+  /** Open straight into archived threads. Only read on mount — see the hook. */
+  defaultIncludeArchived?: boolean;
   onSelectThread: (threadId: string) => void;
 }
 
@@ -29,9 +31,10 @@ export function ProjectChatThreadHistory({
   open,
   onOpenChange,
   projectId,
+  defaultIncludeArchived,
   onSelectThread,
 }: ProjectChatThreadHistoryProps) {
-  const history = useProjectChatThreadHistory(projectId, open);
+  const history = useProjectChatThreadHistory(projectId, open, defaultIncludeArchived);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

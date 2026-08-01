@@ -6,7 +6,6 @@ import type { ProjectActivity, ProjectChatThread, Task } from "@/lib/api";
 import { useProjectActivity } from "@/hooks/use-project-activity";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { remoteNameMap, workspaceLabel } from "@/lib/workspace-label";
 import { ProjectChatCard } from "./project-chat-card";
 import { RecentAgentSessionsCard } from "./recent-agent-sessions-card";
@@ -194,39 +193,44 @@ export function ProjectActivityView({
         </div>
       ) : null}
 
-      <ProjectChatCard
-        scopeKey={projectId}
-        threads={activity.recentThreads}
-        onCreateThread={onCreateThread ? async (message) => {
-          const created = await onCreateThread(message);
-          void refetch();
-          return created;
-        } : undefined}
-        onOpenThread={onOpenThread}
-      />
+      {/* Two standing columns, not three stacked bands: the wide column carries
+          the narrative of what the agents are doing (chat → sessions → runs)
+          while the narrow one holds the short, glanceable lists. */}
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(16.25rem,2fr)]">
+        <div className="flex min-w-0 flex-col gap-4">
+          <ProjectChatCard
+            scopeKey={projectId}
+            projectId={projectId}
+            threads={activity.recentThreads}
+            onCreateThread={onCreateThread ? async (message) => {
+              const created = await onCreateThread(message);
+              void refetch();
+              return created;
+            } : undefined}
+            onOpenThread={onOpenThread}
+          />
+          <RecentAgentSessionsCard
+            sessions={activity.recentAgentSessions}
+            remoteNames={remoteNames}
+            onOpenSession={onOpenAgentSession}
+          />
+          <ScheduleResultsCard
+            runs={activity.recentScheduleRuns}
+            remoteNames={remoteNames}
+            onOpenRun={onOpenScheduleRun}
+          />
+        </div>
 
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
-        <RecentAgentSessionsCard
-          sessions={activity.recentAgentSessions}
-          remoteNames={remoteNames}
-          onOpenSession={onOpenAgentSession}
-        />
-        <ScheduleResultsCard
-          runs={activity.recentScheduleRuns}
-          remoteNames={remoteNames}
-          onOpenRun={onOpenScheduleRun}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-        <PriorityTasksCard tasks={activity.priorityTasks} onOpenTask={onOpenTask} onViewAll={onViewAllTasks} />
-        <AttentionRequiredCard
-          scopeKey={projectId}
-          items={activity.attention}
-          onOpenAgentSession={onOpenAgentSession}
-          onOpenScheduleRun={onOpenScheduleRun}
-          onRunScheduleAgain={onRunScheduleAgain}
-        />
+        <div className="flex min-w-0 flex-col gap-4">
+          <PriorityTasksCard tasks={activity.priorityTasks} onOpenTask={onOpenTask} onViewAll={onViewAllTasks} />
+          <AttentionRequiredCard
+            scopeKey={projectId}
+            items={activity.attention}
+            onOpenAgentSession={onOpenAgentSession}
+            onOpenScheduleRun={onOpenScheduleRun}
+            onRunScheduleAgain={onRunScheduleAgain}
+          />
+        </div>
       </div>
     </section>
   );

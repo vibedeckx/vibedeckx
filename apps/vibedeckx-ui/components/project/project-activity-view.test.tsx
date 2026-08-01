@@ -24,6 +24,13 @@ vi.mock("@/hooks/use-project-remotes", () => ({
   useProjectRemotes: () => ({ remotes: remotesHook.value, loading: false, refresh: vi.fn() }),
 }));
 
+const listThreadPage = vi.hoisted(() => vi.fn(async () => ({ threads: [], nextCursor: null })));
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, listProjectChatThreadPage: listThreadPage } };
+});
+
 import { ProjectActivityView } from "./project-activity-view";
 import type {
   ProjectActivity,
@@ -206,7 +213,9 @@ describe("ProjectActivityView", () => {
     expect(container.textContent).toContain("Attention Required");
     expect(container.textContent).not.toContain("Workspaces");
 
-    expect(container.querySelectorAll('[data-testid="recent-thread"]')).toHaveLength(3);
+    // Every thread the server sent, not a client-side slice — the server owns
+    // the recent-thread limit and the card's footer opens the rest.
+    expect(container.querySelectorAll('[data-testid="recent-thread"]')).toHaveLength(4);
     expect(container.querySelectorAll('[data-testid="recent-session"]')).toHaveLength(8);
     expect(container.querySelectorAll('[data-testid="schedule-run"]')).toHaveLength(5);
     expect(container.querySelectorAll('[data-testid="priority-task"]')).toHaveLength(5);
@@ -291,6 +300,20 @@ describe("ProjectActivityView", () => {
     expect((container.querySelector("textarea") as HTMLTextAreaElement).disabled).toBe(true);
     expect(button("Start conversation").disabled).toBe(true);
     expect(button("Open Project Chat thread: Thread 4").disabled).toBe(true);
+    expect(button("Show archived").disabled).toBe(true);
+    expect(button("All threads").disabled).toBe(true);
+  });
+
+  it("opens thread history from the chat footer, archived-first when asked", async () => {
+    render();
+    expect(listThreadPage).not.toHaveBeenCalled();
+
+    await act(async () => button("All threads").click());
+    expect(listThreadPage).toHaveBeenLastCalledWith("project-1", expect.objectContaining({ includeArchived: false }));
+
+    // Reopening with the other intent must not inherit the first dialog's state.
+    await act(async () => button("Show archived").click());
+    expect(listThreadPage).toHaveBeenLastCalledWith("project-1", expect.objectContaining({ includeArchived: true }));
   });
 
   it("prevents duplicate schedule reruns from Attention Required", async () => {

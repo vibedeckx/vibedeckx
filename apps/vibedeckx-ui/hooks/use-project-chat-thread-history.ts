@@ -32,6 +32,12 @@ function mergeUnique(
 export function useProjectChatThreadHistory(
   projectId: string,
   enabled: boolean,
+  /**
+   * Seeds the archived toggle so a caller can open straight into archived
+   * threads. Read once, at mount — callers that need to switch intent should
+   * remount the dialog rather than flip this underneath a live fetch.
+   */
+  initialIncludeArchived = false,
 ): UseProjectChatThreadHistoryResult {
   const [threads, setThreads] = useState<ProjectChatThread[]>([]);
   const [loading, setLoading] = useState(false);
@@ -39,7 +45,7 @@ export function useProjectChatThreadHistory(
   const [error, setError] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [includeArchived, setIncludeArchived] = useState(false);
+  const [includeArchived, setIncludeArchived] = useState(initialIncludeArchived);
   const requestEpochRef = useRef(0);
   const loadMoreEpochRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);

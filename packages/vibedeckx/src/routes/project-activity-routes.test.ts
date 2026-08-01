@@ -187,7 +187,7 @@ describe("project activity route", () => {
     expect(response.statusCode, response.body).toBe(200);
     const body = response.json();
 
-    expect(body.recentThreads).toHaveLength(3);
+    expect(body.recentThreads).toHaveLength(5);
     expect(body.recentAgentSessions).toHaveLength(8);
     expect(body.recentScheduleRuns).toHaveLength(5);
   });
