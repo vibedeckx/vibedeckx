@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { ProjectGlyph } from "@/components/project/project-glyph";
 import { WorkspaceMergeBadge } from "./workspace-merge-badge";
 import { WorkspaceRowMenu } from "./workspace-row-menu";
 
@@ -127,19 +128,6 @@ function ScheduleDot({ schedule }: { schedule: Schedule }) {
   return <span className={cn(base, "bg-blue-500")} />;
 }
 
-function ProjectStatusDot({ project }: { project: Project }) {
-  const hasLocal = !!project.path;
-  const hasRemote = project.is_remote || !!project.remote_path;
-  const base = "h-[7px] w-[7px] rounded-full shrink-0";
-  if (hasLocal && hasRemote) {
-    return <span className={cn(base, "bg-purple-500")} />;
-  }
-  if (hasRemote) {
-    return <span className={cn(base, "bg-blue-500")} />;
-  }
-  return <span className={cn(base, "bg-muted-foreground/40")} />;
-}
-
 // Section grouping — design's `.sidebar-section` with hairline divider between
 function SidebarSection({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -261,7 +249,7 @@ export function AppSidebar({
                           onViewChange("project-info");
                         }}
                         className={cn(
-                          "relative w-full flex items-center gap-[9px] rounded-md px-2 py-[5px] text-[12.5px] transition-colors min-w-0",
+                          "relative w-full flex items-center gap-1.5 rounded-md px-2 py-[5px] text-[12.5px] transition-colors min-w-0",
                           "hover:bg-muted hover:text-foreground",
                           isSelected ? "text-foreground font-medium" : "text-foreground/75"
                         )}
@@ -269,7 +257,7 @@ export function AppSidebar({
                         {isActiveInfo && (
                           <span className="absolute -left-2 top-1.5 bottom-1.5 w-[2px] rounded-full bg-primary" />
                         )}
-                        <ProjectStatusDot project={project} />
+                        <ProjectGlyph name={project.name} />
                         <span className="truncate flex-1 text-left">{project.name}</span>
                         {isSelected && <FolderOpen className="h-3 w-3 shrink-0 text-muted-foreground ml-auto" />}
                       </button>

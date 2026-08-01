@@ -14,7 +14,8 @@ import {
   updateCachedSessionTitle,
 } from "@/lib/quick-switcher-cache";
 import { useGlobalEventStream } from "@/hooks/global-event-stream";
-import { FolderGit2, GitBranch, Loader2, MessageSquare, Star } from "lucide-react";
+import { ProjectGlyph } from "@/components/project/project-glyph";
+import { GitBranch, Loader2, MessageSquare, Star } from "lucide-react";
 
 export interface QuickSwitcherProps {
   open: boolean;
@@ -196,7 +197,7 @@ export function QuickSwitcher({
           <CommandGroup heading="Projects">
             {results.projects.map((p) => (
               <CommandItem key={p.id} value={`project-${p.id}`} onSelect={() => onNavigateProject(p.id)}>
-                <FolderGit2 />
+                <ProjectGlyph name={p.name} size="md" />
                 <span>{p.name}</span>
                 {p.path && <span className="truncate text-xs text-muted-foreground">{p.path}</span>}
               </CommandItem>

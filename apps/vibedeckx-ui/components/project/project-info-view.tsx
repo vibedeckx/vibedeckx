@@ -7,6 +7,7 @@ import { TaskDetailDialog } from "@/components/task/task-detail-dialog";
 import { useCreateProjectChatThread } from "@/hooks/use-create-project-chat-thread";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import type { Project, ProjectRemote, SyncButtonConfig, Task } from "@/lib/api";
+import { projectInitials } from "@/lib/project-initials";
 import { cn } from "@/lib/utils";
 import { ProjectActivityView } from "./project-activity-view";
 import { ProjectSettingsForm } from "./project-settings-form";
@@ -29,13 +30,6 @@ function StatusBadge({ project }: { project: Project }) {
       {label}
     </span>
   );
-}
-
-/** Up to two mono characters standing in for a project avatar. */
-function projectInitials(name: string): string {
-  const words = name.split(/[\s._/-]+/).filter(Boolean);
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toLowerCase();
-  return (words[0] ?? name).slice(0, 2).toLowerCase() || "??";
 }
 
 /** Mono chip for one of the places this project lives. */
