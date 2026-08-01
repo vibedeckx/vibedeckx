@@ -7,6 +7,7 @@ import type {
 } from "./storage/types.js";
 export { projectChatPublicOperationContent } from "./project-chat-public-operation.js";
 import { projectChatPublicOperationContent } from "./project-chat-public-operation.js";
+import { sanitizeProjectChatPublicError } from "./project-chat-public-error.js";
 
 const LIST_LIMIT = 20;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
@@ -539,8 +540,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     return execute(args);
   };
   const boundedError = (error: unknown): string => {
-    const message = error instanceof Error ? error.message : String(error);
-    return preview(message || "Mutation failed", 512);
+    return sanitizeProjectChatPublicError(error, "Mutation failed");
   };
   const operationPayload = (
     kind: Parameters<Storage["projectChatOperations"]["create"]>[0]["kind"],
@@ -576,11 +576,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       operation.id, threadId, projectId, userId,
     );
     if (!current) throw new Error("Project Chat operation not found");
+    const publicError = error === null ? null : sanitizeProjectChatPublicError(error, "Operation failed");
     const payload = { ...current.payload, status, ...details } as ProjectChatOperationPayload;
-    const content = projectChatPublicOperationContent(payload, error);
+    const content = projectChatPublicOperationContent(payload, publicError);
     const result = await storage.projectChatOperations.transition({
       id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
-      status, payload, error,
+      status, payload, error: publicError,
       message: { id: `operation:${operation.id}:${status}`, content },
     });
     if (!result) throw new Error("Failed to update Project Chat operation");

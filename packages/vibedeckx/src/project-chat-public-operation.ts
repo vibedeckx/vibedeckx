@@ -1,4 +1,5 @@
 import type { ProjectChatOperationPayload, ProjectChatOperationStatus } from "./storage/types.js";
+import { sanitizeProjectChatPublicError } from "./project-chat-public-error.js";
 
 export type PublicProjectChatFailureCode = "failed" | "timeout" | "remote_offline" | "deleted_target";
 
@@ -90,7 +91,7 @@ export function projectChatPublicOperationContent(
   error: string | null = null,
 ): string {
   const publicPayload = projectChatPublicOperation(payload);
-  const failureCode = publicFailureCode(error ?? "");
+  const failureCode = publicFailureCode(sanitizeProjectChatPublicError(error ?? "", "Operation failed"));
   return JSON.stringify({
     ...publicPayload,
     ...(payload.status === "failed"

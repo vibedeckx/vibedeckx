@@ -497,6 +497,31 @@ describe("createProjectChatTools", () => {
     expect(JSON.stringify(failed)).not.toContain("x".repeat(600));
   });
 
+  it("sanitizes mutation failures before returning or persisting a tool result", async () => {
+    await storage.scheduledTasks.create({
+      id: "schedule-secret-error", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",
+      timezone: "UTC", run_type: "command", content: "true", cwd_mode: "project", target: "local",
+    });
+    const secret = "tool-secret-456";
+    const internalUrl = `https://runner.internal/start?token=${secret}&api_key=other-secret`;
+    runScheduleNow.mockImplementationOnce(async () => ({
+      error: `Runner unavailable; verify its connection. Authorization=Bearer ${secret} ${internalUrl}`,
+    }));
+
+    const failed = await (await tools()).run_schedule_now.execute({ scheduleId: "schedule-secret-error" });
+    const operation = await storage.projectChatOperations.getById(
+      failed.operationId as string, "thread-1", "project-1", "user-1",
+    );
+    const publicSurfaces = JSON.stringify({ failed, operation });
+
+    expect(publicSurfaces).toContain("Runner unavailable; verify its connection.");
+    expect(publicSurfaces).not.toContain(secret);
+    expect(publicSurfaces).not.toContain("other-secret");
+    expect(publicSurfaces).not.toContain(internalUrl);
+    expect(publicSurfaces).not.toMatch(/Authorization[=:]\s*Bearer/i);
+    expect(operation?.error?.length).toBeLessThanOrEqual(512);
+  });
+
   it("keeps a started schedule run pending when atomic context confirmation fails", async () => {
     await storage.scheduledTasks.create({
       id: "schedule-context", project_id: "project-1", name: "Run", cron_expr: "0 * * * *",

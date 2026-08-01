@@ -23,6 +23,10 @@ import {
   type ProjectChatTool,
   type ProjectChatTools,
 } from "./project-chat-tools.js";
+import {
+  sanitizeProjectChatPublicError,
+  sanitizeProjectChatPublicToolResult,
+} from "./project-chat-public-error.js";
 
 export const PROJECT_CHAT_SYSTEM_PROMPT = [
   "You are Project Commander, a project-scoped assistant with a small safe mutation surface.",
@@ -191,14 +195,8 @@ function isWorkspaceSelectionConflictMessage(message: string): boolean {
     || message.startsWith("Workspace is no longer available");
 }
 
-const PROJECT_CHAT_STREAM_ERROR_LIMIT = 512;
-
 function boundedStreamError(error: unknown): Error {
-  const raw = error instanceof Error ? error.message : String(error);
-  const message = raw.length <= PROJECT_CHAT_STREAM_ERROR_LIMIT
-    ? raw
-    : `${raw.slice(0, PROJECT_CHAT_STREAM_ERROR_LIMIT)}…`;
-  return new Error(message || "Project Chat model stream failed");
+  return new Error(sanitizeProjectChatPublicError(error, "Project Chat model stream failed"));
 }
 
 export async function* adaptProjectChatFullStream(
@@ -232,23 +230,24 @@ export async function* adaptProjectChatFullStream(
         }),
       };
     } else if (part.type === "tool-result") {
+      const content = sanitizeProjectChatPublicToolResult(JSON.stringify({
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        output: part.output,
+      }));
       yield {
         type: "tool_result",
-        content: JSON.stringify({
-          toolCallId: part.toolCallId,
-          toolName: part.toolName,
-          output: part.output,
-        }),
+        content,
       };
     } else if (part.type === "tool-error") {
       const error = boundedStreamError(part.error);
       yield {
         type: "tool_result",
-        content: JSON.stringify({
+        content: sanitizeProjectChatPublicToolResult(JSON.stringify({
           toolCallId: part.toolCallId,
           toolName: part.toolName,
           error: error.message,
-        }),
+        })),
       };
     } else if (part.type === "error") {
       throw boundedStreamError(part.error);
@@ -816,12 +815,13 @@ export class ProjectChatManager {
     details: Record<string, unknown>,
     error: string | null = null,
   ) {
+    const publicError = error === null ? null : sanitizeProjectChatPublicError(error, "Operation failed");
     const payload = { ...operation.payload, status, ...details } as import("./storage/types.js").ProjectChatOperationPayload;
-    const content = projectChatPublicOperationContent(payload, error);
+    const content = projectChatPublicOperationContent(payload, publicError);
     return this.storage.projectChatOperations.transition({
       id: operation.id, thread_id: operation.thread_id,
       project_id: operation.project_id, user_id: operation.user_id,
-      status, payload, error,
+      status, payload, error: publicError,
       message: { id: `operation:${operation.id}:${status}`, content },
     });
   }
@@ -1620,6 +1620,7 @@ export class ProjectChatManager {
         }
         return;
       }
+      const publicError = sanitizeProjectChatPublicError(error);
       try {
         await this.append(
           live,
@@ -1627,7 +1628,7 @@ export class ProjectChatManager {
           turnId,
           attempt,
           "error",
-          error instanceof Error ? error.message : String(error),
+          publicError,
         );
         await this.finishWorkWithRetry(
           live,
@@ -1635,7 +1636,7 @@ export class ProjectChatManager {
           turnId,
           attempt,
           "failed",
-          error instanceof Error ? error.message : String(error),
+          publicError,
         );
       } catch {
         // Preserve the original failure when persistence is also unavailable.
@@ -1679,6 +1680,7 @@ export class ProjectChatManager {
     await previousWrite;
     try {
       if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
+      const publicError = error === null ? null : sanitizeProjectChatPublicError(error);
       const result = await this.storage.projectChatWorkItems.finish({
         id: queued.workId,
         thread_id: live.thread.id,
@@ -1687,7 +1689,7 @@ export class ProjectChatManager {
         attempt,
         is_current: () => this.canPersistTurn(live, turnId),
         status,
-        error,
+        error: publicError,
         turn_end_id: turnEndId,
         turn_end_content: JSON.stringify({
           status: status === "failed" ? "error" : status,
@@ -1743,6 +1745,11 @@ export class ProjectChatManager {
     let message: ProjectChatMessage;
     try {
       if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();
+      const publicContent = type === "error"
+        ? sanitizeProjectChatPublicError(content)
+        : type === "tool_result"
+          ? sanitizeProjectChatPublicToolResult(content)
+          : content;
       const persisted = await this.storage.projectChatWorkItems.appendEvent({
         id: queued.workId,
         thread_id: live.thread.id,
@@ -1752,7 +1759,7 @@ export class ProjectChatManager {
         is_current: () => this.canPersistTurn(live, turnId),
         message_id: randomUUID(),
         type,
-        content,
+        content: publicContent,
       });
       if (!persisted) throw new ProjectChatNotFoundError();
       if (!this.canPersistTurn(live, turnId)) throw new ProjectChatNotFoundError();

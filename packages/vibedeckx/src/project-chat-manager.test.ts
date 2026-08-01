@@ -1446,6 +1446,99 @@ describe("ProjectChatManager", () => {
     expect(JSON.parse(messages.at(-1)!.content)).toEqual(expect.objectContaining({ status: "error" }));
   });
 
+  it("redacts runner secrets from transcript, terminal work, and live frames while keeping safe guidance", async () => {
+    await createThread("thread-public-error");
+    const secret = "sk-project-chat-private-123456";
+    const internalUrl = `https://internal.example.test/v1/run?api_key=${secret}&token=second-secret`;
+    const internalDatabaseUrl = "postgresql://service:database-password@db.internal/project";
+    const manager = new ProjectChatManager(storage, {
+      async *run() {
+        yield {
+          type: "tool_result",
+          content: JSON.stringify({
+            ok: false,
+            error: `Workspace lookup failed; choose another workspace. Authorization: Bearer ${secret} ${internalUrl}`,
+          }),
+        };
+        throw new Error(
+          `Provider temporarily unavailable; retry shortly. api_key=${secret} API key: spaced-secret endpoint=${internalUrl} database=${internalDatabaseUrl}`,
+        );
+      },
+    });
+    await manager.openThread("thread-public-error", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("thread-public-error", {
+      projectChatUserId: "user-1", readyState: 1,
+      send: (raw: string) => { frames.push(raw); },
+    } as never);
+    frames.length = 0;
+
+    await manager.sendMessage("thread-public-error", "user-1", "go");
+    await waitFor(async () => (await manager.openThread("thread-public-error", "user-1")).status === "idle");
+
+    const messages = await storage.projectChatMessages.listByThread(
+      "thread-public-error", "project-1", "user-1",
+    );
+    const db = new Database(dbPath, { readonly: true });
+    const work = db.prepare("SELECT error FROM project_chat_work_items WHERE thread_id = ?")
+      .get("thread-public-error") as { error: string };
+    db.close();
+    const publicSurfaces = JSON.stringify({ messages, work, frames });
+
+    expect(publicSurfaces).toContain("Workspace lookup failed; choose another workspace.");
+    expect(publicSurfaces).toContain("Provider temporarily unavailable; retry shortly.");
+    expect(publicSurfaces).not.toContain(secret);
+    expect(publicSurfaces).not.toContain("second-secret");
+    expect(publicSurfaces).not.toContain("spaced-secret");
+    expect(publicSurfaces).not.toContain("database-password");
+    expect(publicSurfaces).not.toContain(internalUrl);
+    expect(publicSurfaces).not.toContain(internalDatabaseUrl);
+    expect(publicSurfaces).not.toMatch(/Authorization:\s*Bearer/i);
+    expect(work.error.length).toBeLessThanOrEqual(512);
+    await manager.shutdown();
+  });
+
+  it("sanitizes provider error parts and tool-error parts before producing runner events", async () => {
+    const secret = "provider-secret-987";
+    const internalUrl = `https://provider.internal/error?access_token=${secret}`;
+    const toolEvents: ProjectChatStreamEvent[] = [];
+    for await (const event of adaptProjectChatFullStream(streamParts([{
+      type: "tool-error", toolCallId: "call-1", toolName: "inspect",
+      error: new Error(`Workspace unavailable; select another. Bearer ${secret} ${internalUrl}`),
+    }]), new AbortController().signal)) toolEvents.push(event);
+    const toolContent = toolEvents[0]?.content ?? "";
+    expect(toolContent).toContain("Workspace unavailable; select another.");
+    expect(toolContent).not.toContain(secret);
+    expect(toolContent).not.toContain(internalUrl);
+
+    const resultEvents: ProjectChatStreamEvent[] = [];
+    for await (const event of adaptProjectChatFullStream(streamParts([{
+      type: "tool-result", toolCallId: "call-2", toolName: "inspect",
+      output: {
+        ok: false, error: "Workspace unavailable; select another.",
+        headers: { Authorization: `Basic ${secret}`, "x-api-key": secret },
+      },
+    }]), new AbortController().signal)) resultEvents.push(event);
+    const resultContent = resultEvents[0]?.content ?? "";
+    expect(resultContent).toContain("Workspace unavailable; select another.");
+    expect(resultContent).not.toContain(secret);
+    expect(resultContent).not.toContain(`Basic ${secret}`);
+
+    let providerError: unknown;
+    try {
+      for await (const _event of adaptProjectChatFullStream(streamParts([{
+        type: "error",
+        error: new Error(`Provider unavailable; retry shortly. token=${secret} ${internalUrl}`),
+      }]), new AbortController().signal)) { /* consume */ }
+    } catch (error) {
+      providerError = error;
+    }
+    expect(providerError).toBeInstanceOf(Error);
+    expect((providerError as Error).message).toContain("Provider unavailable; retry shortly.");
+    expect((providerError as Error).message).not.toContain(secret);
+    expect((providerError as Error).message).not.toContain(internalUrl);
+  });
+
   it("preserves provider order and handles explicit abort parts", async () => {
     const signal = new AbortController().signal;
     const ordered: ProjectChatStreamEvent[] = [];
