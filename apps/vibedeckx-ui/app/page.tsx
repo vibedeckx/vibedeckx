@@ -4,6 +4,7 @@ import { WorkspaceTabs } from '@/components/workspace/workspace-tabs';
 import { useRules } from '@/hooks/use-rules';
 import { useCommands } from '@/hooks/use-commands';
 import { ProjectInfoView } from '@/components/project/project-info-view';
+import { ProjectChatWorkbench } from '@/components/project-chat';
 import { useProjects } from '@/hooks/use-projects';
 import { useWorktrees } from '@/hooks/use-worktrees';
 import {
@@ -64,7 +65,7 @@ import {
 export type { WorkspaceStatus } from '@/lib/workspace-status';
 
 export default function Home() {
-  const { projectId: urlProject, tab: urlTab, branch: urlBranch } = useUrlState();
+  const { projectId: urlProject, tab: urlTab, branch: urlBranch, threadId: urlThreadId } = useUrlState();
   const { config } = useAppConfig();
 
   // ?session=<id> param is orthogonal to the path-based URL state (projectId/tab/branch).
@@ -101,7 +102,7 @@ export default function Home() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.has('project')) {
-      const url = buildUrl({ projectId: urlProject, tab: urlTab, branch: urlBranch });
+      const url = buildUrl({ projectId: urlProject, tab: urlTab, branch: urlBranch, threadId: urlThreadId });
       window.history.replaceState(null, '', url);
     }
   }, []);
@@ -112,6 +113,7 @@ export default function Home() {
   const [worktreeToDelete, setWorktreeToDelete] = useState<Worktree | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
+  const [selectedProjectChatThreadId, setSelectedProjectChatThreadId] = useState<string | null>(urlThreadId);
   const [activateAgentTabNonce, setActivateAgentTabNonce] = useState(0);
   const [diffCompareNonce, setDiffCompareNonce] = useState(0);
   // True while a cross-project session jump is still resolving: the project has
@@ -548,6 +550,30 @@ export default function Home() {
     },
   });
 
+  const openProjectChatThread = useCallback((threadId: string) => {
+    setSelectedProjectChatThreadId(threadId);
+    setSelectedBranch(null);
+    setSessionUrlParam(null);
+    setActiveView("project-chat");
+  }, [setSessionUrlParam]);
+
+  const showProjectOverview = useCallback(() => {
+    setSelectedProjectChatThreadId(null);
+    setActiveView("project-info");
+  }, []);
+
+  // Unlike replaceState-driven in-app navigation, browser back/forward changes
+  // useUrlState. Restore the selected Project Chat thread (or normal view)
+  // without stopping a turn that may still be running on the server.
+  useEffect(() => {
+    setActiveView(urlTab);
+    setSelectedProjectChatThreadId(urlTab === "project-chat" ? urlThreadId : null);
+    if (urlTab === "project-chat") {
+      setSelectedBranch(null);
+      setSessionUrlParam(null);
+    }
+  }, [urlTab, urlThreadId, setSessionUrlParam]);
+
   const handleScheduleRunOpened = useCallback((runId: string) => {
     setSelectedScheduleRunId((current) => current === runId ? null : current);
   }, []);
@@ -680,6 +706,7 @@ export default function Home() {
       projectId: currentProject?.id,
       tab: activeView,
       branch: selectedBranch,
+      threadId: selectedProjectChatThreadId,
     });
     // Preserve ?session=<id> on tab changes within the same (projectId, branch).
     if (urlSessionId) {
@@ -689,7 +716,7 @@ export default function Home() {
     } else {
       window.history.replaceState(null, '', url);
     }
-  }, [currentProject?.id, activeView, selectedBranch, projectsLoading, urlSessionId, setSessionUrlParam]);
+  }, [currentProject?.id, activeView, selectedBranch, selectedProjectChatThreadId, projectsLoading, urlSessionId, setSessionUrlParam]);
 
   const handleWorktreeCreated = useCallback((branch: string) => {
     refetchWorktrees();
@@ -792,7 +819,10 @@ Please proceed step by step and let me know if there are any issues or conflicts
           {/* Sidebar Navigation */}
           <AppSidebar
             activeView={activeView}
-            onViewChange={setActiveView}
+            onViewChange={(view) => {
+              if (view !== "project-chat") setSelectedProjectChatThreadId(null);
+              setActiveView(view);
+            }}
             worktrees={worktrees}
             selectedBranch={selectedBranch}
             onBranchChange={setSelectedBranch}
@@ -833,7 +863,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Welcome state — shown for project-dependent views when no project exists */}
           <div className={
-            needsProject && (activeView === 'workspace' || activeView === 'tasks' || activeView === 'project-info')
+            needsProject && (activeView === 'workspace' || activeView === 'tasks' || activeView === 'project-info' || activeView === 'project-chat')
               ? 'flex-1 overflow-hidden'
               : 'hidden'
           }>
@@ -953,6 +983,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             <div className="flex-1 overflow-hidden">
               <ProjectInfoView
                 project={currentProject}
+                onOpenProjectChatThread={openProjectChatThread}
                 onOpenAgentSession={(sessionId, target, branch) => {
                   void projectActivityActions.openAgentSession(sessionId, target, branch);
                 }}
@@ -962,6 +993,19 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 onRunScheduleAgain={projectActivityActions.runScheduleAgain}
                 onViewAllTasks={() => setActiveView("tasks")}
                 onProjectUpdated={updateProject}
+              />
+            </div>
+          )}
+
+          {/* Project Chat — project scoped, deliberately independent of branch/workspace. */}
+          {activeView === 'project-chat' && !needsProject && currentProject && selectedProjectChatThreadId && (
+            <div className="flex-1 overflow-hidden">
+              <ProjectChatWorkbench
+                projectId={currentProject.id}
+                threadId={selectedProjectChatThreadId}
+                projectName={currentProject.name}
+                onBack={showProjectOverview}
+                onSelectThread={openProjectChatThread}
               />
             </div>
           )}

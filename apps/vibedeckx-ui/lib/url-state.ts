@@ -1,12 +1,13 @@
 import type { ActiveView } from "@/components/layout";
 
-const VALID_TABS = new Set<ActiveView>(["workspace", "tasks", "schedules", "remote-servers", "settings", "project-info"]);
+const VALID_TABS = new Set<ActiveView>(["workspace", "tasks", "schedules", "remote-servers", "settings", "project-info", "project-chat"]);
 const DEFAULT_TAB: ActiveView = "tasks";
 
 export interface UrlState {
   projectId: string | null;
   tab: ActiveView;
   branch: string | null;
+  threadId: string | null;
 }
 
 /**
@@ -29,6 +30,7 @@ export function parseUrlState(): UrlState {
         ? (legacyTab as ActiveView)
         : DEFAULT_TAB,
       branch: params.get("branch"),
+      threadId: null,
     };
   }
 
@@ -39,36 +41,53 @@ export function parseUrlState(): UrlState {
   if (segments.length === 1 && VALID_TABS.has(segments[0] as ActiveView)) {
     const viewTab = segments[0] as ActiveView;
     if (viewTab === "remote-servers" || viewTab === "settings") {
-      return { projectId: null, tab: viewTab, branch: null };
+      return { projectId: null, tab: viewTab, branch: null, threadId: null };
     }
   }
 
   let projectId: string | null = null;
   let tab: ActiveView = DEFAULT_TAB;
+  let threadId: string | null = null;
 
   if (segments[0] === "p" && segments[1]) {
     projectId = segments[1];
     const maybeTab = segments[2];
-    if (maybeTab && VALID_TABS.has(maybeTab as ActiveView)) {
+    if (maybeTab === "chat" && segments[3]) {
+      try {
+        threadId = decodeURIComponent(segments[3]);
+        tab = "project-chat";
+      } catch {
+        tab = "project-info";
+        threadId = null;
+      }
+    } else if (maybeTab === "chat") {
+      tab = "project-info";
+    } else if (maybeTab && VALID_TABS.has(maybeTab as ActiveView) && maybeTab !== "project-chat") {
       tab = maybeTab as ActiveView;
     }
   }
 
-  return { projectId, tab, branch: params.get("branch") };
+  return { projectId, tab, branch: params.get("branch"), threadId };
 }
 
 /**
  * Build a URL string from app state.
  * Returns paths like: /, /p/uuid/tasks, /p/uuid/workspace, /p/uuid/files?branch=main
  */
-export function buildUrl(state: { projectId?: string | null; tab?: ActiveView; branch?: string | null }): string {
-  const { projectId, tab, branch } = state;
+export function buildUrl(state: { projectId?: string | null; tab?: ActiveView; branch?: string | null; threadId?: string | null }): string {
+  const { projectId, tab, branch, threadId } = state;
 
   // Project-independent views always get clean URLs
   if (tab === "remote-servers" || tab === "settings") return `/${tab}`;
 
   if (!projectId) {
     return "/";
+  }
+
+  if (tab === "project-chat") {
+    return threadId
+      ? `/p/${projectId}/chat/${encodeURIComponent(threadId)}`
+      : `/p/${projectId}/project-info`;
   }
 
   // Always emit the tab segment (including the default `tasks` tab) so the

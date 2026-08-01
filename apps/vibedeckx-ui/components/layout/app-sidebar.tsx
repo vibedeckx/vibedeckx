@@ -12,7 +12,7 @@ import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
 
-export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info";
+export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info" | "project-chat";
 
 interface AppSidebarProps {
   activeView: ActiveView;
@@ -250,7 +250,7 @@ export function AppSidebar({
             <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto mt-0.5">
               {projects.map((project) => {
                 const isSelected = currentProject?.id === project.id;
-                const isActiveInfo = isSelected && activeView === "project-info";
+                const isActiveInfo = isSelected && (activeView === "project-info" || activeView === "project-chat");
                 return (
                   <Tooltip key={project.id}>
                     <TooltipTrigger asChild>
