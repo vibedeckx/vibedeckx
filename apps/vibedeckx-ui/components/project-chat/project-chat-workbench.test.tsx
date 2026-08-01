@@ -105,7 +105,7 @@ function setupHook() {
       message(5, "error", "Remote server unavailable"),
       message(6, "turn_end", JSON.stringify({ status: "completed" })),
       message(7, "tool_approval_request", JSON.stringify({ approvalId: "approval-1", tool: "run_schedule_now", input: { scheduleId: "s1" } })),
-      message(8, "operation", JSON.stringify({ version: 1, operationId: "op-1", kind: "schedule_run", status: "running", scheduleId: "s1", runId: "r1" })),
+      message(8, "operation", JSON.stringify({ version: 1, operationId: "op-1", kind: "schedule_run", status: "running", scheduleId: "s1", runId: "r1", runAvailable: true })),
     ],
     status: "running",
     activeTurnId: "turn-7",
@@ -189,15 +189,15 @@ describe("ProjectChatWorkbench", () => {
     hook.value.messages = [
       message(1, "operation", JSON.stringify({
         version: 1, operationId: "same-operation", kind: "schedule_run", status: "pending",
-        scheduleId: "schedule-1", runId: "run-1",
+        scheduleId: "schedule-1", runId: "run-1", runAvailable: false,
       })),
       message(2, "operation", JSON.stringify({
         version: 1, operationId: "same-operation", kind: "schedule_run", status: "running",
-        scheduleId: "schedule-1", runId: "run-1",
+        scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
       })),
       message(3, "operation", JSON.stringify({
         version: 1, operationId: "same-operation", kind: "schedule_run", status: "completed",
-        scheduleId: "schedule-1", runId: "run-1",
+        scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
       })),
     ];
 
@@ -208,17 +208,42 @@ describe("ProjectChatWorkbench", () => {
     expect(container.textContent).not.toContain("Queued");
   });
 
+  it("rerenders a same-message operation advancement with one stable live announcement", () => {
+    const onOpenScheduleRun = vi.fn();
+    hook.value.status = "idle";
+    hook.value.activeTurnId = null;
+    hook.value.messages = [message(1, "operation", JSON.stringify({
+      version: 1, operationId: "stable-operation", kind: "schedule_run", status: "running",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: false,
+    }))];
+    render({ onOpenScheduleRun });
+    const announcer = container.querySelector('[data-operation-id="stable-operation"] [role="status"]');
+    expect(announcer?.textContent).toBe("Running");
+    expect(container.textContent).not.toContain("View Output");
+
+    hook.value.messages = [message(1, "operation", JSON.stringify({
+      version: 1, operationId: "stable-operation", kind: "schedule_run", status: "running",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
+    }))];
+    render({ onOpenScheduleRun });
+
+    expect(container.querySelectorAll('[data-operation-id="stable-operation"]')).toHaveLength(1);
+    expect(container.querySelector('[data-operation-id="stable-operation"] [role="status"]')).toBe(announcer);
+    expect(container.textContent).toContain("View Output");
+  });
+
   it("routes safe operation actions, guards reruns, and reports action failures", async () => {
     hook.value.status = "idle";
     hook.value.activeTurnId = null;
     hook.value.messages = [
       message(1, "operation", JSON.stringify({
         version: 1, operationId: "session-operation", kind: "agent_session_create", status: "completed",
-        sessionId: "session-1", target: "remote-1", branch: "dev",
+        sessionId: "session-1", target: "remote-1", branch: "dev", sessionAvailable: true,
       })),
       message(2, "operation", JSON.stringify({
         version: 1, operationId: "schedule-operation", kind: "schedule_run", status: "failed",
-        scheduleId: "schedule-1", runId: "run-1", failure: { code: "timeout" },
+        scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
+        failure: { code: "timeout", message: "Operation timed out. Review the target and try again." },
       })),
     ];
     const rerun = deferred<void>();

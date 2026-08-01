@@ -294,8 +294,46 @@ describe("Project Chat public operation parsing", () => {
     )).toBeNull();
     expect(parseProjectChatOperationMessage(JSON.stringify({
       version: 1, operationId: "operation-1", kind: "schedule_run", status: "completed",
-      scheduleId: "schedule-1", runId: "run-1",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
     }))).toMatchObject({ kind: "schedule_run", status: "completed", runId: "run-1" });
+  });
+
+  it.each([
+    { version: 1, operationId: "task", kind: "task_create", status: "completed", taskId: "task-1", title: "Task", description: "private" },
+    { version: 1, operationId: "update", kind: "task_update", status: "completed", taskId: "task-1", patch: { status: "done" } },
+    { version: 1, operationId: "session", kind: "agent_session_create", status: "running", sessionId: "front-1", sessionAvailable: true, workerSessionId: "private-worker" },
+    { version: 1, operationId: "instruction", kind: "agent_instruction", status: "completed", sessionId: "front-1", target: { remoteServerId: "private", remoteSessionId: "private" } },
+    { version: 1, operationId: "run", kind: "schedule_run", status: "running", scheduleId: "schedule-1", runId: "run-1", runAvailable: true, contextConfirmed: true },
+    { version: 1, operationId: "selection", kind: "workspace_selection", status: "pending", requestId: "request-1", candidates: [], claimToken: "private" },
+  ])("rejects non-allowlisted fields for every public operation kind", (operation) => {
+    expect(parseProjectChatOperationMessage(JSON.stringify(operation))).toBeNull();
+  });
+
+  it("accepts only bounded public failures and explicit action availability", () => {
+    expect(parseProjectChatOperationMessage(JSON.stringify({
+      version: 1, operationId: "run", kind: "schedule_run", status: "failed",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
+      failure: { code: "timeout", message: "Timed out on the selected runner" },
+    }))).toMatchObject({ kind: "schedule_run", runAvailable: true, failure: { code: "timeout" } });
+    expect(parseProjectChatOperationMessage(JSON.stringify({
+      version: 1, operationId: "run", kind: "schedule_run", status: "failed",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
+      failure: { code: "timeout", message: "x".repeat(513) },
+    }))).toBeNull();
+    expect(parseProjectChatOperationMessage(JSON.stringify({
+      version: 1, operationId: "run", kind: "schedule_run", status: "running",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: true,
+      failure: { code: "failed", message: "Contradictory" },
+    }))).toBeNull();
+    expect(parseProjectChatOperationMessage(JSON.stringify({
+      version: 1, operationId: "run", kind: "schedule_run", status: "failed",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: false,
+    }))).toBeNull();
+    expect(parseProjectChatOperationMessage(JSON.stringify({
+      version: 1, operationId: "run", kind: "schedule_run", status: "failed",
+      scheduleId: "schedule-1", runId: "run-1", runAvailable: false,
+      failure: { code: "failed" },
+    }))).toBeNull();
   });
 });
 

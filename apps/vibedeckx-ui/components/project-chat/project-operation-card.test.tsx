@@ -36,6 +36,7 @@ const sessionOperation = (
   sessionId: "session-1",
   target: "local",
   branch: "feature/chat",
+  sessionAvailable: true,
   ...overrides,
 });
 
@@ -49,6 +50,7 @@ const scheduleOperation = (
   status,
   scheduleId: "schedule-1",
   runId: "run-1",
+  runAvailable: true,
   ...overrides,
 });
 
@@ -80,11 +82,23 @@ describe("ProjectOperationCard", () => {
     expect(container.querySelector('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
   });
 
+  it("keeps one stable per-operation live announcer across a status rerender", () => {
+    render(<ProjectOperationCard operation={sessionOperation("pending", { sessionAvailable: false })} />);
+    const announcer = container.querySelector('[role="status"]');
+    expect(announcer?.textContent).toBe("Queued");
+
+    render(<ProjectOperationCard operation={sessionOperation("running", { sessionAvailable: true })} />);
+
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(container.querySelector('[role="status"]')).toBe(announcer);
+    expect(announcer?.textContent).toBe("Running");
+  });
+
   it("renders timeout, remote-offline, and deleted-target states without parsing prose", () => {
     const cases = [
-      [scheduleOperation("failed", { failure: { code: "timeout" } }), "Timed out"],
-      [sessionOperation("failed", { failure: { code: "remote_offline" } }), "Remote offline"],
-      [sessionOperation("failed", { failure: { code: "deleted_target" } }), "Deleted target"],
+      [scheduleOperation("failed", { failure: { code: "timeout", message: "Timed out" } }), "Timed out"],
+      [sessionOperation("failed", { failure: { code: "remote_offline", message: "Remote offline" } }), "Remote offline"],
+      [sessionOperation("failed", { failure: { code: "deleted_target", message: "Deleted target" } }), "Deleted target"],
     ] as const;
 
     for (const [operation, expected] of cases) {
@@ -104,7 +118,7 @@ describe("ProjectOperationCard", () => {
 
     const instruction: ProjectChatOperationMessage = {
       version: 1, operationId: "instruction-operation", kind: "agent_instruction", status: "running",
-      sessionId: "session-1", instruction: "Run the focused tests", delivery: "pending",
+      sessionId: "session-1", instruction: "Run the focused tests",
     };
     render(<ProjectOperationCard operation={instruction} />);
     expect(container.textContent).toContain("Agent instruction");
@@ -140,7 +154,7 @@ describe("ProjectOperationCard", () => {
   it("disables unavailable or in-flight actions and exposes an accessible action error", () => {
     render(
       <ProjectOperationCard
-        operation={scheduleOperation("failed", { failure: { code: "deleted_target" } })}
+        operation={scheduleOperation("failed", { failure: { code: "deleted_target", message: "Deleted target" } })}
         onViewOutput={vi.fn()}
         onRunAgain={vi.fn()}
         pendingAction="run_again"
@@ -148,9 +162,57 @@ describe("ProjectOperationCard", () => {
       />,
     );
 
-    expect(button("View Output").disabled).toBe(true);
-    expect(button("Running again…").disabled).toBe(true);
+    expect(container.textContent).not.toContain("View Output");
+    expect(container.textContent).not.toContain("Running again…");
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Schedule could not be started");
+  });
+
+  it.each(["pending", "resolving", "failed"] as const)(
+    "does not offer Open Session for an unconfirmed or %s creation",
+    (status) => {
+      render(<ProjectOperationCard
+        operation={sessionOperation(status, { sessionAvailable: status === "failed" })}
+        onOpenSession={vi.fn()}
+      />);
+      expect(container.textContent).not.toContain("Open Session");
+    },
+  );
+
+  it.each(["running", "completed"] as const)(
+    "offers Open Session only for a confirmed %s creation",
+    (status) => {
+      render(<ProjectOperationCard
+        operation={sessionOperation(status, { sessionAvailable: true })}
+        onOpenSession={vi.fn()}
+      />);
+      expect(button("Open Session").disabled).toBe(false);
+    },
+  );
+
+  it.each(["pending", "resolving", "running"] as const)(
+    "does not offer Run Again while a schedule operation is %s",
+    (status) => {
+      render(<ProjectOperationCard operation={scheduleOperation(status)} onRunAgain={vi.fn()} />);
+      expect(container.textContent).not.toContain("Run Again");
+    },
+  );
+
+  it("offers schedule actions only when the durable run is available", () => {
+    render(<ProjectOperationCard
+      operation={scheduleOperation("failed", { runAvailable: false })}
+      onViewOutput={vi.fn()}
+      onRunAgain={vi.fn()}
+    />);
+    expect(container.textContent).not.toContain("View Output");
+    expect(container.textContent).not.toContain("Run Again");
+
+    render(<ProjectOperationCard
+      operation={scheduleOperation("completed", { runAvailable: true })}
+      onViewOutput={vi.fn()}
+      onRunAgain={vi.fn()}
+    />);
+    expect(button("View Output").disabled).toBe(false);
+    expect(button("Run Again").disabled).toBe(false);
   });
 });
 

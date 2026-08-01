@@ -271,7 +271,10 @@ export function ProjectChatConversation({
               }
               if (parsedOperations.latestMessageIdByOperation.get(parsed.operationId) !== message.id) return null;
               const operation = operationHasDeletedTarget(parsed, contextRefs)
-                ? { ...parsed, failure: { code: "deleted_target" as const } }
+                ? { ...parsed, failure: {
+                  code: "deleted_target" as const,
+                  message: "The target no longer exists or is unavailable.",
+                } }
                 : parsed;
               const pendingAction = pendingOperationActions.get(operation.operationId);
               const operationError = operationErrors.get(operation.operationId);

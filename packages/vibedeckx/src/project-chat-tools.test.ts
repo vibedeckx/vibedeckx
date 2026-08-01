@@ -92,6 +92,37 @@ describe("createProjectChatTools", () => {
     });
   });
 
+  it.each([
+    [{ version: 1, kind: "task_create", operationId: "op-task-create", status: "completed", taskId: "task-1", title: "Create", description: "private description", taskStatus: "done", priority: "urgent", assignedBranch: "private-branch" },
+      { version: 1, kind: "task_create", operationId: "op-task-create", status: "completed", taskId: "task-1", title: "Create" }],
+    [{ version: 1, kind: "task_update", operationId: "op-task-update", status: "completed", taskId: "task-2", title: "Update", patch: { description: "private patch" }, before: { title: "Before", description: "private before", status: "todo", priority: "low", assignedBranch: null } },
+      { version: 1, kind: "task_update", operationId: "op-task-update", status: "completed", taskId: "task-2", title: "Update" }],
+    [{ version: 1, kind: "agent_session_create", operationId: "op-session", status: "running", sessionId: "front-session", workerSessionId: "private-worker", workspaceId: "private-workspace", target: "remote-label", branch: "feature", instruction: "bounded instruction", permissionMode: "edit", agentType: "codex", model: "private-model", initialInstructionDelivery: "confirmed", selectedWorkspaceId: "private-selection", claimToken: "private-claim" },
+      { version: 1, kind: "agent_session_create", operationId: "op-session", status: "running", sessionId: "front-session", target: "remote-label", branch: "feature", instruction: "bounded instruction", sessionAvailable: true }],
+    [{ version: 1, kind: "agent_instruction", operationId: "op-instruction", status: "completed", sessionId: "front-session", instruction: "Continue", target: { remoteServerId: "private-server", remoteSessionId: "private-remote-session" }, delivery: "confirmed" },
+      { version: 1, kind: "agent_instruction", operationId: "op-instruction", status: "completed", sessionId: "front-session", instruction: "Continue" }],
+    [{ version: 1, kind: "schedule_run", operationId: "op-run", status: "failed", scheduleId: "schedule-1", runId: "run-1", contextConfirmed: true, skipped: false },
+      { version: 1, kind: "schedule_run", operationId: "op-run", status: "failed", scheduleId: "schedule-1", runId: "run-1", runAvailable: true, failure: { code: "failed", message: "Operation failed. Review the target and try again." } }],
+    [{ version: 1, kind: "workspace_selection", operationId: "op-selection", status: "pending", requestId: "request-1", candidates: [{ id: "public-selector", target: "local", branch: "dev" }] },
+      { version: 1, kind: "workspace_selection", operationId: "op-selection", status: "pending", requestId: "request-1", candidates: [{ id: "public-selector", target: "local", branch: "dev" }] }],
+  ] as const)("constructs an allowlisted public DTO for %#", (internal, expected) => {
+    expect(JSON.parse(projectChatPublicOperationContent(internal as never))).toEqual(expected);
+  });
+
+  it("publishes a bounded actionable failure message while redacting common secret forms", () => {
+    const secret = "super-private-token";
+    const content = projectChatPublicOperationContent({
+      version: 1, kind: "schedule_run", operationId: "operation-1", status: "failed",
+      scheduleId: "schedule-1", runId: "run-1", contextConfirmed: false,
+    }, `Remote rejected Authorization: Bearer ${secret}; api_key=${secret}; token=${secret} ${"x".repeat(800)}`);
+    const failure = JSON.parse(content).failure;
+
+    expect(failure.code).toBe("failed");
+    expect(failure.message).toBe("Operation failed. Review the target and try again.");
+    expect(failure.message).not.toContain(secret);
+    expect(failure.message.length).toBeLessThanOrEqual(512);
+  });
+
   it("exposes only the five V1 mutations and workspace resolution alongside read tools", async () => {
     const surface = await tools();
     expect(Object.keys(surface).sort()).toEqual([

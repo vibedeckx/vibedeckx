@@ -1761,7 +1761,23 @@ export class ProjectChatManager {
   }
 
   private publishMessage(live: LiveThread, message: ProjectChatMessage): void {
-    if (live.messages.some((existing) => existing.id === message.id)) return;
+    if (message.thread_id !== live.thread.id) return;
+    const existingIndex = live.messages.findIndex((existing) => existing.id === message.id);
+    if (existingIndex >= 0) {
+      const existing = live.messages[existingIndex];
+      if (existing.sequence !== message.sequence || existing.type !== message.type) return;
+      if (existing.content === message.content) return;
+      live.messages[existingIndex] = message;
+      live.nextSequence = Math.max(live.nextSequence, message.sequence + 1);
+      this.broadcast(live, {
+        JsonPatch: [{
+          op: "replace",
+          path: `/messages/${existingIndex}`,
+          value: { type: "ENTRY", content: message },
+        }],
+      });
+      return;
+    }
     live.messages.push(message);
     live.messages.sort((left, right) => left.sequence - right.sequence);
     live.nextSequence = Math.max(live.nextSequence, message.sequence + 1);

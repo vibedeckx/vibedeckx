@@ -18,6 +18,7 @@ import type {
   ProjectChatWorkItem,
   Storage,
 } from "../types.js";
+import { projectChatPublicOperationContent } from "../../project-chat-public-operation.js";
 
 const now = () => sql<string>`strftime('%Y-%m-%d %H:%M:%f', 'now')`;
 
@@ -947,9 +948,10 @@ export const createProjectChatRepos = (
         } catch {
           malformed += 1;
           await kdb.transaction().execute(async (trx) => {
+            const failedPayload = quarantinedPayload(row);
             const updated = await trx.updateTable("project_chat_operations").set({
               status: "failed",
-              payload: JSON.stringify(quarantinedPayload(row)),
+              payload: JSON.stringify(failedPayload),
               error: "Malformed operation data was quarantined",
               updated_at: now(),
             })
@@ -963,8 +965,9 @@ export const createProjectChatRepos = (
             await trx.insertInto("project_chat_messages").values({
               id: `operation:${row.id}:failed`, thread_id: row.thread_id,
               sequence: Number(sequenceRow.sequence) + 1, type: "operation",
-              content: JSON.stringify({ operationId: row.id, status: "failed",
-                error: "Malformed operation data was quarantined" }),
+              content: projectChatPublicOperationContent(
+                failedPayload, "Malformed operation data was quarantined",
+              ),
             }).onConflict((oc) => oc.column("id").doNothing()).execute();
           });
         }

@@ -604,7 +604,7 @@ export type ProjectChatOperationFailureCode =
 
 export interface ProjectChatOperationFailure {
   code: ProjectChatOperationFailureCode;
-  message?: string;
+  message: string;
 }
 
 interface ProjectChatOperationMessageBase {
@@ -619,59 +619,30 @@ export type ProjectChatOperationMessage = ProjectChatOperationMessageBase & (
     kind: "task_create";
     taskId: string;
     title?: string;
-    description?: string | null;
-    taskStatus?: TaskStatus;
-    priority?: TaskPriority;
-    assignedBranch?: string | null;
   }
   | {
     kind: "task_update";
     taskId: string;
     title?: string;
-    patch?: {
-      title?: string;
-      description?: string | null;
-      status?: TaskStatus;
-      priority?: TaskPriority;
-      assignedBranch?: string | null;
-    };
-    before?: {
-      title: string;
-      description: string | null;
-      status: TaskStatus;
-      priority: TaskPriority;
-      assignedBranch: string | null;
-    };
   }
   | {
     kind: "agent_session_create";
     sessionId: string;
-    workerSessionId?: string;
-    workspaceId?: string;
     target?: string;
     branch?: string | null;
     instruction?: string;
-    permissionMode?: string;
-    agentType?: string;
-    model?: string | null;
-    phase?: "workspace_selection";
-    requestId?: string;
-    candidates?: ProjectChatWorkspaceCandidate[];
-    selectedWorkspaceId?: string;
-    claimToken?: string;
+    sessionAvailable: boolean;
   }
   | {
     kind: "agent_instruction";
     sessionId: string;
     instruction?: string;
-    target?: "local" | { remoteServerId: string; remoteSessionId: string };
-    delivery?: "pending" | "confirmed";
   }
   | {
     kind: "schedule_run";
     scheduleId: string;
     runId: string;
-    skipped?: boolean;
+    runAvailable: boolean;
   }
   | {
     kind: "workspace_selection";
@@ -690,6 +661,25 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const PUBLIC_OPERATION_BASE_KEYS = ["version", "operationId", "kind", "status", "failure"] as const;
+const PUBLIC_OPERATION_KEYS = {
+  task_create: [...PUBLIC_OPERATION_BASE_KEYS, "taskId", "title"],
+  task_update: [...PUBLIC_OPERATION_BASE_KEYS, "taskId", "title"],
+  agent_session_create: [...PUBLIC_OPERATION_BASE_KEYS, "sessionId", "target", "branch", "instruction", "sessionAvailable"],
+  agent_instruction: [...PUBLIC_OPERATION_BASE_KEYS, "sessionId", "instruction"],
+  schedule_run: [...PUBLIC_OPERATION_BASE_KEYS, "scheduleId", "runId", "runAvailable"],
+  workspace_selection: [...PUBLIC_OPERATION_BASE_KEYS, "requestId", "candidates"],
+} as const;
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function isBoundedString(value: unknown, options: { optional?: boolean; allowEmpty?: boolean } = {}): value is string | undefined {
+  if (value === undefined) return options.optional === true;
+  return typeof value === "string" && value.length <= 512 && (options.allowEmpty === true || value.length > 0);
+}
+
 /**
  * Parses the versioned public operation envelope. This deliberately validates
  * the JSON shape and never derives operation state or identities from prose.
@@ -698,30 +688,43 @@ export function parseProjectChatOperationMessage(content: string): ProjectChatOp
   let value: unknown;
   try { value = JSON.parse(content); } catch { return null; }
   if (!isRecordValue(value) || value.version !== 1
-    || typeof value.operationId !== "string" || value.operationId.length === 0
+    || !isBoundedString(value.operationId)
     || !["pending", "resolving", "running", "completed", "failed"].includes(String(value.status))
     || !["task_create", "task_update", "agent_session_create", "agent_instruction", "schedule_run", "workspace_selection"]
       .includes(String(value.kind))) return null;
+  const kind = value.kind as keyof typeof PUBLIC_OPERATION_KEYS;
+  if (!hasOnlyKeys(value, PUBLIC_OPERATION_KEYS[kind])) return null;
   if (value.failure !== undefined) {
     if (!isRecordValue(value.failure)
+      || !hasOnlyKeys(value.failure, ["code", "message"])
       || !["failed", "timeout", "remote_offline", "deleted_target"].includes(String(value.failure.code))
-      || (value.failure.message !== undefined && typeof value.failure.message !== "string")) return null;
+      || !isBoundedString(value.failure.message)) return null;
   }
+  if ((value.status === "failed") !== (value.failure !== undefined)) return null;
   if ((value.kind === "task_create" || value.kind === "task_update")
-    && typeof value.taskId !== "string") return null;
-  if ((value.kind === "agent_session_create" || value.kind === "agent_instruction")
-    && typeof value.sessionId !== "string") return null;
+    && (!isBoundedString(value.taskId)
+      || !isBoundedString(value.title, { optional: true, allowEmpty: true }))) return null;
+  if (value.kind === "agent_instruction"
+    && (!isBoundedString(value.sessionId)
+      || !isBoundedString(value.instruction, { optional: true, allowEmpty: true }))) return null;
   if (value.kind === "agent_session_create"
-    && (value.target !== undefined && typeof value.target !== "string"
-      || value.branch !== undefined && value.branch !== null && typeof value.branch !== "string")) return null;
+    && (!isBoundedString(value.sessionId)
+      || !isBoundedString(value.target, { optional: true, allowEmpty: true })
+      || value.branch !== undefined && value.branch !== null
+        && !isBoundedString(value.branch, { allowEmpty: true })
+      || !isBoundedString(value.instruction, { optional: true, allowEmpty: true })
+      || typeof value.sessionAvailable !== "boolean")) return null;
   if (value.kind === "schedule_run"
-    && (typeof value.scheduleId !== "string" || typeof value.runId !== "string")) return null;
+    && (!isBoundedString(value.scheduleId) || !isBoundedString(value.runId)
+      || typeof value.runAvailable !== "boolean")) return null;
   if (value.kind === "workspace_selection") {
-    if (typeof value.requestId !== "string" || !Array.isArray(value.candidates)) return null;
+    if (!isBoundedString(value.requestId) || !Array.isArray(value.candidates)
+      || value.candidates.length > 20) return null;
     if (!value.candidates.every((candidate) => isRecordValue(candidate)
-      && typeof candidate.id === "string" && candidate.id.length > 0
-      && typeof candidate.target === "string"
-      && (candidate.branch === null || typeof candidate.branch === "string"))) return null;
+      && hasOnlyKeys(candidate, ["id", "target", "branch"])
+      && isBoundedString(candidate.id)
+      && isBoundedString(candidate.target, { allowEmpty: true })
+      && (candidate.branch === null || isBoundedString(candidate.branch, { allowEmpty: true })))) return null;
   }
   return value as unknown as ProjectChatOperationMessage;
 }

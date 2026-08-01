@@ -16,6 +16,7 @@ import {
   type ProjectChatRunInput,
   type ProjectChatStreamEvent,
 } from "./project-chat-manager.js";
+import { projectChatPublicOperationContent } from "./project-chat-tools.js";
 
 async function* streamParts(parts: unknown[]): AsyncGenerator<unknown> {
   for (const part of parts) yield part;
@@ -120,6 +121,64 @@ describe("ProjectChatManager", () => {
     expect(snapshot.identity).not.toHaveProperty("branch");
     expect(snapshot.identity).not.toHaveProperty("workspace");
     expect(snapshot).toMatchObject({ status: "idle", queueLength: 0, activeTurnId: null });
+  });
+
+  it("replaces an existing live message when durable same-status operation content advances", async () => {
+    await createThread("thread-operation-replace");
+    const manager = new ProjectChatManager(storage, reply("unused"), { reconciliationIntervalMs: 60_000 });
+    await manager.ready();
+    const originalPayload = {
+      version: 1 as const, kind: "schedule_run" as const, operationId: "operation-1",
+      status: "running" as const, scheduleId: "schedule-1", runId: "run-1", contextConfirmed: false,
+    };
+    await storage.projectChatOperations.create({
+      id: "operation-1", thread_id: "thread-operation-replace", project_id: "project-1", user_id: "user-1",
+      kind: "schedule_run", status: "running", entity_type: "schedule_run", entity_id: "run-1",
+      idempotency_key: "operation-1", payload: originalPayload, error: null,
+    });
+    const original = await storage.projectChatOperations.announce({
+      id: "operation-1", thread_id: "thread-operation-replace", project_id: "project-1", user_id: "user-1",
+      message: {
+        id: "operation:operation-1:running",
+        content: projectChatPublicOperationContent(originalPayload),
+      },
+    });
+    expect(original).not.toBeNull();
+    await manager.openThread("thread-operation-replace", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("thread-operation-replace", {
+      projectChatUserId: "user-1", readyState: 1, OPEN: 1,
+      send: (frame: string) => frames.push(frame),
+    } as never);
+    frames.length = 0;
+
+    const advancedPayload = { ...originalPayload, contextConfirmed: true };
+    const advanced = await storage.projectChatOperations.transition({
+      id: "operation-1", thread_id: "thread-operation-replace", project_id: "project-1", user_id: "user-1",
+      status: "running", payload: advancedPayload, error: null,
+      message: {
+        id: "operation:operation-1:running",
+        content: projectChatPublicOperationContent(advancedPayload),
+      },
+    });
+    expect(advanced?.changed).toBe(true);
+    const publisher = manager as unknown as {
+      publishMessage: (live: unknown, message: NonNullable<typeof original>) => void;
+      liveThreads: Map<string, unknown>;
+    };
+    publisher.publishMessage(publisher.liveThreads.get("thread-operation-replace"), advanced!.message);
+    publisher.publishMessage(publisher.liveThreads.get("thread-operation-replace"), advanced!.message);
+
+    const snapshot = await manager.openThread("thread-operation-replace", "user-1");
+    expect(snapshot.messages).toHaveLength(1);
+    expect(JSON.parse(snapshot.messages[0].content)).toMatchObject({
+      kind: "schedule_run", status: "running", runAvailable: true,
+    });
+    expect(frames).toHaveLength(1);
+    expect(JSON.parse(frames[0])).toMatchObject({
+      JsonPatch: [{ op: "replace", path: "/messages/0" }],
+    });
+    await manager.shutdown();
   });
 
   it("starts an atomically accepted initial turn once and does not duplicate it on reopen", async () => {
@@ -549,11 +608,26 @@ describe("ProjectChatManager", () => {
 
   it("persists schedule timeouts as a structured timeout failure", async () => {
     await createThread("thread-timeout");
+    await storage.scheduledTasks.create({
+      id: "schedule-1", project_id: "project-1", name: "Timeout schedule",
+      cron_expr: "0 9 * * *", timezone: "UTC", run_type: "command",
+      content: "exit 1", cwd_mode: "branch",
+    });
+    await storage.scheduledTaskRuns.create({
+      id: "run-timeout", schedule_id: "schedule-1", status: "running",
+    });
     await correlate("thread-timeout", "timeout-op", "schedule_run", "schedule_run", "run-timeout", {
       scheduleId: "schedule-1", runId: "run-timeout",
     });
     const eventBus = new EventBus();
     const manager = new ProjectChatManager(storage, reply("unused"), { eventBus });
+    await manager.openThread("thread-timeout", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("thread-timeout", {
+      projectChatUserId: "user-1", readyState: 1, OPEN: 1,
+      send: (frame: string) => frames.push(frame),
+    } as never);
+    frames.length = 0;
 
     eventBus.emit({
       type: "schedule:run-finished", projectId: "project-1", scheduleId: "schedule-1",
@@ -571,9 +645,18 @@ describe("ProjectChatManager", () => {
       kind: "schedule_run",
       operationId: "timeout-op",
       status: "failed",
-      failure: { code: "timeout" },
+      failure: {
+        code: "timeout",
+        message: "Operation timed out. Review the target and try again.",
+      },
     });
+    expect(frames.some((frame) => frame.includes("Operation timed out"))).toBe(true);
     await manager.shutdown();
+
+    const restarted = new ProjectChatManager(storage, reply("unused"));
+    const snapshot = await restarted.openThread("thread-timeout", "user-1");
+    expect(snapshot.messages.some(({ content }) => content.includes("Operation timed out"))).toBe(true);
+    await restarted.shutdown();
   });
 
   it("subscribes to global events once, persists before websocket delivery, and unsubscribes on shutdown", async () => {

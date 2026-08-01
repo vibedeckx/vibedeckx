@@ -49,11 +49,14 @@ describe("project chat storage", () => {
     });
     expect(await storage.projectChatOperations.getById("a-malformed", "thread", "p1", "local"))
       .toMatchObject({ status: "failed", error: "Malformed operation data was quarantined" });
-    await expect(storage.projectChatMessages.listByThread("thread", "p1", "local"))
-      .resolves.toContainEqual(expect.objectContaining({
-        id: "operation:a-malformed:failed", type: "operation",
-        content: expect.stringContaining("Malformed operation data was quarantined"),
-      }));
+    const quarantineMessage = (await storage.projectChatMessages.listByThread("thread", "p1", "local"))
+      .find(({ id }) => id === "operation:a-malformed:failed");
+    expect(quarantineMessage).toMatchObject({ type: "operation" });
+    expect(JSON.parse(quarantineMessage!.content)).toEqual({
+      version: 1, kind: "schedule_run", operationId: "a-malformed", status: "failed",
+      scheduleId: "a-malformed", runId: "a-malformed", runAvailable: false,
+      failure: { code: "failed", message: "Operation failed. Review the target and try again." },
+    });
     await expect(storage.projectChatOperations.listNonterminal(null, 50))
       .resolves.toMatchObject({ malformed: 0 });
   });

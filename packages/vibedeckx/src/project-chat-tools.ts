@@ -1,6 +1,12 @@
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import type { ProjectChatContextEntityType, ProjectChatOperationPayload, Storage } from "./storage/types.js";
+import type {
+  ProjectChatContextEntityType,
+  ProjectChatOperationPayload,
+  Storage,
+} from "./storage/types.js";
+export { projectChatPublicOperationContent } from "./project-chat-public-operation.js";
+import { projectChatPublicOperationContent } from "./project-chat-public-operation.js";
 
 const LIST_LIMIT = 20;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
@@ -221,40 +227,6 @@ export interface CreateProjectChatToolsOptions {
   mutationServices?: ProjectChatMutationServices;
   /** Best-effort live projection after the operation message is durable. */
   onOperationMessage?: (message: import("./storage/types.js").ProjectChatMessage) => Promise<void> | void;
-}
-
-type PublicProjectChatFailureCode = "failed" | "timeout" | "remote_offline" | "deleted_target";
-
-function publicFailureCode(error: string): PublicProjectChatFailureCode {
-  const normalized = error.toLowerCase();
-  if (/\btimeout\b|\btimed\s+out\b/.test(normalized)) return "timeout";
-  if (/\boffline\b|\bdisconnected\b/.test(normalized)
-    || (/\bremote\b/.test(normalized) && /\bunavailable\b/.test(normalized))) return "remote_offline";
-  if (/\bno longer\b|\bnot found\b|\bdeleted\b/.test(normalized)) return "deleted_target";
-  return "failed";
-}
-
-/** Creates the versioned public envelope without internal delivery/claim data. */
-export function projectChatPublicOperationContent(
-  payload: ProjectChatOperationPayload,
-  error: string | null = null,
-): string {
-  const {
-    initialInstructionDelivery: _delivery,
-    contextConfirmed: _context,
-    claimToken: _claimToken,
-    ...publicPayload
-  } = payload as ProjectChatOperationPayload & {
-    initialInstructionDelivery?: unknown;
-    contextConfirmed?: unknown;
-    claimToken?: unknown;
-  };
-  return JSON.stringify({
-    ...publicPayload,
-    ...(payload.status === "failed"
-      ? { failure: { code: publicFailureCode(error ?? "") } }
-      : {}),
-  });
 }
 
 const emptySchema = z.object({}).strict();
@@ -796,7 +768,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             initialInstructionDelivery: "pending",
             candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })),
           }, { operationId, idempotencyKey: `session:${sessionSeed}` });
-          const selectionContent = JSON.stringify(operationPayload(
+          const selectionContent = projectChatPublicOperationContent(operationPayload(
             "workspace_selection", operation.id, "pending",
             { requestId: operation.id, candidates: candidates.map(({ id, target, branch }) => ({ id, target, branch })) },
           ));

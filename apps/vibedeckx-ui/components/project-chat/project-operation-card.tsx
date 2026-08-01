@@ -94,6 +94,18 @@ export function ProjectOperationCard({
   const { label, detail } = presentation(operation);
   const state = statePresentation(operation);
   const targetDeleted = operation.failure?.code === "deleted_target";
+  const canOpenSession = operation.kind === "agent_session_create"
+    && operation.sessionAvailable
+    && (operation.status === "running" || operation.status === "completed")
+    && !targetDeleted;
+  const canViewOutput = operation.kind === "schedule_run"
+    && operation.runAvailable
+    && (operation.status === "running" || operation.status === "completed" || operation.status === "failed")
+    && !targetDeleted;
+  const canRunAgain = operation.kind === "schedule_run"
+    && operation.runAvailable
+    && (operation.status === "completed" || operation.status === "failed")
+    && !targetDeleted;
   const StateIcon = state.Icon;
 
   return (
@@ -126,14 +138,14 @@ export function ProjectOperationCard({
         <p className="mt-2 text-xs text-muted-foreground">{operation.failure.message}</p>
       ) : null}
 
-      {operation.kind === "agent_session_create" && onOpenSession ? (
+      {operation.kind === "agent_session_create" && canOpenSession && onOpenSession ? (
         <div className="mt-3">
           <Button
             type="button"
             size="sm"
             variant="outline"
             aria-busy={pendingAction === "open_session"}
-            disabled={targetDeleted || pendingAction !== null && pendingAction !== undefined}
+            disabled={pendingAction !== null && pendingAction !== undefined}
             onClick={() => onOpenSession(operation)}
           >
             {pendingAction === "open_session" ? <Loader2 className="size-3.5 animate-spin" /> : <ExternalLink className="size-3.5" />}
@@ -142,28 +154,28 @@ export function ProjectOperationCard({
         </div>
       ) : null}
 
-      {operation.kind === "schedule_run" && (onViewOutput || onRunAgain) ? (
+      {operation.kind === "schedule_run" && (canViewOutput && onViewOutput || canRunAgain && onRunAgain) ? (
         <div className="mt-3 flex flex-wrap gap-2">
-          {onViewOutput ? (
+          {canViewOutput && onViewOutput ? (
             <Button
               type="button"
               size="sm"
               variant="outline"
               aria-busy={pendingAction === "view_output"}
-              disabled={targetDeleted || pendingAction !== null && pendingAction !== undefined}
+              disabled={pendingAction !== null && pendingAction !== undefined}
               onClick={() => onViewOutput(operation)}
             >
               {pendingAction === "view_output" ? <Loader2 className="size-3.5 animate-spin" /> : <MessageSquareMore className="size-3.5" />}
               View Output
             </Button>
           ) : null}
-          {onRunAgain ? (
+          {canRunAgain && onRunAgain ? (
             <Button
               type="button"
               size="sm"
               variant="outline"
               aria-busy={pendingAction === "run_again"}
-              disabled={targetDeleted || pendingAction !== null && pendingAction !== undefined}
+              disabled={pendingAction !== null && pendingAction !== undefined}
               onClick={() => onRunAgain(operation)}
             >
               {pendingAction === "run_again" ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
