@@ -2735,15 +2735,33 @@ describe("ProjectChatManager", () => {
         yield { type: "assistant", content: (await decision) ? "approved" : "denied" };
       },
     });
+    const frames: string[] = [];
+    await manager.openThread("thread-1", "user-1");
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1,
+      send: (raw: string) => { frames.push(raw); },
+    } as never);
     await manager.sendMessage("thread-1", "user-1", "do it");
     await waitFor(async () => (await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .some((message) => message.type === "tool_approval_request"));
+    await waitFor(async () => (await manager.openThread("thread-1", "user-1"))
+      .pendingApprovalIds.includes("approval-1"));
+    expect(frames.some((frame) => frame.includes('"type":"APPROVALS"')
+      && frame.includes('"approval-1"'))).toBe(true);
 
     await expect(manager.resolveToolApproval("thread-1", "user-1", "approval-1", false)).resolves.toBe(true);
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
+    expect((await manager.openThread("thread-1", "user-1")).pendingApprovalIds).toEqual([]);
 
     expect((await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .some((message) => message.type === "assistant" && message.content === "denied")).toBe(true);
+
+    await manager.shutdown();
+    const restarted = new ProjectChatManager(storage, reply("unused"));
+    const reloaded = await restarted.openThread("thread-1", "user-1");
+    expect(reloaded.pendingApprovalIds).toEqual([]);
+    expect(reloaded.messages.some(({ type }) => type === "tool_approval_request")).toBe(true);
+    await restarted.shutdown();
   });
 
   it("registers an explicit approval id before broadcasting arbitrary request content", async () => {
@@ -2814,6 +2832,7 @@ describe("ProjectChatManager", () => {
 
     expect(firstResult).toBe("settled");
     expect(observedDecision).toBe(false);
+    expect((await manager.openThread("thread-1", "user-1")).pendingApprovalIds).toEqual([]);
     await expect(manager.resolveToolApproval("thread-1", "user-1", "stop-approval", true)).resolves.toBe(false);
   });
 

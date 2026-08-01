@@ -751,6 +751,7 @@ export interface ProjectChatSnapshot {
   earliestSequence: number | null;
   status: ProjectChatStatus;
   activeTurnId: string | null;
+  pendingApprovalIds: string[];
   queueLength: number;
   contextRefs: ProjectChatContextRef[];
 }

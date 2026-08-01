@@ -41,6 +41,7 @@ const snapshot = (id: string, projectId = "p1"): ProjectChatSnapshot => ({
   earliestSequence: 1,
   status: "idle",
   activeTurnId: null,
+  pendingApprovalIds: [],
   queueLength: 0,
   contextRefs: [],
 });
@@ -902,5 +903,21 @@ describe("useProjectChat", () => {
     expect(mocks.api.listProjectChatMessages).toHaveBeenCalledWith("t1", { beforeSequence: 3 });
     expect(latest.messages.map(({ sequence }) => sequence)).toEqual([1, 3, 4]);
     expect(latest.hasEarlierMessages).toBe(false);
+  });
+
+  it("applies the server pending-approval set and clears it after resolution", async () => {
+    render("p1", "t1");
+    await flush();
+    const socket = FakeWebSocket.instances[0];
+    const initial = snapshot("t1");
+    initial.pendingApprovalIds = ["approval-1"];
+    act(() => socket.message({ type: "project_chat_snapshot", snapshot: initial }));
+    expect(latest.pendingApprovalIds).toEqual(["approval-1"]);
+
+    act(() => socket.message({ JsonPatch: [{
+      op: "replace", path: "/pendingApprovalIds",
+      value: { type: "APPROVALS", content: [] },
+    }] }));
+    expect(latest.pendingApprovalIds).toEqual([]);
   });
 });

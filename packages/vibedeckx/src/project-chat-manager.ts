@@ -59,6 +59,7 @@ export interface ProjectChatSnapshot {
   earliestSequence: number | null;
   status: ProjectChatStatus;
   activeTurnId: string | null;
+  pendingApprovalIds: string[];
   queueLength: number;
   contextRefs: ProjectChatPublicContextRef[];
 }
@@ -127,6 +128,7 @@ export type ProjectChatWsMessage =
         }
         | { type: "STATUS"; content: ProjectChatStatus }
         | { type: "ACTIVE_TURN"; content: string | null }
+        | { type: "APPROVALS"; content: string[] }
         | { type: "QUEUE"; content: number }
         | { type: "CONTEXT"; content: ProjectChatPublicContextRef[] };
     }>;
@@ -670,6 +672,7 @@ export class ProjectChatManager {
     const pending = live?.pendingApprovals.get(approvalId);
     if (!live || !pending || pending.turnId !== live.activeTurnId || live.status !== "running") return false;
     live.pendingApprovals.delete(approvalId);
+    this.broadcastApprovals(live);
     pending.resolve(_approved);
     return true;
   }
@@ -1666,6 +1669,7 @@ export class ProjectChatManager {
               const previous = live.pendingApprovals.get(approvalId);
               if (previous) previous.resolve(false);
               live.pendingApprovals.set(approvalId, { turnId, resolve: settleApproval });
+              this.broadcastApprovals(live);
               registered = true;
             });
           } catch (error) {
@@ -1932,6 +1936,7 @@ export class ProjectChatManager {
       earliestSequence: live.messages[0]?.sequence ?? null,
       status: live.status,
       activeTurnId: live.activeTurnId,
+      pendingApprovalIds: [...live.pendingApprovals.keys()].sort(),
       queueLength: live.queue.length,
       contextRefs: [...live.contextRefs],
     };
@@ -2042,11 +2047,24 @@ export class ProjectChatManager {
     decision: boolean,
   ): void {
     if (!turnId) return;
+    let changed = false;
     for (const [approvalId, pending] of live.pendingApprovals) {
       if (pending.turnId !== turnId) continue;
       live.pendingApprovals.delete(approvalId);
+      changed = true;
       try { pending.resolve(decision); } catch { /* runner already settled */ }
     }
+    if (changed) this.broadcastApprovals(live);
+  }
+
+  private broadcastApprovals(live: LiveThread): void {
+    this.broadcast(live, {
+      JsonPatch: [{
+        op: "replace",
+        path: "/pendingApprovalIds",
+        value: { type: "APPROVALS", content: [...live.pendingApprovals.keys()].sort() },
+      }],
+    });
   }
 
   private queueFromWorkItem(work: ProjectChatWorkItem): QueuedTurn {

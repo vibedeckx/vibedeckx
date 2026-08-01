@@ -181,6 +181,7 @@ export function ProjectChatWorkbench({
               contextRefs={chat.contextRefs}
               status={chat.status}
               activeTurnId={chat.activeTurnId}
+              pendingApprovalIds={chat.pendingApprovalIds}
               queueLength={chat.queueLength}
               loading={chat.threadLoading}
               hasEarlierMessages={chat.hasEarlierMessages}

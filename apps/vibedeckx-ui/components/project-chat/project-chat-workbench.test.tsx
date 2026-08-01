@@ -117,6 +117,7 @@ function setupHook() {
     earliestSequence: 1,
     status: "running",
     activeTurnId: "turn-7",
+    pendingApprovalIds: ["approval-1"],
     queueLength: 1,
     contextRefs: [
       { thread_id: "thread-7", entity_type: "task", entity_id: "task-1", last_referenced_at: "2026-07-20T12:00:00Z", deleted: false, navigation: { kind: "task", taskId: "task-1", label: "Task one" } },
@@ -185,6 +186,14 @@ afterEach(() => {
 });
 
 describe("ProjectChatWorkbench", () => {
+  it("keeps historical approval requests readable but removes stale actions", () => {
+    hook.value.pendingApprovalIds = [];
+    render();
+
+    expect(document.body.textContent).toContain("Approval expired or resolved");
+    expect([...document.querySelectorAll("button")]
+      .some((button) => button.getAttribute("aria-label") === "Approve run_schedule_now")).toBe(false);
+  });
   it("offers authorized loading of earlier transcript pages", async () => {
     hook.value.hasEarlierMessages = true;
     render();
@@ -486,6 +495,8 @@ describe("ProjectChatWorkbench", () => {
 
     await act(async () => { stop.reject(new Error("Stop unavailable")); approval.resolve(); });
     expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Stop unavailable"))).toBe(true);
+    expect([...document.querySelectorAll("button")]
+      .some((button) => button.getAttribute("aria-label") === "Approve run_schedule_now")).toBe(false);
   });
 
   it("keeps stop latched across HTTP completion and reconnect until the observed turn changes", async () => {

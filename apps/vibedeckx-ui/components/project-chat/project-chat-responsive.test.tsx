@@ -50,6 +50,7 @@ function setupChat() {
     earliestSequence: null,
     status: "idle",
     activeTurnId: null,
+    pendingApprovalIds: [],
     queueLength: 0,
     contextRefs: [{
       thread_id: "thread-1",

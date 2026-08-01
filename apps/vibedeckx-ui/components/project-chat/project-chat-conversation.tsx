@@ -53,6 +53,7 @@ interface ProjectChatConversationProps {
   contextRefs: ProjectChatContextRef[];
   status: ProjectChatStatus;
   activeTurnId: string | null;
+  pendingApprovalIds: string[];
   queueLength: number;
   loading: boolean;
   hasEarlierMessages: boolean;
@@ -121,6 +122,7 @@ export function ProjectChatConversation({
   contextRefs,
   status,
   activeTurnId,
+  pendingApprovalIds,
   queueLength,
   loading,
   hasEarlierMessages,
@@ -143,6 +145,7 @@ export function ProjectChatConversation({
   const [submitting, setSubmitting] = useState(false);
   const [stoppingTurnId, setStoppingTurnId] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<Set<string>>(new Set());
+  const [resolvedApprovals, setResolvedApprovals] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const sendInFlightRef = useRef(false);
   const stopInFlightRef = useRef<string | null>(null);
@@ -243,6 +246,7 @@ export function ProjectChatConversation({
     setActionError(null);
     try {
       await onResolveApproval(approvalId, approved);
+      setResolvedApprovals((current) => new Set(current).add(approvalId));
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "Failed to resolve approval");
     } finally {
@@ -254,6 +258,13 @@ export function ProjectChatConversation({
       });
     }
   };
+
+  useEffect(() => {
+    setResolvedApprovals((current) => {
+      const next = new Set([...current].filter((id) => pendingApprovalIds.includes(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [pendingApprovalIds]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -306,14 +317,16 @@ export function ProjectChatConversation({
               const approval = parseObject(message.content) as ProjectChatToolApprovalMessage | null;
               if (!approval || typeof approval.approvalId !== "string") return null;
               const tool = typeof approval.tool === "string" ? approval.tool : "project tool";
+              const isPending = pendingApprovalIds.includes(approval.approvalId)
+                && !resolvedApprovals.has(approval.approvalId);
               return (
                 <div key={message.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
                   <div className="font-medium">Approve {tool.replaceAll("_", " ")}?</div>
                   <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-muted-foreground">{JSON.stringify(approval.input ?? {}, null, 2)}</pre>
-                  <div className="mt-3 flex gap-2">
+                  {isPending ? <div className="mt-3 flex gap-2">
                     <Button size="sm" aria-label={`Approve ${tool}`} disabled={pendingApprovals.has(approval.approvalId)} onClick={() => void resolveApproval(approval.approvalId, true)}><Check className="size-3.5" />Approve</Button>
                     <Button size="sm" variant="outline" aria-label={`Deny ${tool}`} disabled={pendingApprovals.has(approval.approvalId)} onClick={() => void resolveApproval(approval.approvalId, false)}><X className="size-3.5" />Deny</Button>
-                  </div>
+                  </div> : <div className="mt-3 text-xs text-muted-foreground">Approval expired or resolved</div>}
                 </div>
               );
             }

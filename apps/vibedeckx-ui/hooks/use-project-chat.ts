@@ -27,6 +27,7 @@ type ProjectChatPatch = {
     }
     | { type: "STATUS"; content: ProjectChatStatus }
     | { type: "ACTIVE_TURN"; content: string | null }
+    | { type: "APPROVALS"; content: string[] }
     | { type: "QUEUE"; content: number }
     | { type: "CONTEXT"; content: ProjectChatContextRef[] };
 };
@@ -38,6 +39,7 @@ interface ProjectChatStreamState {
   earliestSequence: number | null;
   status: ProjectChatStatus;
   activeTurnId: string | null;
+  pendingApprovalIds: string[];
   queueLength: number;
   contextRefs: ProjectChatContextRef[];
 }
@@ -76,6 +78,7 @@ const emptyStreamState = (): ProjectChatStreamState => ({
   earliestSequence: null,
   status: "idle",
   activeTurnId: null,
+  pendingApprovalIds: [],
   queueLength: 0,
   contextRefs: [],
 });
@@ -160,6 +163,8 @@ function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
     && value.contextRefs.every((ref) => isProjectChatContextRef(ref) && ref.thread_id === threadId)
     && (value.status === "idle" || value.status === "running")
     && (value.activeTurnId === null || typeof value.activeTurnId === "string")
+    && Array.isArray(value.pendingApprovalIds)
+    && value.pendingApprovalIds.every((id) => typeof id === "string" && id.length > 0)
     && Number.isSafeInteger(value.queueLength)
     && (value.queueLength as number) >= 0;
 }
@@ -209,6 +214,10 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
     } else if (patch.path === "/activeTurnId" && patch.value.type === "ACTIVE_TURN"
       && (patch.value.content === null || typeof patch.value.content === "string")) {
       next = { ...next, activeTurnId: patch.value.content };
+    } else if (patch.path === "/pendingApprovalIds" && patch.value.type === "APPROVALS"
+      && Array.isArray(patch.value.content)
+      && patch.value.content.every((id) => typeof id === "string" && id.length > 0)) {
+      next = { ...next, pendingApprovalIds: [...new Set(patch.value.content)].sort() };
     } else if (patch.path === "/queueLength" && patch.value.type === "QUEUE"
       && Number.isSafeInteger(patch.value.content) && patch.value.content >= 0) {
       next = { ...next, queueLength: patch.value.content };
@@ -378,6 +387,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
         earliestSequence: cached.earliestSequence,
         status: cached.status,
         activeTurnId: cached.activeTurnId,
+        pendingApprovalIds: cached.pendingApprovalIds,
         queueLength: cached.queueLength,
         contextRefs: cached.contextRefs,
       });
@@ -552,6 +562,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                   : snapshot.earliestSequence,
                 status: snapshot.status,
                 activeTurnId: snapshot.activeTurnId,
+                pendingApprovalIds: snapshot.pendingApprovalIds,
                 queueLength: snapshot.queueLength,
                 contextRefs: snapshot.contextRefs,
               });
@@ -576,6 +587,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                   earliestSequence: next.earliestSequence,
                   status: next.status,
                   activeTurnId: next.activeTurnId,
+                  pendingApprovalIds: next.pendingApprovalIds,
                   queueLength: next.queueLength,
                   contextRefs: next.contextRefs,
                 });
