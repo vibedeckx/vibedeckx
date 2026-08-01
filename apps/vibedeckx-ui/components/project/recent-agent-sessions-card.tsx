@@ -20,9 +20,11 @@ interface RecentAgentSessionsCardProps {
   onOpenSession: (sessionId: string, target: string, branch: string | null) => void;
 }
 
+// Mirrors the sidebar's ResidentSessionDot so the same session never shows two
+// different colours: blue while running, lime once the turn is done.
 const statusTone: Record<ProjectAgentSessionActivity["status"], DotTone> = {
   running: "blue",
-  stopped: "amber",
+  stopped: "lime",
   error: "rose",
   unknown: "neutral",
 };

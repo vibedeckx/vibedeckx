@@ -78,6 +78,9 @@ const dotTone = {
   neutral: "bg-muted-foreground/60",
   blue: "bg-blue-500",
   green: "bg-emerald-500",
+  // Warm yellow-green for a finished agent session — same tone the sidebar's
+  // per-session dot uses, so one session reads identically in both places.
+  lime: "bg-lime-400",
   amber: "bg-amber-500",
   rose: "bg-destructive",
 } as const;
