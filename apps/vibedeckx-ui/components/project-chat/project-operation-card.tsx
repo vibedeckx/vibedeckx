@@ -108,7 +108,12 @@ export function ProjectOperationCard({
           <div className="text-sm font-medium">{label}</div>
           {detail ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</div> : null}
         </div>
-        <div className={cn("flex shrink-0 items-center gap-1.5 text-xs font-medium", state.className)}>
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className={cn("flex shrink-0 items-center gap-1.5 text-xs font-medium", state.className)}
+        >
           <StateIcon
             className={cn("size-3.5", (operation.status === "running" || operation.status === "resolving") && "animate-spin")}
             aria-hidden="true"

@@ -672,11 +672,19 @@ describe("project chat storage", () => {
         id: "selection", thread_id: "t1", project_id: "p1", user_id: "u1",
         workspace_id: '["local","one"]', session_id: "session-one", claim_token: "claim-one",
         payload: { version: 1, kind: "agent_session_create", operationId: "selection", status: "resolving", sessionId: "session-one", workspaceId: '["local","one"]', selectedWorkspaceId: '["local","one"]', claimToken: "claim-one" },
+        message: { id: "operation:selection:resolving", content: JSON.stringify({
+          version: 1, kind: "agent_session_create", operationId: "selection", status: "resolving",
+          sessionId: "session-one", workspaceId: '["local","one"]',
+        }) },
       }),
       storage.projectChatOperations.claimWorkspaceSelection({
         id: "selection", thread_id: "t1", project_id: "p1", user_id: "u1",
         workspace_id: '["remote","two"]', session_id: "session-two", claim_token: "claim-two",
         payload: { version: 1, kind: "agent_session_create", operationId: "selection", status: "resolving", sessionId: "session-two", workspaceId: '["remote","two"]', selectedWorkspaceId: '["remote","two"]', claimToken: "claim-two" },
+        message: { id: "operation:selection:resolving", content: JSON.stringify({
+          version: 1, kind: "agent_session_create", operationId: "selection", status: "resolving",
+          sessionId: "session-two", workspaceId: '["remote","two"]',
+        }) },
       }),
     ]);
     expect([first?.claimed, second?.claimed].filter(Boolean)).toHaveLength(1);
@@ -685,6 +693,8 @@ describe("project chat storage", () => {
     const persisted = await storage.projectChatOperations.getById("selection", "t1", "p1", "u1");
     expect(persisted?.status).toBe("resolving");
     expect(persisted?.entity_type).toBe("agent_session");
+    const messages = await storage.projectChatMessages.listByThread("t1", "p1", "u1");
+    expect(messages.filter(({ id }) => id === "operation:selection:resolving")).toHaveLength(1);
   });
 
   it("authorizes, bounds, and monotonically updates operation correlations", async () => {

@@ -729,7 +729,11 @@ describe("ProjectChatManager", () => {
         requestId: "selection-op", candidates: [{ id: workspaceId, target: "local", branch: "dev" }],
       }) },
     });
-    const createAgentSession = vi.fn(async ({ sessionId }) => ({ sessionId }));
+    const creationGate = deferred<void>();
+    const createAgentSession = vi.fn(async ({ sessionId }) => {
+      await creationGate.promise;
+      return { sessionId };
+    });
     const manager = new ProjectChatManager(storage, reply("unused"), {
       eventBus: new EventBus(),
       toolDependencies: {
@@ -751,9 +755,38 @@ describe("ProjectChatManager", () => {
     expect(manager.subscribe("selection-thread", socket as never)).not.toBeNull();
     frames.length = 0;
 
-    const result = await manager.selectWorkspace(
+    const selection = manager.selectWorkspace(
       "selection-thread", "user-1", "selection-op", workspaceId,
     );
+
+    await waitFor(async () => {
+      const messages = await storage.projectChatMessages.listByThread(
+        "selection-thread", "project-1", "user-1",
+      );
+      return messages.some(({ type, content }) => type === "operation"
+        && JSON.parse(content).kind === "agent_session_create"
+        && JSON.parse(content).status === "resolving");
+    });
+    expect(createAgentSession).toHaveBeenCalledTimes(1);
+    const resolvingEntries = frames.flatMap((frame) => {
+      const parsed = JSON.parse(frame) as { JsonPatch?: Array<{ value?: { type?: string; content?: unknown } }> };
+      return (parsed.JsonPatch ?? []).flatMap((patch) => patch.value?.type === "ENTRY"
+        ? [patch.value.content as { type?: string; content?: string }] : []);
+    });
+    expect(resolvingEntries.some((entry) => {
+      if (entry.type !== "operation" || typeof entry.content !== "string") return false;
+      const content = JSON.parse(entry.content) as { kind?: string; status?: string };
+      return content.kind === "agent_session_create" && content.status === "resolving";
+    })).toBe(true);
+    const midFlight = await manager.openThread("selection-thread", "user-1");
+    const resolvingMessage = midFlight.messages.find(({ type, content }) => type === "operation"
+      && JSON.parse(content).status === "resolving");
+    expect(resolvingMessage).toBeDefined();
+    expect(resolvingMessage?.content).not.toContain("claimToken");
+    expect(resolvingMessage?.content).not.toContain("initialInstructionDelivery");
+
+    creationGate.resolve();
+    const result = await selection;
 
     expect(result).toMatchObject({ status: "running", sessionId: expect.any(String) });
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
@@ -772,7 +805,7 @@ describe("ProjectChatManager", () => {
     expect(frames.some((frame) => frame.includes('"type":"CONTEXT"')
       && frame.includes('"entity_type":"agent_session"'))).toBe(true);
     const reloaded = await manager.openThread("selection-thread", "user-1");
-    expect(reloaded.messages.filter(({ type }) => type === "operation")).toHaveLength(2);
+    expect(reloaded.messages.filter(({ type }) => type === "operation")).toHaveLength(3);
     expect(JSON.parse(reloaded.messages.at(-1)!.content)).toMatchObject({
       kind: "agent_session_create", status: "running",
     });

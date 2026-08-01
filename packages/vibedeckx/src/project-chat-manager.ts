@@ -638,6 +638,9 @@ export class ProjectChatManager {
       userId: thread.user_id,
       storage: this.storage,
       ...this.toolDependencies,
+      onOperationMessage: () => {
+        void this.trackOperation(this.publishPersistedThreadProjection(thread)).catch(() => undefined);
+      },
     });
     try {
       await tools.select_workspace.execute({ requestId, workspaceId });

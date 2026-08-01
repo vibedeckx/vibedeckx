@@ -911,18 +911,28 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const workspace = await resolveWorkspace(workspaceId);
         const sessionId = canonicalSessionId(workspace, pending.data.sessionId);
         const claimToken = randomUUID();
+        const resolvingPayload = {
+          ...pending.data, version: 1 as const, kind: "agent_session_create" as const,
+          operationId: operation.id,
+          status: "resolving" as const,
+          sessionId, workerSessionId: pending.data.workerSessionId,
+          workspaceId, selectedWorkspaceId: workspaceId,
+          claimToken, target: workspace.target, branch: workspace.branch,
+          initialInstructionDelivery: "pending" as const,
+        };
         const claim = await storage.projectChatOperations.claimWorkspaceSelection({
           id: operation.id, thread_id: threadId, project_id: projectId, user_id: userId,
           workspace_id: workspaceId, session_id: sessionId, claim_token: claimToken,
-          payload: {
-            ...pending.data, version: 1, kind: "agent_session_create", operationId: operation.id,
-            status: "resolving", sessionId, workerSessionId: pending.data.workerSessionId,
-            workspaceId, selectedWorkspaceId: workspaceId,
-            claimToken, target: workspace.target, branch: workspace.branch,
-            initialInstructionDelivery: "pending",
+          payload: resolvingPayload,
+          message: {
+            id: `operation:${operation.id}:resolving`,
+            content: projectChatPublicOperationContent(resolvingPayload),
           },
         });
         if (!claim) throw new Error("Workspace selection request not found");
+        if (claim.claimed && claim.message && onOperationMessage) {
+          try { await onOperationMessage(claim.message); } catch { /* snapshot/reconnect recovers it */ }
+        }
         let correlated = claim.operation;
         if (!claim.claimed) {
           if (correlated.payload.kind !== "agent_session_create"

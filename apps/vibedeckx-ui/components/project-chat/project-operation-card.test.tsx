@@ -76,6 +76,8 @@ describe("ProjectOperationCard", () => {
     expect(container.textContent).toContain("Agent session");
     expect(container.textContent).toContain(label);
     expect(container.textContent).toContain("feature/chat");
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(label);
+    expect(container.querySelector('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
   });
 
   it("renders timeout, remote-offline, and deleted-target states without parsing prose", () => {
@@ -190,5 +192,22 @@ describe("WorkspaceSelectionCard", () => {
     expect([...container.querySelectorAll("button")].every((candidate) => candidate.disabled)).toBe(true);
     expect(container.textContent).toContain("Selecting…");
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Workspace is no longer available");
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Waiting for workspace selection");
+    expect(container.querySelector('[role="status"]')?.textContent).not.toContain("Workspace is no longer available");
+  });
+
+  it("announces a resolving transition without announcing action controls", () => {
+    render(
+      <WorkspaceSelectionCard
+        operation={{ ...operation, status: "resolving" }}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const status = container.querySelector('[role="status"]');
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.getAttribute("aria-atomic")).toBe("true");
+    expect(status?.textContent).toBe("Workspace selected; creating agent session");
+    expect(status?.textContent).not.toContain("Select workspace:");
   });
 });

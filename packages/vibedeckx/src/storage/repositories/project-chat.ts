@@ -1028,14 +1028,14 @@ export const createProjectChatRepos = (
       return mapMessage(message);
     }),
 
-    claimWorkspaceSelection: async (opts) => {
+    claimWorkspaceSelection: async (opts) => kdb.transaction().execute(async (trx) => {
       if (opts.payload.claimToken !== opts.claim_token
         || opts.payload.selectedWorkspaceId !== opts.workspace_id
         || opts.payload.workspaceId !== opts.workspace_id
         || opts.payload.sessionId !== opts.session_id) {
         throw new Error("Invalid Project Chat workspace-selection claim");
       }
-      const updated = await kdb.updateTable("project_chat_operations")
+      const updated = await trx.updateTable("project_chat_operations")
         .set({
           status: "resolving",
           entity_type: "agent_session",
@@ -1055,8 +1055,24 @@ export const createProjectChatRepos = (
         .where("entity_id", "is", null)
         .returningAll()
         .executeTakeFirst();
-      if (updated) return { operation: mapOperation(updated), claimed: true };
-      const existing = await kdb.selectFrom("project_chat_operations")
+      if (updated) {
+        const sequenceRow = await trx.selectFrom("project_chat_messages")
+          .select(sql<number>`coalesce(max(sequence), 0)`.as("sequence"))
+          .where("thread_id", "=", opts.thread_id).executeTakeFirstOrThrow();
+        await trx.insertInto("project_chat_messages").values({
+          id: opts.message.id,
+          thread_id: opts.thread_id,
+          sequence: Number(sequenceRow.sequence) + 1,
+          type: "operation",
+          content: opts.message.content,
+        }).execute();
+        await trx.updateTable("project_chat_threads")
+          .set({ updated_at: now() }).where("id", "=", opts.thread_id).execute();
+        const message = await trx.selectFrom("project_chat_messages")
+          .selectAll().where("id", "=", opts.message.id).executeTakeFirstOrThrow();
+        return { operation: mapOperation(updated), claimed: true, message: mapMessage(message) };
+      }
+      const existing = await trx.selectFrom("project_chat_operations")
         .selectAll()
         .where("id", "=", opts.id)
         .where("thread_id", "=", opts.thread_id)
@@ -1064,7 +1080,7 @@ export const createProjectChatRepos = (
         .where("user_id", "=", opts.user_id)
         .executeTakeFirst();
       return existing ? { operation: mapOperation(existing), claimed: false } : undefined;
-    },
+    }),
 
     bindCorrelation: async (opts) => {
       const owned = await kdb.selectFrom("project_chat_operations as operation")

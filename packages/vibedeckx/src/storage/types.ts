@@ -1284,7 +1284,12 @@ export interface Storage {
       session_id: string;
       claim_token: string;
       payload: Extract<ProjectChatOperationPayload, { kind: "agent_session_create" }>;
-    }) => Promise<{ operation: ProjectChatOperation; claimed: boolean } | undefined>;
+      message: { id: string; content: string };
+    }) => Promise<{
+      operation: ProjectChatOperation;
+      claimed: boolean;
+      message?: ProjectChatMessage;
+    } | undefined>;
     transition: (opts: {
       id: string;
       thread_id: string;
