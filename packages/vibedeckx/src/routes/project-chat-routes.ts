@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { ProjectChatThread } from "../storage/types.js";
+import { ProjectChatActiveTurnConflictError } from "../project-chat-manager.js";
 import { listProjectChatPublicContextRefs } from "../project-chat-context.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
@@ -14,6 +15,7 @@ const LIST_LIMIT = 100;
 type PatchBody = { title?: string | null; archived?: boolean };
 type MessageBody = { content: string };
 type ToolApprovalBody = { approvalId: string; approved: boolean };
+type StopBody = { expectedActiveTurnId: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -75,6 +77,13 @@ function parseToolApprovalBody(body: unknown): ToolApprovalBody | null {
   if (typeof body.approvalId !== "string" || !body.approvalId.trim()) return null;
   if (typeof body.approved !== "boolean") return null;
   return { approvalId: body.approvalId.trim(), approved: body.approved };
+}
+
+function parseStopBody(body: unknown): StopBody | null {
+  if (!isRecord(body) || Object.keys(body).length !== 1
+    || typeof body.expectedActiveTurnId !== "string") return null;
+  const expectedActiveTurnId = body.expectedActiveTurnId.trim();
+  return expectedActiveTurnId ? { expectedActiveTurnId } : null;
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -238,13 +247,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reply.code(202).send({ accepted: true });
   });
 
-  fastify.post<{ Params: { threadId: string } }>(
+  fastify.post<{ Params: { threadId: string }; Body: unknown }>(
     "/api/project-chat/threads/:threadId/stop",
     async (req, reply) => {
       const owned = await getOwnedThread(req, reply, req.params.threadId);
       if (!owned) return;
-      const stopped = await fastify.projectChatManager.stopGeneration(owned.thread.id, owned.userId);
-      return reply.code(200).send({ stopped });
+      const body = parseStopBody(req.body);
+      if (!body) return reply.code(400).send({ error: "expectedActiveTurnId is required" });
+      try {
+        const stopped = await fastify.projectChatManager.stopGeneration(
+          owned.thread.id,
+          owned.userId,
+          body.expectedActiveTurnId,
+        );
+        return reply.code(200).send({ stopped });
+      } catch (error) {
+        if (error instanceof ProjectChatActiveTurnConflictError
+          || (isRecord(error) && error.code === "PROJECT_CHAT_ACTIVE_TURN_CONFLICT")) {
+          return reply.code(409).send({ error: "Active Project Chat turn changed" });
+        }
+        throw error;
+      }
     },
   );
 

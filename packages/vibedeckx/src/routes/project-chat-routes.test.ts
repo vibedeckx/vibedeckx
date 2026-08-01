@@ -492,17 +492,47 @@ describe("project chat thread routes", () => {
       expect(projectChatManager.sendMessage).not.toHaveBeenCalled();
     });
 
-    it("stops only an owned thread and reports whether work was active", async () => {
+    it("requires an active turn identity and stops only that owned turn", async () => {
       await createThread();
       projectChatManager.stopGeneration.mockResolvedValue(false);
 
       const response = await app.inject({
         method: "POST", url: "/api/project-chat/threads/thread-1/stop",
+        payload: { expectedActiveTurnId: "turn-1" },
       });
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ stopped: false });
-      expect(projectChatManager.stopGeneration).toHaveBeenCalledWith("thread-1", "user-1");
+      expect(projectChatManager.stopGeneration).toHaveBeenCalledWith("thread-1", "user-1", "turn-1");
+    });
+
+    it("rejects missing or malformed stop identities before invoking the manager", async () => {
+      await createThread();
+      for (const payload of [undefined, {}, { expectedActiveTurnId: "" }, { expectedActiveTurnId: 1 }, {
+        expectedActiveTurnId: "turn-1", extra: true,
+      }]) {
+        const response = await app.inject({
+          method: "POST", url: "/api/project-chat/threads/thread-1/stop", payload,
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(projectChatManager.stopGeneration).not.toHaveBeenCalled();
+    });
+
+    it("returns conflict when the observed turn is no longer active", async () => {
+      await createThread();
+      projectChatManager.stopGeneration.mockRejectedValue(Object.assign(
+        new Error("Active Project Chat turn changed"),
+        { code: "PROJECT_CHAT_ACTIVE_TURN_CONFLICT" },
+      ));
+
+      const response = await app.inject({
+        method: "POST", url: "/api/project-chat/threads/thread-1/stop",
+        payload: { expectedActiveTurnId: "stale-turn" },
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({ error: "Active Project Chat turn changed" });
     });
 
     it("resolves a validated tool approval and reports stale approvals as 404", async () => {

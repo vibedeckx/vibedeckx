@@ -688,6 +688,7 @@ export interface ProjectChatSnapshot {
   thread: ProjectChatThread;
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
+  activeTurnId: string | null;
   queueLength: number;
   contextRefs: ProjectChatContextRef[];
 }
@@ -2129,8 +2130,12 @@ export const api = {
     }
   },
 
-  async stopProjectChatTurn(threadId: string): Promise<boolean> {
-    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/stop`, { method: "POST" });
+  async stopProjectChatTurn(threadId: string, expectedActiveTurnId: string): Promise<boolean> {
+    const res = await authFetch(`${getApiBase()}/api/project-chat/threads/${threadId}/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedActiveTurnId }),
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error ?? `Failed to stop Project Chat turn: ${res.status}`);

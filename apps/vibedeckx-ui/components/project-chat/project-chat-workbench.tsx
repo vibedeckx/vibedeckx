@@ -163,6 +163,7 @@ export function ProjectChatWorkbench({
               key={scopeKey}
               messages={chat.messages}
               status={chat.status}
+              activeTurnId={chat.activeTurnId}
               queueLength={chat.queueLength}
               loading={chat.threadLoading}
               connected={chat.isConnected}
@@ -193,13 +194,13 @@ export function ProjectChatWorkbench({
       {isMobile ? (
         <Sheet open={mobileRailOpen} onOpenChange={setMobileRailOpen}>
           <SheetContent side="right" className="w-[min(90vw,360px)] gap-0 p-0" aria-label="Project Chat threads and context">
-            <SheetHeader className="sr-only">
-              <SheetTitle>Project Chat threads and context</SheetTitle>
-              <SheetDescription>Switch conversations and open items referenced by this thread.</SheetDescription>
+            <SheetHeader className="shrink-0 border-b px-4 py-3 pr-14 text-left">
+              <SheetTitle className="text-sm">Threads and context</SheetTitle>
+              <SheetDescription className="text-xs">Switch conversations and open referenced project items.</SheetDescription>
             </SheetHeader>
             <ProjectChatAuxiliaryRail
               key={scopeKey}
-              className="w-full border-l-0"
+              className="min-h-0 w-full flex-1 border-l-0"
               currentThreadId={threadId}
               threads={chat.threads}
               contextRefs={chat.contextRefs}

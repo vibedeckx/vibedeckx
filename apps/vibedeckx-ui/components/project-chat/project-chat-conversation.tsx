@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Loader2, Search, Square, X } from "lucide-react";
 
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
@@ -62,18 +62,20 @@ function operationLabel(content: string): string {
 interface ProjectChatConversationProps {
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
+  activeTurnId: string | null;
   queueLength: number;
   loading: boolean;
   connected: boolean;
   error: string | null;
   onSend: (content: string) => Promise<void>;
-  onStop: () => Promise<boolean>;
+  onStop: (expectedActiveTurnId: string) => Promise<boolean>;
   onResolveApproval: (approvalId: string, approved: boolean) => Promise<void>;
 }
 
 export function ProjectChatConversation({
   messages,
   status,
+  activeTurnId,
   queueLength,
   loading,
   connected,
@@ -84,11 +86,11 @@ export function ProjectChatConversation({
 }: ProjectChatConversationProps) {
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [stopping, setStopping] = useState(false);
+  const [stoppingTurnId, setStoppingTurnId] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const sendInFlightRef = useRef(false);
-  const stopInFlightRef = useRef(false);
+  const stopInFlightRef = useRef<string | null>(null);
   const approvalInFlightRef = useRef<Set<string>>(new Set());
 
   const submit = async (event: FormEvent) => {
@@ -109,18 +111,25 @@ export function ProjectChatConversation({
     }
   };
 
+  useEffect(() => {
+    const expected = stopInFlightRef.current;
+    if (!expected || (status === "running" && activeTurnId === expected)) return;
+    stopInFlightRef.current = null;
+    setStoppingTurnId(null);
+  }, [activeTurnId, status]);
+
   const stop = async () => {
-    if (stopInFlightRef.current) return;
-    stopInFlightRef.current = true;
-    setStopping(true);
+    const expectedActiveTurnId = activeTurnId;
+    if (!expectedActiveTurnId || stopInFlightRef.current) return;
+    stopInFlightRef.current = expectedActiveTurnId;
+    setStoppingTurnId(expectedActiveTurnId);
     setActionError(null);
     try {
-      await onStop();
+      await onStop(expectedActiveTurnId);
     } catch (reason) {
-      setActionError(reason instanceof Error ? reason.message : "Failed to stop generation");
-    } finally {
-      stopInFlightRef.current = false;
-      setStopping(false);
+      if (stopInFlightRef.current === expectedActiveTurnId) {
+        setActionError(reason instanceof Error ? reason.message : "Failed to stop generation");
+      }
     }
   };
 
@@ -213,7 +222,7 @@ export function ProjectChatConversation({
           {status === "running" ? (
             <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
               <span>{queueLength > 0 ? `${queueLength} queued` : "Project Chat is working"}</span>
-              <Button type="button" variant="outline" size="sm" aria-label="Stop generating" disabled={stopping} onClick={() => void stop()}><Square className="size-3" />{stopping ? "Stopping…" : "Stop generating"}</Button>
+              <Button type="button" variant="outline" size="sm" aria-label="Stop generating" disabled={!activeTurnId || stoppingTurnId !== null} onClick={() => void stop()}><Square className="size-3" />{stoppingTurnId ? "Stopping…" : "Stop generating"}</Button>
             </div>
           ) : null}
           <div className="relative">

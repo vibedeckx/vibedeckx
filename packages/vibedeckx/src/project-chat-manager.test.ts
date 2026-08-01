@@ -52,6 +52,16 @@ describe("ProjectChatManager", () => {
     });
   }
 
+  async function stopCurrent(
+    manager: ProjectChatManager,
+    threadId: string,
+    userId = "user-1",
+  ): Promise<boolean> {
+    const { activeTurnId } = await manager.openThread(threadId, userId);
+    if (!activeTurnId) throw new Error(`No active turn for ${threadId}`);
+    return manager.stopGeneration(threadId, userId, activeTurnId);
+  }
+
   async function correlate(
     threadId: string, operationId: string,
     kind: "agent_session_create" | "schedule_run",
@@ -108,7 +118,7 @@ describe("ProjectChatManager", () => {
     expect(snapshot.identity).toEqual({ projectId: "project-1", threadId: "thread-1", userId: "user-1" });
     expect(snapshot.identity).not.toHaveProperty("branch");
     expect(snapshot.identity).not.toHaveProperty("workspace");
-    expect(snapshot).toMatchObject({ status: "idle", queueLength: 0 });
+    expect(snapshot).toMatchObject({ status: "idle", queueLength: 0, activeTurnId: null });
   });
 
   it("starts an atomically accepted initial turn once and does not duplicate it on reopen", async () => {
@@ -1489,7 +1499,7 @@ describe("ProjectChatManager", () => {
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
     await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "running");
 
-    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    await expect(stopCurrent(manager, "thread-1")).resolves.toBe(true);
     expect((await manager.openThread("thread-2", "user-1")).status).toBe("running");
 
     secondGate.resolve();
@@ -1497,6 +1507,52 @@ describe("ProjectChatManager", () => {
     await waitFor(async () => (await manager.openThread("thread-2", "user-1")).status === "idle");
     expect((await storage.projectChatMessages.listByThread("thread-2", "project-1", "user-1"))
       .some((message) => message.content === "thread two complete")).toBe(true);
+  });
+
+  it("rejects a stale stop identity after queued work becomes the active turn", async () => {
+    await createThread("thread-1");
+    const starts: Array<{ content: string; signal: AbortSignal }> = [];
+    const frames: Array<{ JsonPatch?: Array<{ path: string; value: { content: unknown } }> }> = [];
+    const manager = new ProjectChatManager(storage, {
+      async *run(input) {
+        const content = input.messages.filter((message) => message.type === "user").at(-1)?.content ?? "";
+        starts.push({ content, signal: input.signal });
+        await new Promise<void>((resolve) => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+        throw new Error("provider aborted");
+      },
+    });
+    await manager.openThread("thread-1", "user-1");
+    manager.subscribe("thread-1", {
+      projectChatUserId: "user-1", readyState: 1,
+      send(raw: string) { frames.push(JSON.parse(raw)); },
+    } as never);
+
+    await manager.sendMessage("thread-1", "user-1", "first");
+    await waitFor(() => starts.length === 1);
+    const first = await manager.openThread("thread-1", "user-1");
+    expect(first).toMatchObject({ status: "running" });
+    expect(first.activeTurnId).toEqual(expect.any(String));
+    expect(frames.flatMap((frame) => frame.JsonPatch ?? [])).toContainEqual(expect.objectContaining({
+      path: "/activeTurnId", value: { type: "ACTIVE_TURN", content: first.activeTurnId },
+    }));
+
+    await manager.sendMessage("thread-1", "user-1", "second");
+    await expect(manager.stopGeneration("thread-1", "user-1", first.activeTurnId!)).resolves.toBe(true);
+    await waitFor(() => starts.length === 2);
+    const second = await manager.openThread("thread-1", "user-1");
+    expect(second).toMatchObject({ status: "running" });
+    expect(second.activeTurnId).toEqual(expect.any(String));
+    expect(second.activeTurnId).not.toBe(first.activeTurnId);
+    expect(frames.flatMap((frame) => frame.JsonPatch ?? [])).toContainEqual(expect.objectContaining({
+      path: "/activeTurnId", value: { type: "ACTIVE_TURN", content: second.activeTurnId },
+    }));
+
+    await expect(manager.stopGeneration("thread-1", "user-1", first.activeTurnId!))
+      .rejects.toMatchObject({ code: "PROJECT_CHAT_ACTIVE_TURN_CONFLICT" });
+    expect(starts[1].signal.aborted).toBe(false);
+
+    await expect(manager.stopGeneration("thread-1", "user-1", second.activeTurnId!)).resolves.toBe(true);
+    expect(starts[1].signal.aborted).toBe(true);
   });
 
   it("bounds stop for an abort-ignoring runner, terminalizes it, and starts queued work", async () => {
@@ -1521,7 +1577,7 @@ describe("ProjectChatManager", () => {
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).queueLength === 1);
 
     const stopped = await Promise.race([
-      manager.stopGeneration("thread-1", "user-1"),
+      stopCurrent(manager, "thread-1"),
       new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
     ]);
     expect(stopped).toBe(true);
@@ -1563,7 +1619,7 @@ describe("ProjectChatManager", () => {
       });
 
       const result = await Promise.race([
-        manager.stopGeneration("thread-1", "user-1").then(() => "settled" as const),
+        stopCurrent(manager, "thread-1").then(() => "settled" as const),
         new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
       ]);
       expect(result).toBe("settled");
@@ -1603,7 +1659,7 @@ describe("ProjectChatManager", () => {
     await staleAppendStarted.promise;
     await manager.sendMessage("thread-1", "user-1", "second");
 
-    await manager.stopGeneration("thread-1", "user-1");
+    await stopCurrent(manager, "thread-1");
     await waitFor(() => starts.length === 2);
     await waitFor(async () => (await storage.projectChatMessages.listByThread(
       "thread-1", "project-1", "user-1",
@@ -1636,7 +1692,7 @@ describe("ProjectChatManager", () => {
       await manager.sendMessage("slot-two", "user-1", "two");
 
       if (action === "stop") {
-        await manager.stopGeneration("slot-one", "user-1");
+        await stopCurrent(manager, "slot-one");
       } else {
         await manager.deleteThread("slot-one", "user-1");
       }
@@ -1669,7 +1725,7 @@ describe("ProjectChatManager", () => {
     for (const id of ids) await manager.sendMessage(id, "user-1", id);
     await waitFor(() => starts.length === 4);
 
-    await Promise.all(ids.slice(0, 4).map((id) => manager.stopGeneration(id, "user-1")));
+    await Promise.all(ids.slice(0, 4).map((id) => stopCurrent(manager, id)));
     await waitFor(() => starts.length === 8);
 
     expect(new Set(starts)).toEqual(new Set(ids));
@@ -1725,7 +1781,7 @@ describe("ProjectChatManager", () => {
 
     await expect(manager.openThread("private", "user-1")).rejects.toMatchObject({ code: "PROJECT_CHAT_NOT_FOUND" });
     await expect(manager.sendMessage("private", "user-1", "steal")).rejects.toMatchObject({ code: "PROJECT_CHAT_NOT_FOUND" });
-    await expect(manager.stopGeneration("private", "user-1")).resolves.toBe(false);
+    await expect(manager.stopGeneration("private", "user-1", "unobserved-turn")).resolves.toBe(false);
     await expect(manager.resolveToolApproval("private", "user-1", "approval", true)).resolves.toBe(false);
     expect(manager.subscribe("private", { projectChatUserId: "user-1", send: vi.fn() } as never)).toBeNull();
   });
@@ -1938,7 +1994,7 @@ describe("ProjectChatManager", () => {
     await manager.sendMessage("thread-1", "user-1", "recover later");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
 
-    await manager.stopGeneration("thread-1", "user-1");
+    await stopCurrent(manager, "thread-1");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -2136,7 +2192,7 @@ describe("ProjectChatManager", () => {
     await manager.sendMessage("thread-1", "user-1", "stop finishing");
     await firstStarted.promise;
 
-    const stopping = manager.stopGeneration("thread-1", "user-1");
+    const stopping = stopCurrent(manager, "thread-1");
     await secondStarted.promise;
     releaseFirst.resolve();
     releaseSecond.resolve();
@@ -2349,7 +2405,7 @@ describe("ProjectChatManager", () => {
     await waitFor(async () => (await storage.projectChatMessages.listByThread("thread-1", "project-1", "user-1"))
       .some((message) => message.type === "tool_approval_request"));
 
-    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    await expect(stopCurrent(manager, "thread-1")).resolves.toBe(true);
     const firstResult = await Promise.race([
       waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle")
         .then(() => "settled" as const),
@@ -2396,7 +2452,7 @@ describe("ProjectChatManager", () => {
     await manager.sendMessage("thread-1", "user-1", "do it");
     await approvalPersisted.promise;
 
-    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    await expect(stopCurrent(manager, "thread-1")).resolves.toBe(true);
     releaseAppend.resolve();
     await waitFor(() => observedDecision !== undefined);
 
@@ -2420,7 +2476,7 @@ describe("ProjectChatManager", () => {
     await manager.sendMessage("thread-1", "user-1", "do it");
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "running");
 
-    await expect(manager.stopGeneration("thread-1", "user-1")).resolves.toBe(true);
+    await expect(stopCurrent(manager, "thread-1")).resolves.toBe(true);
     releaseApproval.resolve();
     await waitFor(async () => (await manager.openThread("thread-1", "user-1")).status === "idle");
 

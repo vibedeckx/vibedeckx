@@ -19,6 +19,7 @@ type ProjectChatPatch = {
   value:
     | { type: "ENTRY"; content: ProjectChatMessage }
     | { type: "STATUS"; content: ProjectChatStatus }
+    | { type: "ACTIVE_TURN"; content: string | null }
     | { type: "QUEUE"; content: number }
     | { type: "CONTEXT"; content: ProjectChatContextRef[] };
 };
@@ -27,6 +28,7 @@ interface ProjectChatStreamState {
   thread: ProjectChatThread | null;
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
+  activeTurnId: string | null;
   queueLength: number;
   contextRefs: ProjectChatContextRef[];
 }
@@ -51,7 +53,7 @@ export interface UseProjectChatResult extends ProjectChatStreamState {
   archiveThread: (threadId: string, archived?: boolean) => Promise<ProjectChatThread>;
   deleteThread: (threadId: string) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
-  stopTurn: () => Promise<boolean>;
+  stopTurn: (expectedActiveTurnId: string) => Promise<boolean>;
   resolveToolApproval: (approvalId: string, approved: boolean) => Promise<void>;
 }
 
@@ -59,6 +61,7 @@ const emptyStreamState = (): ProjectChatStreamState => ({
   thread: null,
   messages: [],
   status: "idle",
+  activeTurnId: null,
   queueLength: 0,
   contextRefs: [],
 });
@@ -131,6 +134,7 @@ function isProjectChatSnapshot(value: unknown): value is ProjectChatSnapshot {
     && value.messages.every((message) => isProjectChatMessage(message) && message.thread_id === threadId)
     && value.contextRefs.every((ref) => isProjectChatContextRef(ref) && ref.thread_id === threadId)
     && (value.status === "idle" || value.status === "running")
+    && (value.activeTurnId === null || typeof value.activeTurnId === "string")
     && Number.isSafeInteger(value.queueLength)
     && (value.queueLength as number) >= 0;
 }
@@ -159,6 +163,9 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
     } else if (patch.path === "/status" && patch.value.type === "STATUS"
       && (patch.value.content === "idle" || patch.value.content === "running")) {
       next = { ...next, status: patch.value.content };
+    } else if (patch.path === "/activeTurnId" && patch.value.type === "ACTIVE_TURN"
+      && (patch.value.content === null || typeof patch.value.content === "string")) {
+      next = { ...next, activeTurnId: patch.value.content };
     } else if (patch.path === "/queueLength" && patch.value.type === "QUEUE"
       && Number.isSafeInteger(patch.value.content) && patch.value.content >= 0) {
       next = { ...next, queueLength: patch.value.content };
@@ -323,6 +330,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
         thread: cached.thread,
         messages: cached.messages,
         status: cached.status,
+        activeTurnId: cached.activeTurnId,
         queueLength: cached.queueLength,
         contextRefs: cached.contextRefs,
       });
@@ -479,6 +487,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                 thread: snapshot.thread,
                 messages: snapshot.messages,
                 status: snapshot.status,
+                activeTurnId: snapshot.activeTurnId,
                 queueLength: snapshot.queueLength,
                 contextRefs: snapshot.contextRefs,
               });
@@ -500,6 +509,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                   thread: next.thread,
                   messages: next.messages,
                   status: next.status,
+                  activeTurnId: next.activeTurnId,
                   queueLength: next.queueLength,
                   contextRefs: next.contextRefs,
                 });
@@ -666,10 +676,10 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     await api.sendProjectChatMessage(targetThreadId, normalized);
   }, []);
 
-  const stopTurn = useCallback(async () => {
+  const stopTurn = useCallback(async (expectedActiveTurnId: string) => {
     const targetThreadId = selectedThreadIdRef.current;
     if (!targetThreadId) return false;
-    return api.stopProjectChatTurn(targetThreadId);
+    return api.stopProjectChatTurn(targetThreadId, expectedActiveTurnId);
   }, []);
 
   const resolveToolApproval = useCallback(async (approvalId: string, approved: boolean) => {

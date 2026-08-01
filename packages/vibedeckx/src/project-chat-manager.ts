@@ -47,6 +47,7 @@ export interface ProjectChatSnapshot {
   thread: ProjectChatThread;
   messages: ProjectChatMessage[];
   status: ProjectChatStatus;
+  activeTurnId: string | null;
   queueLength: number;
   contextRefs: ProjectChatPublicContextRef[];
 }
@@ -104,6 +105,7 @@ export type ProjectChatWsMessage =
       value:
         | { type: "ENTRY"; content: ProjectChatMessage }
         | { type: "STATUS"; content: ProjectChatStatus }
+        | { type: "ACTIVE_TURN"; content: string | null }
         | { type: "QUEUE"; content: number }
         | { type: "CONTEXT"; content: ProjectChatPublicContextRef[] };
     }>;
@@ -158,6 +160,14 @@ export class ProjectChatNotFoundError extends Error {
 
   constructor() {
     super("Project Chat thread not found");
+  }
+}
+
+export class ProjectChatActiveTurnConflictError extends Error {
+  readonly code = "PROJECT_CHAT_ACTIVE_TURN_CONFLICT";
+
+  constructor() {
+    super("Active Project Chat turn changed");
   }
 }
 
@@ -546,11 +556,18 @@ export class ProjectChatManager {
   }
 
   /** Authorization requires storage I/O, so stopping is deliberately async. */
-  async stopGeneration(threadId: string, userId: string): Promise<boolean> {
+  async stopGeneration(
+    threadId: string,
+    userId: string,
+    expectedActiveTurnId: string,
+  ): Promise<boolean> {
     const thread = await this.findAuthorized(threadId, userId);
     if (!thread) return false;
     const live = this.liveThreads.get(thread.id);
-    if (!live?.abortController || live.status !== "running") return false;
+    if (!live || live.activeTurnId !== expectedActiveTurnId) {
+      throw new ProjectChatActiveTurnConflictError();
+    }
+    if (!live.abortController || live.status !== "running") return false;
     this.settlePendingApprovals(live, live.activeTurnId, false);
     live.abortController.abort();
     await this.detachActiveWork(live, "stopped", true);
@@ -1706,6 +1723,7 @@ export class ProjectChatManager {
       thread: live.thread,
       messages: [...live.messages],
       status: live.status,
+      activeTurnId: live.activeTurnId,
       queueLength: live.queue.length,
       contextRefs: [...live.contextRefs],
     };
@@ -1762,6 +1780,11 @@ export class ProjectChatManager {
           op: "replace",
           path: "/status",
           value: { type: "STATUS", content: live.status },
+        },
+        {
+          op: "replace",
+          path: "/activeTurnId",
+          value: { type: "ACTIVE_TURN", content: live.activeTurnId },
         },
         {
           op: "replace",

@@ -36,6 +36,7 @@ const snapshot = (id: string, projectId = "p1"): ProjectChatSnapshot => ({
     created_at: "2026-07-31 00:00:00",
   }],
   status: "idle",
+  activeTurnId: null,
   queueLength: 0,
   contextRefs: [],
 });
@@ -255,6 +256,7 @@ describe("useProjectChat", () => {
     act(() => socket.message({ JsonPatch: [
       { op: "add", path: "/messages/1", value: { type: "ENTRY", content: assistant } },
       { op: "replace", path: "/status", value: { type: "STATUS", content: "running" } },
+      { op: "replace", path: "/activeTurnId", value: { type: "ACTIVE_TURN", content: "turn-1" } },
       { op: "replace", path: "/queueLength", value: { type: "QUEUE", content: 2 } },
       { op: "replace", path: "/contextRefs", value: { type: "CONTEXT", content: [{
         thread_id: "t1", entity_type: "schedule", entity_id: "schedule-1",
@@ -263,7 +265,7 @@ describe("useProjectChat", () => {
       }] } },
     ] }));
     expect(latest.messages).toEqual([snapshot("t1").messages[0], assistant]);
-    expect(latest).toMatchObject({ status: "running", queueLength: 2 });
+    expect(latest).toMatchObject({ status: "running", activeTurnId: "turn-1", queueLength: 2 });
     expect(latest.contextRefs).toEqual([
       expect.objectContaining({ entity_type: "schedule", entity_id: "schedule-1" }),
     ]);
@@ -290,7 +292,7 @@ describe("useProjectChat", () => {
     expect(latest.contextRefs).toEqual([]);
   });
 
-  it("sends and stops turns only for the selected thread", async () => {
+  it("sends and stops turns only for the selected thread and observed turn identity", async () => {
     mocks.api.sendProjectChatMessage.mockResolvedValue(undefined);
     mocks.api.stopProjectChatTurn.mockResolvedValue(true);
     render("p1", "t1");
@@ -298,8 +300,8 @@ describe("useProjectChat", () => {
 
     await act(async () => { await latest.sendMessage("  do it  "); });
     expect(mocks.api.sendProjectChatMessage).toHaveBeenCalledWith("t1", "do it");
-    await act(async () => { await latest.stopTurn(); });
-    expect(mocks.api.stopProjectChatTurn).toHaveBeenCalledWith("t1");
+    await act(async () => { await latest.stopTurn("turn-1"); });
+    expect(mocks.api.stopProjectChatTurn).toHaveBeenCalledWith("t1", "turn-1");
   });
 
   it("rejects a snapshot whose thread or project identity does not match the selection", async () => {

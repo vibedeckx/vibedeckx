@@ -181,6 +181,30 @@ describe("Project Chat create", () => {
   });
 });
 
+describe("Project Chat stop", () => {
+  it("sends the active turn identity observed over the stream", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ stopped: true }),
+    } as Response);
+    global.fetch = fetchMock;
+    try {
+      await expect(api.stopProjectChatTurn("thread-1", "turn-7")).resolves.toBe(true);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/project-chat/threads/thread-1/stop",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ expectedActiveTurnId: "turn-7" }),
+        }),
+      );
+      expect(new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers).get("Content-Type"))
+        .toBe("application/json");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
 describe("single task read", () => {
   it("uses the bounded project-scoped task endpoint", async () => {
     const originalFetch = global.fetch;

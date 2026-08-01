@@ -108,6 +108,7 @@ function setupHook() {
       message(8, "operation", JSON.stringify({ version: 1, operationId: "op-1", kind: "schedule_run", status: "running", scheduleId: "s1", runId: "r1" })),
     ],
     status: "running",
+    activeTurnId: "turn-7",
     queueLength: 1,
     contextRefs: [
       { thread_id: "thread-7", entity_type: "task", entity_id: "task-1", last_referenced_at: "2026-07-20T12:00:00Z", deleted: false, navigation: { kind: "task", taskId: "task-1", label: "Task one" } },
@@ -299,12 +300,36 @@ describe("ProjectChatWorkbench", () => {
       getButton("Approve run_schedule_now").click();
     });
     expect(hook.value.stopTurn).toHaveBeenCalledTimes(1);
+    expect(hook.value.stopTurn).toHaveBeenCalledWith("turn-7");
     expect(hook.value.resolveToolApproval).toHaveBeenCalledTimes(1);
     expect(getButton("Stop generating").disabled).toBe(true);
     expect(getButton("Approve run_schedule_now").disabled).toBe(true);
 
     await act(async () => { stop.reject(new Error("Stop unavailable")); approval.resolve(); });
     expect([...document.querySelectorAll('[role="alert"]')].some((item) => item.textContent?.includes("Stop unavailable"))).toBe(true);
+  });
+
+  it("keeps stop latched across HTTP completion and reconnect until the observed turn changes", async () => {
+    const stop = deferred<boolean>();
+    hook.value.stopTurn = vi.fn(() => stop.promise);
+    render();
+
+    act(() => getButton("Stop generating").click());
+    expect(hook.value.stopTurn).toHaveBeenCalledWith("turn-7");
+    await act(async () => stop.resolve(true));
+    expect(getButton("Stop generating").disabled).toBe(true);
+
+    hook.value.isConnected = false;
+    render();
+    hook.value.isConnected = true;
+    render();
+    expect(getButton("Stop generating").disabled).toBe(true);
+
+    hook.value.activeTurnId = "turn-8";
+    render();
+    expect(getButton("Stop generating").disabled).toBe(false);
+    await act(async () => getButton("Stop generating").click());
+    expect(hook.value.stopTurn).toHaveBeenLastCalledWith("turn-8");
   });
 
   it("retains a destructive dialog and rename input when a thread mutation fails", async () => {
@@ -413,7 +438,16 @@ describe("ProjectChatWorkbench", () => {
     expect(container.querySelector('[data-testid="project-chat-rail"]')).toBeNull();
     expect(container.querySelectorAll("[data-project-chat-column]")).toHaveLength(1);
     act(() => getButton("Open threads and context").click());
-    expect(document.querySelector('[data-slot="sheet-content"] [data-testid="project-chat-rail"]')).not.toBeNull();
+    const sheet = document.querySelector('[data-slot="sheet-content"]')!;
+    const sheetHeader = sheet.querySelector('[data-slot="sheet-header"]')!;
+    const mobileRail = sheet.querySelector('[data-testid="project-chat-rail"]')!;
+    expect(mobileRail).not.toBeNull();
+    expect(sheetHeader.textContent).toContain("Threads and context");
+    expect(sheetHeader.className).not.toContain("sr-only");
+    expect(sheetHeader.className).toContain("pr-14");
+    expect(mobileRail.className).toContain("min-h-0");
+    expect(sheet.contains(getButton("Close"))).toBe(true);
+    expect(getButton("New thread")).not.toBe(getButton("Close"));
     expect(container.querySelector('[data-testid="project-chat-rail"]')).toBeNull();
 
     await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
