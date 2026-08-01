@@ -33,8 +33,8 @@ describe("cross-remote MCP config", () => {
   });
 
   it("is disabled without an authenticated userId", async () => {
-    // requireAuth yields undefined in solo/no-auth mode. A token with an empty userId
-    // would resolve any tenant's remote, so mint nothing.
+    // requireAuth yields undefined in solo/no-auth mode. Empty ownership is not a
+    // valid signed principal, so mint nothing.
     process.env.VIBEDECKX_PUBLIC_URL = "https://app.example.com";
     const b = await storage.remoteServers.create({ name: "b", url: "http://b:5173" }, "user-1");
     await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");

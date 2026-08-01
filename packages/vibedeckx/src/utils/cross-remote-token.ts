@@ -62,8 +62,8 @@ export function verifyCrossRemoteToken(
 
   if (typeof wire.u !== "string" || typeof wire.s !== "string" || typeof wire.exp !== "number") return null;
   if (wire.src !== null && typeof wire.src !== "string") return null;
-  // An empty userId would make remoteServers.getById(id, "") run unscoped and resolve
-  // any tenant's remote. Fail closed rather than rely on every caller to check.
+  // Empty ownership is never a valid signed principal. Reject it here as well as
+  // relying on repository scoping, so later lookup changes cannot widen access.
   if (!wire.u || !wire.s) return null;
   if (nowMs >= wire.exp) return null;
 

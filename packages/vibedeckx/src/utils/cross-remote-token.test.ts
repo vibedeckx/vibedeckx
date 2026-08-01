@@ -64,8 +64,8 @@ describe("cross-remote token", () => {
   });
 
   it("rejects a token with an empty userId or sessionId", () => {
-    // An empty userId would make remoteServers.getById(id, "") fall through to the
-    // unscoped query, resolving any tenant's remote. Fail closed at verification.
+    // Empty ownership is not a valid signed principal. Fail closed at verification
+    // independently of the repository's own tenant-scoping checks.
     const noUser = signCrossRemoteToken(SECRET, { ...payload, userId: "" }, NOW);
     expect(verifyCrossRemoteToken(SECRET, noUser, NOW)).toBeNull();
 
