@@ -65,7 +65,9 @@ interface ProjectInfoViewProps {
 }
 
 const TAB_TRIGGER = cn(
-  "relative rounded-none border-0 bg-transparent px-2.5 py-2.5 text-[12.5px] font-medium text-muted-foreground shadow-none",
+  // Transparent background, so the radius only ever shows on the focus ring —
+  // square corners there read as a border rather than a focus indicator.
+  "relative rounded-sm border-0 bg-transparent px-2.5 py-2.5 text-[12.5px] font-medium text-muted-foreground shadow-none",
   "transition-colors hover:text-foreground focus-visible:ring-offset-0",
   "data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none",
   "after:pointer-events-none after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:rounded-[1px] after:bg-primary after:opacity-0",
@@ -146,10 +148,14 @@ export function ProjectInfoView({
         </header>
 
         <div className="sticky top-0 z-10 border-b bg-card">
-          <TabsList className={cn("h-auto justify-start gap-0.5 rounded-none bg-transparent p-0", GUTTER)}>
-            <TabsTrigger value="home" className={TAB_TRIGGER}>Home</TabsTrigger>
-            <TabsTrigger value="settings" className={TAB_TRIGGER}>Settings</TabsTrigger>
-          </TabsList>
+          {/* Gutter sits on a block-level wrapper: TabsList is inline-flex, and
+              margin:auto never centres an inline-level box. */}
+          <div className={GUTTER}>
+            <TabsList className="h-auto justify-start gap-0.5 rounded-none bg-transparent p-0">
+              <TabsTrigger value="home" className={TAB_TRIGGER}>Home</TabsTrigger>
+              <TabsTrigger value="settings" className={TAB_TRIGGER}>Settings</TabsTrigger>
+            </TabsList>
+          </div>
         </div>
 
         <TabsContent value="home" className={cn("mt-0 py-5 pb-15", GUTTER)}>
