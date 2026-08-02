@@ -17,9 +17,9 @@ import type { RemoteServer } from "@/lib/api";
 vi.mock("@/lib/api", () => ({
   api: {
     getRemoteServers: vi.fn(),
-    generateRemoteServerToken: vi.fn(),
-    rotateRemoteServerToken: vi.fn(),
-    revokeRemoteServerToken: vi.fn(),
+    getRemoteServerConnectToken: vi.fn(),
+    rotateRemoteServerConnectToken: vi.fn(),
+    revokeRemoteServerConnectToken: vi.fn(),
     testRemoteServer: vi.fn(),
     updateRemoteServer: vi.fn(),
     createRemoteServer: vi.fn(),
@@ -48,7 +48,7 @@ import { api } from "@/lib/api";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const getRemoteServers = api.getRemoteServers as unknown as ReturnType<typeof vi.fn>;
-const generateRemoteServerToken = api.generateRemoteServerToken as unknown as ReturnType<typeof vi.fn>;
+const getRemoteServerConnectToken = api.getRemoteServerConnectToken as unknown as ReturnType<typeof vi.fn>;
 
 const makeServer = (id: string, name: string): RemoteServer => ({
   id,
@@ -102,7 +102,7 @@ describe("connect token dialog with slow responses", () => {
     getRemoteServers.mockResolvedValue([makeServer("a", "alpha"), makeServer("b", "bravo")]);
     const first = deferred<{ token: string; connectCommand: string }>();
     const second = deferred<{ token: string; connectCommand: string }>();
-    generateRemoteServerToken.mockImplementation((id: string) =>
+    getRemoteServerConnectToken.mockImplementation((id: string) =>
       id === "a" ? first.promise : second.promise,
     );
 
@@ -133,7 +133,7 @@ describe("connect token dialog with slow responses", () => {
 
   it("renders the token for the remote that was actually opened", async () => {
     getRemoteServers.mockResolvedValue([makeServer("a", "alpha"), makeServer("b", "bravo")]);
-    generateRemoteServerToken.mockImplementation(async (id: string) => ({
+    getRemoteServerConnectToken.mockImplementation(async (id: string) => ({
       token: `token-${id}`,
       connectCommand: `connect --token token-${id}`,
     }));

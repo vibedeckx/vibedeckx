@@ -207,7 +207,7 @@ export function RemoteServersSettings() {
     setRotating(false);
     setGeneratingToken(true);
     try {
-      const result = await api.generateRemoteServerToken(server.id);
+      const result = await api.getRemoteServerConnectToken(server.id);
       if (tokenRequestRef.current !== server.id) return;
       setGeneratedToken(result.token);
       setConnectCommand(result.connectCommand);
@@ -225,7 +225,7 @@ export function RemoteServersSettings() {
     setRotating(true);
     setTokenCopied(false);
     try {
-      const result = await api.rotateRemoteServerToken(server.id);
+      const result = await api.rotateRemoteServerConnectToken(server.id);
       if (tokenRequestRef.current === server.id) {
         setGeneratedToken(result.token);
         setConnectCommand(result.connectCommand);
@@ -241,7 +241,7 @@ export function RemoteServersSettings() {
 
   const handleRevokeToken = async (server: RemoteServer) => {
     try {
-      await api.revokeRemoteServerToken(server.id);
+      await api.revokeRemoteServerConnectToken(server.id);
       await loadServers();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to revoke token');

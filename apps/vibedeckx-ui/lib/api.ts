@@ -2700,8 +2700,8 @@ export const api = {
   },
 
   /** Current connect token (minted on first call). Idempotent — safe to re-open the dialog. */
-  async generateRemoteServerToken(id: string): Promise<{ token: string; connectCommand: string }> {
-    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/generate-token`, {
+  async getRemoteServerConnectToken(id: string): Promise<{ token: string; connectCommand: string }> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/connect-token`, {
       method: "POST",
     });
     if (!res.ok) {
@@ -2712,8 +2712,8 @@ export const api = {
   },
 
   /** Replaces the connect token — the previous one stops working immediately. */
-  async rotateRemoteServerToken(id: string): Promise<{ token: string; connectCommand: string }> {
-    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/rotate-token`, {
+  async rotateRemoteServerConnectToken(id: string): Promise<{ token: string; connectCommand: string }> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/connect-token/rotate`, {
       method: "POST",
     });
     if (!res.ok) {
@@ -2723,9 +2723,9 @@ export const api = {
     return res.json();
   },
 
-  async revokeRemoteServerToken(id: string): Promise<{ success: boolean }> {
-    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/revoke-token`, {
-      method: "POST",
+  async revokeRemoteServerConnectToken(id: string): Promise<{ success: boolean }> {
+    const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/connect-token`, {
+      method: "DELETE",
     });
     if (!res.ok) {
       const error = await res.json();

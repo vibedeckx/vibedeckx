@@ -106,7 +106,7 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
     const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-2" } });
     const id = created.json().id as string;
 
-    const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/generate-token` });
+    const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` });
     expect(res.statusCode).toBe(200);
     const { token, connectCommand } = res.json();
     expect(token).toBeTypeOf("string");
@@ -119,12 +119,12 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
     expect(byToken?.id).toBe(id);
   });
 
-  it("returns the same token on repeat generate-token calls", async () => {
+  it("returns the same token on repeat connect-token reads", async () => {
     const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-4" } });
     const id = created.json().id as string;
 
-    const first = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/generate-token` });
-    const second = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/generate-token` });
+    const first = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` });
+    const second = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` });
     expect(second.statusCode).toBe(200);
     // The connect command handed out to a worker must stay stable — re-opening
     // the token dialog is a read, not a rotation.
@@ -132,12 +132,12 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
     expect(second.json().connectCommand).toBe(first.json().connectCommand);
   });
 
-  it("rotate-token issues a new token and invalidates the old one", async () => {
+  it("connect-token/rotate issues a new token and invalidates the old one", async () => {
     const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-5" } });
     const id = created.json().id as string;
 
-    const old = (await app.inject({ method: "POST", url: `/api/remote-servers/${id}/generate-token` })).json().token;
-    const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/rotate-token` });
+    const old = (await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` })).json().token;
+    const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token/rotate` });
     expect(res.statusCode).toBe(200);
     const { token, connectCommand } = res.json();
     expect(token).not.toBe(old);
@@ -147,15 +147,30 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
     expect((await storage.remoteServers.getByToken(token))?.id).toBe(id);
 
     // Subsequent reads return the rotated token, not another new one.
-    const after = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/generate-token` });
+    const after = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` });
     expect(after.json().token).toBe(token);
   });
 
-  it("404s on generate/rotate for an unknown server", async () => {
-    for (const route of ["generate-token", "rotate-token"]) {
+  it("404s on connect-token read/rotate for an unknown server", async () => {
+    for (const route of ["connect-token", "connect-token/rotate"]) {
       const res = await app.inject({ method: "POST", url: `/api/remote-servers/nope/${route}` });
       expect(res.statusCode).toBe(404);
     }
+  });
+
+  it("revokes the connect token via DELETE", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-6" } });
+    const id = created.json().id as string;
+
+    const token = (await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` })).json().token;
+    const res = await app.inject({ method: "DELETE", url: `/api/remote-servers/${id}/connect-token` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().success).toBe(true);
+    expect(await storage.remoteServers.getByToken(token)).toBeUndefined();
+
+    // DELETE /:id must still delete the server itself, not be shadowed by the above.
+    const del = await app.inject({ method: "DELETE", url: `/api/remote-servers/${id}` });
+    expect(del.statusCode).toBe(200);
   });
 
   it("reports reverse-connect status on /test", async () => {

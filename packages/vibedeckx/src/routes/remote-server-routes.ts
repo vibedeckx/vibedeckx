@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import type { RemoteServer, CrossRemoteAccess } from "../storage/types.js";
 import { proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
@@ -98,32 +98,54 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return `npx vibedeckx@latest connect --connect-to ${proto}://${host} --token ${token}`;
   };
 
-  // POST /api/remote-servers/:id/generate-token — read the connect token, minting
+  // Shared body of the two connect-token endpoints: resolve the server, run the
+  // supplied storage op, answer with the token plus a ready-to-paste command.
+  const sendConnectToken = async (
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+    op: (id: string, userId?: string) => Promise<string | undefined>,
+    failure: string
+  ) => {
+    const userId = requireAuth(request, reply);
+    if (userId === null) return;
+    const { id } = request.params;
+    const server = await fastify.storage.remoteServers.getById(id, userId);
+    if (!server) return reply.code(404).send({ error: "Server not found" });
+
+    const token = await op(id, userId);
+    if (!token) return reply.code(500).send({ error: failure });
+
+    return reply.send({ token, connectCommand: connectCommandFor(request, token) });
+  };
+
+  // POST /api/remote-servers/:id/connect-token — read the connect token, minting
   // one on first use. Idempotent: an already-issued token is returned as-is so
-  // re-opening the dialog can't strand a connected worker. Use /rotate-token to
-  // deliberately replace it.
-  // POST /api/remote-servers/:id/rotate-token — mint a replacement, invalidating the old token.
-  for (const mode of ["generate", "rotate"] as const) {
-    fastify.post<{ Params: { id: string } }>(
-      `/api/remote-servers/:id/${mode}-token`,
-      async (request, reply) => {
-        const userId = requireAuth(request, reply);
-        if (userId === null) return;
-        const { id } = request.params;
-        const server = await fastify.storage.remoteServers.getById(id, userId);
-        if (!server)
-          return reply.code(404).send({ error: "Server not found" });
+  // re-opening the dialog can't strand a connected worker. POST rather than GET
+  // because the first call writes, and a GET would put a secret-bearing URL into
+  // proxy caches and access logs.
+  fastify.post<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/connect-token",
+    (request, reply) =>
+      sendConnectToken(
+        request,
+        reply,
+        (id, userId) => fastify.storage.remoteServers.generateToken(id, userId),
+        "Failed to read token"
+      )
+  );
 
-        const token = mode === "generate"
-          ? await fastify.storage.remoteServers.generateToken(id, userId)
-          : await fastify.storage.remoteServers.rotateToken(id, userId);
-        if (!token)
-          return reply.code(500).send({ error: `Failed to ${mode} token` });
-
-        return reply.send({ token, connectCommand: connectCommandFor(request, token) });
-      }
-    );
-  }
+  // POST /api/remote-servers/:id/connect-token/rotate — mint a replacement,
+  // invalidating the old token immediately.
+  fastify.post<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/connect-token/rotate",
+    (request, reply) =>
+      sendConnectToken(
+        request,
+        reply,
+        (id, userId) => fastify.storage.remoteServers.rotateToken(id, userId),
+        "Failed to rotate token"
+      )
+  );
 
   // POST /api/remote-servers/:id/browse — browse directories on remote server
   fastify.post<{ Params: { id: string } }>(
@@ -183,9 +205,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // POST /api/remote-servers/:id/revoke-token — revoke connect token and disconnect
-  fastify.post<{ Params: { id: string } }>(
-    "/api/remote-servers/:id/revoke-token",
+  // DELETE /api/remote-servers/:id/connect-token — revoke the connect token and
+  // drop any live tunnel using it. The next connect-token read mints a fresh one.
+  fastify.delete<{ Params: { id: string } }>(
+    "/api/remote-servers/:id/connect-token",
     async (request, reply) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
