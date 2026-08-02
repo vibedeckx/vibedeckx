@@ -306,6 +306,8 @@ importers:
         specifier: ^1.2.0-beta.12
         version: 1.2.0-beta.12
 
+  packages/vibedeckx-ui-dist: {}
+
   packages/vibedeckx-win32-x64:
     dependencies:
       better-sqlite3:
