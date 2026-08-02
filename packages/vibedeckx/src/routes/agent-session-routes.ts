@@ -12,7 +12,7 @@ import { writePasteToTempFile } from "../utils/paste-file.js";
 import { extractUserText } from "../utils/session-title.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
-import { createRemoteAgentSession, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
+import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { createHash, randomUUID } from "crypto";
@@ -948,6 +948,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }).catch((error) => {
         console.error(`[API] remote activity write-through failed for ${req.params.sessionId}:`, error);
         return false;
+      });
+      // Attach the worker stream for the turn we just started. Every "turn
+      // ended" signal the front has — the `/status stopped` patch, the
+      // `taskCompleted` frame, `branchActivity`, `processAlive` — is bridged
+      // from this stream and from nowhere else, so without it a completion is
+      // invisible until someone opens the session (the durable notification
+      // still arrives, which is exactly how this presents: bell rings, sidebar
+      // dot stays blue). Idempotent, and the same call the commander and the
+      // workflow relay already make for their turns.
+      ensureRemoteAgentStream(req.params.sessionId, {
+        remoteSessionMap: fastify.remoteSessionMap,
+        remotePatchCache: fastify.remotePatchCache,
+        reverseConnectManager: fastify.reverseConnectManager,
+        eventBus: fastify.eventBus,
+        agentSessionManager: fastify.agentSessionManager,
+        storage: fastify.storage,
       });
       // Emit branch:activity working — remote's own EventBus would also emit
       // this event but we don't subscribe to remote SSE; deriving from the

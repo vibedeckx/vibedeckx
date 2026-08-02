@@ -457,8 +457,20 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // a ref to keep this callback's deps empty.
   // `forceRefresh` forces a network token mint (skipCache) — used when reconnecting
   // after the server closed the socket, which may be an expired/rejected token.
+  // Bounded, because the token hop is the one step with no failure path of its
+  // own: `getFreshToken` swallows its own errors, but if Clerk's getToken()
+  // *hangs* (network stall) the `.then` below never runs — no socket, no error,
+  // no reconnect, and the session silently has no stream for the rest of its
+  // life. On timeout we open anyway with the last known token; if the server
+  // rejects it, `onclose` reconnects with `skipCache` — a loop that recovers,
+  // unlike a promise that never settles.
+  const TOKEN_WAIT_TIMEOUT_MS = 5000;
   const connectWebSocket = useCallback((sessionId: string, forceRefresh = false) => {
-    void getFreshToken(forceRefresh ? { skipCache: true } : undefined)
+    void Promise.race([
+      getFreshToken(forceRefresh ? { skipCache: true } : undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, TOKEN_WAIT_TIMEOUT_MS)),
+    ])
+      .catch(() => undefined)
       .then(() => openSocketRef.current(sessionId));
   }, []);
 
@@ -474,6 +486,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       sessionCache.delete(getCacheKey(pid, br, explicitSessionIdRef.current));
       const sid = wsSessionIdRef.current;
       if (sid) sessionCache.delete(getCacheKey(pid, br, sid));
+      // The workspace ("latest") key too. A session created without an explicit
+      // id is cached under BOTH keys, but by the time it stops the user has
+      // usually selected it by id — leaving the latest key holding a snapshot
+      // frozen at `status: "running"`. A later cache hit would hand that stale
+      // status to onSessionStarted, which seeds the sidebar dot from it.
+      sessionCache.delete(getCacheKey(pid, br, null));
     };
 
     // If WS is open/connecting for a DIFFERENT session, close it first

@@ -30,7 +30,9 @@ type Listener = (data: GlobalEvent) => void;
 //   - connecting — opening or (auto-)reconnecting, no live stream yet
 //   - live       — open and receiving data (events or heartbeats)
 //   - stale      — open but silent past the heartbeat deadline (zombie socket);
-//                  shown to the user, recovered by a manual reconnect click
+//                  shown to the user while the watchdog reopens it on its own
+//                  backoff ladder, and holds until a frame actually arrives —
+//                  the manual reconnect click is the immediate override
 export type ConnectionState = "connecting" | "live" | "stale";
 
 interface GlobalEventStreamValue {
@@ -56,10 +58,17 @@ const MAX_RETRY_MS = 5000;
 // Backend sends a `{type:"ping"}` heartbeat every 15s. If we hear nothing —
 // not even a ping — for this long, the connection is silently dead (a zombie
 // socket that never fired `onerror`, e.g. after sleep / network change). We
-// surface it as `stale`; recovery is a manual click here (no watchdog-driven
-// auto-reconnect yet). `onerror` still auto-reconnects clean drops.
+// surface it as `stale` AND reopen it: `onerror` covers clean drops, but for a
+// zombie it never fires, so nothing else would. Leaving it to a manual click
+// meant every SSE-driven surface — status dots, the bell, live titles — froze
+// silently until the user happened to reload the page.
 const STALE_AFTER_MS = 40000;
 const WATCHDOG_INTERVAL_MS = 5000;
+// Auto-recovery is spaced out on its own ladder: a server that is reachable but
+// silent (a proxy holding the connection open, say) would otherwise be torn
+// down and reopened on every watchdog tick. Reset by the first real frame.
+const STALE_RECOVERY_BASE_MS = 10000;
+const STALE_RECOVERY_MAX_MS = 60000;
 
 /**
  * Owns the single `/api/events` SSE connection for the whole app. The backend
@@ -81,8 +90,10 @@ const WATCHDOG_INTERVAL_MS = 5000;
  *     (no-auth) mode there is no token and that is correct.
  *
  * Liveness is published via a second context (`useConnectionStatus`): `onerror`
- * handles clean drops (auto-reconnect), and a heartbeat watchdog flags the
- * zombie case (open-but-silent) as `stale` for the header indicator.
+ * handles clean drops (auto-reconnect), and a heartbeat watchdog covers the
+ * zombie case (open-but-silent) that `onerror` never reports — flagging it
+ * `stale` for the header indicator *and* reopening the stream on its own
+ * backoff ladder.
  */
 export function GlobalEventStreamProvider({ children }: { children: ReactNode }) {
   const { config, loading } = useAppConfig();
@@ -99,12 +110,39 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     };
   }, []);
 
-  // Any frame (real event or ping) proves the stream is alive.
-  const markAlive = useCallback(() => {
+  // Stale-recovery ladder: attempt count and the earliest time the watchdog may
+  // reopen the stream again.
+  const staleRecoveryAttemptRef = useRef(0);
+  const staleRecoveryNotBeforeRef = useRef(0);
+
+  /**
+   * Any frame (real event or ping) proves the stream is alive; `proof: "open"`
+   * is the weaker signal that a socket was accepted.
+   *
+   * Only a delivered frame resets the stale-recovery ladder. A zombie socket
+   * still fires `onopen` — resetting there would let a server that accepts
+   * connections and then says nothing be reopened at a fixed cadence forever,
+   * which is the backoff doing nothing at all. The deadline is refreshed
+   * either way, so a fresh connection gets its full silent window before the
+   * watchdog judges it.
+   */
+  const markAlive = useCallback((proof: "frame" | "open" = "frame") => {
     const now = Date.now();
     lastEventAtRef.current = now;
     setLastEventAt(now);
-    setState((prev) => (prev === "live" ? prev : "live"));
+    if (proof === "frame") {
+      staleRecoveryAttemptRef.current = 0;
+      staleRecoveryNotBeforeRef.current = 0;
+      setState("live");
+      return;
+    }
+    // A handshake alone is not proof of delivery. The ladder stays non-zero
+    // until a frame lands, so while recovering from a silent stream this keeps
+    // the warning up: otherwise a zombie server that accepts the connection and
+    // says nothing again would clear `stale` and claim live updates for a whole
+    // fresh silent window. A first mount or a clean reconnect (ladder at zero)
+    // keeps the original optimism.
+    if (staleRecoveryAttemptRef.current === 0) setState("live");
   }, []);
 
   const authEnabled = !!config?.authEnabled && !!config?.clerkPublishableKey;
@@ -121,8 +159,15 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+    // Bumped by every teardown. `connect()` captures it before awaiting its
+    // token and abandons the attempt if it no longer matches — the watchdog
+    // reopens on a timer, so without this a connect parked on a slow token mint
+    // would come back and assign over `es`, leaving the earlier EventSource
+    // open, unreferenced, and still dispatching to every listener.
+    let generation = 0;
 
     function teardown() {
+      generation += 1;
       if (retryTimer) {
         clearTimeout(retryTimer);
         retryTimer = null;
@@ -141,8 +186,11 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
 
     async function connect() {
       if (cancelled) return;
+      const myGeneration = generation;
       const token = await getFreshToken();
-      if (cancelled) return;
+      // Superseded while awaiting the token (a watchdog reopen, a manual
+      // reconnect, unmount) — the generation that replaced us owns the stream.
+      if (cancelled || myGeneration !== generation) return;
 
       // Auth mode but the token getter isn't live yet — wait rather than open a
       // doomed tokenless stream that 401s without auto-reconnect.
@@ -152,14 +200,15 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
       }
 
       const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
-      es = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
+      const source = new EventSource(`${getApiBase()}/api/events${tokenParam}`);
+      es = source;
 
-      es.onopen = () => {
+      source.onopen = () => {
         attempt = 0;
-        markAlive();
+        markAlive("open");
       };
 
-      es.onmessage = (event) => {
+      source.onmessage = (event) => {
         markAlive();
         let data: GlobalEvent;
         try {
@@ -179,35 +228,58 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
         }
       };
 
-      es.onerror = () => {
+      source.onerror = () => {
         // Tear down and reconnect with a fresh token (covers token expiry and
         // transient drops). Closing first avoids the native stale-token retry.
-        es?.close();
+        source.close();
+        // An error queued before this source was replaced must not close the
+        // stream that replaced it, nor schedule a retry the live one owns.
+        if (es !== source) return;
         es = null;
         scheduleReconnect();
       };
     }
 
+    /**
+     * Drop the current stream and open a fresh one.
+     *
+     * `announceConnecting` is false for the watchdog: the indicator should keep
+     * reading `stale` while no data is flowing, whatever reopen is in flight
+     * underneath. Announcing "connecting" on every silent-stream retry would
+     * leave a permanently broken stream looking like it is merely still
+     * connecting — and would hide the pill that offers the manual retry.
+     */
+    function reopen(announceConnecting: boolean) {
+      if (cancelled) return;
+      teardown();
+      attempt = 0;
+      if (announceConnecting) setState("connecting");
+      void connect();
+    }
+
     // Watchdog: a silently-dead connection never fires `onerror`, so detect it
-    // by the absence of frames (the 15s backend heartbeat included) and flag it
-    // `stale` for the indicator. We do NOT auto-reconnect here — recovery is the
-    // user clicking the stale pill (see ConnectionStatusIndicator).
+    // by the absence of frames (the 15s backend heartbeat included), flag it
+    // `stale` for the indicator, and reopen it. The manual click on the stale
+    // pill stays as the immediate override.
     const watchdog = setInterval(() => {
       if (cancelled) return;
       const last = lastEventAtRef.current;
       if (last === null) return; // never connected yet — `connecting` covers it
-      if (Date.now() - last > STALE_AFTER_MS) {
-        setState((prev) => (prev === "connecting" ? prev : "stale"));
-      }
+      const now = Date.now();
+      if (now - last <= STALE_AFTER_MS) return;
+      setState((prev) => (prev === "connecting" ? prev : "stale"));
+      if (now < staleRecoveryNotBeforeRef.current) return;
+      const attempt = staleRecoveryAttemptRef.current;
+      staleRecoveryAttemptRef.current = attempt + 1;
+      staleRecoveryNotBeforeRef.current =
+        now + Math.min(STALE_RECOVERY_BASE_MS * 2 ** attempt, STALE_RECOVERY_MAX_MS);
+      console.warn(
+        `[GlobalEventStream] No frames for ${Math.round((now - last) / 1000)}s — reopening (attempt ${attempt + 1})`,
+      );
+      reopen(false);
     }, WATCHDOG_INTERVAL_MS);
 
-    reconnectRef.current = () => {
-      if (cancelled) return;
-      teardown();
-      attempt = 0;
-      setState("connecting");
-      void connect();
-    };
+    reconnectRef.current = () => reopen(true);
 
     void connect();
 

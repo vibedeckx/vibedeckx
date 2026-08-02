@@ -18,6 +18,17 @@ export interface ResidentSidebarSession {
   updated_at?: string;
 }
 
+/**
+ * Insert a seeded session, or refresh the row it already has.
+ *
+ * The seed is an *insert-time* snapshot: it comes from `onSessionStarted`,
+ * whose payload may be a `sessionCache` hit minted when the session was first
+ * created — its `status` can be minutes stale ("running" long after the turn
+ * ended). So for a row that already exists, both the title and the status stay
+ * with the values the live channels (`session:title` / `session:status`) and
+ * the authoritative REST refresh have resolved; re-selecting a session must
+ * never flip its dot back to running.
+ */
 export function upsertResidentSession(
   previous: ResidentSidebarSession[],
   next: ResidentSidebarSession,
@@ -30,7 +41,7 @@ export function upsertResidentSession(
       ? existing.title
       : next.title;
   const copy = [...previous];
-  copy[index] = { ...next, title };
+  copy[index] = { ...next, title, status: existing.status };
   return copy;
 }
 

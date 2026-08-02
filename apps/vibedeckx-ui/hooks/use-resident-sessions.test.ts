@@ -32,9 +32,27 @@ describe("upsertResidentSession", () => {
       status: "stopped",
       processAlive: true,
     };
-    const updated = { ...previous, title: "Updated", status: "running" };
+    const updated = { ...previous, title: "Updated", branch: "feature" };
 
     expect(upsertResidentSession([previous], updated)).toEqual([updated]);
+  });
+
+  it("does not resurrect a stale running status on an existing session", () => {
+    // Re-selecting a session seeds from `sessionCache`, whose snapshot can be
+    // minutes old ("running" long after the turn ended). Reapplying it would
+    // flip the sidebar dot back to blue with nothing left to correct it — the
+    // status patch only reaches the EventBus on the FIRST stream attach.
+    const previous: ResidentSidebarSession = {
+      id: "s1",
+      projectId: "p1",
+      branch: null,
+      title: "Generated title",
+      status: "stopped",
+      processAlive: true,
+    };
+    const staleSeed = { ...previous, status: "running" };
+
+    expect(upsertResidentSession([previous], staleSeed)).toEqual([previous]);
   });
 
   it("does not downgrade a generated title back to the placeholder title", () => {
@@ -48,9 +66,7 @@ describe("upsertResidentSession", () => {
     };
     const reconnectSeed = { ...previous, title: "New Session", status: "running" };
 
-    expect(upsertResidentSession([previous], reconnectSeed)).toEqual([
-      { ...previous, status: "running" },
-    ]);
+    expect(upsertResidentSession([previous], reconnectSeed)).toEqual([previous]);
   });
 
   it("updates a resident session title from the websocket title event", () => {
