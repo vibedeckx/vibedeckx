@@ -2,12 +2,24 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomBytes, createHash, verify as cryptoVerify } from "crypto";
 import "../server-types.js";
+import { createRateLimitedWarn } from "../utils/rate-limited-warn.js";
 
 // How long to wait for the remote to answer the machine-identity challenge
 // before falling back to an unauthenticated (legacy) registration.
 const MACHINE_HANDSHAKE_TIMEOUT_MS = 5000;
 
+// A worker holding a dead connect token knocks repeatedly and gets closed before
+// anything else is logged, so the hub's log showed no trace of hundreds of
+// rejections. Log them — but rate-limited per source, so a retry loop can't
+// drown the log. Suppressed hits are reported in the next line's count.
+const REJECT_LOG_WINDOW_MS = 30_000;
+const REJECT_LOG_MAX_KEYS = 500;
+
 const routes: FastifyPluginAsync = async (fastify) => {
+  // Per-instance: a second server in the same process (or the next test app)
+  // should not inherit another's suppression window.
+  const logRejectedUpgrade = createRateLimitedWarn(REJECT_LOG_WINDOW_MS, REJECT_LOG_MAX_KEYS);
+
   // GET /api/reverse-connect/identity — pre-connect preflight. Resolves which
   // remote record a connect token belongs to so a worker can detect "wrong
   // token for this machine" BEFORE opening the WS: connecting first would
@@ -38,6 +50,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       async (socket, req) => {
         const token = (req.query as { token?: string }).token;
         if (!token) {
+          logRejectedUpgrade(`no-token:${req.ip}`, `[ReverseConnect] Rejected upgrade from ${req.ip}: no connect token`);
           socket.send(JSON.stringify({ error: "Token required" }));
           socket.close(4001, "Token required");
           return;
@@ -45,6 +58,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         const server = await fastify.storage.remoteServers.getByToken(token);
         if (!server) {
+          // Never log the token itself — the source address is what identifies
+          // the stuck worker, and it's enough to tell "reissue its token".
+          logRejectedUpgrade(
+            `bad-token:${req.ip}`,
+            `[ReverseConnect] Rejected upgrade from ${req.ip}: connect token not recognized — the worker needs a current token`
+          );
           socket.send(JSON.stringify({ error: "Invalid token" }));
           socket.close(4001, "Invalid token");
           return;
@@ -94,6 +113,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             const publicKey = frame.publicKey;
             const signature = frame.signature;
             if (!publicKey || !signature) {
+              logRejectedUpgrade(`malformed-auth:${serverId}`, `[ReverseConnect] Malformed machine auth from ${serverId}`);
               socket.close(4003, "Malformed machine auth");
               return;
             }
@@ -108,6 +128,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               valid = false;
             }
             if (!valid) {
+              logRejectedUpgrade(`bad-signature:${serverId}`, `[ReverseConnect] Bad machine signature from ${serverId}`);
               socket.close(4003, "Bad machine signature");
               return;
             }

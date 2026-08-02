@@ -13,6 +13,17 @@ const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const NO_PING_TIMEOUT_MS = 60_000;
 
+// The hub accepts the WebSocket upgrade and only *then* closes with one of these
+// when it rejects the connect token or the machine identity. So `open` firing
+// proves nothing — a rejected client would otherwise clear its backoff on every
+// attempt and retry at ~1Hz forever.
+const AUTH_REJECT_CODES = new Set([4001, 4003]);
+
+// How long a socket must stay open before we treat it as a working tunnel and
+// clear the backoff. Guards against tight loops where the connection is torn
+// down immediately after the upgrade (auth rejection, a proxy in between).
+const HEALTHY_CONNECTION_MS = 5000;
+
 // Whether a response body of this content-type is safe to carry as a plain UTF-8
 // string through the control channel. Anything else (octet-stream, images, etc.)
 // is sent as base64 to avoid corrupting the bytes. An empty content-type defaults
@@ -39,6 +50,7 @@ export class ReverseConnectClient {
   private localPort: number;
   private localChannels = new Map<string, WebSocket>();
   private reconnectAttempt = 0;
+  private openedAt: number | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private noPingTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
@@ -65,8 +77,11 @@ export class ReverseConnectClient {
     });
 
     this.ws.on("open", () => {
-      console.log("[ReverseClient] Connected to server");
-      this.reconnectAttempt = 0;
+      // Deliberately not "Connected": the hub can still reject us after the
+      // upgrade. Backoff is cleared in the close handler, once we know the
+      // connection actually lasted.
+      console.log("[ReverseClient] Socket open, awaiting server handshake");
+      this.openedAt = Date.now();
       this.resetNoPingTimer();
 
       // Send status ready
@@ -85,7 +100,31 @@ export class ReverseConnectClient {
 
     this.ws.on("close", (code, reason) => {
       const safeReason = redactSecretForms(reason?.toString() || "", this.token);
-      console.log(`[ReverseClient] Disconnected (code=${code}, reason=${safeReason})`);
+      const rejected = AUTH_REJECT_CODES.has(code);
+      const uptime = this.openedAt === null ? 0 : Date.now() - this.openedAt;
+
+      if (rejected) {
+        console.error(
+          `[ReverseClient] Server rejected this connection (code=${code}, reason=${safeReason}). ` +
+            (code === 4001
+              ? "The connect token is no longer valid — open Settings → Remote Servers, " +
+                "read the current token, and re-run `vibedeckx connect` with it."
+              : "This machine's identity was refused — the remote record may belong to " +
+                "another machine or another account.") +
+            " Retrying with backoff, but it will not recover on its own."
+        );
+      } else {
+        console.log(`[ReverseClient] Disconnected (code=${code}, reason=${safeReason})`);
+      }
+
+      // Only a connection that actually held clears the backoff. Resetting on
+      // `open` made every rejected attempt look like a fresh start, pinning the
+      // retry delay at its 1s floor.
+      if (!rejected && this.openedAt !== null && uptime >= HEALTHY_CONNECTION_MS) {
+        this.reconnectAttempt = 0;
+      }
+      this.openedAt = null;
+
       this.clearNoPingTimer();
       this.closeAllLocalChannels();
       this.ws = null;

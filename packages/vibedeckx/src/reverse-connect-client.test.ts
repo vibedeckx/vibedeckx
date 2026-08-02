@@ -138,3 +138,98 @@ describe("local VIBEDECKX_API_KEY passthrough for tunnel-injected requests", () 
     vi.unstubAllEnvs();
   });
 });
+
+describe("reconnect backoff", () => {
+  // The hub accepts the upgrade and only then closes with 4001/4003, so `open`
+  // fires on every rejected attempt. Clearing the backoff there pinned the retry
+  // delay at its 1s floor — a worker with a stale token hammered the hub ~1Hz.
+  const attemptsFrom = (log: ReturnType<typeof vi.spyOn>) =>
+    log.mock.calls
+      .flat()
+      .map(String)
+      .map((line) => /Reconnecting in \d+ms \(attempt (\d+)\)/.exec(line)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps backing off across repeated post-upgrade auth rejections", () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = new ReverseConnectClient({} as never, "https://hub.example.com", "stale", 4567);
+
+    client.connect();
+    for (let i = 0; i < 3; i++) {
+      const socket = socketState.instances[i];
+      socket.emit("open");
+      socket.emit("close", 4001, Buffer.from("Invalid token"));
+      vi.advanceTimersByTime(10_000);
+    }
+    client.shutdown();
+
+    expect(attemptsFrom(log)).toEqual([1, 2, 3]);
+  });
+
+  it("clears the backoff once a connection actually holds", () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = new ReverseConnectClient({} as never, "https://hub.example.com", "stale", 4567);
+
+    client.connect();
+    for (let i = 0; i < 2; i++) {
+      const socket = socketState.instances[i];
+      socket.emit("open");
+      socket.emit("close", 4001, Buffer.from("Invalid token"));
+      vi.advanceTimersByTime(10_000);
+    }
+    // A working tunnel that runs for a while, then drops on transport error.
+    const healthy = socketState.instances[2];
+    healthy.emit("open");
+    vi.advanceTimersByTime(30_000);
+    healthy.emit("close", 1006, Buffer.from(""));
+    client.shutdown();
+
+    expect(attemptsFrom(log)).toEqual([1, 2, 1]);
+  });
+
+  it("does not clear the backoff for a socket torn down right after the upgrade", () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const client = new ReverseConnectClient({} as never, "https://hub.example.com", "tok", 4567);
+
+    client.connect();
+    for (let i = 0; i < 2; i++) {
+      const socket = socketState.instances[i];
+      socket.emit("open");
+      // Non-auth code, but the socket never lasted — e.g. an intermediary
+      // dropping it. Treating this as healthy would recreate the 1Hz loop.
+      socket.emit("close", 1006, Buffer.from(""));
+      vi.advanceTimersByTime(10_000);
+    }
+    client.shutdown();
+
+    expect(attemptsFrom(log)).toEqual([1, 2]);
+  });
+
+  it("reports an auth rejection at error level with a recovery hint", () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = new ReverseConnectClient({} as never, "https://hub.example.com", "stale", 4567);
+
+    client.connect();
+    const socket = socketState.instances[0];
+    socket.emit("open");
+    socket.emit("close", 4001, Buffer.from("Invalid token"));
+    client.shutdown();
+
+    const message = error.mock.calls.flat().map(String).join("\n");
+    expect(message).toContain("code=4001");
+    expect(message).toMatch(/no longer valid/i);
+    expect(message).toContain("vibedeckx connect");
+  });
+});
