@@ -83,6 +83,20 @@ export async function authenticateWs(
 }
 
 /**
+ * The user id a connection is scoped to for per-process ownership, or null when
+ * the connection is trusted and must not be scoped.
+ *
+ * Only a real Clerk end user is scoped. Solo mode has a single operator *and*
+ * its process WebSocket doubles as the reverse-connect provider transport: a
+ * worker-side terminal or a front-driven executor is provider-owned and has no
+ * local `projects` row to be owned by. Scoping those to the `local` tenant fails
+ * closed, which severs the tunnel the instant it attaches.
+ */
+export function processOwnerScope(principal: WsPrincipal): string | null {
+  return principal.kind === "user" ? principal.userId : null;
+}
+
+/**
  * Resolve the owning projectId of a local executor/terminal process. Prefers the
  * live ProcessManager (the only source for terminals, which are never persisted)
  * and falls back to the persisted executor_process → executor → project chain so

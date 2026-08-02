@@ -8,7 +8,7 @@ import {
   type InputMessage,
 } from "./executor-stream-handlers.js";
 import type { AgentWsInput } from "../agent-types.js";
-import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs } from "./ws-authz.js";
+import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs, processOwnerScope } from "./ws-authz.js";
 import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
 import { ProjectChatNotFoundError } from "../project-chat-manager.js";
 import "../server-types.js";
@@ -93,8 +93,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           console.log(`[WebSocket] Auth rejected for process ${processId}`);
           return;
         }
-        // Only a validated API-key proxy is unscoped. Solo mode owns `local`.
-        const ownerUserId = principal.kind === "api_key" ? null : (principal.userId ?? "local");
+        const ownerUserId = processOwnerScope(principal);
         if (ownerUserId !== null && !(await userOwnsProcess(fastify, processId, ownerUserId))) {
           console.log(`[WebSocket] Ownership denied for process ${processId} (user=${ownerUserId})`);
           try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* socket closed */ }
@@ -169,9 +168,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const subscribeProcess = async (processId: string): Promise<void> => {
           if (subs.has(processId)) return; // 幂等：已订阅则跳过
 
-          // Per-process ownership, checked per subscription. Only a validated
-          // API-key proxy is unscoped; solo mode owns `local`.
-          const ownerUserId = principal.kind === "api_key" ? null : (principal.userId ?? "local");
+          // Per-process ownership, checked per subscription (one mux connection
+          // can subscribe to many processIds).
+          const ownerUserId = processOwnerScope(principal);
           if (ownerUserId !== null && !(await userOwnsProcess(fastify, processId, ownerUserId))) {
             console.log(`[ExecutorMux] Ownership denied for process ${processId} (user=${ownerUserId})`);
             try { socket.send(JSON.stringify({ processId, type: "error", message: "Forbidden" })); } catch { /* closed */ }

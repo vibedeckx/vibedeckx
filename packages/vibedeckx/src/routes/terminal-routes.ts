@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
+import { ensurePathProjectId } from "../utils/path-project.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
@@ -33,7 +34,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const resolvedPath = resolveWorktreePath(projectPath, branch ?? null);
 
     try {
-      const terminal = fastify.processManager.startTerminal("remote", resolvedPath);
+      // Own the terminal with a real project row. A sentinel id here resolves to
+      // no project, and per-process WS authorization then refuses the very
+      // log stream the front server opens to attach this terminal.
+      const projectId = await ensurePathProjectId(fastify, projectPath);
+      const terminal = fastify.processManager.startTerminal(projectId, resolvedPath, branch ?? null);
       return reply.code(201).send({ terminal: { id: terminal.id, name: terminal.name, cwd: resolvedPath } });
     } catch (error) {
       console.error(`[terminal-routes] Failed to start terminal in ${resolvedPath}:`, error);
