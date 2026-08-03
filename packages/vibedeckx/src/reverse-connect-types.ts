@@ -70,6 +70,10 @@ export interface PongFrame {
 export interface StatusFrame {
   type: "status";
   ready: boolean;
+  /** Worker package version. Absent on workers older than the reporting rollout. */
+  version?: string;
+  /** Worker capability keys (see reverse-connect-capabilities.ts). Absent on older workers. */
+  capabilities?: string[];
 }
 
 /**
@@ -84,6 +88,14 @@ export interface MachineAuthFrame {
   publicKey: string;
   /** base64-encoded Ed25519 signature over the challenge nonce. */
   signature: string;
+  /**
+   * Worker version/capabilities, duplicated from StatusFrame: the status frame
+   * is sent at socket open and can arrive before the hub's handshake listener
+   * is attached (the upgrade handler awaits storage calls first), so machine_auth
+   * — parsed synchronously by that listener — is the reliable carrier.
+   */
+  version?: string;
+  capabilities?: string[];
 }
 
 // ---------------------------------------------------------------------------

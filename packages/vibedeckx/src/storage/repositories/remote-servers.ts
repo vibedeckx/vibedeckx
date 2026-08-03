@@ -20,9 +20,22 @@ const mapRemoteServer = (row: Selectable<RemoteServersTable>): RemoteServer => (
   status: (row.status as RemoteServerStatus) ?? "unknown",
   last_connected_at: row.last_connected_at ?? undefined,
   cross_remote_access: (row.cross_remote_access as CrossRemoteAccess) ?? "off",
+  worker_version: row.worker_version ?? undefined,
+  worker_capabilities: parseWorkerCapabilities(row.worker_capabilities),
+  worker_version_reported_at: row.worker_version_reported_at ?? undefined,
   created_at: row.created_at,
   updated_at: row.updated_at,
 });
+
+function parseWorkerCapabilities(raw: string | null): string[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === "string") : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const mapProjectRemote = (row: Selectable<ProjectRemotesTable>): ProjectRemote => ({
   id: row.id,
@@ -171,6 +184,15 @@ export const createRemoteServerRepos = (
       const sets: Record<string, unknown> = { status, updated_at: sql`datetime('now')` };
       if (status === "online") sets.last_connected_at = sql`datetime('now')`;
       await kdb.updateTable("remote_servers").set(sets).where("id", "=", id).execute();
+    },
+
+    updateWorkerVersion: async (id, version, capabilities) => {
+      await kdb.updateTable("remote_servers").set({
+        worker_version: version,
+        worker_capabilities: JSON.stringify(capabilities),
+        worker_version_reported_at: sql`datetime('now')`,
+        updated_at: sql`datetime('now')`,
+      }).where("id", "=", id).execute();
     },
 
     generateToken: async (id, userId) => {

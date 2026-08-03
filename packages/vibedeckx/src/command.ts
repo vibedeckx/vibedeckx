@@ -22,6 +22,7 @@ import {
   type DaemonCommandResult,
 } from "./connect-daemon.js";
 import { preflightIdentityCheck } from "./connect-preflight.js";
+import { readPackageVersion } from "./utils/package-version.js";
 import open from "open";
 import { redactErrorSecret } from "./secret-redaction.js";
 
@@ -48,18 +49,6 @@ function loadTLSOptions(flags: {
   };
 }
 
-function readPackageVersion(): string {
-  try {
-    const parsed = JSON.parse(
-      fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as { version?: unknown };
-    return typeof parsed.version === "string" && parsed.version.length > 0
-      ? parsed.version
-      : "unknown";
-  } catch {
-    return "unknown";
-  }
-}
 
 const startCommand = buildCommand({
   parameters: {

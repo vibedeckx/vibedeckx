@@ -3,6 +3,21 @@ import fp from "fastify-plugin";
 import { randomBytes, createHash, verify as cryptoVerify } from "crypto";
 import "../server-types.js";
 import { createRateLimitedWarn } from "../utils/rate-limited-warn.js";
+import { MIN_WORKER_VERSION } from "../constants.js";
+import { compareVersionStrings } from "../update-check.js";
+
+interface ReportedWorkerVersion {
+  version: string;
+  capabilities: string[];
+}
+
+function extractReportedVersion(frame: { version?: unknown; capabilities?: unknown }): ReportedWorkerVersion | undefined {
+  if (typeof frame.version !== "string" || frame.version.length === 0) return undefined;
+  const capabilities = Array.isArray(frame.capabilities)
+    ? frame.capabilities.filter((c): c is string => typeof c === "string")
+    : [];
+  return { version: frame.version, capabilities };
+}
 
 // How long to wait for the remote to answer the machine-identity challenge
 // before falling back to an unauthenticated (legacy) registration.
@@ -76,6 +91,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
         const ownerId = (await fastify.storage.remoteServers.getOwnerId(serverId)) ?? "";
         const nonce = randomBytes(32);
         let settled = false;
+        // Version stashed from a status frame that arrived while this listener
+        // was up. machine_auth is the reliable carrier (the status frame can
+        // beat the listener attach above); this is belt-and-suspenders for a
+        // worker that reports on status but never completes machine auth.
+        let stashedVersion: ReportedWorkerVersion | undefined;
+
+        // Phase 1 of the compat plan: record what the worker reports, warn on
+        // old/silent workers, never reject. NULL column = never reported.
+        const recordWorkerVersion = async (reported: ReportedWorkerVersion | undefined) => {
+          if (!reported) {
+            console.log(`[ReverseConnect] Worker ${serverId} reported no version (pre-reporting release)`);
+            return;
+          }
+          await fastify.storage.remoteServers.updateWorkerVersion(serverId, reported.version, reported.capabilities);
+          const cmp = compareVersionStrings(reported.version, MIN_WORKER_VERSION);
+          if (cmp !== undefined && cmp < 0) {
+            console.warn(
+              `[ReverseConnect] Worker ${serverId} runs ${reported.version}, below MIN_WORKER_VERSION ${MIN_WORKER_VERSION} — advise upgrading`
+            );
+          }
+        };
 
         const registerUnauthenticated = async () => {
           if (settled) return;
@@ -85,6 +121,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // falls back to exact server-ID matching with no aliasing (safe).
           fastify.reverseConnectManager.registerConnection(serverId, ws);
           await fastify.storage.remoteServers.updateStatus(serverId, "online");
+          await recordWorkerVersion(stashedVersion);
         };
 
         const timer = setTimeout(() => {
@@ -99,10 +136,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // rejection from any awaited storage call below would otherwise
           // become an unhandled rejection and can kill the process.
           try {
-            let frame: { type?: string; publicKey?: string; signature?: string };
+            let frame: { type?: string; publicKey?: string; signature?: string; version?: string; capabilities?: string[] };
             try {
               frame = JSON.parse(data.toString());
             } catch {
+              return;
+            }
+            if (frame?.type === "status") {
+              stashedVersion = extractReportedVersion(frame) ?? stashedVersion;
               return;
             }
             if (frame?.type !== "machine_auth" || settled) return;
@@ -153,6 +194,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             console.log(`[ReverseConnect] Machine auth verified ${fingerprint.slice(0, 12)} for ${serverId}`);
             fastify.reverseConnectManager.registerConnection(serverId, ws, fingerprint);
             await fastify.storage.remoteServers.updateStatus(serverId, "online");
+            await recordWorkerVersion(extractReportedVersion(frame) ?? stashedVersion);
           } catch (err) {
             console.error(`[ReverseConnect] Machine challenge handling failed for ${serverId}:`, err);
             try { socket.close(4003, "Machine auth error"); } catch { /* already closed */ }

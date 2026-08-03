@@ -1,6 +1,21 @@
 # Server / Worker 版本兼容方案（同包异端部署）
 
-> 状态：**设计方案**（2026-08-03）。尚未实现。
+> 状态：**部分实现**（设计 2026-08-03，§7 前四步同日实现于 dev3）。
+> 已落地：Phase 1 版本握手 + `remote_servers` 版本列（§2）、capability 注册表 +
+> 双向对账测试（wrapper 清单两向校验 + buildTargetCall 路径收割）+ snapshot
+> （§3.1，`reverse-connect-capabilities.ts` / `.test.ts`）、路径分类脚本
+> （§3.3，`scripts/classify-diff.mjs`）、注册表驱动的跨版本 e2e（§4.2，
+> `scripts/cross-version-e2e.mjs`：56 个 capability 均有受校验的覆盖决策——
+> 36 个跨版本实测冒烟、15 个由 CI 路由测试覆盖（指针受校验）、5 个显式豁免；
+> 对 npm 0.2.0 与 0.3.2 均真实 PASS，404 按 capability `since` 逐项判定）、
+> CI（`.github/workflows/worker-compat.yml` 矩阵 {0.2.0, latest}；注册表测试
+> 随 `test.yml` 自动跑）。经验兼容下限 = **0.2.0**（0.1.x 无反向连接，连不上）。
+> 未实现：§2 Phase 2–4（上报随下一次 npm 发布生效；观察/拒连未启用）、
+> §3.2 Zod 契约、§4.3 金丝雀、§4.4 平台矩阵、UI 升级角标/版本分布页。
+>
+> 实现修正一则：status 帧在 open 时发送，可能早于 hub 握手监听器挂载而丢失，
+> 因此 version/capabilities 同时携带在 `machine_auth` 帧上（可靠载体），
+> status 帧仅作旁路暂存 —— 见 `reverse-connect-types.ts` 注释。
 > 背景：server（SaaS，持续部署）与 worker（`vibedeckx connect`，跑在**用户自己的机器上**）
 > 共用同一个 npm 包。server 版本完全受控、随时可发；worker 版本不受控、落后程度任意。
 > 本文回答两个日常问题，并给出配套的机械判断手段与测试方案：
@@ -178,7 +193,30 @@ WORKER_PID=$!
 # 6. kill $WORKER_PID $SERVER_PID；清理 mktemp 目录。绝不使用 connect stop
 ```
 
-矩阵两个点：`MIN_WORKER_VERSION` 与 `latestReleased`。
+矩阵两个点：兼容下限（当前钉在 **0.2.0**，`MIN_WORKER_VERSION` 提升时同步移动）
+与 `latestReleased`。
+
+已实现形态（`scripts/cross-version-e2e.mjs`）——**注册表驱动**，56 个 capability
+必须严格分区为三类之一，分区两向校验（新增条目未做覆盖决定 → FAIL）：
+
+- **36 个实测冒烟**：文件组、git/worktree 组、executor 组 + 日志 WS 通道、终端、
+  搜索、同步执行、browse/mkdir、断线重连，以及**完整 agent 会话 round**——靠
+  worker PATH 上注入的 stub `claude`（最小 stream-json:init→assistant→result）
+  驱动 find/create(new)/list/get/message/**会话流 WS**/paste/title/favorite/
+  restart/stop/delete + workflow 列表。
+- **15 个 COVERED_BY**：指向 CI（test.yml）实际执行的路由级测试文件
+  （switch-mode、accept-plan、model、branch、cross-remote×5、outbox、workflow
+  create/gate/cancel/reviewer-candidate、executor running）。指针受校验：文件
+  必须存在且包含标记串，指针失效 → FAIL。
+- **5 个硬豁免**（各带具体缺失夹具的理由）：workflow 单条读取、approve（skip-
+  permissions 下不产生审批）、agent-type（切 codex 会真下载二进制）、terminal
+  send（仅 LLM 工具可驱动）、browser 透传。
+
+404 策略按 **capability `since` 逐项判定**（无全局开关）：被测 worker 版本早于
+该 capability 的 `since` → 预期缺口，容忍并报告；worker 理应支持却 404 → 判为
+breaking，FAIL。`--worker-bin` 自测（当前分支即最新）404 一律 FAIL。`since`
+基线 = 0.2.0（最早能反向连接的发布版），晚引入的路由用发布版探测钉准
+（如 outbox=0.2.16）。
 
 ### 4.3 常驻金丝雀 worker（唯一的常驻资源，一个容器即可）
 
@@ -277,12 +315,11 @@ server 调用新 capability 前查对端 `capabilities`、给老 worker 写降�
 
 ## 7. 落地顺序
 
-1. **Phase 1 握手 + `remote_servers` 版本列**（§2）——趁存量 worker 少赶紧铺，
-   越晚做 unknown 窗口期越长；
-2. **capability 注册表 + 调用点对账**（§3.1）；
-3. **路径脚本**（§3.3，半小时）；
-4. **跨版本 e2e**（§4.2，把现有 e2e 习惯参数化一个版本号）;
-5. 其余（Zod 契约、金丝雀、平台矩阵、Phase 3/4）按痛感补。
+1. ~~**Phase 1 握手 + `remote_servers` 版本列**（§2）~~ ✅ 已实现；
+2. ~~**capability 注册表 + 调用点对账**（§3.1）~~ ✅ 已实现（56 条目：53 http + 2 ws + 1 passthrough）；
+3. ~~**路径脚本**（§3.3）~~ ✅ 已实现；
+4. ~~**跨版本 e2e**（§4.2）~~ ✅ 已实现（`--worker-bin` 自测 + npx 已发布版两种模式）；
+5. 其余（Zod 契约、金丝雀、平台矩阵、Phase 2–4、UI 角标/分布页）按痛感补。
 
 > 本机开发注意：开发机本身可能就是在线 worker。测试一律 `--data-dir` 一次性目录，
 > **绝不 `connect stop`**。

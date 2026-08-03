@@ -79,6 +79,15 @@ pnpm --filter vibedeckx test
 - Git worktree support: `resolveWorktreePath()` in `utils/worktree-paths.ts` resolves paths relative to project or parent directory
 - Agent CLI protocol knowledge (stream-json / Codex JSON-RPC shapes, CLI flags, binary detection) lives in `packages/vibedeckx/src/protocol/` — providers and process-manager consume it; never re-implement parsing or arg-building inline. Offline contract tests validate recorded fixtures against the zod schemas there.
 
+### Reverse-Connect Tunnel Contract (server↔worker compat)
+
+Workers run on user machines at arbitrarily old versions while the server deploys continuously, so the tunnel contract is **additive-only** (full design: `docs/server-worker-compat-design.md`):
+
+- Every server→worker call — a `proxyToRemoteAuto` route or an `openVirtualChannel` path — must have an entry in `src/reverse-connect-capabilities.ts`. `reverse-connect-capabilities.test.ts` enforces this in both directions (unregistered call site / stale entry) and snapshots the registry; a snapshot diff is a tunnel-contract change and the PR must state whether it is additive or breaking.
+- Adding routes/channels/frame fields is fine: old workers 404 or ignore them, and the **calling server code must degrade gracefully** (check `remote_servers.worker_capabilities`, tolerate 404s). Renaming, removing, or changing semantics is breaking: keep old and new side by side through a deprecation window, then bump `MIN_WORKER_VERSION` in `constants.ts`.
+- Workers report `version`/`capabilities` in both handshake frames (`status` and `machine_auth` — the latter is the reliable carrier); the hub persists them on `remote_servers`.
+- Tools: `node scripts/classify-diff.mjs` buckets a diff by server/worker impact; `node scripts/cross-version-e2e.mjs <version>` smokes the branch server against a published worker (CI: `worker-compat.yml`).
+
 ### Default Ports
 
 - Frontend dev: **3000**

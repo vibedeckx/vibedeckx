@@ -90,6 +90,17 @@ function compareSemver(a: ParsedSemver, b: ParsedSemver): number {
 }
 
 /**
+ * Compares two version strings; >0 when a is newer than b, <0 when older,
+ * 0 when equal, undefined when either doesn't parse as strict semver.
+ */
+export function compareVersionStrings(a: string, b: string): number | undefined {
+  const parsedA = parseSemver(a);
+  const parsedB = parseSemver(b);
+  if (!parsedA || !parsedB) return undefined;
+  return compareSemver(parsedA, parsedB);
+}
+
+/**
  * Tri-state comparison: "can't compare" must be distinguishable from "no
  * update". Returns "unknown" when `latest` is undefined (fetch failed) or when
  * either version doesn't parse as strict semver — e.g. the daemon state's

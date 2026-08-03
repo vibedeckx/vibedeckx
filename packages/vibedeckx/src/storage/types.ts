@@ -38,6 +38,10 @@ export interface RemoteServer {
   status: RemoteServerStatus;
   last_connected_at?: string;
   cross_remote_access: CrossRemoteAccess;
+  /** Version the worker reported at its last handshake; absent = pre-reporting worker (unknown). */
+  worker_version?: string;
+  worker_capabilities?: string[];
+  worker_version_reported_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -640,6 +644,8 @@ export interface Storage {
     update(id: string, opts: { name?: string; cross_remote_access?: CrossRemoteAccess }, userId?: string): Promise<RemoteServer | undefined>;
     /** Trusted connection-manager update, not a user-facing mutation API. */
     updateStatus(id: string, status: RemoteServerStatus): Promise<void>;
+    /** Trusted connection-manager write of the version the worker reported at handshake. */
+    updateWorkerVersion(id: string, version: string, capabilities: string[]): Promise<void>;
     /** Current connect token, minting one on first use. Idempotent — never invalidates a token in use. */
     generateToken(id: string, userId?: string): Promise<string | undefined>;
     /** Replace the connect token with a fresh one, invalidating the previous token immediately. */

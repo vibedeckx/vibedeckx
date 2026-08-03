@@ -3,6 +3,8 @@ import { generateKeyPairSync, sign as cryptoSign, createPrivateKey, createPublic
 import type { ControlFrame, HttpRequestFrame, WsOpenFrame, WsCloseFrame, PingFrame, HttpResponseFrame, PongFrame, StatusFrame, WsDataFrame, MachineChallengeFrame, MachineAuthFrame } from "./reverse-connect-types.js";
 import type { FastifyInstance } from "fastify";
 import { redactErrorSecret, redactSecretForms } from "./secret-redaction.js";
+import { readPackageVersion } from "./utils/package-version.js";
+import { WORKER_CAPABILITY_KEYS } from "./reverse-connect-capabilities.js";
 
 // Settings key under which the remote node persists its stable Ed25519 private
 // key (PKCS8 PEM). This key is the machine's cryptographic identity, recognized
@@ -84,8 +86,14 @@ export class ReverseConnectClient {
       this.openedAt = Date.now();
       this.resetNoPingTimer();
 
-      // Send status ready
-      const frame: StatusFrame = { type: "status", ready: true };
+      // Send status ready. version/capabilities also ride machine_auth (the
+      // reliable carrier — this frame can beat the hub's handshake listener).
+      const frame: StatusFrame = {
+        type: "status",
+        ready: true,
+        version: readPackageVersion(),
+        capabilities: WORKER_CAPABILITY_KEYS,
+      };
       this.ws!.send(JSON.stringify(frame));
     });
 
@@ -194,6 +202,8 @@ export class ReverseConnectClient {
         type: "machine_auth",
         publicKey: publicKeyPem,
         signature: signature.toString("base64"),
+        version: readPackageVersion(),
+        capabilities: WORKER_CAPABILITY_KEYS,
       };
       this.sendFrame(reply);
     } catch (err) {

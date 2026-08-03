@@ -1034,6 +1034,23 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     }
   }
 
+  // Migration: worker version reporting (docs/server-worker-compat-design.md §2
+  // Phase 1). Placed after every remote_servers table rebuild above — a column
+  // added before them would be silently dropped by their explicit
+  // CREATE TABLE ... INSERT INTO ... SELECT column lists. NULL = the worker has
+  // never reported a version (pre-reporting release), deliberately distinct
+  // from any real version string.
+  {
+    // Guarded per column: a crash between the ALTERs must not leave the later
+    // columns permanently skipped on the next startup.
+    const workerVersionInfo = db.prepare("PRAGMA table_info(remote_servers)").all() as { name: string }[];
+    for (const column of ["worker_version", "worker_capabilities", "worker_version_reported_at"]) {
+      if (!workerVersionInfo.some((col) => col.name === column)) {
+        db.exec(`ALTER TABLE remote_servers ADD COLUMN ${column} TEXT`);
+      }
+    }
+  }
+
   // Reset stale 'online' status for inbound remote_servers from previous server instances.
   // status='online' is only flipped to 'offline' by the WS close handler; if the host crashes
   // before the handler runs, the row stays online forever and the UI shows a green dot for an

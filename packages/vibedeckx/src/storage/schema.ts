@@ -263,6 +263,9 @@ export interface RemoteServersTable {
   last_connected_at: string | null;
   cross_remote_access: Generated<string>;
   user_id: Generated<string>;
+  worker_version: string | null;
+  worker_capabilities: string | null; // JSON: string[]
+  worker_version_reported_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

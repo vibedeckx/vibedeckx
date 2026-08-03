@@ -1,0 +1,61 @@
+name: worker-compat
+
+# Server/worker compat gates (docs/server-worker-compat-design.md):
+# - classify-diff: bucket the PR's files by server/worker impact into the job
+#   summary (fast signal; the enforcing check is the capability-registry test
+#   already run by test.yml).
+# - cross-version-e2e matrix {compat floor 0.2.0, latest published}: green
+#   means workers of those versions keep working against this server build, so
+#   the server can deploy without a coordinated npm release. 404s are judged
+#   per capability against its `since` in the registry: tolerated only when
+#   the worker predates the capability, failed when it should serve it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  classify-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify diff impact
+        run: |
+          BASE="origin/${{ github.base_ref || 'main' }}"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          node scripts/classify-diff.mjs "$BASE" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  cross-version-e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Compat floor: the oldest published worker the fleet can be running.
+          # 0.2.0 is the oldest release that speaks reverse-connect at all
+          # (0.1.x cannot connect — verified empirically); keep this pinned and
+          # move it only when MIN_WORKER_VERSION is raised via the deprecation
+          # flow in docs/server-worker-compat-design.md §2.
+          - worker: "0.2.0"
+          # Newest published worker.
+          - worker: latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:main
+      - name: Smoke branch server against worker@${{ matrix.worker }}
+        run: |
+          VER="${{ matrix.worker }}"
+          if [ "$VER" = "latest" ]; then VER="$(npm view vibedeckx version)"; fi
+          node scripts/cross-version-e2e.mjs "$VER"
