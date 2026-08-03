@@ -248,6 +248,8 @@ export interface Project {
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
 export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
+export type WorkerUpdateStatus = 'unreported' | 'behind-min' | 'behind-latest' | 'current';
+
 export interface RemoteServer {
   id: string;
   name: string;
@@ -256,6 +258,13 @@ export interface RemoteServer {
   created_at: string;
   updated_at: string;
   cross_remote_access: CrossRemoteAccess;
+  /** Version the worker reported at its last handshake; absent = pre-reporting worker. */
+  worker_version?: string;
+  worker_capabilities?: string[];
+  worker_version_reported_at?: string;
+  /** npm latest at list time (server-cached); absent when the registry check failed. */
+  latest_worker_version?: string;
+  worker_update_status?: WorkerUpdateStatus;
 }
 
 export interface ProjectRemote {

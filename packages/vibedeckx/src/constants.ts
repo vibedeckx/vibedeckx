@@ -13,3 +13,11 @@ export const DEFAULT_PORT = 5173;
  * adoption is observable. Bump when a tunnel-contract deprecation completes.
  */
 export const MIN_WORKER_VERSION = "0.0.0";
+
+/**
+ * Date the first version-reporting worker release (v0.3.3) was published to
+ * npm. Anchor for the Phase 4 deprecation window: enforcement may only start
+ * once a full window has passed since workers COULD report — before that,
+ * "unknown" is simply "hasn't had a chance to upgrade yet".
+ */
+export const WORKER_VERSION_REPORTING_SINCE = "2026-08-03";

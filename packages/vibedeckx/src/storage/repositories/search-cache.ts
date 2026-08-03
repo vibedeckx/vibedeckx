@@ -162,6 +162,26 @@ export const createSearchCacheRepos = (
       return { running: Number(row.running) };
     },
 
+    countRunningRemoteSessions: async () => {
+      // Same validity joins as remoteSessionScope (mapping + association must
+      // still exist), minus the per-project filter: this is the fleet total.
+      const row = await kdb
+        .selectFrom("session_search_cache as c")
+        .innerJoin("remote_session_mappings as mapping", (join) => join
+          .onRef("mapping.local_session_id", "=", "c.local_session_id")
+          .onRef("mapping.project_id", "=", "c.project_id")
+          .onRef("mapping.remote_server_id", "=", "c.target_id"))
+        .innerJoin("project_remotes as association", (join) => join
+          .onRef("association.project_id", "=", "c.project_id")
+          .onRef("association.remote_server_id", "=", "c.target_id"))
+        .where("c.target_id", "!=", "local")
+        .where("c.deleted_at", "is", null)
+        .where("c.status", "=", "running")
+        .select([sql<number>`count(*)`.as("n")])
+        .executeTakeFirstOrThrow();
+      return Number(row.n);
+    },
+
     updateRemoteSessionActivity: async (entry) => {
       return kdb.transaction().execute(async (trx) => {
         const authorized = await trx.selectFrom("remote_session_mappings as mapping")

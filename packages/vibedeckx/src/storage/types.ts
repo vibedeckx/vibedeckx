@@ -1023,6 +1023,8 @@ export interface Storage {
     listRemoteSessionActivityByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
     listRemoteSessionAttentionByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
     countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number }>;
+    /** Operator stats: fleet-wide count of remote sessions whose cached status is 'running' (= turns in flight a deploy would interrupt). */
+    countRunningRemoteSessions(): Promise<number>;
     /**
      * Persist one live remote-stream transition only when the exact durable
      * mapping and project↔remote association still agree. Creates the cache

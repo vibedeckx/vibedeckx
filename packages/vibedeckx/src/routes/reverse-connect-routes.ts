@@ -104,7 +104,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
             console.log(`[ReverseConnect] Worker ${serverId} reported no version (pre-reporting release)`);
             return;
           }
+          // Version-transition log: the upgrade-adoption event stream, and the
+          // "when did this worker change version" lead when one breaks after
+          // upgrading. First report logs as "unreported → x.y.z".
+          const previous = (await fastify.storage.remoteServers.getById(serverId))?.worker_version;
           await fastify.storage.remoteServers.updateWorkerVersion(serverId, reported.version, reported.capabilities);
+          if (previous !== reported.version) {
+            console.log(`[ReverseConnect] Worker ${serverId} version ${previous ?? "unreported"} → ${reported.version}`);
+          }
           const cmp = compareVersionStrings(reported.version, MIN_WORKER_VERSION);
           if (cmp !== undefined && cmp < 0) {
             console.warn(

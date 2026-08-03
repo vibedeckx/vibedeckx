@@ -10,8 +10,15 @@
 > 对 npm 0.2.0 与 0.3.2 均真实 PASS，404 按 capability `since` 逐项判定）、
 > CI（`.github/workflows/worker-compat.yml` 矩阵 {0.2.0, latest}；注册表测试
 > 随 `test.yml` 自动跑）。经验兼容下限 = **0.2.0**（0.1.x 无反向连接，连不上）。
-> 未实现：§2 Phase 2–4（上报随下一次 npm 发布生效；观察/拒连未启用）、
-> §3.2 Zod 契约、§4.3 金丝雀、§4.4 平台矩阵、UI 升级角标/版本分布页。
+> **Phase 2 已生效**（v0.3.3 于 2026-08-03 发布 npm，e2e 实测
+> `worker online (reported version: 0.3.3)`）。**Phase 3 已实现**（同日）：
+> `GET /api/remote-servers` 每行附 `worker_update_status` 四态 +
+> UI"建议升级"角标（`remote-servers-settings.tsx`）；运营端点
+> `GET /api/admin/worker-version-stats`（API-key / solo 门禁，聚合双口径版本
+> 分布、部署冲击面、失联 worker、Phase 4 退场判定，见 §2 Phase 3）；握手落库
+> 时打版本变迁日志（`unreported → 0.3.3` 式）。
+> 未实现：§2 Phase 4（拒连；`MIN_WORKER_VERSION=0.0.0` 仍是警告线）、
+> §3.2 Zod 契约、§4.3 金丝雀、§4.4 平台矩阵。
 >
 > 实现修正一则：status 帧在 open 时发送，可能早于 hub 握手监听器挂载而丢失，
 > 因此 version/capabilities 同时携带在 `machine_auth` 帧上（可靠载体），
@@ -72,15 +79,41 @@
   `remoteServerId` 注册，存这里才覆盖无 executor 的在线 worker、离线 worker 与历史值。
 - server 端定义 `MIN_WORKER_VERSION` 常量，此阶段**只作警告线**，不拒连。
 
-### Phase 2 — worker 上报（随下一个 npm 发布）
+### Phase 2 — worker 上报（已生效：v0.3.3 发布 npm，2026-08-03）
 
 - 新版 worker 在 status 帧里带上 `version`（取自 package.json）与 capability 列表。
+- 存量 fleet 仍是旧版：各 worker 升级到 ≥0.3.3 后 `worker_version` 才陆续有值，
+  在此之前保持 NULL（= unknown）。采用曲线看 Phase 3 的统计端点。
 
-### Phase 3 — 观察
+### Phase 3 — 观察（已实现 2026-08-03）
 
-- 版本分布页（基于 `remote_servers` 数据）：各版本在线/离线数量、unknown 占比。
-- unknown 或低于警告线的 worker：UI 上该 remote 显示"建议升级"角标 + 升级命令。
-  不拒绝。
+两个受众拆开：用户看**自己 worker** 的版本（本来就是他的数据，进普通 UI）；
+运营者看**全租户聚合**（绝不进用户 UI，走 API-key 信道，不新建 admin 角色）。
+
+- **用户侧**：`GET /api/remote-servers` 每行附 `worker_update_status` 四态
+  （`unreported` / `behind-min` / `behind-latest` / `current`，服务端算，npm
+  latest 内存缓存 1h/失败 5min、stale-while-revalidate 不阻塞响应）+
+  `latest_worker_version`；设置页 remote servers 表格每行显示版本 chip 与
+  "建议升级"角标（`behind-min` 红 / `behind-latest` 琥珀 / `unreported` 灰，
+  从未连接过的 server 不显示）。只提示，不拒绝。
+- **运营侧**：`GET /api/admin/worker-version-stats`——门禁 = 持有
+  `VIBEDECKX_API_KEY`（`x-vibedeckx-api-key` header，经中间件校验）或 solo
+  无认证部署；Clerk 租户一律 404。仅聚合、无 server 名/用户 ID，返回：
+  双口径版本分布（`versions_all` 含废弃死行 / `versions_connected` 供 Phase 4
+  决策用）、部署冲击面（`connected_workers`、`active_remote_sessions`、
+  `active_turns`=缓存状态 running 的远程会话数——打断进行中的 turn 才是真实
+  用户伤害）、`stale_workers_7d`（曾活跃、失联超 7 天——升级失败"daemon 没
+  回来"的兜底信号）、`phase4_ready`（unknown 占比 + 距上报发布天数 + 退场
+  verdict，条件即下方 Phase 4 的两条，算好放响应里）。
+- **版本变迁日志**：握手落库时新旧版本不同则打
+  `[ReverseConnect] Worker <id> version 0.3.1 → 0.3.3`（首报为
+  `unreported → x.y.z`）——升级采用事件流 + 升级后出问题时的时间线索。
+- **零依赖兜底**（无需任何 UI/端点，Docker 主机上直查）：
+
+  ```bash
+  sqlite3 ~/.vibedeckx/data.sqlite \
+    "SELECT COALESCE(worker_version,'unknown') v, COUNT(*) FROM remote_servers GROUP BY v"
+  ```
 
 ### Phase 4 — 执行（unknown 退场）
 
@@ -433,7 +466,11 @@ gap），AI 兜灰区，人只拍"急不急"的产品优先级。
 2. ~~**capability 注册表 + 调用点对账**（§3.1）~~ ✅ 已实现（56 条目：53 http + 2 ws + 1 passthrough）；
 3. ~~**路径脚本**（§3.3）~~ ✅ 已实现；
 4. ~~**跨版本 e2e**（§4.2）~~ ✅ 已实现（`--worker-bin` 自测 + npx 已发布版两种模式）；
-5. 其余（Zod 契约、金丝雀、平台矩阵、Phase 2–4、UI 角标/分布页）按痛感补。
+5. ~~**Phase 2 上报生效**~~ ✅ v0.3.3 发布 npm（2026-08-03），e2e 实测上报成功；
+6. ~~**Phase 3 观察**~~ ✅ 已实现（UI 角标 + `worker_update_status`、运营统计
+   端点、版本变迁日志，见 §2 Phase 3）；
+7. 其余（Zod 契约、金丝雀、平台矩阵、Phase 4 拒连）按痛感补——Phase 4 何时进
+   看 `phase4_ready.verdict`。
 
 > 本机开发注意：开发机本身可能就是在线 worker。测试一律 `--data-dir` 一次性目录，
 > **绝不 `connect stop`**。

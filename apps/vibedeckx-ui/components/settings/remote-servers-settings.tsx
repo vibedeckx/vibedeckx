@@ -265,6 +265,38 @@ export function RemoteServersSettings() {
     }
   };
 
+  const upgradeHint =
+    'Update the vibedeckx package on the worker machine, then restart `vibedeckx connect`.';
+
+  // Phase 3 upgrade nudge: advisory only, nothing is blocked. A server that
+  // has never connected has nothing to report yet — no chip, no badge.
+  const renderWorkerVersion = (server: RemoteServer) => {
+    if (!server.worker_version) {
+      if (!server.last_connected_at) return null;
+      return (
+        <div className="mt-0.5 text-[11px] text-muted-foreground" title={upgradeHint}>
+          version unknown · upgrade recommended
+        </div>
+      );
+    }
+    const badge =
+      server.worker_update_status === 'behind-min' ? (
+        <span className="text-red-500" title={upgradeHint}>
+          upgrade required
+        </span>
+      ) : server.worker_update_status === 'behind-latest' ? (
+        <span className="text-amber-500" title={upgradeHint}>
+          update available → v{server.latest_worker_version}
+        </span>
+      ) : null;
+    return (
+      <div className="mt-0.5 text-[11px]">
+        <span className="text-muted-foreground">v{server.worker_version}</span>
+        {badge && <span className="ml-1.5">{badge}</span>}
+      </div>
+    );
+  };
+
   const renderStatusDot = (server: RemoteServer) => {
     const isOnline = server.status === 'online';
     return (
@@ -355,7 +387,8 @@ export function RemoteServersSettings() {
                   </div>
                 </TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
-                  {server.status === 'online' ? 'Connected' : 'Waiting for connection...'}
+                  <div>{server.status === 'online' ? 'Connected' : 'Waiting for connection...'}</div>
+                  {renderWorkerVersion(server)}
                 </TableCell>
                 <TableCell>
                   <Select

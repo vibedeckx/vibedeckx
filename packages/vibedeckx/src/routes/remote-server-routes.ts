@@ -3,11 +3,64 @@ import fp from "fastify-plugin";
 import type { RemoteServer, CrossRemoteAccess } from "../storage/types.js";
 import { proxyToRemoteAuto, proxyStatus } from "../utils/remote-proxy.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
+import { fetchLatestPublishedVersion, compareVersionStrings } from "../update-check.js";
+import { MIN_WORKER_VERSION } from "../constants.js";
 import "../server-types.js";
 
 function sanitizeServer(server: RemoteServer) {
   const { connect_token: _t, ...safe } = server;
   return safe;
+}
+
+export type WorkerUpdateStatus = "unreported" | "behind-min" | "behind-latest" | "current";
+
+// npm-latest cache: successes are good for an hour, failures retried after
+// five minutes so a registry blip doesn't hide the upgrade badge all day.
+let npmLatestCache: { value: string | undefined; fetchedAt: number } | undefined;
+let npmLatestRefreshInFlight = false;
+
+/**
+ * Non-blocking stale-while-revalidate: the list response must never wait on
+ * the npm registry. An expired (or absent) cache serves what it has and kicks
+ * off a background refresh — the settings UI polls every 15s, so the badge
+ * appears one poll later.
+ */
+function getLatestWorkerVersion(): string | undefined {
+  const ttlMs = npmLatestCache?.value !== undefined ? 60 * 60 * 1000 : 5 * 60 * 1000;
+  const fresh = npmLatestCache !== undefined && Date.now() - npmLatestCache.fetchedAt < ttlMs;
+  if (!fresh && !npmLatestRefreshInFlight) {
+    npmLatestRefreshInFlight = true;
+    void fetchLatestPublishedVersion()
+      .then((value) => {
+        npmLatestCache = { value, fetchedAt: Date.now() };
+      })
+      .finally(() => {
+        npmLatestRefreshInFlight = false;
+      });
+  }
+  return npmLatestCache?.value;
+}
+
+/** Test seam: preseed the npm-latest cache so route tests stay offline. */
+export function primeNpmLatestCacheForTests(value: string | undefined): void {
+  npmLatestCache = { value, fetchedAt: Date.now() };
+}
+
+/**
+ * Phase 3 upgrade nudge (docs/server-worker-compat-design.md §2): advisory
+ * only — nothing is rejected here. "current" also covers "can't judge"
+ * (npm unreachable or unparseable version): no badge is better than a wrong one.
+ */
+export function workerUpdateStatus(
+  workerVersion: string | undefined,
+  latest: string | undefined,
+): WorkerUpdateStatus {
+  if (!workerVersion) return "unreported";
+  const vsMin = compareVersionStrings(workerVersion, MIN_WORKER_VERSION);
+  if (vsMin !== undefined && vsMin < 0) return "behind-min";
+  const vsLatest = latest === undefined ? undefined : compareVersionStrings(workerVersion, latest);
+  if (vsLatest !== undefined && vsLatest < 0) return "behind-latest";
+  return "current";
 }
 
 const CROSS_REMOTE_ACCESS_VALUES: readonly CrossRemoteAccess[] = ["off", "read", "exec"];
@@ -16,12 +69,18 @@ const isCrossRemoteAccess = (value: unknown): value is CrossRemoteAccess =>
   typeof value === "string" && (CROSS_REMOTE_ACCESS_VALUES as readonly string[]).includes(value);
 
 const routes: FastifyPluginAsync = async (fastify) => {
-  // GET /api/remote-servers — list all (api_key sanitized)
+  // GET /api/remote-servers — list all (api_key sanitized), each annotated
+  // with the worker's upgrade status against MIN_WORKER_VERSION / npm latest.
   fastify.get("/api/remote-servers", async (request, reply) => {
     const userId = requireAuth(request, reply);
     if (userId === null) return;
     const servers = await fastify.storage.remoteServers.getAll(userId);
-    return reply.send(servers.map(sanitizeServer));
+    const latest = getLatestWorkerVersion();
+    return reply.send(servers.map((server) => ({
+      ...sanitizeServer(server),
+      latest_worker_version: latest,
+      worker_update_status: workerUpdateStatus(server.worker_version, latest),
+    })));
   });
 
   // POST /api/remote-servers — create (all servers connect inbound via reverse-connect)

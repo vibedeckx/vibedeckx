@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
-import remoteServerRoutes from "./remote-server-routes.js";
+import remoteServerRoutes, { primeNpmLatestCacheForTests } from "./remote-server-routes.js";
 
 describe("PUT /api/remote-servers/:id cross-remote access", () => {
   let app: FastifyInstance;
@@ -180,5 +180,49 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
     const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/test` });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ success: false, status: "offline" });
+  });
+});
+
+describe("GET /api/remote-servers worker upgrade annotation", () => {
+  let app: FastifyInstance;
+  let storage: Storage;
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "vdx-rsr-"));
+    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    app = Fastify();
+    app.decorate("storage", storage);
+    app.decorate("reverseConnectManager", { isConnected: () => false } as never);
+    await app.register(remoteServerRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    await storage.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("annotates each server with its update status against the cached npm latest", async () => {
+    primeNpmLatestCacheForTests("0.3.3");
+    const behind = await storage.remoteServers.create({ name: "behind" });
+    const current = await storage.remoteServers.create({ name: "current" });
+    await storage.remoteServers.create({ name: "silent" });
+    await storage.remoteServers.updateWorkerVersion(behind.id, "0.3.1", []);
+    await storage.remoteServers.updateWorkerVersion(current.id, "0.3.3", ["http:GET /x"]);
+
+    const res = await app.inject({ method: "GET", url: "/api/remote-servers" });
+    expect(res.statusCode).toBe(200);
+    const byName = Object.fromEntries(
+      (res.json() as Array<{ name: string; worker_version?: string; worker_update_status: string; latest_worker_version?: string; connect_token?: string }>)
+        .map((s) => [s.name, s]),
+    );
+    expect(byName.behind.worker_update_status).toBe("behind-latest");
+    expect(byName.behind.worker_version).toBe("0.3.1");
+    expect(byName.behind.latest_worker_version).toBe("0.3.3");
+    expect(byName.current.worker_update_status).toBe("current");
+    expect(byName.silent.worker_update_status).toBe("unreported");
+    expect(byName.silent.connect_token).toBeUndefined();
   });
 });
