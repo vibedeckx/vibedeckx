@@ -18,8 +18,197 @@ vi.mock("./utils/remote-proxy.js", () => ({
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
 import {
   connectPersistentRemoteWs, createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction,
+  entryPatchFrames, isEntryPatchFrame,
   type RemoteAgentSessionDeps,
 } from "./remote-agent-sessions.js";
+
+const entryPatch = (index: number, text: string) => JSON.stringify({
+  JsonPatch: [{
+    op: "add",
+    path: `/entries/${index}`,
+    value: { type: "ENTRY", content: { type: "assistant", content: text, timestamp: 1 } },
+  }],
+});
+const statusPatch = (content: string) => JSON.stringify({
+  JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content } }],
+});
+
+describe("replay-sequence classification", () => {
+  it("counts entry patches and nothing else", () => {
+    // The exact mix a real cache holds after one completed turn.
+    const cached = [
+      entryPatch(0, "a"),
+      statusPatch("running"),
+      entryPatch(1, "b"),
+      JSON.stringify({ taskCompleted: { summaryText: "done" } }),
+      statusPatch("stopped"),
+    ];
+    expect(entryPatchFrames(cached).length).toBe(2);
+  });
+
+  it("excludes the CLEAR_ALL marker, which resets the sequence rather than extending it", () => {
+    const clearAll = JSON.stringify({
+      JsonPatch: [{
+        op: "replace",
+        path: "/entries",
+        value: { type: "ENTRY", content: { type: "system", content: "__CLEAR_ALL__", timestamp: 1 } },
+      }],
+    });
+    expect(isEntryPatchFrame(JSON.parse(clearAll))).toBe(false);
+    expect(entryPatchFrames([clearAll]).length).toBe(0);
+  });
+
+  it("ignores non-patch frames and unparseable input", () => {
+    expect(isEntryPatchFrame(undefined)).toBe(false);
+    expect(isEntryPatchFrame({ taskCompleted: {} })).toBe(false);
+    expect(isEntryPatchFrame({ JsonPatch: "not-an-array" })).toBe(false);
+    expect(entryPatchFrames(["}{"]).length).toBe(0);
+  });
+});
+
+describe("reconnect reconciliation", () => {
+  const sessionId = "remote-server-1-project-1-worker-session";
+  const remoteInfo = { remoteServerId: "server-1", remoteSessionId: "worker-session", branch: "dev" };
+
+  /** Drive a reconnect against a pre-seeded cache and capture what subscribers get. */
+  const reconnectWith = (cached: Array<[string, boolean]>, replay: string[]) => {
+    const cache = new RemotePatchCache();
+    for (const [raw, isPatch] of cached) cache.appendMessage(sessionId, raw, isPatch);
+
+    const received: string[] = [];
+    cache.addSubscriber(sessionId, { send: (raw: string) => received.push(raw) } as never);
+
+    let adapter: VirtualWsAdapter | undefined;
+    const reverse = {
+      isConnected: () => true,
+      setChannelAdapter: (_s: string, _c: string, value: VirtualWsAdapter) => { adapter = value; },
+      openVirtualChannel: vi.fn(),
+      sendChannelData: vi.fn(),
+      closeChannel: vi.fn(),
+    };
+
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, reverse as never);
+    for (const frame of replay) adapter!.deliverMessage(frame);
+    adapter!.deliverMessage(JSON.stringify({ Ready: true }));
+
+    return { cache, received, entriesIn: (frames: string[]) => frames
+      .map((f) => JSON.parse(f) as { JsonPatch?: Array<{ path: string }> })
+      .flatMap((m) => m.JsonPatch?.map((op) => op.path) ?? [])
+      .filter((p) => p.startsWith("/entries/")) };
+  };
+
+  it("delivers every entry the worker gained during the disconnect", () => {
+    // Cache holds 2 entry patches but 5 raw messages: the status patches and
+    // taskCompleted that a completed turn leaves behind. Comparing raw counts
+    // treated those 3 as already-seen entries and sliced them off the delta,
+    // permanently losing entries 2-4 from both the stream and the cache.
+    const replay = [0, 1, 2, 3, 4, 5, 6].map((i) => entryPatch(i, `e${i}`));
+    // Verbatim copies of what the worker already sent — a real cache holds the
+    // exact frames, interleaved with the status/taskCompleted traffic.
+    const cached: Array<[string, boolean]> = [
+      [replay[0], true],
+      [statusPatch("running"), true],
+      [replay[1], true],
+      [JSON.stringify({ taskCompleted: { summaryText: "done" } }), false],
+      [statusPatch("stopped"), true],
+    ];
+
+    const { cache, received, entriesIn } = reconnectWith(cached, replay);
+
+    expect(entriesIn(received)).toEqual([
+      "/entries/2", "/entries/3", "/entries/4", "/entries/5", "/entries/6",
+    ]);
+    // Repaired in the cache too — otherwise every later replay stays short.
+    expect(entryPatchFrames(cache.get(sessionId)!.messages).length).toBe(7);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  it("sends nothing when the cache already matches the worker", () => {
+    const replay = [0, 1].map((i) => entryPatch(i, `e${i}`));
+    const cached: Array<[string, boolean]> = [
+      [replay[0], true],
+      [statusPatch("running"), true],
+      [replay[1], true],
+    ];
+
+    const { cache, received, entriesIn } = reconnectWith(cached, replay);
+
+    expect(entriesIn(received)).toEqual([]);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  it("clears and replaces when the worker has fewer entries than we cached", () => {
+    // Session was restarted remotely: our history no longer exists upstream.
+    const cached: Array<[string, boolean]> = [0, 1, 2, 3].map((i) => [entryPatch(i, `e${i}`), true]);
+    const replay = [entryPatch(0, "fresh")];
+
+    const { cache, received, entriesIn } = reconnectWith(cached, replay);
+
+    expect(received.some((r) => r.includes("__CLEAR_ALL__"))).toBe(true);
+    expect(entriesIn(received)).toEqual(["/entries/0"]);
+    expect(entryPatchFrames(cache.get(sessionId)!.messages).length).toBe(1);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  // restartSession/switchAgentType wipe store.patches AND reset the index
+  // provider, so a session restarted during the disconnect replays a brand-new
+  // sequence that also starts at /entries/0. Neither length nor index tells it
+  // apart from the old sequence having grown.
+  it("replaces rather than deltas when a reset sequence has grown past the cached one", () => {
+    const cached: Array<[string, boolean]> = [0, 1, 2].map((i) => [entryPatch(i, `old${i}`), true]);
+    const replay = [0, 1, 2, 3, 4].map((i) => entryPatch(i, `new${i}`));
+
+    const { cache, received, entriesIn } = reconnectWith(cached, replay);
+
+    // A delta would have kept old0..old2 and appended new3, new4 — a cache that
+    // is half one conversation and half another, forever.
+    expect(received.some((r) => r.includes("__CLEAR_ALL__"))).toBe(true);
+    expect(entriesIn(received)).toEqual([
+      "/entries/0", "/entries/1", "/entries/2", "/entries/3", "/entries/4",
+    ]);
+    const repaired = entryPatchFrames(cache.get(sessionId)!.messages);
+    expect(repaired).toEqual(replay);
+    expect(repaired.some((f) => f.includes("old"))).toBe(false);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  it("replaces when a reset sequence has the same length as the cached one", () => {
+    const cached: Array<[string, boolean]> = [0, 1, 2].map((i) => [entryPatch(i, `old${i}`), true]);
+    const replay = [0, 1, 2].map((i) => entryPatch(i, `new${i}`));
+
+    const { cache, received, entriesIn } = reconnectWith(cached, replay);
+
+    // Equal counts previously read as "cache is current" and sent nothing,
+    // leaving the window showing a conversation the worker no longer has.
+    expect(received.some((r) => r.includes("__CLEAR_ALL__"))).toBe(true);
+    expect(entriesIn(received)).toEqual(["/entries/0", "/entries/1", "/entries/2"]);
+    expect(entryPatchFrames(cache.get(sessionId)!.messages)).toEqual(replay);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  it("forwards a taskCompleted that races the reconnect instead of folding it into the sequence", () => {
+    const cached: Array<[string, boolean]> = [[entryPatch(0, "a"), true]];
+    const replay = [
+      entryPatch(0, "a"),
+      entryPatch(1, "b"),
+      JSON.stringify({ taskCompleted: { summaryText: "raced" } }),
+    ];
+
+    const { cache, received, entriesIn } = reconnectWith(cached, replay);
+
+    // The taskCompleted must not consume a slot in the sequence comparison,
+    // which would have hidden entry 1.
+    expect(entriesIn(received)).toEqual(["/entries/1"]);
+    expect(received.some((r) => r.includes("raced"))).toBe(true);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+});
 
 describe("createRemoteAgentSession", () => {
   let dir: string;

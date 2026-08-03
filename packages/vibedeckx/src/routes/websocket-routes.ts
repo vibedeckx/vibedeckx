@@ -10,6 +10,7 @@ import {
 import type { AgentWsInput } from "../agent-types.js";
 import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs, processOwnerScope } from "./ws-authz.js";
 import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
+import { attachWsHeartbeat } from "../utils/ws-heartbeat.js";
 import { ProjectChatNotFoundError } from "../project-chat-manager.js";
 import "../server-types.js";
 
@@ -69,10 +70,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
+        const stopHeartbeat = attachWsHeartbeat(socket, {
+          label: `ProjectChatWS thread=${req.params.threadId}`,
+        });
+
         let cleaned = false;
         const cleanup = () => {
           if (cleaned) return;
           cleaned = true;
+          stopHeartbeat();
           unsubscribe();
         };
         socket.on("close", cleanup);
@@ -102,14 +108,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         console.log(`[WebSocket] Client connected for process ${processId}`);
 
-        // Ping/pong keepalive to prevent idle disconnections (code 1005).
-        // Terminals sit quiet on hidden tabs; without this the idle socket is
-        // dropped by the browser/proxy and input silently stops working.
-        const pingInterval = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.ping();
-          }
-        }, 30000); // Ping every 30 seconds
+        // Keeps idle terminals from being reaped by the browser/proxy (code
+        // 1005) and reaps the socket if the peer stops answering.
+        const stopHeartbeat = attachWsHeartbeat(socket, {
+          label: `ExecutorWS process=${processId}`,
+        });
 
         // 旧端点：send 不包 processId；onTerminal 关闭 socket（保持单进程单连接语义）
         const send = (msg: StreamMessage) => {
@@ -134,7 +137,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         socket.on("close", () => {
           console.log(`[WebSocket] Client disconnected from process ${processId}`);
-          clearInterval(pingInterval);
+          stopHeartbeat();
           handle.cleanup();
         });
       }
@@ -154,13 +157,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
         console.log(`[ExecutorMux] Client connected`);
 
-        // Ping/pong keepalive to prevent idle disconnections (code 1005),
-        // same as the single-process endpoint above.
-        const pingInterval = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.ping();
-          }
-        }, 30000); // Ping every 30 seconds
+        // Same liveness contract as the single-process endpoint above.
+        const stopHeartbeat = attachWsHeartbeat(socket, { label: "ExecutorMux" });
 
         const subs = new Map<string, () => void>(); // processId → cleanup
         const handleInputMap = new Map<string, (msg: InputMessage) => void>();
@@ -230,7 +228,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         socket.on("close", () => {
           console.log(`[ExecutorMux] Client disconnected; cleaning ${subs.size} subscriptions`);
-          clearInterval(pingInterval);
+          stopHeartbeat();
           for (const cleanup of subs.values()) cleanup();
           subs.clear();
           handleInputMap.clear();
@@ -283,17 +281,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         console.log(`[AgentWS] Client connected for session ${sessionId}`);
 
-        // Ping/pong keepalive to prevent idle disconnections (code 1005)
-        const pingInterval = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.ping();
-          }
-        }, 30000); // Ping every 30 seconds
+        // Liveness, not just anti-idle: a suspended tab leaves this socket OPEN
+        // on our side, so without pong verification every patch broadcast while
+        // it is dead is silently discarded and the client never learns it needs
+        // to reconnect and replay.
+        // The only endpoint with `keepalive`: its client (use-agent-session)
+        // runs a silence watchdog and needs an observable frame to reset it.
+        const stopHeartbeat = attachWsHeartbeat(socket, {
+          label: `AgentWS session=${sessionId}`,
+          keepalive: true,
+        });
 
         if (sessionId.startsWith("remote-")) {
           const remoteInfo = fastify.remoteSessionMap.get(sessionId);
           if (!remoteInfo) {
             console.log(`[AgentWS] Remote session ${sessionId} not found in map`);
+            stopHeartbeat();
             socket.send(JSON.stringify({ type: "error", message: "Remote session not found" }));
             socket.close();
             return;
@@ -316,7 +319,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               try { socket.send(JSON.stringify({ finished: true })); } catch { /* noop */ }
               cache.addSubscriber(sessionId, socket);
               socket.on("close", () => {
-                clearInterval(pingInterval);
+                stopHeartbeat();
                 cache.removeSubscriber(sessionId, socket);
               });
               return;
@@ -355,7 +358,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           socket.on("close", () => {
             console.log(`[AgentWS] Client disconnected from remote session ${sessionId}`);
-            clearInterval(pingInterval);
+            stopHeartbeat();
             cache.removeSubscriber(sessionId, socket);
             // Do NOT close persistent remote WS
           });
@@ -368,7 +371,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         if (!unsubscribe) {
           console.log(`[AgentWS] Session ${sessionId} not found`);
-          clearInterval(pingInterval);
+          stopHeartbeat();
           socket.send(JSON.stringify({ error: "Session not found" }));
           socket.close();
           return;
@@ -389,7 +392,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         socket.on("close", () => {
           console.log(`[AgentWS] Client disconnected from session ${sessionId}`);
-          clearInterval(pingInterval);
+          stopHeartbeat();
           unsubscribe?.();
         });
       }
@@ -442,18 +445,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         console.log(`[ChatWS] Client connected for session ${sessionId}`);
 
-        // Ping/pong keepalive
-        const pingInterval = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.ping();
-          }
-        }, 30000);
+        const stopHeartbeat = attachWsHeartbeat(socket, { label: `ChatWS session=${sessionId}` });
 
         const unsubscribe = fastify.chatSessionManager.subscribe(sessionId, socket);
 
         if (!unsubscribe) {
           console.log(`[ChatWS] Session ${sessionId} not found`);
-          clearInterval(pingInterval);
+          stopHeartbeat();
           socket.send(JSON.stringify({ error: "Session not found" }));
           socket.close();
           return;
@@ -476,7 +474,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         socket.on("close", () => {
           console.log(`[ChatWS] Client disconnected from session ${sessionId}`);
-          clearInterval(pingInterval);
+          stopHeartbeat();
           unsubscribe?.();
         });
       }

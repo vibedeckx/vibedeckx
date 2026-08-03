@@ -166,6 +166,10 @@ export function attachRemoteProcessStream(
         let parsed: StreamMessage | null = null;
         try { parsed = JSON.parse(raw) as StreamMessage; } catch { /* non-JSON, ignore */ }
         if (!parsed) return;
+        // Worker liveness frame — proves the channel is alive but carries no
+        // stream content. The browser-facing socket has its own heartbeat, so
+        // this one stops here rather than reaching terminal clients.
+        if ("keepalive" in parsed) return;
         send(parsed);
 
         if (parsed.type === "finished" || parsed.type === "error") terminalSignalSent = true;

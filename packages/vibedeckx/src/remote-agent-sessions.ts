@@ -214,6 +214,61 @@ export function tryParseWsMessage(raw: string): Record<string, unknown> | undefi
 }
 
 /**
+ * Whether a frame belongs to the worker's replay sequence.
+ *
+ * That sequence is the worker's `store.patches` — append-only, prefix-stable,
+ * and containing *only* patches targeting `/entries/<i>`. Status patches are
+ * broadcast live but never recorded there, and `taskCompleted`/`error` are not
+ * patches at all; both nonetheless land in the front's message cache. Counting
+ * raw cache messages (or even all JsonPatch frames) therefore overstates how
+ * much of the sequence we hold, and reconciliation then slices that many frames
+ * off the delta — silently dropping real entries. Reconciliation must compare
+ * like with like, which is what this predicate defines.
+ *
+ * `/entries` with no index is the CLEAR_ALL marker, deliberately excluded: it
+ * resets the sequence rather than extending it.
+ */
+export function isEntryPatchFrame(parsed: Record<string, unknown> | undefined): boolean {
+  if (!parsed || !("JsonPatch" in parsed)) return false;
+  const ops = parsed.JsonPatch;
+  if (!Array.isArray(ops)) return false;
+  return ops.some((op: { path?: unknown }) =>
+    typeof op?.path === "string" && op.path.startsWith("/entries/"));
+}
+
+/** The entry patches in `messages`, in order — our copy of the replay sequence. */
+export function entryPatchFrames(messages: readonly string[]): string[] {
+  const frames: string[] = [];
+  for (const raw of messages) {
+    if (isEntryPatchFrame(tryParseWsMessage(raw))) frames.push(raw);
+  }
+  return frames;
+}
+
+/**
+ * Whether `cached` is a genuine prefix of `replay`, compared frame by frame.
+ *
+ * Lengths alone cannot answer this. `restartSession`/`switchAgentType` wipe
+ * `store.patches` AND reset the index provider, so a session reset during a
+ * disconnect produces a *new* sequence that also starts at `/entries/0`. To a
+ * length or index check that is indistinguishable from the old sequence having
+ * grown — and reconciliation would then skip the new sequence's first N frames
+ * as "already held", leaving the cache a permanent splice of two conversations.
+ *
+ * Frames are the worker's own serialization, cached verbatim and re-sent
+ * verbatim on replay, so equality is exact. A false mismatch (were the worker
+ * ever to re-serialize differently) costs one full re-render, while a false
+ * match corrupts history — so this errs toward replacing.
+ */
+function isSequencePrefix(cached: readonly string[], replay: readonly string[]): boolean {
+  if (cached.length > replay.length) return false;
+  for (let i = 0; i < cached.length; i++) {
+    if (cached[i] !== replay[i]) return false;
+  }
+  return true;
+}
+
+/**
  * Persist the activity carried by one worker stream frame. The repository
  * validates the exact project, remote target, and durable session mapping, so
  * a malformed synthetic local id cannot move another project's cache row.
@@ -312,6 +367,11 @@ export function connectPersistentRemoteWs(
     const raw = data.toString();
     const parsed = tryParseWsMessage(raw);
     if (!parsed) return;
+
+    // The worker's liveness frame. Proves the tunnel channel is alive; carries
+    // no conversation state, so it must not be cached, forwarded, or logged
+    // (it arrives every 30s on every open stream).
+    if ("keepalive" in parsed) return;
 
     // DEBUG: trace every message arriving from remote, with status-patch detail
     const kind = "JsonPatch" in parsed ? "JsonPatch"
@@ -485,7 +545,9 @@ export function connectPersistentRemoteWs(
     // First connection ever — stream directly in live mode
     remoteWs.on("message", handleLiveMessage);
   } else {
-    // Has cached data but persistent WS died — need sync first
+    // Has cached data but persistent WS died — need sync first.
+    // `replayBuffer` holds ONLY entry-patch frames: the worker replays
+    // `store.patches`, which is exactly that sequence (see entryPatchCount).
     const replayBuffer: string[] = [];
     let syncing = true;
 
@@ -503,26 +565,22 @@ export function connectPersistentRemoteWs(
         // Remote finished replay — reconcile
         syncing = false;
         const currentEntry = cache.get(sessionId)!;
-        const cachedMsgCount = currentEntry.messages.length;
+        const cachedSeq = entryPatchFrames(currentEntry.messages);
+        const extendsCache = isSequencePrefix(cachedSeq, replayBuffer);
 
-        if (replayBuffer.length > cachedMsgCount) {
+        if (extendsCache && replayBuffer.length > cachedSeq.length) {
           // Remote has newer data — send delta + update cache
-          const delta = replayBuffer.slice(cachedMsgCount);
-          console.log(`[AgentWS] Sync delta: ${delta.length} new msgs for ${sessionId}`);
+          const delta = replayBuffer.slice(cachedSeq.length);
+          console.log(`[AgentWS] Sync delta: ${delta.length} new entry patches for ${sessionId} (remote=${replayBuffer.length}, cached=${cachedSeq.length})`);
           for (const msg of delta) {
-            const p = tryParseWsMessage(msg);
-            cache.appendMessage(sessionId, msg, !!(p && "JsonPatch" in p));
+            cache.appendMessage(sessionId, msg, true);
             cache.broadcast(sessionId, msg);
           }
-        } else if (replayBuffer.length < cachedMsgCount) {
-          // Cache is stale (session was restarted remotely) — full replace
-          console.log(`[AgentWS] Sync stale cache for ${sessionId}: remote=${replayBuffer.length}, cached=${cachedMsgCount}`);
-          let newPatchCount = 0;
-          for (const msg of replayBuffer) {
-            const p = tryParseWsMessage(msg);
-            if (p && "JsonPatch" in p) newPatchCount++;
-          }
-          cache.replaceAll(sessionId, [...replayBuffer], newPatchCount);
+        } else if (!extendsCache) {
+          // Cache no longer matches the worker — it restarted the session, or
+          // truncated it. Either way our copy is unusable: replace it whole.
+          console.log(`[AgentWS] Sync replace for ${sessionId}: remote=${replayBuffer.length}, cached=${cachedSeq.length} (sequence diverged or shrank)`);
+          cache.replaceAll(sessionId, [...replayBuffer], replayBuffer.length);
           // Tell frontends to clear and re-render
           const clearPatch = {
             JsonPatch: [{
@@ -537,7 +595,7 @@ export function connectPersistentRemoteWs(
           }
           cache.broadcast(sessionId, JSON.stringify({ Ready: true }));
         }
-        // else equal — cache is current, nothing to send
+        // else the cache is exactly the worker's sequence — nothing to send
 
         // NOTE: a reviewer that completed during the disconnect needs no
         // patch-scanning here any more. Its milestone is durable in the worker's
@@ -550,13 +608,21 @@ export function connectPersistentRemoteWs(
         return;
       }
 
-      // Buffer history messages during sync
-      if ("JsonPatch" in parsed || "taskCompleted" in parsed || "error" in parsed) {
+      // Buffer the replay sequence itself.
+      if (isEntryPatchFrame(parsed)) {
         replayBuffer.push(raw);
+        return;
       }
       if ("finished" in parsed) {
         cache.setFinished(sessionId);
+        return;
       }
+      // Anything else arriving before Ready is not part of the replay prefix
+      // (the worker sends only entry patches ahead of it), so it is live
+      // traffic that raced the reconnect — a `taskCompleted` for a turn that
+      // ended just now, a `/status` flip, an `error`. Forwarding it keeps it
+      // out of the sequence comparison without dropping it.
+      handleLiveMessage(data);
     });
   }
 

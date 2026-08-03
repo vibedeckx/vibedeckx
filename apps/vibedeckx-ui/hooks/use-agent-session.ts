@@ -76,7 +76,10 @@ type AgentWsMessage =
   | { processAlive: { alive: boolean } }
   | { remoteStatus: RemoteConnectionStatus; attempt?: number }
   | { titleUpdated: { title: string } }
-  | { workflowRunUpdated: WorkflowRun };
+  | { workflowRunUpdated: WorkflowRun }
+  // Server liveness frame, every 30s. Carries no state — its only job is to
+  // give the silence watchdog something to observe on an idle session.
+  | { keepalive: number };
 
 // Container for patch target
 interface PatchContainer {
@@ -404,6 +407,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const stabilityTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const shortLivedConnectionsRef = useRef(0);
   const isReplayingRef = useRef(false); // True during history replay (before Ready signal)
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null); // Zombie-socket watchdog (see SILENCE_TIMEOUT_MS)
   const sessionGenerationRef = useRef(0); // Incremented on branch/project change to discard stale API responses
   const lastStartFailedRef = useRef(false); // Prevents auto-restart loop after session creation failure
   const startingRef = useRef(false); // Reentrancy guard for startSession
@@ -443,6 +447,37 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const MAX_RECONNECT_DELAY_MS = 30000;   // Maximum reconnect delay (30s)
   const MAX_RECONNECT_ATTEMPTS = 10;      // Stop trying after this many attempts
   const MAX_SHORT_LIVED_CONNECTIONS = 3;  // After 3 short connections, assume session is invalid
+
+  // Zombie-socket watchdog. When the device sleeps or the network switches, the
+  // TCP connection dies without a close handshake: readyState stays OPEN, no
+  // `onclose` fires, and no reconnect is ever scheduled — so every patch the
+  // server broadcasts from then on is lost and the conversation freezes
+  // mid-turn while the sidebar (fed by SSE) keeps updating. The server sends a
+  // `keepalive` frame every 30s, so three missed intervals means the socket is
+  // gone; close it ourselves to fall into the normal reconnect + replay path.
+  // Browsers never expose pong events to JS, which is why this watches for
+  // application-level frames rather than the protocol-level heartbeat.
+  const SILENCE_TIMEOUT_MS = 95000;
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  /** Restart the silence countdown for `ws`; called on every inbound frame. */
+  const armSilenceTimer = useCallback((ws: WebSocket) => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(() => {
+      silenceTimerRef.current = null;
+      if (ws.readyState !== WebSocket.OPEN) return;
+      console.warn(`[AgentSession] No frames for ${SILENCE_TIMEOUT_MS}ms — assuming dead socket, forcing reconnect`);
+      // Not 1000: that code is reserved for intentional closes, which onclose
+      // treats as "do not reconnect".
+      try { ws.close(4000, "silence watchdog"); } catch { /* already gone */ }
+    }, SILENCE_TIMEOUT_MS);
+  }, []);
 
   // Calculate reconnect delay with jitter
   const getReconnectDelay = (attempt: number): number => {
@@ -530,6 +565,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
       // Track connection start time
       connectionStartTimeRef.current = Date.now();
+      armSilenceTimer(ws);
 
       // Only reset backoff counter after connection has been stable
       if (stabilityTimeoutRef.current) {
@@ -543,8 +579,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     ws.onmessage = (event) => {
+      // Any frame proves the socket is alive, whatever it turns out to be.
+      armSilenceTimer(ws);
       try {
         const msg = JSON.parse(event.data) as AgentWsMessage;
+
+        // Liveness-only frame — already accounted for above.
+        if ("keepalive" in msg) return;
 
         // Handle JsonPatch messages
         if ("JsonPatch" in msg) {
@@ -652,6 +693,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     ws.onclose = (event) => {
       console.log("[AgentSession] WebSocket disconnected", event.code, event.reason);
       setIsConnected(false);
+      clearSilenceTimer();
 
       // Clear stability timeout if connection closed before stability threshold
       if (stabilityTimeoutRef.current) {
@@ -723,7 +765,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     ws.onerror = (error) => {
       console.error("[AgentSession] WebSocket error:", error);
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, armSilenceTimer, clearSilenceTimer]);
 
   // Keep the ref pointed at the latest openSocket so connectWebSocket (stable
   // deps) reaches the current closure after refreshing the token.
@@ -1272,12 +1314,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       if (stabilityTimeoutRef.current) {
         clearTimeout(stabilityTimeoutRef.current);
       }
+      clearSilenceTimer();
       // Invalidate in-flight creates and answer any open eviction dialog with
       // "No" so a suspended ensureSession caller doesn't hang forever.
       sessionGenerationRef.current += 1;
       cancelResidentLimitPrompt();
     };
-  }, [cancelResidentLimitPrompt]);
+  }, [cancelResidentLimitPrompt, clearSilenceTimer]);
 
   // Reset session when projectId or branch changes
   useEffect(() => {
@@ -1296,6 +1339,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       clearTimeout(stabilityTimeoutRef.current);
       stabilityTimeoutRef.current = null;
     }
+    clearSilenceTimer();
 
     // Increment generation to invalidate any in-flight startSession /
     // ensureSession API calls
@@ -1345,7 +1389,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Agent type changes are handled by restartSession() which keeps the WebSocket
     // connected so it can receive the clearAll patch and new messages from the backend.
     // Including agentType here would close the WebSocket and race with restartSession.
-  }, [projectId, branch, agentMode, explicitSessionId, cancelResidentLimitPrompt]);
+  }, [projectId, branch, agentMode, explicitSessionId, cancelResidentLimitPrompt, clearSilenceTimer]);
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
