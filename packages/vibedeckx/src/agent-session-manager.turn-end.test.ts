@@ -32,7 +32,13 @@ function fixture(name: string): string {
   return readFileSync(new URL(`./protocol/claude-code/__fixtures__/${name}`, import.meta.url), "utf-8");
 }
 
-function makeHarness(agentType: "claude-code" | "codex" = "claude-code") {
+function makeHarness(
+  agentType: "claude-code" | "codex" = "claude-code",
+  // Seeded history. The default is the single opening user entry every turn
+  // needs; tests about which entry a process-opened turn inherits its
+  // disposition from override it.
+  seedEntries: AgentMessage[] = [{ type: "user", content: "go", timestamp: 1 }],
+) {
   // status: "stopped" — liveSession() below uses restoreSessionsFromDb() purely
   // as a session-construction helper (then flips dormant/status/turnOpenSince
   // in memory to simulate a live process). A "running" DB row would instead
@@ -54,9 +60,9 @@ function makeHarness(agentType: "claude-code" | "codex" = "claude-code") {
   const storage = {
     agentSessions: {
       getAll: async () => [row],
-      getEntries: async () => [
-        { session_id: SESSION_ID, entry_index: 0, data: JSON.stringify({ type: "user", content: "go", timestamp: 1 }) },
-      ],
+      getEntries: async () => seedEntries.map((entry, i) => ({
+        session_id: SESSION_ID, entry_index: i, data: JSON.stringify(entry),
+      })),
       getById: async () => row,
       listByBranch: async () => [row],
       markCompleted: vi.fn(async () => undefined),
@@ -127,13 +133,20 @@ describe("turn_end on turn completion", () => {
     expect(internals.sessions.get(SESSION_ID)!.turnOpenSince).toBeNull();
   });
 
-  it("no-ops when no turn is open (turnOpenSince=null)", async () => {
+  it("does not re-open or re-clock a turn that is already open", async () => {
     const { storage, turnEnds } = makeHarness();
     const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
-    const { feed } = await liveSession(manager, null);
+    const openSince = Date.now() - 5000;
+    const { feed } = await liveSession(manager, openSince);
+
+    // The stream carries system/init and plenty of activity — none of it may
+    // restart the clock of a turn this server already opened (a mid-turn send
+    // that the CLI injected is exactly this shape).
     await feed(fixture("in-turn-consumption.jsonl"));
     await settle(GRACE_MS * 5);
-    expect(turnEnds).toHaveLength(0);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].durationMs).toBe(turnEnds[0].timestamp - openSince);
   });
 
   it("buildFullConversationContext skips turn_end entries", async () => {
@@ -166,9 +179,131 @@ describe("turn_end on turn completion", () => {
   it("stop with no open turn writes no turn_end (turnOpenSince already null)", async () => {
     const { storage, turnEnds } = makeHarness();
     const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
-    await liveSession(manager, null); // between turns
+    await liveSession(manager, null); // between turns, and no process activity to open one
     await manager.stopSession(SESSION_ID); // any stop transition with no open turn
     expect(turnEnds).toHaveLength(0);
+  });
+});
+
+/**
+ * Turns that open inside the agent process, with no send behind them.
+ *
+ * Claude Code enqueues a message written to stdin mid-turn and dequeues it
+ * only when the running turn ends — it can inject it at a tool boundary, but
+ * a turn that makes no tool call (a plain text answer) offers none. Observed
+ * live in the CLI's own queue-operation log: enqueue at 09:31:46, dequeue
+ * 17.3s later at the previous turn's result, then a full turn of its own.
+ * sendUserMessage cannot predict which way it goes, so it no longer tries:
+ * such a turn is opened by the process announcing it.
+ *
+ * Before this, the second turn's result hit the turnOpenSince===null guard in
+ * endActiveTurn and the whole turn finished with no turn_end — no divider, no
+ * Branch stop point, and (pushTurnEnd being the only outbox writer) no durable
+ * attention milestone. Background auto-resume after a grace-committed
+ * completion lands in the same hole.
+ */
+describe("turn opened by the process", () => {
+  /** Real recorded protocol lines, so these streams can't drift from the CLI's. */
+  function fixtureLines(name: string, pick: (msg: Record<string, unknown>) => boolean): string {
+    return fixture(name).trim().split("\n")
+      .filter((l) => pick(JSON.parse(l) as Record<string, unknown>))
+      .join("\n") + "\n";
+  }
+
+  it("opens on turn_started (system/init) and writes turn_end + milestone", async () => {
+    const { storage, turnEnds, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { feed } = await liveSession(manager, null);
+
+    // init → result only: the open must come from turn_started alone, with no
+    // assistant activity to fall back on.
+    await feed(fixtureLines("in-turn-consumption.jsonl", (m) =>
+      (m.type === "system" && m.subtype === "init") || m.type === "result"));
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].outcome).toBe("completed");
+    expect(outbox.map((o) => o.kind)).toEqual(["session_result_ready"]);
+  });
+
+  it("falls back to first turn activity when no turn_started arrives", async () => {
+    const { storage, turnEnds, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { feed } = await liveSession(manager, null);
+
+    // Same stream minus system/init — a provider or CLI version that stops
+    // emitting it must degrade to a less precise start time, never to a
+    // dropped milestone.
+    await feed(fixtureLines("in-turn-consumption.jsonl", (m) => m.type !== "system"));
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(outbox.map((o) => o.kind)).toEqual(["session_result_ready"]);
+  });
+
+  it("clocks the new turn from its own first event, not from the previous one", async () => {
+    const { storage, turnEnds } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { feed } = await liveSession(manager, null);
+    const before = Date.now();
+
+    await feed(fixture("in-turn-consumption.jsonl"));
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    // The queue wait belongs to the previous turn's wall clock, not this one:
+    // duration covers only this turn, so its start can't predate the feed.
+    expect(turnEnds[0].timestamp - turnEnds[0].durationMs!).toBeGreaterThanOrEqual(before);
+  });
+
+  it("inherits the disposition from the latest user entry, even across the previous turn_end", async () => {
+    // History exactly as a queued message leaves it: the message is persisted
+    // BEFORE the turn_end of the turn that was running when it was sent, so
+    // findTurnOpeningUserEntry (which stops at that boundary) would miss it
+    // and mis-resolve an internal workflow turn into a user-facing ding.
+    //
+    // The same shape also describes an *injected* relay plus an auto-resume —
+    // indistinguishable from here (see findLatestUserEntry). Resolving to the
+    // trailing message is the deliberate tie-break; the opposite direction is
+    // pinned by the test below.
+    const { storage, turnEnds, outbox } = makeHarness("claude-code", [
+      { type: "user", content: "first", timestamp: 1, notificationDisposition: "result" },
+      { type: "user", content: "queued reviewer message", timestamp: 2, origin: "workflow", notificationDisposition: "internal" },
+      { type: "turn_end", timestamp: 3, durationMs: 1, outcome: "completed", notificationDisposition: "result" },
+    ] as AgentMessage[]);
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { feed } = await liveSession(manager, null);
+
+    await feed(fixture("in-turn-consumption.jsonl"));
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].notificationDisposition).toBe("internal");
+    expect(outbox).toHaveLength(0); // internal turns earn no attention milestone
+  });
+
+  it("resolves a mixed-disposition tie toward notifying (user message trailing an internal turn)", async () => {
+    // The mirror of the case above, and the reason the tie is broken toward
+    // the trailing message rather than the previous turn's opener: a user
+    // message sent into a running reviewer turn. Queued, it IS this turn and
+    // must ding; injected, this is an auto-resume of the internal turn and the
+    // ding is redundant. The two histories are byte-identical, so one of them
+    // has to lose — and resolveNotificationDisposition's stated bias is that a
+    // missed milestone costs the user more than a redundant one.
+    const { storage, turnEnds, outbox } = makeHarness("claude-code", [
+      { type: "user", content: "review this", timestamp: 1, origin: "workflow", notificationDisposition: "internal" },
+      { type: "user", content: "wait — also check the migration", timestamp: 2, notificationDisposition: "result" },
+      { type: "turn_end", timestamp: 3, durationMs: 1, outcome: "completed", notificationDisposition: "internal" },
+    ] as AgentMessage[]);
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { feed } = await liveSession(manager, null);
+
+    await feed(fixture("in-turn-consumption.jsonl"));
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].notificationDisposition).toBe("result");
+    expect(outbox.map((o) => o.kind)).toEqual(["session_result_ready"]);
   });
 });
 

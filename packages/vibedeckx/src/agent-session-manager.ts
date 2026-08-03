@@ -13,6 +13,7 @@ import type {
 } from "./agent-types.js";
 import {
   findTurnOpeningUserEntry,
+  findLatestUserEntry,
   resolveNotificationDisposition,
   sessionMilestoneForTurnEnd,
 } from "./notification-milestones.js";
@@ -173,18 +174,27 @@ interface RunningSession {
   lastActiveAt: number;
   /**
    * Wall-clock start of the currently open user turn, or null when no turn
-   * is in flight. Set when a user message actually starts a turn (steering
-   * messages don't reset it); cleared by endActiveTurn after the turn_end
-   * entry is written. In-memory only — a crash mid-turn is repaired by
-   * restoreSessionsFromDb (see repairInterruptedTurn).
+   * is in flight. Cleared by endActiveTurn after the turn_end entry is
+   * written. Two openers, both guarded on "no turn already open":
+   *  - sendUserMessage, when the send finds the session idle (accurate start,
+   *    and the turn is open before any output can race in), and
+   *  - processAgentEvent, on turn_started / first turn activity, for turns
+   *    that start inside the process with no send behind them (a queued
+   *    message the CLI held until the previous turn ended, a background
+   *    auto-resume). A message sent mid-turn deliberately does NOT open one:
+   *    it either gets injected into the running turn, or the CLI starts its
+   *    turn later and processAgentEvent opens it then.
+   * In-memory only — a crash mid-turn is repaired by restoreSessionsFromDb
+   * (see repairInterruptedTurn).
    */
   turnOpenSince: number | null;
   /**
    * Notification disposition of the currently open turn, set alongside
-   * `turnOpenSince` (so steering messages don't change it) and cleared with it.
-   * The live path reads it here rather than re-deriving it from history: the
-   * intent is known at send time, and a history scan can't distinguish a
-   * steering message from a turn opener when a previous turn was left unclosed.
+   * `turnOpenSince` and cleared with it. Resolved from the send's intent when
+   * the send opens the turn, and from the latest user entry in history
+   * (findLatestUserEntry) when the process does — a turn opened in-process has
+   * no send to ask, and the queued message that owns it sits before the
+   * previous turn_end, out of findTurnOpeningUserEntry's reach.
    * The same value is ALSO persisted on the opening user entry, which is what
    * lets crash repair recover it after this field is gone.
    */
@@ -1143,6 +1153,45 @@ export class AgentSessionManager {
       this.applyCompletionTimerAction(session, session.completion.noteTurnActivity());
     }
 
+    // A turn can *open* with no send reaching sendUserMessage at all, so the
+    // open has to be driven off the process, not off our own writes:
+    //
+    //  - Queued message. A message written to stdin mid-turn is enqueued by
+    //    the CLI and dequeued only when the running turn ends — it can be
+    //    injected into that turn at a tool boundary, but a turn that makes no
+    //    tool call (a plain text answer) offers none, so the message becomes
+    //    a turn of its own. sendUserMessage can't know which will happen: the
+    //    boundary is decided by the model, after the send.
+    //  - Background auto-resume, when the grace window committed the previous
+    //    completion before the resume announced itself.
+    //
+    // Left unopened, such a turn's `result` hits the turnOpenSince===null
+    // guard in endActiveTurn: no turn_end stop point (no divider, no Branch
+    // affordance) and — because pushTurnEnd is the only writer of the
+    // attention outbox — no durable milestone either, so the turn finishes
+    // silently. `turn_started` (system/init) fires per turn (recorded
+    // fixtures show it on auto-resume turns mid-stream, not just at spawn),
+    // making it the earliest and most accurate open signal; the activity
+    // events are the fallback for a provider or CLI version that doesn't emit
+    // it, so a drift there degrades the turn's start time rather than
+    // dropping its milestone. An already-open turn is never re-opened: a
+    // message that WAS injected mid-turn leaves the turn's clock and
+    // disposition alone, exactly as before.
+    if (
+      session.turnOpenSince === null &&
+      (event.type === "turn_started" ||
+        event.type === "text" ||
+        event.type === "thinking" ||
+        event.type === "tool_use" ||
+        event.type === "tool_result" ||
+        event.type === "approval_request")
+    ) {
+      session.turnOpenSince = timestamp;
+      // Not findTurnOpeningUserEntry: a queued message sits *before* the
+      // previous turn_end, which that helper treats as a hard boundary.
+      session.turnDisposition = resolveNotificationDisposition(findLatestUserEntry(session.store.entries));
+    }
+
     // A turn can start without any user message going through this server:
     // Claude Code auto-resumes the same process when a background task
     // (background subagent, run_in_background command) completes. The prior
@@ -1728,10 +1777,13 @@ export class AgentSessionManager {
         `[AgentSession] sendUserMessage: wrote ${formatted.length}B to ${session.agentType} stdin (session=${sessionId})`,
       );
       session.process.stdin.write(formatted);
-      // A turn is now genuinely in flight. Steering messages (sent while a
-      // turn is already open) must not reset the clock — nor the disposition:
-      // a user steering an in-flight reviewer turn doesn't turn it into a
-      // generic session result.
+      // The session was idle, so this send genuinely starts a turn. A send
+      // that lands mid-turn must not reset the clock — nor the disposition: a
+      // user steering an in-flight reviewer turn doesn't turn it into a
+      // generic session result. Nor does it open a turn of its own here: the
+      // CLI decides whether to inject it into the running turn or run it as
+      // the next turn, and processAgentEvent opens that one when the process
+      // announces it.
       if (session.turnOpenSince === null) {
         session.turnOpenSince = Date.now();
         session.turnDisposition = disposition;

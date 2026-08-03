@@ -56,6 +56,44 @@ export function findTurnOpeningUserEntry(
 }
 
 /**
+ * Find the user entry a turn that opened *inside the agent process* belongs
+ * to — the latest one, deliberately scanning THROUGH turn_end boundaries.
+ *
+ * The CLI queues a message sent while a turn is running and dequeues it only
+ * when that turn ends (verified in Claude Code's own `queue-operation` log:
+ * enqueue at send, dequeue 17s later at the previous turn's result). So the
+ * queued message is persisted BEFORE the previous turn's turn_end, where
+ * findTurnOpeningUserEntry — which stops at that boundary — can never see it.
+ *
+ * Scanning through the boundary covers all three ways such a turn starts:
+ * a queued message (latest user entry sits just before the boundary), a
+ * message that opened its turn normally (latest sits after it), and a
+ * background auto-resume carrying no new message at all (falls back to the
+ * previous turn's opener).
+ *
+ * Known residual: a message sent mid-turn is persisted identically whether the
+ * CLI queued it for the next turn or injected it into the running one — the
+ * distinction lives inside the CLI and reaches us in neither the entry nor the
+ * stream. So when an auto-resume follows an *injected* message, this returns
+ * that message rather than the turn's opener, and a turn whose dispositions
+ * disagree can resolve to the injected one. The tie is broken this way on
+ * purpose: the alternative (always taking the opener) silences a queued user
+ * message that lands in a reviewer session, and resolveNotificationDisposition
+ * below states the bias — a missed milestone is worse than a redundant one.
+ * Only mixed-disposition sessions can notice; a user message steering a user
+ * turn, or a relay steering a workflow turn, resolves the same either way.
+ */
+export function findLatestUserEntry(
+  entries: Array<AgentMessage | undefined>,
+): AgentMessage | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type === "user") return entry;
+  }
+  return undefined;
+}
+
+/**
  * Resolve a turn's notification disposition from its opening user entry.
  *
  * Legacy entries (persisted before the field existed) have no disposition:
