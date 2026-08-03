@@ -227,6 +227,9 @@ breaking，FAIL。`--worker-bin` 自测（当前分支即最新）404 一律 FAI
 
 ### 4.3 常驻金丝雀 worker（唯一的常驻资源，一个容器即可）
 
+> 金丝雀同时是 server 部署可靠性演进的第一档观测手段，见
+> `server-upgrade-reliability-design.md`。
+
 固定跑 `MIN_WORKER_VERSION`，连 staging（或测试账号连生产），长期在线。测 CI
 测不了的：**server 部署瞬间旧 worker 能否干净重连**、auth backoff、daemon 长期
 存活（参考 reverse-connect auth backoff 一类只有长连接才暴露的问题）。部署后
