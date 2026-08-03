@@ -139,8 +139,15 @@ safeParse，并对 schema 面做 snapshot。定位：抓帧结构漂移；**不�
 
 - 位置：`scripts/classify-diff.mjs`（纯 Node，无依赖），规则表（glob → 桶）写在
   脚本顶部，与上表保持同步。
-- 触发：手动 `node scripts/classify-diff.mjs [base-ref]`（默认 `origin/main...HEAD`）；
-  CI 上作为 PR 的一个 job 跑，结果写进 job summary / PR comment。
+- 触发：手动 `node scripts/classify-diff.mjs [base-ref]`（默认 `origin/main`，
+  适用于在 dev 分支上合并前预看）；CI 上作为 job 跑，结果写进 job summary。
+  base 按事件选：PR 事件用 PR base；**push main 事件用上一个发布 tag**
+  （`git describe --tags --match 'v*'`）。理由：本项目流程是本地 merge 后直推
+  main、不走 PR，origin/main 当 base 恒为空 diff；而每次 npm 发版都打 `v*` tag，
+  拿它当 base 正好回答"**自上次 worker 发布以来积累了哪些 worker 可达改动**"——
+  gray/wire-contract 信号在每次 push 的 summary 里持续出现，直到打 tag 发出去
+  才清零，等于常驻的"worker 发版欠账表"。兜底链：无 tag → `event.before` →
+  `HEAD~1`。
 - 输出：逐文件桶归属 + 一行结论，例如：
 
   ```
@@ -276,7 +283,8 @@ ubuntu-22.04 / ubuntu-24.04 / macOS 的 CI runner 各跑一次 `npm install + co
 | 灰区变、注册表没变 | 不会 | 只判断"修复急不急"决定发版节奏 |
 
 兜底：判断错了，§4.2 跨版本 e2e 在部署前红给你看，§4.3 金丝雀在部署后告警。
-最坏后果是 CI 红一次，不是用户的 worker 悄悄坏掉。
+最坏后果是 CI 红一次，不是用户的 worker 悄悄坏掉。各检查的具体输出怎么读、
+tag 怎么决策，见 §6.5 检测手册。
 
 ### 6.2 开发者日常操作（响应式，非主动）
 
@@ -290,7 +298,8 @@ ubuntu-22.04 / ubuntu-24.04 / macOS 的 CI runner 各跑一次 `npm install + co
 | npm 发版 | 手动触发平台矩阵 job（§4.4） |
 
 本地想提前知道结果：`node scripts/classify-diff.mjs` 或跑对账/snapshot 两个
-vitest——**可选，CI 兜底**。
+vitest——**可选，CI 兜底**。更省事的方式是 `/compat-check` skill
+（`.claude/skills/compat-check/`）：按 §6.5 流程自动跑检查并给出分支结论。
 
 ### 6.3 唯一自动化不了的编码习惯
 
@@ -312,6 +321,108 @@ server 调用新 capability 前查对端 `capabilities`、给老 worker 写降�
 - **过渡期提醒**：Phase 1–3 期间 `MIN_WORKER_VERSION` 只是警告线，拒连到 Phase 4
   才启用——开发侧约束（注册表、降级分支）先生效，运维侧强制力（拒连）后生效，
   设计使然。
+
+### 6.5 检测手册：push 之后看什么、怎么读输出
+
+发布机制前提：**server = Docker 镜像随时构建部署，与版本号无关；worker = 创建
+git tag → GitHub Action 构建发布 npm 包**。所以"要不要更新 worker"落到操作上
+就是"要不要打 tag"。
+
+三套检查的位置（常见误解：对账测试**不在** worker-compat 里）：
+
+| 检查 | 在哪跑 | 时机 | 回答的问题 |
+|---|---|---|---|
+| 对账 + snapshot 测试（`reverse-connect-capabilities.test.ts`） | `test.yml`，随全量 vitest | 每次 push / 本地 | 这次改动**是不是**协议变更 |
+| classify-diff（job summary） | `worker-compat.yml` | 每次 push | 改动碰了哪类文件 |
+| cross-version-e2e 矩阵 {0.2.0, latest} | `worker-compat.yml` | 每次 push | 旧 worker **会不会坏**；新功能**到没到** |
+
+#### push 后的阅读顺序
+
+1. **test.yml 绿不绿**。红了先修——这是开发问题，不是发布问题。三种红：
+   - **调用点不在注册表** → 补一行条目，`since` 填**下一个要发布的版本号**。
+     这一步就在强迫你想清楚该功能随哪个 tag 发出去。
+   - **注册表条目失去调用点（stale）** → 你删/改了旧调用，breaking 方向。修法
+     是代码恢复新旧并存、走弃用流程——**这时打 tag 是错误反应**，发新 worker
+     救不了 fleet 里不升级的存量。
+   - **提取器维护类**（新 wrapper 不在 `HTTP_SENDER_NAMES` 清单等）→ 修测试
+     配置，与发布无关。
+
+   注意：**worker 侧 bug 修复不会让对账测试红**（调用面没变），它属于下面第 4 步。
+
+2. **classify-diff 的 verdict 行**（job summary）：
+
+   ```
+   verdict: server-only / non-runtime — safe to deploy the server alone; no worker release needed.
+   ```
+   → 直接部署 server，结束。
+
+   ```
+   verdict: wire-contract touched — tunnel protocol change: the capability registry must reflect it (§3.1);
+            gray files touched — worker-reachable code: review whether the change must reach workers (npm release) or is server-only.
+   ```
+   → 注意 gray 的措辞是 "review whether"——它只知道"碰了 worker 可达代码"，
+   判断不了语义，进第 4 步。
+
+3. **cross-version-e2e 两档的关键行**：
+
+   - `[xver] smoke X: FAILED — ...` / 结尾 `FAIL` → **breaking，server 不能部署**。
+     修法是代码新旧并存，不是打 tag。
+   - `[xver] smoke X: 404 — worker@<ver> predates <capability> (expected gap)` +
+     结尾 `missing on this version` 列表 → 出现在 **latest 档**时，就是"该打
+     tag"的执行信号：你新增的 capability 连最新发布版 worker 都没有，打 tag 前
+     该功能对所有用户不可用。出现在 **floor（0.2.0）档**是常态（老版本落后于
+     后来加的路由），不用理。
+   - 全绿零 missing + `PASS` → server 随便部署，与 worker 无关。
+
+   覆盖面限制：expected gap 只会为 **36 个实测冒烟**的 capability 出现；新
+   capability 若落入 COVERED_BY/EXEMPT 的处理方式，e2e 不会替它发请求。**不会
+   漏的信号是 PR 里的注册表 snapshot diff**（新增条目 + 未发布的 `since` 本身
+   就等于"打 tag 前不可用"），expected gap 是它的运行时回声。
+
+4. **只剩 gray 且 e2e 全绿零 missing**（worker 侧 bug fix，没动协议）→ 唯一
+   无机械信号的场景，人工判断"修复急不急"：急 → 打 tag；不急 → 攒着下次一起发。
+
+#### 流程图
+
+```mermaid
+flowchart TD
+    A["push 代码"] --> B{"test.yml 绿？<br/>（含对账 / snapshot 测试）"}
+
+    B -- "红：调用点未登记" --> B1["注册表补条目<br/>since = 下一发布版本"] --> A
+    B -- "红：条目失去调用点<br/>（stale，breaking 方向）" --> B2["代码恢复新旧并存<br/>走弃用流程——不是打 tag"] --> A
+    B -- "红：提取器维护类" --> B3["修测试配置<br/>（与发布无关）"] --> A
+
+    B -- "绿" --> C{"classify-diff verdict"}
+    C -- "server-only / non-runtime" --> D["部署 server（Docker）<br/>与 worker 无关，结束"]
+    C -- "wire-contract / gray" --> E{"cross-version-e2e<br/>矩阵 0.2.0 ＋ latest"}
+
+    E -- "任一档 FAILED" --> F["breaking：server 不能部署<br/>修代码新旧并存"] --> A
+    E -- "latest 档 expected gap<br/>或注册表 snapshot 新增条目" --> G["部署 server ＋ 打 tag 发 npm<br/>（新 capability 要到达用户；<br/>不急，不打也不会坏）"]
+    E -- "两档全绿、零 missing" --> H{"gray 文件有变？<br/>（worker 侧行为改了）"}
+
+    H -- "否" --> D
+    H -- "是（典型：worker 侧 bug fix）" --> I{"人工判断：修复急不急<br/>（唯一无机械信号的一步）"}
+    I -- "急" --> G2["部署 server ＋ 打 tag<br/>＋ 催用户升级"]
+    I -- "不急" --> J["部署 server；<br/>修复攒着随下次 tag 一起发"]
+```
+
+floor（0.2.0）档的 expected gap 是常态（老版本落后于后来加的路由），不进入
+判断；只有 **latest 档**的 gap 才是"打 tag"信号。
+
+#### tag 决策链（一句话版）
+
+**对账红（登记 `since`=下一版本）→ 绿（合并）→ latest 档 expected gap（打
+tag）**。tag 不是任何一种红的修法：真红（FAILED/stale）修代码，expected gap
+才是发版提醒。判断错了有兜底——e2e 在部署前拦 breaking，金丝雀（§4.3，建成后）
+在部署后告警，最坏后果是 CI 红一次。
+
+#### 与"直接问 AI"的分工
+
+这套机制不取代 AI 复核，而是把 AI 要回答的问题从"整个 diff 有没有破坏旧
+worker"（大海捞针，静态读 diff 对间接破坏是盲的）缩小到"第 4 步这几个 gray
+文件的修复急不急"。机器管"会不会坏"（e2e 是拿真实旧版跑出来的证据，不是意见；
+`since` 值也是发布版探测出来的，不在 diff 里）和"到没到"（注册表 + expected
+gap），AI 兜灰区，人只拍"急不急"的产品优先级。
 
 ## 7. 落地顺序
 

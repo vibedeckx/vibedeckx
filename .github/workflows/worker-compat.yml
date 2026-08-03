@@ -24,7 +24,26 @@ jobs:
           fetch-depth: 0
       - name: Classify diff impact
         run: |
-          BASE="origin/${{ github.base_ref || 'main' }}"
+          # PR: diff against the PR base. Push to main (the dev flow here merges
+          # locally and pushes main directly — no PR, so origin/main == HEAD and
+          # would always diff empty): diff against the LAST RELEASE TAG (v*).
+          # That answers the question this job exists for — "what worker-
+          # reachable changes have accumulated since the last worker release" —
+          # and the gray/wire-contract signal persists in every push's summary
+          # until a tag ships it. Fallbacks: github.event.before (no tags),
+          # then HEAD~1.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          elif BASE="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)" && [ -n "$BASE" ]; then
+            :
+          elif [ -n "${{ github.event.before }}" ] \
+            && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            BASE="${{ github.event.before }}"
+          else
+            BASE="HEAD~1"
+          fi
+          echo "classify-diff base: $BASE"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           node scripts/classify-diff.mjs "$BASE" | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

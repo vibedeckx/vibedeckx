@@ -86,7 +86,7 @@ Workers run on user machines at arbitrarily old versions while the server deploy
 - Every server→worker call — a `proxyToRemoteAuto` route or an `openVirtualChannel` path — must have an entry in `src/reverse-connect-capabilities.ts`. `reverse-connect-capabilities.test.ts` enforces this in both directions (unregistered call site / stale entry) and snapshots the registry; a snapshot diff is a tunnel-contract change and the PR must state whether it is additive or breaking.
 - Adding routes/channels/frame fields is fine: old workers 404 or ignore them, and the **calling server code must degrade gracefully** (check `remote_servers.worker_capabilities`, tolerate 404s). Renaming, removing, or changing semantics is breaking: keep old and new side by side through a deprecation window, then bump `MIN_WORKER_VERSION` in `constants.ts`.
 - Workers report `version`/`capabilities` in both handshake frames (`status` and `machine_auth` — the latter is the reliable carrier); the hub persists them on `remote_servers`.
-- Tools: `node scripts/classify-diff.mjs` buckets a diff by server/worker impact; `node scripts/cross-version-e2e.mjs <version>` smokes the branch server against a published worker (CI: `worker-compat.yml`).
+- Tools: `node scripts/classify-diff.mjs` buckets a diff by server/worker impact; `node scripts/cross-version-e2e.mjs <version>` smokes the branch server against a published worker (CI: `worker-compat.yml`). The `/compat-check` skill runs the whole local pre-CI flow and reports which branch of the §6.5 decision flow applies.
 
 ### Default Ports
 
