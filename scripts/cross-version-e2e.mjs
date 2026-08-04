@@ -470,6 +470,31 @@ await sessionSmoke("session-stream-ws", ["ws:/api/agent-sessions/:param/stream"]
     ws.onerror = () => finish(timer, () => reject(new Error("WS transport error")));
   });
 });
+// The only smoke that asks the worker's own port instead of the hub. The hub
+// has no route of its own here: intent-brief distillation calls
+// proxyToRemoteAuto directly, so there is nothing to drive through the public
+// API, and adding a hub route only so this script could reach it would be
+// production code written for a test. Asking the worker still answers the
+// question this harness exists for — does a worker of THIS version serve the
+// path — which is what the 404-vs-`since` policy is judged on; that the hub
+// requests exactly this path over the tunnel is asserted in
+// workflow-run-remote-routes.test.ts.
+//
+// Runs after the stream smoke, so the session holds a real user→assistant
+// exchange to project. The route earns its place by what it leaves out — tool
+// calls, tool results and thinking never cross the tunnel — so the shape
+// assertion is the contract, not the presence of the text.
+await sessionSmoke("session-brief-source", ["http:GET /api/agent-sessions/:param/brief-source"], async () => {
+  // remote-<serverId>-<projectId>-<sessionId>, each a 36-char uuid.
+  const bare = sessionId.slice(-36);
+  const apiPath = `/api/agent-sessions/${bare}/brief-source`;
+  const { status, json } = await request("GET", apiPath, undefined, `http://127.0.0.1:${WORKER_PORT}`);
+  if (status >= 300) throw new HttpError("GET", apiPath, status, JSON.stringify(json)?.slice(0, 150));
+  assert(Array.isArray(json?.messages), `no messages array: ${JSON.stringify(json).slice(0, 120)}`);
+  const types = [...new Set(json.messages.map((m) => m.type))];
+  assert(types.every((t) => t === "user" || t === "assistant"), `unprojected entry types: ${types.join(", ")}`);
+  assert(JSON.stringify(json.messages).includes("hello stub"), "the sent user message is missing from the projection");
+});
 await sessionSmoke("session-paste", ["http:POST /api/agent-sessions/:param/paste"], async () => {
   await api("POST", `/api/agent-sessions/${sessionId}/paste`, { content: "pasted-by-xver" });
 });
