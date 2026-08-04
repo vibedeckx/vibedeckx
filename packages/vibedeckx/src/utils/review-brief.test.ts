@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { AgentMessage } from "../agent-types.js";
+import type { AgentMessage, ContentPart } from "../agent-types.js";
 
 vi.mock("ai", () => ({ generateText: vi.fn() }));
 vi.mock("./chat-model.js", () => {
@@ -20,6 +20,7 @@ import { generateText } from "ai";
 import { isModelConfigured } from "./chat-model.js";
 import {
   serializeConversationForBrief,
+  projectMessagesForBrief,
   generateIntentBrief,
   clearIntentBriefCache,
   generateIntentBriefWithModel,
@@ -391,6 +392,66 @@ describe("generateIntentBriefWithModel", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * The projection is a transport optimization: a worker sends only what the
+ * distiller reads instead of the whole session. It is only sound if the
+ * distiller's input is unchanged by it — every property here is about that
+ * equality, not about the projection's own shape.
+ */
+describe("projectMessagesForBrief", () => {
+  const nasty = (): AgentMessage[] => [
+    { type: "user", content: "  build the exporter  ", timestamp: 1 },
+    { type: "thinking", content: "weighing options", timestamp: 2 },
+    { type: "tool_use", tool: "Write", input: { content: "x".repeat(50_000) }, timestamp: 3 },
+    { type: "tool_result", tool: "Write", output: "y".repeat(50_000), timestamp: 4 },
+    // Multi-part user turn: text parts joined, non-text dropped.
+    { type: "user", content: [
+      { type: "text", text: "here is the spec" },
+      { type: "image", mediaType: "image/png", data: "AAAA" },
+      { type: "text", text: "and the follow-up" },
+    ] satisfies ContentPart[], timestamp: 5 },
+    // Over the per-message cap, so both sides truncate it.
+    { type: "assistant", content: "z".repeat(20_000), timestamp: 6 },
+    // Harness-injected, not user-written.
+    { type: "user", content: "task finished", timestamp: 7,
+      event: { kind: "agent_task_completed", sessionId: "s2", turnEndEntryIndex: 3 } },
+    { type: "assistant", content: "done, sorted by primary key", timestamp: 8 },
+    { type: "turn_end", timestamp: 9 },
+    { type: "error", message: "boom", timestamp: 10 },
+  ];
+
+  // The whole safety argument in one assertion: distilling the projection must
+  // produce the exact prompt input that distilling the raw session would.
+  it("leaves the distiller's input byte-identical", () => {
+    const messages = nasty();
+    expect(serializeConversationForBrief(projectMessagesForBrief(messages)))
+      .toBe(serializeConversationForBrief(messages));
+  });
+
+  /**
+   * The structural property the byte-equality above is a consequence of: the
+   * projection is a fixed point, so running it again — which is what the
+   * receiving side effectively does when it serializes — changes nothing.
+   *
+   * Worth pinning separately because serialized equality does not imply it
+   * (renderAll joins with "\n\n", so different entry lists could in principle
+   * render alike), and the compaction path slices by entry, not by the joined
+   * string. Truncation is the step that could have compounded here: the cap
+   * appends "…" and the receiving side caps again — slicing back to the cap
+   * removes exactly that "…", so re-appending reproduces the same text.
+   */
+  it("is a fixed point, so the receiving side's own pass changes nothing", () => {
+    const once = projectMessagesForBrief(nasty());
+    expect(projectMessagesForBrief(once)).toEqual(once);
+  });
+
+  it("carries none of the tool traffic", () => {
+    const projected = JSON.stringify(projectMessagesForBrief(nasty()));
+    expect(projected).not.toMatch(/xxxx|yyyy|weighing options|boom/);
+    expect(projected.length).toBeLessThan(7_000); // vs ~100KB of raw entries
   });
 });
 

@@ -10,6 +10,7 @@ import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
 import { extractUserText } from "../utils/session-title.js";
+import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
@@ -868,6 +869,31 @@ const routes: FastifyPluginAsync = async (fastify) => {
         messages,
       });
     }
+  );
+
+  /**
+   * Conversation projected down to what intent-brief distillation actually
+   * reads (tier 1). Distillation runs hub-side — chat-provider keys live there
+   * — but only ever uses user text and assistant text; tool calls, tool
+   * results and thinking are discarded on arrival. Pulling the raw history to
+   * do that ships ~70x the bytes it needs (measured: 6.3MB of entries carry
+   * 91KB of conversation), in one WebSocket frame, over a tunnel that usually
+   * ends at somebody's home uplink.
+   *
+   * The body is a subset of GET /api/agent-sessions/:id's `messages`, so the
+   * hub feeds it to the same pipeline unchanged. Same authorization shape as
+   * that route: session-scoped, no user model on this side (a hosted front
+   * runs no local agent sessions).
+   */
+  fastify.get<{ Params: { sessionId: string } }>(
+    "/api/agent-sessions/:sessionId/brief-source",
+    async (req, reply) => {
+      const session = fastify.agentSessionManager.getSession(req.params.sessionId);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+      return reply.code(200).send({
+        messages: projectMessagesForBrief(fastify.agentSessionManager.getMessages(req.params.sessionId)),
+      });
+    },
   );
 
   // 发送消息到 Agent Session

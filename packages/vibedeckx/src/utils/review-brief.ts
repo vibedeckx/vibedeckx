@@ -193,6 +193,27 @@ export function serializeConversationForBrief(messages: AgentMessage[]): string 
   return renderAll(toEntries(messages));
 }
 
+/**
+ * The same messages a distillation would keep, in the same AgentMessage shape.
+ *
+ * Exists so a worker can hand the hub only what the hub is going to use: tool
+ * calls, tool results and thinking are the bulk of a session's bytes and are
+ * dropped by toEntries the instant they arrive. Measured on a 2300-entry
+ * session: 6.3MB of raw entries carry 91KB of conversation — everything else
+ * crossed the tunnel to be thrown away.
+ *
+ * Derived from toEntries rather than reimplemented, so what a worker sends can
+ * never drift from what the distiller reads. Timestamps are not preserved:
+ * nothing in this module reads them (they are dropped by toEntries too).
+ */
+export function projectMessagesForBrief(messages: AgentMessage[]): AgentMessage[] {
+  return toEntries(messages).map((entry) =>
+    entry.role === "User"
+      ? { type: "user" as const, content: entry.text, timestamp: 0 }
+      : { type: "assistant" as const, content: entry.text, timestamp: 0 },
+  );
+}
+
 /** Split off the newest entries that fit in `maxChars`, verbatim. */
 function splitRecent(entries: BriefEntry[], maxChars: number): { older: BriefEntry[]; recent: BriefEntry[] } {
   let size = 0;

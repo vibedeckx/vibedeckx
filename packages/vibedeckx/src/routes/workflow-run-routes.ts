@@ -119,8 +119,14 @@ async function routes(fastify: FastifyInstance) {
       if (sourceSessionId.startsWith("remote-")) {
         const remoteInfo = fastify.remoteSessionMap.get(sourceSessionId);
         if (!remoteInfo) return undefined;
+        // Projected history, not the raw session: distillation reads only user
+        // and assistant text, and pulling the tool traffic to discard it here
+        // was ~70x the bytes over the tunnel. A worker too old to serve this
+        // 404s, which lands in the `!ok` branch below — the review then starts
+        // on the deterministic excerpt (tier 2), the same degradation as any
+        // other failure to reach the source history.
         const historyResult = await proxyAuto(
-          remoteInfo, "GET", `/api/agent-sessions/${remoteInfo.remoteSessionId}`,
+          remoteInfo, "GET", `/api/agent-sessions/${remoteInfo.remoteSessionId}/brief-source`,
         );
         if (!historyResult.ok) return undefined;
         messages = (historyResult.data as { messages?: AgentMessage[] }).messages ?? [];

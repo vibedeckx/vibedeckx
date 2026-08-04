@@ -238,7 +238,9 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().brief).toBe("distilled brief");
     expect(proxyMock.mock.calls[0][1]).toBe("GET");
-    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/src1");
+    // Projected history, not the raw session — the tool traffic in a real
+    // session dwarfs the text distillation reads.
+    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/src1/brief-source");
   });
 
   it("POST proxies to the worker path mirror, maps ids, registers the reviewer stream", async () => {
@@ -257,7 +259,7 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { projectId: "p1", sourceSessionId: SRC, reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" },
     });
     expect(res.statusCode).toBe(201);
-    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/src1");
+    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/src1/brief-source");
     const [serverId, method, apiPath, body] = proxyMock.mock.calls[1];
     expect([serverId, method, apiPath]).toEqual(["srv1", "POST", "/api/path/workflow-runs"]);
     expect(body).toMatchObject({ sourceSessionId: "src1", reviewFocus: "tests", sourceTurnEndIndex: 4, reviewerAgentType: "codex" });
