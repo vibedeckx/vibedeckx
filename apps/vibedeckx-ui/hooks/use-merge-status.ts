@@ -146,8 +146,9 @@ function ensureLegacyImport(projectId: string): Promise<void> {
 
 /**
  * Merge status per workspace branch, fetched once per distinct target.
- * Refreshes whenever the worktree list identity changes (same cadence as
- * useWorktrees) or after setTarget.
+ * Refreshes whenever the observable worktree list changes or after setTarget.
+ * Background drift checks preserve the array identity when their payload is
+ * unchanged, so they do not cascade into redundant merge-status requests.
  */
 export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) {
   const [statuses, setStatuses] = useState<Map<string, BranchMergeInfo>>(new Map());
@@ -168,8 +169,8 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 
-  // Depends on the worktrees array identity: useWorktrees replaces it on every
-  // fetch, so merge status refreshes on the same cadence (spec requirement).
+  // Depends on the worktrees array identity, which changes only when the
+  // workspace list or a currentBranch drift marker actually changes.
   useEffect(() => {
     const branches = worktrees
       .map((w) => w.branch)

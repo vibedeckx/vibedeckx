@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type Worktree } from "@/lib/api";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
+
+export const WORKTREE_DRIFT_BACKSTOP_MS = 5 * 60_000;
 
 /**
  * True while the worktree list can't be trusted for `projectId` — a fetch is
@@ -56,6 +59,7 @@ export function useWorktrees(
   const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
   const requestGeneration = useRef(0);
   const requestController = useRef<AbortController | null>(null);
+  const previousSelectionRef = useRef<{ projectId: string | null; branch: string | null | undefined } | null>(null);
   const selectedBranchRef = useRef(selectedBranch);
   selectedBranchRef.current = selectedBranch;
 
@@ -100,17 +104,73 @@ export function useWorktrees(
 
   useEffect(() => {
     void fetchWorktrees();
-    // Branch switches made by an agent happen outside React. A lightweight
-    // background refresh makes drift visible without requiring navigation or
-    // a page reload, while keeping the existing list rendered during fetches.
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void fetchWorktrees(true);
-    }, 15_000);
     return () => {
-      window.clearInterval(timer);
       requestController.current?.abort();
       requestController.current = null;
       requestGeneration.current += 1;
+    };
+  }, [fetchWorktrees]);
+
+  // Selecting another workspace is a natural point to verify its physical
+  // checkout. Do not duplicate the initial/project-change fetch above.
+  useEffect(() => {
+    const previous = previousSelectionRef.current;
+    previousSelectionRef.current = { projectId, branch: selectedBranch };
+    if (
+      previous
+      && previous.projectId === projectId
+      && previous.branch !== selectedBranch
+    ) {
+      void fetchWorktrees(true);
+    }
+  }, [projectId, selectedBranch, fetchWorktrees]);
+
+  // Agent turns and executors are the normal sources of Git changes. Refresh
+  // when they finish instead of spawning Git processes every few seconds.
+  useGlobalEventStream((event) => {
+    if (!projectId || event.projectId !== projectId) return;
+    const terminalSessionStatus = event.type === "session:status"
+      && (event.status === "stopped" || event.status === "error");
+    if (
+      event.type === "session:taskCompleted"
+      || event.type === "executor:stopped"
+      || terminalSessionStatus
+    ) {
+      void fetchWorktrees(true);
+    }
+  });
+
+  // External Git commands may not produce an app event. Refresh immediately
+  // when the user returns, then retain a low-frequency visible-tab backstop.
+  useEffect(() => {
+    let timer: number | null = null;
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const start = () => {
+      stop();
+      timer = window.setInterval(() => void fetchWorktrees(true), WORKTREE_DRIFT_BACKSTOP_MS);
+    };
+    const onFocus = () => void fetchWorktrees(true);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void fetchWorktrees(true);
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    if (document.visibilityState === "visible") start();
+    return () => {
+      stop();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [fetchWorktrees]);
 
