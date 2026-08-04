@@ -158,7 +158,10 @@ export default function Home() {
     setBranchResetProjectId(currentProject?.id);
   }
 
-  const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(currentProject?.id ?? null);
+  const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(
+    currentProject?.id ?? null,
+    selectedBranch,
+  );
   const {
     statuses: mergeStatuses,
     defaultTarget: mergeDefaultTarget,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isWorktreesLoading } from "./use-worktrees";
+import { isWorktreesLoading, preserveSelectedWorkspace, worktreesEqual } from "./use-worktrees";
 
 describe("isWorktreesLoading", () => {
   it("is loading while a fetch is in flight", () => {
@@ -27,5 +27,37 @@ describe("isWorktreesLoading", () => {
 
   it("is not loading in the no-project state", () => {
     expect(isWorktreesLoading(false, null, null)).toBe(false);
+  });
+});
+
+describe("worktreesEqual", () => {
+  it("treats separately allocated but structurally identical lists as equal", () => {
+    expect(worktreesEqual(
+      [{ branch: null }, { branch: "dev", currentBranch: "agent/work" }],
+      [{ branch: null }, { branch: "dev", currentBranch: "agent/work" }],
+    )).toBe(true);
+  });
+
+  it("detects a live branch change", () => {
+    expect(worktreesEqual(
+      [{ branch: "dev" }],
+      [{ branch: "dev", currentBranch: "agent/work" }],
+    )).toBe(false);
+  });
+});
+
+describe("preserveSelectedWorkspace", () => {
+  it("keeps the selected prior workspace when a background response omits it", () => {
+    expect(preserveSelectedWorkspace(
+      [{ branch: null }, { branch: "dev" }],
+      [{ branch: null }, { branch: "agent/work" }],
+      "dev",
+    )).toEqual([{ branch: null }, { branch: "dev" }, { branch: "agent/work" }]);
+  });
+
+  it("does not retain an unselected missing workspace", () => {
+    const incoming = [{ branch: null }, { branch: "agent/work" }];
+    expect(preserveSelectedWorkspace([{ branch: null }, { branch: "dev" }], incoming, "other"))
+      .toBe(incoming);
   });
 });

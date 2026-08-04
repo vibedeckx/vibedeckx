@@ -67,7 +67,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       pruneWorktrees(projectPath);
-      const worktrees = getWorktreeBranches(projectPath);
+      const project = await fastify.storage.projects.getByPath(projectPath);
+      const sessions = project
+        ? await fastify.storage.agentSessions.getByProjectId(project.id)
+        : [];
+      const worktrees = getWorktreeBranches(projectPath, sessions.map((session) => session.branch));
       return reply.code(200).send({ worktrees });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -248,7 +252,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       pruneWorktrees(project.path);
-      const worktrees = getWorktreeBranches(project.path);
+      const sessions = await fastify.storage.agentSessions.getByProjectId(project.id);
+      const worktrees = getWorktreeBranches(project.path, sessions.map((session) => session.branch));
       return reply.code(200).send({ worktrees });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";

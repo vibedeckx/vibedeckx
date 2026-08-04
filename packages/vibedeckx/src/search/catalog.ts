@@ -27,8 +27,8 @@ export async function buildSearchCatalog(
   projectPath: string,
 ): Promise<SearchCatalogSnapshot & { snapshotAt: number }> {
   pruneWorktrees(projectPath);
-  const workspaces = getWorktreeBranches(projectPath); // [{ branch: null }, { branch: "dev" }, ...]
   const sessions = await deps.storage.agentSessions.getByProjectId(projectId);
+  const workspaces = getWorktreeBranches(projectPath, sessions.map((session) => session.branch));
   const counts = new Map(
     (await deps.storage.agentSessions.countEntries()).map((r) => [r.session_id, r.cnt]),
   );

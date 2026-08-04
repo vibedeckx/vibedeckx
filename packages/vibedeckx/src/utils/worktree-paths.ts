@@ -10,6 +10,13 @@ interface CachedWorktreeList {
   expiresAt: number;
 }
 
+export interface WorktreeBranch {
+  /** Stable workspace identity used by sessions and the UI. */
+  branch: string | null;
+  /** Present only when this worktree is no longer checked out on `branch`. */
+  currentBranch?: string | null;
+}
+
 const worktreeListCache = new Map<string, CachedWorktreeList>();
 
 /** Stable short identifier for a project path */
@@ -130,18 +137,49 @@ export function getWorktreeBaseForProject(projectPath: string): string {
   return path.join(WORKTREE_BASE_DIR, getProjectIdentifier(projectPath));
 }
 
-/** Get worktree branches for a project in the API response shape */
-export function getWorktreeBranches(projectPath: string): Array<{ branch: string | null }> {
-  const entries = parseGitWorktreeList(projectPath);
-  const worktrees: Array<{ branch: string | null }> = [{ branch: null }];
+function conventionalWorktreePath(projectPath: string, branch: string): string {
+  return path.join(getWorktreeBaseForProject(projectPath), branch.replace(/\//g, "-"));
+}
 
-  // The first entry (index 0) is always the main worktree — skip it.
-  // Add all other worktrees that have a branch name.
-  for (let i = 1; i < entries.length; i++) {
-    if (entries[i].branch) {
-      worktrees.push({ branch: entries[i].branch });
-    }
+/**
+ * Preserve the branch a workspace's sessions were created under even if an
+ * agent switched that physical worktree to another branch. Session rows are a
+ * durable identity anchor; the live Git branch is runtime state only.
+ */
+export function reconcileWorktreeBranches(
+  projectPath: string,
+  entries: Array<{ path: string; branch: string | null }>,
+  sessionBranches: Iterable<string> = [],
+): WorktreeBranch[] {
+  const stableBranchByPath = new Map<string, string>();
+  for (const branch of sessionBranches) {
+    if (!branch) continue; // "" is the main-workspace sentinel.
+    stableBranchByPath.set(path.resolve(conventionalWorktreePath(projectPath, branch)), branch);
   }
 
+  const worktrees: WorktreeBranch[] = [{ branch: null }];
+  // The first entry is the project/main worktree. Its stable API identity is
+  // deliberately null and is not derived from whichever branch it has checked
+  // out, matching the existing workspace model.
+  for (let i = 1; i < entries.length; i++) {
+    const entry = entries[i];
+    const stableBranch = stableBranchByPath.get(path.resolve(entry.path));
+    if (stableBranch) {
+      worktrees.push(entry.branch === stableBranch
+        ? { branch: stableBranch }
+        : { branch: stableBranch, currentBranch: entry.branch });
+    } else if (entry.branch) {
+      worktrees.push({ branch: entry.branch });
+    }
+  }
   return worktrees;
+}
+
+/** Get worktree branches for a project in the API response shape. */
+export function getWorktreeBranches(
+  projectPath: string,
+  sessionBranches: Iterable<string> = [],
+): WorktreeBranch[] {
+  const entries = parseGitWorktreeList(projectPath);
+  return reconcileWorktreeBranches(projectPath, entries, sessionBranches);
 }

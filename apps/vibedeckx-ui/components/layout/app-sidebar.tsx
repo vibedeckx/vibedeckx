@@ -363,6 +363,8 @@ export function AppSidebar({
                 {worktrees.map((wt) => {
                   const isActive = activeView === "workspace" && selectedBranch === wt.branch;
                   const branchKey = wt.branch === null ? "" : wt.branch;
+                  const hasBranchDrift = wt.currentBranch !== undefined;
+                  const currentBranchLabel = wt.currentBranch ?? "detached HEAD";
                   const liveSessions = residentSessions?.get(branchKey) ?? [];
                   const dotStatus = workspaceDotStatus(workspaceStatuses?.get(branchKey), liveSessions.length > 0);
                   return (
@@ -385,10 +387,21 @@ export function AppSidebar({
                               )}
                             >
                               <StatusDot status={dotStatus} />
-                              <span className="truncate text-left">{wt.branch ?? "main"}</span>
+                              <span className="truncate text-left">
+                                {wt.branch ?? "main"}
+                                {hasBranchDrift && (
+                                  <span className="text-amber-600 dark:text-amber-400">
+                                    {" → "}{currentBranchLabel}
+                                  </span>
+                                )}
+                              </span>
                             </button>
                           </TooltipTrigger>
-                          <TooltipContent side="right">{wt.branch ?? "main"}</TooltipContent>
+                          <TooltipContent side="right">
+                            {hasBranchDrift
+                              ? `Workspace branch: ${wt.branch ?? "main"}; currently checked out: ${currentBranchLabel}`
+                              : (wt.branch ?? "main")}
+                          </TooltipContent>
                         </Tooltip>
                         {wt.branch !== null && mergeStatuses?.get(wt.branch) && (
                           <WorkspaceMergeBadge

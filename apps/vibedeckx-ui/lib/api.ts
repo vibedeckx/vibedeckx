@@ -297,7 +297,10 @@ export interface DirectoryEntry {
 }
 
 export interface Worktree {
+  /** Stable workspace/session identity. */
   branch: string | null;
+  /** Live checkout when it differs from `branch`; null means detached HEAD. */
+  currentBranch?: string | null;
 }
 
 export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";
@@ -1437,11 +1440,11 @@ export const api = {
     }
   },
 
-  async getProjectWorktrees(id: string, target?: string): Promise<Worktree[]> {
+  async getProjectWorktrees(id: string, target?: string, signal?: AbortSignal): Promise<Worktree[]> {
     const params = new URLSearchParams();
     if (target && target !== "local") params.set("target", target);
     const query = params.toString() ? `?${params.toString()}` : "";
-    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees${query}`);
+    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees${query}`, { signal });
     if (!res.ok) {
       return [{ branch: null }];
     }
