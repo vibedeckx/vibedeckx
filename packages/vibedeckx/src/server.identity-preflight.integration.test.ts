@@ -5,13 +5,15 @@ import path from "path";
 import { CONNECT_IDENTITY_HEADER } from "./connect-preflight.js";
 
 /**
- * Full-server integration test for the identity-preflight auth exemptions.
- * server.ts reads VIBEDECKX_API_KEY at module load, so the env var is set
- * before a fresh dynamic import. This is the deployment the capability
- * discovery exists for: an API-key-protected hub where a token-only HTTP
- * request would be 401'd by the global middleware unless explicitly exempted.
+ * Full-server integration test for identity preflight on a hub that has an
+ * operator key configured. server.ts reads VIBEDECKX_API_KEY at module load, so
+ * the env var is set before a fresh dynamic import.
+ *
+ * The key gates /api/admin/* only, so nothing here should need an exemption —
+ * these cases pin that down from the outside, since the reverse-connect
+ * handshake is the flow that a broader gate used to break.
  */
-describe("identity preflight through an API-key-protected server", () => {
+describe("identity preflight on a server with an operator key configured", () => {
   let baseUrl: string;
   let close: () => Promise<void>;
   let dir: string;
@@ -73,10 +75,25 @@ describe("identity preflight through an API-key-protected server", () => {
     expect(((await bad.json()) as { error: string }).error).toMatch(/invalid/i);
   });
 
-  it("still guards every other /api route", async () => {
+  it("does not gate ordinary /api routes — the UI's requests must not need the key", async () => {
     const res = await fetch(`${baseUrl}/api/projects`);
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("Unauthorized");
+    expect(res.status).toBe(200);
+  });
+
+  it("gates /api/admin/* on the operator key", async () => {
+    const withoutKey = await fetch(`${baseUrl}/api/admin/worker-version-stats`);
+    expect(withoutKey.status).toBe(404);
+
+    const wrongKey = await fetch(`${baseUrl}/api/admin/worker-version-stats`, {
+      headers: { "x-vibedeckx-api-key": "not-the-key" },
+    });
+    expect(wrongKey.status).toBe(404);
+
+    const withKey = await fetch(`${baseUrl}/api/admin/worker-version-stats`, {
+      headers: { "x-vibedeckx-api-key": "test-api-key" },
+    });
+    expect(withKey.status).toBe(200);
+    expect((await withKey.json()) as { workers_total: number }).toHaveProperty("workers_total");
   });
 
   it("lets a token-only reverse-connect WS upgrade through to the route (bad token → 4001, not HTTP 401)", async () => {

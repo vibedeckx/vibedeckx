@@ -150,18 +150,29 @@ const startCommand = buildCommand({
     const tls = loadTLSOptions(flags);
 
     // Binding beyond loopback puts the (per-route-unauthenticated) executor API
-    // on the network. Without --auth or an API key, anyone who can reach the
-    // host can run commands. Warn rather than refuse — a trusted tunnel/proxy in
-    // front is a legitimate setup, but the operator should know it's open.
+    // on the network. Without --auth, anyone who can reach the host can run
+    // commands. Warn rather than refuse — a trusted tunnel/proxy in front is a
+    // legitimate setup, but the operator should know it's open. VIBEDECKX_API_KEY
+    // is deliberately not an escape from this warning: it gates /api/admin/*
+    // only and protects nothing a caller would use to run commands.
     const isLoopbackHost =
       host === "127.0.0.1" || host === "::1" || host === "localhost";
-    if (!isLoopbackHost && !authEnabled && !process.env.VIBEDECKX_API_KEY) {
+    if (!isLoopbackHost && !authEnabled) {
       console.warn(
         `Warning: binding to ${host} exposes vibedeckx on the network with no authentication.\n` +
         "Anyone who can reach this host can run commands via the executor API. Enable --auth, or put\n" +
-        "an authenticating proxy in front, or keep the default loopback bind (127.0.0.1).\n" +
-        "(VIBEDECKX_API_KEY also locks the API, but the built-in UI cannot send it — it suits scripts,\n" +
-        "or a proxy that injects the x-vibedeckx-api-key header on every request.)"
+        "an authenticating proxy in front, or keep the default loopback bind (127.0.0.1)."
+      );
+    }
+
+    // Anyone who set this expecting a lock on the whole API surface should hear
+    // that it no longer is one — silence would leave them believing in a
+    // protection that isn't there.
+    if (process.env.VIBEDECKX_API_KEY) {
+      console.log(
+        "VIBEDECKX_API_KEY is set: it authenticates operator-only endpoints (/api/admin/*).\n" +
+        "It does not lock the rest of the API and is not user authentication — use --auth or a\n" +
+        "proxy in front for that."
       );
     }
 

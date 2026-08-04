@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -101,6 +101,41 @@ describe("GET /api/admin/worker-version-stats", () => {
     // "gone" is 10 days offline; "fresh" reconnected recently; "never" has no
     // last_connected_at and must not count.
     expect(body.stale_workers_7d).toBe(1);
+  });
+
+  // `VIBEDECKX_API_KEY=` is what uncommenting the line in the env examples
+  // without filling it in produces. server.ts's gate treats "" as falsy and
+  // validates nothing, so if this route counted "" as a configured key, any
+  // caller sending any header value would be an operator on a Clerk
+  // deployment — unauthenticated access to cross-tenant fleet aggregates.
+  it("treats an empty VIBEDECKX_API_KEY as unset, so no header can pass as the operator", async () => {
+    const original = process.env.VIBEDECKX_API_KEY;
+    process.env.VIBEDECKX_API_KEY = "";
+    vi.resetModules();
+    try {
+      const { default: freshRoutes } = await import("./worker-stats-routes.js");
+      const instance = Fastify();
+      instance.decorate("authEnabled", true);
+      instance.decorate("storage", storage);
+      instance.decorate("reverseConnectManager", { isConnected: () => false } as never);
+      instance.decorate("remoteSessionMap", new Map());
+      await instance.register(freshRoutes);
+      await instance.ready();
+      app = instance;
+
+      for (const key of ["anything", "", "undefined"]) {
+        const res = await app.inject({
+          method: "GET",
+          url: URL_PATH,
+          headers: { "x-vibedeckx-api-key": key },
+        });
+        expect(res.statusCode).toBe(404);
+      }
+    } finally {
+      if (original === undefined) delete process.env.VIBEDECKX_API_KEY;
+      else process.env.VIBEDECKX_API_KEY = original;
+      vi.resetModules();
+    }
   });
 });
 

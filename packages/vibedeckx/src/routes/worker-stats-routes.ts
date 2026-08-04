@@ -9,7 +9,8 @@ import "../server-types.js";
 // Deliberately NOT a user-facing API — it spans tenants — and deliberately
 // aggregate-only: no server names, no user ids.
 
-const API_KEY = process.env.VIBEDECKX_API_KEY;
+// Empty means unset, matching server.ts's gate — see the note there.
+const API_KEY = process.env.VIBEDECKX_API_KEY || undefined;
 
 const STALE_WORKER_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 // Phase 4 exit criteria (§2): enforcement may start only once unknown-version

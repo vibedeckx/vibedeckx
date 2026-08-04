@@ -46,8 +46,13 @@ import { getAuth, clerkClient } from "@clerk/fastify";
 import { getLogger } from "./logger.js";
 import "./server-types.js";
 
-// API Key from environment variable for remote access authentication
-const API_KEY = process.env.VIBEDECKX_API_KEY;
+// Operator secret for /api/admin/*. An empty value is normalized to "unset":
+// `VIBEDECKX_API_KEY=` is what you get from uncommenting the line in the env
+// examples without filling it in, and treating "" as configured would gate the
+// admin routes on a secret nobody can fail to guess. worker-stats-routes.ts
+// normalizes identically — the two must agree or the gate and the route behind
+// it disagree about whether a key exists.
+const API_KEY = process.env.VIBEDECKX_API_KEY || undefined;
 
 /**
  * Check auth and send 401 if unauthorized. Returns userId (or undefined in no-auth mode).
@@ -214,41 +219,30 @@ export const createServer = async (opts: {
     done();
   });
 
-  // API Key authentication middleware
+  // Operator gate for /api/admin/*. VIBEDECKX_API_KEY is the operator's shared
+  // secret — the credential for cross-tenant fleet endpoints that no end user,
+  // Clerk or otherwise, may reach. It deliberately does NOT gate the rest of
+  // /api/: it grants no identity (see requireAuth), the bundled UI cannot send
+  // it, and locking the whole surface with it only ever produced a UI that
+  // loaded and then 401'd on every request. User-facing auth is --auth (Clerk)
+  // or an authenticating proxy in front. Machine callers on other paths carry
+  // their own credential — the connect token for /api/reverse-connect*, a
+  // session-scoped token for the cross-remote MCP gateway — so neither needs an
+  // exemption here.
   server.addHook("onRequest", (req, reply, done) => {
+    // Unset: leave the decision to the route, which treats a solo no-auth
+    // deployment as its own operator.
     if (!API_KEY) return done();
-    if (!req.url.startsWith("/api/")) return done();
+    if (!req.url.startsWith("/api/admin/")) return done();
     if (req.method === "OPTIONS") return done();
 
-    // Self-authenticating / public endpoints: /api/config is the public
-    // bootstrap endpoint (its authEnabled-only escape below never fires on
-    // API-key-only deployments, so it needs an explicit exemption), and the
-    // reverse-connect control WS + identity preflight authenticate themselves
-    // with the connect token (an invalid token is rejected by the route), so
-    // an API-key-only hub can still accept inbound workers.
-    const pathname = req.url.split("?")[0];
-    if (
-      pathname === "/api/config" ||
-      pathname === "/api/reverse-connect" ||
-      pathname === "/api/reverse-connect/identity"
-    ) {
-      return done();
-    }
-
-    // This gate only decides whether a request may reach a route at all; who the
-    // caller *is* remains Clerk's answer (see requireAuth). A present key must
-    // therefore still match, but its absence is not fatal when Clerk is enabled
-    // — that path just defers to per-route auth.
     const providedKey = req.headers["x-vibedeckx-api-key"] ||
       (req.query as { apiKey?: string })?.apiKey;
 
-    if (!providedKey && authEnabled) {
-      // No API key provided but Clerk is enabled — let Clerk handle auth
-      return done();
-    }
-
+    // 404, not 401, to match the routes behind it: an operator surface should
+    // not confirm its own existence to a caller without the secret.
     if (providedKey !== API_KEY) {
-      return reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(404).send({ error: "Not found" });
     }
     done();
   });

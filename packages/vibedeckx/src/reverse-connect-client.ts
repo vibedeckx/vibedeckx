@@ -256,17 +256,14 @@ export class ReverseConnectClient {
         body = await response.text();
       } else {
         // Route through Fastify server — used for API proxy. The tunnel is
-        // already token-authenticated at the hub; if this worker's own server
-        // is additionally locked with VIBEDECKX_API_KEY, present that local
-        // key so injected requests pass the worker's API-key hook.
-        const injectHeaders: Record<string, unknown> = { ...(frame.headers ?? {}) };
-        if (process.env.VIBEDECKX_API_KEY) {
-          injectHeaders["x-vibedeckx-api-key"] = process.env.VIBEDECKX_API_KEY;
-        }
+        // already token-authenticated at the hub, and the worker's own
+        // VIBEDECKX_API_KEY (if it inherited one from ~/.vibedeckx/.env) now
+        // only gates /api/admin/*, which the tunnel never calls — so injected
+        // requests need no local credential.
         const response = await (this.localServer.inject as Function)({
           method: frame.method,
           url: frame.path,
-          headers: injectHeaders,
+          headers: frame.headers ?? {},
           payload: frame.body,
         }) as { statusCode: number; headers: Record<string, string | string[] | undefined>; payload: string; rawPayload: Buffer };
 
@@ -313,15 +310,7 @@ export class ReverseConnectClient {
   }
 
   private handleWsOpen(frame: WsOpenFrame): void {
-    // Same local-key rule as handleHttpRequest: a VIBEDECKX_API_KEY-locked
-    // worker gates its WS routes on ?apiKey=, so tunnel channels present it.
-    const queryParts = [
-      ...(frame.query ? [frame.query] : []),
-      ...(process.env.VIBEDECKX_API_KEY
-        ? [`apiKey=${encodeURIComponent(process.env.VIBEDECKX_API_KEY)}`]
-        : []),
-    ];
-    const wsUrl = `ws://127.0.0.1:${this.localPort}${frame.path}${queryParts.length ? `?${queryParts.join("&")}` : ""}`;
+    const wsUrl = `ws://127.0.0.1:${this.localPort}${frame.path}${frame.query ? `?${frame.query}` : ""}`;
     console.log(`[ReverseClient] Opening local WS channel ${frame.channelId} → ${frame.path}`);
 
     const localWs = new WebSocket(wsUrl);

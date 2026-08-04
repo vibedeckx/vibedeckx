@@ -215,23 +215,29 @@ Notes:
 
 #### `VIBEDECKX_API_KEY`
 
-Setting this environment variable requires every `/api/` request to carry the same
-value, as an `x-vibedeckx-api-key` header or an `?apiKey=` query param. A request
-without it — or with the wrong one — gets a 401 before it reaches any route.
+The operator's shared secret. It authenticates the operator-only endpoints under
+`/api/admin/*` — fleet-wide aggregates that span tenants and that no end user,
+Clerk or otherwise, may read. Pass it as an `x-vibedeckx-api-key` header; a
+request with the wrong value, or none, gets a 404 rather than a 401, so the
+endpoint never confirms it exists. An empty value (`VIBEDECKX_API_KEY=`) counts
+as unset, not as a key that matches the empty string.
 
-It locks a door; it does not say who walked through it. Requests are not
-authenticated *as* anyone, so this is not a substitute for user authentication:
-when Clerk (`--auth`) is enabled, a valid session token is still required. Its
-real use is as an origin lock — the same job as Authenticated Origin Pulls, but
-via a header instead of a client certificate — so that someone who discovers your
-origin IP cannot bypass the proxy in front.
+Who counts as the operator depends on the deployment:
 
-> [!IMPORTANT]
-> **The built-in web UI does not send this key.** With the key set and nothing
-> injecting it, the page loads and then every request fails with 401. Use it when
-> you drive Vibedeckx over its API (scripts, automation), or when a reverse proxy
-> adds the header for you — `proxy_set_header` in nginx, a Transform Rule or
-> Worker on Cloudflare. A plain `cloudflared` tunnel does not inject headers.
+| Deployment | `/api/admin/*` |
+|---|---|
+| Key set | Requires the header — everyone else gets a 404 |
+| `--auth`, no key | Closed: no Clerk tenant qualifies, so every request 404s |
+| Solo, no auth, no key | Open to anyone who can reach the server — the sole local user *is* the operator, exactly as the rest of the API already is |
+
+It gates nothing else. Ordinary `/api/` routes, and therefore the web UI, behave
+exactly as if it were unset — setting it can never lock you out of your own
+instance. It also grants no identity: with `--auth` enabled, a Clerk session
+token is still required everywhere it was before.
+
+For protecting the instance itself, use `--auth` or an authenticating proxy in
+front. To keep someone who discovers your origin IP from bypassing that proxy,
+use Authenticated Origin Pulls (`--client-ca`, above).
 
 ### `vibedeckx connect`
 
