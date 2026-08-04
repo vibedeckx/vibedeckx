@@ -191,16 +191,6 @@ export function reconcileWorktreeBranches(
   return worktrees;
 }
 
-/** Get worktree branches for a project in the API response shape. */
-export function getWorktreeBranches(
-  projectPath: string,
-  sessionBranches: Iterable<string> = [],
-  registry: Iterable<WorkspaceIdentityAnchor> = [],
-): WorktreeBranch[] {
-  const entries = parseGitWorktreeList(projectPath);
-  return reconcileWorktreeBranches(projectPath, entries, sessionBranches, registry);
-}
-
 /**
  * Lazily imports pre-registry worktrees, then lists them using the persisted
  * checkout path/expected branch as the authoritative workspace identity.

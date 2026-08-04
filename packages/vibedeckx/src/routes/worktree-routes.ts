@@ -397,6 +397,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const deleteOnRemote = async (rc: RemoteConfig) => {
       const registered = await fastify.storage.workspaceRegistry
         .getByProjectBranch(project.id, branch, rc.serverId);
+      const restorePreviousStatus = async () => {
+        if (!registered) return;
+        const current = await fastify.storage.workspaceRegistry
+          .getByProjectBranch(project.id, branch, rc.serverId);
+        if (!current || current.checkout.status !== "deleting") return;
+        await fastify.storage.workspaceRegistry.setCheckoutStatusIfCurrent(
+          registered.workspace.id,
+          rc.serverId,
+          { status: "deleting", updatedAt: current.checkout.updated_at },
+          registered.checkout.status,
+          registered.checkout.error,
+        );
+      };
       if (registered) {
         await fastify.storage.workspaceRegistry.setCheckoutStatus(registered.workspace.id, rc.serverId, "deleting");
       }
@@ -411,26 +424,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (registered) {
           if (result.ok) {
             await fastify.storage.workspaceRegistry.removeCheckout(registered.workspace.id, rc.serverId);
-          } else if (result.status === 409) {
-            // The worker refused deletion because the checkout is still in
-            // use/dirty. Its health did not regress; undo the deleting intent.
-            await fastify.storage.workspaceRegistry.setCheckoutStatus(
-              registered.workspace.id, rc.serverId, "ready",
-            );
           } else {
-            const detail = result.data as { error?: string };
-            await fastify.storage.workspaceRegistry.setCheckoutStatus(
-              registered.workspace.id, rc.serverId, "error", detail.error ?? result.errorCode ?? "Remote deletion failed",
-            );
+            // A failed delete describes the operation, not checkout health.
+            // This includes explicit refusal, worker 5xx, and transport
+            // failures where the remote outcome is unknown.
+            await restorePreviousStatus();
           }
         }
         return result;
       } catch (error) {
         if (registered) {
-          const message = error instanceof Error ? error.message : "Remote deletion failed";
-          await fastify.storage.workspaceRegistry
-            .setCheckoutStatus(registered.workspace.id, rc.serverId, "error", message)
-            .catch((registryError) => console.error("[worktree] Failed to record remote delete error:", registryError));
+          await restorePreviousStatus()
+            .catch((registryError) => console.error("[worktree] Failed to restore remote checkout status:", registryError));
         }
         throw error;
       }

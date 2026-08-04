@@ -201,7 +201,8 @@ hub 预分配 session id
 checkout 状态描述的是物理 checkout 的健康状态，不是最近一次 API 操作的结果：
 
 - 已有 `ready` checkout 的重复创建被 worker 拒绝时，仍保持 `ready`；
-- 删除因未提交修改等安全条件被拒绝时，从 `deleting` 恢复为 `ready`；
+- 远程删除失败（包括 worker 拒绝、5xx、传输失败或代理异常）时，恢复删除前的
+  checkout 状态；失败只描述删除操作，不能证明 checkout 健康状态恶化；
 - 只有能够证明 checkout 本身不可用的失败才写成 `error`；
 - reconcile 写状态必须使用 compare-and-set，不能用旧 Git/数据库快照覆盖已经完成的
   创建或删除。

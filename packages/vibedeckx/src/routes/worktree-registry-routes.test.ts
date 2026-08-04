@@ -28,6 +28,24 @@ describe("worktree routes persisted identity", () => {
   let projectPath: string;
   let worktreePath: string;
 
+  const registerRemoteCheckout = async () => {
+    await storage.projects.create({ id: "remote-project", name: "remote", path: null });
+    const remote = await storage.remoteServers.create({ name: "worker" });
+    await storage.projectRemotes.add({
+      project_id: "remote-project",
+      remote_server_id: remote.id,
+      remote_path: "/remote/repo",
+    });
+    const registered = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "remote-project",
+      branch: "dev",
+      targetId: remote.id,
+      worktreePath: conventionalWorktreePath("/remote/repo", "dev"),
+      expectedBranch: "dev",
+    });
+    return { remote, registered };
+  };
+
   beforeEach(async () => {
     proxyToRemoteAuto.mockReset();
     dir = mkdtempSync(path.join(tmpdir(), "vdx-worktree-routes-"));
@@ -171,20 +189,7 @@ describe("worktree routes persisted identity", () => {
   });
 
   it("preserves a remote checkout when deletion cannot reach the worker", async () => {
-    await storage.projects.create({ id: "remote-project", name: "remote", path: null });
-    const remote = await storage.remoteServers.create({ name: "worker" });
-    await storage.projectRemotes.add({
-      project_id: "remote-project",
-      remote_server_id: remote.id,
-      remote_path: "/remote/repo",
-    });
-    await storage.workspaceRegistry.registerReadyCheckout({
-      projectId: "remote-project",
-      branch: "dev",
-      targetId: remote.id,
-      worktreePath: conventionalWorktreePath("/remote/repo", "dev"),
-      expectedBranch: "dev",
-    });
+    const { remote } = await registerRemoteCheckout();
     proxyToRemoteAuto.mockResolvedValue({
       ok: false,
       status: 0,
@@ -201,6 +206,75 @@ describe("worktree routes persisted identity", () => {
     expect(response.statusCode).toBe(502);
     expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
       .toMatchObject({ status: "ready", error: null });
+  });
+
+  it("restores the exact prior checkout state when remote deletion returns 5xx", async () => {
+    const { remote, registered } = await registerRemoteCheckout();
+    await storage.workspaceRegistry.setCheckoutStatus(
+      registered.workspace.id,
+      remote.id,
+      "error",
+      "pre-existing health failure",
+    );
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: false,
+      status: 500,
+      data: { error: "Worker delete failed" },
+      errorCode: "server_error",
+    });
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/remote-project/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
+      .toMatchObject({ status: "error", error: "pre-existing health failure" });
+  });
+
+  it("preserves a remote checkout when the deletion proxy throws", async () => {
+    const { remote } = await registerRemoteCheckout();
+    proxyToRemoteAuto.mockRejectedValue(new Error("reverse-connect channel closed"));
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/remote-project/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
+      .toMatchObject({ status: "ready", error: null });
+  });
+
+  it("does not overwrite a concurrent checkout status change after remote deletion fails", async () => {
+    const { remote, registered } = await registerRemoteCheckout();
+    proxyToRemoteAuto.mockImplementation(async () => {
+      await storage.workspaceRegistry.setCheckoutStatus(
+        registered.workspace.id,
+        remote.id,
+        "error",
+        "concurrent health check",
+      );
+      return {
+        ok: false,
+        status: 0,
+        data: { error: "Remote server is not connected" },
+        errorCode: "network_error",
+      };
+    });
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/remote-project/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
+      .toMatchObject({ status: "error", error: "concurrent health check" });
   });
 
   it("uses the canonical pseudo project for path-based registry rows", async () => {
