@@ -198,6 +198,19 @@ hub 预分配 session id
 任何一步失败都必须可重试，并使用预分配 session id 防止重复创建。不能通过分布式
 锁假装获得跨数据库事务。
 
+checkout 状态描述的是物理 checkout 的健康状态，不是最近一次 API 操作的结果：
+
+- 已有 `ready` checkout 的重复创建被 worker 拒绝时，仍保持 `ready`；
+- 删除因未提交修改等安全条件被拒绝时，从 `deleting` 恢复为 `ready`；
+- 只有能够证明 checkout 本身不可用的失败才写成 `error`；
+- reconcile 写状态必须使用 compare-and-set，不能用旧 Git/数据库快照覆盖已经完成的
+  创建或删除。
+
+远程 checkout 的物理路径必须最终以 worker 为权威。新版 worker 的创建/查询响应应
+附带实际 `worktreePath`，hub 持久化该值；旧 worker 缺少该字段时可以暂时退回
+conventional path 推导，但推导结果只能视作兼容快照，不能在未来的 session 绑定中
+覆盖 worker 已报告的真实路径。
+
 ## 7. 索引建议
 
 至少增加：
@@ -231,5 +244,6 @@ CREATE INDEX idx_remote_session_mappings_workspace_checkout
 - 何时将 `workspace_checkout_id` 改为 `NOT NULL`；
 - 何时停止兼容未升级 worker；
 - 是否最终合并本地 `agent_sessions` 与 hub `remote_session_mappings` 模型。
+- 何时要求所有 worker 在 worktree 响应中返回权威物理路径。
 
 这些事项需要在正式迁移设计中单独确认，不能由数据库迁移脚本隐式决定。

@@ -3,6 +3,7 @@ import fp from "fastify-plugin";
 import { mkdir } from "fs/promises";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath, conventionalWorktreePath, getWorktreeBaseForProject, getRegisteredWorktreeBranches, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache } from "../utils/worktree-paths.js";
+import { ensurePathProjectId } from "../utils/path-project.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
@@ -27,18 +28,10 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project): Prom
 }
 
 async function ensurePathProject(fastify: FastifyInstance, projectPath: string): Promise<Project> {
-  const existing = await fastify.storage.projects.getByPath(projectPath);
-  if (existing) return existing;
-  const id = `path:${projectPath}`;
-  const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
-  try {
-    return await fastify.storage.projects.create({ id, name, path: projectPath });
-  } catch (error) {
-    // Concurrent path-based requests may race the UNIQUE(path) insert.
-    const raced = await fastify.storage.projects.getByPath(projectPath);
-    if (raced) return raced;
-    throw error;
-  }
+  const projectId = await ensurePathProjectId(fastify, projectPath);
+  const project = await fastify.storage.projects.getById(projectId);
+  if (!project) throw new Error(`Path project '${projectId}' was not persisted`);
+  return project;
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -418,6 +411,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (registered) {
           if (result.ok) {
             await fastify.storage.workspaceRegistry.removeCheckout(registered.workspace.id, rc.serverId);
+          } else if (result.status === 409) {
+            // The worker refused deletion because the checkout is still in
+            // use/dirty. Its health did not regress; undo the deleting intent.
+            await fastify.storage.workspaceRegistry.setCheckoutStatus(
+              registered.workspace.id, rc.serverId, "ready",
+            );
           } else {
             const detail = result.data as { error?: string };
             await fastify.storage.workspaceRegistry.setCheckoutStatus(
@@ -657,13 +656,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Helper to create worktree on a single remote
     const createOnRemote = async (rc: RemoteConfig) => {
-      const pending = await fastify.storage.workspaceRegistry.beginCheckout({
-        projectId: project.id,
-        branch: trimmedBranch,
-        targetId: rc.serverId,
-        worktreePath: conventionalWorktreePath(rc.remotePath, trimmedBranch),
-        expectedBranch: trimmedBranch,
-      });
+      const previous = await fastify.storage.workspaceRegistry
+        .getByProjectBranch(project.id, trimmedBranch, rc.serverId);
+      const preserveReady = previous?.checkout.status === "ready";
+      const pending = preserveReady && previous
+        ? previous
+        : await fastify.storage.workspaceRegistry.beginCheckout({
+            projectId: project.id,
+            branch: trimmedBranch,
+            targetId: rc.serverId,
+            worktreePath: conventionalWorktreePath(rc.remotePath, trimmedBranch),
+            expectedBranch: trimmedBranch,
+          });
       try {
         const result = await proxyToRemoteAuto(
           rc.serverId,
@@ -673,6 +677,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
           { reverseConnectManager: fastify.reverseConnectManager }
         );
         if (result.ok) {
+          await fastify.storage.workspaceRegistry.setCheckoutStatus(pending.workspace.id, rc.serverId, "ready");
+        } else if (preserveReady) {
+          // A duplicate/retried create must not turn an already healthy
+          // checkout into a sticky error merely because the worker rejected
+          // the redundant operation.
           await fastify.storage.workspaceRegistry.setCheckoutStatus(pending.workspace.id, rc.serverId, "ready");
         } else {
           const detail = result.data as { error?: string };
@@ -684,7 +693,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : "Remote creation failed";
         await fastify.storage.workspaceRegistry
-          .setCheckoutStatus(pending.workspace.id, rc.serverId, "error", message)
+          .setCheckoutStatus(
+            pending.workspace.id,
+            rc.serverId,
+            preserveReady ? "ready" : "error",
+            preserveReady ? null : message,
+          )
           .catch((registryError) => console.error("[worktree] Failed to record remote checkout error:", registryError));
         throw error;
       }

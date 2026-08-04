@@ -17,8 +17,8 @@ export async function ensurePathProjectId(
   const pseudoProjectId = `path:${projectPath}`;
   if (await fastify.storage.projects.getById(pseudoProjectId)) return pseudoProjectId;
 
-  // A project already registered under this path owns it — reuse its id rather
-  // than tripping the UNIQUE constraint on `path`.
+  // A project already registered under this path owns it when the canonical
+  // pseudo id has not been created yet.
   const existingByPath = await fastify.storage.projects.getByPath(projectPath);
   if (existingByPath) return existingByPath.id;
 
@@ -26,7 +26,7 @@ export async function ensurePathProjectId(
   try {
     await fastify.storage.projects.create({ id: pseudoProjectId, name, path: projectPath });
   } catch (err: unknown) {
-    // Safety net for a concurrent create: if UNIQUE still fires, the row exists.
+    // Safety net for concurrent creation of the same path:<path> primary key.
     if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
   }
   return pseudoProjectId;

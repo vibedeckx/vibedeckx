@@ -226,8 +226,14 @@ export async function getRegisteredWorktreeBranches(
       // Crash recovery: Git removal landed but the registry cleanup did not.
       await storage.workspaceRegistry.removeCheckout(row.workspace.id, "local");
     } else if (row.checkout.status !== "error" || row.checkout.error !== "Worktree is missing") {
-      await storage.workspaceRegistry.setCheckoutStatus(
-        row.workspace.id, "local", "error", "Worktree is missing",
+      // The Git list and registry row are separate snapshots. Do not overwrite
+      // a create that reached ready after this row was read.
+      await storage.workspaceRegistry.setCheckoutStatusIfCurrent(
+        row.workspace.id,
+        "local",
+        { status: row.checkout.status, updatedAt: row.checkout.updated_at },
+        "error",
+        "Worktree is missing",
       );
     }
   }

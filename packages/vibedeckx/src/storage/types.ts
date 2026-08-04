@@ -674,6 +674,13 @@ export interface Storage {
       status: WorkspaceCheckoutStatus,
       error?: string | null,
     ) => Promise<void>;
+    setCheckoutStatusIfCurrent: (
+      workspaceId: string,
+      targetId: string,
+      expected: { status: WorkspaceCheckoutStatus; updatedAt: string },
+      status: WorkspaceCheckoutStatus,
+      error?: string | null,
+    ) => Promise<boolean>;
     listByProject: (projectId: string, targetId?: string) => Promise<RegisteredWorkspaceCheckout[]>;
     getByProjectBranch: (
       projectId: string,

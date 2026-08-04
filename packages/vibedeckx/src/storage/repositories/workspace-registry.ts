@@ -145,6 +145,25 @@ export const createWorkspaceRegistryRepo = (
       });
     },
 
+    setCheckoutStatusIfCurrent: async (
+      workspaceId,
+      targetId,
+      expected,
+      status,
+      error = null,
+    ) => kdb.transaction().execute(async (trx) => {
+      const result = await trx.updateTable("workspace_checkouts")
+        .set({ status, error, updated_at: h.nowMs() })
+        .where("workspace_id", "=", workspaceId)
+        .where("target_id", "=", targetId)
+        .where("status", "=", expected.status)
+        .where("updated_at", "=", expected.updatedAt)
+        .executeTakeFirst();
+      const changed = result.numUpdatedRows > 0n;
+      if (changed) await recomputeWorkspace(trx, workspaceId, h);
+      return changed;
+    }),
+
     listByProject: async (projectId, targetId) => {
       let query = kdb.selectFrom("workspaces as workspace")
         .innerJoin("workspace_checkouts as checkout", "checkout.workspace_id", "workspace.id")

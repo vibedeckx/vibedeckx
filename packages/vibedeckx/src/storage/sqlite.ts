@@ -65,7 +65,6 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       UNIQUE(workspace_id, target_id),
-      UNIQUE(target_id, worktree_path),
       FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
     );
 
@@ -378,6 +377,40 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
   `);
+
+  // The original registry schema made (target_id, worktree_path) globally
+  // unique. The same physical checkout can legitimately be represented by
+  // multiple project aliases, so that constraint caused the second project to
+  // fail permanently. SQLite cannot drop a table constraint in place; rebuild
+  // only databases that still carry the old declaration.
+  const workspaceCheckoutsTable = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace_checkouts'",
+  ).get() as { sql: string } | undefined;
+  if (/UNIQUE\s*\(\s*target_id\s*,\s*worktree_path\s*\)/i.test(workspaceCheckoutsTable?.sql ?? "")) {
+    db.transaction(() => db.exec(`
+      ALTER TABLE workspace_checkouts RENAME TO workspace_checkouts_global_path_unique;
+      CREATE TABLE workspace_checkouts (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        expected_branch TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        UNIQUE(workspace_id, target_id),
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      );
+      INSERT INTO workspace_checkouts
+        (id, workspace_id, target_id, worktree_path, expected_branch, status, error, created_at, updated_at)
+      SELECT id, workspace_id, target_id, worktree_path, expected_branch, status, error, created_at, updated_at
+        FROM workspace_checkouts_global_path_unique;
+      DROP TABLE workspace_checkouts_global_path_unique;
+      CREATE INDEX idx_workspace_checkouts_workspace_status
+        ON workspace_checkouts(workspace_id, status, target_id);
+    `))();
+  }
 
   const instructionDeliveryCols = db.prepare("PRAGMA table_info(agent_instruction_deliveries)").all() as { name: string }[];
   if (!instructionDeliveryCols.some((c) => c.name === "owner_token")) {
