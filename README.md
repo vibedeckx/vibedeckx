@@ -127,7 +127,7 @@ Starts the local server. All flags are optional.
 | Flag | Description |
 |------|-------------|
 | `--port <number>` | Port to bind (default: `5173`) |
-| `--host <address>` | Interface to bind (default: `127.0.0.1`, loopback only). Use `0.0.0.0` to expose on all interfaces — only do so behind `--auth`, `VIBEDECKX_API_KEY`, or a trusted tunnel/proxy. |
+| `--host <address>` | Interface to bind (default: `127.0.0.1`, loopback only). Use `0.0.0.0` to expose on all interfaces — only do so behind `--auth` or an authenticating proxy. |
 | `--auth` | Enable Clerk authentication (requires `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`) |
 | `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
 | `--cert <path>` | Path to TLS certificate PEM. Enables HTTPS when paired with `--key`. Env: `VIBEDECKX_TLS_CERT` |
@@ -144,11 +144,12 @@ CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --auth
 > By default the server binds to `127.0.0.1` (loopback only), so a no-auth instance
 > is reachable only from the same machine. The executor API runs commands on the
 > host and is not authenticated per-route in no-auth mode, so widen the bind with
-> `--host 0.0.0.0` only behind `--auth`, `VIBEDECKX_API_KEY`, or a trusted
-> tunnel/reverse-proxy. A Cloudflare tunnel (`cloudflared`) dials `127.0.0.1`
-> locally and needs no `--host` change; binding `0.0.0.0` is only required when
-> something off-box (a reverse proxy, or Cloudflare reaching the origin IP
-> directly) must connect.
+> `--host 0.0.0.0` only behind `--auth` or an authenticating reverse-proxy.
+> A Cloudflare tunnel (`cloudflared`) dials `127.0.0.1` locally and needs no
+> `--host` change; binding `0.0.0.0` is only required when something off-box
+> (a reverse proxy, or Cloudflare reaching the origin IP directly) must connect.
+> Note that a tunnel exposes the instance just as a wide bind does — loopback is
+> not a safety margin once a public hostname points at it.
 
 #### HTTPS / TLS
 
@@ -162,7 +163,7 @@ The CLI flags take precedence over the environment variables. Values point to **
 | `--key` | `VIBEDECKX_TLS_KEY` | Server private key (PEM) |
 | `--client-ca` | `VIBEDECKX_TLS_CLIENT_CA` | Client CA bundle for mTLS (optional) |
 
-**Recommended setup behind Cloudflare** — use a Cloudflare Origin Certificate (valid up to 15 years, no ACME / auto-renewal needed) plus Authenticated Origin Pulls so the origin only accepts connections from Cloudflare, and protect the public Cloudflare route with Cloudflare Access, `--auth`, `VIBEDECKX_API_KEY`, or an equivalent user-authentication layer:
+**Recommended setup behind Cloudflare** — use a Cloudflare Origin Certificate (valid up to 15 years, no ACME / auto-renewal needed) plus Authenticated Origin Pulls so the origin only accepts connections from Cloudflare, and protect the public Cloudflare route with Cloudflare Access, `--auth`, or an equivalent user-authentication layer:
 
 ```bash
 # These bind --host 0.0.0.0 because Cloudflare reaches the origin IP over the
@@ -186,7 +187,7 @@ CLERK_SECRET_KEY=... CLERK_PUBLISHABLE_KEY=... vibedeckx start --host 0.0.0.0 --
 # 3. Origin Cert + Authenticated Origin Pulls (mTLS) — origin rejects any request
 #    that doesn't present Cloudflare's client cert, so direct hits on the origin
 #    IP are dropped at the TLS layer. You still need Cloudflare Access, --auth,
-#    VIBEDECKX_API_KEY, or equivalent user authentication for the public URL.
+#    or equivalent user authentication for the public URL.
 #    Download the CA from:
 #    https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
 vibedeckx start --host 0.0.0.0 \
@@ -208,9 +209,29 @@ Notes:
 - `--client-ca` requires `--cert`/`--key` (mTLS needs server identity first).
 
 > [!WARNING]
-> TLS, Cloudflare Origin Certificates, and Authenticated Origin Pulls do not authenticate end users. If this Vibedeckx URL is Internet-reachable, protect it with Cloudflare Access, `--auth`, `VIBEDECKX_API_KEY`, or an equivalent user-authentication layer. Do not expose a no-auth Vibedeckx instance directly to the public Internet.
+> TLS, Cloudflare Origin Certificates, and Authenticated Origin Pulls do not authenticate end users. If this Vibedeckx URL is Internet-reachable, protect it with Cloudflare Access, `--auth`, or an equivalent user-authentication layer. Do not expose a no-auth Vibedeckx instance directly to the public Internet.
 
 - TLS mode skips the auto-open-browser step on launch — the certificate is for the public hostname, so opening `https://localhost:<port>` would just trigger a cert-mismatch warning. Visit your public URL through Cloudflare instead.
+
+#### `VIBEDECKX_API_KEY`
+
+Setting this environment variable requires every `/api/` request to carry the same
+value, as an `x-vibedeckx-api-key` header or an `?apiKey=` query param. A request
+without it — or with the wrong one — gets a 401 before it reaches any route.
+
+It locks a door; it does not say who walked through it. Requests are not
+authenticated *as* anyone, so this is not a substitute for user authentication:
+when Clerk (`--auth`) is enabled, a valid session token is still required. Its
+real use is as an origin lock — the same job as Authenticated Origin Pulls, but
+via a header instead of a client certificate — so that someone who discovers your
+origin IP cannot bypass the proxy in front.
+
+> [!IMPORTANT]
+> **The built-in web UI does not send this key.** With the key set and nothing
+> injecting it, the page loads and then every request fails with 401. Use it when
+> you drive Vibedeckx over its API (scripts, automation), or when a reverse proxy
+> adds the header for you — `proxy_set_header` in nginx, a Transform Rule or
+> Worker on Cloudflare. A plain `cloudflared` tunnel does not inject headers.
 
 ### `vibedeckx connect`
 

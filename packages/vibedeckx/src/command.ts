@@ -62,7 +62,7 @@ const startCommand = buildCommand({
       host: {
         kind: "parsed",
         parse: String,
-        brief: "Network interface to bind (default: 127.0.0.1, loopback only). Use 0.0.0.0 to expose on all interfaces — only do so behind --auth, VIBEDECKX_API_KEY, or a trusted tunnel/proxy.",
+        brief: "Network interface to bind (default: 127.0.0.1, loopback only). Use 0.0.0.0 to expose on all interfaces — only do so behind --auth or an authenticating proxy.",
         optional: true,
       },
       auth: {
@@ -158,8 +158,10 @@ const startCommand = buildCommand({
     if (!isLoopbackHost && !authEnabled && !process.env.VIBEDECKX_API_KEY) {
       console.warn(
         `Warning: binding to ${host} exposes vibedeckx on the network with no authentication.\n` +
-        "Anyone who can reach this host can run commands via the executor API. Enable --auth or\n" +
-        "set VIBEDECKX_API_KEY, or keep the default loopback bind (127.0.0.1) behind a trusted tunnel/proxy."
+        "Anyone who can reach this host can run commands via the executor API. Enable --auth, or put\n" +
+        "an authenticating proxy in front, or keep the default loopback bind (127.0.0.1).\n" +
+        "(VIBEDECKX_API_KEY also locks the API, but the built-in UI cannot send it — it suits scripts,\n" +
+        "or a proxy that injects the x-vibedeckx-api-key header on every request.)"
       );
     }
 
