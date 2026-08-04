@@ -466,7 +466,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // --- WebSocket Reverse Proxy (for HMR) ---
   fastify.get<{
     Params: { id: string; "*": string };
-    Querystring: { apiKey?: string; token?: string };
+    Querystring: { token?: string };
   }>("/api/projects/:id/browser/proxy-ws/*", { websocket: true }, async (socket, req) => {
     const { id: projectId } = req.params;
 
@@ -475,9 +475,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // the channel pipes into the project's reverse-connected remote.
     const principal = await authenticateWs(fastify.authEnabled, req.query, socket);
     if (!principal) return;
-    const projectOwner = principal.kind === "api_key"
-      ? undefined
-      : (principal.userId ?? "local");
+    const projectOwner = principal.userId ?? "local";
     if (!(await fastify.storage.projects.getById(projectId, projectOwner))) {
       try { socket.send(JSON.stringify({ error: "Forbidden" })); } catch { /* closed */ }
       try { socket.close(); } catch { /* already closed */ }

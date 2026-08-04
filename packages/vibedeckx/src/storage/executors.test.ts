@@ -376,7 +376,10 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
       expect(replaced?.status).toBe("running");
       expect(replaced?.exit_code).toBeNull();
       expect(replaced?.finished_at).toBeNull();
-      expect(replaced?.remote_url).toBe("");
+      // The legacy direct-URL columns still exist in SQLite (NOT NULL, written
+      // as "") but must never surface on the mapped row.
+      expect(replaced).not.toHaveProperty("remote_url");
+      expect(replaced).not.toHaveProperty("remote_api_key");
       expect(replaced?.remote_process_id).toBe("rp2");
     });
 

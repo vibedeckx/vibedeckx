@@ -57,14 +57,14 @@ export function requireAuth(req: FastifyRequest, reply: FastifyReply): string | 
   const server = req.server;
   if (!server.authEnabled) return undefined;
 
-  // Skip Clerk auth only when a server API key is configured AND the header is
-  // present (remote proxy). The API-key middleware has, by this point, already
-  // rejected any header that doesn't match API_KEY, so a present header here is
-  // the validated key. When VIBEDECKX_API_KEY is unset the header is unvalidated
-  // and must NOT bypass Clerk — otherwise any value authenticates as no-user.
-  const apiKeyHeader = req.headers["x-vibedeckx-api-key"];
-  if (API_KEY && apiKeyHeader) return undefined;
-
+  // VIBEDECKX_API_KEY deliberately does NOT authenticate a principal here: it is
+  // a door gate (the onRequest hook below), not an identity. It used to short
+  // out Clerk and resolve to the `local` tenant, which was unreachable in the
+  // only config where the key is actually enforced (--auth off) and actively
+  // harmful in the one where it wasn't (a reverse proxy injecting the header for
+  // origin-locking would collapse every Clerk user into one tenant). Who you are
+  // is Clerk's answer alone. Operator-only surfaces that legitimately key off
+  // the shared secret check the header themselves — see worker-stats-routes.ts.
   try {
     const { userId } = getAuth(req);
     if (!userId) {
@@ -235,9 +235,10 @@ export const createServer = async (opts: {
       return done();
     }
 
-    // When both API_KEY and Clerk auth are enabled, API key takes precedence
-    // (used by remote proxy). If no API key header present and Clerk is enabled,
-    // let Clerk handle auth.
+    // This gate only decides whether a request may reach a route at all; who the
+    // caller *is* remains Clerk's answer (see requireAuth). A present key must
+    // therefore still match, but its absence is not fatal when Clerk is enabled
+    // — that path just defers to per-route auth.
     const providedKey = req.headers["x-vibedeckx-api-key"] ||
       (req.query as { apiKey?: string })?.apiKey;
 

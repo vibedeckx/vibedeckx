@@ -9,8 +9,6 @@ const mapProject = (row: Selectable<ProjectsTable>): Project => ({
   path: row.path,
   is_remote: fromDbBool(row.is_remote),
   remote_path: row.remote_path ?? undefined,
-  remote_url: row.remote_url ?? undefined,
-  remote_api_key: row.remote_api_key ?? undefined,
   agent_mode: (row.agent_mode as ExecutionMode) ?? "local",
   executor_mode: (row.executor_mode as ExecutionMode) ?? "local",
   sync_up_config: row.sync_up_config ? (JSON.parse(row.sync_up_config) as SyncButtonConfig) : undefined,
@@ -30,10 +28,10 @@ export const createCoreRepos = (
         path: opts.path ?? null,
         remote_path: opts.remote_path ?? null,
         is_remote: h.toDbBool(false),
-        remote_url: null,
-        remote_api_key: null,
-        // Dead column: never populated by any current caller (kept only so
-        // legacy DDL/back-compat readers relying on its presence don't break).
+        // Dead columns: never populated by any current caller (kept only so
+        // legacy DDL/back-compat readers relying on their presence don't break).
+        // remote_url/remote_api_key are leftovers from the removed direct-URL
+        // (outbound) transport — all remote traffic rides reverse-connect now.
         remote_project_id: null,
         agent_mode: opts.agent_mode ?? "local",
         executor_mode: opts.executor_mode ?? "local",

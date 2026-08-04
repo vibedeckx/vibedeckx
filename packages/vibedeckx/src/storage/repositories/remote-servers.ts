@@ -122,12 +122,13 @@ export const createRemoteServerRepos = (
   remoteServers: {
     create: async (server, userId) => {
       const id = crypto.randomUUID();
+      // url / api_key / connection_mode are legacy columns from the removed
+      // direct-URL (outbound) transport. Nothing reads them and every server is
+      // reverse-connect now, so leave them to their column defaults rather than
+      // writing values that only look meaningful.
       await kdb.insertInto("remote_servers").values({
         id,
         name: server.name,
-        url: null,
-        api_key: null,
-        connection_mode: "inbound",
         connect_token: null,
         connect_token_created_at: null,
         last_connected_at: null,

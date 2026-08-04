@@ -28,9 +28,23 @@ const mapExecutorProcess = (row: Selectable<ExecutorProcessesTable>): ExecutorPr
   status: row.status as ExecutorProcessStatus,
 });
 
+// Mapped field by field rather than spread: the row still carries the legacy
+// remote_url / remote_api_key columns (NOT NULL, so `insert` keeps writing "")
+// and a spread would hand them back on every returned object, making the type's
+// silence about them a lie. Today's callers all pick named fields, so nothing
+// serialized them; an explicit map keeps that true without relying on it.
 const mapRemoteExecutorProcess = (row: Selectable<RemoteExecutorProcessesTable>): RemoteExecutorProcessRow => ({
-  ...row,
+  local_process_id: row.local_process_id,
+  remote_server_id: row.remote_server_id,
+  remote_process_id: row.remote_process_id,
+  executor_id: row.executor_id,
+  project_id: row.project_id,
+  branch: row.branch,
+  started_at: row.started_at,
   status: row.status as ExecutorProcessStatus,
+  exit_code: row.exit_code,
+  finished_at: row.finished_at,
+  machine_id: row.machine_id,
 });
 
 export const createExecutorRepos = (

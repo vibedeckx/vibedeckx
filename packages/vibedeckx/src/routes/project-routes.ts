@@ -12,10 +12,10 @@ import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 
-function sanitizeProject(project: Project) {
-  const { remote_api_key, ...safe } = project;
-  return { ...safe, has_remote_api_key: !!remote_api_key };
-}
+// A `Project` carries no secrets to strip: the per-project `remote_api_key` it
+// used to expose (as a `has_remote_api_key` boolean) belonged to the removed
+// direct-URL transport and is no longer read or written. Re-introduce a
+// sanitizer here if a future field ever needs withholding from the wire.
 
 const routes: FastifyPluginAsync = async (fastify) => {
   // 获取所有项目
@@ -23,7 +23,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
     const userId = resolveUserId(authResult);
-    const projects = (await fastify.storage.projects.getAll(userId)).map(sanitizeProject);
+    const projects = await fastify.storage.projects.getAll(userId);
     return reply.code(200).send({ projects });
   });
 
@@ -36,7 +36,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!project) {
       return reply.code(404).send({ error: "Project not found" });
     }
-    return reply.code(200).send({ project: sanitizeProject(project) });
+    return reply.code(200).send({ project });
   });
 
   // 打开目录选择对话框
@@ -142,7 +142,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       executor_mode: executorMode,
     }, userId);
 
-    return reply.code(201).send({ project: sanitizeProject(project) });
+    return reply.code(201).send({ project });
   });
 
   // 更新项目
@@ -215,7 +215,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    return reply.code(200).send({ project: sanitizeProject(updated) });
+    return reply.code(200).send({ project: updated });
   });
 
   // 删除项目

@@ -3,13 +3,14 @@ import type { FastifyInstance } from "fastify";
 /**
  * The authenticated principal behind a WebSocket connection.
  *
- * The explicit kind keeps the canonical local solo tenant separate from a
- * server-to-server proxy authenticated by VIBEDECKX_API_KEY. Only `api_key`
- * principals may bypass end-user ownership checks.
+ * A connection is either a Clerk end user or the canonical local solo tenant.
+ * There is deliberately no API-key principal: VIBEDECKX_API_KEY gates the door
+ * (the global onRequest hook) but never confers an identity — see requireAuth
+ * in server.ts.
  */
 export type WsPrincipal =
   | { userId: string; kind: "user" }
-  | { userId: null; kind: "solo" | "api_key" };
+  | { userId: null; kind: "solo" };
 
 /** Minimal socket surface needed to reject a connection. */
 type RejectableSocket = {
@@ -55,20 +56,17 @@ export async function verifyWsToken(token: string): Promise<string | null> {
  *
  * Mirrors `requireAuth` for the WS world: WebSocket upgrades carry no
  * Authorization header (the global Clerk preHandler skips them), so auth rides
- * on query params. When auth is enabled, require either a pre-validated
- * `apiKey` (already checked against VIBEDECKX_API_KEY by the global API-key
- * onRequest hook) or a valid Clerk session `token`. A present `apiKey` only
- * counts when VIBEDECKX_API_KEY is configured — otherwise it is unvalidated and
- * must NOT bypass Clerk. Solo and API-key principals both lack a Clerk user id,
- * but retain distinct kinds so solo mode can be scoped to `local`.
+ * on query params. When auth is enabled, a valid Clerk session `token` is the
+ * only way through. A `?apiKey=` may still ride along on an API-key-locked
+ * server — the global onRequest hook consumes it to open the door — but it is
+ * not an identity and is ignored here.
  */
 export async function authenticateWs(
   authEnabled: boolean,
-  query: { apiKey?: string; token?: string },
+  query: { token?: string },
   socket: RejectableSocket,
 ): Promise<WsPrincipal | null> {
   if (!authEnabled) return { userId: null, kind: "solo" };
-  if (process.env.VIBEDECKX_API_KEY && query.apiKey) return { userId: null, kind: "api_key" };
 
   const reject = (error: string): null => {
     try { socket.send(JSON.stringify({ error })); } catch { /* socket closed */ }

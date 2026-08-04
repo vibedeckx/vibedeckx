@@ -18,13 +18,16 @@ describe("authenticateWs principal kind", () => {
     });
   });
 
-  it("keeps a prevalidated server API key distinguishable from solo mode", async () => {
+  // The server API key is a door gate, not an identity: a reverse proxy that
+  // injects it to origin-lock a Clerk deployment must not thereby collapse every
+  // request into one unscoped principal.
+  it("does not let a matching server API key stand in for a Clerk session", async () => {
     process.env.VIBEDECKX_API_KEY = "server-key";
     const socket = { send: vi.fn(), close: vi.fn() };
 
-    await expect(authenticateWs(true, { apiKey: "server-key" }, socket)).resolves.toEqual({
-      userId: null,
-      kind: "api_key",
-    });
+    await expect(
+      authenticateWs(true, { apiKey: "server-key" } as { token?: string }, socket),
+    ).resolves.toBeNull();
+    expect(socket.close).toHaveBeenCalled();
   });
 });

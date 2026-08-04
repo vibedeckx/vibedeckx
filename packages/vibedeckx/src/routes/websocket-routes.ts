@@ -41,7 +41,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.after(() => {
     fastify.get<{
       Params: { threadId: string };
-      Querystring: { apiKey?: string; token?: string };
+      Querystring: { token?: string };
     }>(
       "/api/project-chat/threads/:threadId/stream",
       { websocket: true },
@@ -81,7 +81,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     );
 
     // Executor process logs WebSocket
-    fastify.get<{ Params: { processId: string }; Querystring: { apiKey?: string; token?: string } }>(
+    fastify.get<{ Params: { processId: string }; Querystring: { token?: string } }>(
       "/api/executor-processes/:processId/logs",
       { websocket: true },
       async (socket, req) => {
@@ -141,7 +141,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     );
 
     // 多路复用 executor 日志端点：一个 workspace 一条连接，按 processId 订阅
-    fastify.get<{ Querystring: { projectId?: string; apiKey?: string; token?: string } }>(
+    fastify.get<{ Querystring: { projectId?: string; token?: string } }>(
       "/api/executor-logs/stream",
       { websocket: true },
       async (socket, req) => {
@@ -239,7 +239,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     );
 
     // Agent Session WebSocket
-    fastify.get<{ Params: { sessionId: string }; Querystring: { apiKey?: string; token?: string } }>(
+    fastify.get<{ Params: { sessionId: string }; Querystring: { token?: string } }>(
       "/api/agent-sessions/:sessionId/stream",
       { websocket: true },
       async (socket, req) => {
@@ -249,34 +249,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
         console.log(`[AgentWS] Connection attempt for session ${sessionId} (auth=${fastify.authEnabled})`);
 
         // Verify auth token for WebSocket when auth is enabled. `principalUserId`
-        // stays null for trusted connections (no-auth, or apiKey server-to-server
-        // proxy) and is set to the Clerk user otherwise.
+        // stays null only in no-auth solo mode; under Clerk it is always a real
+        // user (VIBEDECKX_API_KEY gates the door but confers no identity — see
+        // requireAuth in server.ts).
         let principalUserId: string | null = fastify.authEnabled ? null : "local";
         if (fastify.authEnabled) {
-          const apiKey = req.query.apiKey;
           const token = req.query.token;
 
-          // API key takes precedence (remote proxy connections), but only when the
-          // server has VIBEDECKX_API_KEY set — the global API-key onRequest hook has
-          // validated its value by this point. An unvalidated ?apiKey= (key unset)
-          // must NOT bypass Clerk, so fall through to token verification.
-          const apiKeyTrusted = !!process.env.VIBEDECKX_API_KEY && !!apiKey;
-          if (!apiKeyTrusted) {
-            if (!token) {
-              console.log(`[AgentWS] Auth rejected: no token (session=${sessionId})`);
-              socket.send(JSON.stringify({ error: "Authentication required" }));
-              socket.close();
-              return;
-            }
-            const userId = await verifyWsToken(token);
-            if (!userId) {
-              console.log(`[AgentWS] Auth rejected: invalid token (session=${sessionId})`);
-              socket.send(JSON.stringify({ error: "Invalid authentication token" }));
-              socket.close();
-              return;
-            }
-            principalUserId = userId;
+          if (!token) {
+            console.log(`[AgentWS] Auth rejected: no token (session=${sessionId})`);
+            socket.send(JSON.stringify({ error: "Authentication required" }));
+            socket.close();
+            return;
           }
+          const userId = await verifyWsToken(token);
+          if (!userId) {
+            console.log(`[AgentWS] Auth rejected: invalid token (session=${sessionId})`);
+            socket.send(JSON.stringify({ error: "Invalid authentication token" }));
+            socket.close();
+            return;
+          }
+          principalUserId = userId;
         }
 
         // Per-session ownership: a Clerk user may only stream sessions they own.
@@ -402,7 +395,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     );
     // Chat Session WebSocket
-    fastify.get<{ Params: { sessionId: string }; Querystring: { apiKey?: string; token?: string } }>(
+    fastify.get<{ Params: { sessionId: string }; Querystring: { token?: string } }>(
       "/api/chat-sessions/:sessionId/stream",
       { websocket: true },
       async (socket, req) => {
@@ -412,30 +405,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // stream forwards `user_message` into sendMessage, which builds a system
         // prompt from the workspace's rules and streams the model reply back — an
         // unauthenticated connection would leak another tenant's rule content and
-        // burn their LLM budget. `principalUserId` stays null for trusted
-        // connections (no-auth, or apiKey server-to-server proxy).
+        // burn their LLM budget. `principalUserId` stays null only in no-auth
+        // solo mode; under Clerk it is always a real user.
         let principalUserId: string | null = fastify.authEnabled ? null : "local";
         if (fastify.authEnabled) {
-          const apiKey = req.query.apiKey;
           const token = req.query.token;
 
-          const apiKeyTrusted = !!process.env.VIBEDECKX_API_KEY && !!apiKey;
-          if (!apiKeyTrusted) {
-            if (!token) {
-              console.log(`[ChatWS] Auth rejected: no token (session=${sessionId})`);
-              try { socket.send(JSON.stringify({ error: "Authentication required" })); } catch { /* socket closed */ }
-              try { socket.close(); } catch { /* already closed */ }
-              return;
-            }
-            const userId = await verifyWsToken(token);
-            if (!userId) {
-              console.log(`[ChatWS] Auth rejected: invalid token (session=${sessionId})`);
-              try { socket.send(JSON.stringify({ error: "Invalid authentication token" })); } catch { /* socket closed */ }
-              try { socket.close(); } catch { /* already closed */ }
-              return;
-            }
-            principalUserId = userId;
+          if (!token) {
+            console.log(`[ChatWS] Auth rejected: no token (session=${sessionId})`);
+            try { socket.send(JSON.stringify({ error: "Authentication required" })); } catch { /* socket closed */ }
+            try { socket.close(); } catch { /* already closed */ }
+            return;
           }
+          const userId = await verifyWsToken(token);
+          if (!userId) {
+            console.log(`[ChatWS] Auth rejected: invalid token (session=${sessionId})`);
+            try { socket.send(JSON.stringify({ error: "Invalid authentication token" })); } catch { /* socket closed */ }
+            try { socket.close(); } catch { /* already closed */ }
+            return;
+          }
+          principalUserId = userId;
         }
 
         // Per-session ownership: a Clerk user may only stream chat sessions they

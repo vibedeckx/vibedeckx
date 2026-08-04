@@ -26,6 +26,9 @@ export interface ProjectsTable {
   path: string | null;
   remote_path: string | null;
   is_remote: DbBool;
+  // Inert columns kept to describe the on-disk shape of existing DBs. No code
+  // reads or writes them: remote_url/remote_api_key are leftovers from the
+  // removed direct-URL (outbound) transport, remote_project_id was never used.
   remote_url: string | null;
   remote_api_key: string | null;
   remote_project_id: string | null;
@@ -254,6 +257,9 @@ export interface UserSettingsTable {
 export interface RemoteServersTable {
   id: string;
   name: string;
+  // Inert columns from the removed direct-URL (outbound) transport, kept to
+  // describe the on-disk shape of existing DBs. Every server is reverse-connect
+  // now; nothing reads these and inserts leave them at their column defaults.
   url: string | null;
   api_key: string | null;
   connection_mode: Generated<string>;

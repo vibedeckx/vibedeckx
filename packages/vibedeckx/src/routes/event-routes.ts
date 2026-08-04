@@ -17,40 +17,33 @@ function toWireEvent(event: GlobalEvent): GlobalEvent {
 
 const routes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Querystring: { token?: string } }>("/api/events", async (req, reply) => {
-    // Tenant scope for event filtering: null means a trusted principal (no-auth
-    // solo mode, or a validated API-key proxy connection) that sees all events;
-    // a Clerk userId only receives events for projects it owns.
+    // Tenant scope for event filtering: null means no-auth solo mode, which sees
+    // all events; a Clerk userId only receives events for projects it owns.
+    // VIBEDECKX_API_KEY confers no identity here — it only gates the door — so an
+    // API-key-locked server under Clerk still requires a session token.
     let userId: string | null = null;
 
     // SSE doesn't support Authorization headers, so verify token from query param
     if (fastify.authEnabled) {
-      // Skip Clerk only when VIBEDECKX_API_KEY is configured AND the header is
-      // present — the global API-key middleware has by then rejected any header
-      // that doesn't match, so a present header is the validated key. When the
-      // env var is unset the header is unvalidated and must NOT bypass Clerk —
-      // otherwise any value authenticates.
-      const apiKey = req.headers["x-vibedeckx-api-key"];
-      if (!(process.env.VIBEDECKX_API_KEY && apiKey)) {
-        const token = req.query.token;
-        if (!token) {
+      const token = req.query.token;
+      if (!token) {
+        return reply.code(401).send({ error: "Unauthorized" });
+      }
+      try {
+        const { verifyToken } = await import("@clerk/backend");
+        const payload = await verifyToken(token, {
+          secretKey: process.env.CLERK_SECRET_KEY!,
+          clockSkewInMs: CLERK_CLOCK_SKEW_MS,
+        });
+        if (!payload.sub) {
           return reply.code(401).send({ error: "Unauthorized" });
         }
-        try {
-          const { verifyToken } = await import("@clerk/backend");
-          const payload = await verifyToken(token, {
-            secretKey: process.env.CLERK_SECRET_KEY!,
-            clockSkewInMs: CLERK_CLOCK_SKEW_MS,
-          });
-          if (!payload.sub) {
-            return reply.code(401).send({ error: "Unauthorized" });
-          }
-          userId = payload.sub;
-        } catch (err) {
-          // Preserve Clerk's reason (clock-skew hook for B) — see ws-authz.ts.
-          const reason = (err as { reason?: string })?.reason;
-          if (reason) console.log(`[EventsSSE] token verification failed: ${reason}`);
-          return reply.code(401).send({ error: "Unauthorized" });
-        }
+        userId = payload.sub;
+      } catch (err) {
+        // Preserve Clerk's reason (clock-skew hook for B) — see ws-authz.ts.
+        const reason = (err as { reason?: string })?.reason;
+        if (reason) console.log(`[EventsSSE] token verification failed: ${reason}`);
+        return reply.code(401).send({ error: "Unauthorized" });
       }
     }
 

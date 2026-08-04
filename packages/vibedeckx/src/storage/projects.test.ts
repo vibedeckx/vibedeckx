@@ -39,8 +39,9 @@ describe("projects + settings storage", () => {
     expect(p.sync_up_config).toBeUndefined();
     expect(p.sync_down_config).toBeUndefined();
     expect(p.remote_path).toBeUndefined();
-    expect(p.remote_url).toBeUndefined();
-    expect(p.remote_api_key).toBeUndefined();
+    // The legacy direct-URL columns are no longer mapped onto the domain object.
+    expect(p).not.toHaveProperty("remote_url");
+    expect(p).not.toHaveProperty("remote_api_key");
   });
 
   it("user scoping: getById with wrong userId returns undefined", async () => {
