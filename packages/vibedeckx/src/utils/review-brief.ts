@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { generateText } from "ai";
 import type { Storage } from "../storage/types.js";
 import type { AgentMessage } from "../agent-types.js";
@@ -451,6 +452,57 @@ async function distill(
 }
 
 /**
+ * Briefs keyed by the exact conversation they were distilled from, so a
+ * repeated ask for an unchanged conversation is free. The review dialog asks
+ * on every open and the create request can ask again, and each ask is two
+ * model calls on the user's critical path.
+ *
+ * Content-keyed, never session-keyed: a session that has since produced
+ * another turn hashes differently and misses, so a stale brief can't be
+ * served for work it never saw.
+ */
+const BRIEF_CACHE_TTL_MS = 30 * 60_000;
+const BRIEF_CACHE_MAX_ENTRIES = 50;
+const briefCache = new Map<string, { brief: string; at: number }>();
+/**
+ * In-flight distillations, so two asks that overlap (dialog open racing the
+ * create request, or two browser tabs) share one run instead of doubling the
+ * load. Failures are shared too but never cached — a transient provider error
+ * must not pin tier 2 for the next half hour.
+ */
+const briefInFlight = new Map<string, Promise<string | null>>();
+
+/** Test helper: drop cached and in-flight briefs. */
+export function clearIntentBriefCache(): void {
+  briefCache.clear();
+  briefInFlight.clear();
+}
+
+function cacheKey(userId: string, conversation: string): string {
+  return createHash("sha256").update(userId).update("\0").update(conversation).digest("hex");
+}
+
+function readBriefCache(key: string): string | null {
+  const hit = briefCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > BRIEF_CACHE_TTL_MS) {
+    briefCache.delete(key);
+    return null;
+  }
+  return hit.brief;
+}
+
+function writeBriefCache(key: string, brief: string): void {
+  briefCache.set(key, { brief, at: Date.now() });
+  // Map preserves insertion order, so the first key is the oldest write.
+  while (briefCache.size > BRIEF_CACHE_MAX_ENTRIES) {
+    const oldest = briefCache.keys().next();
+    if (oldest.done) break;
+    briefCache.delete(oldest.value);
+  }
+}
+
+/**
  * Distill a source session's conversation into an intent brief. Judgment calls
  * use the configured MAIN chat model (falling back to the fast lane when main
  * has no key); slice compression uses the fast model.
@@ -463,20 +515,56 @@ async function distill(
  *
  * Null on any failure or when no model is configured — never throws, so review
  * start degrades to the deterministic excerpt (tier 2) silently.
+ *
+ * Successful briefs are cached by conversation content and concurrent asks for
+ * the same conversation share one run (see briefCache / briefInFlight).
  */
 export async function generateIntentBrief(
   storage: Storage,
   userId: string,
   messages: AgentMessage[],
 ): Promise<string | null> {
+  let conversation: string;
+  let mainOk: boolean;
+  let fastOk: boolean;
   try {
     const config = await getChatProviderConfig(storage, userId);
-    const mainOk = isModelConfigured(config, config.main);
-    const fastOk = isModelConfigured(config, config.fast);
+    mainOk = isModelConfigured(config, config.main);
+    fastOk = isModelConfigured(config, config.fast);
     if (!mainOk && !fastOk) return null;
-    const conversation = serializeConversationForBrief(messages);
+    conversation = serializeConversationForBrief(messages);
     if (!conversation) return null;
+  } catch (error) {
+    console.warn("[ReviewBrief] generation failed:", (error as Error).message);
+    return null;
+  }
 
+  const key = cacheKey(userId, conversation);
+  const cached = readBriefCache(key);
+  if (cached !== null) return cached;
+  const pending = briefInFlight.get(key);
+  if (pending) return pending;
+
+  const run = distillConversation(storage, userId, messages, conversation, mainOk, fastOk)
+    .then((brief) => {
+      if (brief !== null) writeBriefCache(key, brief);
+      return brief;
+    })
+    .finally(() => briefInFlight.delete(key));
+  briefInFlight.set(key, run);
+  return run;
+}
+
+/** The distillation itself. Never throws — see generateIntentBrief's contract. */
+async function distillConversation(
+  storage: Storage,
+  userId: string,
+  messages: AgentMessage[],
+  conversation: string,
+  mainOk: boolean,
+  fastOk: boolean,
+): Promise<string | null> {
+  try {
     // Judgment (reversal + brief) runs on the strongest configured lane —
     // weighing importance (dominant question, settled vs tentative) is exactly
     // where the fast lane is weakest, and it is one call per review start.

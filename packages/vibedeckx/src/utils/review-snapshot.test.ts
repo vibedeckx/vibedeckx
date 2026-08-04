@@ -98,6 +98,25 @@ describe("computeScope", () => {
     expect(computeScope(start, end, dir).changedFiles).toEqual([]);
   });
 
+  // Both hashing and head lookups answer a whole batch per git process, so
+  // the interesting case is a worktree that spans more than one batch: a
+  // misaligned chunk would silently pair a path with another file's sha.
+  it("stays correct across more files than fit in one git batch", () => {
+    const count = 250;
+    for (let i = 0; i < count; i++) writeFileSync(path.join(dir, `f${i}.ts`), `content ${i}\n`);
+    writeFileSync(path.join(dir, "kept.ts"), "const a = 2;\n");
+
+    const end = captureSnapshot(dir)!;
+    expect(Object.keys(end.dirty)).toHaveLength(count + 1);
+    for (const name of ["f0.ts", "f199.ts", "f200.ts", `f${count - 1}.ts`, "kept.ts"]) {
+      expect(end.dirty[name]).toBe(git(dir, ["hash-object", name]));
+    }
+
+    // Every f*.ts is absent at the start head, kept.ts merely differs there.
+    const start = { head: git(dir, ["rev-parse", "HEAD"]), dirty: {} };
+    expect(computeScope(start, end, dir).changedFiles).toHaveLength(count + 1);
+  });
+
   it("includes an uncommitted deletion", () => {
     const start = { head: git(dir, ["rev-parse", "HEAD"]), dirty: {} };
     const end = { head: git(dir, ["rev-parse", "HEAD"]), dirty: { "kept.ts": ABSENT } };

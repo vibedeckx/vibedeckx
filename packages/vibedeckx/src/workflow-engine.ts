@@ -4,7 +4,7 @@ import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
 import { reviewReadyId, workflowFailedId } from "./notification-milestones.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
-import { captureSnapshot, computeScope, resolveStartSnapshot } from "./utils/review-snapshot.js";
+import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 
@@ -18,6 +18,8 @@ export interface AgentOps {
     permissionMode?: "plan" | "edit",
     agentType?: string,
     announceRunning?: boolean,
+    force?: boolean,
+    opts?: { startSnapshot?: SnapshotState | null },
   ): Promise<string>;
   sendUserMessage(
     sessionId: string,
@@ -664,8 +666,9 @@ export class WorkflowEngine {
       }
 
       let scope: { changedFiles: string[]; startHead: string } | null = null;
+      let endSnap: SnapshotState | null = null;
       try {
-        const endSnap = captureSnapshot(worktreePath);
+        endSnap = captureSnapshot(worktreePath);
         const startSnap = await resolveStartSnapshot(
           this.storage, opts.sourceSessionId, opts.reviewSpan ?? "this_turn", turnEndIndex,
         );
@@ -680,8 +683,12 @@ export class WorkflowEngine {
         // reviewer could mutate the very code it's supposed to be judging.
         // Plan mode is read-only for both agents (codex maps it to
         // sandbox: "read-only"), so any reviewer agent is safe here.
+        // The reviewer's own session-start snapshot describes the same
+        // worktree we just snapshotted for the scope, milliseconds earlier —
+        // hand it over rather than walking the worktree a second time.
         const reviewerId = await this.agentOps.createNewSession(
           opts.project.id, opts.branch, opts.project.path, false, "plan", opts.reviewerAgentType ?? "claude-code", true,
+          false, { startSnapshot: endSnap },
         );
         const taskContext = extractTaskContextBefore(entries, turnEndIndex);
         // Deterministic "Review - <source title>" (same pattern as Branch

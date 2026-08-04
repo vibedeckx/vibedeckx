@@ -26,7 +26,7 @@ import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
-import { recordTurnSnapshot } from "./utils/review-snapshot.js";
+import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import {
   BranchActivityDedupe,
   computeBranchActivity,
@@ -578,7 +578,13 @@ export class AgentSessionManager {
     agentType: AgentType = "claude-code",
     announceRunning: boolean = false,
     force: boolean = false,
-    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null } = {},
+    opts: {
+      sessionId?: string;
+      crossRemoteMcp?: CrossRemoteMcpConfig;
+      model?: string | null;
+      /** Worktree state the caller already captured — reused for the session-start snapshot. */
+      startSnapshot?: SnapshotState | null;
+    } = {},
   ): Promise<string> {
     // The caller may supply the id so it can mint a session-scoped token before spawn.
     const sessionId = opts.sessionId ?? randomUUID();
@@ -626,7 +632,7 @@ export class AgentSessionManager {
     }
 
     if (!skipDb && !stored) {
-      await recordTurnSnapshot(this.storage, sessionId, -1, absoluteWorktreePath);
+      await recordTurnSnapshot(this.storage, sessionId, -1, absoluteWorktreePath, opts.startSnapshot);
     }
 
     // Explicit durable recovery keeps any transcript rows. Zero-entry rows get

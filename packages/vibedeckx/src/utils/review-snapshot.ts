@@ -12,13 +12,62 @@ export interface SnapshotState {
   dirty: Record<string, string>;
 }
 
-function git(cwd: string, args: string[]): string {
+function git(cwd: string, args: string[], input?: string): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     maxBuffer: MAX_BUFFER,
+    input,
     stdio: ["pipe", "pipe", "pipe"],
   });
+}
+
+/**
+ * Paths per batched git invocation. Snapshotting used to spawn one process per
+ * file, which on a worktree with a few hundred changed files cost a second of
+ * blocked event loop before the review even started — and on a worker that
+ * loop also carries the tunnel. Chunked rather than unbounded so a huge
+ * worktree can't blow the command line length limit.
+ */
+const PATHS_PER_BATCH = 200;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Blob sha of each path's working-tree content, in one `git hash-object` call
+ * per batch. git emits one sha per line, in argument order.
+ *
+ * Throws whenever a sha cannot be produced for every requested path, exactly
+ * as the old per-file loop did: a path silently missing from the result would
+ * read as "not dirty" downstream and quietly drop a changed file from the
+ * review scope, which is worse than degrading to no scope at all. The
+ * per-path retry only exists to surface which path a batch failure came from.
+ */
+function hashObjects(worktreePath: string, paths: string[]): Map<string, string> {
+  const hashes = new Map<string, string>();
+  for (const batch of chunk(paths, PATHS_PER_BATCH)) {
+    let shas: string[] = [];
+    try {
+      shas = git(worktreePath, ["hash-object", "--", ...batch])
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+    } catch {
+      shas = [];
+    }
+    if (shas.length !== batch.length) {
+      // Batch failed, or git returned a line count we can't align with the
+      // arguments. Redo it one path at a time; the offending path throws.
+      for (const p of batch) hashes.set(p, git(worktreePath, ["hash-object", "--", p]).trim());
+      continue;
+    }
+    batch.forEach((p, i) => hashes.set(p, shas[i]!));
+  }
+  return hashes;
 }
 
 /**
@@ -49,13 +98,15 @@ export function captureSnapshot(worktreePath: string): SnapshotState | null {
       "--name-status",
       "--no-renames",
     ]);
+    const toHash: string[] = [];
     for (const line of nameStatus.split("\n")) {
       if (!line.trim()) continue;
       const tab = line.indexOf("\t");
       if (tab < 0) continue;
       const status = line.slice(0, tab).trim();
       const p = line.slice(tab + 1).trim();
-      dirty[p] = status.startsWith("D") ? ABSENT : git(worktreePath, ["hash-object", p]).trim();
+      if (status.startsWith("D")) dirty[p] = ABSENT;
+      else toHash.push(p);
     }
 
     // Untracked files (never added) — always additions.
@@ -68,8 +119,10 @@ export function captureSnapshot(worktreePath: string): SnapshotState | null {
     ]);
     for (const p of untracked.split("\n")) {
       const t = p.trim();
-      if (t) dirty[t] = git(worktreePath, ["hash-object", t]).trim();
+      if (t) toHash.push(t);
     }
+
+    for (const [p, sha] of hashObjects(worktreePath, toHash)) dirty[p] = sha;
 
     return { head, dirty };
   } catch {
@@ -84,6 +137,51 @@ function blobShaOrAbsent(worktreePath: string, head: string, filePath: string): 
   } catch {
     return ABSENT;
   }
+}
+
+/** `<sha> <type> <size>` — anything else (notably `<object> missing`) is ABSENT. */
+const BATCH_CHECK_FOUND = /^([0-9a-f]{40,64}) [a-z]+ \d+$/;
+
+/**
+ * Blob sha of every path at `head`, ABSENT where the path does not exist
+ * there. `git cat-file --batch-check` answers a whole batch from one process,
+ * replacing the `git rev-parse <head>:<path>` spawned per candidate file —
+ * which, across both boundaries, was two processes per changed file.
+ *
+ * The protocol is one request line in, one result line out, so a path
+ * containing a newline is answered individually instead; any batch whose
+ * output doesn't line up falls back the same way. ABSENT is a legitimate
+ * answer here (the file didn't exist at that boundary), so unlike hashObjects
+ * a failure degrades rather than throws — exactly what the per-file
+ * blobShaOrAbsent already did.
+ */
+function blobShasAt(worktreePath: string, head: string, paths: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const batchable: string[] = [];
+  for (const p of paths) {
+    if (p.includes("\n")) out.set(p, blobShaOrAbsent(worktreePath, head, p));
+    else batchable.push(p);
+  }
+  for (const batch of chunk(batchable, PATHS_PER_BATCH)) {
+    let lines: string[] = [];
+    try {
+      const stdin = batch.map((p) => `${head}:${p}`).join("\n") + "\n";
+      lines = git(worktreePath, ["cat-file", "--batch-check"], stdin)
+        .split("\n")
+        .filter((l) => l.length > 0);
+    } catch {
+      lines = [];
+    }
+    if (lines.length !== batch.length) {
+      for (const p of batch) out.set(p, blobShaOrAbsent(worktreePath, head, p));
+      continue;
+    }
+    batch.forEach((p, i) => {
+      const found = BATCH_CHECK_FOUND.exec(lines[i]!);
+      out.set(p, found ? found[1]! : ABSENT);
+    });
+  }
+  return out;
 }
 
 /**
@@ -120,10 +218,18 @@ export function computeScope(
   for (const p of Object.keys(start.dirty)) candidates.add(p);
   for (const p of Object.keys(end.dirty)) candidates.add(p);
 
+  const candidateList = [...candidates];
+  const startShas = blobShasAt(
+    worktreePath, start.head, candidateList.filter((f) => start.dirty[f] === undefined),
+  );
+  const endShas = blobShasAt(
+    worktreePath, end.head, candidateList.filter((f) => end.dirty[f] === undefined),
+  );
+
   const changed: string[] = [];
-  for (const f of candidates) {
-    const startSha = start.dirty[f] ?? blobShaOrAbsent(worktreePath, start.head, f);
-    const endSha = end.dirty[f] ?? blobShaOrAbsent(worktreePath, end.head, f);
+  for (const f of candidateList) {
+    const startSha = start.dirty[f] ?? startShas.get(f) ?? ABSENT;
+    const endSha = end.dirty[f] ?? endShas.get(f) ?? ABSENT;
     if (startSha !== endSha) changed.push(f);
   }
   changed.sort();
@@ -133,15 +239,20 @@ export function computeScope(
 /**
  * Capture + persist a turn-boundary snapshot. Best-effort: any failure logs and
  * returns, so review scoping degrades but the turn lifecycle is never disrupted.
+ *
+ * `captured` lets a caller that already snapshotted this worktree moments ago
+ * hand the result over instead of walking it again — see the reviewer spawn in
+ * WorkflowEngine.startAdhocReview.
  */
 export async function recordTurnSnapshot(
   storage: Storage,
   sessionId: string,
   turnEndIndex: number,
   worktreePath: string,
+  captured?: SnapshotState | null,
 ): Promise<void> {
   try {
-    const snap = captureSnapshot(worktreePath);
+    const snap = captured ?? captureSnapshot(worktreePath);
     if (!snap) return;
     await storage.turnSnapshots.create({
       session_id: sessionId,

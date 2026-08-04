@@ -21,6 +21,7 @@ import { isModelConfigured } from "./chat-model.js";
 import {
   serializeConversationForBrief,
   generateIntentBrief,
+  clearIntentBriefCache,
   generateIntentBriefWithModel,
   extractReversalsWithModel,
   compactConversation,
@@ -398,6 +399,10 @@ describe("generateIntentBrief", () => {
     mockGenerateText.mockReset();
     mockIsModelConfigured.mockReset();
     mockIsModelConfigured.mockReturnValue(true);
+    // Briefs are cached by conversation content, and these cases deliberately
+    // reuse the same conversations — without this each would be answered by
+    // its predecessor's result instead of the model it wires up.
+    clearIntentBriefCache();
   });
 
   /** Route each call by its system prompt; `briefBehaviour` drives the distill step. */
@@ -554,6 +559,68 @@ describe("generateIntentBrief", () => {
 
     expect(await generateIntentBrief(storage, "u1", messages)).toBeNull();
     expect(briefCalls).toBe(0);
+  });
+});
+
+// The review dialog asks on every open and the create request can ask again;
+// each ask is two model calls on the user's critical path.
+describe("generateIntentBrief caching", () => {
+  const messages: AgentMessage[] = [
+    { type: "user", content: "build it", timestamp: 1 },
+    { type: "assistant", content: "done", timestamp: 2 },
+  ];
+
+  beforeEach(() => {
+    mockGenerateText.mockReset();
+    mockIsModelConfigured.mockReset();
+    mockIsModelConfigured.mockReturnValue(true);
+    clearIntentBriefCache();
+    mockGenerateText.mockImplementation((async (opts: { system: string }) => (
+      opts.system === REVERSAL_SYSTEM_PROMPT ? { text: "NONE" } : { text: "the brief" }
+    )) as never);
+  });
+
+  it("answers a repeat of the same conversation from cache", async () => {
+    expect(await generateIntentBrief(storage, "u1", messages)).toBe("the brief");
+    const callsAfterFirst = mockGenerateText.mock.calls.length;
+    expect(await generateIntentBrief(storage, "u1", messages)).toBe("the brief");
+    expect(mockGenerateText.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  // Keyed by conversation content, never by session: a session that has since
+  // produced another turn must not be handed the previous turn's brief.
+  it("distills again once the conversation has grown", async () => {
+    await generateIntentBrief(storage, "u1", messages);
+    const callsAfterFirst = mockGenerateText.mock.calls.length;
+    await generateIntentBrief(storage, "u1", [
+      ...messages,
+      { type: "user", content: "now fix the test", timestamp: 3 },
+    ]);
+    expect(mockGenerateText.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("does not serve one user's brief to another", async () => {
+    await generateIntentBrief(storage, "u1", messages);
+    const callsAfterFirst = mockGenerateText.mock.calls.length;
+    await generateIntentBrief(storage, "u2", messages);
+    expect(mockGenerateText.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("shares one run between overlapping asks", async () => {
+    const [a, b] = await Promise.all([
+      generateIntentBrief(storage, "u1", messages),
+      generateIntentBrief(storage, "u1", messages),
+    ]);
+    expect([a, b]).toEqual(["the brief", "the brief"]);
+    expect(mockGenerateText.mock.calls.filter((c) => (c[0] as { system: string }).system === SYSTEM_PROMPT))
+      .toHaveLength(1);
+  });
+
+  // A provider hiccup must not pin tier 2 for the cache's whole lifetime.
+  it("does not cache a failure", async () => {
+    mockGenerateText.mockImplementationOnce((async () => { throw new Error("429 rate limited"); }) as never);
+    expect(await generateIntentBrief(storage, "u1", messages)).toBeNull();
+    expect(await generateIntentBrief(storage, "u1", messages)).toBe("the brief");
   });
 });
 

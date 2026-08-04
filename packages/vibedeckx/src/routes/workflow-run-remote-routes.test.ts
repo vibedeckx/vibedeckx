@@ -207,6 +207,25 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(body).toMatchObject({ sourceSessionId: "src1", intentBrief: "client brief" });
   });
 
+  // Same contract as the local branch: "" says the client already ran tier-1
+  // and got nothing. Re-distilling would pull the whole remote history back
+  // over the tunnel and repeat two model calls that just failed.
+  it("POST treats an empty client intentBrief as an attempt, without pulling history", async () => {
+    makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, intentBrief: "" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(proxyMock).toHaveBeenCalledTimes(1); // no history pull
+    const [, method, apiPath, body] = proxyMock.mock.calls[0];
+    expect([method, apiPath]).toEqual(["POST", "/api/path/workflow-runs"]);
+    expect((body as { intentBrief?: string }).intentBrief).toBeUndefined();
+  });
+
   it("POST /intent-brief pulls remote history over the session proxy and returns the brief", async () => {
     makeApp();
     await app.register(workflowRunRoutes);

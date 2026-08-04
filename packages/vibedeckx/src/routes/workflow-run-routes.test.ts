@@ -153,6 +153,25 @@ describe("workflow-run-routes", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  // The dialog pre-generates on open and sends "" when that produced nothing.
+  // Re-distilling here would repeat two model calls that just failed, on the
+  // request the user is actively waiting on — the field's presence, not its
+  // content, is what says the client already tried.
+  it("POST treats an empty client intentBrief as an attempt, not as a missing one", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { startAdhocReview } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", intentBrief: "" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(mockGenerateIntentBrief).not.toHaveBeenCalled();
+    expect(startAdhocReview).toHaveBeenCalledWith(
+      expect.objectContaining({ intentBrief: undefined }),
+    );
+  });
+
   it("POST /intent-brief pre-generates for an authorized source and 404s foreign sessions", async () => {
     const app = makeApp();
     await app.register(workflowRunRoutes);

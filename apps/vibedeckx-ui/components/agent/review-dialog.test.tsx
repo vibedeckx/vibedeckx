@@ -127,6 +127,113 @@ describe("ReviewDialog reviewer reuse", () => {
   });
 });
 
+describe("ReviewDialog intent brief", () => {
+  it("pre-generates on open without waiting for the reviewer candidate", async () => {
+    // Distillation is the long pole (model calls, tens of seconds); anything
+    // serial ahead of it lands on the user as submit-time latency.
+    let resolveCandidate: (value: unknown) => void = () => {};
+    getReviewerCandidate.mockReturnValueOnce(new Promise((resolve) => { resolveCandidate = resolve; }));
+    createWorkflowRun.mockResolvedValue({});
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<ReviewDialog projectId="p1" branch="dev" sessionId="s-src" />);
+    });
+    await act(async () => {
+      container!.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(generateReviewIntentBrief).toHaveBeenCalledWith("p1", "s-src");
+    await act(async () => {
+      resolveCandidate(null);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  });
+
+  // Omitting the field would read server-side as "the client never tried" and
+  // trigger a second full distillation inside the create request.
+  it("reports a failed pre-generation as an attempt rather than omitting it", async () => {
+    generateReviewIntentBrief.mockResolvedValueOnce(null);
+    await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
+    await act(async () => {
+      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ intentBrief: "" }));
+  });
+
+  // A rejection means the request never got an answer (auth, 404, network) —
+  // the route returns 200 + {brief: null} when distillation itself yields
+  // nothing. Nothing was distilled, so the server's own pass is still worth
+  // having: omit the field rather than suppressing it with "".
+  it("omits the field when the pre-generation request never reached the server", async () => {
+    generateReviewIntentBrief.mockRejectedValueOnce(new Error("Failed to generate intent brief: 503"));
+    await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
+    await act(async () => {
+      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
+  });
+
+  it("sends the pre-generated brief when there is one", async () => {
+    generateReviewIntentBrief.mockResolvedValueOnce("the brief");
+    await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
+    await act(async () => {
+      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ intentBrief: "the brief" }));
+  });
+
+  // Props can change under an open dialog (a commander surfacing a freshly
+  // spawned session). Submitting the previous session's brief would hand the
+  // reviewer another conversation's intent as this one's.
+  it("re-generates when the session changes under an open dialog", async () => {
+    getReviewerCandidate.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    createWorkflowRun.mockResolvedValue({});
+    generateReviewIntentBrief
+      .mockResolvedValueOnce("brief for s-a")
+      .mockResolvedValueOnce("brief for s-b");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const render = (sessionId: string) => act(async () => {
+      root!.render(<ReviewDialog projectId="p1" branch="dev" sessionId={sessionId} />);
+    });
+
+    await render("s-a");
+    await act(async () => {
+      container!.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await render("s-b");
+
+    expect(generateReviewIntentBrief).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
+      sourceSessionId: "s-b",
+      intentBrief: "brief for s-b",
+    }));
+  });
+
+  // Reuse continues the reviewer's own context, so no brief rides along.
+  it("omits the brief entirely when reusing a reviewer", async () => {
+    generateReviewIntentBrief.mockResolvedValueOnce("the brief");
+    await renderAndOpen({ available: true, sessionId: "s-rev", title: "Prev", agentType: "codex", reason: null });
+    await act(async () => {
+      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
+  });
+});
+
 describe("ReviewDialog review span", () => {
   it("sends reviewSpan this_turn by default on a fresh review", async () => {
     await renderAndOpen({

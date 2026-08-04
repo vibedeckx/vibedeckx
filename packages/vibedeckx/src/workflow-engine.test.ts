@@ -467,7 +467,12 @@ describe("WorkflowEngine", () => {
     expect(run.status).toBe("waiting_reviewer");
     expect(run.reviewer_session_id).toBe("s-rev");
     expect(run.source_turn_end_index).toBe(4); // derived from entries
-    expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "plan", "claude-code", true);
+    // Trailing args: no forced eviction, and the worktree snapshot taken for
+    // the scope handed over so the new session doesn't re-walk it.
+    expect(agentOps.createNewSession).toHaveBeenCalledWith(
+      "p1", "dev", project.path, false, "plan", "claude-code", true,
+      false, { startSnapshot: null },
+    );
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
     // Machine-authored: `origin` marks it so the UI renders it as markdown
     // rather than verbatim, and the disposition hands the attention event to
@@ -509,7 +514,10 @@ describe("WorkflowEngine", () => {
     await engine.startAdhocReview({
       project, branch: "dev", sourceSessionId: "s-src", reviewerAgentType: "codex",
     });
-    expect(agentOps.createNewSession).toHaveBeenCalledWith("p1", "dev", project.path, false, "plan", "codex", true);
+    expect(agentOps.createNewSession).toHaveBeenCalledWith(
+      "p1", "dev", project.path, false, "plan", "codex", true,
+      false, { startSnapshot: null },
+    );
   });
 
   it("reviewer title prefers the source session's own title", async () => {

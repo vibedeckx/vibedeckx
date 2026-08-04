@@ -62,9 +62,24 @@ export function ReviewDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Tier-1 pre-generation: kicked off while the dialog is open so the LLM
-  // latency hides behind the user filling in the form. Null result = no brief
-  // (server degrades to the deterministic excerpt).
-  const briefPromiseRef = useRef<Promise<string | null> | null>(null);
+  // latency hides behind the user filling in the form.
+  //
+  // `reached` distinguishes the two ways this yields no brief, which the
+  // create request treats differently: the server ran the distillation and it
+  // produced nothing (don't make it try again), versus the request never got
+  // an answer at all — auth, 404, a network drop — in which case the model
+  // never ran and the server's own pass is still worth having.
+  //
+  // Tagged with the identity it was generated for: props can change while the
+  // dialog is open (a commander surfacing a freshly spawned session, say), and
+  // a brief distilled from another session's conversation must never be
+  // submitted as this one's intent.
+  type BriefPrefetch = {
+    projectId: string;
+    sessionId: string;
+    result: Promise<{ reached: boolean; brief: string | null }>;
+  };
+  const briefPrefetchRef = useRef<BriefPrefetch | null>(null);
 
   const options = providers?.length ? providers : FALLBACK_PROVIDERS;
 
@@ -111,19 +126,31 @@ export function ReviewDialog({
     };
   }, [open, projectId, sessionId]);
 
-  // Pre-generate the brief once per dialog open, but only when a NEW reviewer
-  // is in play (reuse continues the reviewer's own context — no brief). Waits
-  // for the candidate check so reuse-default opens don't spend an LLM call.
+  // Pre-generate the brief the moment the dialog opens, in parallel with the
+  // candidate check. Distillation costs model calls measured in tens of
+  // seconds, so anything serial ahead of it lands on the user: waiting for the
+  // candidate meant a reuse-default open didn't start distilling until the
+  // user picked "new reviewer", and then paid the whole latency behind the
+  // submit spinner. An open that ends in reuse spends one speculative call;
+  // the server caches by conversation content, so reopening the dialog on the
+  // same conversation costs nothing.
   useEffect(() => {
     if (!open) {
-      briefPromiseRef.current = null;
+      briefPrefetchRef.current = null;
       return;
     }
-    if (!sessionId || candidateLoading || reviewerMode !== "new" || briefPromiseRef.current) return;
-    briefPromiseRef.current = api
-      .generateReviewIntentBrief(projectId, sessionId)
-      .catch(() => null);
-  }, [open, candidateLoading, reviewerMode, projectId, sessionId]);
+    if (!sessionId) return;
+    const current = briefPrefetchRef.current;
+    if (current && current.projectId === projectId && current.sessionId === sessionId) return;
+    briefPrefetchRef.current = {
+      projectId,
+      sessionId,
+      result: api
+        .generateReviewIntentBrief(projectId, sessionId)
+        .then((brief) => ({ reached: true, brief }))
+        .catch(() => ({ reached: false, brief: null })),
+    };
+  }, [open, projectId, sessionId]);
 
   if (!sessionId) return null;
 
@@ -135,12 +162,20 @@ export function ReviewDialog({
         ? { reviewerSessionId: candidate.sessionId }
         : { reviewerAgentType: reviewerAgent };
       // Usually resolved by now (pre-generated on open); if not, the busy
-      // spinner covers the remaining wait. Null → omit the field so the
-      // server decides (it retries distillation, which is instant when no
-      // chat model is configured).
-      const intentBrief = "reviewerAgentType" in reviewer && briefPromiseRef.current
-        ? await briefPromiseRef.current
-        : null;
+      // spinner covers the remaining wait. Only the prefetch that belongs to
+      // the session being submitted counts.
+      const prefetch = briefPrefetchRef.current;
+      const usable = "reviewerAgentType" in reviewer
+        && prefetch?.projectId === projectId && prefetch?.sessionId === sessionId
+        ? prefetch : null;
+      const pre = usable ? await usable.result : null;
+      // A present field tells the server the client already ran tier-1, so it
+      // skips its own pass — "" is how a distillation that produced nothing
+      // says so, instead of making the server redo two model calls that just
+      // came back empty, on the request the user is waiting on. A prefetch
+      // that never reached the server is different: nothing was distilled, so
+      // omit the field and let the server try.
+      const briefFields = pre?.reached ? { intentBrief: pre.brief ?? "" } : {};
       await api.createWorkflowRun({
         projectId,
         branch,
@@ -148,7 +183,7 @@ export function ReviewDialog({
         reviewFocus: focus.trim() || undefined,
         reviewSpan,
         ...reviewer,
-        ...(intentBrief ? { intentBrief } : {}),
+        ...briefFields,
       });
       setOpen(false);
       setFocus("");
