@@ -20,6 +20,7 @@ import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
 import { createTurnSnapshotRepos } from "./repositories/turn-snapshots.js";
 import { createNotificationRepos } from "./repositories/notifications.js";
 import { createProjectChatRepos } from "./repositories/project-chat.js";
+import { createWorkspaceRegistryRepo } from "./repositories/workspace-registry.js";
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
@@ -40,6 +41,38 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       user_id TEXT NOT NULL DEFAULT 'local',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      branch TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      UNIQUE(project_id, branch),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS workspace_checkouts (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      worktree_path TEXT NOT NULL,
+      expected_branch TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      UNIQUE(workspace_id, target_id),
+      UNIQUE(target_id, worktree_path),
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workspaces_project_status
+      ON workspaces(project_id, status, branch);
+    CREATE INDEX IF NOT EXISTS idx_workspace_checkouts_workspace_status
+      ON workspace_checkouts(workspace_id, status, target_id);
 
     CREATE TABLE IF NOT EXISTS project_chat_threads (
       id TEXT PRIMARY KEY,
@@ -1582,6 +1615,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
 
   return {
     ...createCoreRepos(kdb, h),
+    ...createWorkspaceRegistryRepo(kdb, h),
     ...createRemoteServerRepos(kdb, h),
     ...createExecutorRepos(kdb, h),
     ...createScheduledRepos(kdb, h),

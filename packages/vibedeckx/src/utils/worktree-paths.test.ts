@@ -40,4 +40,23 @@ describe("reconcileWorktreeBranches", () => {
       { path: managedPath("manual"), branch: "manual" },
     ])).toEqual([{ branch: null }, { branch: "manual" }]);
   });
+
+  it("uses a persisted checkout as the identity anchor without any sessions", () => {
+    const worktreePath = managedPath("dev");
+    expect(reconcileWorktreeBranches(projectPath, [
+      { path: projectPath, branch: "main" },
+      { path: worktreePath, branch: "agent/experiment" },
+    ], [], [{ branch: "dev", worktreePath, expectedBranch: "dev" }])).toEqual([
+      { branch: null },
+      { branch: "dev", currentBranch: "agent/experiment" },
+    ]);
+  });
+
+  it("detects drift in the main workspace once its expected branch is registered", () => {
+    expect(reconcileWorktreeBranches(projectPath, [
+      { path: projectPath, branch: "agent/experiment" },
+    ], [], [{ branch: "", worktreePath: projectPath, expectedBranch: "main" }])).toEqual([
+      { branch: null, currentBranch: "agent/experiment" },
+    ]);
+  });
 });

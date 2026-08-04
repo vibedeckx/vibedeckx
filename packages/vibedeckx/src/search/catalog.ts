@@ -1,5 +1,5 @@
 import type { Storage, SearchCatalogSnapshot } from "../storage/types.js";
-import { pruneWorktrees, getWorktreeBranches } from "../utils/worktree-paths.js";
+import { pruneWorktrees, getRegisteredWorktreeBranches } from "../utils/worktree-paths.js";
 import { shouldShowBranchSessionInList } from "../resident-agent-processes.js";
 
 export interface CatalogDeps {
@@ -28,7 +28,7 @@ export async function buildSearchCatalog(
 ): Promise<SearchCatalogSnapshot & { snapshotAt: number }> {
   pruneWorktrees(projectPath);
   const sessions = await deps.storage.agentSessions.getByProjectId(projectId);
-  const workspaces = getWorktreeBranches(projectPath, sessions.map((session) => session.branch));
+  const workspaces = await getRegisteredWorktreeBranches(deps.storage, projectId, projectPath);
   const counts = new Map(
     (await deps.storage.agentSessions.countEntries()).map((r) => [r.session_id, r.cnt]),
   );

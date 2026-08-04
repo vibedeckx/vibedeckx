@@ -588,6 +588,36 @@ export interface SearchResults {
   favorites: SearchResultSessionRow[];
 }
 
+export type WorkspaceCheckoutStatus = "creating" | "ready" | "deleting" | "error";
+
+export interface WorkspaceRecord {
+  id: string;
+  project_id: string;
+  /** Empty string is the main-workspace sentinel. */
+  branch: string;
+  status: WorkspaceCheckoutStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceCheckoutRecord {
+  id: string;
+  workspace_id: string;
+  target_id: string;
+  worktree_path: string;
+  expected_branch: string;
+  status: WorkspaceCheckoutStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RegisteredWorkspaceCheckout {
+  workspace: WorkspaceRecord;
+  checkout: WorkspaceCheckoutRecord;
+}
+
 export interface Storage {
   projects: {
     create: (opts: {
@@ -622,6 +652,35 @@ export interface Storage {
      * Returns the `"local"` sentinel for solo-mode rows, undefined if absent.
      */
     getOwnerId: (projectId: string) => Promise<string | undefined>;
+  };
+  workspaceRegistry: {
+    beginCheckout: (opts: {
+      projectId: string;
+      branch: string;
+      targetId: string;
+      worktreePath: string;
+      expectedBranch: string;
+    }) => Promise<RegisteredWorkspaceCheckout>;
+    registerReadyCheckout: (opts: {
+      projectId: string;
+      branch: string;
+      targetId: string;
+      worktreePath: string;
+      expectedBranch: string;
+    }) => Promise<RegisteredWorkspaceCheckout>;
+    setCheckoutStatus: (
+      workspaceId: string,
+      targetId: string,
+      status: WorkspaceCheckoutStatus,
+      error?: string | null,
+    ) => Promise<void>;
+    listByProject: (projectId: string, targetId?: string) => Promise<RegisteredWorkspaceCheckout[]>;
+    getByProjectBranch: (
+      projectId: string,
+      branch: string,
+      targetId: string,
+    ) => Promise<RegisteredWorkspaceCheckout | undefined>;
+    removeCheckout: (workspaceId: string, targetId: string) => Promise<void>;
   };
   mergeTargets: {
     getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;

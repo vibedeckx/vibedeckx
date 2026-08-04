@@ -47,6 +47,30 @@ export interface BranchMergeTargetsTable {
   updated_at: Generated<string>;
 }
 
+export interface WorkspacesTable {
+  id: string;
+  project_id: string;
+  /** Empty string is the main-workspace sentinel. */
+  branch: string;
+  status: string;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface WorkspaceCheckoutsTable {
+  id: string;
+  workspace_id: string;
+  /** "local" on the machine owning the checkout, or a remote server id on the hub. */
+  target_id: string;
+  worktree_path: string;
+  expected_branch: string;
+  status: string;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface ExecutorGroupsTable {
   id: string;
   project_id: string;
@@ -464,6 +488,8 @@ export interface CrossRemoteAuditTable {
 
 export interface DB {
   projects: ProjectsTable;
+  workspaces: WorkspacesTable;
+  workspace_checkouts: WorkspaceCheckoutsTable;
   branch_merge_targets: BranchMergeTargetsTable;
   executor_groups: ExecutorGroupsTable;
   executors: ExecutorsTable;

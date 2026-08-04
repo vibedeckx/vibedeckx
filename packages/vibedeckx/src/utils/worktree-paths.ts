@@ -1,6 +1,7 @@
 import path from "path";
 import { createHash } from "crypto";
 import { execSync } from "child_process";
+import type { Storage, RegisteredWorkspaceCheckout } from "../storage/types.js";
 
 const WORKTREE_BASE_DIR = "/var/tmp/vibedeckx/worktrees";
 const WORKTREE_LIST_TTL_MS = 10_000;
@@ -137,8 +138,14 @@ export function getWorktreeBaseForProject(projectPath: string): string {
   return path.join(WORKTREE_BASE_DIR, getProjectIdentifier(projectPath));
 }
 
-function conventionalWorktreePath(projectPath: string, branch: string): string {
+export function conventionalWorktreePath(projectPath: string, branch: string): string {
   return path.join(getWorktreeBaseForProject(projectPath), branch.replace(/\//g, "-"));
+}
+
+export interface WorkspaceIdentityAnchor {
+  branch: string;
+  worktreePath: string;
+  expectedBranch: string;
 }
 
 /**
@@ -150,22 +157,31 @@ export function reconcileWorktreeBranches(
   projectPath: string,
   entries: Array<{ path: string; branch: string | null }>,
   sessionBranches: Iterable<string> = [],
+  registry: Iterable<WorkspaceIdentityAnchor> = [],
 ): WorktreeBranch[] {
+  const registryByPath = new Map<string, WorkspaceIdentityAnchor>();
+  for (const anchor of registry) registryByPath.set(path.resolve(anchor.worktreePath), anchor);
   const stableBranchByPath = new Map<string, string>();
   for (const branch of sessionBranches) {
     if (!branch) continue; // "" is the main-workspace sentinel.
     stableBranchByPath.set(path.resolve(conventionalWorktreePath(projectPath, branch)), branch);
   }
 
-  const worktrees: WorktreeBranch[] = [{ branch: null }];
+  const rootEntry = entries[0];
+  const rootAnchor = rootEntry ? registryByPath.get(path.resolve(rootEntry.path)) : undefined;
+  const worktrees: WorktreeBranch[] = [rootAnchor && rootEntry?.branch !== rootAnchor.expectedBranch
+    ? { branch: null, currentBranch: rootEntry?.branch ?? null }
+    : { branch: null }];
   // The first entry is the project/main worktree. Its stable API identity is
   // deliberately null and is not derived from whichever branch it has checked
   // out, matching the existing workspace model.
   for (let i = 1; i < entries.length; i++) {
     const entry = entries[i];
-    const stableBranch = stableBranchByPath.get(path.resolve(entry.path));
+    const anchor = registryByPath.get(path.resolve(entry.path));
+    const stableBranch = anchor?.branch || stableBranchByPath.get(path.resolve(entry.path));
     if (stableBranch) {
-      worktrees.push(entry.branch === stableBranch
+      const expectedBranch = anchor?.expectedBranch ?? stableBranch;
+      worktrees.push(entry.branch === expectedBranch
         ? { branch: stableBranch }
         : { branch: stableBranch, currentBranch: entry.branch });
     } else if (entry.branch) {
@@ -179,7 +195,73 @@ export function reconcileWorktreeBranches(
 export function getWorktreeBranches(
   projectPath: string,
   sessionBranches: Iterable<string> = [],
+  registry: Iterable<WorkspaceIdentityAnchor> = [],
 ): WorktreeBranch[] {
   const entries = parseGitWorktreeList(projectPath);
-  return reconcileWorktreeBranches(projectPath, entries, sessionBranches);
+  return reconcileWorktreeBranches(projectPath, entries, sessionBranches, registry);
+}
+
+/**
+ * Lazily imports pre-registry worktrees, then lists them using the persisted
+ * checkout path/expected branch as the authoritative workspace identity.
+ */
+export async function getRegisteredWorktreeBranches(
+  storage: Storage,
+  projectId: string,
+  projectPath: string,
+): Promise<WorktreeBranch[]> {
+  const entries = parseGitWorktreeList(projectPath);
+  const sessions = await storage.agentSessions.getByProjectId(projectId);
+  const sessionBranches = sessions.map((session) => session.branch);
+  const sessionBranchByPath = new Map<string, string>();
+  for (const branch of sessionBranches) {
+    if (branch) sessionBranchByPath.set(path.resolve(conventionalWorktreePath(projectPath, branch)), branch);
+  }
+
+  let registered = await storage.workspaceRegistry.listByProject(projectId, "local");
+  const livePaths = new Set(entries.map((entry) => path.resolve(entry.path)));
+  for (const row of registered) {
+    if (livePaths.has(path.resolve(row.checkout.worktree_path))) continue;
+    if (row.checkout.status === "deleting") {
+      // Crash recovery: Git removal landed but the registry cleanup did not.
+      await storage.workspaceRegistry.removeCheckout(row.workspace.id, "local");
+    } else if (row.checkout.status !== "error" || row.checkout.error !== "Worktree is missing") {
+      await storage.workspaceRegistry.setCheckoutStatus(
+        row.workspace.id, "local", "error", "Worktree is missing",
+      );
+    }
+  }
+  registered = await storage.workspaceRegistry.listByProject(projectId, "local");
+  const registeredPaths = new Set(registered.map((row) => path.resolve(row.checkout.worktree_path)));
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const resolvedPath = path.resolve(entry.path);
+    const existing = registered.find((row) => path.resolve(row.checkout.worktree_path) === resolvedPath);
+    if (existing) {
+      // Crash recovery: Git exists but the final DB transition did not land.
+      if (existing.checkout.status === "creating" || existing.checkout.status === "error") {
+        await storage.workspaceRegistry.setCheckoutStatus(existing.workspace.id, "local", "ready");
+      }
+      continue;
+    }
+    if (registeredPaths.has(resolvedPath) || entry.branch === null) continue;
+    const stableBranch = index === 0
+      ? ""
+      : (sessionBranchByPath.get(resolvedPath) ?? entry.branch);
+    await storage.workspaceRegistry.registerReadyCheckout({
+      projectId,
+      branch: stableBranch,
+      targetId: "local",
+      worktreePath: entry.path,
+      expectedBranch: index === 0 ? entry.branch : stableBranch,
+    });
+    registeredPaths.add(resolvedPath);
+  }
+  registered = await storage.workspaceRegistry.listByProject(projectId, "local");
+  const anchors = registered.map((row: RegisteredWorkspaceCheckout): WorkspaceIdentityAnchor => ({
+    branch: row.workspace.branch,
+    worktreePath: row.checkout.worktree_path,
+    expectedBranch: row.checkout.expected_branch,
+  }));
+  return reconcileWorktreeBranches(projectPath, entries, sessionBranches, anchors);
 }
