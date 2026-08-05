@@ -62,16 +62,21 @@ export function TurnEndDivider({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant="outline"
-                size="icon-xs"
-                className="shrink-0"
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "h-7 w-7 shrink-0 rounded-md transition-colors hover:bg-muted hover:text-foreground",
+                  emphasis === "subtle"
+                    ? "text-muted-foreground/50 group-hover:text-muted-foreground group-focus-within:text-muted-foreground"
+                    : "text-muted-foreground",
+                )}
                 aria-label="生成 review 终稿"
                 onClick={onFinalize}
                 disabled={disabled || finalizeBusy}
               >
                 {finalizeBusy
-                  ? <Loader2 className="h-3 w-3 animate-spin" />
-                  : <FileCheck className="h-3 w-3" />}
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <FileCheck className="h-4 w-4" />}
               </Button>
             </TooltipTrigger>
             <TooltipContent>生成 review 终稿</TooltipContent>
