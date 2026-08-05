@@ -13,7 +13,9 @@
 - Phase 4：标准远程创建的持久化 saga、registry、mapping 双写和发现入口已完成；conversation branch/reviewer
   等派生创建入口尚未统一纳入 durable intent。
 - Phase 5：完成。Storage 运维接口支持分批/dry-run 回填、稳定原因码、计数和具体问题记录。
-- Phase 6：运行路径已开始 checkout-first 切换；其余读取投影与指标待完成。Phase 7 尚未开始，FK 收紧必须等待 fallback 清零。
+- Phase 6：运行路径、Project Activity、全局 session 搜索、Project Chat 的 session 列表/详情和远程通知
+  导入候选已切到 checkout-first 投影；墓碑历史与 legacy/dangling 区分已有测试。workflow reviewer、
+  本地通知归属、逐消费者指标和 fallback 清零仍待完成。Phase 7 尚未开始，FK 收紧必须等待 fallback 清零。
 
 ## User stories
 

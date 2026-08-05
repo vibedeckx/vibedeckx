@@ -66,6 +66,8 @@ const activityStatus = (status: string): AgentSessionActivityStatus =>
 
 const mapRemoteActivity = (row: {
   local_session_id: string; project_id: string; target_id: string; branch: string;
+  worktree_path: string | null; checkout_deleted_at: string | null;
+  workspace_checkout_id: string | null;
   title: string | null; last_active_at: number | null; status: string;
   agent_type: string | null; model: string | null; last_user_message_at: number | null;
   last_completed_at: number | null;
@@ -79,6 +81,9 @@ const mapRemoteActivity = (row: {
     title: row.title,
     target: row.target_id,
     workspace: { target: row.target_id, branch },
+    worktreePath: row.worktree_path,
+    checkoutDeletedAt: row.checkout_deleted_at,
+    binding: row.workspace_checkout_id === null ? "legacy" : "checkout",
     agentType: row.agent_type,
     model: row.model,
     lastActiveAt: row.last_active_at,
@@ -89,22 +94,49 @@ const mapRemoteActivity = (row: {
 
 const remoteSessionScope = (kdb: Kysely<DB>, projectId: string) => kdb
   .selectFrom("session_search_cache as c")
-  .innerJoin("remote_session_mappings as mapping", (join) => join
-    .onRef("mapping.local_session_id", "=", "c.local_session_id")
-    .onRef("mapping.project_id", "=", "c.project_id")
-    .onRef("mapping.remote_server_id", "=", "c.target_id"))
-  .innerJoin("project_remotes as association", (join) => join
-    .onRef("association.project_id", "=", "c.project_id")
-    .onRef("association.remote_server_id", "=", "c.target_id"))
-  .where("c.project_id", "=", projectId)
-  .where("c.target_id", "!=", "local")
+  .innerJoin("remote_session_mappings as mapping", "mapping.local_session_id", "c.local_session_id")
+  .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+  .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+  .innerJoin("project_remotes as association", (join) => join.on((eb) => eb.or([
+    eb.and([
+      eb("mapping.workspace_checkout_id", "is", null),
+      eb("association.project_id", "=", eb.ref("mapping.project_id")),
+      eb("association.remote_server_id", "=", eb.ref("mapping.remote_server_id")),
+    ]),
+    eb.and([
+      eb("mapping.workspace_checkout_id", "is not", null),
+      eb("association.project_id", "=", eb.ref("workspace.project_id")),
+      eb("association.remote_server_id", "=", eb.ref("checkout.target_id")),
+    ]),
+  ])))
+  .where((eb) => eb.or([
+    eb.and([
+      eb("mapping.workspace_checkout_id", "is", null),
+      eb("mapping.project_id", "=", projectId),
+      eb("mapping.remote_server_id", "!=", "local"),
+      // Legacy fallback is valid only if the cache and mapping snapshots agree.
+      eb("c.project_id", "=", eb.ref("mapping.project_id")),
+      eb("c.target_id", "=", eb.ref("mapping.remote_server_id")),
+    ]),
+    eb.and([
+      eb("mapping.workspace_checkout_id", "is not", null),
+      eb("checkout.id", "is not", null),
+      eb("workspace.id", "is not", null),
+      eb("workspace.project_id", "=", projectId),
+      eb("checkout.target_id", "!=", "local"),
+    ]),
+  ]))
   .where("c.deleted_at", "is", null);
 
 const remoteActivityBase = (kdb: Kysely<DB>, projectId: string) => remoteSessionScope(kdb, projectId)
   .select([
-    "c.local_session_id", "c.project_id", "c.target_id", "c.branch", "c.title",
+    "c.local_session_id", "mapping.workspace_checkout_id", "c.title",
     "c.last_active_at", "c.status", "c.agent_type", "c.model",
     "c.last_user_message_at", "c.last_completed_at",
+    "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at",
+    sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
+    sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("target_id"),
+    sql<string>`case when mapping.workspace_checkout_id is null then coalesce(mapping.branch, '') else workspace.branch end`.as("branch"),
   ]);
 
 export const createSearchCacheRepos = (
@@ -491,8 +523,23 @@ export const createSearchCacheRepos = (
       // qualifying sessions. Portable correlated EXISTS, no dialect-specific
       // aggregates.
       let localBase = kdb.selectFrom("agent_sessions as s")
-        .select(["s.id", "s.project_id", "s.branch", "s.title", "s.last_user_message_at", "s.updated_at", "s.favorited_at"])
-        .where("s.project_id", "in", projectIds)
+        .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+        .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+        .select([
+          "s.id", "s.title", "s.last_user_message_at", "s.updated_at", "s.favorited_at",
+          sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("project_id"),
+          sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("branch"),
+          sql<string>`case when s.workspace_checkout_id is null then 'local' else checkout.target_id end`.as("target_id"),
+        ])
+        .where((eb) => eb.or([
+          eb.and([eb("s.workspace_checkout_id", "is", null), eb("s.project_id", "in", projectIds)]),
+          eb.and([
+            eb("s.workspace_checkout_id", "is not", null),
+            eb("checkout.id", "is not", null),
+            eb("workspace.id", "is not", null),
+            eb("workspace.project_id", "in", projectIds),
+          ]),
+        ]))
         .where((eb) => eb.or([
           eb("s.title", "is not", null),
           eb.exists(
@@ -513,15 +560,58 @@ export const createSearchCacheRepos = (
       // the project drops its cached rows out of search without an explicit
       // purge; re-linking makes them reappear on the next snapshot.
       let cacheBase = kdb.selectFrom("session_search_cache as c")
-        .leftJoin("project_remotes as pr", (join) => join
-          .onRef("pr.project_id", "=", "c.project_id")
-          .onRef("pr.remote_server_id", "=", "c.target_id"))
-        .select(["c.local_session_id", "c.project_id", "c.target_id", "c.branch", "c.title", "c.last_active_at", "c.favorited_at"])
-        .where("c.project_id", "in", projectIds)
+        .leftJoin("remote_session_mappings as mapping", "mapping.local_session_id", "c.local_session_id")
+        .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+        .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+        .leftJoin("project_remotes as pr", (join) => join.on((eb) => eb.or([
+          eb.and([
+            eb("mapping.local_session_id", "is", null),
+            eb("pr.project_id", "=", eb.ref("c.project_id")),
+            eb("pr.remote_server_id", "=", eb.ref("c.target_id")),
+          ]),
+          eb.and([
+            eb("mapping.local_session_id", "is not", null),
+            eb("mapping.workspace_checkout_id", "is", null),
+            eb("pr.project_id", "=", eb.ref("mapping.project_id")),
+            eb("pr.remote_server_id", "=", eb.ref("mapping.remote_server_id")),
+          ]),
+          eb.and([
+            eb("mapping.workspace_checkout_id", "is not", null),
+            eb("pr.project_id", "=", eb.ref("workspace.project_id")),
+            eb("pr.remote_server_id", "=", eb.ref("checkout.target_id")),
+          ]),
+        ])))
+        .select([
+          "c.local_session_id", "c.title", "c.last_active_at", "c.favorited_at",
+          sql<string>`case when mapping.local_session_id is null then c.project_id when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
+          sql<string>`case when mapping.local_session_id is null then c.target_id when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("target_id"),
+          sql<string>`case when mapping.local_session_id is null then c.branch when mapping.workspace_checkout_id is null then coalesce(mapping.branch, '') else workspace.branch end`.as("branch"),
+        ])
         .where("c.deleted_at", "is", null)
         .where((eb) => eb.or([
-          eb("c.target_id", "=", "local"),
-          eb("pr.id", "is not", null),
+          eb.and([
+            eb("mapping.local_session_id", "is", null),
+            eb("c.project_id", "in", projectIds),
+            eb("c.target_id", "!=", "local"),
+            eb("pr.id", "is not", null),
+          ]),
+          eb.and([
+            eb("mapping.local_session_id", "is not", null),
+            eb("mapping.workspace_checkout_id", "is", null),
+            eb("mapping.project_id", "in", projectIds),
+            eb("mapping.remote_server_id", "!=", "local"),
+            eb("c.project_id", "=", eb.ref("mapping.project_id")),
+            eb("c.target_id", "=", eb.ref("mapping.remote_server_id")),
+            eb("pr.id", "is not", null),
+          ]),
+          eb.and([
+            eb("mapping.workspace_checkout_id", "is not", null),
+            eb("checkout.id", "is not", null),
+            eb("workspace.id", "is not", null),
+            eb("workspace.project_id", "in", projectIds),
+            eb("checkout.target_id", "!=", "local"),
+            eb("pr.id", "is not", null),
+          ]),
         ]));
       if (q) cacheBase = cacheBase.where(sql<boolean>`lower(coalesce(c.title, '')) like ${pattern} escape '\\'`);
       const cacheRows = await cacheBase.orderBy("c.last_active_at", "desc").limit(200).execute();
@@ -536,7 +626,7 @@ export const createSearchCacheRepos = (
           sessionId: r.id,
           projectId: r.project_id,
           projectName: nameById.get(r.project_id) ?? "",
-          targetId: "local",
+          targetId: r.target_id,
           branch: fromDbBranch(r.branch),
           title: r.title ?? null,
           lastActiveAt: r.last_user_message_at ?? parseDbTimestamp(r.updated_at),

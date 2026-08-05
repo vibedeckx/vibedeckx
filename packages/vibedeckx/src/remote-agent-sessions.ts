@@ -2,7 +2,7 @@ import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
 import type { AgentMessage } from "./agent-types.js";
-import type { RemoteSessionActivityUpdateResult, Storage } from "./storage/types.js";
+import type { RemoteSessionActivityUpdateResult, RemoteSessionCreationIntent, Storage } from "./storage/types.js";
 import type { RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
@@ -65,7 +65,9 @@ export async function bindRemoteSessionMapping(
   );
   // A reported worker path is authoritative. Absence means an old worker and
   // never replaces a path already persisted by a newer worker.
-  if (!registered || (opts.reportedWorktreePath && registered.checkout.path_source === "conventional")) {
+  if (!registered || (opts.reportedWorktreePath
+    && (registered.checkout.path_source !== "reported"
+      || registered.checkout.worktree_path !== opts.reportedWorktreePath))) {
     registered = await storage.workspaceRegistry.registerReadyCheckout({
       projectId: opts.projectId,
       branch: branchKey,
@@ -254,17 +256,55 @@ export async function recoverPendingRemoteAgentSessions(
   let confirmed = 0;
   let failed = 0;
   for (const intent of pending) {
+    const outcome = await recoverPendingRemoteAgentSessionOnce(deps, intent);
+    if (outcome === "confirmed") confirmed++;
+    else failed++;
+  }
+  return { attempted: pending.length, confirmed, failed };
+}
+
+type PendingRecoveryOutcome = "confirmed" | "failed";
+const pendingRecoveryFlights = new WeakMap<Storage, Map<string, Promise<PendingRecoveryOutcome>>>();
+
+function recoverPendingRemoteAgentSessionOnce(
+  deps: RemoteAgentSessionDeps,
+  intent: RemoteSessionCreationIntent,
+): Promise<PendingRecoveryOutcome> {
+  let flights = pendingRecoveryFlights.get(deps.storage);
+  if (!flights) {
+    flights = new Map();
+    pendingRecoveryFlights.set(deps.storage, flights);
+  }
+  const existingFlight = flights.get(intent.local_session_id);
+  if (existingFlight) return existingFlight;
+
+  const flight = (async (): Promise<PendingRecoveryOutcome> => {
     const association = await deps.storage.projectRemotes.getByProjectAndServer(
       intent.project_id, intent.remote_server_id,
     );
     if (!association) {
-      failed++;
       await deps.storage.remoteSessionCreationIntents.recordError(
         intent.local_session_id, "remote workspace association no longer exists",
       );
-      continue;
+      return "failed";
     }
+
+    // A concurrent sweep may have completed the mapping after this sweep read
+    // its pending page. Confirm locally instead of issuing a second worker call.
+    const mapped = await deps.remoteSessionMappings.getByLocal(intent.local_session_id);
+    if (mapped?.workspace_checkout_id
+      && mapped.project_id === intent.project_id
+      && mapped.remote_server_id === intent.remote_server_id
+      && mapped.remote_session_id === intent.remote_session_id
+      && (mapped.branch ?? "") === (intent.branch ?? "")) {
+      await deps.storage.remoteSessionCreationIntents.confirm(intent.local_session_id);
+      return "confirmed";
+    }
+
     try {
+      // Safe replay requires a worker that honors the preallocated sessionId
+      // idempotently. Older workers fail the identity check loudly; they must
+      // not be treated as having confirmed this intent.
       const result = await createRemoteAgentSession(deps, {
         projectId: intent.project_id,
         agentMode: intent.remote_server_id,
@@ -281,14 +321,18 @@ export async function recoverPendingRemoteAgentSessions(
         remoteSessionId: intent.remote_session_id,
         localSessionId: intent.local_session_id,
       });
-      if (result.ok) confirmed++;
-      else failed++;
+      return result.ok ? "confirmed" : "failed";
     } catch (error) {
-      failed++;
       console.warn(`[RemoteSession] Pending creation recovery failed for ${intent.local_session_id}:`, error);
+      return "failed";
     }
-  }
-  return { attempted: pending.length, confirmed, failed };
+  })();
+  flights.set(intent.local_session_id, flight);
+  const clearFlight = () => {
+    if (flights?.get(intent.local_session_id) === flight) flights.delete(intent.local_session_id);
+  };
+  void flight.then(clearFlight, clearFlight);
+  return flight;
 }
 
 export async function createRemoteProjectChatSessionWithInstruction(

@@ -352,11 +352,22 @@ describe("createRemoteAgentSession", () => {
     });
 
     await bindRemoteSessionMapping(storage, {
+      localSessionId: "relocated", projectId, remoteServerId: agentMode,
+      remoteSessionId: "relocated-worker", branch: "dev", remotePath: "/remote/path",
+      reportedWorktreePath: "/worker/relocated/dev",
+    });
+    checkout = await storage.workspaceRegistry.getByProjectBranch(projectId, "dev", agentMode);
+    expect(checkout?.checkout).toMatchObject({
+      worktree_path: "/worker/relocated/dev",
+      path_source: "reported",
+    });
+
+    await bindRemoteSessionMapping(storage, {
       localSessionId: "later-legacy", projectId, remoteServerId: agentMode,
       remoteSessionId: "later-legacy-worker", branch: "dev", remotePath: "/changed/config/path",
     });
     checkout = await storage.workspaceRegistry.getByProjectBranch(projectId, "dev", agentMode);
-    expect(checkout?.checkout.worktree_path).toBe("/worker/authoritative/dev");
+    expect(checkout?.checkout.worktree_path).toBe("/worker/relocated/dev");
   });
 
   it("failure cleanup — !ok: deletes the map entry and returns { ok: false, status }", async () => {
@@ -484,6 +495,46 @@ describe("createRemoteAgentSession", () => {
     expect(restartedDeps.remoteSessionMap.get(identity.localSessionId)?.remoteSessionId)
       .toBe(identity.remoteSessionId);
     expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+  });
+
+  it("coalesces concurrent startup and online recovery sweeps for the same intent", async () => {
+    const identity = { remoteSessionId: "worker-single-flight", localSessionId: "front-single-flight" };
+    await storage.remoteSessionCreationIntents.begin({
+      localSessionId: identity.localSessionId,
+      remoteSessionId: identity.remoteSessionId,
+      projectId,
+      remoteServerId: agentMode,
+      branch: "main",
+      remotePath: "/remote/path",
+      permissionMode: "edit",
+      agentType: "claude-code",
+      model: null,
+      force: false,
+      userId: "user-1",
+    });
+    vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
+      project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path",
+      sort_order: 0, sync_up_config: null, sync_down_config: null,
+    });
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>((resolve) => { releaseWorker = resolve; });
+    proxyToRemoteAuto.mockImplementation(async (...args: unknown[]) => {
+      await workerGate;
+      const body = args[3] as { sessionId: string };
+      return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [] } };
+    });
+    const deps = makeDeps();
+
+    const startupSweep = recoverPendingRemoteAgentSessions(deps);
+    const onlineSweep = recoverPendingRemoteAgentSessions(deps, agentMode);
+    await vi.waitFor(() => expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1));
+    releaseWorker();
+
+    await expect(Promise.all([startupSweep, onlineSweep])).resolves.toEqual([
+      { attempted: 1, confirmed: 1, failed: 0 },
+      { attempted: 1, confirmed: 1, failed: 0 },
+    ]);
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
   });
 
   it("recreates a lost frontend mapping and only then delivers the initial instruction with the stable key", async () => {

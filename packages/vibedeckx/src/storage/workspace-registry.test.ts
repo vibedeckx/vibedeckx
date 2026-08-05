@@ -112,6 +112,28 @@ describe("workspace registry storage", () => {
     expect(await storage.workspaceRegistry.listByProject("p1", "local")).toHaveLength(1);
   });
 
+  it("does not downgrade a reported path but accepts a newer reported relocation", async () => {
+    const first = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "dev", targetId: "remote-1",
+      worktreePath: "/worker/dev-v1", expectedBranch: "dev", pathSource: "reported",
+    });
+    const legacy = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "dev", targetId: "remote-1",
+      worktreePath: "/conventional/dev", expectedBranch: "dev",
+    });
+    expect(legacy.checkout).toMatchObject({
+      id: first.checkout.id, worktree_path: "/worker/dev-v1", path_source: "reported",
+    });
+
+    const relocated = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "dev", targetId: "remote-1",
+      worktreePath: "/worker/dev-v2", expectedBranch: "dev", pathSource: "reported",
+    });
+    expect(relocated.checkout).toMatchObject({
+      id: first.checkout.id, worktree_path: "/worker/dev-v2", path_source: "reported",
+    });
+  });
+
   it("allows project aliases to register the same physical checkout", async () => {
     await storage.projects.create({ id: "p2", name: "project alias", path: "/repo" });
     await storage.workspaceRegistry.registerReadyCheckout({
@@ -146,6 +168,61 @@ describe("workspace registry storage", () => {
 });
 
 describe("workspace registry schema migration", () => {
+  it("adds path_source in place to an existing lifecycle schema", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "vdx-workspace-path-source-migration-"));
+    const dbPath = path.join(dir, "test.sqlite");
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT, remote_path TEXT,
+        is_remote INTEGER DEFAULT 0, remote_url TEXT, remote_api_key TEXT,
+        remote_project_id TEXT, user_id TEXT NOT NULL DEFAULT 'local',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error', 'archived')),
+        error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(project_id, branch)
+      );
+      CREATE TABLE workspace_checkouts (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, target_id TEXT NOT NULL,
+        worktree_path TEXT NOT NULL, expected_branch TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
+        error TEXT, deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_workspace_checkouts_active_target
+        ON workspace_checkouts(workspace_id, target_id) WHERE deleted_at IS NULL;
+      INSERT INTO projects (id, name, path) VALUES ('p1', 'project', '/repo');
+      INSERT INTO workspaces VALUES ('w-local', 'p1', '', 'ready', NULL, 'now', 'now');
+      INSERT INTO workspaces VALUES ('w-remote', 'p1', 'dev', 'ready', NULL, 'now', 'now');
+      INSERT INTO workspace_checkouts VALUES
+        ('c-local', 'w-local', 'local', '/repo', 'main', 'ready', NULL, NULL, 'now', 'now');
+      INSERT INTO workspace_checkouts VALUES
+        ('c-remote', 'w-remote', 'remote-1', '/remote/dev', 'dev', 'ready', NULL, NULL, 'now', 'now');
+    `);
+    legacy.close();
+
+    const migrated = await createSqliteStorage(dbPath);
+    try {
+      expect(await migrated.workspaceRegistry.getCheckoutById("c-local"))
+        .toMatchObject({ checkout: { id: "c-local", path_source: "local" } });
+      expect(await migrated.workspaceRegistry.getCheckoutById("c-remote"))
+        .toMatchObject({ checkout: { id: "c-remote", path_source: "conventional" } });
+    } finally {
+      await migrated.close();
+    }
+
+    const reopened = await createSqliteStorage(dbPath);
+    try {
+      expect(await reopened.workspaceRegistry.getCheckoutById("c-remote"))
+        .toMatchObject({ checkout: { id: "c-remote", path_source: "conventional" } });
+    } finally {
+      await reopened.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("migrates legacy uniqueness to lifecycle tombstones without losing rows", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "vdx-workspace-registry-migration-"));
     const dbPath = path.join(dir, "test.sqlite");

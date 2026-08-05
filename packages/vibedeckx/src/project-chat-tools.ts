@@ -637,7 +637,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
   };
   const sessionExistsInScope = async (sessionId: string): Promise<boolean> => {
     const local = await storage.agentSessions.getById(sessionId);
-    if (local) return local.project_id === projectId;
+    if (local) return (await storage.agentSessions.getActivityById(sessionId))?.projectId === projectId;
     const mapping = await remoteSessions?.getMapping(sessionId);
     if (!mapping || mapping.projectId !== projectId) return false;
     return Boolean(await storage.projectRemotes.getByProjectAndServer(
@@ -648,7 +648,8 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     operation: Awaited<ReturnType<typeof beginOperation>>, sessionId: string,
   ) => {
     const local = await storage.agentSessions.getById(sessionId);
-    if (local?.project_id === projectId && local.status !== "running") {
+    const localProjection = local ? await storage.agentSessions.getActivityById(sessionId) : undefined;
+    if (local && localProjection?.projectId === projectId && local.status !== "running") {
       const status = local.status === "stopped" && local.last_completed_at ? "completed" : "failed";
       return finishOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
     }
@@ -982,7 +983,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         const local = await storage.agentSessions.getById(sessionId);
         let target: "local" | { remoteServerId: string; remoteSessionId: string };
         if (local) {
-          if (local.project_id !== projectId) throw new Error("Object is not part of this project");
+          const localProjectId = local.workspace_checkout_id
+            ? (await storage.agentSessions.getActivityById(sessionId))?.projectId
+            : local.project_id;
+          if (localProjectId !== projectId) {
+            throw new Error("Object is not part of this project");
+          }
           target = "local";
         } else {
           const mapping = await remoteSessions?.getMapping(sessionId);
@@ -1000,7 +1006,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           await revalidateScope();
           if (target === "local") {
             const current = await storage.agentSessions.getById(sessionId);
-            if (!current || current.project_id !== projectId) {
+            const currentProjection = current
+              && current.workspace_checkout_id
+              ? await storage.agentSessions.getActivityById(sessionId)
+              : undefined;
+            const currentProjectId = current?.workspace_checkout_id
+              ? currentProjection?.projectId
+              : current?.project_id;
+            if (!current || currentProjectId !== projectId) {
               throw new Error("Agent session is no longer authorized");
             }
           } else {
@@ -1182,7 +1195,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: readInScope(async () => {
         const [localRows, untrustedRemoteRows] = await Promise.all([
-          storage.agentSessions.listByProject(projectId, LIST_LIMIT / 2),
+          storage.agentSessions.listRecentActivityByProject(projectId, LIST_LIMIT / 2),
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
         ]);
         const remoteRows = safeArrayPrefix(untrustedRemoteRows, LIST_LIMIT / 2);
@@ -1190,12 +1203,12 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           canonicalId: row.id,
           item: {
             id: preview(row.id, ID_CHAR_LIMIT),
-            projectId: preview(row.project_id, ID_CHAR_LIMIT),
-            branch: nullablePreview(row.branch || null, LIST_BRANCH_CHAR_LIMIT),
+            projectId: preview(row.projectId, ID_CHAR_LIMIT),
+            branch: nullablePreview(row.branch, LIST_BRANCH_CHAR_LIMIT),
             title: nullablePreview(row.title, LIST_NAME_CHAR_LIMIT),
             status: preview(row.status, ENUM_CHAR_LIMIT),
-            target: "local",
-            agentType: nullablePreview(row.agent_type, ENUM_CHAR_LIMIT),
+            target: preview(row.target, LIST_TARGET_CHAR_LIMIT),
+            agentType: nullablePreview(row.agentType, ENUM_CHAR_LIMIT),
             model: nullablePreview(row.model, LIST_MODEL_CHAR_LIMIT),
           } satisfies ProjectSessionSummary,
         }] : []);
@@ -1255,15 +1268,16 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       execute: readInScope(async ({ sessionId }) => {
         const local = await storage.agentSessions.getById(sessionId);
         if (local) {
-          if (local.project_id !== projectId) throw new Error("Object is not part of this project");
+          const projection = await storage.agentSessions.getActivityById(sessionId);
+          if (projection?.projectId !== projectId) throw new Error("Object is not part of this project");
           if (!isToolSelectorId(local.id)) throw new Error("Agent session not found");
           const detail: ProjectSessionDetail = {
             id: preview(local.id, ID_CHAR_LIMIT),
-            projectId: preview(local.project_id, ID_CHAR_LIMIT),
-            branch: nullablePreview(local.branch || null, BRANCH_CHAR_LIMIT),
+            projectId: preview(projection.projectId, ID_CHAR_LIMIT),
+            branch: nullablePreview(projection.branch, BRANCH_CHAR_LIMIT),
             title: nullablePreview(local.title, NAME_CHAR_LIMIT),
             status: preview(local.status, ENUM_CHAR_LIMIT),
-            target: "local",
+            target: preview(projection.target, LIST_TARGET_CHAR_LIMIT),
             agentType: nullablePreview(local.agent_type, ENUM_CHAR_LIMIT),
             model: nullablePreview(local.model, MODEL_CHAR_LIMIT),
             processAlive: agentSessionManager.getSessionProcessAlive(local.id),

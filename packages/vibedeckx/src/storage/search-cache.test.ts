@@ -483,6 +483,42 @@ describe("searchCache", () => {
       })).resolves.toBe(false);
     });
 
+    it("projects remote activity ownership from a bound checkout and preserves tombstone history", async () => {
+      const remote = await storage.remoteServers.create({ name: "Bound", url: "http://bound" });
+      await storage.projectRemotes.add({ project_id: "p1", remote_server_id: remote.id, remote_path: "/repo" });
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "actual", targetId: remote.id,
+        worktreePath: "/repo/.worktrees/actual", expectedBranch: "actual", pathSource: "reported",
+      });
+      const localId = `remote-${remote.id}-bound`;
+      await storage.remoteSessionMappings.upsertBound({
+        localSessionId: localId, projectId: "p1", remoteServerId: remote.id,
+        remoteSessionId: "worker-bound", branch: "actual", checkoutId: registered.checkout.id,
+      });
+      await storage.searchCache.noteSessionCreated({
+        localSessionId: localId, projectId: "p1", targetId: remote.id,
+        branch: "snapshot", title: "Bound activity", status: "stopped",
+      });
+      await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
+
+      expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10))
+        .toEqual([expect.objectContaining({
+          id: localId,
+          projectId: "p1",
+          branch: "actual",
+          target: remote.id,
+          worktreePath: "/repo/.worktrees/actual",
+          checkoutDeletedAt: expect.any(String),
+          binding: "checkout",
+        })]);
+      expect(await storage.searchCache.search({ query: "Bound activity", limitPerGroup: 10 }))
+        .toEqual(expect.objectContaining({
+          sessions: [expect.objectContaining({
+            sessionId: localId, projectId: "p1", targetId: remote.id, branch: "actual",
+          })],
+        }));
+    });
+
     it("a confirming snapshot watermarks its row against a delayed pre-dispatch running ACK", async () => {
       const localId = `remote-${serverId}-p1-worker-confirmed`;
       await storage.remoteSessionMappings.upsert(

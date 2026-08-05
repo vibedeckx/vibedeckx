@@ -106,16 +106,22 @@ async function upsertCheckout(
   }
 
   const activeCheckout = await trx.selectFrom("workspace_checkouts")
-    .select("id")
+    .select(["id", "worktree_path", "path_source"])
     .where("workspace_id", "=", workspaceRow.id)
     .where("target_id", "=", opts.targetId)
     .where("deleted_at", "is", null)
     .executeTakeFirst();
   const checkoutId = activeCheckout?.id ?? crypto.randomUUID();
+  const requestedPathSource = opts.pathSource ?? (opts.targetId === "local" ? "local" : "conventional");
   if (activeCheckout) {
+    // A legacy caller that lacks a worker-reported path must never downgrade
+    // an authoritative remote path. A fresh reported path may still update the
+    // same live checkout when the worker legitimately relocates it.
+    const preserveReportedPath = activeCheckout.path_source === "reported"
+      && requestedPathSource === "conventional";
     await trx.updateTable("workspace_checkouts").set({
-      worktree_path: opts.worktreePath,
-      path_source: opts.pathSource ?? (opts.targetId === "local" ? "local" : "conventional"),
+      worktree_path: preserveReportedPath ? activeCheckout.worktree_path : opts.worktreePath,
+      path_source: preserveReportedPath ? activeCheckout.path_source : requestedPathSource,
       expected_branch: opts.expectedBranch,
       status: opts.status,
       error: null,
@@ -127,7 +133,7 @@ async function upsertCheckout(
       workspace_id: workspaceRow.id,
       target_id: opts.targetId,
       worktree_path: opts.worktreePath,
-      path_source: opts.pathSource ?? (opts.targetId === "local" ? "local" : "conventional"),
+      path_source: requestedPathSource,
       expected_branch: opts.expectedBranch,
       status: opts.status,
       error: null,

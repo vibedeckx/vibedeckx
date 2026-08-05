@@ -4,6 +4,7 @@ import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type {
   Storage,
   AgentSession,
+  AgentSessionActivity,
   AgentSessionStatus,
   NotificationSyncStart,
   RemoteSessionMapping,
@@ -28,6 +29,37 @@ const mapRemoteSessionMapping = (
   notification_watch_until: row.notification_watch_until,
 });
 
+const projectedRemoteMappingBase = (kdb: Kysely<DB>) => kdb
+  .selectFrom("remote_session_mappings as mapping")
+  .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+  .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+  .innerJoin("project_remotes as association", (join) => join.on((eb) => eb.or([
+    eb.and([
+      eb("mapping.workspace_checkout_id", "is", null),
+      eb("association.project_id", "=", eb.ref("mapping.project_id")),
+      eb("association.remote_server_id", "=", eb.ref("mapping.remote_server_id")),
+    ]),
+    eb.and([
+      eb("mapping.workspace_checkout_id", "is not", null),
+      eb("association.project_id", "=", eb.ref("workspace.project_id")),
+      eb("association.remote_server_id", "=", eb.ref("checkout.target_id")),
+    ]),
+  ])))
+  .select([
+    "mapping.local_session_id", "mapping.remote_session_id", "mapping.workspace_checkout_id",
+    "mapping.notification_sync_start", "mapping.notification_watch_until",
+    sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
+    sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("remote_server_id"),
+    sql<string | null>`case when mapping.workspace_checkout_id is null then mapping.branch else nullif(workspace.branch, '') end`.as("branch"),
+  ])
+  .where((eb) => eb.or([
+    eb("mapping.workspace_checkout_id", "is", null),
+    eb.and([
+      eb("checkout.id", "is not", null),
+      eb("workspace.id", "is not", null),
+    ]),
+  ]));
+
 const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => ({
   id: row.id,
   project_id: row.project_id,
@@ -48,6 +80,86 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   last_completed_at: row.last_completed_at,
   favorited_at: row.favorited_at,
 });
+
+const parseActivityTimestamp = (value: string): number | null => {
+  const explicitZone = /(?:Z|[+-]\d\d:\d\d)$/i.test(value);
+  const parsed = Date.parse(explicitZone ? value : `${value.replace(" ", "T")}Z`);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const mapLocalActivity = (row: {
+  id: string;
+  projected_project_id: string;
+  projected_branch: string;
+  projected_target_id: string;
+  worktree_path: string | null;
+  checkout_deleted_at: string | null;
+  workspace_checkout_id: string | null;
+  status: string;
+  title: string | null;
+  agent_type: string | null;
+  model: string | null;
+  activity_at: number;
+  created_at: string;
+  updated_at: string;
+  last_user_message_at: number | null;
+  last_completed_at: number | null;
+}): AgentSessionActivity => {
+  const branch = row.projected_branch === "" ? null : row.projected_branch;
+  return {
+    id: row.id,
+    projectId: row.projected_project_id,
+    branch,
+    status: row.status as AgentSessionActivity["status"],
+    title: row.title,
+    target: row.projected_target_id,
+    workspace: { target: row.projected_target_id, branch },
+    worktreePath: row.worktree_path,
+    checkoutDeletedAt: row.checkout_deleted_at,
+    binding: row.workspace_checkout_id === null ? "legacy" : "checkout",
+    agentType: row.agent_type,
+    model: row.model,
+    lastActiveAt: Math.max(
+      row.last_user_message_at ?? 0,
+      row.last_completed_at ?? 0,
+      parseActivityTimestamp(row.updated_at) ?? 0,
+      parseActivityTimestamp(row.created_at) ?? 0,
+    ),
+    lastUserMessageAt: row.last_user_message_at,
+    lastCompletedAt: row.last_completed_at,
+  };
+};
+
+const localActivityBase = (kdb: Kysely<DB>, projectId?: string) => {
+  let query = kdb
+  .selectFrom("agent_sessions as s")
+  .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+  .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+  .select([
+    "s.id", "s.workspace_checkout_id", "s.status", "s.title", "s.agent_type", "s.model",
+    "s.activity_at", "s.created_at", "s.updated_at", "s.last_user_message_at", "s.last_completed_at",
+    "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at",
+    sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("projected_project_id"),
+    sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("projected_branch"),
+    sql<string>`case when s.workspace_checkout_id is null then 'local' else checkout.target_id end`.as("projected_target_id"),
+  ])
+  // A non-NULL missing checkout is a broken binding, not a legacy row. The
+  // explicit validity arm prevents CASE/LEFT JOIN NULLs from becoming a
+  // snapshot fallback.
+  .where((eb) => eb.or([
+    eb.and([
+      eb("s.workspace_checkout_id", "is", null),
+      ...(projectId === undefined ? [] : [eb("s.project_id", "=", projectId)]),
+    ]),
+    eb.and([
+      eb("s.workspace_checkout_id", "is not", null),
+      eb("checkout.id", "is not", null),
+      eb("workspace.id", "is not", null),
+      ...(projectId === undefined ? [] : [eb("workspace.project_id", "=", projectId)]),
+    ]),
+  ]));
+  return query;
+};
 
 const mapRemoteCreationIntent = (
   row: Selectable<RemoteSessionCreationIntentsTable>,
@@ -233,6 +345,20 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
+    listRecentActivityByProject: async (projectId, limit) => {
+      const rows = await localActivityBase(kdb, projectId)
+        .orderBy("s.activity_at", "desc")
+        .orderBy("s.id", "desc")
+        .limit(limit)
+        .execute();
+      return rows.map(mapLocalActivity);
+    },
+
+    getActivityById: async (id) => {
+      const row = await localActivityBase(kdb).where("s.id", "=", id).executeTakeFirst();
+      return row ? mapLocalActivity(row) : undefined;
+    },
+
     listAttentionByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
@@ -254,11 +380,40 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
+    listAttentionActivityByProject: async (projectId, limit) => {
+      const rows = await localActivityBase(kdb, projectId)
+        .where((eb) => eb.or([
+          eb("s.status", "=", "error"),
+          eb.and([
+            eb("s.status", "=", "stopped"),
+            eb("s.last_user_message_at", "is not", null),
+            eb.or([
+              eb("s.last_completed_at", "is", null),
+              eb("s.last_completed_at", "<", eb.ref("s.last_user_message_at")),
+            ]),
+          ]),
+        ]))
+        .orderBy("s.activity_at", "desc")
+        .orderBy("s.id", "desc")
+        .limit(limit)
+        .execute();
+      return rows.map(mapLocalActivity);
+    },
+
     countRunningByProject: async (projectId) => {
       const row = await kdb.selectFrom("agent_sessions")
         .select(kdb.fn.countAll<number>().as("count"))
         .where("project_id", "=", projectId)
         .where("status", "=", "running")
+        .executeTakeFirstOrThrow();
+      return Number(row.count);
+    },
+
+    countRunningActivityByProject: async (projectId) => {
+      const row = await localActivityBase(kdb, projectId)
+        .where("s.status", "=", "running")
+        .clearSelect()
+        .select(kdb.fn.countAll<number>().as("count"))
         .executeTakeFirstOrThrow();
       return Number(row.count);
     },
@@ -549,16 +704,12 @@ export const createAgentSessionRepos = (
     },
 
     listByProject: async (projectId, limit) => {
-      const rows = await kdb.selectFrom("remote_session_mappings as mapping")
-        .innerJoin("project_remotes as association", (join) => join
-          .onRef("association.project_id", "=", "mapping.project_id")
-          .onRef("association.remote_server_id", "=", "mapping.remote_server_id"))
-        .selectAll("mapping")
-        .where("mapping.project_id", "=", projectId)
+      const rows = await projectedRemoteMappingBase(kdb)
+        .where(sql<boolean>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end = ${projectId}`)
         .orderBy("mapping.local_session_id", "asc")
         .limit(limit)
         .execute();
-      return rows.map(mapRemoteSessionMapping);
+      return rows.map((row) => mapRemoteSessionMapping(row as Selectable<RemoteSessionMappingsTable>));
     },
 
     getByLocal: async (localSessionId) => {
@@ -569,15 +720,11 @@ export const createAgentSessionRepos = (
     },
 
     getAuthorizedByLocal: async (localSessionId, projectId) => {
-      const row = await kdb.selectFrom("remote_session_mappings as mapping")
-        .innerJoin("project_remotes as association", (join) => join
-          .onRef("association.project_id", "=", "mapping.project_id")
-          .onRef("association.remote_server_id", "=", "mapping.remote_server_id"))
-        .selectAll("mapping")
+      const row = await projectedRemoteMappingBase(kdb)
         .where("mapping.local_session_id", "=", localSessionId)
-        .where("mapping.project_id", "=", projectId)
+        .where(sql<boolean>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end = ${projectId}`)
         .executeTakeFirst();
-      return row ? mapRemoteSessionMapping(row) : undefined;
+      return row ? mapRemoteSessionMapping(row as Selectable<RemoteSessionMappingsTable>) : undefined;
     },
 
     getByRemote: async (remoteServerId, remoteSessionId) => {
@@ -601,12 +748,30 @@ export const createAgentSessionRepos = (
     },
 
     getNotificationSyncCandidates: async ({ now, includeExpired }) => {
-      let query = kdb.selectFrom("remote_session_mappings").selectAll();
+      // Unlike user-facing authorized lists, the sweep deliberately retains
+      // legacy mappings whose association disappeared so resolveTarget() can
+      // skip them explicitly without changing the established recovery
+      // contract. Bound rows still project ownership through their checkout;
+      // only a non-NULL dangling binding is excluded.
+      let query = kdb.selectFrom("remote_session_mappings as mapping")
+        .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+        .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+        .select([
+          "mapping.local_session_id", "mapping.remote_session_id", "mapping.workspace_checkout_id",
+          "mapping.notification_sync_start", "mapping.notification_watch_until",
+          sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
+          sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("remote_server_id"),
+          sql<string | null>`case when mapping.workspace_checkout_id is null then mapping.branch else nullif(workspace.branch, '') end`.as("branch"),
+        ])
+        .where((eb) => eb.or([
+          eb("mapping.workspace_checkout_id", "is", null),
+          eb.and([eb("checkout.id", "is not", null), eb("workspace.id", "is not", null)]),
+        ]));
       if (!includeExpired) {
-        query = query.where("notification_watch_until", ">", now);
+        query = query.where("mapping.notification_watch_until", ">", now);
       }
-      const rows = await query.orderBy("local_session_id", "asc").execute();
-      return rows.map(mapRemoteSessionMapping);
+      const rows = await query.orderBy("mapping.local_session_id", "asc").execute();
+      return rows.map((row) => mapRemoteSessionMapping(row as Selectable<RemoteSessionMappingsTable>));
     },
 
     // The cursor is deleted with the mapping: without a mapping the front has

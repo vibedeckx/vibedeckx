@@ -557,6 +557,12 @@ export interface AgentSessionActivity {
   title: string | null;
   target: string;
   workspace: { target: string; branch: string | null };
+  /** Exact checkout path for bound rows; null for unbound legacy rows. */
+  worktreePath: string | null;
+  /** Tombstone timestamp of the bound checkout, retained for historical display. */
+  checkoutDeletedAt: string | null;
+  /** Makes compatibility fallback explicit instead of presenting it as a binding. */
+  binding: "checkout" | "legacy";
   agentType: string | null;
   model: string | null;
   lastActiveAt: number | null;
@@ -964,9 +970,17 @@ export interface Storage {
     listByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** Project Overview recency list; insertion order breaks sub-millisecond timestamp ties. */
     listRecentByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
+    /** Checkout-first Project Overview projection. Dangling bound rows never fall back to snapshots. */
+    listRecentActivityByProject: (projectId: string, limit: number) => Promise<AgentSessionActivity[]>;
+    /** Checkout-first projection for one local session; undefined for missing or dangling bindings. */
+    getActivityById: (id: string) => Promise<AgentSessionActivity | undefined>;
     /** Newest stopped/error sessions, independent of the recent-sessions card window. */
     listAttentionByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
+    /** Checkout-first attention projection using the same identity rules as recent activity. */
+    listAttentionActivityByProject: (projectId: string, limit: number) => Promise<AgentSessionActivity[]>;
     countRunningByProject: (projectId: string) => Promise<number>;
+    /** Checkout-first running count; bound rows are scoped through their workspace. */
+    countRunningActivityByProject: (projectId: string) => Promise<number>;
     /** @deprecated — use listByBranch + getLatestByBranch */
     getByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
     listByBranch: (projectId: string, branch: string) => Promise<AgentSession[]>;

@@ -1,5 +1,4 @@
 import type {
-  AgentSession,
   AgentSessionActivity,
   ProjectChatThread,
   ScheduledTaskRunActivity,
@@ -45,34 +44,6 @@ const parseDbTimestamp = (value: string | null | undefined): number | null => {
   return Number.isNaN(parsed) ? null : parsed;
 };
 
-const maxTimestamp = (...values: Array<number | null | undefined>): number | null => {
-  const valid = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  return valid.length > 0 ? Math.max(...valid) : null;
-};
-
-const localActivity = (session: AgentSession): AgentSessionActivity => {
-  const branch = session.branch || null;
-  return {
-    id: session.id,
-    projectId: session.project_id,
-    branch,
-    status: session.status,
-    title: session.title ?? null,
-    target: "local",
-    workspace: { target: "local", branch },
-    agentType: session.agent_type ?? null,
-    model: session.model ?? null,
-    lastActiveAt: maxTimestamp(
-      session.last_user_message_at,
-      session.last_completed_at,
-      parseDbTimestamp(session.updated_at),
-      parseDbTimestamp(session.created_at),
-    ),
-    lastUserMessageAt: session.last_user_message_at ?? null,
-    lastCompletedAt: session.last_completed_at ?? null,
-  };
-};
-
 const mergeActivity = (local: AgentSessionActivity[], remote: AgentSessionActivity[], limit: number) => {
   const byId = new Map<string, AgentSessionActivity>();
   for (const row of [...local, ...remote]) if (!byId.has(row.id)) byId.set(row.id, row);
@@ -102,26 +73,26 @@ export async function getProjectActivity(
     nextScheduleAt,
   ] = await Promise.all([
     storage.projectChatThreads.listByProject(projectId, userId, RECENT_THREAD_LIMIT),
-    storage.agentSessions.listRecentByProject(projectId, RECENT_SESSION_LIMIT),
+    storage.agentSessions.listRecentActivityByProject(projectId, RECENT_SESSION_LIMIT),
     storage.searchCache.listRemoteSessionActivityByProject(projectId, RECENT_SESSION_LIMIT),
     storage.scheduledTaskRuns.getRecentByProject(projectId, RECENT_RUN_LIMIT),
     storage.tasks.listPriorityByProject(projectId, PRIORITY_TASK_LIMIT),
-    storage.agentSessions.listAttentionByProject(projectId, ATTENTION_LIMIT),
+    storage.agentSessions.listAttentionActivityByProject(projectId, ATTENTION_LIMIT),
     storage.searchCache.listRemoteSessionAttentionByProject(projectId, ATTENTION_LIMIT),
     storage.scheduledTaskRuns.getAttentionByProject(projectId, ATTENTION_LIMIT),
-    storage.agentSessions.countRunningByProject(projectId),
+    storage.agentSessions.countRunningActivityByProject(projectId),
     storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["starting", "running"]),
     storage.searchCache.countRemoteSessionActivityByProject(projectId),
     storage.scheduledTasks.getEarliestNextRunAt(projectId),
   ]);
 
   const recentAgentSessions = mergeActivity(
-    localRecentSessions.map(localActivity),
+    localRecentSessions,
     remoteRecentSessions,
     RECENT_SESSION_LIMIT,
   );
   const attentionSessions = mergeActivity(
-    localAttentionSessions.map(localActivity),
+    localAttentionSessions,
     remoteAttentionSessions,
     ATTENTION_LIMIT,
   );

@@ -51,7 +51,9 @@ async function syncRemoteWorktreeList(
       projectId, branch, remote.serverId,
     );
     const reportedPath = typeof worktree.worktreePath === "string" ? worktree.worktreePath : null;
-    if (existing && (!reportedPath || existing.checkout.path_source !== "conventional")) continue;
+    if (existing && (!reportedPath
+      || (existing.checkout.path_source === "reported"
+        && existing.checkout.worktree_path === reportedPath))) continue;
     await fastify.storage.workspaceRegistry.registerReadyCheckout({
       projectId,
       branch,

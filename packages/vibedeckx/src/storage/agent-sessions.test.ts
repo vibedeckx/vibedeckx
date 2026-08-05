@@ -79,6 +79,60 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       })).rejects.toThrow("not available");
       expect(await storage.agentSessions.getById("rejected")).toBeUndefined();
     });
+
+    it("projects bound activity from the exact checkout, including its tombstone history", async () => {
+      await storage.projects.create({ id: "snapshot-project", name: "snapshot", path: "/tmp/snapshot" });
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "historical", targetId: "local",
+        worktreePath: "/tmp/p-historical", expectedBranch: "historical",
+      });
+      await storage.agentSessions.createBound({
+        id: "bound-history", project_id: "p1", branch: "historical", target_id: "local",
+        checkout_id: registered.checkout.id,
+      });
+      const raw = new Database(dbPath);
+      try {
+        // Simulate stale compatibility snapshots. Projection ownership must
+        // remain attached to the immutable checkout incarnation.
+        raw.prepare("UPDATE agent_sessions SET project_id = ?, branch = ? WHERE id = ?")
+          .run("snapshot-project", "wrong-branch", "bound-history");
+      } finally {
+        raw.close();
+      }
+      await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
+
+      expect(await storage.agentSessions.listRecentActivityByProject("snapshot-project", 10))
+        .toEqual([]);
+      expect(await storage.agentSessions.listRecentActivityByProject("p1", 10))
+        .toEqual([expect.objectContaining({
+          id: "bound-history",
+          projectId: "p1",
+          branch: "historical",
+          target: "local",
+          worktreePath: "/tmp/p-historical",
+          checkoutDeletedAt: expect.any(String),
+          binding: "checkout",
+        })]);
+    });
+
+    it("falls back only for genuinely unbound legacy activity and omits dangling bindings", async () => {
+      await storage.agentSessions.create({ id: "legacy", project_id: "p1", branch: "legacy" });
+      await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dangling" });
+      const raw = new Database(dbPath);
+      try {
+        raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = ?")
+          .run("missing-checkout", "dangling");
+      } finally {
+        raw.close();
+      }
+
+      const rows = await storage.agentSessions.listRecentActivityByProject("p1", 10);
+      expect(rows).toEqual([expect.objectContaining({
+        id: "legacy", branch: "legacy", target: "local",
+        worktreePath: null, checkoutDeletedAt: null, binding: "legacy",
+      })]);
+      expect(await storage.agentSessions.countRunningActivityByProject("p1")).toBe(1);
+    });
   });
 
   describe("workspace checkout binding backfill", () => {
@@ -673,6 +727,41 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       await storage.remoteSessionMappings.upsert("l2", "p1", "rs1", "r2", "main");
       const all = await storage.remoteSessionMappings.getAll();
       expect(all.map((m) => m.local_session_id).sort()).toEqual(["l1", "l2"]);
+    });
+
+    it("projects notification candidates from checkout ownership while preserving routing ids", async () => {
+      await storage.projects.create({ id: "snapshot-project", name: "snapshot", path: "/tmp/snapshot" });
+      const remote = await storage.remoteServers.create({ name: "worker" });
+      await storage.projectRemotes.add({
+        project_id: "p1", remote_server_id: remote.id, remote_path: "/repo",
+      });
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "actual", targetId: remote.id,
+        worktreePath: "/repo/actual", expectedBranch: "actual", pathSource: "reported",
+      });
+      await storage.remoteSessionMappings.upsertBound({
+        localSessionId: "bound-notification", projectId: "p1", remoteServerId: remote.id,
+        remoteSessionId: "worker-routing-id", branch: "actual", checkoutId: registered.checkout.id,
+      });
+      const raw = new Database(dbPath);
+      try {
+        raw.prepare("UPDATE remote_session_mappings SET project_id = ?, branch = ? WHERE local_session_id = ?")
+          .run("snapshot-project", "wrong", "bound-notification");
+      } finally {
+        raw.close();
+      }
+      await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
+
+      expect(await storage.remoteSessionMappings.getNotificationSyncCandidates({
+        now: Date.now(), includeExpired: true,
+      })).toEqual([expect.objectContaining({
+        local_session_id: "bound-notification",
+        remote_session_id: "worker-routing-id",
+        project_id: "p1",
+        remote_server_id: remote.id,
+        branch: "actual",
+        workspace_checkout_id: registered.checkout.id,
+      })]);
     });
   });
 });
