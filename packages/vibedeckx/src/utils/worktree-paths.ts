@@ -88,8 +88,24 @@ export function parseGitWorktreeList(projectPath: string): Array<{ path: string;
   return entries;
 }
 
+/**
+ * The workspaces a project has when Git cannot answer — a project directory
+ * that is not a repository still has exactly one workspace: its own root.
+ * Returning that (instead of throwing) is what lets a non-git project own a
+ * registered checkout and therefore bind its sessions.
+ */
+function readWorktreeListTolerant(projectPath: string): Array<{ path: string; branch: string | null }> {
+  try {
+    return parseGitWorktreeList(projectPath);
+  } catch {
+    return [{ path: projectPath, branch: null }];
+  }
+}
+
 /** Run `git worktree prune` and invalidate the cached list for this project.
- *  Call from list-style API handlers; not on every internal lookup. */
+ *  Call from list-style API handlers; not on every internal lookup.
+ *  Best-effort: a non-git project has nothing to prune and must not fail the
+ *  caller that was only refreshing its workspace list. */
 export function pruneWorktrees(projectPath: string): void {
   try {
     execSync("git worktree prune", {
@@ -97,6 +113,8 @@ export function pruneWorktrees(projectPath: string): void {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
+  } catch {
+    // Not a repository, or git unavailable — nothing to prune.
   } finally {
     worktreeListCache.delete(projectPath);
   }
@@ -169,7 +187,14 @@ export function reconcileWorktreeBranches(
 
   const rootEntry = entries[0];
   const rootAnchor = rootEntry ? registryByPath.get(path.resolve(rootEntry.path)) : undefined;
-  const worktrees: WorktreeBranch[] = [rootAnchor && rootEntry?.branch !== rootAnchor.expectedBranch
+  // Drift is only claimable when Git actually names a branch. A root with no
+  // branch (detached HEAD, or a project directory that is not a repository)
+  // has nothing to compare against — reporting it as drifted would be a
+  // permanent false positive for non-git projects.
+  const rootDrifted = Boolean(rootAnchor)
+    && rootEntry?.branch != null
+    && rootEntry.branch !== rootAnchor!.expectedBranch;
+  const worktrees: WorktreeBranch[] = [rootDrifted
     ? { branch: null, currentBranch: rootEntry?.branch ?? null }
     : { branch: null }];
   // The first entry is the project/main worktree. Its stable API identity is
@@ -200,7 +225,7 @@ export async function getRegisteredWorktreeBranches(
   projectId: string,
   projectPath: string,
 ): Promise<WorktreeBranch[]> {
-  const entries = parseGitWorktreeList(projectPath);
+  const entries = readWorktreeListTolerant(projectPath);
   const sessions = await storage.agentSessions.getProjectedByProjectId(projectId, "runtime");
   const sessionBranches = sessions.map((session) => session.branch);
   const sessionBranchByPath = new Map<string, string>();
@@ -239,16 +264,20 @@ export async function getRegisteredWorktreeBranches(
       }
       continue;
     }
-    if (registeredPaths.has(resolvedPath) || entry.branch === null) continue;
+    // A branch-less non-root entry is a detached-HEAD worktree with no stable
+    // identity to anchor. The root is different: it is the main workspace even
+    // when Git reports no branch (detached HEAD, or not a repository at all),
+    // and skipping it would leave the project with nothing to bind against.
+    if (registeredPaths.has(resolvedPath) || (entry.branch === null && index > 0)) continue;
     const stableBranch = index === 0
       ? ""
-      : (sessionBranchByPath.get(resolvedPath) ?? entry.branch);
+      : (sessionBranchByPath.get(resolvedPath) ?? entry.branch!);
     await storage.workspaceRegistry.registerReadyCheckout({
       projectId,
       branch: stableBranch,
       targetId: "local",
       worktreePath: entry.path,
-      expectedBranch: index === 0 ? entry.branch : stableBranch,
+      expectedBranch: index === 0 ? (entry.branch ?? "") : stableBranch,
     });
     registeredPaths.add(resolvedPath);
   }

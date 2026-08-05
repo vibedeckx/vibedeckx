@@ -12,6 +12,28 @@ import {
   invalidateWorktreeListCache,
 } from "./worktree-paths.js";
 
+describe("non-git project", () => {
+  it("owns exactly one workspace at its root, so its sessions can still bind", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "vdx-nongit-"));
+    const storage = await createSqliteStorage(path.join(dir, "db.sqlite"));
+    try {
+      await storage.projects.create({ id: "p1", name: "p", path: dir });
+
+      expect(await getRegisteredWorktreeBranches(storage, "p1", dir)).toEqual([{ branch: null }]);
+      expect(await storage.workspaceRegistry.getByProjectBranch("p1", "", "local"))
+        .toMatchObject({ checkout: { worktree_path: dir, status: "ready" } });
+
+      const bound = await storage.agentSessions.createBound({
+        id: "s1", project_id: "p1", branch: "", target_id: "local",
+      });
+      expect(bound.session.workspace_checkout_id).toBe(bound.checkout.id);
+    } finally {
+      await storage.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("persisted worktree identity", () => {
   let dir: string;
   let projectPath: string;
