@@ -3,6 +3,10 @@
 面向运维执行。设计背景见 [`session-workspace-checkout-migration.md`](./session-workspace-checkout-migration.md)，
 阶段拆分与验收项见 [`../plans/session-workspace-checkout-migration.md`](../plans/session-workspace-checkout-migration.md)。
 
+**适用范围：Phase 1–7 整体，一次升级。** 计划里的 phase 是开发阶段，不是发布批次——所有迁移都在数据库
+打开时按序自动执行，因此从迁移前版本升级上来的实例一次就会跑完全部。已经跑过的阶段是幂等的，会直接跳过；
+分批升级的部署只需关注尚未应用的那部分（见 §4 的验证项）。
+
 ## 0. 不可回滚点
 
 **Phase 1 起，数据库格式单向前进。**
