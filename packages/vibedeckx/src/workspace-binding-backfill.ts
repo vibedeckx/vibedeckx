@@ -78,14 +78,16 @@ export async function registerReportedWorktrees(
 }
 
 /**
- * Lazily import every local worktree this machine can still see, so historical
- * sessions have a checkout to bind to. Per-project failures are non-fatal: a
- * project whose path is gone simply keeps its unbound rows.
+ * Lazily import the local worktrees this machine can still see, so historical
+ * sessions have a checkout to bind to.
+ *
+ * Scoped to projects that actually have unbound sessions — which on a worker
+ * means `path:*` pseudo projects, the only kind it has. Per-project failures
+ * are non-fatal: a project whose path is gone simply keeps its unbound rows.
  */
 export async function syncLocalWorkspaceRegistry(storage: Storage): Promise<void> {
-  const projects = await storage.projects.getAll();
+  const projects = await storage.workspaceBindingMigration.listUnboundLocalProjects();
   for (const project of projects) {
-    if (!project.path) continue;
     try {
       await getRegisteredWorktreeBranches(storage, project.id, project.path);
     } catch (error) {

@@ -1187,6 +1187,18 @@ export const createAgentSessionRepos = (
   },
 
   workspaceBindingMigration: {
+    listUnboundLocalProjects: async () => {
+      const rows = await kdb.selectFrom("agent_sessions as s")
+        .innerJoin("projects as p", "p.id", "s.project_id")
+        .select(["p.id", "p.path"])
+        .where("s.workspace_checkout_id", "is", null)
+        .where("p.path", "is not", null)
+        .where("p.path", "<>", "")
+        .groupBy(["p.id", "p.path"])
+        .execute();
+      return rows.map((row) => ({ id: row.id, path: row.path! }));
+    },
+
     backfill: async ({ kind, dryRun = true, batchSize = 100, afterId = "" }) => {
       const limit = Math.max(1, Math.min(1000, batchSize));
       const source = kind === "local"

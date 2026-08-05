@@ -140,6 +140,26 @@ describe("self-healing workspace binding backfill", () => {
     expect(listRemoteWorktrees).not.toHaveBeenCalled();
   });
 
+  it("heals a worker, whose projects are all path pseudo projects", async () => {
+    // A worker never has anything else: `/api/path/agent-sessions*` creates a
+    // `path:` row per workspace. Sourcing the sweep from the user-facing
+    // project list would silently skip every one of them.
+    const repo = mkdtempSync(path.join(tmpdir(), "vdx-worker-project-"));
+    try {
+      await storage.projects.create({ id: `path:${repo}`, name: "repo", path: repo });
+      await storage.agentSessions.create({ id: "legacy", project_id: `path:${repo}`, branch: "" });
+
+      const result = await healWorkspaceBindings(storage);
+
+      expect(result.local.updated).toBe(1);
+      const bound = await storage.agentSessions.getById("legacy");
+      const checkout = await storage.workspaceRegistry.getByProjectBranch(`path:${repo}`, "", "local");
+      expect(bound?.workspace_checkout_id).toBe(checkout?.checkout.id);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("keeps a project whose local path disappeared from failing the whole sweep", async () => {
     await storage.projects.create({ id: "gone", name: "gone", path: "/tmp/vdx-not-a-repo" });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

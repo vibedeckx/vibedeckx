@@ -1172,6 +1172,16 @@ export interface Storage {
     listPending: (remoteServerId?: string) => Promise<RemoteReviewerCreationIntent[]>;
   };
   workspaceBindingMigration: {
+    /**
+     * Local projects that still own unbound sessions, with their on-disk path.
+     *
+     * Deliberately NOT `projects.getAll()`: that excludes `path:*` pseudo
+     * projects, which is right for a user-facing list but wrong here — on a
+     * worker every project is one, so the registry sync would find nothing to
+     * do. Scoping to projects that actually have unbound rows also keeps the
+     * sweep off every other project's worktree listing.
+     */
+    listUnboundLocalProjects: () => Promise<Array<{ id: string; path: string }>>;
     backfill: (opts: {
       kind: "local" | "remote";
       dryRun?: boolean;
