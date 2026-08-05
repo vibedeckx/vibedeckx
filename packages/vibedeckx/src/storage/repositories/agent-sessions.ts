@@ -13,11 +13,17 @@ import type {
   WorkspaceBindingIssue,
   WorkspaceBindingIssueReason,
 } from "../types.js";
+import {
+  recordWorkspaceBindingRead,
+  type WorkspaceBindingReadConsumer,
+} from "../../workspace-binding-metrics.js";
 // NotificationOutboxEvent is referenced only through Storage's method
 // signatures, which this factory's return type already pins.
 
 const mapRemoteSessionMapping = (
-  row: Selectable<RemoteSessionMappingsTable>,
+  row: Pick<Selectable<RemoteSessionMappingsTable>,
+    "local_session_id" | "project_id" | "remote_server_id" | "remote_session_id"
+    | "branch" | "workspace_checkout_id" | "notification_sync_start" | "notification_watch_until">,
 ): RemoteSessionMapping => ({
   local_session_id: row.local_session_id,
   project_id: row.project_id,
@@ -48,6 +54,8 @@ const projectedRemoteMappingBase = (kdb: Kysely<DB>) => kdb
   .select([
     "mapping.local_session_id", "mapping.remote_session_id", "mapping.workspace_checkout_id",
     "mapping.notification_sync_start", "mapping.notification_watch_until",
+    "mapping.project_id as snapshot_project_id", "mapping.remote_server_id as snapshot_remote_server_id",
+    "mapping.branch as snapshot_branch",
     sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
     sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("remote_server_id"),
     sql<string | null>`case when mapping.workspace_checkout_id is null then mapping.branch else nullif(workspace.branch, '') end`.as("branch"),
@@ -59,6 +67,30 @@ const projectedRemoteMappingBase = (kdb: Kysely<DB>) => kdb
       eb("workspace.id", "is not", null),
     ]),
   ]));
+
+const observeProjectedRemoteMapping = (
+  consumer: WorkspaceBindingReadConsumer | undefined,
+  row: {
+    workspace_checkout_id: string | null;
+    snapshot_project_id: string;
+    snapshot_remote_server_id: string;
+    snapshot_branch: string | null;
+    project_id: string;
+    remote_server_id: string;
+    branch: string | null;
+  },
+) => {
+  if (!consumer) return;
+  if (row.workspace_checkout_id === null) {
+    recordWorkspaceBindingRead(consumer, "legacy-fallback");
+  } else if (row.snapshot_project_id !== row.project_id
+    || row.snapshot_remote_server_id !== row.remote_server_id
+    || (row.snapshot_branch ?? "") !== (row.branch ?? "")) {
+    recordWorkspaceBindingRead(consumer, "mismatch");
+  } else {
+    recordWorkspaceBindingRead(consumer, "checkout-hit");
+  }
+};
 
 const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => ({
   id: row.id,
@@ -89,11 +121,14 @@ const parseActivityTimestamp = (value: string): number | null => {
 
 const mapLocalActivity = (row: {
   id: string;
+  snapshot_project_id: string;
+  snapshot_branch: string;
   projected_project_id: string;
   projected_branch: string;
   projected_target_id: string;
   worktree_path: string | null;
   checkout_deleted_at: string | null;
+  checkout_status: string | null;
   workspace_checkout_id: string | null;
   status: string;
   title: string | null;
@@ -116,6 +151,7 @@ const mapLocalActivity = (row: {
     workspace: { target: row.projected_target_id, branch },
     worktreePath: row.worktree_path,
     checkoutDeletedAt: row.checkout_deleted_at,
+    checkoutStatus: row.checkout_status as AgentSessionActivity["checkoutStatus"],
     binding: row.workspace_checkout_id === null ? "legacy" : "checkout",
     agentType: row.agent_type,
     model: row.model,
@@ -130,6 +166,29 @@ const mapLocalActivity = (row: {
   };
 };
 
+const observeLocalActivity = (
+  consumer: WorkspaceBindingReadConsumer | undefined,
+  row: {
+    workspace_checkout_id: string | null;
+    snapshot_project_id: string;
+    snapshot_branch: string;
+    projected_project_id: string;
+    projected_branch: string;
+    projected_target_id: string;
+  },
+) => {
+  if (!consumer) return;
+  if (row.workspace_checkout_id === null) {
+    recordWorkspaceBindingRead(consumer, "legacy-fallback");
+  } else if (row.snapshot_project_id !== row.projected_project_id
+    || row.snapshot_branch !== row.projected_branch
+    || row.projected_target_id !== "local") {
+    recordWorkspaceBindingRead(consumer, "mismatch");
+  } else {
+    recordWorkspaceBindingRead(consumer, "checkout-hit");
+  }
+};
+
 const localActivityBase = (kdb: Kysely<DB>, projectId?: string) => {
   let query = kdb
   .selectFrom("agent_sessions as s")
@@ -137,8 +196,9 @@ const localActivityBase = (kdb: Kysely<DB>, projectId?: string) => {
   .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
   .select([
     "s.id", "s.workspace_checkout_id", "s.status", "s.title", "s.agent_type", "s.model",
+    "s.project_id as snapshot_project_id", "s.branch as snapshot_branch",
     "s.activity_at", "s.created_at", "s.updated_at", "s.last_user_message_at", "s.last_completed_at",
-    "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at",
+    "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at", "checkout.status as checkout_status",
     sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("projected_project_id"),
     sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("projected_branch"),
     sql<string>`case when s.workspace_checkout_id is null then 'local' else checkout.target_id end`.as("projected_target_id"),
@@ -161,6 +221,117 @@ const localActivityBase = (kdb: Kysely<DB>, projectId?: string) => {
   return query;
 };
 
+const projectedSessionByBranchBase = (
+  kdb: Kysely<DB>,
+  projectId: string,
+  branch: string,
+) => kdb
+  .selectFrom("agent_sessions as s")
+  .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+  .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+  .selectAll("s")
+  .select([
+    sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("projected_project_id"),
+    sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("projected_branch"),
+  ])
+  .where((eb) => eb.or([
+    eb.and([
+      eb("s.workspace_checkout_id", "is", null),
+      eb("s.project_id", "=", projectId),
+      eb("s.branch", "=", branch),
+    ]),
+    eb.and([
+      eb("s.workspace_checkout_id", "is not", null),
+      eb("checkout.id", "is not", null),
+      eb("workspace.id", "is not", null),
+      eb("workspace.project_id", "=", projectId),
+      eb("workspace.branch", "=", branch),
+    ]),
+  ]));
+
+const mapProjectedAgentSession = (row: Selectable<AgentSessionsTable> & {
+  projected_project_id: string;
+  projected_branch: string;
+}): AgentSession => ({
+  ...mapAgentSession(row),
+  project_id: row.projected_project_id,
+  branch: row.projected_branch,
+});
+
+const observeProjectedSession = (
+  consumer: WorkspaceBindingReadConsumer | undefined,
+  row: Selectable<AgentSessionsTable> & { projected_project_id: string; projected_branch: string },
+) => {
+  if (!consumer) return;
+  if (row.workspace_checkout_id === null) {
+    recordWorkspaceBindingRead(consumer, "legacy-fallback");
+  } else if (row.project_id !== row.projected_project_id || row.branch !== row.projected_branch) {
+    recordWorkspaceBindingRead(consumer, "mismatch");
+  } else {
+    recordWorkspaceBindingRead(consumer, "checkout-hit");
+  }
+};
+
+const projectedSessionsByProject = async (
+  kdb: Kysely<DB>,
+  projectId: string,
+  consumer?: WorkspaceBindingReadConsumer,
+) => {
+  const rows = await kdb
+    .selectFrom("agent_sessions as s")
+    .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+    .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
+    .selectAll("s")
+    .select([
+      sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("projected_project_id"),
+      sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("projected_branch"),
+    ])
+    .where((eb) => eb.or([
+      eb.and([
+        eb("s.workspace_checkout_id", "is", null),
+        eb("s.project_id", "=", projectId),
+      ]),
+      eb.and([
+        eb("s.workspace_checkout_id", "is not", null),
+        eb("checkout.id", "is not", null),
+        eb("workspace.id", "is not", null),
+        eb("workspace.project_id", "=", projectId),
+      ]),
+    ]))
+    .orderBy("s.updated_at", "desc")
+    .execute();
+  rows.forEach((row) => observeProjectedSession(consumer, row));
+  if (consumer) {
+    const dangling = await kdb.selectFrom("agent_sessions as s")
+      .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+      .select(kdb.fn.countAll<number>().as("count"))
+      .where("s.workspace_checkout_id", "is not", null)
+      .where("checkout.id", "is", null)
+      .where("s.project_id", "=", projectId)
+      .executeTakeFirstOrThrow();
+    recordWorkspaceBindingRead(consumer, "dangling", Number(dangling.count));
+  }
+  return rows.map(mapProjectedAgentSession);
+};
+
+const observeDanglingLocalScope = async (
+  kdb: Kysely<DB>,
+  consumer: WorkspaceBindingReadConsumer | undefined,
+  projectId: string,
+  branch?: string,
+) => {
+  if (!consumer) return;
+  let query = kdb.selectFrom("agent_sessions as s")
+    .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+    .select(kdb.fn.countAll<number>().as("count"))
+    .where("s.workspace_checkout_id", "is not", null)
+    .where("checkout.id", "is", null)
+    .where("s.project_id", "=", projectId);
+  if (branch !== undefined) query = query.where("s.branch", "=", branch);
+  const row = await query.executeTakeFirstOrThrow();
+  recordWorkspaceBindingRead(consumer, "dangling", Number(row.count));
+};
+
 const mapRemoteCreationIntent = (
   row: Selectable<RemoteSessionCreationIntentsTable>,
 ): RemoteSessionCreationIntent => ({
@@ -175,6 +346,9 @@ const mapRemoteCreationIntent = (
   model: row.model,
   force: fromDbBool(row.force),
   user_id: row.user_id,
+  operation_kind: row.operation_kind as "new" | "branch",
+  source_remote_session_id: row.source_remote_session_id,
+  up_to_entry_index: row.up_to_entry_index,
   status: row.status as "pending" | "confirmed",
   error: row.error,
   created_at: row.created_at,
@@ -325,6 +499,8 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
+    getProjectedByProjectId: async (projectId, consumer) => projectedSessionsByProject(kdb, projectId, consumer),
+
     listByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
@@ -345,17 +521,26 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
-    listRecentActivityByProject: async (projectId, limit) => {
+    listRecentActivityByProject: async (projectId, limit, consumer) => {
       const rows = await localActivityBase(kdb, projectId)
         .orderBy("s.activity_at", "desc")
         .orderBy("s.id", "desc")
         .limit(limit)
         .execute();
+      rows.forEach((row) => observeLocalActivity(consumer, row));
+      await observeDanglingLocalScope(kdb, consumer, projectId);
       return rows.map(mapLocalActivity);
     },
 
-    getActivityById: async (id) => {
+    getActivityById: async (id, consumer) => {
       const row = await localActivityBase(kdb).where("s.id", "=", id).executeTakeFirst();
+      if (row) {
+        observeLocalActivity(consumer, row);
+      } else if (consumer) {
+        const raw = await kdb.selectFrom("agent_sessions")
+          .select("workspace_checkout_id").where("id", "=", id).executeTakeFirst();
+        if (raw?.workspace_checkout_id) recordWorkspaceBindingRead(consumer, "dangling");
+      }
       return row ? mapLocalActivity(row) : undefined;
     },
 
@@ -380,7 +565,7 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
-    listAttentionActivityByProject: async (projectId, limit) => {
+    listAttentionActivityByProject: async (projectId, limit, consumer) => {
       const rows = await localActivityBase(kdb, projectId)
         .where((eb) => eb.or([
           eb("s.status", "=", "error"),
@@ -397,6 +582,8 @@ export const createAgentSessionRepos = (
         .orderBy("s.id", "desc")
         .limit(limit)
         .execute();
+      rows.forEach((row) => observeLocalActivity(consumer, row));
+      await observeDanglingLocalScope(kdb, consumer, projectId);
       return rows.map(mapLocalActivity);
     },
 
@@ -419,34 +606,32 @@ export const createAgentSessionRepos = (
     },
 
     getByBranch: async (projectId, branch) => {
-      const row = await kdb.selectFrom("agent_sessions").selectAll()
-        .where("project_id", "=", projectId)
-        .where("branch", "=", branch)
-        .orderBy("updated_at", "desc")
+      const row = await projectedSessionByBranchBase(kdb, projectId, branch)
+        .orderBy("s.updated_at", "desc")
         .limit(1)
         .executeTakeFirst();
-      return row ? mapAgentSession(row) : undefined;
+      return row ? mapProjectedAgentSession(row) : undefined;
     },
 
-    listByBranch: async (projectId, branch) => {
-      const rows = await kdb.selectFrom("agent_sessions").selectAll()
-        .where("project_id", "=", projectId)
-        .where("branch", "=", branch)
-        .orderBy("updated_at", "desc")
-        .orderBy("created_at", "desc")
+    listByBranch: async (projectId, branch, consumer) => {
+      const rows = await projectedSessionByBranchBase(kdb, projectId, branch)
+        .orderBy("s.updated_at", "desc")
+        .orderBy("s.created_at", "desc")
         .execute();
-      return rows.map(mapAgentSession);
+      rows.forEach((row) => observeProjectedSession(consumer, row));
+      await observeDanglingLocalScope(kdb, consumer, projectId, branch);
+      return rows.map(mapProjectedAgentSession);
     },
 
-    getLatestByBranch: async (projectId, branch) => {
-      const row = await kdb.selectFrom("agent_sessions").selectAll()
-        .where("project_id", "=", projectId)
-        .where("branch", "=", branch)
-        .orderBy("updated_at", "desc")
-        .orderBy("created_at", "desc")
+    getLatestByBranch: async (projectId, branch, consumer) => {
+      const row = await projectedSessionByBranchBase(kdb, projectId, branch)
+        .orderBy("s.updated_at", "desc")
+        .orderBy("s.created_at", "desc")
         .limit(1)
         .executeTakeFirst();
-      return row ? mapAgentSession(row) : undefined;
+      if (row) observeProjectedSession(consumer, row);
+      await observeDanglingLocalScope(kdb, consumer, projectId, branch);
+      return row ? mapProjectedAgentSession(row) : undefined;
     },
 
     updateStatus: async (id, status) => {
@@ -703,13 +888,24 @@ export const createAgentSessionRepos = (
       return rows.map(mapRemoteSessionMapping);
     },
 
-    listByProject: async (projectId, limit) => {
+    listByProject: async (projectId, limit, consumer) => {
       const rows = await projectedRemoteMappingBase(kdb)
         .where(sql<boolean>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end = ${projectId}`)
         .orderBy("mapping.local_session_id", "asc")
         .limit(limit)
         .execute();
-      return rows.map((row) => mapRemoteSessionMapping(row as Selectable<RemoteSessionMappingsTable>));
+      rows.forEach((row) => observeProjectedRemoteMapping(consumer, row));
+      if (consumer) {
+        const dangling = await kdb.selectFrom("remote_session_mappings as mapping")
+          .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+          .select(kdb.fn.countAll<number>().as("count"))
+          .where("mapping.workspace_checkout_id", "is not", null)
+          .where("checkout.id", "is", null)
+          .where("mapping.project_id", "=", projectId)
+          .executeTakeFirstOrThrow();
+        recordWorkspaceBindingRead(consumer, "dangling", Number(dangling.count));
+      }
+      return rows.map(mapRemoteSessionMapping);
     },
 
     getByLocal: async (localSessionId) => {
@@ -719,12 +915,21 @@ export const createAgentSessionRepos = (
       return row ? mapRemoteSessionMapping(row) : undefined;
     },
 
-    getAuthorizedByLocal: async (localSessionId, projectId) => {
+    getAuthorizedByLocal: async (localSessionId, projectId, consumer) => {
       const row = await projectedRemoteMappingBase(kdb)
         .where("mapping.local_session_id", "=", localSessionId)
         .where(sql<boolean>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end = ${projectId}`)
         .executeTakeFirst();
-      return row ? mapRemoteSessionMapping(row as Selectable<RemoteSessionMappingsTable>) : undefined;
+      if (row) {
+        observeProjectedRemoteMapping(consumer, row);
+      } else if (consumer) {
+        const raw = await kdb.selectFrom("remote_session_mappings")
+          .select("workspace_checkout_id")
+          .where("local_session_id", "=", localSessionId)
+          .executeTakeFirst();
+        if (raw?.workspace_checkout_id) recordWorkspaceBindingRead(consumer, "dangling");
+      }
+      return row ? mapRemoteSessionMapping(row) : undefined;
     },
 
     getByRemote: async (remoteServerId, remoteSessionId) => {
@@ -747,7 +952,7 @@ export const createAgentSessionRepos = (
         .execute();
     },
 
-    getNotificationSyncCandidates: async ({ now, includeExpired }) => {
+    getNotificationSyncCandidates: async ({ now, includeExpired }, consumer) => {
       // Unlike user-facing authorized lists, the sweep deliberately retains
       // legacy mappings whose association disappeared so resolveTarget() can
       // skip them explicitly without changing the established recovery
@@ -759,6 +964,8 @@ export const createAgentSessionRepos = (
         .select([
           "mapping.local_session_id", "mapping.remote_session_id", "mapping.workspace_checkout_id",
           "mapping.notification_sync_start", "mapping.notification_watch_until",
+          "mapping.project_id as snapshot_project_id", "mapping.remote_server_id as snapshot_remote_server_id",
+          "mapping.branch as snapshot_branch",
           sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
           sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("remote_server_id"),
           sql<string | null>`case when mapping.workspace_checkout_id is null then mapping.branch else nullif(workspace.branch, '') end`.as("branch"),
@@ -771,7 +978,28 @@ export const createAgentSessionRepos = (
         query = query.where("mapping.notification_watch_until", ">", now);
       }
       const rows = await query.orderBy("mapping.local_session_id", "asc").execute();
-      return rows.map((row) => mapRemoteSessionMapping(row as Selectable<RemoteSessionMappingsTable>));
+      if (consumer) {
+        for (const row of rows) {
+          if (row.workspace_checkout_id === null) {
+            recordWorkspaceBindingRead(consumer, "legacy-fallback");
+          } else if (row.snapshot_project_id !== row.project_id
+            || row.snapshot_remote_server_id !== row.remote_server_id
+            || (row.snapshot_branch ?? "") !== (row.branch ?? "")) {
+            recordWorkspaceBindingRead(consumer, "mismatch");
+          } else {
+            recordWorkspaceBindingRead(consumer, "checkout-hit");
+          }
+        }
+        let danglingQuery = kdb.selectFrom("remote_session_mappings as mapping")
+          .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+          .select(kdb.fn.countAll<number>().as("count"))
+          .where("mapping.workspace_checkout_id", "is not", null)
+          .where("checkout.id", "is", null);
+        if (!includeExpired) danglingQuery = danglingQuery.where("mapping.notification_watch_until", ">", now);
+        const dangling = await danglingQuery.executeTakeFirstOrThrow();
+        recordWorkspaceBindingRead(consumer, "dangling", Number(dangling.count));
+      }
+      return rows.map(mapRemoteSessionMapping);
     },
 
     // The cursor is deleted with the mapping: without a mapping the front has
@@ -823,6 +1051,9 @@ export const createAgentSessionRepos = (
         model: intent.model ?? null,
         force: h.toDbBool(intent.force ?? false),
         user_id: intent.userId ?? null,
+        operation_kind: intent.operationKind ?? "new",
+        source_remote_session_id: intent.sourceRemoteSessionId ?? null,
+        up_to_entry_index: intent.upToEntryIndex ?? null,
         status: "pending",
         error: null,
         created_at: h.nowMs(),
@@ -840,7 +1071,10 @@ export const createAgentSessionRepos = (
         && row.model === (intent.model ?? null)
         && fromDbBool(row.force) === (intent.force ?? false)
         && row.user_id === (intent.userId ?? null);
-      if (!sameIdentity) throw new Error(`Remote creation intent ${intent.localSessionId} has conflicting identity`);
+      const sameOperation = row.operation_kind === (intent.operationKind ?? "new")
+        && row.source_remote_session_id === (intent.sourceRemoteSessionId ?? null)
+        && row.up_to_entry_index === (intent.upToEntryIndex ?? null);
+      if (!sameIdentity || !sameOperation) throw new Error(`Remote creation intent ${intent.localSessionId} has conflicting identity`);
       return mapRemoteCreationIntent(row);
     }),
 

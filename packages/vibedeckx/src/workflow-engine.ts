@@ -520,11 +520,22 @@ export class WorkflowEngine {
     const source = await this.storage.agentSessions.getById(sourceSessionId);
     const reviewer = await this.storage.agentSessions.getById(previous.reviewer_session_id);
     if (!reviewer) return unavailable("deleted");
-    if (!source || reviewer.project_id !== source.project_id || reviewer.project_id !== previous.project_id) {
+    const [sourceProjection, reviewerProjection] = await Promise.all([
+      source ? this.storage.agentSessions.getActivityById(source.id, "workflow-reviewer") : undefined,
+      this.storage.agentSessions.getActivityById(reviewer.id, "workflow-reviewer"),
+    ]);
+    if (!sourceProjection || !reviewerProjection) return unavailable("unavailable");
+    if (sourceProjection.projectId !== reviewerProjection.projectId
+      || reviewerProjection.projectId !== previous.project_id) {
       return unavailable("project-mismatch");
     }
-    if ((reviewer.branch || null) !== (source.branch || null) || (reviewer.branch || null) !== previous.branch) {
+    if (reviewerProjection.branch !== sourceProjection.branch
+      || reviewerProjection.branch !== previous.branch) {
       return unavailable("branch-mismatch");
+    }
+    if ((reviewerProjection.binding === "checkout"
+      && (reviewerProjection.checkoutDeletedAt !== null || reviewerProjection.checkoutStatus !== "ready"))) {
+      return unavailable("unavailable");
     }
     if (!REVIEWER_AGENT_TYPES.has(reviewer.agent_type as AgentType)) {
       return unavailable("unsupported-agent");
@@ -589,6 +600,18 @@ export class WorkflowEngine {
       }
 
       const sourceSession = await this.storage.agentSessions.getById(opts.sourceSessionId);
+      const sourceProjection = sourceSession
+        ? await this.storage.agentSessions.getActivityById(opts.sourceSessionId, "workflow-reviewer")
+        : undefined;
+      if (!sourceSession || !sourceProjection
+        || sourceProjection.projectId !== opts.project.id
+        || sourceProjection.branch !== opts.branch) {
+        throw new WorkflowError("reviewer-unavailable", "source session 不属于当前 workspace");
+      }
+      if (sourceProjection.binding === "checkout"
+        && (sourceProjection.checkoutDeletedAt !== null || sourceProjection.checkoutStatus !== "ready")) {
+        throw new WorkflowError("reviewer-unavailable", "source session 的 workspace checkout 不可用");
+      }
       if (sourceSession?.status === "running") {
         throw new WorkflowError("source-running", "source session 正在运行，请等待当前 turn 完成后再发起 review");
       }
@@ -599,7 +622,8 @@ export class WorkflowEngine {
         throw new WorkflowError("no-completed-turn", "source session 还没有已完成的 turn 可供 review");
       }
 
-      const worktreePath = resolveWorktreePath(opts.project.path, opts.branch);
+      const worktreePath = sourceProjection.worktreePath
+        ?? resolveWorktreePath(opts.project.path, opts.branch);
       const target = captureReviewTarget(worktreePath);
 
       let reviewerSession = null;
@@ -608,11 +632,16 @@ export class WorkflowEngine {
         if (!reviewerSession) {
           throw new WorkflowError("reviewer-unavailable", "上次 reviewer session 已不存在");
         }
-        if (reviewerSession.project_id !== opts.project.id) {
+        const reviewerProjection = await this.storage.agentSessions.getActivityById(opts.reviewerSessionId, "workflow-reviewer");
+        if (!reviewerProjection || reviewerProjection.projectId !== opts.project.id) {
           throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前项目");
         }
-        if ((reviewerSession.branch || null) !== opts.branch) {
+        if (reviewerProjection.branch !== opts.branch) {
           throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前 branch");
+        }
+        if (reviewerProjection.binding === "checkout"
+          && (reviewerProjection.checkoutDeletedAt !== null || reviewerProjection.checkoutStatus !== "ready")) {
+          throw new WorkflowError("reviewer-unavailable", "reviewer session 的 workspace checkout 不可用");
         }
         if (!REVIEWER_AGENT_TYPES.has(reviewerSession.agent_type as AgentType)) {
           throw new WorkflowError("reviewer-unavailable", "reviewer agent 类型不可用");
@@ -747,7 +776,10 @@ export class WorkflowEngine {
     try {
       const target = run.review_target ? (JSON.parse(run.review_target) as ReviewTarget) : null;
       const project = await this.storage.projects.getById(run.project_id);
-      if (target && project && hasDrifted(resolveWorktreePath(project.path ?? "", run.branch), target)) {
+      const sourceProjection = await this.storage.agentSessions.getActivityById(run.source_session_id, "workflow-reviewer");
+      const worktreePath = sourceProjection?.worktreePath
+        ?? (project ? resolveWorktreePath(project.path ?? "", run.branch) : null);
+      if (target && worktreePath && hasDrifted(worktreePath, target)) {
         driftNote = "注意：workspace 在 review 期间发生了变化，部分反馈可能针对的不是被审工作。";
       }
     } catch { /* drift check is best-effort */ }

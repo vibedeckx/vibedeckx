@@ -7,8 +7,10 @@ import workerStatsRoutes from "./worker-stats-routes.js";
 import { workerUpdateStatus } from "./remote-server-routes.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
+import { recordWorkspaceBindingRead, resetWorkspaceBindingReadMetrics } from "../workspace-binding-metrics.js";
 
 const URL_PATH = "/api/admin/worker-version-stats";
+const BINDING_STATS_PATH = "/api/admin/workspace-binding-read-stats";
 
 describe("GET /api/admin/worker-version-stats", () => {
   let dir: string;
@@ -33,6 +35,7 @@ describe("GET /api/admin/worker-version-stats", () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-wstats-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     connectedIds.clear();
+    resetWorkspaceBindingReadMetrics();
   });
 
   afterEach(async () => {
@@ -76,6 +79,25 @@ describe("GET /api/admin/worker-version-stats", () => {
     // 1 of 2 connected workers is unknown — nowhere near the 5% exit bar.
     expect(phase4.unknown_share_connected).toBe(0.5);
     expect(phase4.verdict).toBe(false);
+  });
+
+  it("reports per-consumer binding reads together with current database diagnostics", async () => {
+    recordWorkspaceBindingRead("search", "legacy-fallback", 2);
+    app = await build(false);
+
+    const res = await app.inject({ method: "GET", url: BINDING_STATS_PATH });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      reads: expect.arrayContaining([
+        { consumer: "search", outcome: "legacy-fallback", count: 2 },
+      ]),
+      database: {
+        unboundLocal: 0,
+        unboundRemote: 0,
+        danglingLocal: 0,
+        danglingRemote: 0,
+      },
+    });
   });
 
   it("counts ever-active workers offline for over 7 days as stale", async () => {

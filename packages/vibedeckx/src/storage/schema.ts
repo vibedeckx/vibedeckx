@@ -340,6 +340,9 @@ export interface RemoteSessionCreationIntentsTable {
   model: string | null;
   force: GeneratedDbBool;
   user_id: string | null;
+  operation_kind: Generated<string>;
+  source_remote_session_id: string | null;
+  up_to_entry_index: number | null;
   status: Generated<string>;
   error: string | null;
   created_at: Generated<string>;

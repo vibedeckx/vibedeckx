@@ -1021,6 +1021,19 @@ export class ProjectChatManager {
     return flight;
   }
 
+  private async projectLocalSession(sessionId: string) {
+    const session = await this.storage.agentSessions.getById(sessionId);
+    if (!session) return undefined;
+    const reader = this.storage.agentSessions.getActivityById;
+    const projection = typeof reader === "function"
+      ? await reader(sessionId, "project-chat")
+      : (session.workspace_checkout_id ? undefined : {
+        projectId: session.project_id,
+        branch: session.branch || null,
+      });
+    return projection ? { session, projection } : undefined;
+  }
+
   private async reconcilePersistedOperation(
     operation: import("./storage/types.js").ProjectChatOperation,
   ): Promise<void> {
@@ -1111,8 +1124,9 @@ export class ProjectChatManager {
         await this.transitionOperation(operation, "failed", {}, "Workspace is no longer authorized");
         return;
       }
-      const local = await this.storage.agentSessions.getById(sessionId);
-      if (local?.project_id === operation.project_id && operation.status === "running"
+      const localProjection = await this.projectLocalSession(sessionId);
+      const local = localProjection?.session;
+      if (local && localProjection?.projection.projectId === operation.project_id && operation.status === "running"
         && operation.payload.initialInstructionDelivery === "confirmed") {
         const status = local.status === "error" ? "failed"
           : local.status === "stopped" && local.last_completed_at ? "completed"
@@ -1170,8 +1184,10 @@ export class ProjectChatManager {
           sessionId, initialInstructionDelivery: "confirmed",
         });
         if (confirmed) {
-          const latestLocal = await this.storage.agentSessions.getById(sessionId);
-          if (latestLocal?.project_id === operation.project_id && latestLocal.status !== "running") {
+          const latestLocalProjection = await this.projectLocalSession(sessionId);
+          const latestLocal = latestLocalProjection?.session;
+          if (latestLocalProjection?.projection.projectId === operation.project_id
+            && latestLocal && latestLocal.status !== "running") {
             const latestStatus = latestLocal.status === "stopped" && latestLocal.last_completed_at
               ? "completed" : "failed";
             await this.transitionOperation(confirmed.operation, latestStatus, { sessionId },
@@ -1192,7 +1208,7 @@ export class ProjectChatManager {
         }
       } catch (error) {
         const currentRemote = await this.toolDependencies?.remoteSessions?.getMapping(sessionId);
-        const exists = (await this.storage.agentSessions.getById(sessionId))?.project_id === operation.project_id
+        const exists = (await this.projectLocalSession(sessionId))?.projection.projectId === operation.project_id
           || (currentRemote?.projectId === operation.project_id
             && currentRemote.remoteServerId === payload.target
             && Boolean(await this.storage.projectRemotes.getByProjectAndServer(
@@ -1213,8 +1229,8 @@ export class ProjectChatManager {
       if (!service || !operation.payload.instruction || !operation.payload.target) return;
       try {
         if (operation.payload.target === "local") {
-          const session = await this.storage.agentSessions.getById(operation.payload.sessionId);
-          if (!session || session.project_id !== operation.project_id) {
+          const session = await this.projectLocalSession(operation.payload.sessionId);
+          if (!session || session.projection.projectId !== operation.project_id) {
             throw new Error("Agent session is no longer authorized");
           }
         } else {

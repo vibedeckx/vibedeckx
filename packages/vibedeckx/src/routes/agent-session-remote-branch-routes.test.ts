@@ -52,6 +52,12 @@ function makeApp() {
         upsert(opts.localSessionId, opts.projectId, opts.remoteServerId, opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
       markTitleResolved: vi.fn(async () => undefined),
     },
+    remoteSessionCreationIntents: {
+      begin: vi.fn(async (intent: Record<string, unknown>) => intent),
+      confirm: vi.fn(async () => undefined),
+      discard: vi.fn(async () => undefined),
+      recordError: vi.fn(async () => undefined),
+    },
     workspaceRegistry: {
       getCheckoutById,
       getByProjectBranch: async () => ({

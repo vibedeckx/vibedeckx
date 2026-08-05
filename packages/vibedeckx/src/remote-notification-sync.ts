@@ -395,7 +395,7 @@ export class RemoteNotificationSync {
     const mappings = await this.storage.remoteSessionMappings.getNotificationSyncCandidates({
       now: Date.now(),
       includeExpired: opts.includeExpired,
-    });
+    }, "notification");
     // A full sweep already covers everything.
     if (opts.includeExpired || this.activeRemoteSessions.size === 0) return mappings;
 

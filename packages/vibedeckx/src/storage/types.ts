@@ -1,3 +1,5 @@
+import type { WorkspaceBindingReadConsumer } from "../workspace-binding-metrics.js";
+
 export type ExecutionMode = 'local' | string;
 
 export type SyncActionType = 'command' | 'prompt';
@@ -501,6 +503,9 @@ export interface RemoteSessionCreationIntent {
   model: string | null;
   force: boolean;
   user_id: string | null;
+  operation_kind: "new" | "branch";
+  source_remote_session_id: string | null;
+  up_to_entry_index: number | null;
   status: "pending" | "confirmed";
   error: string | null;
   created_at: string;
@@ -561,6 +566,8 @@ export interface AgentSessionActivity {
   worktreePath: string | null;
   /** Tombstone timestamp of the bound checkout, retained for historical display. */
   checkoutDeletedAt: string | null;
+  /** Current state of the exact bound checkout; null for legacy rows. */
+  checkoutStatus: WorkspaceCheckoutStatus | null;
   /** Makes compatibility fallback explicit instead of presenting it as a binding. */
   binding: "checkout" | "legacy";
   agentType: string | null;
@@ -966,25 +973,27 @@ export interface Storage {
     getAll: () => Promise<AgentSession[]>;
     getById: (id: string) => Promise<AgentSession | undefined>;
     getByProjectId: (projectId: string) => Promise<AgentSession[]>;
+    /** Checkout-first project enumeration; dangling bindings are excluded and NULL legacy rows use snapshots. */
+    getProjectedByProjectId: (projectId: string, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSession[]>;
     /** Newest sessions for exactly one project, capped in SQL. */
     listByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** Project Overview recency list; insertion order breaks sub-millisecond timestamp ties. */
     listRecentByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** Checkout-first Project Overview projection. Dangling bound rows never fall back to snapshots. */
-    listRecentActivityByProject: (projectId: string, limit: number) => Promise<AgentSessionActivity[]>;
+    listRecentActivityByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity[]>;
     /** Checkout-first projection for one local session; undefined for missing or dangling bindings. */
-    getActivityById: (id: string) => Promise<AgentSessionActivity | undefined>;
+    getActivityById: (id: string, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity | undefined>;
     /** Newest stopped/error sessions, independent of the recent-sessions card window. */
     listAttentionByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** Checkout-first attention projection using the same identity rules as recent activity. */
-    listAttentionActivityByProject: (projectId: string, limit: number) => Promise<AgentSessionActivity[]>;
+    listAttentionActivityByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity[]>;
     countRunningByProject: (projectId: string) => Promise<number>;
     /** Checkout-first running count; bound rows are scoped through their workspace. */
     countRunningActivityByProject: (projectId: string) => Promise<number>;
     /** @deprecated — use listByBranch + getLatestByBranch */
     getByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
-    listByBranch: (projectId: string, branch: string) => Promise<AgentSession[]>;
-    getLatestByBranch: (projectId: string, branch: string) => Promise<AgentSession | undefined>;
+    listByBranch: (projectId: string, branch: string, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSession[]>;
+    getLatestByBranch: (projectId: string, branch: string, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSession | undefined>;
     updateStatus: (id: string, status: AgentSessionStatus) => Promise<void>;
     /**
      * Update status without touching `updated_at`. Used by startup restore, where
@@ -1076,10 +1085,10 @@ export interface Storage {
     }) => Promise<void>;
     getAll: () => Promise<RemoteSessionMapping[]>;
     /** Persisted remote mappings for exactly one project, capped in SQL. */
-    listByProject: (projectId: string, limit: number) => Promise<RemoteSessionMapping[]>;
+    listByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<RemoteSessionMapping[]>;
     getByLocal: (localSessionId: string) => Promise<RemoteSessionMapping | undefined>;
     /** Mapping only while its exact project-to-remote association still exists. */
-    getAuthorizedByLocal: (localSessionId: string, projectId: string) => Promise<RemoteSessionMapping | undefined>;
+    getAuthorizedByLocal: (localSessionId: string, projectId: string, consumer?: WorkspaceBindingReadConsumer) => Promise<RemoteSessionMapping | undefined>;
     /** Resolve the local target of a milestone the worker reported. */
     getByRemote: (remoteServerId: string, remoteSessionId: string) => Promise<RemoteSessionMapping | undefined>;
     /** Move `notification_watch_until` forward (never backward). */
@@ -1091,7 +1100,7 @@ export interface Storage {
      * forever. `includeExpired: true` is the bounded startup / remote-online
      * sweep, which must still recover durable events produced during downtime.
      */
-    getNotificationSyncCandidates: (opts: { now: number; includeExpired: boolean }) => Promise<RemoteSessionMapping[]>;
+    getNotificationSyncCandidates: (opts: { now: number; includeExpired: boolean }, consumer?: WorkspaceBindingReadConsumer) => Promise<RemoteSessionMapping[]>;
     /** Also deletes the mapping's notification sync cursor. */
     delete: (localSessionId: string) => Promise<void>;
     isTitleResolved: (localSessionId: string) => Promise<boolean>;
@@ -1110,6 +1119,9 @@ export interface Storage {
       model?: string | null;
       force?: boolean;
       userId?: string | null;
+      operationKind?: "new" | "branch";
+      sourceRemoteSessionId?: string | null;
+      upToEntryIndex?: number | null;
     }) => Promise<RemoteSessionCreationIntent>;
     confirm: (localSessionId: string) => Promise<void>;
     discard: (localSessionId: string) => Promise<void>;
@@ -1212,8 +1224,8 @@ export interface Storage {
   searchCache: {
     /** Active workspace catalog rows for exactly one project, in stable target/branch order. */
     listWorkspacesByProject(projectId: string, limit: number): Promise<Array<{ targetId: string; branch: string | null }>>;
-    listRemoteSessionActivityByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
-    listRemoteSessionAttentionByProject(projectId: string, limit: number): Promise<AgentSessionActivity[]>;
+    listRemoteSessionActivityByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
+    listRemoteSessionAttentionByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
     countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number }>;
     /** Operator stats: fleet-wide count of remote sessions whose cached status is 'running' (= turns in flight a deploy would interrupt). */
     countRunningRemoteSessions(): Promise<number>;

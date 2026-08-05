@@ -27,7 +27,7 @@ export async function buildSearchCatalog(
   projectPath: string,
 ): Promise<SearchCatalogSnapshot & { snapshotAt: number }> {
   pruneWorktrees(projectPath);
-  const sessions = await deps.storage.agentSessions.getByProjectId(projectId);
+  const sessions = await deps.storage.agentSessions.getProjectedByProjectId(projectId, "search");
   const workspaces = await getRegisteredWorktreeBranches(deps.storage, projectId, projectPath);
   const registered = await deps.storage.workspaceRegistry.listByProject(projectId, "local");
   const pathByBranch = new Map(registered.map((row) => [row.workspace.branch, row.checkout.worktree_path]));

@@ -48,6 +48,46 @@ function errStatus(err: unknown): number | null {
 }
 
 async function routes(fastify: FastifyInstance) {
+  const projectLocalSession = async (session: {
+    id: string; project_id: string; branch: string; workspace_checkout_id?: string | null;
+  }) => {
+    const reader = fastify.storage.agentSessions.getActivityById;
+    // Compatibility for injected/custom storage used by embedders while the
+    // Storage interface rolls forward. Real storage always provides the
+    // checkout-first reader; only an actually unbound row may use snapshots.
+    if (typeof reader !== "function") {
+      return session.workspace_checkout_id ? undefined : {
+        projectId: session.project_id,
+        branch: session.branch || null,
+      };
+    }
+    return reader(session.id, "workflow-reviewer");
+  };
+
+  const remoteWorkflowCheckoutAvailable = async (
+    localSessionId: string,
+    remoteInfo: { remoteServerId: string; remoteSessionId: string },
+    projectId: string,
+  ): Promise<boolean> => {
+    const getMapping = fastify.storage.remoteSessionMappings?.getByLocal;
+    const getCheckout = fastify.storage.workspaceRegistry?.getCheckoutById;
+    if (typeof getMapping !== "function" || typeof getCheckout !== "function") return true;
+    const rawMapping = await getMapping(localSessionId);
+    const getAuthorized = fastify.storage.remoteSessionMappings?.getAuthorizedByLocal;
+    const mapping = rawMapping && typeof getAuthorized === "function"
+      ? await getAuthorized(localSessionId, projectId, "workflow-reviewer")
+      : rawMapping;
+    if (rawMapping && !mapping) return false;
+    if (!mapping?.workspace_checkout_id) return true;
+    const registered = await getCheckout(mapping.workspace_checkout_id);
+    return Boolean(registered
+      && registered.checkout.deleted_at === null
+      && registered.checkout.status === "ready"
+      && registered.workspace.project_id === projectId
+      && registered.checkout.target_id === remoteInfo.remoteServerId
+      && mapping.remote_server_id === remoteInfo.remoteServerId
+      && mapping.remote_session_id === remoteInfo.remoteSessionId);
+  };
   /**
    * Front-side handles for runs living on a worker. Mirrors remoteSessionMap's
    * hydrate-by-use model: populated on POST/GET responses, so after a front
@@ -180,6 +220,9 @@ async function routes(fastify: FastifyInstance) {
       if (derivedProjectId !== projectId) return reply.code(404).send({ error: "Session not found" });
       const remoteProject = await fastify.storage.projects.getById(projectId, userId);
       if (!remoteProject) return reply.code(404).send({ error: "Project not found" });
+      if (!(await remoteWorkflowCheckoutAvailable(sourceSessionId, remoteInfo, projectId))) {
+        return reply.code(409).send({ error: "Source session workspace checkout is unavailable" });
+      }
 
       let bareReviewerSessionId: string | undefined;
       if (reviewerSessionId) {
@@ -188,6 +231,9 @@ async function routes(fastify: FastifyInstance) {
             reviewerInfo.remoteServerId !== remoteInfo.remoteServerId ||
             projectIdFromRemoteSessionId(reviewerSessionId, reviewerInfo) !== projectId) {
           return reply.code(404).send({ error: "Reviewer session not found" });
+        }
+        if (!(await remoteWorkflowCheckoutAvailable(reviewerSessionId, reviewerInfo, projectId))) {
+          return reply.code(409).send({ error: "Reviewer session workspace checkout is unavailable" });
         }
         bareReviewerSessionId = reviewerInfo.remoteSessionId;
       }
@@ -343,7 +389,10 @@ async function routes(fastify: FastifyInstance) {
     if (!project) return reply.code(404).send({ error: "Project not found" });
     if (!project.path) return reply.code(400).send({ error: "Project has no local path (remote-only projects are not supported yet)" });
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
-    if (!sourceSession || sourceSession.project_id !== projectId) {
+    const sourceProjection = sourceSession
+      ? await projectLocalSession(sourceSession)
+      : undefined;
+    if (!sourceSession || sourceProjection?.projectId !== projectId) {
       return reply.code(404).send({ error: "Session not found" });
     }
     // The run's branch is derived from the source session itself, never taken
@@ -353,7 +402,7 @@ async function routes(fastify: FastifyInstance) {
     // main workspace (see agent-session-manager.ts createNewSession's
     // `branch ?? ""`), so normalize it to null to match WorkflowRun.branch /
     // the rest of the API's null-branch convention.
-    const runBranch = sourceSession.branch || null;
+    const runBranch = sourceProjection.branch;
     if (branch !== undefined && (branch || null) !== runBranch) {
       return reply.code(400).send({ error: "branch does not match source session" });
     }
@@ -407,7 +456,10 @@ async function routes(fastify: FastifyInstance) {
       }
     } else {
       const session = await fastify.storage.agentSessions.getById(sourceSessionId);
-      if (!session || session.project_id !== projectId) {
+      const projection = session
+        ? await projectLocalSession(session)
+        : undefined;
+      if (!session || projection?.projectId !== projectId) {
         return reply.code(404).send({ error: "Session not found" });
       }
     }
@@ -463,7 +515,10 @@ async function routes(fastify: FastifyInstance) {
       return reply.send({ candidate });
     }
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
-    if (!sourceSession || sourceSession.project_id !== projectId) {
+    const sourceProjection = sourceSession
+      ? await projectLocalSession(sourceSession)
+      : undefined;
+    if (!sourceSession || sourceProjection?.projectId !== projectId) {
       return reply.code(404).send({ error: "Session not found" });
     }
     const candidate = await fastify.workflowEngine.getReviewerCandidate(sourceSessionId);
@@ -621,13 +676,15 @@ async function routes(fastify: FastifyInstance) {
     const reviewerSessionId = reviewerSessionIdRaw?.trim();
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
     if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
-    const project = await fastify.storage.projects.getById(sourceSession.project_id);
+    const sourceProjection = await projectLocalSession(sourceSession);
+    if (!sourceProjection) return reply.code(409).send({ error: "Session workspace binding is unavailable" });
+    const project = await fastify.storage.projects.getById(sourceProjection.projectId);
     if (!project) return reply.code(404).send({ error: "Session not found" });
     if (!project.path) return reply.code(400).send({ error: "Project has no local path" });
     try {
       const run = await fastify.workflowEngine.startAdhocReview({
         project: { id: project.id, path: project.path },
-        branch: sourceSession.branch || null,
+        branch: sourceProjection.branch,
         sourceSessionId,
         reviewFocus,
         sourceTurnEndIndex,
@@ -653,6 +710,9 @@ async function routes(fastify: FastifyInstance) {
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
     if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
+    if (!(await projectLocalSession(sourceSession))) {
+      return reply.code(409).send({ error: "Session workspace binding is unavailable" });
+    }
     const candidate = await fastify.workflowEngine.getReviewerCandidate(sourceSessionId);
     return reply.send({ candidate });
   });

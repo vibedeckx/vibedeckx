@@ -201,7 +201,7 @@ export async function getRegisteredWorktreeBranches(
   projectPath: string,
 ): Promise<WorktreeBranch[]> {
   const entries = parseGitWorktreeList(projectPath);
-  const sessions = await storage.agentSessions.getByProjectId(projectId);
+  const sessions = await storage.agentSessions.getProjectedByProjectId(projectId, "runtime");
   const sessionBranches = sessions.map((session) => session.branch);
   const sessionBranchByPath = new Map<string, string>();
   for (const branch of sessionBranches) {

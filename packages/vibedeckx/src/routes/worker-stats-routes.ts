@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { MIN_WORKER_VERSION, WORKER_VERSION_REPORTING_SINCE } from "../constants.js";
 import { compareVersionStrings } from "../update-check.js";
+import { getWorkspaceBindingReadMetrics } from "../workspace-binding-metrics.js";
 import "../server-types.js";
 
 // Operator-only fleet aggregates (docs/server-worker-compat-design.md §2
@@ -49,17 +50,28 @@ function oldestVersion(versions: string[]): string | undefined {
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  const isOperatorRequest = (request: { headers: Record<string, unknown> }) => {
+    const apiKeyHeader = request.headers["x-vibedeckx-api-key"];
+    return (API_KEY !== undefined && apiKeyHeader !== undefined)
+      || (!fastify.authEnabled && API_KEY === undefined);
+  };
+
+  fastify.get("/api/admin/workspace-binding-read-stats", async (request, reply) => {
+    if (!isOperatorRequest(request)) return reply.code(404).send({ error: "Not found" });
+    return reply.send({
+      process_started_at: process.uptime() > 0 ? Date.now() - Math.floor(process.uptime() * 1000) : Date.now(),
+      reads: getWorkspaceBindingReadMetrics(),
+      database: await fastify.storage.workspaceBindingMigration.diagnose(),
+    });
+  });
+
   // GET /api/admin/worker-version-stats — operator gate, then aggregates.
   fastify.get("/api/admin/worker-version-stats", async (request, reply) => {
     // Operator = holder of the server-side API key (the middleware has already
     // rejected any non-matching header by this point), or the solo no-auth
     // deployment where the only user IS the operator. Clerk tenants never
     // qualify; 404 rather than 403 so the endpoint's existence isn't leaked.
-    const apiKeyHeader = request.headers["x-vibedeckx-api-key"];
-    const isOperator =
-      (API_KEY !== undefined && apiKeyHeader !== undefined) ||
-      (!fastify.authEnabled && API_KEY === undefined);
-    if (!isOperator) return reply.code(404).send({ error: "Not found" });
+    if (!isOperatorRequest(request)) return reply.code(404).send({ error: "Not found" });
 
     const now = Date.now();
     const servers = await fastify.storage.remoteServers.getAll();

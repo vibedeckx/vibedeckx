@@ -2,6 +2,7 @@ import { sql, type Kysely } from "kysely";
 import type { DB } from "../schema.js";
 import type { AgentSessionActivity, AgentSessionActivityStatus, Storage, SearchResultProjectRow, SearchResultSessionRow, SearchResultWorkspaceRow } from "../types.js";
 import type { DialectHelpers } from "../dialect.js";
+import { recordWorkspaceBindingRead, type WorkspaceBindingReadConsumer } from "../../workspace-binding-metrics.js";
 
 export const toDbBranch = (branch: string | null): string => branch ?? "";
 export const fromDbBranch = (branch: string): string | null => (branch === "" ? null : branch);
@@ -66,7 +67,9 @@ const activityStatus = (status: string): AgentSessionActivityStatus =>
 
 const mapRemoteActivity = (row: {
   local_session_id: string; project_id: string; target_id: string; branch: string;
+  snapshot_project_id: string; snapshot_target_id: string; snapshot_branch: string | null;
   worktree_path: string | null; checkout_deleted_at: string | null;
+  checkout_status: string | null;
   workspace_checkout_id: string | null;
   title: string | null; last_active_at: number | null; status: string;
   agent_type: string | null; model: string | null; last_user_message_at: number | null;
@@ -83,6 +86,7 @@ const mapRemoteActivity = (row: {
     workspace: { target: row.target_id, branch },
     worktreePath: row.worktree_path,
     checkoutDeletedAt: row.checkout_deleted_at,
+    checkoutStatus: row.checkout_status as AgentSessionActivity["checkoutStatus"],
     binding: row.workspace_checkout_id === null ? "legacy" : "checkout",
     agentType: row.agent_type,
     model: row.model,
@@ -90,6 +94,64 @@ const mapRemoteActivity = (row: {
     lastUserMessageAt: row.last_user_message_at,
     lastCompletedAt: row.last_completed_at,
   };
+};
+
+const observeRemoteActivity = (consumer: WorkspaceBindingReadConsumer | undefined, row: {
+  workspace_checkout_id: string | null;
+  snapshot_project_id: string;
+  snapshot_target_id: string;
+  snapshot_branch: string | null;
+  project_id: string;
+  target_id: string;
+  branch: string;
+}) => {
+  if (!consumer) return;
+  if (row.workspace_checkout_id === null) {
+    recordWorkspaceBindingRead(consumer, "legacy-fallback");
+  } else if (row.snapshot_project_id !== row.project_id
+    || row.snapshot_target_id !== row.target_id
+    || (row.snapshot_branch ?? "") !== row.branch) {
+    recordWorkspaceBindingRead(consumer, "mismatch");
+  } else {
+    recordWorkspaceBindingRead(consumer, "checkout-hit");
+  }
+};
+
+const observeDanglingRemoteActivity = async (
+  kdb: Kysely<DB>,
+  consumer: WorkspaceBindingReadConsumer | undefined,
+  projectId: string,
+) => {
+  if (!consumer) return;
+  const row = await kdb.selectFrom("session_search_cache as c")
+    .innerJoin("remote_session_mappings as mapping", "mapping.local_session_id", "c.local_session_id")
+    .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+    .select(kdb.fn.countAll<number>().as("count"))
+    .where("mapping.workspace_checkout_id", "is not", null)
+    .where("checkout.id", "is", null)
+    .where("mapping.project_id", "=", projectId)
+    .where("c.deleted_at", "is", null)
+    .executeTakeFirstOrThrow();
+  recordWorkspaceBindingRead(consumer, "dangling", Number(row.count));
+};
+
+const observeLocalSearchRow = (row: {
+  workspace_checkout_id: string | null;
+  snapshot_project_id: string;
+  snapshot_branch: string;
+  project_id: string;
+  branch: string;
+  target_id: string;
+}) => {
+  if (row.workspace_checkout_id === null) {
+    recordWorkspaceBindingRead("search", "legacy-fallback");
+  } else if (row.snapshot_project_id !== row.project_id
+    || row.snapshot_branch !== row.branch
+    || row.target_id !== "local") {
+    recordWorkspaceBindingRead("search", "mismatch");
+  } else {
+    recordWorkspaceBindingRead("search", "checkout-hit");
+  }
 };
 
 const remoteSessionScope = (kdb: Kysely<DB>, projectId: string) => kdb
@@ -131,9 +193,11 @@ const remoteSessionScope = (kdb: Kysely<DB>, projectId: string) => kdb
 const remoteActivityBase = (kdb: Kysely<DB>, projectId: string) => remoteSessionScope(kdb, projectId)
   .select([
     "c.local_session_id", "mapping.workspace_checkout_id", "c.title",
+    "mapping.project_id as snapshot_project_id", "mapping.remote_server_id as snapshot_target_id",
+    "mapping.branch as snapshot_branch",
     "c.last_active_at", "c.status", "c.agent_type", "c.model",
     "c.last_user_message_at", "c.last_completed_at",
-    "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at",
+    "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at", "checkout.status as checkout_status",
     sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
     sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("target_id"),
     sql<string>`case when mapping.workspace_checkout_id is null then coalesce(mapping.branch, '') else workspace.branch end`.as("branch"),
@@ -156,16 +220,18 @@ export const createSearchCacheRepos = (
       return rows.map((row) => ({ targetId: row.target_id, branch: fromDbBranch(row.branch) }));
     },
 
-    listRemoteSessionActivityByProject: async (projectId, limit) => {
+    listRemoteSessionActivityByProject: async (projectId, limit, consumer) => {
       const rows = await remoteActivityBase(kdb, projectId)
         .orderBy("c.last_active_at", "desc")
         .orderBy("c.local_session_id", "asc")
         .limit(limit)
         .execute();
+      rows.forEach((row) => observeRemoteActivity(consumer, row));
+      await observeDanglingRemoteActivity(kdb, consumer, projectId);
       return rows.map(mapRemoteActivity);
     },
 
-    listRemoteSessionAttentionByProject: async (projectId, limit) => {
+    listRemoteSessionAttentionByProject: async (projectId, limit, consumer) => {
       const rows = await remoteActivityBase(kdb, projectId)
         .where((eb) => eb.or([
           eb("c.status", "=", "error"),
@@ -182,6 +248,8 @@ export const createSearchCacheRepos = (
         .orderBy("c.local_session_id", "asc")
         .limit(limit)
         .execute();
+      rows.forEach((row) => observeRemoteActivity(consumer, row));
+      await observeDanglingRemoteActivity(kdb, consumer, projectId);
       return rows.map(mapRemoteActivity);
     },
 
@@ -527,6 +595,7 @@ export const createSearchCacheRepos = (
         .leftJoin("workspaces as workspace", "workspace.id", "checkout.workspace_id")
         .select([
           "s.id", "s.title", "s.last_user_message_at", "s.updated_at", "s.favorited_at",
+          "s.workspace_checkout_id", "s.project_id as snapshot_project_id", "s.branch as snapshot_branch",
           sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("project_id"),
           sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("branch"),
           sql<string>`case when s.workspace_checkout_id is null then 'local' else checkout.target_id end`.as("target_id"),
@@ -583,6 +652,9 @@ export const createSearchCacheRepos = (
         ])))
         .select([
           "c.local_session_id", "c.title", "c.last_active_at", "c.favorited_at",
+          "mapping.local_session_id as mapping_local_session_id", "mapping.workspace_checkout_id",
+          "mapping.project_id as snapshot_project_id", "mapping.remote_server_id as snapshot_target_id",
+          "mapping.branch as snapshot_branch",
           sql<string>`case when mapping.local_session_id is null then c.project_id when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
           sql<string>`case when mapping.local_session_id is null then c.target_id when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("target_id"),
           sql<string>`case when mapping.local_session_id is null then c.branch when mapping.workspace_checkout_id is null then coalesce(mapping.branch, '') else workspace.branch end`.as("branch"),
@@ -617,11 +689,32 @@ export const createSearchCacheRepos = (
       const cacheRows = await cacheBase.orderBy("c.last_active_at", "desc").limit(200).execute();
       const cacheFavRows = await cacheBase.where("c.favorited_at", "is not", null).execute();
 
+      const [danglingLocal, danglingRemote] = await Promise.all([
+        kdb.selectFrom("agent_sessions as s")
+          .leftJoin("workspace_checkouts as checkout", "checkout.id", "s.workspace_checkout_id")
+          .select(kdb.fn.countAll<number>().as("count"))
+          .where("s.workspace_checkout_id", "is not", null)
+          .where("checkout.id", "is", null)
+          .where("s.project_id", "in", projectIds)
+          .executeTakeFirstOrThrow(),
+        kdb.selectFrom("session_search_cache as c")
+          .innerJoin("remote_session_mappings as mapping", "mapping.local_session_id", "c.local_session_id")
+          .leftJoin("workspace_checkouts as checkout", "checkout.id", "mapping.workspace_checkout_id")
+          .select(kdb.fn.countAll<number>().as("count"))
+          .where("mapping.workspace_checkout_id", "is not", null)
+          .where("checkout.id", "is", null)
+          .where("mapping.project_id", "in", projectIds)
+          .where("c.deleted_at", "is", null)
+          .executeTakeFirstOrThrow(),
+      ]);
+      recordWorkspaceBindingRead("search", "dangling", Number(danglingLocal.count) + Number(danglingRemote.count));
+
       // Union of the recency windows and the uncapped favorites, deduped by
       // sessionId (a favorited session inside the window appears in both).
       const candidateById = new Map<string, SessionCandidate>();
       for (const r of [...localRows, ...localFavRows]) {
         if (candidateById.has(r.id)) continue;
+        observeLocalSearchRow(r);
         candidateById.set(r.id, {
           sessionId: r.id,
           projectId: r.project_id,
@@ -635,6 +728,15 @@ export const createSearchCacheRepos = (
       }
       for (const r of [...cacheRows, ...cacheFavRows]) {
         if (candidateById.has(r.local_session_id)) continue;
+        if (r.mapping_local_session_id === null || r.workspace_checkout_id === null) {
+          recordWorkspaceBindingRead("search", "legacy-fallback");
+        } else if (r.snapshot_project_id !== r.project_id
+          || r.snapshot_target_id !== r.target_id
+          || (r.snapshot_branch ?? "") !== r.branch) {
+          recordWorkspaceBindingRead("search", "mismatch");
+        } else {
+          recordWorkspaceBindingRead("search", "checkout-hit");
+        }
         candidateById.set(r.local_session_id, {
           sessionId: r.local_session_id,
           projectId: r.project_id,

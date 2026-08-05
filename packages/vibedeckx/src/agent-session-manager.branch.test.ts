@@ -69,7 +69,7 @@ function makeHarness() {
     },
   } as unknown as Storage;
 
-  return { storage };
+  return { storage, created };
 }
 
 describe("branchSession cross-remote MCP", () => {
@@ -90,6 +90,22 @@ describe("branchSession cross-remote MCP", () => {
 
     expect(result).toEqual({ ok: true, sessionId: preSessionId });
     expect(manager.getSession(preSessionId)?.crossRemoteMcp).toEqual(crossRemoteMcp);
+  });
+
+  it("replays an exact preallocated branch identity without copying it twice", async () => {
+    const { storage, created } = makeHarness();
+    const manager = new AgentSessionManager(storage);
+
+    const first = await manager.branchSession(SOURCE_ID, undefined, { sessionId: "durable-branch" });
+    const freshCrossRemoteMcp = { url: "https://new.example.test/mcp", token: "fresh-token" };
+    const replay = await manager.branchSession(SOURCE_ID, undefined, {
+      sessionId: "durable-branch", crossRemoteMcp: freshCrossRemoteMcp,
+    });
+
+    expect(first).toEqual({ ok: true, sessionId: "durable-branch" });
+    expect(replay).toEqual(first);
+    expect(created).toHaveLength(1);
+    expect(manager.getSession("durable-branch")?.crossRemoteMcp).toEqual(freshCrossRemoteMcp);
   });
 });
 

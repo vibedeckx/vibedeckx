@@ -147,5 +147,9 @@ export async function userOwnsSession(fastify: FastifyInstance, sessionId: strin
   }
   const session = await fastify.storage.agentSessions.getById(sessionId);
   if (!session) return false;
-  return !!(await fastify.storage.projects.getById(session.project_id, userId));
+  const projection = typeof fastify.storage.agentSessions.getActivityById === "function"
+    ? await fastify.storage.agentSessions.getActivityById(sessionId, "runtime")
+    : (session.workspace_checkout_id ? undefined : { projectId: session.project_id });
+  if (!projection) return false;
+  return !!(await fastify.storage.projects.getById(projection.projectId, userId));
 }

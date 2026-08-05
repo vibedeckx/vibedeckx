@@ -13,7 +13,7 @@ import { extractUserText } from "../utils/session-title.js";
 import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
-import { bindRemoteSessionMapping, createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
+import { bindRemoteSessionMapping, createRemoteAgentSession, createRemoteBranchedSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { createHash, randomUUID } from "crypto";
@@ -108,7 +108,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
   ): Promise<RemoteSessionInfo | null> {
     const remoteInfo = fastify.remoteSessionMap.get(sessionId);
     if (!remoteInfo) return null;
-    const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
+    const mapping = await fastify.storage.remoteSessionMappings?.getByLocal?.(sessionId);
+    let projectId = mapping?.project_id ?? projectIdFromRemoteSessionId(sessionId, remoteInfo);
+    if (mapping?.workspace_checkout_id) {
+      const registered = await fastify.storage.workspaceRegistry.getCheckoutById(mapping.workspace_checkout_id);
+      if (!registered
+        || registered.checkout.target_id !== remoteInfo.remoteServerId
+        || mapping.remote_session_id !== remoteInfo.remoteSessionId) return null;
+      projectId = registered.workspace.project_id;
+    }
+    if (mapping && typeof fastify.storage.remoteSessionMappings.getAuthorizedByLocal === "function") {
+      const projected = await fastify.storage.remoteSessionMappings.getAuthorizedByLocal(
+        sessionId, projectId, "runtime",
+      );
+      if (!projected) return null;
+    }
     const project = await fastify.storage.projects.getById(projectId, userId);
     if (!project) return null;
     return remoteInfo;
@@ -133,9 +147,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       && registered.checkout.deleted_at === null
       && registered.checkout.status === "ready"
       && registered.workspace.project_id === projectId
-      && registered.workspace.branch === (mapping.branch ?? "")
       && registered.checkout.target_id === remoteInfo.remoteServerId
-      && mapping.project_id === projectId
       && mapping.remote_server_id === remoteInfo.remoteServerId
       && mapping.remote_session_id === remoteInfo.remoteSessionId;
     if (valid) return { ok: true };
@@ -145,6 +157,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
         ? "The workspace checkout for this session was deleted"
         : "The workspace checkout for this session is unavailable",
     };
+  }
+
+  async function projectLocalSessionIdentity(session: {
+    id: string; project_id: string; branch: string; workspace_checkout_id?: string | null;
+  }) {
+    const reader = fastify.storage.agentSessions.getActivityById;
+    if (typeof reader !== "function") {
+      return session.workspace_checkout_id ? undefined : {
+        projectId: session.project_id,
+        branch: session.branch || null,
+      };
+    }
+    return reader(session.id, "runtime");
   }
 
   // Branch a local session: verify the caller owns the source's project, copy
@@ -163,7 +188,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     | { ok: false; code: number; error: string }
   > {
     const sourceRow = await fastify.storage.agentSessions.getById(sourceSessionId);
-    if (!sourceRow || !(await fastify.storage.projects.getById(sourceRow.project_id, userId))) {
+    const sourceProjection = sourceRow ? await projectLocalSessionIdentity(sourceRow) : undefined;
+    if (!sourceRow || !sourceProjection
+      || !(await fastify.storage.projects.getById(sourceProjection.projectId, userId))) {
       return { ok: false, code: 404, error: "Session not found" };
     }
 
@@ -292,6 +319,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
+      const projection = await fastify.storage.agentSessions.getActivityById(sessionId, "session-detail");
+      if (session?.workspaceCheckoutId && !projection) {
+        return reply.code(409).send({
+          errorCode: "workspace_checkout_unavailable",
+          error: "The workspace checkout binding for this session is unavailable",
+        });
+      }
 
       const effectiveStatus = session?.status || "stopped";
 
@@ -300,14 +334,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(200).send({
         session: {
           id: sessionId,
-          projectId: pseudoProjectId,
-          branch: branch ?? null,
+          projectId: projection?.projectId ?? pseudoProjectId,
+          branch: projection ? projection.branch : (branch ?? null),
+          target: projection?.target ?? "local",
           status: effectiveStatus,
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
           model: session?.model ?? null,
           workspaceCheckoutId: session?.workspaceCheckoutId ?? null,
-          worktreePath: session?.checkoutPath ?? null,
+          worktreePath: projection?.worktreePath ?? session?.checkoutPath ?? null,
+          checkoutDeletedAt: projection?.checkoutDeletedAt ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
         },
         messages,
@@ -340,6 +376,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const dbSessions = await fastify.storage.agentSessions.listByBranch(
         existing.id,
         typeof req.query.branch === "string" ? req.query.branch : "",
+        "session-list",
       );
 
       const countMap = new Map(
@@ -357,6 +394,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return {
             ...s,
             status,
+            projectId: s.project_id,
+            branch: s.branch === "" ? null : s.branch,
+            target: registered?.checkout.target_id ?? "local",
+            workspaceCheckoutId: s.workspace_checkout_id,
             worktreePath: registered?.checkout.worktree_path,
             processAlive: fastify.agentSessionManager.getSessionProcessAlive(s.id),
             entry_count: countMap.get(s.id) ?? 0,
@@ -563,7 +604,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
             reportedWorktreePath: typeof s.worktreePath === "string" ? s.worktreePath : null,
             notificationSyncStart: "from_now",
           });
-          return { ...s, id: localSessionId, processAlive: s.processAlive ?? false, entry_count: s.entry_count ?? 0 };
+          const mapping = await fastify.storage.remoteSessionMappings.getAuthorizedByLocal(
+            localSessionId, project.id, "session-list",
+          );
+          const registered = mapping?.workspace_checkout_id
+            ? await fastify.storage.workspaceRegistry.getCheckoutById(mapping.workspace_checkout_id)
+            : undefined;
+          return {
+            ...s,
+            id: localSessionId,
+            projectId: registered?.workspace.project_id ?? mapping?.project_id ?? project.id,
+            branch: registered
+              ? (registered.workspace.branch === "" ? null : registered.workspace.branch)
+              : (mapping?.branch ?? null),
+            target: registered?.checkout.target_id ?? mapping?.remote_server_id ?? project.agent_mode,
+            workspaceCheckoutId: mapping?.workspace_checkout_id ?? null,
+            worktreePath: registered?.checkout.worktree_path
+              ?? (typeof s.worktreePath === "string" ? s.worktreePath : null),
+            checkoutDeletedAt: registered?.checkout.deleted_at ?? null,
+            processAlive: s.processAlive ?? false,
+            entry_count: s.entry_count ?? 0,
+          };
         }));
         return reply.code(200).send({ sessions: mapped });
       }
@@ -578,6 +639,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const dbSessions = await fastify.storage.agentSessions.listByBranch(
         req.params.projectId,
         typeof req.query.branch === "string" ? req.query.branch : "",
+        "session-list",
       );
 
       const countMap = new Map(
@@ -585,17 +647,25 @@ const routes: FastifyPluginAsync = async (fastify) => {
       );
       // Hide empty sessions from history — only sessions that actually held a
       // conversation should appear in the dropdown.
-      const sessions = dbSessions
-        .map(s => {
+      const sessions = (await Promise.all(dbSessions
+        .map(async (s) => {
           const inMemory = fastify.agentSessionManager.getSession(s.id);
           const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
+          const registered = s.workspace_checkout_id
+            ? await fastify.storage.workspaceRegistry.getCheckoutById(s.workspace_checkout_id)
+            : undefined;
           return {
             ...s,
             status,
+            projectId: s.project_id,
+            branch: s.branch === "" ? null : s.branch,
+            target: registered?.checkout.target_id ?? "local",
+            workspaceCheckoutId: s.workspace_checkout_id,
+            worktreePath: registered?.checkout.worktree_path,
             processAlive: fastify.agentSessionManager.getSessionProcessAlive(s.id),
             entry_count: countMap.get(s.id) ?? 0,
           };
-        })
+        })))
         .filter(s => shouldShowBranchSessionInList({
           entryCount: s.entry_count,
           processAlive: s.processAlive,
@@ -901,9 +971,32 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // (notably the WebSocket URL), which local doesn't recognize and
           // would 404 with "Session not found" in a reconnect loop.
           const remoteData = result.data as { session: { id: string; [k: string]: unknown }; messages: unknown[] };
+          const rawMapping = await fastify.storage.remoteSessionMappings?.getByLocal?.(req.params.sessionId);
+          const rawRegistered = rawMapping?.workspace_checkout_id
+            ? await fastify.storage.workspaceRegistry.getCheckoutById(rawMapping.workspace_checkout_id)
+            : undefined;
+          const mapping = rawMapping && typeof fastify.storage.remoteSessionMappings.getAuthorizedByLocal === "function"
+            ? await fastify.storage.remoteSessionMappings.getAuthorizedByLocal(
+              req.params.sessionId,
+              rawRegistered?.workspace.project_id ?? rawMapping.project_id,
+              "session-detail",
+            )
+            : rawMapping;
+          const registered = rawRegistered;
           return reply.code(200).send({
             ...remoteData,
-            session: { ...remoteData.session, id: req.params.sessionId },
+            session: {
+              ...remoteData.session,
+              id: req.params.sessionId,
+              projectId: registered?.workspace.project_id ?? mapping?.project_id,
+              branch: registered
+                ? (registered.workspace.branch === "" ? null : registered.workspace.branch)
+                : mapping?.branch,
+              target: registered?.checkout.target_id ?? mapping?.remote_server_id,
+              workspaceCheckoutId: mapping?.workspace_checkout_id ?? null,
+              worktreePath: registered?.checkout.worktree_path ?? null,
+              checkoutDeletedAt: registered?.checkout.deleted_at ?? null,
+            },
           });
         }
         return reply.code(proxyStatus(result)).send(result.data);
@@ -914,13 +1007,25 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Session not found" });
       }
 
+      const projection = await fastify.storage.agentSessions.getActivityById(req.params.sessionId, "session-detail");
+      if (session.workspaceCheckoutId && !projection) {
+        return reply.code(409).send({
+          errorCode: "workspace_checkout_unavailable",
+          error: "The workspace checkout binding for this session is unavailable",
+        });
+      }
+
       const messages = fastify.agentSessionManager.getMessages(req.params.sessionId);
 
       return reply.code(200).send({
         session: {
           id: session.id,
-          projectId: session.projectId,
-          branch: session.branch,
+          projectId: projection?.projectId ?? session.projectId,
+          branch: projection ? projection.branch : session.branch,
+          target: projection?.target ?? "local",
+          workspaceCheckoutId: session.workspaceCheckoutId,
+          worktreePath: projection?.worktreePath ?? null,
+          checkoutDeletedAt: projection?.checkoutDeletedAt ?? null,
           status: session.status,
           permissionMode: session.permissionMode,
           agentType: session.agentType || "claude-code",
@@ -1088,8 +1193,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // scope before any workflow
     // mutation, delivery-ledger write, wake-up, or stdin write.
     const storedSession = await fastify.storage.agentSessions.getById(req.params.sessionId);
-    if (!storedSession
-      || !(await fastify.storage.projects.getById(storedSession.project_id, authResult))) {
+    const storedProjection = storedSession ? await projectLocalSessionIdentity(storedSession) : undefined;
+    if (!storedSession || !storedProjection
+      || !(await fastify.storage.projects.getById(storedProjection.projectId, authResult))) {
       return reply.code(404).send({ error: "Session not found or not running" });
     }
 
@@ -1432,99 +1538,40 @@ const routes: FastifyPluginAsync = async (fastify) => {
           projectId, remoteInfo.remoteServerId,
         );
         if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
-        // Pre-generate the branch's id so we can mint a token bound to it before
-        // the remote creates the (dormant) branch — mirrors createRemoteAgentSession.
-        // The branch runs on the remote, which can't mint (no userId / no public
-        // URL), so the config must be minted here and passed down.
-        const newRemoteSessionId = randomUUID();
-        const localSessionId = `remote-${remoteInfo.remoteServerId}-${projectId}-${newRemoteSessionId}`;
-        const crossRemoteMcp = await mintCrossRemoteMcpConfig(
-          { storage: fastify.storage },
-          { userId, sessionId: localSessionId, sourceRemoteServerId: remoteInfo.remoteServerId },
-        );
-        const result = await proxyAuto(
-          remoteInfo.remoteServerId,
-          "POST",
-          `/api/path/agent-sessions/${remoteInfo.remoteSessionId}/branch`,
-          { agentType, sessionId: newRemoteSessionId, crossRemoteMcp, upToEntryIndex }
-        );
+        const result = await createRemoteBranchedSession({
+          remoteSessionMap: fastify.remoteSessionMap,
+          remoteSessionMappings: fastify.storage.remoteSessionMappings,
+          remotePatchCache: fastify.remotePatchCache,
+          agentSessionManager: fastify.agentSessionManager,
+          reverseConnectManager: fastify.reverseConnectManager,
+          storage: fastify.storage,
+        }, {
+          projectId,
+          agentMode: remoteInfo.remoteServerId,
+          remotePath: remoteConfig.remote_path,
+          branch: remoteInfo.branch ?? null,
+          sourceRemoteSessionId: remoteInfo.remoteSessionId,
+          agentType,
+          upToEntryIndex,
+          userId,
+        });
         if (!result.ok) {
           return reply.code(proxyStatus(result)).send(result.data);
         }
-
-        const remoteData = result.data as { session: { id: string }; messages: unknown[] };
-        if (remoteData.session.id !== newRemoteSessionId) {
-          // Older remote that ignored the supplied id (or lacks the path-branch
-          // route). The token we minted names a session that won't exist, so
-          // cross-remote calls would be rejected — fail closed and don't register.
-          return reply.code(409).send({ error: "Remote returned an unexpected session id; upgrade the remote" });
-        }
-        // Old-remote guard (post-hoc by design — lockstep upgrades assumed,
-        // same pattern as the id check above): a remote that ignored the
-        // cutoff copied the full history. Fail closed and don't register.
-        if (upToEntryIndex !== undefined && remoteData.messages.length > upToEntryIndex + 1) {
-          console.error(
-            `[Branch] Remote ${remoteInfo.remoteServerId} ignored branch cutoff (${remoteData.messages.length} messages > cutoff ${upToEntryIndex}) — version drift, upgrade the remote`,
-          );
-          return reply.code(409).send({ error: "Remote ignored branch cutoff; upgrade the remote" });
-        }
-        // Register the local handle. The in-memory set is first (so a later
-        // failure has something to roll back), but a throw in the DB write or
-        // any subsequent step must not leave a half-registered handle: the map
-        // entry would keep a session id "usable" to the gateway (isSessionUsable
-        // checks map presence) while the client, having gotten a 500, retries
-        // and creates a *second* branch on the remote. Clean up on any error,
-        // mirroring createRemoteAgentSession's rollback.
-        fastify.remoteSessionMap.set(localSessionId, {
-          remoteServerId: remoteInfo.remoteServerId,
-          remoteSessionId: newRemoteSessionId,
+        const { localSessionId, remoteSession: remoteData, messages } = result;
+        await fastify.storage.searchCache.noteSessionCreated({
+          localSessionId, projectId, targetId: remoteInfo.remoteServerId,
           branch: remoteInfo.branch ?? null,
-        });
-        try {
-          // from_start: the branch operation just created this remote session.
-          await bindRemoteSessionMapping(fastify.storage, {
-            localSessionId, projectId, remoteServerId: remoteInfo.remoteServerId,
-            remoteSessionId: newRemoteSessionId, branch: remoteInfo.branch ?? null,
-            remotePath: remoteConfig.remote_path,
-            reportedWorktreePath: typeof (remoteData.session as Record<string, unknown>).worktreePath === "string"
-              ? (remoteData.session as Record<string, unknown>).worktreePath as string : null,
-            notificationSyncStart: "from_start",
-          });
-          // The remote already wrote the final "Branch - ..." title — claim both
-          // title-generation guards so the first message here doesn't clobber it.
-          await fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);
-          fastify.agentSessionManager.markTitleResolved(localSessionId);
-
-          // Search-cache write-through so the branched session shows in Cmd+K
-          // immediately. Best-effort: it exists on the remote at this point.
-          await fastify.storage.searchCache.noteSessionCreated({
-            localSessionId, projectId, targetId: remoteInfo.remoteServerId,
-            branch: remoteInfo.branch ?? null,
-            title: (remoteData.session as { title?: string | null }).title ?? null,
-            status: (remoteData.session as { status?: "running" | "stopped" | "error" }).status,
-            agentType: (remoteData.session as { agent_type?: string | null }).agent_type,
-            model: (remoteData.session as { model?: string | null }).model,
-          }).catch((err) => console.error("[Branch] search-cache create write-through failed:", err));
-
-          // Seed remotePatchCache with the copied messages so WS replay has data
-          // immediately (mirrors the create/findExisting proxy paths).
-          if (remoteData.messages && remoteData.messages.length > 0) {
-            const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
-            if (cacheEntry.messages.length === 0) {
-              for (let i = 0; i < remoteData.messages.length; i++) {
-                const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
-                fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
-              }
-            }
-          }
-        } catch (err) {
-          fastify.remoteSessionMap.delete(localSessionId);
-          throw err;
-        }
+          title: typeof remoteData.title === "string" ? remoteData.title : null,
+          status: remoteData.status === "running" || remoteData.status === "stopped" || remoteData.status === "error"
+            ? remoteData.status : undefined,
+          agentType: typeof remoteData.agent_type === "string" ? remoteData.agent_type : null,
+          model: typeof remoteData.model === "string" ? remoteData.model : null,
+        }).catch((err) => console.error("[Branch] search-cache create write-through failed:", err));
 
         return reply.code(200).send({
-          session: { ...remoteData.session, id: localSessionId, projectId },
-          messages: remoteData.messages,
+          session: { ...remoteData, id: localSessionId, projectId },
+          messages,
         });
       }
 
@@ -1825,11 +1872,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const session = await fastify.storage.agentSessions.getById(req.params.sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
+    const projection = await projectLocalSessionIdentity(session);
+    if (!projection) return reply.code(409).send({ errorCode: "workspace_checkout_unavailable", error: "Session checkout binding is unavailable" });
     await fastify.storage.agentSessions.updateTitle(req.params.sessionId, normalizedTitle);
     broadcastRenamedTitle(
       req.params.sessionId,
-      session.project_id,
-      session.branch,
+      projection.projectId,
+      projection.branch,
       normalizedTitle
     );
     return reply.code(200).send({ success: true, title: normalizedTitle });

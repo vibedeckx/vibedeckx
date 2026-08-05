@@ -91,7 +91,7 @@ export function createRemoteProjectSessionReader(options: {
 }): RemoteProjectSessionReader {
   return {
     listByProject: async (projectId, limit) => {
-      const rows = await options.storage.remoteSessionMappings.listByProject(projectId, limit);
+      const rows = await options.storage.remoteSessionMappings.listByProject(projectId, limit, "project-chat");
       return rows.map((row) => ({
         id: row.local_session_id,
         projectId: row.project_id,
@@ -104,7 +104,7 @@ export function createRemoteProjectSessionReader(options: {
     getMapping: async (sessionId) => {
       const unscoped = await options.storage.remoteSessionMappings.getByLocal(sessionId);
       if (!unscoped) return undefined;
-      const row = await options.storage.remoteSessionMappings.getAuthorizedByLocal(sessionId, unscoped.project_id);
+      const row = await options.storage.remoteSessionMappings.getAuthorizedByLocal(sessionId, unscoped.project_id, "project-chat");
       return row ? {
         id: row.local_session_id,
         projectId: row.project_id,
@@ -637,7 +637,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
   };
   const sessionExistsInScope = async (sessionId: string): Promise<boolean> => {
     const local = await storage.agentSessions.getById(sessionId);
-    if (local) return (await storage.agentSessions.getActivityById(sessionId))?.projectId === projectId;
+    if (local) return (await storage.agentSessions.getActivityById(sessionId, "project-chat"))?.projectId === projectId;
     const mapping = await remoteSessions?.getMapping(sessionId);
     if (!mapping || mapping.projectId !== projectId) return false;
     return Boolean(await storage.projectRemotes.getByProjectAndServer(
@@ -648,7 +648,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     operation: Awaited<ReturnType<typeof beginOperation>>, sessionId: string,
   ) => {
     const local = await storage.agentSessions.getById(sessionId);
-    const localProjection = local ? await storage.agentSessions.getActivityById(sessionId) : undefined;
+    const localProjection = local ? await storage.agentSessions.getActivityById(sessionId, "project-chat") : undefined;
     if (local && localProjection?.projectId === projectId && local.status !== "running") {
       const status = local.status === "stopped" && local.last_completed_at ? "completed" : "failed";
       return finishOperation(operation, status, { sessionId }, status === "failed" ? "Agent session failed" : null);
@@ -984,7 +984,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         let target: "local" | { remoteServerId: string; remoteSessionId: string };
         if (local) {
           const localProjectId = local.workspace_checkout_id
-            ? (await storage.agentSessions.getActivityById(sessionId))?.projectId
+            ? (await storage.agentSessions.getActivityById(sessionId, "project-chat"))?.projectId
             : local.project_id;
           if (localProjectId !== projectId) {
             throw new Error("Object is not part of this project");
@@ -1008,7 +1008,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             const current = await storage.agentSessions.getById(sessionId);
             const currentProjection = current
               && current.workspace_checkout_id
-              ? await storage.agentSessions.getActivityById(sessionId)
+              ? await storage.agentSessions.getActivityById(sessionId, "project-chat")
               : undefined;
             const currentProjectId = current?.workspace_checkout_id
               ? currentProjection?.projectId
@@ -1195,7 +1195,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       inputSchema: emptySchema,
       execute: readInScope(async () => {
         const [localRows, untrustedRemoteRows] = await Promise.all([
-          storage.agentSessions.listRecentActivityByProject(projectId, LIST_LIMIT / 2),
+          storage.agentSessions.listRecentActivityByProject(projectId, LIST_LIMIT / 2, "project-chat"),
           remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
         ]);
         const remoteRows = safeArrayPrefix(untrustedRemoteRows, LIST_LIMIT / 2);
@@ -1268,7 +1268,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       execute: readInScope(async ({ sessionId }) => {
         const local = await storage.agentSessions.getById(sessionId);
         if (local) {
-          const projection = await storage.agentSessions.getActivityById(sessionId);
+          const projection = await storage.agentSessions.getActivityById(sessionId, "project-chat");
           if (projection?.projectId !== projectId) throw new Error("Object is not part of this project");
           if (!isToolSelectorId(local.id)) throw new Error("Agent session not found");
           const detail: ProjectSessionDetail = {

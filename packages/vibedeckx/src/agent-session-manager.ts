@@ -359,7 +359,7 @@ export class AgentSessionManager {
     projectId: string,
     branch: string | null,
   ): Promise<BranchActivityState | null> {
-    const sessions = await this.storage.agentSessions.listByBranch(projectId, branch ?? "");
+    const sessions = await this.storage.agentSessions.listByBranch(projectId, branch ?? "", "runtime");
     const derived = computeBranchActivity(sessions).get(branch ?? "")
                   ?? { activity: "idle", since: Date.now() };
     return this.emitBranchActivityIfChanged(projectId, branch, derived);
@@ -575,7 +575,8 @@ export class AgentSessionManager {
     if (!skipDb) {
       const latestDbRow = await this.storage.agentSessions.getLatestByBranch(
         projectId,
-        branch ?? ""
+        branch ?? "",
+        "runtime",
       );
       console.log(`[findExisting] DB latestByBranch(${projectId}, ${branch ?? ""}) → ${latestDbRow ? `id=${latestDbRow.id} status=${latestDbRow.status} updatedAt=${latestDbRow.updated_at}` : "NONE"}`);
       if (latestDbRow) {
@@ -1644,15 +1645,28 @@ export class AgentSessionManager {
     // so no milestone is possible — an explicit non-durable internal path, not a
     // silent promise of recovery.
     if (!session.skipDb) {
-      const outbox = sessionMilestoneForTurnEnd({
+      const activityReader = this.storage.agentSessions.getActivityById;
+      const projected = typeof activityReader === "function"
+        ? await activityReader(session.id, "notification")
+        : undefined;
+      // Custom/old storage may lack the projection API. Snapshot fallback is
+      // allowed only for a genuinely unbound legacy session; a bound row that
+      // cannot be projected keeps its durable turn_end but emits no possibly
+      // misattributed notification.
+      const notificationScope = projected
+        ? { projectId: projected.projectId, branch: projected.branch }
+        : session.workspaceCheckoutId
+          ? null
+          : { projectId: session.projectId, branch: session.branch };
+      const outbox = notificationScope ? sessionMilestoneForTurnEnd({
         sessionId: session.id,
-        projectId: session.projectId,
-        branch: session.branch,
+        projectId: notificationScope.projectId,
+        branch: notificationScope.branch,
         entryIndex: index,
         outcome,
         disposition,
         createdAt: endedAt,
-      });
+      }) : undefined;
       try {
         await this.storage.agentSessions.upsertTurnEndWithOutbox({
           sessionId: session.id,
@@ -2748,15 +2762,24 @@ export class AgentSessionManager {
       notificationDisposition: disposition,
     };
     const data = JSON.stringify(repair);
-    const outbox = sessionMilestoneForTurnEnd({
+    const activityReader = this.storage.agentSessions.getActivityById;
+    const projected = typeof activityReader === "function"
+      ? await activityReader(sessionId, "notification")
+      : undefined;
+    const notificationScope = projected
+      ? { projectId: projected.projectId, branch: projected.branch }
+      : dbSession.workspace_checkout_id
+        ? null
+        : { projectId: dbSession.project_id, branch: dbSession.branch || null };
+    const outbox = notificationScope ? sessionMilestoneForTurnEnd({
       sessionId,
-      projectId: dbSession.project_id,
-      branch: dbSession.branch || null,
+      projectId: notificationScope.projectId,
+      branch: notificationScope.branch,
       entryIndex: repairIndex,
       outcome: "server_restart",
       disposition,
       createdAt: repair.timestamp,
-    });
+    }) : undefined;
     await this.storage.agentSessions.upsertTurnEndWithOutbox({
       sessionId,
       entryIndex: repairIndex,
@@ -2812,11 +2835,22 @@ export class AgentSessionManager {
       const restoredCheckout = dbSession.workspace_checkout_id
         ? await this.storage.workspaceRegistry.getCheckoutById(dbSession.workspace_checkout_id)
         : undefined;
+      const activityReader = this.storage.agentSessions.getActivityById;
+      const restoredProjection = typeof activityReader === "function"
+        ? await activityReader(dbSession.id, "runtime")
+        : restoredCheckout
+          ? {
+            projectId: restoredCheckout.workspace.project_id,
+            branch: restoredCheckout.workspace.branch || null,
+          }
+          : dbSession.workspace_checkout_id
+            ? undefined
+            : { projectId: dbSession.project_id, branch: dbSession.branch || null };
 
       const runningSession: RunningSession = {
         id: dbSession.id,
-        projectId: dbSession.project_id,
-        branch: dbSession.branch || null,
+        projectId: restoredProjection?.projectId ?? dbSession.project_id,
+        branch: restoredProjection ? restoredProjection.branch : (dbSession.branch || null),
         workspaceCheckoutId: dbSession.workspace_checkout_id,
         checkoutPath: restoredCheckout?.checkout.worktree_path ?? null,
         process: null,
@@ -2927,6 +2961,34 @@ export class AgentSessionManager {
       : null;
 
     const newId = opts.sessionId ?? randomUUID();
+    if (opts.sessionId) {
+      const existingBranch = await this.storage.agentSessions.getById(newId);
+      if (existingBranch) {
+        const existingEntries = await this.storage.agentSessions.getEntries(newId);
+        const sameEntries = existingEntries.length === entryRows.length
+          && existingEntries.every((row, index) => row.entry_index === entryRows[index]?.entry_index
+            && row.data === entryRows[index]?.data);
+        if (existingBranch.project_id !== projectId
+          || existingBranch.branch !== (branch ?? "")
+          || existingBranch.permission_mode !== permissionMode
+          || existingBranch.agent_type !== agentType
+          || (existingBranch.model ?? null) !== model
+          || !sameEntries) {
+          throw new Error("Branched session identity is already in use");
+        }
+        const existingRuntime = this.sessions.get(newId);
+        if (existingRuntime && opts.crossRemoteMcp) {
+          // Tokens are intentionally not persisted. After a worker restart,
+          // hub recovery mints a fresh one and the exact-ID replay must attach
+          // it to the restored dormant session before its first wake-up.
+          existingRuntime.crossRemoteMcp = opts.crossRemoteMcp;
+        }
+        // Hub recovery replays the exact preallocated ID after an uncertain
+        // response. Returning the already-copied transcript makes the worker
+        // operation idempotent without creating a second branch.
+        return { ok: true, sessionId: newId };
+      }
+    }
     let inheritedCheckoutId = source?.workspaceCheckoutId ?? sourceRow?.workspace_checkout_id ?? undefined;
     if (!inheritedCheckoutId) {
       const activeCheckout = await this.storage.workspaceRegistry.getByProjectBranch(

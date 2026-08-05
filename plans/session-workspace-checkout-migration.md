@@ -8,14 +8,16 @@
 ## Implementation status
 
 - Phase 1：完成。
-- Phase 2：核心写入和运行路径完成；运行时 fallback 指标尚未补齐。
-- Phase 3：核心协议完成；完整的新旧 hub/worker 组合测试尚未补齐。
-- Phase 4：标准远程创建的持久化 saga、registry、mapping 双写和发现入口已完成；conversation branch/reviewer
-  等派生创建入口尚未统一纳入 durable intent。
+- Phase 2：完成。核心写入、运行路径和 fallback/dangling/mismatch 指标均已接入。
+- Phase 3：完成。新旧 hub/worker 的四种协议组合已有契约测试。
+- Phase 4：标准远程创建与 conversation branch 已纳入持久化 saga，registry、mapping 双写和发现入口已完成；
+  workflow reviewer 的派生创建仍待增加可重放的 worker-side saga。
 - Phase 5：完成。Storage 运维接口支持分批/dry-run 回填、稳定原因码、计数和具体问题记录。
-- Phase 6：运行路径、Project Activity、全局 session 搜索、Project Chat 的 session 列表/详情和远程通知
-  导入候选已切到 checkout-first 投影；墓碑历史与 legacy/dangling 区分已有测试。workflow reviewer、
-  本地通知归属、逐消费者指标和 fallback 清零仍待完成。Phase 7 尚未开始，FK 收紧必须等待 fallback 清零。
+- Phase 6：代码实施完成。运行路径、session 列表/详情、Project Activity、全局 session 搜索、Project Chat、workflow reviewer
+  和本地/远程通知归属已切到 checkout-first 投影；墓碑历史与 legacy/dangling 区分已有测试。branch activity、
+  搜索目录构建和 worktree 兼容导入也已停止读取绑定行的快照 project/branch。逐消费者指标可通过 operator-only
+  `/api/admin/workspace-binding-read-stats` 观察；生产样本窗口 fallback 清零仍待发布后验证。Phase 7 尚未开始，
+  FK 收紧必须等待该外部门禁通过。
 
 ## User stories
 
@@ -112,7 +114,7 @@
 - [x] agent 在物理 checkout 中切换 Git branch 后，后续 turn、restart 和 snapshot 仍使用原 checkout 路径。
 - [x] conversation branch 继承源 session 的 checkout ID，包括源 session 已发生 Git branch drift 的情况。
 - [x] checkout 被删除后历史 session 仍可读，但启动新 turn 返回明确的 checkout-deleted 错误。
-- [ ] NULL 历史行仍能读取和执行旧 fallback，且指标能区分 fallback、悬空 FK 和快照不一致。
+- [x] NULL 历史行仍能读取和执行旧 fallback，且指标能区分 fallback、悬空 FK 和快照不一致。
 
 ---
 
@@ -135,7 +137,7 @@
 - [x] 新 hub 遇到缺少 `worktreePath` 的旧 worker 时使用 conventional fallback，不中断现有 session。
 - [x] 旧 hub 可忽略新 worker 的额外字段，响应形状保持向后兼容。
 - [x] 已持久化权威路径不会被后续旧 worker 的推导路径覆盖。
-- [ ] 协议组合测试覆盖新/旧 hub 与新/旧 worker 的可支持组合。
+- [x] 协议组合测试覆盖新/旧 hub 与新/旧 worker 的可支持组合。
 
 ---
 
@@ -161,6 +163,8 @@ intent 记录跨 hub/worker 步骤，使任一步失败都可以使用同一预�
 - [x] worker 创建成功但 hub 写 mapping 失败后，重启或重试不会创建第二个 worker session。
 - [x] 不同的失败点（worker 拒绝、5xx、传输中断、hub DB 失败、hub 重启）都有可重跑测试。
 - [x] 旧 worker 响应没有 checkout/path 扩展时，新 hub 仍能双写 mapping，并记录兼容 fallback 指标。
+- [x] conversation branch 有可持久化、可重放的 intent，并以同一 source、cutoff 和预分配 session ID 恢复。
+- [ ] workflow reviewer 的派生远程创建有可持久化、可重放的 intent，而非只依赖一次 `/api/path/workflow-runs` 调用。
 
 ---
 
@@ -202,14 +206,14 @@ project activity、project chat 和 workflow 都通过 checkout/workspace join �
 
 ### Acceptance criteria
 
-- [ ] 已绑定 session 的 project、branch、target 和路径来自 checkout/workspace join，不来自当前 Git branch。
+- [x] 已绑定 session 的 project、branch、target 和路径来自 checkout/workspace join，不来自当前 Git branch。
 - [x] 本地恢复、唤醒、restart、模式切换和 snapshot 对已绑定行不调用 branch-to-path 推导。
-- [ ] remote routing 仍由 mapping 的 remote session ID 完成，workspace/target 归属来自其 checkout 绑定。
-- [ ] 搜索、通知、project activity、project chat 和 workflow reviewer 对同一 session 投影出一致的 workspace/target。
-- [ ] 墓碑 checkout 的历史 session 显示原 branch、target 和路径快照，不被新 incarnation 的信息替换。
+- [x] remote routing 仍由 mapping 的 remote session ID 完成，workspace/target 归属来自其 checkout 绑定。
+- [x] 搜索、通知、project activity、project chat 和 workflow reviewer 对同一 session 投影出一致的 workspace/target。
+- [x] 墓碑 checkout 的历史 session 显示原 branch、target 和路径快照，不被新 incarnation 的信息替换。
 - [x] 尝试继续墓碑或非 ready checkout 上的 session 时，本地和远程入口返回等价错误。
-- [ ] 每一类读取消费者都有 checkout-hit、legacy-fallback、dangling 和 mismatch 指标。
-- [ ] 未回填旧行在兼容期仍可用，但不会被当作已绑定行。
+- [x] 每一类读取消费者都有 checkout-hit、legacy-fallback、dangling 和 mismatch 指标。
+- [x] 未回填旧行在兼容期仍可用，但不会被当作已绑定行。
 - [ ] 生产样本窗口中所有 legacy fallback 指标归零，且未绑定报告中剩余行均被明确隔离。
 
 ---

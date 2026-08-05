@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
 import { EventBus } from "./event-bus.js";
@@ -493,6 +494,48 @@ describe("WorkflowEngine", () => {
     expect(agentOps.setFinalSessionTitle).toHaveBeenCalledWith("s-rev", "Review - please fix the bug");
     expect(agentOps.setFinalSessionTitle.mock.invocationCallOrder[0])
       .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
+  });
+
+  it("uses checkout ownership when source compatibility snapshots disagree", async () => {
+    await storage.projects.create({ id: "snapshot-project", name: "snapshot", path: "/tmp/snapshot" });
+    const registered = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "actual", targetId: "local",
+      worktreePath: "/tmp/exact-review-checkout", expectedBranch: "actual",
+    });
+    await storage.agentSessions.createBound({
+      id: "bound-source", project_id: "p1", branch: "actual", target_id: "local",
+      checkout_id: registered.checkout.id,
+    });
+    await storage.agentSessions.updateStatus("bound-source", "stopped");
+    const raw = new Database(path.join(dir, "t.sqlite"));
+    try {
+      raw.prepare("UPDATE agent_sessions SET project_id = ?, branch = ? WHERE id = ?")
+        .run("snapshot-project", "wrong", "bound-source");
+    } finally {
+      raw.close();
+    }
+
+    await expect(engine.startAdhocReview({
+      project, branch: "actual", sourceSessionId: "bound-source",
+    })).resolves.toMatchObject({ project_id: "p1", branch: "actual" });
+  });
+
+  it("fails closed when the source checkout is tombstoned", async () => {
+    const registered = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "gone", targetId: "local",
+      worktreePath: "/tmp/gone-review-checkout", expectedBranch: "gone",
+    });
+    await storage.agentSessions.createBound({
+      id: "gone-source", project_id: "p1", branch: "gone", target_id: "local",
+      checkout_id: registered.checkout.id,
+    });
+    await storage.agentSessions.updateStatus("gone-source", "stopped");
+    await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
+
+    await expect(engine.startAdhocReview({
+      project, branch: "gone", sourceSessionId: "gone-source",
+    })).rejects.toMatchObject({ code: "reviewer-unavailable" });
+    expect(agentOps.createNewSession).not.toHaveBeenCalled();
   });
 
   it("startAdhocReview threads an intent brief into the reviewer prompt", async () => {

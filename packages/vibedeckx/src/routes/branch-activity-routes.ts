@@ -63,7 +63,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // No project row yet — no activity to report.
         return reply.code(200).send({ branches: [] } satisfies BranchActivityResponse);
       }
-      const sessions = await fastify.storage.agentSessions.getByProjectId(project.id);
+      const sessions = await fastify.storage.agentSessions.getProjectedByProjectId(project.id, "project-activity");
       const computed = computeBranchActivity(sessions);
       const orchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
       return reply.code(200).send(toResponse(overlayOrchestratorActivity(computed, orchestrator)));
@@ -120,7 +120,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      const sessions = await fastify.storage.agentSessions.getByProjectId(project.id);
+      const sessions = await fastify.storage.agentSessions.getProjectedByProjectId(project.id, "project-activity");
       const computed = computeBranchActivity(sessions);
       const orchestrator = fastify.agentSessionManager.getProjectBranchStates(project.id);
       return reply.code(200).send(toResponse(overlayOrchestratorActivity(computed, orchestrator)));

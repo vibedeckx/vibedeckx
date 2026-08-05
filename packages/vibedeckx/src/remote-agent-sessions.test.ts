@@ -8,6 +8,7 @@ import { RemotePatchCache } from "./remote-patch-cache.js";
 import type { RemoteSessionInfo } from "./server-types.js";
 import type { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import { EventBus, type GlobalEvent } from "./event-bus.js";
+import { conventionalWorktreePath } from "./utils/worktree-paths.js";
 
 const proxyToRemoteAuto = vi.hoisted(() => vi.fn());
 vi.mock("./utils/remote-proxy.js", () => ({
@@ -17,7 +18,7 @@ vi.mock("./utils/remote-proxy.js", () => ({
 
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
 import {
-  connectPersistentRemoteWs, createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction,
+  connectPersistentRemoteWs, createRemoteAgentSession, createRemoteBranchedSession, createRemoteProjectChatSessionWithInstruction,
   bindRemoteSessionMapping, entryPatchFrames, isEntryPatchFrame, recoverPendingRemoteAgentSessions,
   type RemoteAgentSessionDeps,
 } from "./remote-agent-sessions.js";
@@ -232,9 +233,10 @@ describe("createRemoteAgentSession", () => {
       }) => upsert(opts.localSessionId, opts.projectId, opts.remoteServerId,
         opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
       extendNotificationWatch, getByLocal: async () => mapping,
+      markTitleResolved: vi.fn(async () => undefined),
     } as unknown as Storage["remoteSessionMappings"],
     remotePatchCache: new RemotePatchCache(),
-    agentSessionManager: { emitBranchActivityIfChanged } as never,
+    agentSessionManager: { emitBranchActivityIfChanged, markTitleResolved: vi.fn() } as never,
     reverseConnectManager: null,
     storage,
   });
@@ -331,6 +333,52 @@ describe("createRemoteAgentSession", () => {
     await createRemoteAgentSession(makeDeps(), params());
     expect(hadEntryAtCallTime).toBe(true);
   });
+
+  it.each([
+    { hub: "new", worker: "old", reportedPath: undefined, expectedSource: "conventional" },
+    { hub: "new", worker: "new", reportedPath: "/worker/reported/main", expectedSource: "reported" },
+    { hub: "old", worker: "old", reportedPath: undefined, expectedSource: undefined },
+    { hub: "old", worker: "new", reportedPath: "/worker/reported/main", expectedSource: undefined },
+  ] as const)(
+    "supports the $hub hub + $worker worker protocol combination",
+    async ({ hub, reportedPath, expectedSource }) => {
+      const workerResponse = {
+        session: {
+          id: "matrix-worker-session",
+          processAlive: false,
+          ...(reportedPath ? { worktreePath: reportedPath } : {}),
+        },
+        messages: [],
+      };
+
+      if (hub === "old") {
+        // This is the pre-extension response decoder: it reads only fields in
+        // the original contract. JSON's additive-field semantics ensure a new
+        // worker remains consumable without a capability/version handshake.
+        const legacyDecode = (data: typeof workerResponse) => ({
+          session: { id: data.session.id, processAlive: data.session.processAlive },
+          messages: data.messages,
+        });
+        expect(legacyDecode(workerResponse)).toEqual({
+          session: { id: "matrix-worker-session", processAlive: false },
+          messages: [],
+        });
+        return;
+      }
+
+      proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: workerResponse });
+      const result = await createRemoteAgentSession(makeDeps(), {
+        ...params(), remoteSessionId: "matrix-worker-session", localSessionId: "matrix-local-session",
+      });
+      expect(result.ok).toBe(true);
+
+      const registered = await storage.workspaceRegistry.getByProjectBranch(projectId, "main", agentMode);
+      expect(registered?.checkout).toMatchObject({
+        path_source: expectedSource,
+        worktree_path: reportedPath ?? conventionalWorktreePath("/remote/path", "main"),
+      });
+    },
+  );
 
   it("upgrades a conventional old-worker path and never downgrades the reported path", async () => {
     await bindRemoteSessionMapping(storage, {
@@ -494,6 +542,57 @@ describe("createRemoteAgentSession", () => {
       .toEqual(["/remote/path", "/remote/path"]);
     expect(restartedDeps.remoteSessionMap.get(identity.localSessionId)?.remoteSessionId)
       .toBe(identity.remoteSessionId);
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+  });
+
+  it("recovers a conversation branch with the same source, cutoff, and preallocated worker id", async () => {
+    proxyToRemoteAuto.mockImplementation(async (...args: unknown[]) => {
+      const body = args[3] as { sessionId: string };
+      return {
+        ok: true,
+        status: 200,
+        data: { session: { id: body.sessionId, status: "stopped" }, messages: [{ type: "turn_end" }] },
+      };
+    });
+    upsert.mockRejectedValueOnce(new Error("hub stopped before branch mapping"));
+    const identity = { remoteSessionId: "worker-branch", localSessionId: "front-branch" };
+    const branchParams = {
+      projectId,
+      agentMode,
+      remotePath: "/remote/path",
+      branch: "main",
+      sourceRemoteSessionId: "worker-source",
+      agentType: "codex",
+      upToEntryIndex: 0,
+      userId: "user-1",
+      ...identity,
+    };
+
+    await expect(createRemoteBranchedSession(makeDeps(), branchParams))
+      .rejects.toThrow("hub stopped before branch mapping");
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([
+      expect.objectContaining({
+        operation_kind: "branch",
+        source_remote_session_id: "worker-source",
+        up_to_entry_index: 0,
+      }),
+    ]);
+
+    vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
+      project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path",
+      sort_order: 0, sync_up_config: null, sync_down_config: null,
+    });
+    const recovered = await recoverPendingRemoteAgentSessions(makeDeps(), agentMode);
+
+    expect(recovered).toEqual({ attempted: 1, confirmed: 1, failed: 0 });
+    expect(proxyToRemoteAuto.mock.calls.map((call) => call[2])).toEqual([
+      "/api/path/agent-sessions/worker-source/branch",
+      "/api/path/agent-sessions/worker-source/branch",
+    ]);
+    expect(proxyToRemoteAuto.mock.calls.map((call) => call[3])).toEqual([
+      expect.objectContaining({ sessionId: identity.remoteSessionId, agentType: "codex", upToEntryIndex: 0 }),
+      expect.objectContaining({ sessionId: identity.remoteSessionId, agentType: "codex", upToEntryIndex: 0 }),
+    ]);
     expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
   });
 

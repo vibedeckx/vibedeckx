@@ -5,6 +5,7 @@ import path from "path";
 import Database from "better-sqlite3";
 import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
+import { getWorkspaceBindingReadMetrics, resetWorkspaceBindingReadMetrics } from "../workspace-binding-metrics.js";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -103,6 +104,13 @@ describe("agentSessions/remoteSessionMappings storage", () => {
 
       expect(await storage.agentSessions.listRecentActivityByProject("snapshot-project", 10))
         .toEqual([]);
+      expect(await storage.agentSessions.getProjectedByProjectId("snapshot-project")).toEqual([]);
+      expect(await storage.agentSessions.getProjectedByProjectId("p1")).toEqual([
+        expect.objectContaining({
+          id: "bound-history", project_id: "p1", branch: "historical",
+          workspace_checkout_id: registered.checkout.id,
+        }),
+      ]);
       expect(await storage.agentSessions.listRecentActivityByProject("p1", 10))
         .toEqual([expect.objectContaining({
           id: "bound-history",
@@ -116,6 +124,7 @@ describe("agentSessions/remoteSessionMappings storage", () => {
     });
 
     it("falls back only for genuinely unbound legacy activity and omits dangling bindings", async () => {
+      resetWorkspaceBindingReadMetrics();
       await storage.agentSessions.create({ id: "legacy", project_id: "p1", branch: "legacy" });
       await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dangling" });
       const raw = new Database(dbPath);
@@ -126,12 +135,44 @@ describe("agentSessions/remoteSessionMappings storage", () => {
         raw.close();
       }
 
-      const rows = await storage.agentSessions.listRecentActivityByProject("p1", 10);
+      const rows = await storage.agentSessions.listRecentActivityByProject("p1", 10, "project-activity");
       expect(rows).toEqual([expect.objectContaining({
         id: "legacy", branch: "legacy", target: "local",
         worktreePath: null, checkoutDeletedAt: null, binding: "legacy",
       })]);
       expect(await storage.agentSessions.countRunningActivityByProject("p1")).toBe(1);
+      expect(getWorkspaceBindingReadMetrics()).toEqual(expect.arrayContaining([
+        { consumer: "project-activity", outcome: "legacy-fallback", count: 1 },
+        { consumer: "project-activity", outcome: "dangling", count: 1 },
+      ]));
+    });
+
+    it("records snapshot mismatches separately from clean checkout hits", async () => {
+      resetWorkspaceBindingReadMetrics();
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "dev", targetId: "local",
+        worktreePath: "/tmp/p-dev", expectedBranch: "dev",
+      });
+      await storage.agentSessions.createBound({
+        id: "clean", project_id: "p1", branch: "dev", target_id: "local",
+        checkout_id: registered.checkout.id,
+      });
+      await storage.agentSessions.createBound({
+        id: "mismatch", project_id: "p1", branch: "dev", target_id: "local",
+        checkout_id: registered.checkout.id,
+      });
+      const raw = new Database(dbPath);
+      try {
+        raw.prepare("UPDATE agent_sessions SET branch = ? WHERE id = ?").run("stale", "mismatch");
+      } finally {
+        raw.close();
+      }
+
+      await storage.agentSessions.getProjectedByProjectId("p1", "search");
+      expect(getWorkspaceBindingReadMetrics()).toEqual(expect.arrayContaining([
+        { consumer: "search", outcome: "checkout-hit", count: 1 },
+        { consumer: "search", outcome: "mismatch", count: 1 },
+      ]));
     });
   });
 
@@ -295,6 +336,9 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       const first = await storage.remoteSessionCreationIntents.begin(intent);
       const replay = await storage.remoteSessionCreationIntents.begin(intent);
       expect(first).toMatchObject({ status: "pending", error: null });
+      expect(first).toMatchObject({
+        operation_kind: "new", source_remote_session_id: null, up_to_entry_index: null,
+      });
       expect(replay.local_session_id).toBe(first.local_session_id);
 
       await storage.remoteSessionCreationIntents.recordError(intent.localSessionId, "transport lost");
@@ -450,6 +494,34 @@ describe("agentSessions/remoteSessionMappings storage", () => {
 
       const list = await storage.agentSessions.listByBranch("p1", "dev");
       expect(list.map((s) => s.id)).toEqual(["s2", "s1"]);
+    });
+
+    it("listByBranch scopes bound sessions through checkout ownership and omits dangling bindings", async () => {
+      await storage.projects.create({ id: "snapshot-project", name: "snapshot", path: "/tmp/snapshot" });
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "dev", targetId: "local",
+        worktreePath: "/tmp/p-dev", expectedBranch: "dev",
+      });
+      await storage.agentSessions.createBound({
+        id: "bound", project_id: "p1", branch: "dev", target_id: "local",
+        checkout_id: registered.checkout.id,
+      });
+      await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dev" });
+      const raw = new Database(dbPath);
+      try {
+        raw.prepare("UPDATE agent_sessions SET project_id = ?, branch = ? WHERE id = ?")
+          .run("snapshot-project", "wrong", "bound");
+        raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = ?")
+          .run("missing-checkout", "dangling");
+      } finally {
+        raw.close();
+      }
+
+      expect(await storage.agentSessions.listByBranch("snapshot-project", "wrong")).toEqual([]);
+      expect(await storage.agentSessions.listByBranch("p1", "dev")).toEqual([
+        expect.objectContaining({ id: "bound", project_id: "p1", branch: "dev" }),
+      ]);
+      expect((await storage.agentSessions.getLatestByBranch("p1", "dev"))?.id).toBe("bound");
     });
 
     // Adapted from the task brief's characterization skeleton, which asserted
@@ -730,6 +802,7 @@ describe("agentSessions/remoteSessionMappings storage", () => {
     });
 
     it("projects notification candidates from checkout ownership while preserving routing ids", async () => {
+      resetWorkspaceBindingReadMetrics();
       await storage.projects.create({ id: "snapshot-project", name: "snapshot", path: "/tmp/snapshot" });
       const remote = await storage.remoteServers.create({ name: "worker" });
       await storage.projectRemotes.add({
@@ -754,7 +827,7 @@ describe("agentSessions/remoteSessionMappings storage", () => {
 
       expect(await storage.remoteSessionMappings.getNotificationSyncCandidates({
         now: Date.now(), includeExpired: true,
-      })).toEqual([expect.objectContaining({
+      }, "notification")).toEqual([expect.objectContaining({
         local_session_id: "bound-notification",
         remote_session_id: "worker-routing-id",
         project_id: "p1",
@@ -762,6 +835,9 @@ describe("agentSessions/remoteSessionMappings storage", () => {
         branch: "actual",
         workspace_checkout_id: registered.checkout.id,
       })]);
+      expect(getWorkspaceBindingReadMetrics()).toContainEqual({
+        consumer: "notification", outcome: "mismatch", count: 1,
+      });
     });
   });
 });

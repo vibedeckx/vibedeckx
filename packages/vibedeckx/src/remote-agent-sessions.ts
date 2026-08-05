@@ -29,6 +29,19 @@ export type CreateRemoteAgentSessionResult =
   | { ok: true; localSessionId: string; remoteSession: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] }
   | { ok: false; status: number; data: unknown };
 
+export interface CreateRemoteBranchedSessionParams {
+  projectId: string;
+  agentMode: string;
+  remotePath: string;
+  branch: string | null;
+  sourceRemoteSessionId: string;
+  agentType?: string;
+  upToEntryIndex?: number;
+  userId: string | undefined;
+  remoteSessionId?: string;
+  localSessionId?: string;
+}
+
 export async function bindRemoteSessionMapping(
   storage: Storage,
   opts: {
@@ -248,6 +261,119 @@ export async function createRemoteAgentSession(
   return { ok: true, localSessionId, remoteSession: remoteData.session, messages: remoteData.messages };
 }
 
+/** Durable, idempotent counterpart of the remote conversation-branch route. */
+export async function createRemoteBranchedSession(
+  deps: RemoteAgentSessionDeps,
+  params: CreateRemoteBranchedSessionParams,
+): Promise<CreateRemoteAgentSessionResult> {
+  const remoteSessionId = params.remoteSessionId ?? randomUUID();
+  const localSessionId = params.localSessionId
+    ?? `remote-${params.agentMode}-${params.projectId}-${remoteSessionId}`;
+  await deps.storage.remoteSessionCreationIntents.begin({
+    localSessionId,
+    remoteSessionId,
+    projectId: params.projectId,
+    remoteServerId: params.agentMode,
+    branch: params.branch,
+    remotePath: params.remotePath,
+    // These columns predate operation_kind and remain required. A branch
+    // inherits its effective mode/model on the worker; they are not replay
+    // inputs for this operation.
+    permissionMode: "edit",
+    agentType: params.agentType ?? null,
+    model: null,
+    force: false,
+    userId: params.userId ?? null,
+    operationKind: "branch",
+    sourceRemoteSessionId: params.sourceRemoteSessionId,
+    upToEntryIndex: params.upToEntryIndex ?? null,
+  });
+
+  const crossRemoteMcp = await mintCrossRemoteMcpConfig(
+    { storage: deps.storage },
+    { userId: params.userId, sessionId: localSessionId, sourceRemoteServerId: params.agentMode },
+  );
+  deps.remoteSessionMap.set(localSessionId, {
+    remoteServerId: params.agentMode,
+    remoteSessionId,
+    branch: params.branch,
+  });
+
+  try {
+    const result = await proxyToRemoteAuto(
+      params.agentMode,
+      "POST",
+      `/api/path/agent-sessions/${params.sourceRemoteSessionId}/branch`,
+      { agentType: params.agentType, sessionId: remoteSessionId, crossRemoteMcp, upToEntryIndex: params.upToEntryIndex },
+      { reverseConnectManager: deps.reverseConnectManager ?? undefined },
+    );
+    if (!result.ok) {
+      deps.remoteSessionMap.delete(localSessionId);
+      const uncertain = result.errorCode === "network_error" || result.errorCode === "timeout";
+      await (uncertain
+        ? deps.storage.remoteSessionCreationIntents.recordError(
+          localSessionId, `worker result unknown: ${result.errorCode}`,
+        )
+        : deps.storage.remoteSessionCreationIntents.discard(localSessionId));
+      return { ok: false, status: result.status, data: result.data };
+    }
+
+    const remoteData = result.data as {
+      session: { id: string; processAlive?: boolean; [key: string]: unknown };
+      messages: unknown[];
+    };
+    if (remoteData.session.id !== remoteSessionId
+      || (params.upToEntryIndex !== undefined
+        && remoteData.messages.length > params.upToEntryIndex + 1)) {
+      deps.remoteSessionMap.delete(localSessionId);
+      await deps.storage.remoteSessionCreationIntents.discard(localSessionId);
+      return {
+        ok: false,
+        status: 409,
+        data: { error: remoteData.session.id !== remoteSessionId
+          ? "Remote returned an unexpected session id; upgrade the remote"
+          : "Remote ignored branch cutoff; upgrade the remote" },
+      };
+    }
+
+    await bindRemoteSessionMapping(deps.storage, {
+      localSessionId,
+      projectId: params.projectId,
+      remoteServerId: params.agentMode,
+      remoteSessionId,
+      branch: params.branch,
+      remotePath: params.remotePath,
+      reportedWorktreePath: typeof remoteData.session.worktreePath === "string"
+        ? remoteData.session.worktreePath : null,
+      notificationSyncStart: "from_start",
+      mappingRepo: deps.remoteSessionMappings,
+    });
+    await deps.remoteSessionMappings.markTitleResolved(localSessionId);
+    deps.agentSessionManager.markTitleResolved(localSessionId);
+    await deps.storage.remoteSessionCreationIntents.confirm(localSessionId);
+
+    if (remoteData.messages.length > 0) {
+      const cacheEntry = deps.remotePatchCache.getOrCreate(localSessionId);
+      if (cacheEntry.messages.length === 0) {
+        for (let i = 0; i < remoteData.messages.length; i++) {
+          deps.remotePatchCache.appendMessage(
+            localSessionId,
+            JSON.stringify({ JsonPatch: ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage) }),
+            true,
+          );
+        }
+      }
+    }
+    return { ok: true, localSessionId, remoteSession: remoteData.session, messages: remoteData.messages };
+  } catch (error) {
+    deps.remoteSessionMap.delete(localSessionId);
+    await deps.storage.remoteSessionCreationIntents.recordError(
+      localSessionId, error instanceof Error ? error.message : String(error),
+    ).catch((intentError) => console.warn("[RemoteSession] Failed to record branch intent error:", intentError));
+    throw error;
+  }
+}
+
 export async function recoverPendingRemoteAgentSessions(
   deps: RemoteAgentSessionDeps,
   remoteServerId?: string,
@@ -305,7 +431,20 @@ function recoverPendingRemoteAgentSessionOnce(
       // Safe replay requires a worker that honors the preallocated sessionId
       // idempotently. Older workers fail the identity check loudly; they must
       // not be treated as having confirmed this intent.
-      const result = await createRemoteAgentSession(deps, {
+      const result = intent.operation_kind === "branch"
+        ? await createRemoteBranchedSession(deps, {
+          projectId: intent.project_id,
+          agentMode: intent.remote_server_id,
+          remotePath: intent.remote_path,
+          branch: intent.branch,
+          sourceRemoteSessionId: intent.source_remote_session_id!,
+          agentType: intent.agent_type ?? undefined,
+          upToEntryIndex: intent.up_to_entry_index ?? undefined,
+          userId: intent.user_id ?? undefined,
+          remoteSessionId: intent.remote_session_id,
+          localSessionId: intent.local_session_id,
+        })
+        : await createRemoteAgentSession(deps, {
         projectId: intent.project_id,
         agentMode: intent.remote_server_id,
         // Replay the exact effect recorded before the worker call. The current

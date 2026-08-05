@@ -99,6 +99,37 @@ function makeApp() {
 }
 
 describe("workflow-run remote proxying (front server)", () => {
+  it("fails closed before proxying when the source mapping points at a tombstoned checkout", async () => {
+    makeApp();
+    const storage = app.storage as any;
+    storage.remoteSessionMappings.getByLocal = vi.fn(async () => ({
+      local_session_id: SRC,
+      project_id: "p1",
+      remote_server_id: "srv1",
+      remote_session_id: "src1",
+      branch: "dev",
+      workspace_checkout_id: "checkout-old",
+    }));
+    storage.workspaceRegistry.getCheckoutById = vi.fn(async () => ({
+      workspace: { id: "workspace-dev", project_id: "p1", branch: "dev", status: "archived", error: null },
+      checkout: {
+        id: "checkout-old", workspace_id: "workspace-dev", target_id: "srv1",
+        worktree_path: "/w/old-dev", path_source: "reported", expected_branch: "dev",
+        status: "ready", error: null, deleted_at: "2026-08-01 00:00:00",
+      },
+    }));
+    await app.register(workflowRunRoutes);
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/checkout/i);
+    expect(proxyMock).not.toHaveBeenCalled();
+  });
+
   it("GET reviewer candidate proxies to the worker and hydrates the mapped reviewer handle", async () => {
     const { remoteSessionMap, upsert } = makeApp();
     await app.register(workflowRunRoutes);

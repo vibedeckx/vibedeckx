@@ -138,23 +138,40 @@ export class NotificationService {
   }
 
   private async importLocalEvent(event: NotificationOutboxEvent): Promise<void> {
+    let projectId = event.project_id;
+    let branch = event.branch;
+    if (event.session_id) {
+      const session = await this.storage.agentSessions.getById(event.session_id);
+      if (session?.workspace_checkout_id) {
+        const reader = this.storage.agentSessions.getActivityById;
+        const projection = typeof reader === "function"
+          ? await reader(event.session_id, "notification")
+          : undefined;
+        if (!projection) {
+          console.warn(`[Notifications] dropping outbox event ${event.id}: session checkout binding is unavailable`);
+          return;
+        }
+        projectId = projection.projectId;
+        branch = projection.branch;
+      }
+    }
     // Ownership is DERIVED from the local project, never taken from the event.
     // An event for a project this server doesn't know has no addressable owner —
     // skip it rather than guessing a tenant, and let the cursor move past it so
     // one orphan can't wedge the drain forever.
-    const ownerId = await this.storage.projects.getOwnerId(event.project_id);
+    const ownerId = await this.storage.projects.getOwnerId(projectId);
     if (ownerId === undefined) {
-      console.warn(`[Notifications] dropping outbox event ${event.id}: project ${event.project_id} not found`);
+      console.warn(`[Notifications] dropping outbox event ${event.id}: project ${projectId} not found`);
       return;
     }
 
-    const notification = await this.buildNotification(event, {
+    const notification = await this.buildNotification({ ...event, branch }, {
       id: event.id,
       // Legacy blank owners are normalized to "local" when storage opens;
       // keep the fallback for compatibility with injected/custom storage.
       userId: ownerId || "local",
       sessionId: event.session_id,
-      projectId: event.project_id,
+      projectId,
       workflowRunId: event.workflow_run_id,
     });
 

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import Database from "better-sqlite3";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Notification, NotificationOutboxEvent, Storage } from "./storage/types.js";
 import { EventBus, type GlobalEvent } from "./event-bus.js";
@@ -64,6 +65,51 @@ describe("NotificationService local drain", () => {
 
     expect((await storage.notifications.listForUser("u1", { limit: 100 })).map((n) => n.id)).toEqual(["a"]);
     expect((await storage.notifications.listForUser("u2", { limit: 100 })).map((n) => n.id)).toEqual(["b"]);
+  });
+
+  it("projects bound session notification ownership from its checkout, including after tombstoning", async () => {
+    await storage.projects.create({ id: "p2", name: "Snapshot", path: "/tmp/p2" }, "u2");
+    const registered = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "actual", targetId: "local",
+      worktreePath: "/tmp/p-actual", expectedBranch: "actual",
+    });
+    await storage.agentSessions.createBound({
+      id: "bound-notification", project_id: "p1", branch: "actual", target_id: "local",
+      checkout_id: registered.checkout.id,
+    });
+    const raw = new Database(path.join(dir, "test.sqlite"));
+    try {
+      raw.prepare("UPDATE agent_sessions SET project_id = ?, branch = ? WHERE id = ?")
+        .run("p2", "wrong", "bound-notification");
+    } finally {
+      raw.close();
+    }
+    await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
+    await storage.notificationOutbox.insert(event({
+      id: "bound-history", project_id: "p2", branch: "wrong", session_id: "bound-notification",
+    }));
+
+    await service.drainLocal();
+
+    expect(await storage.notifications.listForUser("u2", { limit: 100 })).toEqual([]);
+    expect(await storage.notifications.listForUser("u1", { limit: 100 }))
+      .toEqual([expect.objectContaining({ id: "bound-history", project_id: "p1", branch: "actual" })]);
+  });
+
+  it("does not snapshot-fallback a notification whose non-null checkout binding is dangling", async () => {
+    await storage.agentSessions.create({ id: "dangling-notification", project_id: "p1", branch: "dev" });
+    const raw = new Database(path.join(dir, "test.sqlite"));
+    try {
+      raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = ?")
+        .run("missing-checkout", "dangling-notification");
+    } finally {
+      raw.close();
+    }
+    await storage.notificationOutbox.insert(event({ id: "dangling", session_id: "dangling-notification" }));
+
+    await service.drainLocal();
+
+    expect(await storage.notifications.listForUser("u1", { limit: 100 })).toEqual([]);
   });
 
   it("maps a solo-mode empty owner onto the local sentinel", async () => {

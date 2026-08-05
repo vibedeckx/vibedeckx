@@ -370,6 +370,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       model TEXT,
       force INTEGER NOT NULL DEFAULT 0,
       user_id TEXT,
+      operation_kind TEXT NOT NULL DEFAULT 'new' CHECK (operation_kind IN ('new', 'branch')),
+      source_remote_session_id TEXT,
+      up_to_entry_index INTEGER,
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed')),
       error TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
@@ -513,6 +516,17 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!checkoutPathSourceColumns.some((column) => column.name === "path_source")) {
     db.exec("ALTER TABLE workspace_checkouts ADD COLUMN path_source TEXT NOT NULL DEFAULT 'local' CHECK (path_source IN ('local', 'reported', 'conventional'))");
     db.exec("UPDATE workspace_checkouts SET path_source = 'conventional' WHERE target_id <> 'local'");
+  }
+
+  const remoteCreationIntentColumns = db.prepare("PRAGMA table_info(remote_session_creation_intents)").all() as { name: string }[];
+  if (!remoteCreationIntentColumns.some((column) => column.name === "operation_kind")) {
+    db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'new' CHECK (operation_kind IN ('new', 'branch'))");
+  }
+  if (!remoteCreationIntentColumns.some((column) => column.name === "source_remote_session_id")) {
+    db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN source_remote_session_id TEXT");
+  }
+  if (!remoteCreationIntentColumns.some((column) => column.name === "up_to_entry_index")) {
+    db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN up_to_entry_index INTEGER");
   }
 
   const instructionDeliveryCols = db.prepare("PRAGMA table_info(agent_instruction_deliveries)").all() as { name: string }[];
