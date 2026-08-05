@@ -4,6 +4,7 @@ import { mkdir } from "fs/promises";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath, conventionalWorktreePath, getWorktreeBaseForProject, getRegisteredWorktreeBranches, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache } from "../utils/worktree-paths.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
+import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
@@ -40,29 +41,14 @@ async function syncRemoteWorktreeList(
   remote: RemoteConfig,
   data: unknown,
 ): Promise<void> {
-  const worktrees = (data as { worktrees?: Array<{ branch?: string | null; worktreePath?: unknown }> })?.worktrees;
+  const worktrees = (data as { worktrees?: ReportedWorktree[] })?.worktrees;
   if (!Array.isArray(worktrees)) return;
-  for (const worktree of worktrees) {
-    const branch = worktree.branch ?? "";
-    const fallbackPath = branch
-      ? conventionalWorktreePath(remote.remotePath, branch)
-      : remote.remotePath;
-    const existing = await fastify.storage.workspaceRegistry.getByProjectBranch(
-      projectId, branch, remote.serverId,
-    );
-    const reportedPath = typeof worktree.worktreePath === "string" ? worktree.worktreePath : null;
-    if (existing && (!reportedPath
-      || (existing.checkout.path_source === "reported"
-        && existing.checkout.worktree_path === reportedPath))) continue;
-    await fastify.storage.workspaceRegistry.registerReadyCheckout({
-      projectId,
-      branch,
-      targetId: remote.serverId,
-      worktreePath: reportedPath ?? fallbackPath,
-      expectedBranch: branch,
-      pathSource: reportedPath ? "reported" : "conventional",
-    });
-  }
+  await registerReportedWorktrees(fastify.storage, {
+    projectId,
+    targetId: remote.serverId,
+    remotePath: remote.remotePath,
+    worktrees,
+  });
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {

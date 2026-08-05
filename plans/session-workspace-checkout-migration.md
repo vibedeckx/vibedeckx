@@ -214,7 +214,8 @@ project activity、project chat 和 workflow 都通过 checkout/workspace join �
 - [x] 尝试继续墓碑或非 ready checkout 上的 session 时，本地和远程入口返回等价错误。
 - [x] 每一类读取消费者都有 checkout-hit、legacy-fallback、dangling 和 mismatch 指标。
 - [x] 未回填旧行在兼容期仍可用，但不会被当作已绑定行。
-- [ ] 生产样本窗口中所有 legacy fallback 指标归零，且未绑定报告中剩余行均被明确隔离。
+- [x] 启动与 remote 重新上线时自动补 registry 并回填，终端用户无需执行任何数据操作。
+- [ ] 自有部署样本窗口中 legacy fallback 降到只剩明确隔离行（孤儿/歧义），dangling 为 0。
 
 ---
 
@@ -239,7 +240,18 @@ project activity、project chat 和 workflow 都通过 checkout/workspace join �
 - [ ] 新 hub + 旧 worker 组合在外键收紧后仍可工作，其 fallback 绑定也必须先解析到真实 hub checkout ID。
 - [ ] 发布 runbook 包含备份、dry-run、迁移、验证、指标观察和停止条件。
 - [ ] 发布文档明确 Phase 1 后数据库不可回滚到不理解 incarnation schema 的旧版本。
-- [ ] 是否将新列改为 `NOT NULL`、何时停止旧 worker 兼容和何时清理快照字段被记录为独立后续决策。
+- [ ] 何时停止旧 worker 兼容和何时清理快照字段被记录为独立后续决策。
+- [ ] 过渡期代码在旧库退场后一并清理，且清理范围被明确区分：
+  - 删除 `healWorkspaceBindings` / `runWorkspaceBindingBackfill` 及其启动与 remote-online 调用点。
+  - 删除 `workspaceBindingMigration.backfill`；`diagnose` 是否保留单独决定。
+  - 删除 `workspace-binding-metrics.ts` 与仓库层的 `recordWorkspaceBindingRead` 调用——它比回填更贵，
+    每次投影查询都额外跑一条 dangling 计数。
+  - 保留 `registerReportedWorktrees` 和 registry 同步函数：它们是常态功能（外部创建的 worktree 对账、
+    worker 权威路径不被推导路径降级），与迁移无关。
+  - 前提是自有部署的 `unbound*` 只剩已接受的隔离行；因为稳态下自愈已是空转（两条索引查询即返回），
+    清理没有时间压力，不得为赶进度提前删除仍在服役的兼容路径。
+- [x] `workspace_checkout_id` 保持永久 nullable：自托管用户的库无法保证可全绑，legacy 快照 fallback 是长期
+  支持的行为而非临时代码，因此不追求 `NOT NULL`。
 
 ---
 

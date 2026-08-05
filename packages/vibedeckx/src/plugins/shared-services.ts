@@ -19,6 +19,7 @@ import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
 import { RemoteNotificationSync } from "../remote-notification-sync.js";
 import { createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction, recoverPendingRemoteAgentSessions } from "../remote-agent-sessions.js";
+import { formatBackfillSummary, healWorkspaceBindings } from "../workspace-binding-backfill.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -263,6 +264,18 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     }
   }
 
+  /** Worktree listing over the tunnel, used only to populate the hub registry. */
+  const listRemoteWorktrees = async (remoteServerId: string, remotePath: string) => {
+    const result = await proxyToRemoteAuto(
+      remoteServerId,
+      "GET",
+      `/api/path/worktrees?path=${encodeURIComponent(remotePath)}`,
+      undefined,
+      { reverseConnectManager },
+    );
+    return { ok: result.ok, data: result.data };
+  };
+
   reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
     void (async () => {
       await opts.storage.remoteServers.updateStatus(remoteServerId, status);
@@ -281,6 +294,15 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
         if (recovery.attempted > 0) {
           console.log(`[SharedServices] Remote creation recovery for ${remoteServerId}: ${recovery.confirmed}/${recovery.attempted} confirmed`);
         }
+        // A worker that was offline at startup could not report its worktrees,
+        // so its legacy mappings stayed unbound. Heal them now that it is back.
+        const healed = await healWorkspaceBindings(
+          opts.storage,
+          { listRemoteWorktrees },
+          { remoteServerId },
+        );
+        const summary = formatBackfillSummary(`remote ${remoteServerId} reconnect`, healed);
+        if (summary) console.log(summary);
       }
     })().catch(err => {
       console.warn(`[SharedServices] Failed to handle status change for ${remoteServerId}: ${err}`);
@@ -318,6 +340,16 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
       console.log(`[SharedServices] Startup remote creation recovery: ${recovery.confirmed}/${recovery.attempted} confirmed`);
     }
   }).catch((error) => console.warn("[SharedServices] Startup remote creation recovery failed:", error));
+
+  // Self-healing workspace-binding migration (see workspace-binding-backfill).
+  // Deliberately background and time-boxed: an unbound legacy row still works
+  // through the snapshot fallback, so this must never delay serving traffic.
+  void healWorkspaceBindings(opts.storage, { listRemoteWorktrees })
+    .then((result) => {
+      const summary = formatBackfillSummary("startup", result);
+      if (summary) console.log(summary);
+    })
+    .catch((error) => console.warn("[SharedServices] Workspace binding backfill failed:", error));
 
   // Durable notification inbox. Milestone producers (agent sessions, workflow
   // runs) only nudge it; the periodic + startup drains are what make delivery
