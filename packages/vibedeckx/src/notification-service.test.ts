@@ -100,6 +100,9 @@ describe("NotificationService local drain", () => {
     await storage.agentSessions.create({ id: "dangling-notification", project_id: "p1", branch: "dev" });
     const raw = new Database(path.join(dir, "test.sqlite"));
     try {
+      // Only reachable on a restored or not-yet-tightened database, which is
+      // exactly when a milestone must not be attributed from a stale snapshot.
+      raw.pragma("foreign_keys = OFF");
       raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = ?")
         .run("missing-checkout", "dangling-notification");
     } finally {

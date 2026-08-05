@@ -16,8 +16,11 @@
 - Phase 6：代码实施完成。运行路径、session 列表/详情、Project Activity、全局 session 搜索、Project Chat、workflow reviewer
   和本地/远程通知归属已切到 checkout-first 投影；墓碑历史与 legacy/dangling 区分已有测试。branch activity、
   搜索目录构建和 worktree 兼容导入也已停止读取绑定行的快照 project/branch。逐消费者指标可通过 operator-only
-  `/api/admin/workspace-binding-read-stats` 观察；生产样本窗口 fallback 清零仍待发布后验证。Phase 7 尚未开始，
-  FK 收紧必须等待该外部门禁通过。
+  `/api/admin/workspace-binding-read-stats` 观察；生产样本窗口 fallback 清零仍待发布后验证。
+- Phase 7：代码实施完成。预检查、双表重建（外键 `DEFERRABLE INITIALLY DEFERRED`）、索引 DDL 重放、
+  project 依赖删除顺序和发布 runbook 均已落地，并在 hub / worker 真实库副本上演练通过（行数、索引、
+  子表外键、`foreign_key_check` 均一致）。剩余为运营决策：旧 worker 兼容何时停止、快照字段何时清理、
+  过渡期自愈与指标代码何时删除。
 
 ## User stories
 
@@ -231,15 +234,21 @@ project activity、project chat 和 workflow 都通过 checkout/workspace join �
 
 ### Acceptance criteria
 
-- [ ] 收紧前预检查能报告并拒绝存在悬空 checkout ID 的数据库。
-- [ ] 表重建保留所有 session/mapping 字段、行数、ID、时间戳和 NULL 隔离行。
-- [ ] `workspace_checkout_id` 外键在运行时真正启用，不能写入不存在的 checkout ID。
-- [ ] 建立 session 按 checkout+更新时间查询和 mapping 按 checkout 查询的最终索引，兼容期旧索引保留。
-- [ ] 普通 worktree 删除仅写墓碑，不触发外键错误，历史 session 仍可查询。
-- [ ] project 全量删除通过明确的依赖删除顺序成功，不依赖偶然的 cascade 执行顺序。
-- [ ] 新 hub + 旧 worker 组合在外键收紧后仍可工作，其 fallback 绑定也必须先解析到真实 hub checkout ID。
-- [ ] 发布 runbook 包含备份、dry-run、迁移、验证、指标观察和停止条件。
-- [ ] 发布文档明确 Phase 1 后数据库不可回滚到不理解 incarnation schema 的旧版本。
+- [x] 收紧前预检查能报告并拒绝存在悬空 checkout ID 的数据库。拒绝时停留在收紧前 schema 并保持可用，
+  不清空绑定——悬空引用是唯一能证明 session 曾在何处运行的记录。
+- [x] 表重建保留所有 session/mapping 字段、行数、ID、时间戳和 NULL 隔离行。索引 DDL 从 `sqlite_master`
+  捕获后重放，避免硬编码清单漏掉后续新增的索引。
+- [x] `workspace_checkout_id` 外键在运行时真正启用，不能写入不存在的 checkout ID。
+- [x] 建立 session 按 checkout+更新时间查询和 mapping 按 checkout 查询的最终索引，兼容期旧索引保留。
+- [x] 普通 worktree 删除仅写墓碑，不触发外键错误，历史 session 仍可查询。
+- [x] project 全量删除通过明确的依赖删除顺序成功，不依赖偶然的 cascade 执行顺序。
+  `remote_session_mappings` 没有指向 `projects` 的外键，因此必须在同一事务内显式删除，
+  否则它会残留并引用同一语句刚级联删掉的 checkout。外键用 `DEFERRABLE INITIALLY DEFERRED`，
+  使结果只取决于事务终态，而非两条级联路径的执行先后。
+- [x] 新 hub + 旧 worker 组合在外键收紧后仍可工作，其 fallback 绑定也必须先解析到真实 hub checkout ID。
+- [x] 发布 runbook 包含备份、dry-run、迁移、验证、指标观察和停止条件：
+  [`docs/session-workspace-checkout-runbook.md`](../docs/session-workspace-checkout-runbook.md)。
+- [x] 发布文档明确 Phase 1 后数据库不可回滚到不理解 incarnation schema 的旧版本（runbook §0）。
 - [ ] 何时停止旧 worker 兼容和何时清理快照字段被记录为独立后续决策。
 - [ ] 过渡期代码在旧库退场后一并清理，且清理范围被明确区分：
   - 删除 `healWorkspaceBindings` / `runWorkspaceBindingBackfill` 及其启动与 remote-online 调用点。

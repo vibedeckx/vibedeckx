@@ -94,10 +94,36 @@ export const createCoreRepos = (
       return row ? mapProject(row) : undefined;
     },
 
+    /**
+     * Deleting a project cascades down two independent paths: to its sessions,
+     * and to `workspaces` → `workspace_checkouts`. `remote_session_mappings`
+     * sits on neither — it has no key to `projects` — so once a mapping's
+     * checkout is a real foreign key, leaving those rows behind would strand
+     * them against a checkout the same statement just deleted.
+     *
+     * The dependents are therefore removed explicitly, in order, inside one
+     * transaction. The scope check happens first so an unauthorized caller
+     * cannot delete another tenant's mappings on the way to a no-op.
+     */
     delete: async (id, userId) => {
-      let query = kdb.deleteFrom("projects").where("id", "=", id);
-      if (userId) query = query.where("user_id", "=", userId);
-      await query.execute();
+      await kdb.transaction().execute(async (trx) => {
+        let scope = trx.selectFrom("projects").select("id").where("id", "=", id);
+        if (userId) scope = scope.where("user_id", "=", userId);
+        if (!(await scope.executeTakeFirst())) return;
+
+        const mappings = await trx.selectFrom("remote_session_mappings")
+          .select(["remote_server_id", "remote_session_id"])
+          .where("project_id", "=", id)
+          .execute();
+        for (const mapping of mappings) {
+          await trx.deleteFrom("notification_sync_cursors")
+            .where("remote_server_id", "=", mapping.remote_server_id)
+            .where("remote_session_id", "=", mapping.remote_session_id)
+            .execute();
+        }
+        await trx.deleteFrom("remote_session_mappings").where("project_id", "=", id).execute();
+        await trx.deleteFrom("projects").where("id", "=", id).execute();
+      });
     },
 
     // Deliberately unscoped: the notification importer runs without a request

@@ -22,6 +22,150 @@ import { createNotificationRepos } from "./repositories/notifications.js";
 import { createProjectChatRepos } from "./repositories/project-chat.js";
 import { createWorkspaceRegistryRepo } from "./repositories/workspace-registry.js";
 
+/** Rows whose `workspace_checkout_id` points at a checkout that no longer exists. */
+export interface DanglingCheckoutReport {
+  sessions: number;
+  mappings: number;
+}
+
+export const countDanglingCheckoutBindings = (db: BetterSqlite3Database): DanglingCheckoutReport => {
+  const scalar = (sql: string) => Number((db.prepare(sql).get() as { count: number }).count);
+  return {
+    sessions: scalar(`SELECT count(*) AS count FROM agent_sessions s
+      LEFT JOIN workspace_checkouts c ON c.id = s.workspace_checkout_id
+      WHERE s.workspace_checkout_id IS NOT NULL AND c.id IS NULL`),
+    mappings: scalar(`SELECT count(*) AS count FROM remote_session_mappings m
+      LEFT JOIN workspace_checkouts c ON c.id = m.workspace_checkout_id
+      WHERE m.workspace_checkout_id IS NOT NULL AND c.id IS NULL`),
+  };
+};
+
+/**
+ * Phase 7: promote `workspace_checkout_id` from a convention to a real foreign
+ * key on both session tables.
+ *
+ * Three properties this migration must preserve, each of which dictates part of
+ * the shape below:
+ *
+ * 1. **It refuses rather than destroys.** A dangling binding cannot be made
+ *    valid by a schema change, and nulling it would silently discard the only
+ *    record of where a session ran. The preflight reports and leaves the
+ *    database on the pre-FK schema; reads keep working through the legacy
+ *    snapshot fallback either way.
+ * 2. **The new table is built before the old one is dropped.** `ALTER TABLE
+ *    ... RENAME` rewrites REFERENCES clauses in *other* tables, so renaming
+ *    `agent_sessions` out of the way would silently re-point its three child
+ *    tables (entries, instruction deliveries, turn snapshots) at the temporary
+ *    table. Creating the replacement first and renaming it into place leaves
+ *    those children pointing at the name they always referenced.
+ * 3. **The key is deferred.** Deleting a project cascades to `agent_sessions`
+ *    *and*, by a separate path, to `workspaces` → `workspace_checkouts`. With
+ *    an immediate key the outcome would depend on which cascade SQLite happens
+ *    to run first; deferring the check to COMMIT makes it depend only on the
+ *    end state, where both sides are gone.
+ *
+ * `workspace_checkout_id` stays nullable on purpose — see the plan's Phase 7
+ * decision: legacy snapshot fallback is permanently supported, so a row that
+ * cannot be bound is expected, not a defect.
+ */
+const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void => {
+  const ddl = (table: string) => (db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(table) as { sql: string } | undefined)?.sql ?? "";
+  const bound = (table: string) => /REFERENCES\s+workspace_checkouts/i.test(ddl(table));
+  if (bound("agent_sessions") && bound("remote_session_mappings")) return;
+
+  /**
+   * Dropping a table drops its indexes with it, including ones added by later
+   * migration steps this function knows nothing about. Replaying the captured
+   * DDL keeps the rebuild correct as indexes are added over time, instead of
+   * silently losing whichever ones a hard-coded list forgot.
+   */
+  const indexDdl = (table: string) => (db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+  ).all(table) as { sql: string }[]).map((row) => row.sql);
+
+  const dangling = countDanglingCheckoutBindings(db);
+  if (dangling.sessions > 0 || dangling.mappings > 0) {
+    console.warn(
+      "[Storage] Refusing to add the workspace_checkout foreign key: "
+      + `${dangling.sessions} session(s) and ${dangling.mappings} remote mapping(s) reference a checkout that no longer exists. `
+      + "Resolve or clear those bindings, then restart to complete the migration.",
+    );
+    return;
+  }
+
+  const sessionIndexes = indexDdl("agent_sessions");
+  const mappingIndexes = indexDdl("remote_session_mappings");
+
+  db.transaction(() => {
+    if (!bound("agent_sessions")) {
+      db.exec(`
+        CREATE TABLE agent_sessions_fk_new (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          branch TEXT NOT NULL DEFAULT '',
+          workspace_checkout_id TEXT DEFAULT NULL,
+          status TEXT NOT NULL DEFAULT 'running',
+          permission_mode TEXT DEFAULT 'edit',
+          agent_type TEXT DEFAULT 'claude-code',
+          title TEXT DEFAULT NULL,
+          model TEXT DEFAULT NULL,
+          created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+          updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+          activity_at INTEGER DEFAULT (cast((julianday('now') - 2440587.5) * 86400000 as integer)),
+          last_user_message_at INTEGER DEFAULT NULL,
+          last_completed_at INTEGER DEFAULT NULL,
+          favorited_at INTEGER DEFAULT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+          FOREIGN KEY (workspace_checkout_id) REFERENCES workspace_checkouts(id)
+            DEFERRABLE INITIALLY DEFERRED
+        );
+        INSERT INTO agent_sessions_fk_new
+          (id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
+           title, model, created_at, updated_at, activity_at, last_user_message_at,
+           last_completed_at, favorited_at)
+          SELECT id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
+                 title, model, created_at, updated_at, activity_at, last_user_message_at,
+                 last_completed_at, favorited_at
+            FROM agent_sessions;
+        DROP TABLE agent_sessions;
+        ALTER TABLE agent_sessions_fk_new RENAME TO agent_sessions;
+      `);
+      for (const sql of sessionIndexes) db.exec(sql);
+    }
+
+    if (!bound("remote_session_mappings")) {
+      db.exec(`
+        CREATE TABLE remote_session_mappings_fk_new (
+          local_session_id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          remote_server_id TEXT NOT NULL,
+          remote_session_id TEXT NOT NULL,
+          branch TEXT,
+          workspace_checkout_id TEXT DEFAULT NULL,
+          title_resolved INTEGER NOT NULL DEFAULT 0,
+          notification_sync_start TEXT NOT NULL DEFAULT 'from_now',
+          notification_watch_until INTEGER,
+          FOREIGN KEY (workspace_checkout_id) REFERENCES workspace_checkouts(id)
+            DEFERRABLE INITIALLY DEFERRED
+        );
+        INSERT INTO remote_session_mappings_fk_new
+          (local_session_id, project_id, remote_server_id, remote_session_id, branch,
+           workspace_checkout_id, title_resolved, notification_sync_start, notification_watch_until)
+          SELECT local_session_id, project_id, remote_server_id, remote_session_id, branch,
+                 workspace_checkout_id, title_resolved, notification_sync_start, notification_watch_until
+            FROM remote_session_mappings;
+        DROP TABLE remote_session_mappings;
+        ALTER TABLE remote_session_mappings_fk_new RENAME TO remote_session_mappings;
+      `);
+      for (const sql of mappingIndexes) db.exec(sql);
+    }
+  })();
+
+  console.log("[Storage] workspace_checkout foreign keys are now enforced.");
+};
+
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
@@ -1724,6 +1868,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_session_mappings_workspace_checkout
     ON remote_session_mappings(workspace_checkout_id)`);
+
+  tightenWorkspaceCheckoutForeignKeys(db);
 
   // Migration: add written_at to session_search_cache — the timestamp of the
   // last out-of-band write-through (session create/delete/title transiting the

@@ -129,6 +129,10 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dangling" });
       const raw = new Database(dbPath);
       try {
+        // The foreign key makes this unreachable through the app, but not
+        // impossible: a restored backup, or a database that refused to tighten,
+        // still carries dangling bindings. The read path must survive them.
+        raw.pragma("foreign_keys = OFF");
         raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = ?")
           .run("missing-checkout", "dangling");
       } finally {
@@ -303,6 +307,7 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dev" });
       await storage.agentSessions.create({ id: "mismatch", project_id: "p1", branch: "other" });
       const raw = new Database(dbPath);
+      raw.pragma("foreign_keys = OFF"); // simulate a restored/corrupt database
       raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = 'dangling'").run("missing-checkout");
       raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = 'mismatch'").run(checkout.checkout.id);
       raw.close();
@@ -555,6 +560,7 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dev" });
       const raw = new Database(dbPath);
       try {
+        raw.pragma("foreign_keys = OFF"); // simulate a restored/corrupt database
         raw.prepare("UPDATE agent_sessions SET project_id = ?, branch = ? WHERE id = ?")
           .run("snapshot-project", "wrong", "bound");
         raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = ?")
