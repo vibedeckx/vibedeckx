@@ -10,8 +10,8 @@
 - Phase 1：完成。
 - Phase 2：完成。核心写入、运行路径和 fallback/dangling/mismatch 指标均已接入。
 - Phase 3：完成。新旧 hub/worker 的四种协议组合已有契约测试。
-- Phase 4：标准远程创建与 conversation branch 已纳入持久化 saga，registry、mapping 双写和发现入口已完成；
-  workflow reviewer 的派生创建仍待增加可重放的 worker-side saga。
+- Phase 4：完成。标准远程创建、conversation branch 与 workflow reviewer 均纳入持久化 saga，registry、
+  mapping 双写和发现入口已完成；旧 worker 明确成功的 reviewer 响应保留非重放兼容路径。
 - Phase 5：完成。Storage 运维接口支持分批/dry-run 回填、稳定原因码、计数和具体问题记录。
 - Phase 6：代码实施完成。运行路径、session 列表/详情、Project Activity、全局 session 搜索、Project Chat、workflow reviewer
   和本地/远程通知归属已切到 checkout-first 投影；墓碑历史与 legacy/dangling 区分已有测试。branch activity、
@@ -164,7 +164,7 @@ intent 记录跨 hub/worker 步骤，使任一步失败都可以使用同一预�
 - [x] 不同的失败点（worker 拒绝、5xx、传输中断、hub DB 失败、hub 重启）都有可重跑测试。
 - [x] 旧 worker 响应没有 checkout/path 扩展时，新 hub 仍能双写 mapping，并记录兼容 fallback 指标。
 - [x] conversation branch 有可持久化、可重放的 intent，并以同一 source、cutoff 和预分配 session ID 恢复。
-- [ ] workflow reviewer 的派生远程创建有可持久化、可重放的 intent，而非只依赖一次 `/api/path/workflow-runs` 调用。
+- [x] workflow reviewer 的派生远程创建有可持久化、可重放的 intent，并使用预分配 run/reviewer ID 在 worker 上幂等恢复。
 
 ---
 

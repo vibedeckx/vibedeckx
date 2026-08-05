@@ -2,7 +2,7 @@ import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
 import type { AgentMessage } from "./agent-types.js";
-import type { RemoteSessionActivityUpdateResult, RemoteSessionCreationIntent, Storage } from "./storage/types.js";
+import type { RemoteReviewerCreationIntent, RemoteSessionActivityUpdateResult, RemoteSessionCreationIntent, ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
 import type { RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
@@ -41,6 +41,32 @@ export interface CreateRemoteBranchedSessionParams {
   remoteSessionId?: string;
   localSessionId?: string;
 }
+
+export interface CreateRemoteWorkflowReviewerParams {
+  projectId: string;
+  agentMode: string;
+  remotePath: string;
+  branch: string | null;
+  sourceRemoteSessionId: string;
+  reviewFocus?: string;
+  sourceTurnEndIndex?: number;
+  reviewSpan: ReviewSpan;
+  reviewerAgentType: string;
+  intentBrief?: string;
+  userId: string | undefined;
+  remoteRunId?: string;
+  remoteReviewerSessionId?: string;
+  localReviewerSessionId?: string;
+}
+
+export type CreateRemoteWorkflowReviewerResult =
+  | {
+    ok: true;
+    localReviewerSessionId: string;
+    remoteReviewerSessionId: string;
+    remoteRun: WorkflowRun;
+  }
+  | { ok: false; status: number; data: unknown };
 
 export async function bindRemoteSessionMapping(
   storage: Storage,
@@ -374,11 +400,128 @@ export async function createRemoteBranchedSession(
   }
 }
 
+export async function createRemoteWorkflowReviewer(
+  deps: RemoteAgentSessionDeps,
+  params: CreateRemoteWorkflowReviewerParams,
+): Promise<CreateRemoteWorkflowReviewerResult> {
+  const remoteRunId = params.remoteRunId ?? randomUUID();
+  const remoteReviewerSessionId = params.remoteReviewerSessionId ?? randomUUID();
+  const localReviewerSessionId = params.localReviewerSessionId
+    ?? `remote-${params.agentMode}-${params.projectId}-${remoteReviewerSessionId}`;
+  await deps.storage.remoteReviewerCreationIntents.begin({
+    localReviewerSessionId,
+    remoteReviewerSessionId,
+    remoteRunId,
+    projectId: params.projectId,
+    remoteServerId: params.agentMode,
+    branch: params.branch,
+    remotePath: params.remotePath,
+    sourceRemoteSessionId: params.sourceRemoteSessionId,
+    reviewFocus: params.reviewFocus ?? null,
+    sourceTurnEndIndex: params.sourceTurnEndIndex ?? null,
+    reviewSpan: params.reviewSpan,
+    agentType: params.reviewerAgentType,
+    intentBrief: params.intentBrief ?? null,
+    userId: params.userId ?? null,
+  });
+
+  let registeredLocalSessionId: string | null = null;
+  try {
+    const result = await proxyToRemoteAuto(
+      params.agentMode,
+      "POST",
+      "/api/path/workflow-runs",
+      {
+        sourceSessionId: params.sourceRemoteSessionId,
+        reviewFocus: params.reviewFocus,
+        sourceTurnEndIndex: params.sourceTurnEndIndex,
+        reviewSpan: params.reviewSpan,
+        reviewerAgentType: params.reviewerAgentType,
+        intentBrief: params.intentBrief,
+        runId: remoteRunId,
+        newReviewerSessionId: remoteReviewerSessionId,
+      },
+      { reverseConnectManager: deps.reverseConnectManager ?? undefined },
+    );
+    if (!result.ok) {
+      const uncertain = result.errorCode === "network_error" || result.errorCode === "timeout";
+      await (uncertain
+        ? deps.storage.remoteReviewerCreationIntents.recordError(
+          localReviewerSessionId, `worker result unknown: ${result.errorCode}`,
+        )
+        : deps.storage.remoteReviewerCreationIntents.discard(localReviewerSessionId));
+      return { ok: false, status: result.status, data: result.data };
+    }
+
+    const remoteRun = (result.data as { run: WorkflowRun }).run;
+    if (!remoteRun?.reviewer_session_id) {
+      await deps.storage.remoteReviewerCreationIntents.discard(localReviewerSessionId);
+      return {
+        ok: false,
+        status: 409,
+        data: { error: "Remote did not return a reviewer session" },
+      };
+    }
+    const stableIdentity = remoteRun.id === remoteRunId
+      && remoteRun.reviewer_session_id === remoteReviewerSessionId;
+    const effectiveRemoteReviewerSessionId = remoteRun.reviewer_session_id;
+    const effectiveLocalReviewerSessionId = stableIdentity
+      ? localReviewerSessionId
+      : `remote-${params.agentMode}-${params.projectId}-${effectiveRemoteReviewerSessionId}`;
+    if (!stableIdentity) {
+      // Additive rolling compatibility: an old worker ignores the two stable
+      // IDs but can still create a valid reviewer. Its acknowledged result is
+      // usable, just not replay-safe; remove the preallocated intent so a later
+      // sweep cannot manufacture a second reviewer from a request the old
+      // worker cannot deduplicate.
+      await deps.storage.remoteReviewerCreationIntents.discard(localReviewerSessionId);
+    }
+
+    registeredLocalSessionId = effectiveLocalReviewerSessionId;
+    deps.remoteSessionMap.set(effectiveLocalReviewerSessionId, {
+      remoteServerId: params.agentMode,
+      remoteSessionId: effectiveRemoteReviewerSessionId,
+      branch: remoteRun.branch,
+    });
+    await bindRemoteSessionMapping(deps.storage, {
+      localSessionId: effectiveLocalReviewerSessionId,
+      projectId: params.projectId,
+      remoteServerId: params.agentMode,
+      remoteSessionId: effectiveRemoteReviewerSessionId,
+      branch: remoteRun.branch,
+      remotePath: params.remotePath,
+      notificationSyncStart: "from_start",
+      mappingRepo: deps.remoteSessionMappings,
+    });
+    await deps.remoteSessionMappings.markTitleResolved(effectiveLocalReviewerSessionId);
+    deps.agentSessionManager.markTitleResolved(effectiveLocalReviewerSessionId);
+    await deps.remoteSessionMappings.extendNotificationWatch(
+      effectiveLocalReviewerSessionId, Date.now() + NOTIFICATION_WATCH_WINDOW_MS,
+    );
+    if (stableIdentity) {
+      await deps.storage.remoteReviewerCreationIntents.confirm(localReviewerSessionId);
+    }
+    return {
+      ok: true,
+      localReviewerSessionId: effectiveLocalReviewerSessionId,
+      remoteReviewerSessionId: effectiveRemoteReviewerSessionId,
+      remoteRun,
+    };
+  } catch (error) {
+    deps.remoteSessionMap.delete(registeredLocalSessionId ?? localReviewerSessionId);
+    await deps.storage.remoteReviewerCreationIntents.recordError(
+      localReviewerSessionId, error instanceof Error ? error.message : String(error),
+    ).catch((intentError) => console.warn("[RemoteSession] Failed to record reviewer intent error:", intentError));
+    throw error;
+  }
+}
+
 export async function recoverPendingRemoteAgentSessions(
   deps: RemoteAgentSessionDeps,
   remoteServerId?: string,
 ): Promise<{ attempted: number; confirmed: number; failed: number }> {
   const pending = await deps.storage.remoteSessionCreationIntents.listPending(remoteServerId);
+  const pendingReviewers = await deps.storage.remoteReviewerCreationIntents.listPending(remoteServerId);
   let confirmed = 0;
   let failed = 0;
   for (const intent of pending) {
@@ -386,7 +529,12 @@ export async function recoverPendingRemoteAgentSessions(
     if (outcome === "confirmed") confirmed++;
     else failed++;
   }
-  return { attempted: pending.length, confirmed, failed };
+  for (const intent of pendingReviewers) {
+    const outcome = await recoverPendingRemoteReviewerOnce(deps, intent);
+    if (outcome === "confirmed") confirmed++;
+    else failed++;
+  }
+  return { attempted: pending.length + pendingReviewers.length, confirmed, failed };
 }
 
 type PendingRecoveryOutcome = "confirmed" | "failed";
@@ -469,6 +617,72 @@ function recoverPendingRemoteAgentSessionOnce(
   flights.set(intent.local_session_id, flight);
   const clearFlight = () => {
     if (flights?.get(intent.local_session_id) === flight) flights.delete(intent.local_session_id);
+  };
+  void flight.then(clearFlight, clearFlight);
+  return flight;
+}
+
+const pendingReviewerRecoveryFlights = new WeakMap<Storage, Map<string, Promise<PendingRecoveryOutcome>>>();
+
+function recoverPendingRemoteReviewerOnce(
+  deps: RemoteAgentSessionDeps,
+  intent: RemoteReviewerCreationIntent,
+): Promise<PendingRecoveryOutcome> {
+  let flights = pendingReviewerRecoveryFlights.get(deps.storage);
+  if (!flights) {
+    flights = new Map();
+    pendingReviewerRecoveryFlights.set(deps.storage, flights);
+  }
+  const key = intent.local_reviewer_session_id;
+  const existingFlight = flights.get(key);
+  if (existingFlight) return existingFlight;
+
+  const flight = (async (): Promise<PendingRecoveryOutcome> => {
+    const association = await deps.storage.projectRemotes.getByProjectAndServer(
+      intent.project_id, intent.remote_server_id,
+    );
+    if (!association) {
+      await deps.storage.remoteReviewerCreationIntents.recordError(
+        key, "remote workspace association no longer exists",
+      );
+      return "failed";
+    }
+    const mapped = await deps.remoteSessionMappings.getByLocal(key);
+    if (mapped?.workspace_checkout_id
+      && mapped.project_id === intent.project_id
+      && mapped.remote_server_id === intent.remote_server_id
+      && mapped.remote_session_id === intent.remote_reviewer_session_id
+      && (mapped.branch ?? "") === (intent.branch ?? "")) {
+      await deps.storage.remoteReviewerCreationIntents.confirm(key);
+      return "confirmed";
+    }
+
+    try {
+      const result = await createRemoteWorkflowReviewer(deps, {
+        projectId: intent.project_id,
+        agentMode: intent.remote_server_id,
+        remotePath: intent.remote_path,
+        branch: intent.branch,
+        sourceRemoteSessionId: intent.source_remote_session_id,
+        reviewFocus: intent.review_focus ?? undefined,
+        sourceTurnEndIndex: intent.source_turn_end_index ?? undefined,
+        reviewSpan: intent.review_span,
+        reviewerAgentType: intent.agent_type,
+        intentBrief: intent.intent_brief ?? undefined,
+        userId: intent.user_id ?? undefined,
+        remoteRunId: intent.remote_run_id,
+        remoteReviewerSessionId: intent.remote_reviewer_session_id,
+        localReviewerSessionId: key,
+      });
+      return result.ok ? "confirmed" : "failed";
+    } catch (error) {
+      console.warn(`[RemoteSession] Pending reviewer recovery failed for ${key}:`, error);
+      return "failed";
+    }
+  })();
+  flights.set(key, flight);
+  const clearFlight = () => {
+    if (flights?.get(key) === flight) flights.delete(key);
   };
   void flight.then(clearFlight, clearFlight);
   return flight;

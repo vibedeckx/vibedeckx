@@ -357,6 +357,28 @@ describe("workflow-run-routes", () => {
     });
   });
 
+  it("path POST forwards preallocated workflow and fresh reviewer identities", async () => {
+    const startMock = vi.fn(async () => ({ ...run, id: "stable-run", reviewer_session_id: "stable-reviewer" }));
+    const app = makeApp({ engine: { startAdhocReview: startMock } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "POST", url: "/api/path/workflow-runs",
+      payload: {
+        sourceSessionId: "s-src",
+        runId: "stable-run",
+        newReviewerSessionId: "stable-reviewer",
+        reviewerAgentType: "codex",
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(startMock).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "stable-run",
+      newReviewerSessionId: "stable-reviewer",
+      reviewerAgentType: "codex",
+    }));
+  });
+
   it("path routes support reviewer candidate lookup and reuse", async () => {
     const getReviewerCandidate = vi.fn(async () => ({
       available: true, sessionId: "s-rev", title: null, agentType: "codex", reason: null,

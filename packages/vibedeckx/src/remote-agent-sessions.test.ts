@@ -19,6 +19,7 @@ vi.mock("./utils/remote-proxy.js", () => ({
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
 import {
   connectPersistentRemoteWs, createRemoteAgentSession, createRemoteBranchedSession, createRemoteProjectChatSessionWithInstruction,
+  createRemoteWorkflowReviewer,
   bindRemoteSessionMapping, entryPatchFrames, isEntryPatchFrame, recoverPendingRemoteAgentSessions,
   type RemoteAgentSessionDeps,
 } from "./remote-agent-sessions.js";
@@ -594,6 +595,123 @@ describe("createRemoteAgentSession", () => {
       expect.objectContaining({ sessionId: identity.remoteSessionId, agentType: "codex", upToEntryIndex: 0 }),
     ]);
     expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+  });
+
+  it("recovers a workflow reviewer with the same run and reviewer identities", async () => {
+    proxyToRemoteAuto.mockImplementation(async (...args: unknown[]) => {
+      const body = args[3] as { runId: string; newReviewerSessionId: string };
+      return {
+        ok: true,
+        status: 201,
+        data: {
+          run: {
+            id: body.runId,
+            project_id: "worker-project",
+            branch: "main",
+            source_session_id: "worker-source",
+            source_turn_end_index: 4,
+            reviewer_session_id: body.newReviewerSessionId,
+            review_focus: "tests",
+            review_target: null,
+            review_span: "this_turn",
+            feedback_snapshot: null,
+            status: "waiting_reviewer",
+            error: null,
+            created_at: "",
+            updated_at: "",
+          },
+        },
+      };
+    });
+    upsert.mockRejectedValueOnce(new Error("hub stopped before reviewer mapping"));
+    const reviewerParams = {
+      projectId,
+      agentMode,
+      remotePath: "/remote/path",
+      branch: "main",
+      sourceRemoteSessionId: "worker-source",
+      reviewFocus: "tests",
+      sourceTurnEndIndex: 4,
+      reviewSpan: "this_turn" as const,
+      reviewerAgentType: "codex",
+      intentBrief: "brief",
+      userId: "user-1",
+      remoteRunId: "worker-run",
+      remoteReviewerSessionId: "worker-reviewer",
+      localReviewerSessionId: "front-reviewer",
+    };
+
+    await expect(createRemoteWorkflowReviewer(makeDeps(), reviewerParams))
+      .rejects.toThrow("hub stopped before reviewer mapping");
+    expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([
+      expect.objectContaining({
+        remote_run_id: "worker-run",
+        remote_reviewer_session_id: "worker-reviewer",
+        source_remote_session_id: "worker-source",
+      }),
+    ]);
+
+    vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
+      project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path",
+      sort_order: 0, sync_up_config: null, sync_down_config: null,
+    });
+    const recovery = await recoverPendingRemoteAgentSessions(makeDeps(), agentMode);
+
+    expect(recovery).toEqual({ attempted: 1, confirmed: 1, failed: 0 });
+    expect(proxyToRemoteAuto.mock.calls.map((call) => call[2])).toEqual([
+      "/api/path/workflow-runs", "/api/path/workflow-runs",
+    ]);
+    expect(proxyToRemoteAuto.mock.calls.map((call) => call[3])).toEqual([
+      expect.objectContaining({ runId: "worker-run", newReviewerSessionId: "worker-reviewer" }),
+      expect.objectContaining({ runId: "worker-run", newReviewerSessionId: "worker-reviewer" }),
+    ]);
+    expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([]);
+  });
+
+  it("accepts an acknowledged old-worker reviewer response but does not leave it replayable", async () => {
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 201,
+      data: {
+        run: {
+          id: "legacy-run",
+          project_id: "worker-project",
+          branch: "main",
+          source_session_id: "worker-source",
+          source_turn_end_index: 4,
+          reviewer_session_id: "legacy-reviewer",
+          review_focus: null,
+          review_target: null,
+          review_span: "this_turn",
+          feedback_snapshot: null,
+          status: "waiting_reviewer",
+          error: null,
+          created_at: "",
+          updated_at: "",
+        },
+      },
+    });
+
+    const result = await createRemoteWorkflowReviewer(makeDeps(), {
+      projectId,
+      agentMode,
+      remotePath: "/remote/path",
+      branch: "main",
+      sourceRemoteSessionId: "worker-source",
+      reviewSpan: "this_turn",
+      reviewerAgentType: "claude-code",
+      userId: "user-1",
+      remoteRunId: "requested-run",
+      remoteReviewerSessionId: "requested-reviewer",
+      localReviewerSessionId: "requested-local-reviewer",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      localReviewerSessionId: `remote-${agentMode}-${projectId}-legacy-reviewer`,
+      remoteReviewerSessionId: "legacy-reviewer",
+    });
+    expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([]);
   });
 
   it("coalesces concurrent startup and online recovery sweeps for the same intent", async () => {

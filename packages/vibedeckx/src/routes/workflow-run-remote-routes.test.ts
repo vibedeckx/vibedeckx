@@ -2,9 +2,34 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { RemoteSessionActivityUpdateResult } from "../storage/types.js";
 
-const { proxyMock, ensureStreamMock } = vi.hoisted(() => ({
+const { proxyMock, ensureStreamMock, reviewerCreateMock } = vi.hoisted(() => ({
   proxyMock: vi.fn(),
   ensureStreamMock: vi.fn(),
+  reviewerCreateMock: vi.fn(async (_deps: unknown, params: Record<string, unknown>) => {
+    const result = await proxyMock(
+      params.agentMode,
+      "POST",
+      "/api/path/workflow-runs",
+      {
+        sourceSessionId: params.sourceRemoteSessionId,
+        reviewFocus: params.reviewFocus,
+        sourceTurnEndIndex: params.sourceTurnEndIndex,
+        reviewSpan: params.reviewSpan,
+        reviewerAgentType: params.reviewerAgentType,
+        intentBrief: params.intentBrief,
+        runId: "run1",
+        newReviewerSessionId: "rev1",
+      },
+    );
+    if (!result.ok) return result;
+    const remoteRun = (result.data as { run: Record<string, unknown> }).run;
+    return {
+      ok: true,
+      localReviewerSessionId: "remote-srv1-p1-rev1",
+      remoteReviewerSessionId: "rev1",
+      remoteRun,
+    };
+  }),
 }));
 vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -13,6 +38,7 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
 vi.mock("../remote-agent-sessions.js", async (importOriginal) => ({
   ...(await importOriginal()) as Record<string, unknown>,
   ensureRemoteAgentStream: ensureStreamMock,
+  createRemoteWorkflowReviewer: reviewerCreateMock,
 }));
 vi.mock("../utils/review-brief.js", () => ({
   generateIntentBrief: vi.fn(async () => "distilled brief"),

@@ -19,7 +19,7 @@ export interface AgentOps {
     agentType?: string,
     announceRunning?: boolean,
     force?: boolean,
-    opts?: { startSnapshot?: SnapshotState | null },
+    opts?: { startSnapshot?: SnapshotState | null; sessionId?: string },
   ): Promise<string>;
   sendUserMessage(
     sessionId: string,
@@ -572,15 +572,45 @@ export class WorkflowEngine {
     reviewerSessionId?: string;
     /** Agent that runs the review; defaults to claude-code. */
     reviewerAgentType?: AgentType;
+    /** Stable identities supplied by a hub durable-intent replay. */
+    runId?: string;
+    newReviewerSessionId?: string;
   }): Promise<WorkflowRun> {
     if (opts.reviewerSessionId === opts.sourceSessionId) {
       throw new WorkflowError("reviewer-unavailable", "reviewer session 不能与 source session 相同");
     }
-    const runId = randomUUID();
-    const participantIds = [opts.sourceSessionId, opts.reviewerSessionId]
+    if (opts.reviewerSessionId && opts.newReviewerSessionId) {
+      throw new WorkflowError("reviewer-unavailable", "不能同时复用和新建 reviewer session");
+    }
+    const runId = opts.runId ?? randomUUID();
+    const existingRun = opts.runId
+      ? await this.storage.workflowRuns.getById(runId)
+      : undefined;
+    if (existingRun) {
+      const sameRequest = existingRun.project_id === opts.project.id
+        && existingRun.branch === opts.branch
+        && existingRun.source_session_id === opts.sourceSessionId
+        && existingRun.review_focus === (opts.reviewFocus ?? null)
+        && existingRun.review_span === (opts.reviewSpan ?? "this_turn");
+      if (!sameRequest) {
+        throw new WorkflowError("reviewer-unavailable", "workflow run identity is already in use");
+      }
+      if (existingRun.reviewer_session_id) {
+        if (opts.newReviewerSessionId
+          && existingRun.reviewer_session_id !== opts.newReviewerSessionId) {
+          throw new WorkflowError("reviewer-unavailable", "reviewer session identity is already in use");
+        }
+        return existingRun;
+      }
+      if (existingRun.status !== "waiting_reviewer") {
+        throw new WorkflowError("bad-state", "workflow run 已终止，不能作为未知创建结果重放");
+      }
+    }
+    const participantIds = [opts.sourceSessionId, opts.reviewerSessionId, opts.newReviewerSessionId]
       .filter((id): id is string => Boolean(id));
     for (const sessionId of participantIds) {
-      if (this.participants.has(sessionId)) {
+      const participant = this.participants.get(sessionId);
+      if (participant && participant.runId !== runId) {
         throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
       }
     }
@@ -591,10 +621,14 @@ export class WorkflowEngine {
     if (opts.reviewerSessionId) {
       this.participants.set(opts.reviewerSessionId, { runId, role: "reviewer" });
     }
+    if (opts.newReviewerSessionId) {
+      this.participants.set(opts.newReviewerSessionId, { runId, role: "reviewer" });
+    }
 
     try {
       for (const sessionId of participantIds) {
-        if (await this.storage.workflowRuns.getActiveBySession(sessionId)) {
+        const active = await this.storage.workflowRuns.getActiveBySession(sessionId);
+        if (active && active.id !== runId) {
           throw new WorkflowError("session-busy", "该 session 已在一个进行中的 review 里");
         }
       }
@@ -651,17 +685,20 @@ export class WorkflowEngine {
         }
       }
 
-      const run = await this.storage.workflowRuns.create({
-        id: runId,
-        project_id: opts.project.id,
-        branch: opts.branch,
-        source_session_id: opts.sourceSessionId,
-        source_turn_end_index: turnEndIndex,
-        review_focus: opts.reviewFocus ?? null,
-        review_target: JSON.stringify(target),
-        reviewer_session_id: opts.reviewerSessionId ?? null,
-        review_span: opts.reviewSpan ?? "this_turn",
-      });
+      if (existingRun && existingRun.source_turn_end_index !== turnEndIndex) {
+        throw new WorkflowError("reviewer-unavailable", "workflow run cutoff does not match the replay request");
+      }
+      const run = existingRun ?? await this.storage.workflowRuns.create({
+          id: runId,
+          project_id: opts.project.id,
+          branch: opts.branch,
+          source_session_id: opts.sourceSessionId,
+          source_turn_end_index: turnEndIndex,
+          review_focus: opts.reviewFocus ?? null,
+          review_target: JSON.stringify(target),
+          reviewer_session_id: opts.reviewerSessionId ?? null,
+          review_span: opts.reviewSpan ?? "this_turn",
+        });
       this.trackParticipants(run);
 
       if (opts.reviewerSessionId && reviewerSession) {
@@ -717,7 +754,10 @@ export class WorkflowEngine {
         // hand it over rather than walking the worktree a second time.
         const reviewerId = await this.agentOps.createNewSession(
           opts.project.id, opts.branch, opts.project.path, false, "plan", opts.reviewerAgentType ?? "claude-code", true,
-          false, { startSnapshot: endSnap },
+          false, {
+            startSnapshot: endSnap,
+            ...(opts.newReviewerSessionId ? { sessionId: opts.newReviewerSessionId } : {}),
+          },
         );
         const taskContext = extractTaskContextBefore(entries, turnEndIndex);
         // Deterministic "Review - <source title>" (same pattern as Branch
@@ -757,7 +797,7 @@ export class WorkflowEngine {
         throw new WorkflowError("spawn-failed", "创建 reviewer session 失败");
       }
     } catch (err) {
-      this.releaseReservations(runId);
+      if (!existingRun) this.releaseReservations(runId);
       throw err;
     }
   }

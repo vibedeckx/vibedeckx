@@ -496,6 +496,82 @@ describe("WorkflowEngine", () => {
       .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
   });
 
+  it("replays preallocated workflow and reviewer identities without spawning twice", async () => {
+    agentOps.createNewSession.mockImplementationOnce(async (...args: unknown[]) =>
+      ((args[8] as { sessionId?: string }).sessionId ?? "unexpected"));
+    const request = {
+      project,
+      branch: "dev" as const,
+      sourceSessionId: "s-src",
+      reviewFocus: "focus on tests",
+      runId: "durable-run",
+      newReviewerSessionId: "durable-reviewer",
+    };
+
+    const first = await engine.startAdhocReview(request);
+    const replay = await engine.startAdhocReview(request);
+
+    expect(first).toMatchObject({ id: "durable-run", reviewer_session_id: "durable-reviewer" });
+    expect(replay).toEqual(first);
+    expect(agentOps.createNewSession).toHaveBeenCalledTimes(1);
+    expect(agentOps.createNewSession.mock.calls[0]?.[8]).toMatchObject({
+      sessionId: "durable-reviewer",
+    });
+    expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes a durable run left between run creation and reviewer binding", async () => {
+    await storage.workflowRuns.create({
+      id: "interrupted-run",
+      project_id: "p1",
+      branch: "dev",
+      source_session_id: "s-src",
+      source_turn_end_index: 4,
+      review_focus: "focus on tests",
+      review_target: null,
+      review_span: "this_turn",
+    });
+    agentOps.createNewSession.mockImplementationOnce(async (...args: unknown[]) =>
+      ((args[8] as { sessionId?: string }).sessionId ?? "unexpected"));
+
+    const resumed = await engine.startAdhocReview({
+      project,
+      branch: "dev",
+      sourceSessionId: "s-src",
+      reviewFocus: "focus on tests",
+      runId: "interrupted-run",
+      newReviewerSessionId: "interrupted-reviewer",
+    });
+
+    expect(resumed).toMatchObject({
+      id: "interrupted-run", reviewer_session_id: "interrupted-reviewer", status: "waiting_reviewer",
+    });
+    expect(agentOps.createNewSession).toHaveBeenCalledTimes(1);
+    expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not revive a terminal preallocated workflow run", async () => {
+    const failed = await storage.workflowRuns.create({
+      id: "failed-run",
+      project_id: "p1",
+      branch: "dev",
+      source_session_id: "s-src",
+      source_turn_end_index: 4,
+      review_focus: null,
+      review_target: null,
+    });
+    await storage.workflowRuns.update(failed.id, { status: "failed", error: "explicit failure" });
+
+    await expect(engine.startAdhocReview({
+      project,
+      branch: "dev",
+      sourceSessionId: "s-src",
+      runId: "failed-run",
+      newReviewerSessionId: "failed-reviewer",
+    })).rejects.toMatchObject({ code: "bad-state" });
+    expect(agentOps.createNewSession).not.toHaveBeenCalled();
+  });
+
   it("uses checkout ownership when source compatibility snapshots disagree", async () => {
     await storage.projects.create({ id: "snapshot-project", name: "snapshot", path: "/tmp/snapshot" });
     const registered = await storage.workspaceRegistry.registerReadyCheckout({

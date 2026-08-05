@@ -364,6 +364,52 @@ describe("agentSessions/remoteSessionMappings storage", () => {
     });
   });
 
+  describe("remote reviewer creation intents", () => {
+    const intent = {
+      localReviewerSessionId: "local-reviewer",
+      remoteReviewerSessionId: "worker-reviewer",
+      remoteRunId: "worker-run",
+      projectId: "p1",
+      remoteServerId: "remote-a",
+      branch: "dev",
+      remotePath: "/remote/p",
+      sourceRemoteSessionId: "worker-source",
+      reviewFocus: "tests",
+      sourceTurnEndIndex: 4,
+      reviewSpan: "this_turn" as const,
+      agentType: "codex",
+      intentBrief: "brief",
+      userId: "user-1",
+    };
+
+    it("persists the complete replay identity and confirms idempotently", async () => {
+      const first = await storage.remoteReviewerCreationIntents.begin(intent);
+      const replay = await storage.remoteReviewerCreationIntents.begin(intent);
+      expect(first).toMatchObject({
+        local_reviewer_session_id: "local-reviewer",
+        remote_reviewer_session_id: "worker-reviewer",
+        remote_run_id: "worker-run",
+        source_remote_session_id: "worker-source",
+        source_turn_end_index: 4,
+        status: "pending",
+      });
+      expect(replay).toEqual(first);
+
+      await storage.remoteReviewerCreationIntents.recordError("local-reviewer", "response lost");
+      expect(await storage.remoteReviewerCreationIntents.listPending("remote-a"))
+        .toEqual([expect.objectContaining({ error: "response lost" })]);
+      await storage.remoteReviewerCreationIntents.confirm("local-reviewer");
+      expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([]);
+    });
+
+    it("rejects conflicting replay payloads", async () => {
+      await storage.remoteReviewerCreationIntents.begin(intent);
+      await expect(storage.remoteReviewerCreationIntents.begin({
+        ...intent, sourceTurnEndIndex: 8,
+      })).rejects.toThrow("conflicting identity");
+    });
+  });
+
   it("keeps the same project/branch isolated across remote targets", async () => {
     const a = await storage.workspaceRegistry.registerReadyCheckout({
       projectId: "p1", branch: "shared", targetId: "remote-a",

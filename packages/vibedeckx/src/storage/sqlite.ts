@@ -384,6 +384,33 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE INDEX IF NOT EXISTS idx_remote_session_creation_intents_pending
       ON remote_session_creation_intents(status, remote_server_id, updated_at);
 
+    CREATE TABLE IF NOT EXISTS remote_reviewer_creation_intents (
+      local_reviewer_session_id TEXT PRIMARY KEY,
+      remote_reviewer_session_id TEXT NOT NULL,
+      remote_run_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      remote_server_id TEXT NOT NULL,
+      branch TEXT,
+      remote_path TEXT NOT NULL,
+      source_remote_session_id TEXT NOT NULL,
+      review_focus TEXT,
+      source_turn_end_index INTEGER,
+      review_span TEXT NOT NULL CHECK (review_span IN ('this_turn', 'session_start')),
+      agent_type TEXT NOT NULL,
+      intent_brief TEXT,
+      user_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed')),
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      UNIQUE(remote_server_id, remote_reviewer_session_id),
+      UNIQUE(remote_server_id, remote_run_id),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_remote_reviewer_creation_intents_pending
+      ON remote_reviewer_creation_intents(status, remote_server_id, updated_at);
+
     -- Audit trail for cross-remote MCP gateway calls (one remote diagnosing
     -- another through the server-side gateway). No FK to remote_servers:
     -- audit rows must outlive deletion of the remote they describe. seq is

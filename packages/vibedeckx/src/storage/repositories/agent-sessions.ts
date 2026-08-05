@@ -1,5 +1,5 @@
 import { sql, type Kysely, type Selectable } from "kysely";
-import type { DB, AgentSessionsTable, RemoteSessionMappingsTable, RemoteSessionCreationIntentsTable } from "../schema.js";
+import type { DB, AgentSessionsTable, RemoteSessionMappingsTable, RemoteSessionCreationIntentsTable, RemoteReviewerCreationIntentsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type {
   Storage,
@@ -10,6 +10,7 @@ import type {
   RemoteSessionMapping,
   WorkspaceCheckoutRecord,
   RemoteSessionCreationIntent,
+  RemoteReviewerCreationIntent,
   WorkspaceBindingIssue,
   WorkspaceBindingIssueReason,
 } from "../types.js";
@@ -355,6 +356,14 @@ const mapRemoteCreationIntent = (
   updated_at: row.updated_at,
 });
 
+const mapRemoteReviewerCreationIntent = (
+  row: Selectable<RemoteReviewerCreationIntentsTable>,
+): RemoteReviewerCreationIntent => ({
+  ...row,
+  review_span: row.review_span as "this_turn" | "session_start",
+  status: row.status as "pending" | "confirmed",
+});
+
 const nowActivityAt = () => sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`;
 const touchActivityAt = () => sql<number>`max(activity_at, ${nowActivityAt()})`;
 
@@ -417,7 +426,7 @@ const classifyUnboundCheckout = async (
 export const createAgentSessionRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
-): Pick<Storage, "agentSessions" | "agentInstructionDeliveries" | "remoteSessionMappings" | "remoteSessionCreationIntents" | "workspaceBindingMigration"> => ({
+): Pick<Storage, "agentSessions" | "agentInstructionDeliveries" | "remoteSessionMappings" | "remoteSessionCreationIntents" | "remoteReviewerCreationIntents" | "workspaceBindingMigration"> => ({
   agentSessions: {
     // Millisecond-precision timestamps (h.nowMs()) are set explicitly here
     // (and in the UPDATE statements below) so existing databases whose
@@ -1102,6 +1111,78 @@ export const createAgentSessionRepos = (
       if (remoteServerId) query = query.where("remote_server_id", "=", remoteServerId);
       return (await query.orderBy("updated_at", "asc").orderBy("local_session_id", "asc").execute())
         .map(mapRemoteCreationIntent);
+    },
+  },
+
+  remoteReviewerCreationIntents: {
+    begin: async (intent) => kdb.transaction().execute(async (trx) => {
+      await trx.insertInto("remote_reviewer_creation_intents").values({
+        local_reviewer_session_id: intent.localReviewerSessionId,
+        remote_reviewer_session_id: intent.remoteReviewerSessionId,
+        remote_run_id: intent.remoteRunId,
+        project_id: intent.projectId,
+        remote_server_id: intent.remoteServerId,
+        branch: intent.branch,
+        remote_path: intent.remotePath,
+        source_remote_session_id: intent.sourceRemoteSessionId,
+        review_focus: intent.reviewFocus ?? null,
+        source_turn_end_index: intent.sourceTurnEndIndex ?? null,
+        review_span: intent.reviewSpan,
+        agent_type: intent.agentType,
+        intent_brief: intent.intentBrief ?? null,
+        user_id: intent.userId ?? null,
+        status: "pending",
+        error: null,
+        created_at: h.nowMs(),
+        updated_at: h.nowMs(),
+      }).onConflict((oc) => oc.column("local_reviewer_session_id").doNothing()).execute();
+      const row = await trx.selectFrom("remote_reviewer_creation_intents").selectAll()
+        .where("local_reviewer_session_id", "=", intent.localReviewerSessionId)
+        .executeTakeFirstOrThrow();
+      const sameIdentity = row.remote_reviewer_session_id === intent.remoteReviewerSessionId
+        && row.remote_run_id === intent.remoteRunId
+        && row.project_id === intent.projectId
+        && row.remote_server_id === intent.remoteServerId
+        && (row.branch ?? "") === (intent.branch ?? "")
+        && row.remote_path === intent.remotePath
+        && row.source_remote_session_id === intent.sourceRemoteSessionId
+        && row.review_focus === (intent.reviewFocus ?? null)
+        && row.source_turn_end_index === (intent.sourceTurnEndIndex ?? null)
+        && row.review_span === intent.reviewSpan
+        && row.agent_type === intent.agentType
+        && row.intent_brief === (intent.intentBrief ?? null)
+        && row.user_id === (intent.userId ?? null);
+      if (!sameIdentity) {
+        throw new Error(`Remote reviewer creation intent ${intent.localReviewerSessionId} has conflicting identity`);
+      }
+      return mapRemoteReviewerCreationIntent(row);
+    }),
+
+    confirm: async (localReviewerSessionId) => {
+      await kdb.updateTable("remote_reviewer_creation_intents")
+        .set({ status: "confirmed", error: null, updated_at: h.nowMs() })
+        .where("local_reviewer_session_id", "=", localReviewerSessionId).execute();
+    },
+
+    discard: async (localReviewerSessionId) => {
+      await kdb.deleteFrom("remote_reviewer_creation_intents")
+        .where("local_reviewer_session_id", "=", localReviewerSessionId).execute();
+    },
+
+    recordError: async (localReviewerSessionId, error) => {
+      await kdb.updateTable("remote_reviewer_creation_intents")
+        .set({ error, updated_at: h.nowMs() })
+        .where("local_reviewer_session_id", "=", localReviewerSessionId)
+        .where("status", "=", "pending").execute();
+    },
+
+    listPending: async (remoteServerId) => {
+      let query = kdb.selectFrom("remote_reviewer_creation_intents").selectAll()
+        .where("status", "=", "pending");
+      if (remoteServerId) query = query.where("remote_server_id", "=", remoteServerId);
+      return (await query.orderBy("updated_at", "asc")
+        .orderBy("local_reviewer_session_id", "asc").execute())
+        .map(mapRemoteReviewerCreationIntent);
     },
   },
 

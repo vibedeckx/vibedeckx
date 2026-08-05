@@ -349,6 +349,27 @@ export interface RemoteSessionCreationIntentsTable {
   updated_at: Generated<string>;
 }
 
+export interface RemoteReviewerCreationIntentsTable {
+  local_reviewer_session_id: string;
+  remote_reviewer_session_id: string;
+  remote_run_id: string;
+  project_id: string;
+  remote_server_id: string;
+  branch: string | null;
+  remote_path: string;
+  source_remote_session_id: string;
+  review_focus: string | null;
+  source_turn_end_index: number | null;
+  review_span: string;
+  agent_type: string;
+  intent_brief: string | null;
+  user_id: string | null;
+  status: Generated<string>;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface NotificationOutboxTable {
   seq: Generated<number>;
   id: string;
@@ -541,6 +562,7 @@ export interface DB {
   project_remotes: ProjectRemotesTable;
   remote_session_mappings: RemoteSessionMappingsTable;
   remote_session_creation_intents: RemoteSessionCreationIntentsTable;
+  remote_reviewer_creation_intents: RemoteReviewerCreationIntentsTable;
   notification_outbox: NotificationOutboxTable;
   notifications: NotificationsTable;
   notification_sync_cursors: NotificationSyncCursorsTable;

@@ -512,6 +512,27 @@ export interface RemoteSessionCreationIntent {
   updated_at: string;
 }
 
+export interface RemoteReviewerCreationIntent {
+  local_reviewer_session_id: string;
+  remote_reviewer_session_id: string;
+  remote_run_id: string;
+  project_id: string;
+  remote_server_id: string;
+  branch: string | null;
+  remote_path: string;
+  source_remote_session_id: string;
+  review_focus: string | null;
+  source_turn_end_index: number | null;
+  review_span: ReviewSpan;
+  agent_type: string;
+  intent_brief: string | null;
+  user_id: string | null;
+  status: "pending" | "confirmed";
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type AgentSessionStatus = 'running' | 'stopped' | 'error';
 
 export interface AgentSession {
@@ -1127,6 +1148,28 @@ export interface Storage {
     discard: (localSessionId: string) => Promise<void>;
     recordError: (localSessionId: string, error: string) => Promise<void>;
     listPending: (remoteServerId?: string) => Promise<RemoteSessionCreationIntent[]>;
+  };
+  remoteReviewerCreationIntents: {
+    begin: (intent: {
+      localReviewerSessionId: string;
+      remoteReviewerSessionId: string;
+      remoteRunId: string;
+      projectId: string;
+      remoteServerId: string;
+      branch: string | null;
+      remotePath: string;
+      sourceRemoteSessionId: string;
+      reviewFocus?: string | null;
+      sourceTurnEndIndex?: number | null;
+      reviewSpan: ReviewSpan;
+      agentType: string;
+      intentBrief?: string | null;
+      userId?: string | null;
+    }) => Promise<RemoteReviewerCreationIntent>;
+    confirm: (localReviewerSessionId: string) => Promise<void>;
+    discard: (localReviewerSessionId: string) => Promise<void>;
+    recordError: (localReviewerSessionId: string, error: string) => Promise<void>;
+    listPending: (remoteServerId?: string) => Promise<RemoteReviewerCreationIntent[]>;
   };
   workspaceBindingMigration: {
     backfill: (opts: {

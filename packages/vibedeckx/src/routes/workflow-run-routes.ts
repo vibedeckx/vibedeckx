@@ -8,7 +8,7 @@ import { resolveUserId } from "../utils/resolve-user-id.js";
 import type { AgentMessage } from "../agent-types.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun } from "./remote-status-bridge.js";
-import { bindRemoteSessionMapping, ensureRemoteAgentStream } from "../remote-agent-sessions.js";
+import { bindRemoteSessionMapping, createRemoteWorkflowReviewer, ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
 import type { AgentType } from "../agent-types.js";
 
@@ -48,6 +48,7 @@ function errStatus(err: unknown): number | null {
 }
 
 async function routes(fastify: FastifyInstance) {
+  const durableReviewFlights = new Map<string, Promise<WorkflowRun>>();
   const projectLocalSession = async (session: {
     id: string; project_id: string; branch: string; workspace_checkout_id?: string | null;
   }) => {
@@ -260,18 +261,46 @@ async function routes(fastify: FastifyInstance) {
       // The worker derives branch from its own session row — the body branch
       // is not forwarded (server-derived branch, same rule as the local path).
       const reviewerActivityAt = Date.now();
-      const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
-        sourceSessionId: remoteInfo.remoteSessionId,
-        reviewFocus,
-        sourceTurnEndIndex,
-        reviewSpan,
-        reviewerAgentType,
-        reviewerSessionId: bareReviewerSessionId,
-        intentBrief,
-      });
-      if (!result.ok) return sendProxyFailure(reply, result);
-
-      const bareRun = (result.data as { run: WorkflowRun }).run;
+      let bareRun: WorkflowRun;
+      if (bareReviewerSessionId) {
+        const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
+          sourceSessionId: remoteInfo.remoteSessionId,
+          reviewFocus,
+          sourceTurnEndIndex,
+          reviewSpan,
+          reviewerSessionId: bareReviewerSessionId,
+          intentBrief,
+        });
+        if (!result.ok) return sendProxyFailure(reply, result);
+        bareRun = (result.data as { run: WorkflowRun }).run;
+      } else {
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
+          projectId, remoteInfo.remoteServerId,
+        );
+        if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
+        const result = await createRemoteWorkflowReviewer({
+          remoteSessionMap: fastify.remoteSessionMap,
+          remoteSessionMappings: fastify.storage.remoteSessionMappings,
+          remotePatchCache: fastify.remotePatchCache,
+          agentSessionManager: fastify.agentSessionManager,
+          reverseConnectManager: fastify.reverseConnectManager,
+          storage: fastify.storage,
+        }, {
+          projectId,
+          agentMode: remoteInfo.remoteServerId,
+          remotePath: remoteConfig.remote_path,
+          branch: remoteInfo.branch ?? null,
+          sourceRemoteSessionId: remoteInfo.remoteSessionId,
+          reviewFocus,
+          sourceTurnEndIndex,
+          reviewSpan,
+          reviewerAgentType: reviewerAgentType ?? "claude-code",
+          intentBrief,
+          userId,
+        });
+        if (!result.ok) return reply.code(proxyStatus(result)).send(result.data);
+        bareRun = result.remoteRun;
+      }
       const localRun = mapRemoteRun(bareRun, remoteInfo.remoteServerId, projectId);
       trackRemoteRun(localRun, {
         remoteServerId: remoteInfo.remoteServerId,
@@ -650,7 +679,7 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; runId?: string; newReviewerSessionId?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireRawAuth(req, reply);
     if (userId === null) return;
@@ -674,6 +703,16 @@ async function routes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: "reviewerSessionId and reviewerAgentType are mutually exclusive" });
     }
     const reviewerSessionId = reviewerSessionIdRaw?.trim();
+    const runId = typeof req.body?.runId === "string" ? req.body.runId.trim() : "";
+    const newReviewerSessionId = typeof req.body?.newReviewerSessionId === "string"
+      ? req.body.newReviewerSessionId.trim() : "";
+    if ((req.body?.runId !== undefined && !runId)
+      || (req.body?.newReviewerSessionId !== undefined && !newReviewerSessionId)) {
+      return reply.code(400).send({ error: "runId and newReviewerSessionId must be non-empty strings" });
+    }
+    if (Boolean(runId) !== Boolean(newReviewerSessionId) || (reviewerSessionId && newReviewerSessionId)) {
+      return reply.code(400).send({ error: "runId and newReviewerSessionId must be supplied together for a fresh reviewer" });
+    }
     const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
     if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
     const sourceProjection = await projectLocalSession(sourceSession);
@@ -681,18 +720,33 @@ async function routes(fastify: FastifyInstance) {
     const project = await fastify.storage.projects.getById(sourceProjection.projectId);
     if (!project) return reply.code(404).send({ error: "Session not found" });
     if (!project.path) return reply.code(400).send({ error: "Project has no local path" });
+    const projectPath = project.path;
     try {
-      const run = await fastify.workflowEngine.startAdhocReview({
-        project: { id: project.id, path: project.path },
-        branch: sourceProjection.branch,
-        sourceSessionId,
-        reviewFocus,
-        sourceTurnEndIndex,
-        reviewSpan,
-        reviewerAgentType,
-        reviewerSessionId,
-        intentBrief,
-      });
+      const start = () => fastify.workflowEngine.startAdhocReview({
+          project: { id: project.id, path: projectPath },
+          branch: sourceProjection.branch,
+          sourceSessionId,
+          reviewFocus,
+          sourceTurnEndIndex,
+          reviewSpan,
+          reviewerAgentType,
+          reviewerSessionId,
+          intentBrief,
+          runId: runId || undefined,
+          newReviewerSessionId: newReviewerSessionId || undefined,
+        });
+      let flight = runId ? durableReviewFlights.get(runId) : undefined;
+      if (!flight) {
+        flight = start();
+        if (runId) {
+          durableReviewFlights.set(runId, flight);
+          const clear = () => {
+            if (durableReviewFlights.get(runId) === flight) durableReviewFlights.delete(runId);
+          };
+          void flight.then(clear, clear);
+        }
+      }
+      const run = await flight;
       return reply.code(201).send({ run });
     } catch (err) {
       const status = errStatus(err);
