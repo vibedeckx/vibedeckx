@@ -26,6 +26,7 @@ function makeHarness() {
     id: SOURCE_ID,
     project_id: "p1",
     branch: "feat",
+    workspace_checkout_id: "checkout-feat",
     status: "stopped",
     permission_mode: "edit",
     agent_type: "claude-code",
@@ -37,6 +38,11 @@ function makeHarness() {
   };
 
   const created: AgentSession[] = [];
+  const checkout = {
+    id: "checkout-feat", workspace_id: "workspace-feat", target_id: "local",
+    worktree_path: "/tmp/p1-feat", expected_branch: "feat", status: "ready" as const,
+    error: null, deleted_at: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  };
 
   const storage = {
     agentSessions: {
@@ -44,10 +50,22 @@ function makeHarness() {
       getById: async (id: string) => (id === SOURCE_ID ? sourceRow : created.find((r) => r.id === id) ?? null),
       getEntries: async () => HISTORY,
       create: async (row: AgentSession) => { created.push({ ...sourceRow, ...row }); },
+      createBound: async (row: AgentSession) => {
+        const session = { ...sourceRow, ...row, workspace_checkout_id: checkout.id };
+        created.push(session);
+        return { session, checkout };
+      },
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
       listByBranch: async () => created,
+    },
+    workspaceRegistry: {
+      getCheckoutById: async () => ({
+        workspace: { id: "workspace-feat", project_id: "p1", branch: "feat", status: "ready", error: null,
+          created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        checkout,
+      }),
     },
   } as unknown as Storage;
 

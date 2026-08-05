@@ -14,6 +14,7 @@ import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompleted
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
+import { conventionalWorktreePath } from "./utils/worktree-paths.js";
 
 export interface RemoteAgentSessionDeps {
   remoteSessionMap: Map<string, RemoteSessionInfo>;
@@ -27,6 +28,62 @@ export interface RemoteAgentSessionDeps {
 export type CreateRemoteAgentSessionResult =
   | { ok: true; localSessionId: string; remoteSession: { id: string; processAlive?: boolean; [key: string]: unknown }; messages: unknown[] }
   | { ok: false; status: number; data: unknown };
+
+export async function bindRemoteSessionMapping(
+  storage: Storage,
+  opts: {
+    localSessionId: string;
+    projectId: string;
+    remoteServerId: string;
+    remoteSessionId: string;
+    branch: string | null;
+    remotePath: string;
+    reportedWorktreePath?: string | null;
+    notificationSyncStart?: "from_start" | "from_now";
+    mappingRepo?: Storage["remoteSessionMappings"];
+  },
+): Promise<void> {
+  const mappingRepo = opts.mappingRepo ?? storage.remoteSessionMappings;
+  const existingMapping = await mappingRepo.getByLocal(opts.localSessionId);
+  if (existingMapping?.workspace_checkout_id) {
+    if (existingMapping.project_id !== opts.projectId
+      || existingMapping.remote_server_id !== opts.remoteServerId
+      || existingMapping.remote_session_id !== opts.remoteSessionId
+      || (existingMapping.branch ?? "") !== (opts.branch ?? "")) {
+      throw new Error(`Remote session mapping ${opts.localSessionId} has conflicting workspace identity`);
+    }
+    // Never move an already-bound historical session to the active
+    // incarnation merely because the same branch name was recreated.
+    return;
+  }
+  const branchKey = opts.branch ?? "";
+  const fallbackPath = opts.branch
+    ? conventionalWorktreePath(opts.remotePath, opts.branch)
+    : opts.remotePath;
+  let registered = await storage.workspaceRegistry.getByProjectBranch(
+    opts.projectId, branchKey, opts.remoteServerId,
+  );
+  // A reported worker path is authoritative. Absence means an old worker and
+  // never replaces a path already persisted by a newer worker.
+  if (!registered || (opts.reportedWorktreePath && registered.checkout.worktree_path === fallbackPath)) {
+    registered = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: opts.projectId,
+      branch: branchKey,
+      targetId: opts.remoteServerId,
+      worktreePath: opts.reportedWorktreePath ?? fallbackPath,
+      expectedBranch: branchKey,
+    });
+  }
+  await mappingRepo.upsertBound({
+    localSessionId: opts.localSessionId,
+    projectId: opts.projectId,
+    remoteServerId: opts.remoteServerId,
+    remoteSessionId: opts.remoteSessionId,
+    branch: opts.branch,
+    checkoutId: registered.checkout.id,
+    notificationSyncStart: opts.notificationSyncStart,
+  });
+}
 
 /**
  * Create an agent session on the remote server and register the local handle
@@ -102,7 +159,19 @@ export async function createRemoteAgentSession(
     // from_start: this front just created the session, so it has no unrelated
     // history to suppress — and sequence zero closes the race where the very
     // first turn completes before this mapping row exists.
-    await deps.remoteSessionMappings.upsert(localSessionId, projectId, agentMode, remoteSessionId, branch ?? null, "from_start");
+    if (!remoteConfig.remote_path) throw new Error("Remote project has no workspace path");
+    await bindRemoteSessionMapping(deps.storage, {
+      localSessionId,
+      projectId,
+      remoteServerId: agentMode,
+      remoteSessionId,
+      branch: branch ?? null,
+      remotePath: remoteConfig.remote_path,
+      reportedWorktreePath: typeof remoteData.session.worktreePath === "string"
+        ? remoteData.session.worktreePath : null,
+      notificationSyncStart: "from_start",
+      mappingRepo: deps.remoteSessionMappings,
+    });
     // Bring the new session into the periodic notification-poll set so its first
     // result is picked up even if no stream or browser tab is watching.
     await deps.remoteSessionMappings

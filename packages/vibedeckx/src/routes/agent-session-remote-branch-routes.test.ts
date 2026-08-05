@@ -40,9 +40,22 @@ function makeApp() {
   app.decorate("storage", {
     agentSessions: { getById: async (id: string) => ({ id, project_id: "p1", title: "t" }) },
     projects: { getById: projectsGetById },
+    projectRemotes: { getByProjectAndServer: async () => ({ remote_path: "/remote/p1" }) },
     remoteServers: { getAll: async () => [{ id: "other", cross_remote_access: "read" }] },
     settings: { getOrCreate: async () => SECRET },
-    remoteSessionMappings: { upsert, markTitleResolved: vi.fn(async () => undefined) },
+    remoteSessionMappings: {
+      upsert,
+      upsertBound: async (opts: { localSessionId: string; projectId: string; remoteServerId: string; remoteSessionId: string; branch: string | null; notificationSyncStart?: string }) =>
+        upsert(opts.localSessionId, opts.projectId, opts.remoteServerId, opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
+      markTitleResolved: vi.fn(async () => undefined),
+    },
+    workspaceRegistry: {
+      getByProjectBranch: async () => ({
+        workspace: { id: "w1", project_id: "p1", branch: "", status: "ready", error: null },
+        checkout: { id: "c1", workspace_id: "w1", target_id: "srv1", worktree_path: "/remote/p1",
+          expected_branch: "", status: "ready", error: null, deleted_at: null },
+      }),
+    },
     searchCache: { noteSessionCreated, updateCachedSessionTitle },
   });
   app.decorate("agentSessionManager", {

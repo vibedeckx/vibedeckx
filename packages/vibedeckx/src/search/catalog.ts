@@ -29,12 +29,17 @@ export async function buildSearchCatalog(
   pruneWorktrees(projectPath);
   const sessions = await deps.storage.agentSessions.getByProjectId(projectId);
   const workspaces = await getRegisteredWorktreeBranches(deps.storage, projectId, projectPath);
+  const registered = await deps.storage.workspaceRegistry.listByProject(projectId, "local");
+  const pathByBranch = new Map(registered.map((row) => [row.workspace.branch, row.checkout.worktree_path]));
   const counts = new Map(
     (await deps.storage.agentSessions.countEntries()).map((r) => [r.session_id, r.cnt]),
   );
   return {
     snapshotAt: Date.now(),
-    workspaces,
+    workspaces: workspaces.map((workspace) => ({
+      ...workspace,
+      worktreePath: pathByBranch.get(workspace.branch ?? ""),
+    })),
     sessions: sessions
       .map((s) => ({ s, entryCount: counts.get(s.id) ?? 0 }))
       .filter(({ s, entryCount }) => shouldShowBranchSessionInList({

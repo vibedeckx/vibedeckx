@@ -29,7 +29,7 @@ describe("workspace registry storage", () => {
     expect(creating.workspace.status).toBe("creating");
     expect(creating.checkout.status).toBe("creating");
 
-    await storage.workspaceRegistry.setCheckoutStatus(creating.workspace.id, "local", "ready");
+    await storage.workspaceRegistry.setCheckoutStatus(creating.checkout.id, "ready");
     const ready = await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local");
     expect(ready?.workspace.status).toBe("ready");
     expect(ready?.checkout.status).toBe("ready");
@@ -44,7 +44,7 @@ describe("workspace registry storage", () => {
       projectId: "p1", branch: "dev", targetId: "remote-1",
       worktreePath: "/remote/dev", expectedBranch: "dev",
     });
-    await storage.workspaceRegistry.setCheckoutStatus(remote.workspace.id, "remote-1", "error", "offline");
+    await storage.workspaceRegistry.setCheckoutStatus(remote.checkout.id, "error", "offline");
 
     const rows = await storage.workspaceRegistry.listByProject("p1");
     expect(rows).toHaveLength(2);
@@ -53,13 +53,49 @@ describe("workspace registry storage", () => {
     expect(rows.every((row) => row.workspace.status === "ready")).toBe(true);
   });
 
-  it("removes the logical workspace after its last checkout is removed", async () => {
+  it("archives the logical workspace and retains a tombstone after its last checkout is removed", async () => {
     const registered = await storage.workspaceRegistry.registerReadyCheckout({
       projectId: "p1", branch: "dev", targetId: "local",
       worktreePath: "/worktrees/dev", expectedBranch: "dev",
     });
-    await storage.workspaceRegistry.removeCheckout(registered.workspace.id, "local");
+    await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
     expect(await storage.workspaceRegistry.listByProject("p1")).toEqual([]);
+    const history = await storage.workspaceRegistry.listByProject("p1", "local", { includeDeleted: true });
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      workspace: { id: registered.workspace.id, status: "archived" },
+      checkout: { id: registered.checkout.id, status: "ready" },
+    });
+    expect(history[0].checkout.deleted_at).not.toBeNull();
+    expect(await storage.workspaceRegistry.getCheckoutById(registered.checkout.id))
+      .toMatchObject({ workspace: { status: "archived" }, checkout: { id: registered.checkout.id } });
+  });
+
+  it("creates a new checkout incarnation without overwriting the tombstone", async () => {
+    const first = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "dev", targetId: "local",
+      worktreePath: "/worktrees/dev-v1", expectedBranch: "dev",
+    });
+    await storage.workspaceRegistry.markCheckoutDeleted(first.checkout.id);
+
+    const second = await storage.workspaceRegistry.beginCheckout({
+      projectId: "p1", branch: "dev", targetId: "local",
+      worktreePath: "/worktrees/dev-v2", expectedBranch: "dev",
+    });
+
+    expect(second.workspace.id).toBe(first.workspace.id);
+    expect(second.checkout.id).not.toBe(first.checkout.id);
+    expect(second.workspace.status).toBe("creating");
+    expect(await storage.workspaceRegistry.listByProject("p1", "local")).toHaveLength(1);
+    const history = await storage.workspaceRegistry.listByProject("p1", "local", { includeDeleted: true });
+    expect(history).toHaveLength(2);
+    expect(history.find((row) => row.checkout.id === first.checkout.id)?.checkout)
+      .toMatchObject({ worktree_path: "/worktrees/dev-v1" });
+    expect(history.find((row) => row.checkout.id === first.checkout.id)?.checkout.deleted_at).not.toBeNull();
+
+    await storage.workspaceRegistry.setCheckoutStatus(first.checkout.id, "error", "stale writer");
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ id: second.checkout.id, status: "creating", error: null });
   });
 
   it("registerReadyCheckout adopts an existing worktree idempotently", async () => {
@@ -94,11 +130,10 @@ describe("workspace registry storage", () => {
       projectId: "p1", branch: "dev", targetId: "local",
       worktreePath: "/worktrees/dev", expectedBranch: "dev",
     });
-    await storage.workspaceRegistry.setCheckoutStatus(creating.workspace.id, "local", "ready");
+    await storage.workspaceRegistry.setCheckoutStatus(creating.checkout.id, "ready");
 
     const changed = await storage.workspaceRegistry.setCheckoutStatusIfCurrent(
-      creating.workspace.id,
-      "local",
+      creating.checkout.id,
       { status: "creating", updatedAt: creating.checkout.updated_at },
       "error",
       "Worktree is missing",
@@ -111,7 +146,7 @@ describe("workspace registry storage", () => {
 });
 
 describe("workspace registry schema migration", () => {
-  it("removes the legacy global target/path uniqueness without losing rows", async () => {
+  it("migrates legacy uniqueness to lifecycle tombstones without losing rows", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "vdx-workspace-registry-migration-"));
     const dbPath = path.join(dir, "test.sqlite");
     const legacy = new Database(dbPath);
@@ -148,9 +183,25 @@ describe("workspace registry schema migration", () => {
         worktreePath: "/remote/dev", expectedBranch: "dev",
       })).resolves.toMatchObject({ checkout: { status: "ready" } });
       expect(await migrated.workspaceRegistry.getByProjectBranch("p1", "dev", "remote-1"))
-        .toMatchObject({ checkout: { id: "c1" } });
+        .toMatchObject({ checkout: { id: "c1", deleted_at: null } });
+      await migrated.workspaceRegistry.markCheckoutDeleted("c1");
+      const replacement = await migrated.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "dev", targetId: "remote-1",
+        worktreePath: "/remote/dev-v2", expectedBranch: "dev",
+      });
+      expect(replacement.checkout.id).not.toBe("c1");
+      expect(await migrated.workspaceRegistry.listByProject("p1", "remote-1", { includeDeleted: true }))
+        .toHaveLength(2);
     } finally {
       await migrated.close();
+    }
+
+    const reopened = await createSqliteStorage(dbPath);
+    try {
+      expect(await reopened.workspaceRegistry.listByProject("p1", "remote-1", { includeDeleted: true }))
+        .toHaveLength(2);
+    } finally {
+      await reopened.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

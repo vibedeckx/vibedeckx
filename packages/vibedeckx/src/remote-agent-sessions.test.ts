@@ -225,7 +225,13 @@ describe("createRemoteAgentSession", () => {
   const makeDeps = (): RemoteAgentSessionDeps => ({
     remoteSessionMap,
     remoteSessionMappings: {
-      upsert, extendNotificationWatch, getByLocal: async () => mapping,
+      upsert,
+      upsertBound: async (opts: {
+        localSessionId: string; projectId: string; remoteServerId: string;
+        remoteSessionId: string; branch: string | null; notificationSyncStart?: string;
+      }) => upsert(opts.localSessionId, opts.projectId, opts.remoteServerId,
+        opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
+      extendNotificationWatch, getByLocal: async () => mapping,
     } as unknown as Storage["remoteSessionMappings"],
     remotePatchCache: new RemotePatchCache(),
     agentSessionManager: { emitBranchActivityIfChanged } as never,
@@ -248,6 +254,7 @@ describe("createRemoteAgentSession", () => {
     proxyToRemoteAuto.mockReset();
     dir = mkdtempSync(path.join(tmpdir(), "vdx-ras-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    await storage.projects.create({ id: projectId, name: "project", path: null });
     remoteSessionMap = new Map();
     mapping = undefined;
     upsert = vi.fn(async (

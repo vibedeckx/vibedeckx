@@ -11,6 +11,11 @@ mkdirSync("/tmp/p1", { recursive: true });
 
 function makeStorage() {
   const rows = new Map<string, AgentSession>();
+  const checkout = {
+    id: "checkout-1", workspace_id: "workspace-1", target_id: "local",
+    worktree_path: "/tmp/p1", expected_branch: "", status: "ready" as const,
+    error: null, deleted_at: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  };
   const storage = {
     agentSessions: {
       updateModel: vi.fn(async (id: string, model: string | null) => {
@@ -26,6 +31,10 @@ function makeStorage() {
         } as AgentSession;
         rows.set(row.id, full);
         return full;
+      },
+      createBound: async (row: Partial<AgentSession> & { id: string }) => {
+        const full = await storage.agentSessions.create({ ...row, workspace_checkout_id: checkout.id });
+        return { session: full, checkout };
       },
       getById: async (id: string) => rows.get(id) ?? null,
       getAll: async () => [...rows.values()],
@@ -43,6 +52,18 @@ function makeStorage() {
     // harness, but required or ensureResidentCapacity throws on a bare mock.
     settings: {
       get: async () => undefined,
+    },
+    workspaceRegistry: {
+      getByProjectBranch: async () => ({
+        workspace: { id: "workspace-1", project_id: "p1", branch: "", status: "ready", error: null,
+          created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        checkout,
+      }),
+      getCheckoutById: async () => ({
+        workspace: { id: "workspace-1", project_id: "p1", branch: "", status: "ready", error: null,
+          created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        checkout,
+      }),
     },
   } as unknown as Storage;
   const updateModel = (storage as unknown as {
@@ -138,6 +159,7 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
     id: "s-src",
     project_id: "p1",
     branch: "feat",
+    workspace_checkout_id: "checkout-feat",
     status: "stopped",
     permission_mode: "edit",
     agent_type: "claude-code",
@@ -148,6 +170,11 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
   } as AgentSession;
 
   const created: AgentSession[] = [];
+  const checkout = {
+    id: "checkout-feat", workspace_id: "workspace-feat", target_id: "local",
+    worktree_path: "/tmp/p1", expected_branch: "feat", status: "ready" as const,
+    error: null, deleted_at: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  };
   // Records every persisted model write so a "cleared in memory only" bug —
   // which would silently come back on the next server restart, since
   // restoreSessionsFromDb re-reads the row — can't pass.
@@ -162,6 +189,11 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
       getById: async (id: string) => (id === "s-src" ? source : created.find((r) => r.id === id) ?? null),
       getEntries: async () => HISTORY,
       create: async (row: Partial<AgentSession>) => { created.push({ ...source, ...row } as AgentSession); },
+      createBound: async (row: Partial<AgentSession>) => {
+        const session = { ...source, ...row, workspace_checkout_id: checkout.id } as AgentSession;
+        created.push(session);
+        return { session, checkout };
+      },
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       updateStatus: vi.fn(async () => undefined),
       updateAgentType: vi.fn(async () => undefined),
@@ -182,6 +214,18 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
     turnSnapshots: { getById: async () => null },
     // Waking a dormant session first checks the resident-process cap.
     settings: { get: async () => undefined },
+    workspaceRegistry: {
+      getByProjectBranch: async () => ({
+        workspace: { id: "workspace-feat", project_id: "p1", branch: source.branch, status: "ready", error: null,
+          created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        checkout,
+      }),
+      getCheckoutById: async () => ({
+        workspace: { id: "workspace-feat", project_id: "p1", branch: source.branch, status: "ready", error: null,
+          created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        checkout,
+      }),
+    },
   } as unknown as Storage;
 
   return { storage, created, source, updateModel };

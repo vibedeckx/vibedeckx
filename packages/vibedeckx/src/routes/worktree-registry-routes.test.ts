@@ -124,6 +124,37 @@ describe("worktree routes persisted identity", () => {
       .toMatchObject({ status: "ready", error: null });
   });
 
+  it("retains a tombstone and creates a new incarnation after a clean delete and recreate", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    const first = await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local");
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local")).toBeUndefined();
+
+    const recreated = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(recreated.statusCode).toBe(201);
+    const second = await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local");
+    expect(second?.checkout.id).not.toBe(first?.checkout.id);
+
+    const history = await storage.workspaceRegistry.listByProject("p1", "local", { includeDeleted: true });
+    expect(history).toHaveLength(2);
+    expect(history.find((row) => row.checkout.id === first?.checkout.id)?.checkout.deleted_at).not.toBeNull();
+  });
+
   it("keeps an existing remote checkout ready when duplicate creation is rejected", async () => {
     await storage.projects.create({ id: "remote-project", name: "remote", path: null });
     const remote = await storage.remoteServers.create({ name: "worker" });
@@ -211,8 +242,7 @@ describe("worktree routes persisted identity", () => {
   it("restores the exact prior checkout state when remote deletion returns 5xx", async () => {
     const { remote, registered } = await registerRemoteCheckout();
     await storage.workspaceRegistry.setCheckoutStatus(
-      registered.workspace.id,
-      remote.id,
+      registered.checkout.id,
       "error",
       "pre-existing health failure",
     );
@@ -253,8 +283,7 @@ describe("worktree routes persisted identity", () => {
     const { remote, registered } = await registerRemoteCheckout();
     proxyToRemoteAuto.mockImplementation(async () => {
       await storage.workspaceRegistry.setCheckoutStatus(
-        registered.workspace.id,
-        remote.id,
+        registered.checkout.id,
         "error",
         "concurrent health check",
       );

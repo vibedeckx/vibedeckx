@@ -13,11 +13,12 @@ import { extractUserText } from "../utils/session-title.js";
 import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
-import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
+import { bindRemoteSessionMapping, createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { createHash, randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
+import { WorkspaceCheckoutUnavailableError } from "../agent-session-manager.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -272,6 +273,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
           model: session?.model ?? null,
+          workspaceCheckoutId: session?.workspaceCheckoutId ?? null,
+          worktreePath: session?.checkoutPath ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
         },
         messages,
@@ -311,17 +314,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
       );
       // Hide empty sessions from history — only sessions that actually held a
       // conversation should appear in the dropdown.
-      const sessions = dbSessions
-        .map(s => {
+      const sessions = (await Promise.all(dbSessions
+        .map(async (s) => {
           const inMemory = fastify.agentSessionManager.getSession(s.id);
           const status = inMemory?.status ?? (s.status === "running" ? "stopped" : s.status);
+          const registered = s.workspace_checkout_id
+            ? await fastify.storage.workspaceRegistry.getCheckoutById(s.workspace_checkout_id)
+            : undefined;
           return {
             ...s,
             status,
+            worktreePath: registered?.checkout.worktree_path,
             processAlive: fastify.agentSessionManager.getSessionProcessAlive(s.id),
             entry_count: countMap.get(s.id) ?? 0,
           };
-        })
+        })))
         .filter(s => shouldShowBranchSessionInList({
           entryCount: s.entry_count,
           processAlive: s.processAlive,
@@ -398,6 +405,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
                 id: recoveredSessionId, projectId: pseudoProjectId, branch: requestedBranch,
                 status: recovered?.status || "running", permissionMode: requestedPermission,
                 agentType: requestedAgentType, model: requestedModel,
+                workspaceCheckoutId: recovered?.workspaceCheckoutId ?? null,
+                worktreePath: recovered?.checkoutPath ?? null,
                 processAlive: recovered
                   ? fastify.agentSessionManager.getSessionProcessAlive(recoveredSessionId) : false,
               },
@@ -413,6 +422,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
               permissionMode: active!.permissionMode,
               agentType: active!.agentType,
               model: active!.model ?? null,
+              workspaceCheckoutId: active!.workspaceCheckoutId,
+              worktreePath: active!.checkoutPath,
               processAlive: fastify.agentSessionManager.getSessionProcessAlive(sessionId),
             },
             messages: fastify.agentSessionManager.getMessages(sessionId),
@@ -440,11 +451,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
           permissionMode: session?.permissionMode || "edit",
           agentType: session?.agentType || "claude-code",
           model: session?.model ?? null,
+          workspaceCheckoutId: session?.workspaceCheckoutId ?? null,
+          worktreePath: session?.checkoutPath ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(session.id) : false,
         },
         messages: [],
       });
     } catch (error) {
+      if (error instanceof WorkspaceCheckoutUnavailableError) {
+        return reply.code(error.statusCode).send({ errorCode: error.code, error: error.message });
+      }
       if (error instanceof ResidentProcessLimitError) {
         return reply.code(409).send({
           errorCode: error.errorCode,
@@ -507,9 +523,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // from_now: listing DISCOVERS existing worker sessions (see
           // search-routes for the same reasoning). Insert-only, so a session
           // this front created keeps its from_start policy.
-          await fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, project.id, project.agent_mode, s.id, s.branch ?? null, "from_now",
-          );
+          await bindRemoteSessionMapping(fastify.storage, {
+            localSessionId, projectId: project.id, remoteServerId: project.agent_mode,
+            remoteSessionId: s.id, branch: s.branch ?? null,
+            remotePath: remoteConfig.remote_path,
+            reportedWorktreePath: typeof s.worktreePath === "string" ? s.worktreePath : null,
+            notificationSyncStart: "from_now",
+          });
           return { ...s, id: localSessionId, processAlive: s.processAlive ?? false, entry_count: s.entry_count ?? 0 };
         }));
         return reply.code(200).send({ sessions: mapped });
@@ -632,9 +652,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // from_now: this resolves an EXISTING worker session for the branch
           // (a null session above means there is none) — a discovery, not a
           // creation.
-          await fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, project.id, agentMode, remoteData.session.id, branch ?? null, "from_now",
-          );
+          await bindRemoteSessionMapping(fastify.storage, {
+            localSessionId, projectId: project.id, remoteServerId: agentMode,
+            remoteSessionId: remoteData.session.id, branch: branch ?? null,
+            remotePath: remoteConfig.remote_path,
+            reportedWorktreePath: typeof (remoteData.session as Record<string, unknown>).worktreePath === "string"
+              ? (remoteData.session as Record<string, unknown>).worktreePath as string : null,
+            notificationSyncStart: "from_now",
+          });
 
           // Seed remotePatchCache with REST messages so WS replay has data immediately
           if (remoteData.messages && remoteData.messages.length > 0) {
@@ -805,6 +830,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         messages: [],
       });
     } catch (error) {
+      if (error instanceof WorkspaceCheckoutUnavailableError) {
+        return reply.code(error.statusCode).send({ errorCode: error.code, error: error.message });
+      }
       if (error instanceof ResidentProcessLimitError) {
         return reply.code(409).send({
           errorCode: error.errorCode,
@@ -1361,6 +1389,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return reply.code(404).send({ error: "Remote session not found" });
         }
         const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
+          projectId, remoteInfo.remoteServerId,
+        );
+        if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
         // Pre-generate the branch's id so we can mint a token bound to it before
         // the remote creates the (dormant) branch — mirrors createRemoteAgentSession.
         // The branch runs on the remote, which can't mint (no userId / no public
@@ -1411,9 +1443,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
         try {
           // from_start: the branch operation just created this remote session.
-          await fastify.storage.remoteSessionMappings.upsert(
-            localSessionId, projectId, remoteInfo.remoteServerId, newRemoteSessionId, remoteInfo.branch ?? null, "from_start",
-          );
+          await bindRemoteSessionMapping(fastify.storage, {
+            localSessionId, projectId, remoteServerId: remoteInfo.remoteServerId,
+            remoteSessionId: newRemoteSessionId, branch: remoteInfo.branch ?? null,
+            remotePath: remoteConfig.remote_path,
+            reportedWorktreePath: typeof (remoteData.session as Record<string, unknown>).worktreePath === "string"
+              ? (remoteData.session as Record<string, unknown>).worktreePath as string : null,
+            notificationSyncStart: "from_start",
+          });
           // The remote already wrote the final "Branch - ..." title — claim both
           // title-generation guards so the first message here doesn't clobber it.
           await fastify.storage.remoteSessionMappings.markTitleResolved(localSessionId);

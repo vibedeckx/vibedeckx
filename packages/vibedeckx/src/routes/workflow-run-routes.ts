@@ -8,7 +8,7 @@ import { resolveUserId } from "../utils/resolve-user-id.js";
 import type { AgentMessage } from "../agent-types.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun } from "./remote-status-bridge.js";
-import { ensureRemoteAgentStream } from "../remote-agent-sessions.js";
+import { bindRemoteSessionMapping, ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
 import type { AgentType } from "../agent-types.js";
 
@@ -237,6 +237,10 @@ async function routes(fastify: FastifyInstance) {
       // and open the resident stream — that stream is what carries the
       // reviewer's suppressed taskCompleted and the workflowRunUpdated frames.
       if (bareRun.reviewer_session_id && localRun.reviewer_session_id) {
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
+          projectId, remoteInfo.remoteServerId,
+        );
+        if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
         const reviewerInfo = {
           remoteServerId: remoteInfo.remoteServerId,
           remoteSessionId: bareRun.reviewer_session_id,
@@ -248,10 +252,12 @@ async function routes(fastify: FastifyInstance) {
         // sequence zero is what recovers that race. Insert-only, so a REUSED
         // reviewer keeps the cursor (and policy) it already had and does not
         // replay its previous reviews.
-        await fastify.storage.remoteSessionMappings.upsert(
-          localRun.reviewer_session_id, projectId, remoteInfo.remoteServerId,
-          bareRun.reviewer_session_id, bareRun.branch, "from_start",
-        );
+        await bindRemoteSessionMapping(fastify.storage, {
+          localSessionId: localRun.reviewer_session_id, projectId,
+          remoteServerId: remoteInfo.remoteServerId,
+          remoteSessionId: bareRun.reviewer_session_id, branch: bareRun.branch,
+          remotePath: remoteConfig.remote_path, notificationSyncStart: "from_start",
+        });
         // The worker may be offline again before the resident stream attaches,
         // so create the front's Activity projection from the acknowledged run
         // response. This exact mapping+association-validated write must precede
@@ -435,6 +441,10 @@ async function routes(fastify: FastifyInstance) {
       const bareCandidate = (result.data as { candidate: import("../workflow-engine.js").ReviewerCandidate | null }).candidate;
       const candidate = mapRemoteReviewerCandidate(bareCandidate, remoteInfo.remoteServerId, projectId);
       if (bareCandidate?.sessionId && candidate?.sessionId) {
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
+          projectId, remoteInfo.remoteServerId,
+        );
+        if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
         const reviewerInfo = {
           remoteServerId: remoteInfo.remoteServerId,
           remoteSessionId: bareCandidate.sessionId,
@@ -443,14 +453,12 @@ async function routes(fastify: FastifyInstance) {
         fastify.remoteSessionMap.set(candidate.sessionId, reviewerInfo);
         // from_now: candidate lookup DISCOVERS a reviewer session from an
         // earlier run. Its old reviews are not new attention milestones.
-        await fastify.storage.remoteSessionMappings.upsert(
-          candidate.sessionId,
-          projectId,
-          remoteInfo.remoteServerId,
-          bareCandidate.sessionId,
-          remoteInfo.branch ?? null,
-          "from_now",
-        );
+        await bindRemoteSessionMapping(fastify.storage, {
+          localSessionId: candidate.sessionId, projectId,
+          remoteServerId: remoteInfo.remoteServerId,
+          remoteSessionId: bareCandidate.sessionId, branch: remoteInfo.branch ?? null,
+          remotePath: remoteConfig.remote_path, notificationSyncStart: "from_now",
+        });
       }
       return reply.send({ candidate });
     }

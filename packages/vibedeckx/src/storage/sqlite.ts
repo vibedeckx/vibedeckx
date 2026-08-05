@@ -46,7 +46,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
       branch TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
+      status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error', 'archived')),
       error TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
@@ -62,9 +62,9 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       expected_branch TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
       error TEXT,
+      deleted_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
-      UNIQUE(workspace_id, target_id),
       FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
     );
 
@@ -240,6 +240,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
       branch TEXT NOT NULL DEFAULT '',
+      workspace_checkout_id TEXT DEFAULT NULL,
       status TEXT NOT NULL DEFAULT 'running',
       title TEXT DEFAULT NULL,
       -- Per-session agent model, e.g. 'opus' or 'gpt-5.6-sol'. NULL = use the
@@ -352,6 +353,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       remote_server_id TEXT NOT NULL,
       remote_session_id TEXT NOT NULL,
       branch TEXT,
+      workspace_checkout_id TEXT DEFAULT NULL,
       title_resolved INTEGER NOT NULL DEFAULT 0
     );
 
@@ -411,6 +413,73 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         ON workspace_checkouts(workspace_id, status, target_id);
     `))();
   }
+
+  // Workspace checkout lifecycle migration: explicit deletion leaves a
+  // tombstone, and recreating the same workspace/target gets a new checkout
+  // identity. Rebuild both tables together because SQLite cannot alter either
+  // CHECK constraints or table-level UNIQUE constraints in place.
+  const workspaceTable = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'",
+  ).get() as { sql: string } | undefined;
+  const checkoutTable = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace_checkouts'",
+  ).get() as { sql: string } | undefined;
+  const checkoutColumns = db.prepare("PRAGMA table_info(workspace_checkouts)").all() as { name: string }[];
+  const hasCheckoutDeletedAt = checkoutColumns.some((column) => column.name === "deleted_at");
+  const needsWorkspaceLifecycleMigration = !/['\"]archived['\"]/i.test(workspaceTable?.sql ?? "")
+    || !hasCheckoutDeletedAt
+    || /UNIQUE\s*\(\s*workspace_id\s*,\s*target_id\s*\)/i.test(checkoutTable?.sql ?? "");
+  if (needsWorkspaceLifecycleMigration) {
+    const copyDeletedAt = hasCheckoutDeletedAt ? "deleted_at" : "NULL";
+    db.transaction(() => db.exec(`
+      ALTER TABLE workspace_checkouts RENAME TO workspace_checkouts_lifecycle_legacy;
+      ALTER TABLE workspaces RENAME TO workspaces_lifecycle_legacy;
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        branch TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error', 'archived')),
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        UNIQUE(project_id, branch),
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+      CREATE TABLE workspace_checkouts (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        expected_branch TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
+        error TEXT,
+        deleted_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      );
+      INSERT INTO workspaces (id, project_id, branch, status, error, created_at, updated_at)
+        SELECT id, project_id, branch, status, error, created_at, updated_at
+        FROM workspaces_lifecycle_legacy;
+      INSERT INTO workspace_checkouts
+        (id, workspace_id, target_id, worktree_path, expected_branch, status, error, deleted_at, created_at, updated_at)
+        SELECT id, workspace_id, target_id, worktree_path, expected_branch, status, error,
+               ${copyDeletedAt}, created_at, updated_at
+        FROM workspace_checkouts_lifecycle_legacy;
+      DROP TABLE workspace_checkouts_lifecycle_legacy;
+      DROP TABLE workspaces_lifecycle_legacy;
+      CREATE INDEX idx_workspaces_project_status
+        ON workspaces(project_id, status, branch);
+      CREATE INDEX idx_workspace_checkouts_workspace_status
+        ON workspace_checkouts(workspace_id, status, target_id);
+      CREATE UNIQUE INDEX idx_workspace_checkouts_active_target
+        ON workspace_checkouts(workspace_id, target_id) WHERE deleted_at IS NULL;
+    `))();
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_checkouts_active_target
+      ON workspace_checkouts(workspace_id, target_id) WHERE deleted_at IS NULL;
+  `);
 
   const instructionDeliveryCols = db.prepare("PRAGMA table_info(agent_instruction_deliveries)").all() as { name: string }[];
   if (!instructionDeliveryCols.some((c) => c.name === "owner_token")) {
@@ -750,6 +819,13 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN model TEXT DEFAULT NULL");
   }
 
+  // Phase 2: bind sessions to an immutable checkout incarnation. The foreign
+  // key is intentionally deferred until all legacy rows have been backfilled.
+  const sessionCheckoutInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionCheckoutInfo.some(col => col.name === "workspace_checkout_id")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN workspace_checkout_id TEXT DEFAULT NULL");
+  }
+
   // Persist the semantic max used by Project Activity so its bounded lists
   // can use an index instead of sorting every session in a project. Legacy
   // rows are backfilled from all four historical activity sources.
@@ -776,6 +852,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       ON agent_sessions(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_sessions_project_activity_id
       ON agent_sessions(project_id, activity_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_workspace_checkout
+      ON agent_sessions(workspace_checkout_id, updated_at DESC);
   `);
 
   // Migration: add pid column to executor_processes
@@ -1566,6 +1644,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   if (!remoteMappingNotifyInfo.some((col) => col.name === "notification_watch_until")) {
     db.exec("ALTER TABLE remote_session_mappings ADD COLUMN notification_watch_until INTEGER");
   }
+  if (!remoteMappingNotifyInfo.some((col) => col.name === "workspace_checkout_id")) {
+    db.exec("ALTER TABLE remote_session_mappings ADD COLUMN workspace_checkout_id TEXT DEFAULT NULL");
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_remote_session_mappings_workspace_checkout
+    ON remote_session_mappings(workspace_checkout_id)`);
 
   // Migration: add written_at to session_search_cache — the timestamp of the
   // last out-of-band write-through (session create/delete/title transiting the

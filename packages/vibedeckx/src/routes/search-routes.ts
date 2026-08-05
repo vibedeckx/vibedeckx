@@ -4,6 +4,7 @@ import { createSearchRefresher, listSearchTargets, computeCacheState, type Searc
 import type { SearchCatalogSessionEntry } from "../storage/types.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
+import { bindRemoteSessionMapping } from "../remote-agent-sessions.js";
 
 const searchRoutes: FastifyPluginAsync = async (fastify) => {
   // Worker-side (also served locally in solo mode): full project catalog for
@@ -59,7 +60,8 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
       if (!result.ok) {
         throw new Error(`catalog fetch failed: ${result.status} ${result.errorCode ?? ""}`);
       }
-      const data = result.data as { workspaces: Array<{ branch: string | null }>; sessions: SearchCatalogSessionEntry[] };
+      const data = result.data as { workspaces: Array<{ branch: string | null; worktreePath?: string }>; sessions: SearchCatalogSessionEntry[] };
+      const pathByBranch = new Map(data.workspaces.map((workspace) => [workspace.branch ?? "", workspace.worktreePath]));
       // Wrap remote ids into local remote-prefixed ids and register mappings,
       // mirroring the session list proxy — a cached session must be navigable
       // even if the user never opened its branch dropdown.
@@ -84,9 +86,12 @@ const searchRoutes: FastifyPluginAsync = async (fastify) => {
         // unread notifications and a sound storm — the first sync just records
         // the worker's current head. Insert-only, so a session this front
         // created (from_start) is never downgraded by a later search pass.
-        await fastify.storage.remoteSessionMappings.upsert(
-          localSessionId, target.projectId, target.targetId, s.id, mapBranch, "from_now",
-        );
+        await bindRemoteSessionMapping(fastify.storage, {
+          localSessionId, projectId: target.projectId, remoteServerId: target.targetId,
+          remoteSessionId: s.id, branch: mapBranch, remotePath: r.remotePath,
+          reportedWorktreePath: pathByBranch.get(mapBranch),
+          notificationSyncStart: "from_now",
+        });
         return { ...s, id: localSessionId };
       }));
       return { workspaces: data.workspaces, sessions };

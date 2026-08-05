@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import { execFileSync } from "child_process";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import type { Storage } from "./storage/types.js";
@@ -10,6 +11,7 @@ describe("AgentSessionManager explicit durable identity", () => {
   let dir: string; let storage: Storage; let manager: AgentSessionManager; let spawn: ReturnType<typeof vi.fn>;
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-explicit-session-"));
+    execFileSync("git", ["init", "-q", dir]);
     storage = await createSqliteStorage(path.join(dir, "db.sqlite"));
     await storage.projects.create({ id: "p1", name: "p", path: dir });
     manager = new AgentSessionManager(storage);

@@ -482,6 +482,8 @@ export interface RemoteSessionMapping {
   remote_server_id: string;
   remote_session_id: string;
   branch: string | null;
+  /** Hub-side checkout identity; never a worker database UUID. */
+  workspace_checkout_id: string | null;
   notification_sync_start: NotificationSyncStart;
   /** Epoch ms through which periodic notification sync polls this mapping. */
   notification_watch_until: number | null;
@@ -493,6 +495,8 @@ export interface AgentSession {
   id: string;
   project_id: string;
   branch: string;
+  /** NULL only for legacy/unbound sessions pending migration. */
+  workspace_checkout_id: string | null;
   status: AgentSessionStatus;
   permission_mode?: string;
   agent_type?: string;
@@ -543,7 +547,7 @@ export interface AgentSessionActivity {
 }
 
 export interface SearchCatalogSnapshot {
-  workspaces: Array<{ branch: string | null }>;
+  workspaces: Array<{ branch: string | null; worktreePath?: string }>;
   sessions: SearchCatalogSessionEntry[];
 }
 
@@ -589,13 +593,14 @@ export interface SearchResults {
 }
 
 export type WorkspaceCheckoutStatus = "creating" | "ready" | "deleting" | "error";
+export type WorkspaceStatus = WorkspaceCheckoutStatus | "archived";
 
 export interface WorkspaceRecord {
   id: string;
   project_id: string;
   /** Empty string is the main-workspace sentinel. */
   branch: string;
-  status: WorkspaceCheckoutStatus;
+  status: WorkspaceStatus;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -609,6 +614,8 @@ export interface WorkspaceCheckoutRecord {
   expected_branch: string;
   status: WorkspaceCheckoutStatus;
   error: string | null;
+  /** Non-null after the physical checkout was explicitly removed. */
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -669,25 +676,28 @@ export interface Storage {
       expectedBranch: string;
     }) => Promise<RegisteredWorkspaceCheckout>;
     setCheckoutStatus: (
-      workspaceId: string,
-      targetId: string,
+      checkoutId: string,
       status: WorkspaceCheckoutStatus,
       error?: string | null,
     ) => Promise<void>;
     setCheckoutStatusIfCurrent: (
-      workspaceId: string,
-      targetId: string,
+      checkoutId: string,
       expected: { status: WorkspaceCheckoutStatus; updatedAt: string },
       status: WorkspaceCheckoutStatus,
       error?: string | null,
     ) => Promise<boolean>;
-    listByProject: (projectId: string, targetId?: string) => Promise<RegisteredWorkspaceCheckout[]>;
+    listByProject: (
+      projectId: string,
+      targetId?: string,
+      opts?: { includeDeleted?: boolean },
+    ) => Promise<RegisteredWorkspaceCheckout[]>;
+    getCheckoutById: (checkoutId: string) => Promise<RegisteredWorkspaceCheckout | undefined>;
     getByProjectBranch: (
       projectId: string,
       branch: string,
       targetId: string,
     ) => Promise<RegisteredWorkspaceCheckout | undefined>;
-    removeCheckout: (workspaceId: string, targetId: string) => Promise<void>;
+    markCheckoutDeleted: (checkoutId: string) => Promise<void>;
   };
   mergeTargets: {
     getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
@@ -894,6 +904,21 @@ export interface Storage {
   };
   agentSessions: {
     create: (opts: { id: string; project_id: string; branch: string; permission_mode?: string; agent_type?: string; model?: string | null }) => Promise<AgentSession>;
+    /**
+     * Validate a live ready checkout and insert the session in one transaction.
+     * Passing checkoutId preserves an exact incarnation; otherwise the active
+     * checkout is resolved from the project/branch/target tuple.
+     */
+    createBound: (opts: {
+      id: string;
+      project_id: string;
+      branch: string;
+      target_id: string;
+      checkout_id?: string;
+      permission_mode?: string;
+      agent_type?: string;
+      model?: string | null;
+    }) => Promise<{ session: AgentSession; checkout: WorkspaceCheckoutRecord }>;
     getAll: () => Promise<AgentSession[]>;
     getById: (id: string) => Promise<AgentSession | undefined>;
     getByProjectId: (projectId: string) => Promise<AgentSession[]>;
@@ -988,6 +1013,15 @@ export interface Storage {
       branch: string | null,
       notificationSyncStart?: NotificationSyncStart,
     ) => Promise<void>;
+    upsertBound: (opts: {
+      localSessionId: string;
+      projectId: string;
+      remoteServerId: string;
+      remoteSessionId: string;
+      branch: string | null;
+      checkoutId: string;
+      notificationSyncStart?: NotificationSyncStart;
+    }) => Promise<void>;
     getAll: () => Promise<RemoteSessionMapping[]>;
     /** Persisted remote mappings for exactly one project, capped in SQL. */
     listByProject: (projectId: string, limit: number) => Promise<RemoteSessionMapping[]>;
@@ -1010,6 +1044,27 @@ export interface Storage {
     delete: (localSessionId: string) => Promise<void>;
     isTitleResolved: (localSessionId: string) => Promise<boolean>;
     markTitleResolved: (localSessionId: string) => Promise<void>;
+  };
+  workspaceBindingMigration: {
+    backfill: (opts: {
+      kind: "local" | "remote";
+      dryRun?: boolean;
+      batchSize?: number;
+      afterId?: string;
+    }) => Promise<{
+      scanned: number;
+      updated: number;
+      nextCursor: string | null;
+      reasons: Record<"checkout_missing" | "multiple_incarnations", number>;
+    }>;
+    diagnose: () => Promise<{
+      unboundLocal: number;
+      unboundRemote: number;
+      danglingLocal: number;
+      danglingRemote: number;
+      localSnapshotMismatch: number;
+      remoteSnapshotMismatch: number;
+    }>;
   };
   /**
    * Durable milestone outbox of *this* server, written in the same transaction

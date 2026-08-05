@@ -24,7 +24,7 @@ import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
-import { resolveWorktreePath } from "./utils/worktree-paths.js";
+import { getRegisteredWorktreeBranches, resolveWorktreePath } from "./utils/worktree-paths.js";
 import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
 import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import {
@@ -126,6 +126,9 @@ interface RunningSession {
   id: string;
   projectId: string;
   branch: string | null;
+  workspaceCheckoutId: string | null;
+  /** Last validated path for snapshots while the process is already running. */
+  checkoutPath: string | null;
   process: ChildProcess | null;
   dormant: boolean; // true when restored from DB (no process yet)
   store: MessageStore;
@@ -214,6 +217,16 @@ export type BranchResult =
   | { ok: true; sessionId: string }
   | { ok: false; reason: "not-found" | "empty-history" | "invalid-cutoff" | "running-needs-cutoff" };
 
+export class WorkspaceCheckoutUnavailableError extends Error {
+  readonly code = "workspace_checkout_unavailable";
+  readonly statusCode = 409;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceCheckoutUnavailableError";
+  }
+}
+
 export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
   private storage: Storage;
@@ -242,6 +255,29 @@ export class AgentSessionManager {
   constructor(storage: Storage, opts?: { completionGraceMs?: number }) {
     this.storage = storage;
     this.completionGraceMs = opts?.completionGraceMs ?? COMPLETION_GRACE_MS;
+  }
+
+  private async resolveSessionWorktreePath(
+    session: Pick<RunningSession, "workspaceCheckoutId" | "projectId" | "branch" | "checkoutPath">,
+    legacyProjectPath: string,
+  ): Promise<string> {
+    if (!session.workspaceCheckoutId) {
+      return resolveWorktreePath(legacyProjectPath, session.branch);
+    }
+    const registered = await this.storage.workspaceRegistry.getCheckoutById(session.workspaceCheckoutId);
+    if (!registered || registered.checkout.deleted_at || registered.checkout.status !== "ready") {
+      throw new WorkspaceCheckoutUnavailableError(
+        `Workspace checkout ${session.workspaceCheckoutId} is no longer available`,
+      );
+    }
+    const branch = session.branch ?? "";
+    if (registered.workspace.project_id !== session.projectId || registered.workspace.branch !== branch) {
+      throw new WorkspaceCheckoutUnavailableError(
+        `Workspace checkout ${session.workspaceCheckoutId} does not match session workspace`,
+      );
+    }
+    session.checkoutPath = registered.checkout.worktree_path;
+    return registered.checkout.worktree_path;
   }
 
   setEventBus(eventBus: EventBus): void {
@@ -617,18 +653,37 @@ export class AgentSessionManager {
 
     await this.ensureResidentCapacity({ projectId, branch }, { force });
 
-    // Calculate absolute worktree path
-    const absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
-
-    if (!skipDb && !stored) {
-      await this.storage.agentSessions.create({
+    let workspaceCheckoutId = stored?.workspace_checkout_id ?? null;
+    let absoluteWorktreePath: string;
+    if (skipDb) {
+      absoluteWorktreePath = resolveWorktreePath(projectPath, branch);
+    } else if (stored) {
+      absoluteWorktreePath = await this.resolveSessionWorktreePath({
+        workspaceCheckoutId,
+        projectId,
+        branch,
+        checkoutPath: null,
+      }, projectPath);
+    } else {
+      // Lazy registration covers the main checkout and any git-discovered
+      // worktrees before the transaction resolves the exact incarnation.
+      const existingCheckout = await this.storage.workspaceRegistry.getByProjectBranch(
+        projectId, branchKey, "local",
+      );
+      if (!existingCheckout) {
+        await getRegisteredWorktreeBranches(this.storage, projectId, projectPath);
+      }
+      const bound = await this.storage.agentSessions.createBound({
         id: sessionId,
         project_id: projectId,
         branch: branchKey,
+        target_id: "local",
         permission_mode: permissionMode,
         agent_type: agentType,
         model,
       });
+      workspaceCheckoutId = bound.checkout.id;
+      absoluteWorktreePath = bound.checkout.worktree_path;
     }
 
     if (!skipDb && !stored) {
@@ -651,6 +706,8 @@ export class AgentSessionManager {
       id: sessionId,
       projectId,
       branch,
+      workspaceCheckoutId,
+      checkoutPath: absoluteWorktreePath,
       process: null,
       dormant: false,
       store,
@@ -1688,7 +1745,8 @@ export class AgentSessionManager {
       try {
         const project = await this.storage.projects.getById(session.projectId);
         if (project?.path) {
-          await recordTurnSnapshot(this.storage, session.id, index, resolveWorktreePath(project.path, session.branch));
+          await recordTurnSnapshot(this.storage, session.id, index,
+            session.checkoutPath ?? resolveWorktreePath(project.path, session.branch));
         }
       } catch (error) {
         console.warn(`[AgentSession] Turn snapshot lookup failed for ${session.id}@${index}:`, error);
@@ -1720,6 +1778,12 @@ export class AgentSessionManager {
       }
       await this.wakeDormantSession(session, projectPath, content, userId, opts?.origin, disposition);
       return true;
+    }
+
+    // A resident CLI can survive after its worktree was removed. Revalidate
+    // the durable checkout before opening every subsequent turn as well.
+    if (session.workspaceCheckoutId) {
+      await this.resolveSessionWorktreePath(session, projectPath ?? session.checkoutPath ?? "");
     }
 
     if (!session.process?.stdin) {
@@ -2094,6 +2158,9 @@ export class AgentSessionManager {
     if (!session) {
       return false;
     }
+    // Validate the bound incarnation before killing a healthy process or
+    // clearing history. A tombstoned checkout makes restart a no-op failure.
+    const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
 
     console.log(`[AgentSession] Restarting session ${sessionId}`);
 
@@ -2139,8 +2206,6 @@ export class AgentSessionManager {
     getProvider(session.agentType).onSessionCreated?.(sessionId, session.permissionMode);
 
     // 7. Calculate absolute worktree path and respawn
-    const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
-
     await this.ensureResidentCapacity(
       { projectId: session.projectId, branch: session.branch },
       { excludeSessionId: session.id },
@@ -2354,6 +2419,8 @@ export class AgentSessionManager {
     if (!session) {
       return false;
     }
+    // Do not mutate mode/process state unless the exact checkout can respawn.
+    const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
 
     console.log(`[AgentSession] Switching session ${sessionId} from ${session.permissionMode} to ${newMode}`);
 
@@ -2397,8 +2464,6 @@ export class AgentSessionManager {
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "running" });
 
     // 5. Respawn Claude Code with new mode flags
-    const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
-
     await this.ensureResidentCapacity(
       { projectId: session.projectId, branch: session.branch },
       { excludeSessionId: session.id },
@@ -2522,6 +2587,8 @@ export class AgentSessionManager {
   ): Promise<void> {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
+    const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
+
     await this.ensureResidentCapacity(
       { projectId: session.projectId, branch: session.branch },
       { excludeSessionId: session.id },
@@ -2543,7 +2610,6 @@ export class AgentSessionManager {
     provider.onSessionCreated?.(session.id, session.permissionMode);
 
     // Spawn Claude Code process
-    const absoluteWorktreePath = resolveWorktreePath(projectPath, session.branch);
     await this.spawnAgent(session, absoluteWorktreePath);
 
     // Push user message to store (+ persist to DB)
@@ -2702,7 +2768,12 @@ export class AgentSessionManager {
     try {
       const project = await this.storage.projects.getById(dbSession.project_id);
       if (project?.path) {
-        await recordTurnSnapshot(this.storage, sessionId, repairIndex, resolveWorktreePath(project.path, dbSession.branch));
+        let snapshotPath = resolveWorktreePath(project.path, dbSession.branch);
+        if (dbSession.workspace_checkout_id) {
+          const checkout = await this.storage.workspaceRegistry.getCheckoutById(dbSession.workspace_checkout_id);
+          if (checkout) snapshotPath = checkout.checkout.worktree_path;
+        }
+        await recordTurnSnapshot(this.storage, sessionId, repairIndex, snapshotPath);
       }
     } catch (error) {
       console.warn(`[AgentSession] Turn snapshot lookup failed for ${sessionId}@${repairIndex}:`, error);
@@ -2738,11 +2809,16 @@ export class AgentSessionManager {
       const store = this.rebuildStoreFromRows(entries, dbSession.id);
 
       const permissionMode = (dbSession.permission_mode === "plan" ? "plan" : "edit") as "plan" | "edit";
+      const restoredCheckout = dbSession.workspace_checkout_id
+        ? await this.storage.workspaceRegistry.getCheckoutById(dbSession.workspace_checkout_id)
+        : undefined;
 
       const runningSession: RunningSession = {
         id: dbSession.id,
         projectId: dbSession.project_id,
         branch: dbSession.branch || null,
+        workspaceCheckoutId: dbSession.workspace_checkout_id,
+        checkoutPath: restoredCheckout?.checkout.worktree_path ?? null,
         process: null,
         dormant: true,
         store,
@@ -2851,10 +2927,26 @@ export class AgentSessionManager {
       : null;
 
     const newId = opts.sessionId ?? randomUUID();
-    await this.storage.agentSessions.create({
+    let inheritedCheckoutId = source?.workspaceCheckoutId ?? sourceRow?.workspace_checkout_id ?? undefined;
+    if (!inheritedCheckoutId) {
+      const activeCheckout = await this.storage.workspaceRegistry.getByProjectBranch(
+        projectId, branch ?? "", "local",
+      );
+      inheritedCheckoutId = activeCheckout?.checkout.id;
+      if (!inheritedCheckoutId) {
+        const project = await this.storage.projects.getById(projectId);
+        if (!project?.path) {
+          throw new WorkspaceCheckoutUnavailableError(`Project ${projectId} has no local workspace path`);
+        }
+        await getRegisteredWorktreeBranches(this.storage, projectId, project.path);
+      }
+    }
+    const bound = await this.storage.agentSessions.createBound({
       id: newId,
       project_id: projectId,
       branch: branch ?? "",
+      target_id: "local",
+      checkout_id: inheritedCheckoutId,
       permission_mode: permissionMode,
       agent_type: agentType,
       model,
@@ -2892,6 +2984,8 @@ export class AgentSessionManager {
       id: newId,
       projectId,
       branch,
+      workspaceCheckoutId: bound.checkout.id,
+      checkoutPath: bound.checkout.worktree_path,
       process: null,
       dormant: true,
       store,

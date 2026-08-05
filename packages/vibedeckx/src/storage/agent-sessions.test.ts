@@ -48,6 +48,73 @@ describe("agentSessions/remoteSessionMappings storage", () => {
     });
   });
 
+  describe("agentSessions.createBound", () => {
+    it("persists the exact ready checkout incarnation", async () => {
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "dev", targetId: "local",
+        worktreePath: "/tmp/p-dev", expectedBranch: "dev",
+      });
+      const result = await storage.agentSessions.createBound({
+        id: "bound", project_id: "p1", branch: "dev", target_id: "local",
+      });
+
+      expect(result.checkout.id).toBe(registered.checkout.id);
+      expect(result.session.workspace_checkout_id).toBe(registered.checkout.id);
+      expect((await storage.agentSessions.getById("bound"))?.workspace_checkout_id)
+        .toBe(registered.checkout.id);
+    });
+
+    it("rejects a tombstoned checkout without inserting a session", async () => {
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "gone", targetId: "local",
+        worktreePath: "/tmp/p-gone", expectedBranch: "gone",
+      });
+      await storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
+
+      await expect(storage.agentSessions.createBound({
+        id: "rejected", project_id: "p1", branch: "gone", target_id: "local",
+        checkout_id: registered.checkout.id,
+      })).rejects.toThrow("not available");
+      expect(await storage.agentSessions.getById("rejected")).toBeUndefined();
+    });
+  });
+
+  describe("workspace checkout binding backfill", () => {
+    it("normalizes remote main NULL to the empty workspace branch and is idempotent", async () => {
+      const checkout = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "", targetId: "remote-a",
+        worktreePath: "/remote/p", expectedBranch: "main",
+      });
+      await storage.remoteSessionMappings.upsert("remote-main", "p1", "remote-a", "worker-main", null);
+
+      const dryRun = await storage.workspaceBindingMigration.backfill({ kind: "remote", dryRun: true });
+      expect(dryRun).toMatchObject({ scanned: 1, updated: 0 });
+      const applied = await storage.workspaceBindingMigration.backfill({ kind: "remote", dryRun: false });
+      expect(applied.updated).toBe(1);
+      expect((await storage.remoteSessionMappings.getByLocal("remote-main"))?.workspace_checkout_id)
+        .toBe(checkout.checkout.id);
+      expect((await storage.workspaceBindingMigration.backfill({ kind: "remote", dryRun: false })).updated)
+        .toBe(0);
+    });
+
+    it("leaves an ambiguous historical incarnation unbound", async () => {
+      const oldCheckout = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "rebuilt", targetId: "local",
+        worktreePath: "/tmp/old", expectedBranch: "rebuilt",
+      });
+      await storage.workspaceRegistry.markCheckoutDeleted(oldCheckout.checkout.id);
+      await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "rebuilt", targetId: "local",
+        worktreePath: "/tmp/new", expectedBranch: "rebuilt",
+      });
+      await storage.agentSessions.create({ id: "legacy-ambiguous", project_id: "p1", branch: "rebuilt" });
+
+      const result = await storage.workspaceBindingMigration.backfill({ kind: "local", dryRun: false });
+      expect(result.reasons.multiple_incarnations).toBe(1);
+      expect((await storage.agentSessions.getById("legacy-ambiguous"))?.workspace_checkout_id).toBeNull();
+    });
+  });
+
   describe("agentSessions reads", () => {
     it("persists semantic activity and uses its project index for bounded recents", async () => {
       await storage.agentSessions.create({ id: "activity-a", project_id: "p1", branch: "a" });
@@ -410,6 +477,7 @@ describe("agentSessions/remoteSessionMappings storage", () => {
           "project_id",
           "remote_server_id",
           "remote_session_id",
+          "workspace_checkout_id",
         ].sort()
       );
     });

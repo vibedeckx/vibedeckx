@@ -51,7 +51,7 @@ describe("GET /api/path/search-catalog", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.snapshotAt).toBeGreaterThan(0);
-    expect(body.workspaces).toEqual([{ branch: null }]);           // git-init repo: main worktree only
+    expect(body.workspaces).toEqual([{ branch: null, worktreePath: repoDir }]); // additive worker path protocol
     expect(body.sessions).toHaveLength(1);
     expect(body.sessions[0]).toMatchObject({
       id: "s1", branch: null, title: "Investigate flaky test", entryCount: 1,

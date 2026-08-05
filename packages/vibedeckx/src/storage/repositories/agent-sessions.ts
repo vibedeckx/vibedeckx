@@ -7,6 +7,7 @@ import type {
   AgentSessionStatus,
   NotificationSyncStart,
   RemoteSessionMapping,
+  WorkspaceCheckoutRecord,
 } from "../types.js";
 // NotificationOutboxEvent is referenced only through Storage's method
 // signatures, which this factory's return type already pins.
@@ -19,6 +20,7 @@ const mapRemoteSessionMapping = (
   remote_server_id: row.remote_server_id,
   remote_session_id: row.remote_session_id,
   branch: row.branch,
+  workspace_checkout_id: row.workspace_checkout_id,
   notification_sync_start: row.notification_sync_start as NotificationSyncStart,
   notification_watch_until: row.notification_watch_until,
 });
@@ -27,6 +29,7 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   id: row.id,
   project_id: row.project_id,
   branch: row.branch,
+  workspace_checkout_id: row.workspace_checkout_id,
   status: row.status as AgentSessionStatus,
   // permission_mode/agent_type are nullable columns but always populated
   // with a default by create() below; ?? undefined only matters for a
@@ -46,10 +49,26 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
 const nowActivityAt = () => sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`;
 const touchActivityAt = () => sql<number>`max(activity_at, ${nowActivityAt()})`;
 
+const mapWorkspaceCheckout = (row: {
+  id: string;
+  workspace_id: string;
+  target_id: string;
+  worktree_path: string;
+  expected_branch: string;
+  status: string;
+  error: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}): WorkspaceCheckoutRecord => ({
+  ...row,
+  status: row.status as WorkspaceCheckoutRecord["status"],
+});
+
 export const createAgentSessionRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
-): Pick<Storage, "agentSessions" | "agentInstructionDeliveries" | "remoteSessionMappings"> => ({
+): Pick<Storage, "agentSessions" | "agentInstructionDeliveries" | "remoteSessionMappings" | "workspaceBindingMigration"> => ({
   agentSessions: {
     // Millisecond-precision timestamps (h.nowMs()) are set explicitly here
     // (and in the UPDATE statements below) so existing databases whose
@@ -73,6 +92,45 @@ export const createAgentSessionRepos = (
       const row = await kdb.selectFrom("agent_sessions").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       return mapAgentSession(row);
     },
+
+    createBound: async ({
+      id, project_id, branch, target_id, checkout_id, permission_mode, agent_type, model,
+    }) => kdb.transaction().execute(async (trx) => {
+      let query = trx.selectFrom("workspace_checkouts")
+        .innerJoin("workspaces", "workspaces.id", "workspace_checkouts.workspace_id")
+        .selectAll("workspace_checkouts")
+        .where("workspaces.project_id", "=", project_id)
+        .where("workspaces.branch", "=", branch)
+        .where("workspace_checkouts.target_id", "=", target_id)
+        .where("workspace_checkouts.deleted_at", "is", null)
+        .where("workspace_checkouts.status", "=", "ready");
+      if (checkout_id) {
+        query = query.where("workspace_checkouts.id", "=", checkout_id);
+      }
+      const checkout = await query.executeTakeFirst();
+      if (!checkout) {
+        throw new Error(checkout_id
+          ? `Workspace checkout ${checkout_id} is not available for this session`
+          : `No ready workspace checkout for project ${project_id}, branch ${branch}, target ${target_id}`);
+      }
+
+      await trx.insertInto("agent_sessions").values({
+        id,
+        project_id,
+        branch,
+        workspace_checkout_id: checkout.id,
+        status: "running",
+        permission_mode: permission_mode ?? "edit",
+        agent_type: agent_type ?? "claude-code",
+        model: model ?? null,
+        created_at: h.nowMs(),
+        updated_at: h.nowMs(),
+        activity_at: nowActivityAt(),
+      }).execute();
+      const session = await trx.selectFrom("agent_sessions").selectAll()
+        .where("id", "=", id).executeTakeFirstOrThrow();
+      return { session: mapAgentSession(session), checkout: mapWorkspaceCheckout(checkout) };
+    }),
 
     getAll: async () => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll().orderBy("updated_at", "desc").execute();
@@ -390,6 +448,38 @@ export const createAgentSessionRepos = (
         .execute();
     },
 
+    upsertBound: async ({
+      localSessionId, projectId, remoteServerId, remoteSessionId, branch, checkoutId, notificationSyncStart,
+    }) => kdb.transaction().execute(async (trx) => {
+      const checkout = await trx.selectFrom("workspace_checkouts")
+        .innerJoin("workspaces", "workspaces.id", "workspace_checkouts.workspace_id")
+        .select("workspace_checkouts.id")
+        .where("workspace_checkouts.id", "=", checkoutId)
+        .where("workspace_checkouts.target_id", "=", remoteServerId)
+        .where("workspace_checkouts.deleted_at", "is", null)
+        .where("workspace_checkouts.status", "=", "ready")
+        .where("workspaces.project_id", "=", projectId)
+        .where("workspaces.branch", "=", branch ?? "")
+        .executeTakeFirst();
+      if (!checkout) throw new Error(`Workspace checkout ${checkoutId} is not available for remote session`);
+
+      await trx.insertInto("remote_session_mappings").values({
+        local_session_id: localSessionId,
+        project_id: projectId,
+        remote_server_id: remoteServerId,
+        remote_session_id: remoteSessionId,
+        branch,
+        workspace_checkout_id: checkoutId,
+        notification_sync_start: notificationSyncStart ?? "from_now",
+      }).onConflict((oc) => oc.column("local_session_id").doUpdateSet({
+        project_id: projectId,
+        remote_server_id: remoteServerId,
+        remote_session_id: remoteSessionId,
+        branch,
+        workspace_checkout_id: checkoutId,
+      })).execute();
+    }),
+
     getAll: async () => {
       const rows = await kdb.selectFrom("remote_session_mappings").selectAll().execute();
       return rows.map(mapRemoteSessionMapping);
@@ -488,6 +578,64 @@ export const createAgentSessionRepos = (
         .set({ title_resolved: h.toDbBool(true) })
         .where("local_session_id", "=", localSessionId)
         .execute();
+    },
+  },
+
+  workspaceBindingMigration: {
+    backfill: async ({ kind, dryRun = true, batchSize = 100, afterId = "" }) => {
+      const limit = Math.max(1, Math.min(1000, batchSize));
+      const source = kind === "local"
+        ? await kdb.selectFrom("agent_sessions")
+          .select(["id", "project_id", "branch"])
+          .where("workspace_checkout_id", "is", null)
+          .where("id", ">", afterId).orderBy("id", "asc").limit(limit).execute()
+        : await kdb.selectFrom("remote_session_mappings")
+          .select(["local_session_id as id", "project_id", "branch", "remote_server_id"])
+          .where("workspace_checkout_id", "is", null)
+          .where("local_session_id", ">", afterId).orderBy("local_session_id", "asc").limit(limit).execute();
+      let updated = 0;
+      const reasons = { checkout_missing: 0, multiple_incarnations: 0 };
+      for (const row of source) {
+        const targetId = kind === "local" ? "local" : (row as typeof row & { remote_server_id: string }).remote_server_id;
+        const candidates = await kdb.selectFrom("workspace_checkouts")
+          .innerJoin("workspaces", "workspaces.id", "workspace_checkouts.workspace_id")
+          .select("workspace_checkouts.id")
+          .where("workspaces.project_id", "=", row.project_id)
+          .where("workspaces.branch", "=", row.branch ?? "")
+          .where("workspace_checkouts.target_id", "=", targetId)
+          .execute();
+        if (candidates.length === 0) { reasons.checkout_missing++; continue; }
+        if (candidates.length !== 1) { reasons.multiple_incarnations++; continue; }
+        if (!dryRun) {
+          const result = kind === "local"
+            ? await kdb.updateTable("agent_sessions")
+              .set({ workspace_checkout_id: candidates[0].id })
+              .where("id", "=", row.id).where("workspace_checkout_id", "is", null).executeTakeFirst()
+            : await kdb.updateTable("remote_session_mappings")
+              .set({ workspace_checkout_id: candidates[0].id })
+              .where("local_session_id", "=", row.id).where("workspace_checkout_id", "is", null).executeTakeFirst();
+          if (Number(result.numUpdatedRows) > 0) updated++;
+        }
+      }
+      return {
+        scanned: source.length,
+        updated,
+        nextCursor: source.length === limit ? source[source.length - 1].id : null,
+        reasons,
+      };
+    },
+
+    diagnose: async () => {
+      const scalar = async (query: ReturnType<typeof sql<{ count: number }>>) =>
+        Number((await query.execute(kdb)).rows[0]?.count ?? 0);
+      return {
+        unboundLocal: await scalar(sql`SELECT count(*) AS count FROM agent_sessions WHERE workspace_checkout_id IS NULL`),
+        unboundRemote: await scalar(sql`SELECT count(*) AS count FROM remote_session_mappings WHERE workspace_checkout_id IS NULL`),
+        danglingLocal: await scalar(sql`SELECT count(*) AS count FROM agent_sessions s LEFT JOIN workspace_checkouts c ON c.id=s.workspace_checkout_id WHERE s.workspace_checkout_id IS NOT NULL AND c.id IS NULL`),
+        danglingRemote: await scalar(sql`SELECT count(*) AS count FROM remote_session_mappings m LEFT JOIN workspace_checkouts c ON c.id=m.workspace_checkout_id WHERE m.workspace_checkout_id IS NOT NULL AND c.id IS NULL`),
+        localSnapshotMismatch: await scalar(sql`SELECT count(*) AS count FROM agent_sessions s JOIN workspace_checkouts c ON c.id=s.workspace_checkout_id JOIN workspaces w ON w.id=c.workspace_id WHERE s.project_id<>w.project_id OR s.branch<>w.branch OR c.target_id<>'local'`),
+        remoteSnapshotMismatch: await scalar(sql`SELECT count(*) AS count FROM remote_session_mappings m JOIN workspace_checkouts c ON c.id=m.workspace_checkout_id JOIN workspaces w ON w.id=c.workspace_id WHERE m.project_id<>w.project_id OR coalesce(m.branch,'')<>w.branch OR m.remote_server_id<>c.target_id`),
+      };
     },
   },
 });

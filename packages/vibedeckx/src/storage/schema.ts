@@ -67,6 +67,8 @@ export interface WorkspaceCheckoutsTable {
   expected_branch: string;
   status: string;
   error: string | null;
+  /** Tombstone timestamp. NULL identifies the one active incarnation. */
+  deleted_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
@@ -132,6 +134,8 @@ export interface AgentSessionsTable {
   id: string;
   project_id: string;
   branch: Generated<string>;
+  /** Durable identity of the exact checkout incarnation used by this session. */
+  workspace_checkout_id: Generated<string | null>;
   status: Generated<string>;
   permission_mode: string | null;
   agent_type: string | null;
@@ -316,6 +320,7 @@ export interface RemoteSessionMappingsTable {
   remote_server_id: string;
   remote_session_id: string;
   branch: string | null;
+  workspace_checkout_id: Generated<string | null>;
   title_resolved: GeneratedDbBool;
   notification_sync_start: Generated<string>;
   notification_watch_until: number | null;
