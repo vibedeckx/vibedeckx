@@ -64,6 +64,8 @@ export interface WorkspaceCheckoutsTable {
   /** "local" on the machine owning the checkout, or a remote server id on the hub. */
   target_id: string;
   worktree_path: string;
+  /** Origin of the persisted path; controls whether a later worker report may replace it. */
+  path_source: Generated<string>;
   expected_branch: string;
   status: string;
   error: string | null;
@@ -326,6 +328,24 @@ export interface RemoteSessionMappingsTable {
   notification_watch_until: number | null;
 }
 
+export interface RemoteSessionCreationIntentsTable {
+  local_session_id: string;
+  remote_session_id: string;
+  project_id: string;
+  remote_server_id: string;
+  branch: string | null;
+  remote_path: string;
+  permission_mode: string;
+  agent_type: string | null;
+  model: string | null;
+  force: GeneratedDbBool;
+  user_id: string | null;
+  status: Generated<string>;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface NotificationOutboxTable {
   seq: Generated<number>;
   id: string;
@@ -517,6 +537,7 @@ export interface DB {
   remote_servers: RemoteServersTable;
   project_remotes: ProjectRemotesTable;
   remote_session_mappings: RemoteSessionMappingsTable;
+  remote_session_creation_intents: RemoteSessionCreationIntentsTable;
   notification_outbox: NotificationOutboxTable;
   notifications: NotificationsTable;
   notification_sync_cursors: NotificationSyncCursorsTable;

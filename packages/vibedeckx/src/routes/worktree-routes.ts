@@ -51,13 +51,14 @@ async function syncRemoteWorktreeList(
       projectId, branch, remote.serverId,
     );
     const reportedPath = typeof worktree.worktreePath === "string" ? worktree.worktreePath : null;
-    if (existing && (!reportedPath || existing.checkout.worktree_path !== fallbackPath)) continue;
+    if (existing && (!reportedPath || existing.checkout.path_source !== "conventional")) continue;
     await fastify.storage.workspaceRegistry.registerReadyCheckout({
       projectId,
       branch,
       targetId: remote.serverId,
       worktreePath: reportedPath ?? fallbackPath,
       expectedBranch: branch,
+      pathSource: reportedPath ? "reported" : "conventional",
     });
   }
 }
@@ -713,6 +714,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             targetId: rc.serverId,
             worktreePath: conventionalWorktreePath(rc.remotePath, trimmedBranch),
             expectedBranch: trimmedBranch,
+            pathSource: "conventional",
           });
       try {
         const result = await proxyToRemoteAuto(
@@ -734,6 +736,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               targetId: rc.serverId,
               worktreePath: reportedPath,
               expectedBranch: trimmedBranch,
+              pathSource: "reported",
             });
           } else {
             await fastify.storage.workspaceRegistry.setCheckoutStatus(pending.checkout.id, "ready");

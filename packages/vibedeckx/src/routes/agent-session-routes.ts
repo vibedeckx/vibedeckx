@@ -114,6 +114,39 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return remoteInfo;
   }
 
+  /**
+   * Bound remote sessions may execute only on the exact checkout incarnation
+   * captured by their hub mapping. NULL is the rolling-upgrade legacy case and
+   * deliberately keeps the old worker-side fallback until Phase 6 metrics are
+   * clear; a non-NULL but missing, tombstoned, non-ready, or mismatched binding
+   * fails closed before any worker mutation is sent.
+   */
+  async function ensureRemoteCheckoutCanExecute(
+    sessionId: string,
+    remoteInfo: RemoteSessionInfo,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const mapping = await fastify.storage.remoteSessionMappings.getByLocal(sessionId);
+    if (!mapping?.workspace_checkout_id) return { ok: true };
+    const registered = await fastify.storage.workspaceRegistry.getCheckoutById(mapping.workspace_checkout_id);
+    const projectId = projectIdFromRemoteSessionId(sessionId, remoteInfo);
+    const valid = registered
+      && registered.checkout.deleted_at === null
+      && registered.checkout.status === "ready"
+      && registered.workspace.project_id === projectId
+      && registered.workspace.branch === (mapping.branch ?? "")
+      && registered.checkout.target_id === remoteInfo.remoteServerId
+      && mapping.project_id === projectId
+      && mapping.remote_server_id === remoteInfo.remoteServerId
+      && mapping.remote_session_id === remoteInfo.remoteSessionId;
+    if (valid) return { ok: true };
+    return {
+      ok: false,
+      error: registered?.checkout.deleted_at
+        ? "The workspace checkout for this session was deleted"
+        : "The workspace checkout for this session is unavailable",
+    };
+  }
+
   // Branch a local session: verify the caller owns the source's project, copy
   // its history into a new dormant session, and return the response payload.
   // Shared by the UI route (`/api/agent-sessions/:id/branch`, which mints its
@@ -962,6 +995,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         console.log(`[API] /message 404: remote session not found. Known keys: [${[...fastify.remoteSessionMap.keys()].join(', ')}]`);
         return reply.code(404).send({ error: "Remote session not found" });
       }
+      const checkout = await ensureRemoteCheckoutCanExecute(req.params.sessionId, remoteInfo);
+      if (!checkout.ok) return reply.code(409).send({ errorCode: "workspace_checkout_unavailable", error: checkout.error });
       // Baseline the notification cursor BEFORE the turn starts. For a
       // `from_now` mapping that has never synced, a turn that completes before
       // the baseline is recorded would be indistinguishable from history and
@@ -1229,6 +1264,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
+        const checkout = await ensureRemoteCheckoutCanExecute(req.params.sessionId, remoteInfo);
+        if (!checkout.ok) return reply.code(409).send({ errorCode: "workspace_checkout_unavailable", error: checkout.error });
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
           "POST",
@@ -1388,6 +1425,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
+        const checkout = await ensureRemoteCheckoutCanExecute(req.params.sessionId, remoteInfo);
+        if (!checkout.ok) return reply.code(409).send({ errorCode: "workspace_checkout_unavailable", error: checkout.error });
         const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
         const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
           projectId, remoteInfo.remoteServerId,
@@ -1559,6 +1598,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
+        const checkout = await ensureRemoteCheckoutCanExecute(req.params.sessionId, remoteInfo);
+        if (!checkout.ok) return reply.code(409).send({ errorCode: "workspace_checkout_unavailable", error: checkout.error });
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
           "POST",
@@ -1609,6 +1650,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) {
           return reply.code(404).send({ error: "Remote session not found" });
         }
+        const checkout = await ensureRemoteCheckoutCanExecute(req.params.sessionId, remoteInfo);
+        if (!checkout.ok) return reply.code(409).send({ errorCode: "workspace_checkout_unavailable", error: checkout.error });
         const result = await proxyAuto(
           remoteInfo.remoteServerId,
           "POST",

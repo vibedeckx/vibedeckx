@@ -65,13 +65,14 @@ export async function bindRemoteSessionMapping(
   );
   // A reported worker path is authoritative. Absence means an old worker and
   // never replaces a path already persisted by a newer worker.
-  if (!registered || (opts.reportedWorktreePath && registered.checkout.worktree_path === fallbackPath)) {
+  if (!registered || (opts.reportedWorktreePath && registered.checkout.path_source === "conventional")) {
     registered = await storage.workspaceRegistry.registerReadyCheckout({
       projectId: opts.projectId,
       branch: branchKey,
       targetId: opts.remoteServerId,
       worktreePath: opts.reportedWorktreePath ?? fallbackPath,
       expectedBranch: branchKey,
+      pathSource: opts.reportedWorktreePath ? "reported" : "conventional",
     });
   }
   await mappingRepo.upsertBound({
@@ -114,6 +115,24 @@ export async function createRemoteAgentSession(
   // remote spawns claude. The remote honours the supplied id.
   const remoteSessionId = params.remoteSessionId ?? randomUUID();
   const localSessionId = params.localSessionId ?? `remote-${agentMode}-${projectId}-${remoteSessionId}`;
+  if (!remoteConfig.remote_path) throw new Error("Remote project has no workspace path");
+
+  // Durable saga boundary: this lands before any worker call. A front crash
+  // after the worker creates the session leaves enough identity to replay the
+  // exact same request (worker session IDs are idempotent).
+  await deps.storage.remoteSessionCreationIntents.begin({
+    localSessionId,
+    remoteSessionId,
+    projectId,
+    remoteServerId: agentMode,
+    branch: branch ?? null,
+    remotePath: remoteConfig.remote_path,
+    permissionMode,
+    agentType: agentType ?? null,
+    model: model ?? null,
+    force: force ?? false,
+    userId: userId ?? null,
+  });
 
   const crossRemoteMcp = await mintCrossRemoteMcpConfig(
     { storage: deps.storage },
@@ -144,6 +163,12 @@ export async function createRemoteAgentSession(
     );
     if (!result.ok) {
       deps.remoteSessionMap.delete(localSessionId);
+      const uncertain = result.errorCode === "network_error" || result.errorCode === "timeout";
+      await (uncertain
+        ? deps.storage.remoteSessionCreationIntents.recordError(
+          localSessionId, `worker result unknown: ${result.errorCode}`,
+        )
+        : deps.storage.remoteSessionCreationIntents.discard(localSessionId));
       return { ok: false, status: result.status, data: result.data };
     }
 
@@ -153,13 +178,13 @@ export async function createRemoteAgentSession(
       // names a session that does not exist, so cross-remote calls would be rejected
       // anyway, and the map entry we registered would be wrong.
       deps.remoteSessionMap.delete(localSessionId);
+      await deps.storage.remoteSessionCreationIntents.discard(localSessionId);
       return { ok: false, status: 409, data: { error: "Remote returned an unexpected session id; upgrade the remote" } };
     }
 
     // from_start: this front just created the session, so it has no unrelated
     // history to suppress — and sequence zero closes the race where the very
     // first turn completes before this mapping row exists.
-    if (!remoteConfig.remote_path) throw new Error("Remote project has no workspace path");
     await bindRemoteSessionMapping(deps.storage, {
       localSessionId,
       projectId,
@@ -172,6 +197,7 @@ export async function createRemoteAgentSession(
       notificationSyncStart: "from_start",
       mappingRepo: deps.remoteSessionMappings,
     });
+    await deps.storage.remoteSessionCreationIntents.confirm(localSessionId);
     // Bring the new session into the periodic notification-poll set so its first
     // result is picked up even if no stream or browser tab is watching.
     await deps.remoteSessionMappings
@@ -201,6 +227,9 @@ export async function createRemoteAgentSession(
     // the pre-registered entry orphaned. Remove it, then rethrow so the caller's
     // existing 502 behavior is preserved and the original error is not swallowed.
     deps.remoteSessionMap.delete(localSessionId);
+    await deps.storage.remoteSessionCreationIntents.recordError(
+      localSessionId, err instanceof Error ? err.message : String(err),
+    ).catch((intentError) => console.warn("[RemoteSession] Failed to record creation intent error:", intentError));
     throw err;
   }
 
@@ -215,6 +244,51 @@ export async function createRemoteAgentSession(
   }
 
   return { ok: true, localSessionId, remoteSession: remoteData.session, messages: remoteData.messages };
+}
+
+export async function recoverPendingRemoteAgentSessions(
+  deps: RemoteAgentSessionDeps,
+  remoteServerId?: string,
+): Promise<{ attempted: number; confirmed: number; failed: number }> {
+  const pending = await deps.storage.remoteSessionCreationIntents.listPending(remoteServerId);
+  let confirmed = 0;
+  let failed = 0;
+  for (const intent of pending) {
+    const association = await deps.storage.projectRemotes.getByProjectAndServer(
+      intent.project_id, intent.remote_server_id,
+    );
+    if (!association) {
+      failed++;
+      await deps.storage.remoteSessionCreationIntents.recordError(
+        intent.local_session_id, "remote workspace association no longer exists",
+      );
+      continue;
+    }
+    try {
+      const result = await createRemoteAgentSession(deps, {
+        projectId: intent.project_id,
+        agentMode: intent.remote_server_id,
+        // Replay the exact effect recorded before the worker call. The current
+        // association proves the target is still authorized, but its path may
+        // have changed since the uncertain create attempt.
+        remoteConfig: { remote_path: intent.remote_path },
+        branch: intent.branch,
+        permissionMode: intent.permission_mode,
+        agentType: intent.agent_type ?? undefined,
+        model: intent.model,
+        force: intent.force,
+        userId: intent.user_id ?? undefined,
+        remoteSessionId: intent.remote_session_id,
+        localSessionId: intent.local_session_id,
+      });
+      if (result.ok) confirmed++;
+      else failed++;
+    } catch (error) {
+      failed++;
+      console.warn(`[RemoteSession] Pending creation recovery failed for ${intent.local_session_id}:`, error);
+    }
+  }
+  return { attempted: pending.length, confirmed, failed };
 }
 
 export async function createRemoteProjectChatSessionWithInstruction(

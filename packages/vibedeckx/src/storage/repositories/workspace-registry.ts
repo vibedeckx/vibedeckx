@@ -7,6 +7,7 @@ import type {
   Storage,
   WorkspaceCheckoutRecord,
   WorkspaceCheckoutStatus,
+  WorkspaceCheckoutPathSource,
   WorkspaceRecord,
   WorkspaceStatus,
 } from "../types.js";
@@ -26,6 +27,7 @@ const mapCheckout = (row: Selectable<WorkspaceCheckoutsTable>): WorkspaceCheckou
   workspace_id: row.workspace_id,
   target_id: row.target_id,
   worktree_path: row.worktree_path,
+  path_source: row.path_source as WorkspaceCheckoutPathSource,
   expected_branch: row.expected_branch,
   status: row.status as WorkspaceCheckoutStatus,
   error: row.error,
@@ -79,6 +81,7 @@ async function upsertCheckout(
     targetId: string;
     worktreePath: string;
     expectedBranch: string;
+    pathSource?: WorkspaceCheckoutPathSource;
     status: WorkspaceCheckoutStatus;
   },
 ): Promise<RegisteredWorkspaceCheckout> {
@@ -112,6 +115,7 @@ async function upsertCheckout(
   if (activeCheckout) {
     await trx.updateTable("workspace_checkouts").set({
       worktree_path: opts.worktreePath,
+      path_source: opts.pathSource ?? (opts.targetId === "local" ? "local" : "conventional"),
       expected_branch: opts.expectedBranch,
       status: opts.status,
       error: null,
@@ -123,6 +127,7 @@ async function upsertCheckout(
       workspace_id: workspaceRow.id,
       target_id: opts.targetId,
       worktree_path: opts.worktreePath,
+      path_source: opts.pathSource ?? (opts.targetId === "local" ? "local" : "conventional"),
       expected_branch: opts.expectedBranch,
       status: opts.status,
       error: null,
@@ -201,6 +206,7 @@ export const createWorkspaceRegistryRepo = (
           "checkout.workspace_id as checkout_workspace_id",
           "checkout.target_id as checkout_target_id",
           "checkout.worktree_path as checkout_worktree_path",
+          "checkout.path_source as checkout_path_source",
           "checkout.expected_branch as checkout_expected_branch",
           "checkout.status as checkout_status",
           "checkout.error as checkout_error",
@@ -219,6 +225,7 @@ export const createWorkspaceRegistryRepo = (
           workspace_id: row.checkout_workspace_id,
           target_id: row.checkout_target_id,
           worktree_path: row.checkout_worktree_path,
+          path_source: row.checkout_path_source as WorkspaceCheckoutPathSource,
           expected_branch: row.checkout_expected_branch,
           status: row.checkout_status as WorkspaceCheckoutStatus,
           error: row.checkout_error,
@@ -245,6 +252,7 @@ export const createWorkspaceRegistryRepo = (
         .select([
           "checkout.id as checkout_id", "checkout.workspace_id as checkout_workspace_id",
           "checkout.target_id as checkout_target_id", "checkout.worktree_path as checkout_worktree_path",
+          "checkout.path_source as checkout_path_source",
           "checkout.expected_branch as checkout_expected_branch", "checkout.status as checkout_status",
           "checkout.error as checkout_error", "checkout.created_at as checkout_created_at",
           "checkout.updated_at as checkout_updated_at", "checkout.deleted_at as checkout_deleted_at",
@@ -260,6 +268,7 @@ export const createWorkspaceRegistryRepo = (
         checkout: {
           id: rows.checkout_id, workspace_id: rows.checkout_workspace_id,
           target_id: rows.checkout_target_id, worktree_path: rows.checkout_worktree_path,
+          path_source: rows.checkout_path_source as WorkspaceCheckoutPathSource,
           expected_branch: rows.checkout_expected_branch,
           status: rows.checkout_status as WorkspaceCheckoutStatus, error: rows.checkout_error,
           deleted_at: rows.checkout_deleted_at,

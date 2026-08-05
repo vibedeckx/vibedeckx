@@ -18,7 +18,7 @@ vi.mock("./utils/remote-proxy.js", () => ({
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
 import {
   connectPersistentRemoteWs, createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction,
-  entryPatchFrames, isEntryPatchFrame,
+  bindRemoteSessionMapping, entryPatchFrames, isEntryPatchFrame, recoverPendingRemoteAgentSessions,
   type RemoteAgentSessionDeps,
 } from "./remote-agent-sessions.js";
 
@@ -332,13 +332,72 @@ describe("createRemoteAgentSession", () => {
     expect(hadEntryAtCallTime).toBe(true);
   });
 
+  it("upgrades a conventional old-worker path and never downgrades the reported path", async () => {
+    await bindRemoteSessionMapping(storage, {
+      localSessionId: "legacy-discovered", projectId, remoteServerId: agentMode,
+      remoteSessionId: "legacy-worker", branch: "dev", remotePath: "/remote/path",
+    });
+    let checkout = await storage.workspaceRegistry.getByProjectBranch(projectId, "dev", agentMode);
+    expect(checkout?.checkout.path_source).toBe("conventional");
+
+    await bindRemoteSessionMapping(storage, {
+      localSessionId: "new-discovered", projectId, remoteServerId: agentMode,
+      remoteSessionId: "new-worker", branch: "dev", remotePath: "/remote/path",
+      reportedWorktreePath: "/worker/authoritative/dev",
+    });
+    checkout = await storage.workspaceRegistry.getByProjectBranch(projectId, "dev", agentMode);
+    expect(checkout?.checkout).toMatchObject({
+      worktree_path: "/worker/authoritative/dev",
+      path_source: "reported",
+    });
+
+    await bindRemoteSessionMapping(storage, {
+      localSessionId: "later-legacy", projectId, remoteServerId: agentMode,
+      remoteSessionId: "later-legacy-worker", branch: "dev", remotePath: "/changed/config/path",
+    });
+    checkout = await storage.workspaceRegistry.getByProjectBranch(projectId, "dev", agentMode);
+    expect(checkout?.checkout.worktree_path).toBe("/worker/authoritative/dev");
+  });
+
   it("failure cleanup — !ok: deletes the map entry and returns { ok: false, status }", async () => {
     proxyToRemoteAuto.mockResolvedValue({ ok: false, status: 503, data: { error: "boom" } });
 
-    const res = await createRemoteAgentSession(makeDeps(), params());
+    const deps = makeDeps();
+    const res = await createRemoteAgentSession(deps, params());
     expect(res).toMatchObject({ ok: false, status: 503 });
     expect(remoteSessionMap.size).toBe(0);
     expect(upsert).not.toHaveBeenCalled();
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+
+    const recovery = await recoverPendingRemoteAgentSessions(deps, agentMode);
+    expect(recovery).toEqual({ attempted: 0, confirmed: 0, failed: 0 });
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an unknown network result pending for recovery", async () => {
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: false, status: 0, data: { error: "connection lost" }, errorCode: "network_error",
+    });
+
+    const res = await createRemoteAgentSession(makeDeps(), params());
+    expect(res).toMatchObject({ ok: false, status: 0 });
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([
+      expect.objectContaining({ status: "pending", error: "worker result unknown: network_error" }),
+    ]);
+  });
+
+  it("makes an unexpected worker session id terminal instead of replaying it", async () => {
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true, status: 200, data: { session: { id: "different-id" }, messages: [] },
+    });
+
+    const deps = makeDeps();
+    const res = await createRemoteAgentSession(deps, params());
+    expect(res).toMatchObject({ ok: false, status: 409 });
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+    expect(await recoverPendingRemoteAgentSessions(deps, agentMode))
+      .toEqual({ attempted: 0, confirmed: 0, failed: 0 });
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
   });
 
   it("failure cleanup — thrown: a rejecting proxyToRemoteAuto deletes the entry and propagates", async () => {
@@ -373,6 +432,13 @@ describe("createRemoteAgentSession", () => {
     await expect(createRemoteAgentSession(makeDeps(), { ...params(), ...identity }))
       .rejects.toThrow("frontend crashed before mapping");
     expect(remoteSessionMap.has(identity.localSessionId)).toBe(false);
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([
+      expect.objectContaining({
+        local_session_id: identity.localSessionId,
+        remote_session_id: identity.remoteSessionId,
+        status: "pending",
+      }),
+    ]);
 
     const retried = await createRemoteAgentSession(makeDeps(), { ...params(), ...identity });
 
@@ -385,6 +451,39 @@ describe("createRemoteAgentSession", () => {
       identity.localSessionId, projectId, agentMode, identity.remoteSessionId, "main", "from_start",
     );
     expect(remoteSessionMap.get(identity.localSessionId)?.remoteSessionId).toBe(identity.remoteSessionId);
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+  });
+
+  it("recovers a pending create with the same worker id after a front restart", async () => {
+    proxyToRemoteAuto.mockImplementation(async (...args: unknown[]) => {
+      const body = args[3] as { sessionId: string };
+      return { ok: true, status: 200, data: { session: { id: body.sessionId }, messages: [] } };
+    });
+    const identity = { remoteSessionId: "worker-after-restart", localSessionId: "front-after-restart" };
+    upsert.mockRejectedValueOnce(new Error("hub stopped after worker response"));
+    await expect(createRemoteAgentSession(makeDeps(), { ...params(), ...identity }))
+      .rejects.toThrow("hub stopped after worker response");
+
+    vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
+      project_id: projectId,
+      remote_server_id: agentMode,
+      remote_path: "/remote/path-moved-after-attempt",
+      sort_order: 0,
+      sync_up_config: null,
+      sync_down_config: null,
+    });
+    const restartedDeps = makeDeps();
+    restartedDeps.remoteSessionMap = new Map();
+    const recovery = await recoverPendingRemoteAgentSessions(restartedDeps, agentMode);
+
+    expect(recovery).toEqual({ attempted: 1, confirmed: 1, failed: 0 });
+    expect(proxyToRemoteAuto.mock.calls.map((call) => (call[3] as { sessionId: string }).sessionId))
+      .toEqual([identity.remoteSessionId, identity.remoteSessionId]);
+    expect(proxyToRemoteAuto.mock.calls.map((call) => (call[3] as { path: string }).path))
+      .toEqual(["/remote/path", "/remote/path"]);
+    expect(restartedDeps.remoteSessionMap.get(identity.localSessionId)?.remoteSessionId)
+      .toBe(identity.remoteSessionId);
+    expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
   });
 
   it("recreates a lost frontend mapping and only then delivers the initial instruction with the stable key", async () => {

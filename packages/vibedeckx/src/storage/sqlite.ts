@@ -59,6 +59,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       workspace_id TEXT NOT NULL,
       target_id TEXT NOT NULL,
       worktree_path TEXT NOT NULL,
+      path_source TEXT NOT NULL DEFAULT 'local' CHECK (path_source IN ('local', 'reported', 'conventional')),
       expected_branch TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
       error TEXT,
@@ -357,6 +358,29 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       title_resolved INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS remote_session_creation_intents (
+      local_session_id TEXT PRIMARY KEY,
+      remote_session_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      remote_server_id TEXT NOT NULL,
+      branch TEXT,
+      remote_path TEXT NOT NULL,
+      permission_mode TEXT NOT NULL CHECK (permission_mode IN ('plan', 'edit')),
+      agent_type TEXT,
+      model TEXT,
+      force INTEGER NOT NULL DEFAULT 0,
+      user_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed')),
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      UNIQUE(remote_server_id, remote_session_id),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_remote_session_creation_intents_pending
+      ON remote_session_creation_intents(status, remote_server_id, updated_at);
+
     -- Audit trail for cross-remote MCP gateway calls (one remote diagnosing
     -- another through the server-side gateway). No FK to remote_servers:
     -- audit rows must outlive deletion of the remote they describe. seq is
@@ -426,11 +450,15 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   ).get() as { sql: string } | undefined;
   const checkoutColumns = db.prepare("PRAGMA table_info(workspace_checkouts)").all() as { name: string }[];
   const hasCheckoutDeletedAt = checkoutColumns.some((column) => column.name === "deleted_at");
+  const hasCheckoutPathSource = checkoutColumns.some((column) => column.name === "path_source");
   const needsWorkspaceLifecycleMigration = !/['\"]archived['\"]/i.test(workspaceTable?.sql ?? "")
     || !hasCheckoutDeletedAt
     || /UNIQUE\s*\(\s*workspace_id\s*,\s*target_id\s*\)/i.test(checkoutTable?.sql ?? "");
   if (needsWorkspaceLifecycleMigration) {
     const copyDeletedAt = hasCheckoutDeletedAt ? "deleted_at" : "NULL";
+    const copyPathSource = hasCheckoutPathSource
+      ? "path_source"
+      : "CASE WHEN target_id = 'local' THEN 'local' ELSE 'conventional' END";
     db.transaction(() => db.exec(`
       ALTER TABLE workspace_checkouts RENAME TO workspace_checkouts_lifecycle_legacy;
       ALTER TABLE workspaces RENAME TO workspaces_lifecycle_legacy;
@@ -450,6 +478,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         workspace_id TEXT NOT NULL,
         target_id TEXT NOT NULL,
         worktree_path TEXT NOT NULL,
+        path_source TEXT NOT NULL DEFAULT 'local' CHECK (path_source IN ('local', 'reported', 'conventional')),
         expected_branch TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('creating', 'ready', 'deleting', 'error')),
         error TEXT,
@@ -462,8 +491,8 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
         SELECT id, project_id, branch, status, error, created_at, updated_at
         FROM workspaces_lifecycle_legacy;
       INSERT INTO workspace_checkouts
-        (id, workspace_id, target_id, worktree_path, expected_branch, status, error, deleted_at, created_at, updated_at)
-        SELECT id, workspace_id, target_id, worktree_path, expected_branch, status, error,
+        (id, workspace_id, target_id, worktree_path, path_source, expected_branch, status, error, deleted_at, created_at, updated_at)
+        SELECT id, workspace_id, target_id, worktree_path, ${copyPathSource}, expected_branch, status, error,
                ${copyDeletedAt}, created_at, updated_at
         FROM workspace_checkouts_lifecycle_legacy;
       DROP TABLE workspace_checkouts_lifecycle_legacy;
@@ -480,6 +509,11 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_checkouts_active_target
       ON workspace_checkouts(workspace_id, target_id) WHERE deleted_at IS NULL;
   `);
+  const checkoutPathSourceColumns = db.prepare("PRAGMA table_info(workspace_checkouts)").all() as { name: string }[];
+  if (!checkoutPathSourceColumns.some((column) => column.name === "path_source")) {
+    db.exec("ALTER TABLE workspace_checkouts ADD COLUMN path_source TEXT NOT NULL DEFAULT 'local' CHECK (path_source IN ('local', 'reported', 'conventional'))");
+    db.exec("UPDATE workspace_checkouts SET path_source = 'conventional' WHERE target_id <> 'local'");
+  }
 
   const instructionDeliveryCols = db.prepare("PRAGMA table_info(agent_instruction_deliveries)").all() as { name: string }[];
   if (!instructionDeliveryCols.some((c) => c.name === "owner_token")) {

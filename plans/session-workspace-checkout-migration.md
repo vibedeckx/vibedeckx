@@ -10,9 +10,10 @@
 - Phase 1：完成。
 - Phase 2：核心写入和运行路径完成；运行时 fallback 指标尚未补齐。
 - Phase 3：核心协议完成；完整的新旧 hub/worker 组合测试尚未补齐。
-- Phase 4：registry、mapping 双写和各发现入口已完成；持久化 remote-create saga 尚未实现。
-- Phase 5：底层批量回填与基础诊断已实现；完整原因码、运维入口和综合旧库样本待完成。
-- Phase 6–7：尚未完成；FK 收紧必须等待 fallback 清零。
+- Phase 4：标准远程创建的持久化 saga、registry、mapping 双写和发现入口已完成；conversation branch/reviewer
+  等派生创建入口尚未统一纳入 durable intent。
+- Phase 5：完成。Storage 运维接口支持分批/dry-run 回填、稳定原因码、计数和具体问题记录。
+- Phase 6：运行路径已开始 checkout-first 切换；其余读取投影与指标待完成。Phase 7 尚未开始，FK 收紧必须等待 fallback 清零。
 
 ## User stories
 
@@ -150,14 +151,14 @@ intent 记录跨 hub/worker 步骤，使任一步失败都可以使用同一预�
 ### Acceptance criteria
 
 - [x] hub 能从 worker 创建/查询响应幂等同步 remote checkout，包括 `branch = ''` 的 main checkout。
-- [ ] remote registry 优先使用 worker 报告的路径，旧 worker 才使用标记为兼容快照的推导路径。
+- [x] remote registry 优先使用 worker 报告的路径，旧 worker 才使用标记为兼容快照的推导路径。
 - [x] 新 `remote_session_mappings` 同时写 hub checkout ID 和 project/branch/remote 快照。
 - [x] 同一 project/branch 在两个 remote 上创建 session 时，两个 mapping 指向不同 target checkout。
 - [x] session 列表、搜索、打开旧 session、conversation branch 和 workflow reviewer 每个入口都可创建正确绑定。
-- [ ] 远程创建在 worker 调用前写 pending intent，成功后写 mapping 并 confirmed。
-- [ ] worker 创建成功但 hub 写 mapping 失败后，重启或重试不会创建第二个 worker session。
-- [ ] 不同的失败点（worker 拒绝、5xx、传输中断、hub DB 失败、hub 重启）都有可重跑测试。
-- [ ] 旧 worker 响应没有 checkout/path 扩展时，新 hub 仍能双写 mapping，并记录兼容 fallback 指标。
+- [x] 远程创建在 worker 调用前写 pending intent，成功后写 mapping 并 confirmed。
+- [x] worker 创建成功但 hub 写 mapping 失败后，重启或重试不会创建第二个 worker session。
+- [x] 不同的失败点（worker 拒绝、5xx、传输中断、hub DB 失败、hub 重启）都有可重跑测试。
+- [x] 旧 worker 响应没有 checkout/path 扩展时，新 hub 仍能双写 mapping，并记录兼容 fallback 指标。
 
 ---
 
@@ -179,10 +180,10 @@ NULL，对歧义、缺失和悬空行记录稳定原因码，并提供运维查�
 - [x] hub 回填使用 `project_id + COALESCE(branch, '') + remote_server_id` 匹配唯一活跃或可证明的历史 checkout。
 - [x] 所有 main remote mapping 都通过 `NULL → ''` 规范化参与匹配。
 - [x] 无法判断同名 branch 属于哪个 incarnation 时保持 NULL，不绑定到当前 checkout。
-- [ ] 诊断结果至少区分：project 缺失、workspace 缺失、checkout 缺失、main 未注册、target 缺失、
+- [x] 诊断结果至少区分：project 缺失、workspace 缺失、checkout 缺失、main 未注册、target 缺失、
   多 incarnation 歧义、外键悬空、快照不一致。
 - [x] dry-run 与实际运行输出相同分类口径的计数，实际运行额外输出更新数。
-- [ ] 在包含 local main、local branch、remote main、多 remote、墓碑和重建 incarnation 的旧库样本上连续运行两次，
+- [x] 在包含 local main、local branch、remote main、多 remote、墓碑和重建 incarnation 的旧库样本上连续运行两次，
   第二次结果为零更新且分类不变。
 
 ---
@@ -204,7 +205,7 @@ project activity、project chat 和 workflow 都通过 checkout/workspace join �
 - [ ] remote routing 仍由 mapping 的 remote session ID 完成，workspace/target 归属来自其 checkout 绑定。
 - [ ] 搜索、通知、project activity、project chat 和 workflow reviewer 对同一 session 投影出一致的 workspace/target。
 - [ ] 墓碑 checkout 的历史 session 显示原 branch、target 和路径快照，不被新 incarnation 的信息替换。
-- [ ] 尝试继续墓碑或非 ready checkout 上的 session 时，本地和远程入口返回等价错误。
+- [x] 尝试继续墓碑或非 ready checkout 上的 session 时，本地和远程入口返回等价错误。
 - [ ] 每一类读取消费者都有 checkout-hit、legacy-fallback、dangling 和 mismatch 指标。
 - [ ] 未回填旧行在兼容期仍可用，但不会被当作已绑定行。
 - [ ] 生产样本窗口中所有 legacy fallback 指标归零，且未绑定报告中剩余行均被明确隔离。

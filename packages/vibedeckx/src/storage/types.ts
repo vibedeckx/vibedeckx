@@ -489,6 +489,24 @@ export interface RemoteSessionMapping {
   notification_watch_until: number | null;
 }
 
+export interface RemoteSessionCreationIntent {
+  local_session_id: string;
+  remote_session_id: string;
+  project_id: string;
+  remote_server_id: string;
+  branch: string | null;
+  remote_path: string;
+  permission_mode: "plan" | "edit";
+  agent_type: string | null;
+  model: string | null;
+  force: boolean;
+  user_id: string | null;
+  status: "pending" | "confirmed";
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type AgentSessionStatus = 'running' | 'stopped' | 'error';
 
 export interface AgentSession {
@@ -593,6 +611,7 @@ export interface SearchResults {
 }
 
 export type WorkspaceCheckoutStatus = "creating" | "ready" | "deleting" | "error";
+export type WorkspaceCheckoutPathSource = "local" | "reported" | "conventional";
 export type WorkspaceStatus = WorkspaceCheckoutStatus | "archived";
 
 export interface WorkspaceRecord {
@@ -611,6 +630,7 @@ export interface WorkspaceCheckoutRecord {
   workspace_id: string;
   target_id: string;
   worktree_path: string;
+  path_source: WorkspaceCheckoutPathSource;
   expected_branch: string;
   status: WorkspaceCheckoutStatus;
   error: string | null;
@@ -623,6 +643,22 @@ export interface WorkspaceCheckoutRecord {
 export interface RegisteredWorkspaceCheckout {
   workspace: WorkspaceRecord;
   checkout: WorkspaceCheckoutRecord;
+}
+
+export type WorkspaceBindingIssueReason =
+  | "project_missing"
+  | "workspace_missing"
+  | "checkout_missing"
+  | "main_not_registered"
+  | "target_missing"
+  | "multiple_incarnations"
+  | "dangling_checkout"
+  | "snapshot_mismatch";
+
+export interface WorkspaceBindingIssue {
+  kind: "local" | "remote";
+  id: string;
+  reason: WorkspaceBindingIssueReason;
 }
 
 export interface Storage {
@@ -667,6 +703,7 @@ export interface Storage {
       targetId: string;
       worktreePath: string;
       expectedBranch: string;
+      pathSource?: WorkspaceCheckoutPathSource;
     }) => Promise<RegisteredWorkspaceCheckout>;
     registerReadyCheckout: (opts: {
       projectId: string;
@@ -674,6 +711,7 @@ export interface Storage {
       targetId: string;
       worktreePath: string;
       expectedBranch: string;
+      pathSource?: WorkspaceCheckoutPathSource;
     }) => Promise<RegisteredWorkspaceCheckout>;
     setCheckoutStatus: (
       checkoutId: string,
@@ -1045,6 +1083,25 @@ export interface Storage {
     isTitleResolved: (localSessionId: string) => Promise<boolean>;
     markTitleResolved: (localSessionId: string) => Promise<void>;
   };
+  remoteSessionCreationIntents: {
+    begin: (intent: {
+      localSessionId: string;
+      remoteSessionId: string;
+      projectId: string;
+      remoteServerId: string;
+      branch: string | null;
+      remotePath: string;
+      permissionMode: "plan" | "edit";
+      agentType?: string | null;
+      model?: string | null;
+      force?: boolean;
+      userId?: string | null;
+    }) => Promise<RemoteSessionCreationIntent>;
+    confirm: (localSessionId: string) => Promise<void>;
+    discard: (localSessionId: string) => Promise<void>;
+    recordError: (localSessionId: string, error: string) => Promise<void>;
+    listPending: (remoteServerId?: string) => Promise<RemoteSessionCreationIntent[]>;
+  };
   workspaceBindingMigration: {
     backfill: (opts: {
       kind: "local" | "remote";
@@ -1055,7 +1112,8 @@ export interface Storage {
       scanned: number;
       updated: number;
       nextCursor: string | null;
-      reasons: Record<"checkout_missing" | "multiple_incarnations", number>;
+      reasons: Record<WorkspaceBindingIssueReason, number>;
+      issues: WorkspaceBindingIssue[];
     }>;
     diagnose: () => Promise<{
       unboundLocal: number;
@@ -1064,6 +1122,9 @@ export interface Storage {
       danglingRemote: number;
       localSnapshotMismatch: number;
       remoteSnapshotMismatch: number;
+      conventionalRemoteCheckouts: number;
+      reasons: Record<WorkspaceBindingIssueReason, number>;
+      issues: WorkspaceBindingIssue[];
     }>;
   };
   /**

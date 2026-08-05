@@ -18,7 +18,7 @@ import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
 import { RemoteNotificationSync } from "../remote-notification-sync.js";
-import { createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction } from "../remote-agent-sessions.js";
+import { createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction, recoverPendingRemoteAgentSessions } from "../remote-agent-sessions.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -270,6 +270,17 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
       if (status === "online") {
         const machineId = reverseConnectManager.getMachineId(remoteServerId);
         await restoreRemoteExecutorsForServer(remoteServerId, machineId);
+        const recovery = await recoverPendingRemoteAgentSessions({
+          remoteSessionMap,
+          remoteSessionMappings: opts.storage.remoteSessionMappings,
+          remotePatchCache,
+          agentSessionManager,
+          reverseConnectManager,
+          storage: opts.storage,
+        }, remoteServerId);
+        if (recovery.attempted > 0) {
+          console.log(`[SharedServices] Remote creation recovery for ${remoteServerId}: ${recovery.confirmed}/${recovery.attempted} confirmed`);
+        }
       }
     })().catch(err => {
       console.warn(`[SharedServices] Failed to handle status change for ${remoteServerId}: ${err}`);
@@ -291,6 +302,22 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("browserManager", browserManager);
   fastify.decorate("scheduler", scheduler);
   agentSessionManager.setEventBus(eventBus);
+
+  // Startup sweep covers pending intents for remotes that are already
+  // reachable (including non-reverse transports). Reverse-connect remotes get
+  // another targeted sweep from the online status handler above.
+  void recoverPendingRemoteAgentSessions({
+    remoteSessionMap,
+    remoteSessionMappings: opts.storage.remoteSessionMappings,
+    remotePatchCache,
+    agentSessionManager,
+    reverseConnectManager,
+    storage: opts.storage,
+  }).then((recovery) => {
+    if (recovery.attempted > 0) {
+      console.log(`[SharedServices] Startup remote creation recovery: ${recovery.confirmed}/${recovery.attempted} confirmed`);
+    }
+  }).catch((error) => console.warn("[SharedServices] Startup remote creation recovery failed:", error));
 
   // Durable notification inbox. Milestone producers (agent sessions, workflow
   // runs) only nudge it; the periodic + startup drains are what make delivery

@@ -46,6 +46,7 @@ function makeApp(activityResult: true | "stale" | false = true) {
   app.decorate("authEnabled", true);
   app.decorate("storage", {
     projects: { getById: async () => ({ id: "p1" }) },
+    remoteSessionMappings: { getByLocal: async () => undefined },
     searchCache: { updateRemoteSessionActivity: async () => activityResult },
   });
   app.decorate("agentSessionManager", { emitBranchActivityIfChanged: vi.fn() });

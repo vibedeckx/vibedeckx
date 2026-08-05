@@ -10,7 +10,10 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return { ...actual, proxyToRemoteAuto: proxyMock };
 });
-vi.mock("../remote-agent-sessions.js", () => ({ ensureRemoteAgentStream: ensureStreamMock }));
+vi.mock("../remote-agent-sessions.js", async (importOriginal) => ({
+  ...(await importOriginal()) as Record<string, unknown>,
+  ensureRemoteAgentStream: ensureStreamMock,
+}));
 vi.mock("../utils/review-brief.js", () => ({
   generateIntentBrief: vi.fn(async () => "distilled brief"),
 }));
@@ -57,7 +60,21 @@ function makeApp() {
           ? { remote_path: "/w/repo", remote_server_id: "srv1" }
           : undefined,
     },
-    remoteSessionMappings: { upsert, markTitleResolved: markTitleResolvedDb },
+    remoteSessionMappings: {
+      upsert,
+      getByLocal: async () => undefined,
+      upsertBound: async (opts: { localSessionId: string; projectId: string; remoteServerId: string; remoteSessionId: string; branch: string | null; notificationSyncStart?: string }) =>
+        upsert(opts.localSessionId, opts.projectId, opts.remoteServerId, opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
+      markTitleResolved: markTitleResolvedDb,
+    },
+    workspaceRegistry: {
+      getByProjectBranch: async (_projectId: string, branch: string, targetId: string) => ({
+        workspace: { id: `w-${branch}`, project_id: "p1", branch, status: "ready", error: null },
+        checkout: { id: `c-${targetId}-${branch}`, workspace_id: `w-${branch}`, target_id: targetId,
+          worktree_path: branch ? `/w/repo-worktrees/${branch}` : "/w/repo", path_source: "reported",
+          expected_branch: branch, status: "ready", error: null, deleted_at: null },
+      }),
+    },
     searchCache: { updateRemoteSessionActivity },
     workflowRuns: { getActive: async () => [], getById: async () => undefined },
     agentSessions: { getById: async () => undefined },
@@ -98,7 +115,7 @@ describe("workflow-run remote proxying (front server)", () => {
       url: `/api/workflow-runs/reviewer-candidate?projectId=p1&sourceSessionId=${SRC}`,
     });
 
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode, res.body).toBe(200);
     expect(res.json().candidate.sessionId).toBe("remote-srv1-p1-rev1");
     expect(proxyMock.mock.calls[0][2]).toBe(
       "/api/path/workflow-runs/reviewer-candidate?sourceSessionId=src1",

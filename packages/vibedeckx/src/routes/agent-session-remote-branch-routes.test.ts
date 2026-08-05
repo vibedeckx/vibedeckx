@@ -24,6 +24,8 @@ type ProxyResult = { ok: boolean; status: number; data: unknown };
 
 function makeApp() {
   const upsert = vi.fn(async () => undefined);
+  const getMapping = vi.fn(async () => undefined as Record<string, unknown> | undefined);
+  const getCheckoutById = vi.fn(async () => undefined as Record<string, unknown> | undefined);
   const noteSessionCreated = vi.fn(async () => undefined);
   const updateCachedSessionTitle = vi.fn(async () => undefined);
   const projectsGetById = vi.fn(async () => ({ id: "p1" }));
@@ -45,15 +47,17 @@ function makeApp() {
     settings: { getOrCreate: async () => SECRET },
     remoteSessionMappings: {
       upsert,
+      getByLocal: getMapping,
       upsertBound: async (opts: { localSessionId: string; projectId: string; remoteServerId: string; remoteSessionId: string; branch: string | null; notificationSyncStart?: string }) =>
         upsert(opts.localSessionId, opts.projectId, opts.remoteServerId, opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
       markTitleResolved: vi.fn(async () => undefined),
     },
     workspaceRegistry: {
+      getCheckoutById,
       getByProjectBranch: async () => ({
         workspace: { id: "w1", project_id: "p1", branch: "", status: "ready", error: null },
         checkout: { id: "c1", workspace_id: "w1", target_id: "srv1", worktree_path: "/remote/p1",
-          expected_branch: "", status: "ready", error: null, deleted_at: null },
+          path_source: "reported", expected_branch: "", status: "ready", error: null, deleted_at: null },
       }),
     },
     searchCache: { noteSessionCreated, updateCachedSessionTitle },
@@ -69,7 +73,7 @@ function makeApp() {
   app.decorate("remotePatchCache", { getOrCreate: () => ({ messages: [] }), appendMessage: vi.fn() });
   app.decorate("reverseConnectManager", null);
 
-  return { app, upsert, noteSessionCreated, updateCachedSessionTitle, projectsGetById, branchSession, remoteSessionMap };
+  return { app, upsert, getMapping, getCheckoutById, noteSessionCreated, updateCachedSessionTitle, projectsGetById, branchSession, remoteSessionMap };
 }
 
 /** Echo the center-supplied branch id back, as an upgraded remote would. */
@@ -132,6 +136,47 @@ describe("center-side remote branch protocol", () => {
     expect(ctx.noteSessionCreated).toHaveBeenCalledWith(
       expect.objectContaining({ localSessionId, projectId: "p1", targetId: "srv1" }),
     );
+  });
+
+  it("rejects branching a bound remote session whose exact checkout was deleted", async () => {
+    ctx.getMapping.mockResolvedValue({
+      local_session_id: SRC_SESSION_ID, project_id: "p1", remote_server_id: "srv1",
+      remote_session_id: "srcsess", branch: null, workspace_checkout_id: "c-deleted",
+    });
+    ctx.getCheckoutById.mockResolvedValue({
+      workspace: { id: "w1", project_id: "p1", branch: "", status: "archived", error: null },
+      checkout: { id: "c-deleted", workspace_id: "w1", target_id: "srv1", worktree_path: "/remote/p1",
+        path_source: "reported", expected_branch: "", status: "ready", error: null,
+        deleted_at: "2026-08-05 00:00:00" },
+    });
+
+    const res = await branch();
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ errorCode: "workspace_checkout_unavailable" });
+    expect(proxyMock).not.toHaveBeenCalled();
+  });
+
+  it("still stops a deleted-checkout session but rejects restarting it", async () => {
+    ctx.getMapping.mockResolvedValue({
+      local_session_id: SRC_SESSION_ID, project_id: "p1", remote_server_id: "srv1",
+      remote_session_id: "srcsess", branch: null, workspace_checkout_id: "c-deleted",
+    });
+    ctx.getCheckoutById.mockResolvedValue({
+      workspace: { id: "w1", project_id: "p1", branch: "", status: "archived", error: null },
+      checkout: { id: "c-deleted", workspace_id: "w1", target_id: "srv1", worktree_path: "/remote/p1",
+        path_source: "reported", expected_branch: "", status: "ready", error: null,
+        deleted_at: "2026-08-05 00:00:00" },
+    });
+    proxyMock.mockResolvedValue({ ok: true, status: 200, data: { success: true } });
+
+    const stopped = await app.inject({ method: "POST", url: `/api/agent-sessions/${SRC_SESSION_ID}/stop` });
+    const restarted = await app.inject({ method: "POST", url: `/api/agent-sessions/${SRC_SESSION_ID}/restart`, payload: {} });
+
+    expect(stopped.statusCode).toBe(200);
+    expect(restarted.statusCode).toBe(409);
+    expect(restarted.json()).toMatchObject({ errorCode: "workspace_checkout_unavailable" });
+    expect(proxyMock).toHaveBeenCalledOnce();
+    expect(proxyMock.mock.calls[0][2]).toBe("/api/agent-sessions/srcsess/stop");
   });
 
   it("remote title PATCH: a rename writes the trimmed title through to the search cache", async () => {

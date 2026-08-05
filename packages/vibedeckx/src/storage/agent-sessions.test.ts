@@ -10,11 +10,13 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("agentSessions/remoteSessionMappings storage", () => {
   let dir: string;
+  let dbPath: string;
   let storage: Storage;
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-as-"));
-    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    dbPath = path.join(dir, "test.sqlite");
+    storage = await createSqliteStorage(dbPath);
     await storage.projects.create({ id: "p1", name: "p", path: "/tmp/p" });
   });
   afterEach(async () => {
@@ -113,6 +115,180 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       expect(result.reasons.multiple_incarnations).toBe(1);
       expect((await storage.agentSessions.getById("legacy-ambiguous"))?.workspace_checkout_id).toBeNull();
     });
+
+    it("classifies a mixed legacy database and keeps unresolved results stable on rerun", async () => {
+      const localMain = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "", targetId: "local",
+        worktreePath: "/tmp/p", expectedBranch: "main",
+      });
+      await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "local-branch", targetId: "local",
+        worktreePath: "/tmp/local-branch", expectedBranch: "local-branch",
+      });
+      await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "", targetId: "remote-a",
+        worktreePath: "/remote/a/p", expectedBranch: "main", pathSource: "reported",
+      });
+      await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "shared", targetId: "remote-a",
+        worktreePath: "/remote/a/shared", expectedBranch: "shared", pathSource: "reported",
+      });
+      await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "shared", targetId: "remote-b",
+        worktreePath: "/remote/b/shared", expectedBranch: "shared", pathSource: "reported",
+      });
+      const old = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "rebuilt", targetId: "local",
+        worktreePath: "/tmp/rebuilt-old", expectedBranch: "rebuilt",
+      });
+      await storage.workspaceRegistry.markCheckoutDeleted(old.checkout.id);
+      await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "rebuilt", targetId: "local",
+        worktreePath: "/tmp/rebuilt-new", expectedBranch: "rebuilt",
+      });
+      await storage.projects.create({ id: "p2", name: "p2", path: "/tmp/p2" });
+
+      const raw = new Database(dbPath);
+      raw.prepare("INSERT INTO workspaces (id, project_id, branch, status, error) VALUES (?, ?, ?, 'archived', NULL)")
+        .run("empty-workspace", "p1", "empty");
+      raw.close();
+
+      await storage.agentSessions.create({ id: "local-main", project_id: "p1", branch: "" });
+      await storage.agentSessions.create({ id: "local-ok", project_id: "p1", branch: "local-branch" });
+      await storage.agentSessions.create({ id: "local-workspace-missing", project_id: "p1", branch: "unknown" });
+      await storage.agentSessions.create({ id: "local-checkout-missing", project_id: "p1", branch: "empty" });
+      await storage.agentSessions.create({ id: "local-ambiguous", project_id: "p1", branch: "rebuilt" });
+      await storage.remoteSessionMappings.upsert("remote-main", "p1", "remote-a", "wm", null);
+      await storage.remoteSessionMappings.upsert("remote-a", "p1", "remote-a", "wa", "shared");
+      await storage.remoteSessionMappings.upsert("remote-b", "p1", "remote-b", "wb", "shared");
+      await storage.remoteSessionMappings.upsert("remote-target-missing", "p1", "remote-c", "wc", "shared");
+      await storage.remoteSessionMappings.upsert("remote-main-missing", "p2", "remote-a", "wmm", null);
+      await storage.remoteSessionMappings.upsert("remote-project-missing", "missing-project", "remote-a", "wpm", "dev");
+
+      const localFirst = await storage.workspaceBindingMigration.backfill({ kind: "local", dryRun: false });
+      const remoteFirst = await storage.workspaceBindingMigration.backfill({ kind: "remote", dryRun: false });
+      expect(localFirst.updated).toBe(2);
+      expect(remoteFirst.updated).toBe(3);
+      expect(localFirst.reasons).toMatchObject({
+        workspace_missing: 1, checkout_missing: 1, multiple_incarnations: 1,
+      });
+      expect(remoteFirst.reasons).toMatchObject({
+        target_missing: 1, main_not_registered: 1, project_missing: 1,
+      });
+      expect((await storage.agentSessions.getById("local-main"))?.workspace_checkout_id)
+        .toBe(localMain.checkout.id);
+
+      const localSecond = await storage.workspaceBindingMigration.backfill({ kind: "local", dryRun: false });
+      const remoteSecond = await storage.workspaceBindingMigration.backfill({ kind: "remote", dryRun: false });
+      expect(localSecond.updated).toBe(0);
+      expect(remoteSecond.updated).toBe(0);
+      expect(localSecond.reasons).toEqual(localFirst.reasons);
+      expect(remoteSecond.reasons).toEqual(remoteFirst.reasons);
+
+      const diagnosis = await storage.workspaceBindingMigration.diagnose();
+      expect(diagnosis.reasons).toMatchObject({
+        project_missing: 1,
+        workspace_missing: 1,
+        checkout_missing: 1,
+        main_not_registered: 1,
+        target_missing: 1,
+        multiple_incarnations: 1,
+      });
+      expect(diagnosis.issues).toEqual(expect.arrayContaining([
+        { kind: "local", id: "local-workspace-missing", reason: "workspace_missing" },
+        { kind: "remote", id: "remote-project-missing", reason: "project_missing" },
+      ]));
+    });
+
+    it("reports dangling bindings and snapshot mismatches with concrete session ids", async () => {
+      const checkout = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "p1", branch: "dev", targetId: "local",
+        worktreePath: "/tmp/dev", expectedBranch: "dev",
+      });
+      await storage.agentSessions.create({ id: "dangling", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.create({ id: "mismatch", project_id: "p1", branch: "other" });
+      const raw = new Database(dbPath);
+      raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = 'dangling'").run("missing-checkout");
+      raw.prepare("UPDATE agent_sessions SET workspace_checkout_id = ? WHERE id = 'mismatch'").run(checkout.checkout.id);
+      raw.close();
+
+      const diagnosis = await storage.workspaceBindingMigration.diagnose();
+      expect(diagnosis.reasons.dangling_checkout).toBe(1);
+      expect(diagnosis.reasons.snapshot_mismatch).toBe(1);
+      expect(diagnosis.issues).toEqual(expect.arrayContaining([
+        { kind: "local", id: "dangling", reason: "dangling_checkout" },
+        { kind: "local", id: "mismatch", reason: "snapshot_mismatch" },
+      ]));
+    });
+  });
+
+  describe("remote session creation intents", () => {
+    const intent = {
+      localSessionId: "local-intent",
+      remoteSessionId: "worker-intent",
+      projectId: "p1",
+      remoteServerId: "remote-a",
+      branch: null,
+      remotePath: "/remote/p",
+      permissionMode: "edit" as const,
+      agentType: "claude-code",
+      model: null,
+      force: false,
+      userId: "user-1",
+    };
+
+    it("persists pending before confirmation and supports idempotent replay", async () => {
+      const first = await storage.remoteSessionCreationIntents.begin(intent);
+      const replay = await storage.remoteSessionCreationIntents.begin(intent);
+      expect(first).toMatchObject({ status: "pending", error: null });
+      expect(replay.local_session_id).toBe(first.local_session_id);
+
+      await storage.remoteSessionCreationIntents.recordError(intent.localSessionId, "transport lost");
+      expect(await storage.remoteSessionCreationIntents.listPending("remote-a"))
+        .toEqual([expect.objectContaining({ local_session_id: intent.localSessionId, error: "transport lost" })]);
+
+      await storage.remoteSessionCreationIntents.confirm(intent.localSessionId);
+      expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+    });
+
+    it("removes terminal worker rejection from the pending recovery set", async () => {
+      await storage.remoteSessionCreationIntents.begin(intent);
+      await storage.remoteSessionCreationIntents.discard(intent.localSessionId);
+      expect(await storage.remoteSessionCreationIntents.listPending()).toEqual([]);
+    });
+
+    it("rejects reuse of a durable local id with conflicting identity", async () => {
+      await storage.remoteSessionCreationIntents.begin(intent);
+      await expect(storage.remoteSessionCreationIntents.begin({
+        ...intent,
+        remoteSessionId: "different-worker-id",
+      })).rejects.toThrow("conflicting identity");
+    });
+  });
+
+  it("keeps the same project/branch isolated across remote targets", async () => {
+    const a = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "shared", targetId: "remote-a",
+      worktreePath: "/a/shared", expectedBranch: "shared", pathSource: "reported",
+    });
+    const b = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "shared", targetId: "remote-b",
+      worktreePath: "/b/shared", expectedBranch: "shared", pathSource: "reported",
+    });
+    await storage.remoteSessionMappings.upsertBound({
+      localSessionId: "session-a", projectId: "p1", remoteServerId: "remote-a",
+      remoteSessionId: "worker-a", branch: "shared", checkoutId: a.checkout.id,
+    });
+    await storage.remoteSessionMappings.upsertBound({
+      localSessionId: "session-b", projectId: "p1", remoteServerId: "remote-b",
+      remoteSessionId: "worker-b", branch: "shared", checkoutId: b.checkout.id,
+    });
+
+    expect(a.checkout.id).not.toBe(b.checkout.id);
+    expect((await storage.remoteSessionMappings.getByLocal("session-a"))?.workspace_checkout_id)
+      .toBe(a.checkout.id);
+    expect((await storage.remoteSessionMappings.getByLocal("session-b"))?.workspace_checkout_id)
+      .toBe(b.checkout.id);
   });
 
   describe("agentSessions reads", () => {
