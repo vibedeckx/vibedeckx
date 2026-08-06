@@ -39,6 +39,29 @@
 同段还记录了实测：hub 做 intent-brief 蒸馏时需要**通过隧道从 worker 拉**历史，
 "6.3MB of entries carry 91KB of conversation"。**会话字节在 worker，不在 hub。**
 
+### 0.1.0 机制：不是两套迁移，是自然空操作
+
+**hub 和 worker 共用一套 schema、一套迁移。** `command.ts:184` / `:375` 的
+`createSqliteStorage(dbPath)` 没有 role 参数，`sqlite.ts` 的 41 处
+`CREATE TABLE IF NOT EXISTS` 也没有任何 `isHub` / `isWorker` 分支——
+hub 上同样有 `agent_session_entries` 这张表，它只是空的。
+
+因此本计划每一步在 hosted hub 上都**自然退化成空操作**：`persistEntry` 从不被调用
+（不产生 `sessions/` 目录）→ 读路径两边都空 → 涓流扫到 0 行立即 `complete` →
+`DROP TABLE` 删一张空表。
+
+由此得到一条**实现期的设计约束**：
+
+> 如果实现过程中冒出了「hub 上要不要跑这段」的分支，说明设计错了。
+> 正确形态是每一步在没有 session 的机器上自然为空操作，**全程不需要一个 `if (isHub)`**。
+
+按角色分叉 schema 会立刻把兼容矩阵翻倍（hub 老/新 × worker 老/新 已经够麻烦，
+见 CLAUDE.md 的隧道契约），而「一个二进制两个角色」是本产品的核心设计（存储经验文 §3.3）。
+
+**唯一要留神的实现细节**：搬迁涓流在 hub 上每次启动都会跑，入口必须
+**一次 `COUNT` 就能提前退出**，不要先加载全部 session 再判断。§7.4 的 watermark
+设计已满足（`status = complete` 后不再扫），实现时别写反。
+
 ### 0.1.1 与 hub Postgres 移植的关系
 
 两条线互补，不竞争。三层里只有一层会进 Postgres：
@@ -154,23 +177,46 @@ search_1.sqlite    有代号  →  纯派生,允许丢弃,需要重建表就 bum
    并在文件顶部注明**本库允许被丢弃**。
 2. **加一个 review 检查点**：任何需要「建新表 → 拷贝 → 删旧表 → 改名」的变更，
    先问「这个库能不能换代」。能，就换代，不写重建逻辑。
-3. **按增长率决定去处，不是按当前大小**：
+3. **增长率是「重新问一遍」的触发器，不是结论**：
 
-   > 任何**跟着每条消息 / 每次事件增长**的表，在建它之前就要决定它是文件还是可换代库。
-   > 跟着 **session 或用户配置**增长的，留在 `data.sqlite` 里没问题。
+   > 任何**跟着每条消息 / 每次事件增长**的表，在建它之前必须停下来重跑一遍
+   > Q1（丢了心疼吗）+ Q2（谁控制部署），再决定去处。
+   > 增长率只说明「这张表值得单独想」，**不说明答案**。
 
    `agent_session_entries` 当年是按「一张普通表」加进来的，五个列从没变过，
    单看 schema 完全无害——问题全部来自增长率。这条规则就是为了不再造出第二张。
-   现有表按此判据（2026-08-06 实测）：
 
-   | 表 | 行数 | 跟着什么增长 | 判断 |
-   |---|---|---|---|
-   | `agent_session_entries` | 284,498 | **每条消息** | 本计划处理 |
-   | `turn_snapshots` | 1,631 | 每个 session（≈1:1） | 可接受 |
-   | `notifications` | 1,125 | 每个里程碑 | 可接受 |
-   | `notification_outbox` | 1,125 | 每个里程碑 | 与 `notifications` **完全相等**，疑似投递后未排空，待查（与本计划无关） |
-   | `workflow_runs` | 157 | 每次 workflow | 单行最大（≈4 KB/行），留意 |
-   | 其余 | < 50 | 用户配置 | 无 |
+   但**形状相似不等于结论相同**，Q2 才是分水岭。按完整判据重跑：
+
+   | 表 | Q1 丢了心疼 | Q2 谁控制部署 | 有关系型邻居 | 结论 |
+   |---|---|---|---|---|
+   | `agent_session_entries` | 是 | **用户（worker）** | 否（全仓库一处 `EXISTS`） | **文件** ← 本计划 |
+   | `project_chat_messages` | 是 | **你（hub）** | 是（`project_chat_work_items.user_message_id` 引用它） | **留库**，随 hub Postgres 走 |
+   | `turn_snapshots` | 是（`head` + `dirty` blob sha 别处算不出） | 用户（worker） | 是（挂 session） | 留库，**盯着** |
+   | 搜索索引三张表 | 否 | — | — | 代号库（§5） |
+
+   `project_chat_messages` 的 schema（`thread_id` + `sequence` + `content`）与
+   `agent_session_entries` 几乎同构，很容易被误判成「下一个 entries」。它不是：
+   它跑在 hub（chat provider key 在那侧），你连续部署，且被 work_items 直接引用。
+   entries 需要走文件，很大程度上是因为它在**你不运维的机器**上——不能 VACUUM、
+   不能保证迁移过、降级不可控。这些在 hub 上一条都不成立。
+   （solo 模式下 chat 确实落在用户机器，但 chat 是人打字、entries 是每次
+   tool_use / tool_result 都算一条，量级差数量级，真出问题再说。）
+
+   现有表实测行数（2026-08-06），供判断增长率参考：
+
+   | 表 | 行数 | 跟着什么增长 |
+   |---|---|---|
+   | `agent_session_entries` | 284,498 | **每条消息** |
+   | `turn_snapshots` | 1,631 | 每个 turn（本机 ≈1:1 于 session） |
+   | `notifications` | 1,125 | 每个里程碑 |
+   | `notification_outbox` | 1,125 | 每个里程碑；与 `notifications` **完全相等**，疑似投递后未排空，待查（与本计划无关） |
+   | `workflow_runs` | 157 | 每次 workflow；单行最大（≈4 KB/行），留意 |
+   | 其余 | < 50 | 用户配置 |
+
+   **前瞻**：executor / PTY 输出目前**不在库里**（`executor_processes` 只有
+   `pid / status / exit_code`，无日志内容）。若将来要持久化它，按本规则它是最可能
+   成为「下一个 entries」的东西——必须一开始就是文件或代号库，不能进 `data.sqlite`。
 
 判据本身（存储经验文 §6 的 Q1/Q2/Q3）不变，补一条 Q4，见 §10。
 
