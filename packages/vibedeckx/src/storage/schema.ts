@@ -75,18 +75,10 @@ export interface WorkspaceCheckoutsTable {
   updated_at: Generated<string>;
 }
 
-export interface ExecutorGroupsTable {
-  id: string;
-  project_id: string;
-  name: string;
-  branch: Generated<string>;
-  created_at: Generated<string>;
-}
-
 export interface ExecutorsTable {
   id: string;
   project_id: string;
-  group_id: string | null;
+  workspace_id: string;
   name: string;
   command: string;
   executor_type: Generated<string>;
@@ -540,7 +532,6 @@ export interface DB {
   workspaces: WorkspacesTable;
   workspace_checkouts: WorkspaceCheckoutsTable;
   branch_merge_targets: BranchMergeTargetsTable;
-  executor_groups: ExecutorGroupsTable;
   executors: ExecutorsTable;
   executor_processes: ExecutorProcessesTable;
   remote_executor_processes: RemoteExecutorProcessesTable;

@@ -237,7 +237,7 @@ export class SchedulerService {
     const executor: Executor = {
       id: `schedule-${task.id}`,
       project_id: task.project_id,
-      group_id: "",
+      workspace_id: "",
       name: task.name,
       command: buildRunContent(task),
       executor_type: task.run_type,

@@ -283,6 +283,21 @@ export const createWorkspaceRegistryRepo = (
       };
     },
 
+    getWorkspaceById: async (workspaceId) => {
+      const row = await kdb.selectFrom("workspaces").selectAll()
+        .where("id", "=", workspaceId)
+        .executeTakeFirst();
+      return row ? mapWorkspace(row) : undefined;
+    },
+
+    getWorkspaceByProjectBranch: async (projectId, branch) => {
+      const row = await kdb.selectFrom("workspaces").selectAll()
+        .where("project_id", "=", projectId)
+        .where("branch", "=", branch)
+        .executeTakeFirst();
+      return row ? mapWorkspace(row) : undefined;
+    },
+
     markCheckoutDeleted: async (checkoutId) => {
       await kdb.transaction().execute(async (trx) => {
         const checkout = await trx.selectFrom("workspace_checkouts")

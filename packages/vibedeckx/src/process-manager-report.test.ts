@@ -15,7 +15,7 @@ const fakeStorage = {
 function runPrompt(pm: ProcessManager, provider: "claude" | "codex", prompt: string, cwd: string) {
   return new Promise<{ exitCode: number | null; finalResult?: string }>((resolve, reject) => {
     const executor: Executor = {
-      id: `smoke-${provider}`, project_id: "p", group_id: "", name: "smoke",
+      id: `smoke-${provider}`, project_id: "p", workspace_id: "", name: "smoke",
       command: prompt, executor_type: "prompt", prompt_provider: provider,
       cwd: null, pty: true, position: 0, disabled_targets: [], created_at: new Date().toISOString(),
     };

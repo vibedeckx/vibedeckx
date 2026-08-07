@@ -362,21 +362,13 @@ export interface WorktreeDeleteResult {
   partialSuccess?: boolean;
 }
 
-export interface ExecutorGroup {
-  id: string;
-  project_id: string;
-  name: string;
-  branch: string;
-  created_at: string;
-}
-
 export type ExecutorType = 'command' | 'prompt';
 export type PromptProvider = 'claude' | 'codex';
 
 export interface Executor {
   id: string;
   project_id: string;
-  group_id: string;
+  workspace_id: string;
   name: string;
   command: string;
   executor_type: ExecutorType;
@@ -1539,77 +1531,12 @@ export const api = {
     };
   },
 
-  // Executor Group API
-  async getExecutorGroups(projectId: string): Promise<ExecutorGroup[]> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executor-groups`);
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
-    const data = await res.json();
-    return data.groups;
-  },
-
-  async getExecutorGroupByBranch(projectId: string, branch: string): Promise<ExecutorGroup | null> {
-    const params = new URLSearchParams({ branch });
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executor-groups/by-branch?${params}`);
-    if (res.status === 404) return null;
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
-    const data = await res.json();
-    return data.group;
-  },
-
-  async createExecutorGroup(
-    projectId: string,
-    opts: { name: string; branch: string }
-  ): Promise<ExecutorGroup> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executor-groups`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
-    const data = await res.json();
-    return data.group;
-  },
-
-  async updateExecutorGroup(
-    id: string,
-    opts: { name?: string }
-  ): Promise<ExecutorGroup> {
-    const res = await authFetch(`${getApiBase()}/api/executor-groups/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
-    const data = await res.json();
-    return data.group;
-  },
-
-  async deleteExecutorGroup(id: string): Promise<void> {
-    const res = await authFetch(`${getApiBase()}/api/executor-groups/${id}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
-  },
-
   // Executor API
-  async getExecutors(projectId: string, groupId?: string): Promise<Executor[]> {
+  // `branch` scopes the list to one workspace; the "" main-workspace sentinel
+  // is a real value here, so only `undefined` means "every executor".
+  async getExecutors(projectId: string, branch?: string | null): Promise<Executor[]> {
     const params = new URLSearchParams();
-    if (groupId) params.set("groupId", groupId);
+    if (branch !== undefined && branch !== null) params.set("branch", branch);
     const query = params.toString() ? `?${params.toString()}` : "";
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executors${query}`);
     if (!res.ok) {
@@ -1622,7 +1549,7 @@ export const api = {
 
   async createExecutor(
     projectId: string,
-    opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; group_id: string }
+    opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; branch: string }
   ): Promise<Executor> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executors`, {
       method: "POST",
@@ -1664,11 +1591,11 @@ export const api = {
     }
   },
 
-  async reorderExecutors(projectId: string, orderedIds: string[], groupId: string): Promise<void> {
+  async reorderExecutors(projectId: string, orderedIds: string[], branch: string): Promise<void> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executors/reorder`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orderedIds, groupId }),
+      body: JSON.stringify({ orderedIds, branch }),
     });
     if (!res.ok) {
       const error = await res.json();
@@ -1677,11 +1604,13 @@ export const api = {
   },
 
   // Process Control API
-  async startExecutor(executorId: string, branch?: string | null, target?: string): Promise<string> {
+  // No branch: the server derives the working directory from the executor's
+  // own workspace, so a stale selection here can't run it somewhere else.
+  async startExecutor(executorId: string, target?: string): Promise<string> {
     const res = await authFetch(`${getApiBase()}/api/executors/${executorId}/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ branch, target }),
+      body: JSON.stringify({ target }),
     });
     if (!res.ok) {
       const error = await res.json();

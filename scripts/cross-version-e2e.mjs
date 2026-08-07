@@ -391,9 +391,13 @@ await smoke("execute-sync", ["http:POST /api/execute-one-shot"], async () => {
 });
 let processId;
 await smoke("executor-start", ["http:POST /api/path/execute"], async () => {
-  const { group } = await api("POST", `${P}/executor-groups`, { name: "xver-group", branch: "main" });
+  // Executors hang off a workspace, and the hub only registers one for a
+  // remote branch when it lists that remote's worktrees — do it here rather
+  // than leaning on the earlier worktrees smoke, so this case stands alone.
+  // "" is the main-workspace sentinel.
+  await api("GET", `${P}/worktrees?target=${record.id}`);
   const { executor } = await api("POST", `${P}/executors`, {
-    name: "xver-exec", command: "echo xver-log-line; sleep 20", group_id: group?.id,
+    name: "xver-exec", command: "echo xver-log-line; sleep 20", branch: "",
   });
   const started = await api("POST", `/api/executors/${executor.id}/start`, { target: record.id });
   processId = started.processId;

@@ -5,93 +5,35 @@ import path from "path";
 import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
 
-describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses storage", () => {
+describe("executors/executorProcesses/remoteExecutorProcesses storage", () => {
   let dir: string;
   let storage: Storage;
+  let w1: string;
+
+  const registerWorkspace = async (projectId: string, branch: string) => {
+    const registered = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId, branch, targetId: "local",
+      worktreePath: `/tmp/${projectId}-${branch || "main"}`, expectedBranch: branch,
+    });
+    return registered.workspace.id;
+  };
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-exec-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "p1", name: "p", path: "/tmp/p" });
-    await storage.executorGroups.create({ id: "g1", project_id: "p1", name: "G", branch: "main" });
+    // executors.workspace_id is a real FK now, so the owning workspace has to
+    // exist before any executor can reference it.
+    w1 = await registerWorkspace("p1", "main");
   });
   afterEach(async () => {
     await storage.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  describe("executorGroups", () => {
-    it("create/getById round-trip", async () => {
-      const g = await storage.executorGroups.getById("g1");
-      expect(g?.project_id).toBe("p1");
-      expect(g?.name).toBe("G");
-      expect(g?.branch).toBe("main");
-      expect(await storage.executorGroups.getById("nonexistent")).toBeUndefined();
-    });
-
-    it("getByProjectId scopes to the project (ordering by created_at is not asserted: two groups created back-to-back in a test typically tie at second resolution, and the plain `ORDER BY created_at ASC` has no secondary tiebreak, so tied order is an unspecified implementation detail, not a documented contract)", async () => {
-      await storage.executorGroups.create({ id: "g2", project_id: "p1", name: "G2", branch: "feature-a" });
-      await storage.projects.create({ id: "p2", name: "p2", path: "/tmp/p2" });
-      await storage.executorGroups.create({ id: "g3", project_id: "p2", name: "G3", branch: "main" });
-
-      const list = await storage.executorGroups.getByProjectId("p1");
-      expect(list.map((x) => x.id).sort()).toEqual(["g1", "g2"]);
-    });
-
-    it("getByBranch finds the group for a (project, branch) pair", async () => {
-      const found = await storage.executorGroups.getByBranch("p1", "main");
-      expect(found?.id).toBe("g1");
-      expect(await storage.executorGroups.getByBranch("p1", "does-not-exist")).toBeUndefined();
-    });
-
-    it("createIfBranchFree: created:true for a new branch, created:false (existing row) for a duplicate", async () => {
-      const first = await storage.executorGroups.createIfBranchFree({ id: "g2", project_id: "p1", name: "G2", branch: "feature-x" });
-      expect(first.created).toBe(true);
-      expect(first.group.id).toBe("g2");
-      expect(first.group.branch).toBe("feature-x");
-
-      // A second attempt at the same (project_id, branch) is ignored — the
-      // existing row (g2) is returned instead, and g3 is never inserted.
-      const second = await storage.executorGroups.createIfBranchFree({ id: "g3", project_id: "p1", name: "G3-dup", branch: "feature-x" });
-      expect(second.created).toBe(false);
-      expect(second.group.id).toBe("g2");
-      expect(await storage.executorGroups.getById("g3")).toBeUndefined();
-    });
-
-    it("createIfBranchFree: concurrent calls for the same branch — exactly one wins, both see the same row", async () => {
-      // Regression test for the onConflict((oc) => oc.columns(["project_id",
-      // "branch"]).doNothing()) mapping of the old `INSERT OR IGNORE` +
-      // re-read. DB-level arbitration (the UNIQUE(project_id, branch) index)
-      // does the serializing here, not a JS transaction — see the port's
-      // rationale comment.
-      const [a, b] = await Promise.all([
-        storage.executorGroups.createIfBranchFree({ id: "ga", project_id: "p1", name: "A", branch: "race" }),
-        storage.executorGroups.createIfBranchFree({ id: "gb", project_id: "p1", name: "B", branch: "race" }),
-      ]);
-      const createdCount = [a.created, b.created].filter(Boolean).length;
-      expect(createdCount).toBe(1);
-      expect(a.group.id).toBe(b.group.id);
-      expect(["ga", "gb"]).toContain(a.group.id);
-    });
-
-    it("update: partial name update; no-op opts still returns current row", async () => {
-      const updated = await storage.executorGroups.update("g1", { name: "renamed" });
-      expect(updated?.name).toBe("renamed");
-      expect(updated?.branch).toBe("main");
-      const noop = await storage.executorGroups.update("g1", {});
-      expect(noop?.name).toBe("renamed");
-      expect(await storage.executorGroups.update("nonexistent", { name: "x" })).toBeUndefined();
-    });
-
-    it("delete removes the group", async () => {
-      await storage.executorGroups.delete("g1");
-      expect(await storage.executorGroups.getById("g1")).toBeUndefined();
-    });
-  });
-
   describe("executors", () => {
     it("create round-trip: pty boolean, disabled_targets JSON, defaults", async () => {
-      const e = await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "run", command: "make" });
+      const e = await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "run", command: "make" });
       expect(e.pty).toBe(true);
       expect(e.disabled_targets).toEqual([]);
       expect(e.executor_type).toBe("command");
@@ -106,7 +48,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
     it("create accepts explicit executor_type/prompt_provider/cwd/pty overrides", async () => {
       const e = await storage.executors.create({
-        id: "e1", project_id: "p1", group_id: "g1", name: "prompt-run", command: "n/a",
+        id: "e1", project_id: "p1", workspace_id: w1, name: "prompt-run", command: "n/a",
         executor_type: "prompt", prompt_provider: "codex", cwd: "/tmp/work", pty: false,
       });
       expect(e.executor_type).toBe("prompt");
@@ -115,22 +57,22 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
       expect(e.pty).toBe(false);
     });
 
-    it("create assigns increasing positions per group, independent across groups", async () => {
-      const e1 = await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
-      const e2 = await storage.executors.create({ id: "e2", project_id: "p1", group_id: "g1", name: "b", command: "b" });
-      const e3 = await storage.executors.create({ id: "e3", project_id: "p1", group_id: "g1", name: "c", command: "c" });
+    it("create assigns increasing positions per workspace, independent across workspaces", async () => {
+      const e1 = await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
+      const e2 = await storage.executors.create({ id: "e2", project_id: "p1", workspace_id: w1, name: "b", command: "b" });
+      const e3 = await storage.executors.create({ id: "e3", project_id: "p1", workspace_id: w1, name: "c", command: "c" });
       expect([e1.position, e2.position, e3.position]).toEqual([0, 1, 2]);
 
-      await storage.executorGroups.create({ id: "g2", project_id: "p1", name: "G2", branch: "other" });
-      const eOther = await storage.executors.create({ id: "e-other", project_id: "p1", group_id: "g2", name: "x", command: "x" });
-      expect(eOther.position).toBe(0); // independent counter for group g2
+      const w2 = await registerWorkspace("p1", "other");
+      const eOther = await storage.executors.create({ id: "e-other", project_id: "p1", workspace_id: w2, name: "x", command: "x" });
+      expect(eOther.position).toBe(0); // independent counter for workspace w2
     });
 
-    it("getByProjectId and getByGroupId order by position ascending", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
-      await storage.executors.create({ id: "e2", project_id: "p1", group_id: "g1", name: "b", command: "b" });
-      const byGroup = await storage.executors.getByGroupId("g1");
-      expect(byGroup.map((x) => x.id)).toEqual(["e1", "e2"]);
+    it("getByProjectId and getByWorkspaceId order by position ascending", async () => {
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
+      await storage.executors.create({ id: "e2", project_id: "p1", workspace_id: w1, name: "b", command: "b" });
+      const byWorkspace = await storage.executors.getByWorkspaceId(w1);
+      expect(byWorkspace.map((x) => x.id)).toEqual(["e1", "e2"]);
       const byProject = await storage.executors.getByProjectId("p1");
       expect(byProject.map((x) => x.id)).toEqual(["e1", "e2"]);
     });
@@ -140,7 +82,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("update: partial field updates leave other fields untouched; no-op opts still returns current row", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "run", command: "make", cwd: "/tmp" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "run", command: "make", cwd: "/tmp" });
       const u1 = await storage.executors.update("e1", { name: "renamed" });
       expect(u1?.name).toBe("renamed");
       expect(u1?.command).toBe("make");
@@ -158,7 +100,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("setTargetDisabled: add, add a second, remove one, remove-when-absent is a no-op", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "run", command: "make" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "run", command: "make" });
       const added = await storage.executors.setTargetDisabled("e1", "local", true);
       expect(added?.disabled_targets).toEqual(["local"]);
 
@@ -184,7 +126,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
       // a transaction in the Kysely port — without it, two concurrent
       // Kysely-awaited calls could interleave read->read->write->write and
       // silently drop one toggle.
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "run", command: "make" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "run", command: "make" });
       await Promise.all([
         storage.executors.setTargetDisabled("e1", "local", true),
         storage.executors.setTargetDisabled("e1", "srv-1", true),
@@ -194,16 +136,16 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("delete removes the executor", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "run", command: "make" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "run", command: "make" });
       await storage.executors.delete("e1");
       expect(await storage.executors.getById("e1")).toBeUndefined();
     });
 
     it("reorder persists positions in the given order", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
-      await storage.executors.create({ id: "e2", project_id: "p1", group_id: "g1", name: "b", command: "b" });
-      await storage.executors.reorder("g1", ["e2", "e1"]);
-      const list = await storage.executors.getByGroupId("g1");
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
+      await storage.executors.create({ id: "e2", project_id: "p1", workspace_id: w1, name: "b", command: "b" });
+      await storage.executors.reorder(w1, ["e2", "e1"]);
+      const list = await storage.executors.getByWorkspaceId(w1);
       expect(list.map((x) => x.id)).toEqual(["e2", "e1"]);
       expect(list.map((x) => x.position)).toEqual([0, 1]);
     });
@@ -211,7 +153,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
 
   describe("executorProcesses", () => {
     it("create defaults: status running, pid/exit_code/finished_at null unless given", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       const p = await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       expect(p.status).toBe("running");
       expect(p.pid).toBeNull();
@@ -223,7 +165,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("getById / getRunning", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       await storage.executorProcesses.create({ id: "pr2", executor_id: "e1" });
       await storage.executorProcesses.updateStatus("pr1", "completed", 0);
@@ -234,7 +176,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("getLastByExecutorId returns the single row for that executor", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       expect((await storage.executorProcesses.getLastByExecutorId("e1"))?.id).toBe("pr1");
       expect(await storage.executorProcesses.getLastByExecutorId("no-such-executor")).toBeUndefined();
@@ -245,8 +187,8 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("getLastByExecutorIds returns at most one row per executor", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
-      await storage.executors.create({ id: "e2", project_id: "p1", group_id: "g1", name: "b", command: "b" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
+      await storage.executors.create({ id: "e2", project_id: "p1", workspace_id: w1, name: "b", command: "b" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       await storage.executorProcesses.updateStatus("pr1", "completed", 0);
       await storage.executorProcesses.create({ id: "pr2", executor_id: "e1" });
@@ -270,7 +212,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("getLastByExecutorIds picks the genuinely newest row once started_at no longer ties", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       await storage.executorProcesses.updateStatus("pr1", "completed", 0);
       // started_at has second-level resolution; wait past the boundary so
@@ -285,7 +227,7 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     }, 10000);
 
     it("updateStatus sets exit_code and finished_at when leaving 'running'; clears finished_at going back to running", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       await storage.executorProcesses.updateStatus("pr1", "failed", 17);
       const failed = await storage.executorProcesses.getById("pr1");
@@ -300,14 +242,14 @@ describe("executorGroups/executors/executorProcesses/remoteExecutorProcesses sto
     });
 
     it("updatePid updates the pid", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       await storage.executorProcesses.updatePid("pr1", 999);
       expect((await storage.executorProcesses.getById("pr1"))?.pid).toBe(999);
     });
 
     it("markKilledIfRunning: kills a running process; is a no-op on an already-finished one", async () => {
-      await storage.executors.create({ id: "e1", project_id: "p1", group_id: "g1", name: "a", command: "a" });
+      await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "a", command: "a" });
       await storage.executorProcesses.create({ id: "pr1", executor_id: "e1" });
       await storage.executorProcesses.create({ id: "pr2", executor_id: "e1" });
       await storage.executorProcesses.updateStatus("pr2", "completed", 5);

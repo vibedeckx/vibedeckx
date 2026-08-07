@@ -75,21 +75,14 @@ export interface Project {
   created_at: string;
 }
 
-export interface ExecutorGroup {
-  id: string;
-  project_id: string;
-  name: string;
-  branch: string;
-  created_at: string;
-}
-
 export type ExecutorType = 'command' | 'prompt';
 export type PromptProvider = 'claude' | 'codex';
 
 export interface Executor {
   id: string;
   project_id: string;
-  group_id: string;
+  /** Owning workspace — executors are configured per workspace (project + branch). */
+  workspace_id: string;
   name: string;
   command: string;
   executor_type: ExecutorType;
@@ -769,6 +762,19 @@ export interface Storage {
       branch: string,
       targetId: string,
     ) => Promise<RegisteredWorkspaceCheckout | undefined>;
+    /**
+     * Workspace row alone, with no checkout join. Configuration that belongs to
+     * a workspace rather than to one of its checkouts (executors) must resolve
+     * through these two, NOT through `getByProjectBranch`: that one is
+     * target-scoped and inner-joins live checkouts, so it stops finding a
+     * workspace as soon as its last worktree is deleted — while the workspace
+     * row, and the config hanging off it, deliberately survive.
+     */
+    getWorkspaceById: (workspaceId: string) => Promise<WorkspaceRecord | undefined>;
+    getWorkspaceByProjectBranch: (
+      projectId: string,
+      branch: string,
+    ) => Promise<WorkspaceRecord | undefined>;
     markCheckoutDeleted: (checkoutId: string) => Promise<void>;
   };
   mergeTargets: {
@@ -821,29 +827,10 @@ export interface Storage {
     setPrimary(projectId: string, remoteId: string): Promise<boolean>;
     remove(id: string, projectId?: string): Promise<boolean>;
   };
-  executorGroups: {
-    create: (opts: { id: string; project_id: string; name: string; branch: string }) => Promise<ExecutorGroup>;
-    getByProjectId: (projectId: string) => Promise<ExecutorGroup[]>;
-    getById: (id: string) => Promise<ExecutorGroup | undefined>;
-    getByBranch: (projectId: string, branch: string) => Promise<ExecutorGroup | undefined>;
-    /**
-     * Atomically create a group for (project_id, branch) unless one already
-     * exists there. The existence check and insert happen inside one storage
-     * call (backed by the table's UNIQUE(project_id, branch) constraint), so
-     * two concurrent creates for the same branch can no longer both observe
-     * "none exists" before either insert lands — the loser gets back the
-     * winner's row with `created: false` instead of an unhandled constraint-
-     * violation error. Callers that want the previous "409 Conflict" behavior
-     * should branch on `created`.
-     */
-    createIfBranchFree: (opts: { id: string; project_id: string; name: string; branch: string }) => Promise<{ created: boolean; group: ExecutorGroup }>;
-    update: (id: string, opts: { name?: string }) => Promise<ExecutorGroup | undefined>;
-    delete: (id: string) => Promise<void>;
-  };
   executors: {
-    create: (opts: { id: string; project_id: string; group_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<Executor>;
+    create: (opts: { id: string; project_id: string; workspace_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<Executor>;
     getByProjectId: (projectId: string) => Promise<Executor[]>;
-    getByGroupId: (groupId: string) => Promise<Executor[]>;
+    getByWorkspaceId: (workspaceId: string) => Promise<Executor[]>;
     getById: (id: string) => Promise<Executor | undefined>;
     update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => Promise<Executor | undefined>;
     /**
@@ -856,7 +843,7 @@ export interface Storage {
      */
     setTargetDisabled: (id: string, target: string, disabled: boolean) => Promise<Executor | undefined>;
     delete: (id: string) => Promise<void>;
-    reorder: (groupId: string, orderedIds: string[]) => Promise<void>;
+    reorder: (workspaceId: string, orderedIds: string[]) => Promise<void>;
   };
   executorProcesses: {
     create: (opts: { id: string; executor_id: string; pid?: number }) => Promise<ExecutorProcess>;

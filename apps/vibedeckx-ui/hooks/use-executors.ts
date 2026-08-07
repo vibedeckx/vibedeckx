@@ -73,7 +73,14 @@ export interface ExecutorWithProcess extends Executor {
   isDisabled: boolean;
 }
 
-export function useExecutors(projectId: string | null, groupId: string | null | undefined, executorMode?: string) {
+export function useExecutors(
+  projectId: string | null,
+  selectedBranch: string | null | undefined,
+  executorMode?: string,
+) {
+  // Executors belong to a workspace; the main workspace's branch is the ""
+  // sentinel, which is what a null/absent selection resolves to.
+  const branch = selectedBranch ?? "";
   const [executors, setExecutors] = useState<Executor[]>([]);
   const [runningProcesses, setRunningProcesses] = useState<Map<string, RunningProcessEntry[]>>(
     new Map()
@@ -87,23 +94,23 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   );
   const [loading, setLoading] = useState(true);
 
-  // Fetch executors scoped to group
+  // Fetch executors scoped to the selected workspace
   const fetchExecutors = useCallback(async () => {
-    if (!projectId || !groupId) {
+    if (!projectId) {
       setExecutors([]);
       setLoading(false);
       return;
     }
 
     try {
-      const data = await api.getExecutors(projectId, groupId);
+      const data = await api.getExecutors(projectId, branch);
       setExecutors(data);
     } catch (error) {
       console.error("Failed to fetch executors:", error);
     } finally {
       setLoading(false);
     }
-  }, [projectId, groupId]);
+  }, [projectId, branch]);
 
   // Fetch running processes
   const fetchRunningProcesses = useCallback(async () => {
@@ -124,16 +131,16 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     }
   }, []);
 
-  // Executors are scoped to the active group — refetch when projectId/groupId
-  // resolve or change.
+  // Executors are scoped to the active workspace — refetch when
+  // projectId/branch resolve or change.
   useEffect(() => {
     fetchExecutors();
   }, [fetchExecutors]);
 
-  // Running processes are global (not group-scoped), so fetch once on mount.
-  // Kept out of the executor effect above, whose identity changes as projectId
-  // then groupId resolve — bundling them re-fired this argument-less call 3x
-  // per load for an identical result.
+  // Running processes are global (not workspace-scoped), so fetch once on
+  // mount. Kept out of the executor effect above, whose identity changes as
+  // projectId then branch resolve — bundling them re-fired this argument-less
+  // call 3x per load for an identical result.
   useEffect(() => {
     fetchRunningProcesses();
   }, [fetchRunningProcesses]);
@@ -256,13 +263,13 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
     }
   });
 
-  // Create executor in the active group
+  // Create executor in the active workspace
   const createExecutor = useCallback(
     async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => {
-      if (!projectId || !groupId) return null;
+      if (!projectId) return null;
 
       try {
-        const executor = await api.createExecutor(projectId, { ...opts, group_id: groupId });
+        const executor = await api.createExecutor(projectId, { ...opts, branch });
         setExecutors((prev) => [...prev, executor]);
         return executor;
       } catch (error) {
@@ -270,7 +277,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
         return null;
       }
     },
-    [projectId, groupId]
+    [projectId, branch]
   );
 
   // Update executor
@@ -307,9 +314,9 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   }, []);
 
   // Start executor
-  const startExecutor = useCallback(async (executorId: string, branch?: string | null) => {
+  const startExecutor = useCallback(async (executorId: string) => {
     try {
-      const processId = await api.startExecutor(executorId, branch, executorMode);
+      const processId = await api.startExecutor(executorId, executorMode);
       const target = executorMode ?? "local";
       setRunningProcesses((prev) => {
         const entries = prev.get(executorId) ?? [];
@@ -421,7 +428,7 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
   // Reorder executors with optimistic update
   const reorderExecutors = useCallback(
     async (orderedIds: string[]) => {
-      if (!projectId || !groupId) return;
+      if (!projectId) return;
 
       // Optimistic update: reorder local state immediately
       const previousExecutors = executors;
@@ -431,14 +438,14 @@ export function useExecutors(projectId: string | null, groupId: string | null | 
       setExecutors(reorderedExecutors);
 
       try {
-        await api.reorderExecutors(projectId, orderedIds, groupId);
+        await api.reorderExecutors(projectId, orderedIds, branch);
       } catch (error) {
         // Revert on error
         console.error("Failed to reorder executors:", error);
         setExecutors(previousExecutors);
       }
     },
-    [projectId, groupId, executors]
+    [projectId, branch, executors]
   );
 
   // Get executor with process info, filtered by current executor mode.

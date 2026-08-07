@@ -446,11 +446,11 @@ export class ChatSessionManager {
       const executor = await this.storage.executors.getById(event.executorId);
       if (!executor) { console.log(`[ChatSession] handleExecutorFinished: executor not found`); return; }
 
-      // Look up group to get branch
-      const group = await this.storage.executorGroups.getById(executor.group_id);
-      if (!group) { console.log(`[ChatSession] handleExecutorFinished: group not found for executor.group_id=${executor.group_id}`); return; }
+      // Look up the owning workspace to get branch
+      const workspace = await this.storage.workspaceRegistry.getWorkspaceById(executor.workspace_id);
+      if (!workspace) { console.log(`[ChatSession] handleExecutorFinished: workspace not found for executor.workspace_id=${executor.workspace_id}`); return; }
 
-      const branch = group.branch || null;
+      const branch = workspace.branch || null;
 
       // Find a chat session for this project+branch that has event listening enabled
       const key = `${event.projectId}:${branch ?? ""}`;
@@ -1766,13 +1766,13 @@ export class ChatSessionManager {
             .describe("Number of recent output lines to include per executor"),
         }),
         execute: async ({ tailLines }) => {
-          const group = await storage.executorGroups.getByBranch(projectId, branch ?? "");
+          const workspace = await storage.workspaceRegistry.getWorkspaceByProjectBranch(projectId, branch ?? "");
 
-          if (!group) {
-            return { executors: [], message: "No executor group found for this workspace." };
+          if (!workspace) {
+            return { executors: [], message: "No workspace found for this branch." };
           }
 
-          const executors = await storage.executors.getByGroupId(group.id);
+          const executors = await storage.executors.getByWorkspaceId(workspace.id);
           const now = Date.now();
 
           const results = await Promise.all(executors.map(async (executor) => {
@@ -1842,13 +1842,13 @@ export class ChatSessionManager {
             .describe("Remote server name or ID to run the executor on. If omitted, uses project executor_mode or runs locally."),
         }),
         execute: async ({ executorName, remote }) => {
-          const group = await storage.executorGroups.getByBranch(projectId, branch ?? "");
+          const workspace = await storage.workspaceRegistry.getWorkspaceByProjectBranch(projectId, branch ?? "");
 
-          if (!group) {
-            return { success: false, message: "No executor group found for this workspace." };
+          if (!workspace) {
+            return { success: false, message: "No workspace found for this branch." };
           }
 
-          const executors = await storage.executors.getByGroupId(group.id);
+          const executors = await storage.executors.getByWorkspaceId(workspace.id);
           const executor = executors.find(
             (e) => e.name.toLowerCase() === executorName.toLowerCase()
           );
@@ -2026,13 +2026,13 @@ export class ChatSessionManager {
             .describe("Remote server name or ID where the executor is running. If omitted, auto-detects."),
         }),
         execute: async ({ executorName, remote }) => {
-          const group = await storage.executorGroups.getByBranch(projectId, branch ?? "");
+          const workspace = await storage.workspaceRegistry.getWorkspaceByProjectBranch(projectId, branch ?? "");
 
-          if (!group) {
-            return { success: false, message: "No executor group found for this workspace." };
+          if (!workspace) {
+            return { success: false, message: "No workspace found for this branch." };
           }
 
-          const executors = await storage.executors.getByGroupId(group.id);
+          const executors = await storage.executors.getByWorkspaceId(workspace.id);
           const executor = executors.find(
             (e) => e.name.toLowerCase() === executorName.toLowerCase()
           );

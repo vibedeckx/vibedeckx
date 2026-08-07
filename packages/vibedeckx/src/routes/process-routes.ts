@@ -43,7 +43,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const tempExecutor = {
       id: randomUUID(),
       project_id: project.id,
-      group_id: "",
+      workspace_id: "",
       name: "remote-command",
       command,
       executor_type: (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType,
@@ -65,7 +65,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   });
 
   // 启动 Executor
-  fastify.post<{ Params: { id: string }; Body: { branch?: string | null; target?: string } }>("/api/executors/:id/start", async (req, reply) => {
+  fastify.post<{ Params: { id: string }; Body: { target?: string } }>("/api/executors/:id/start", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
@@ -79,7 +79,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const branch = req.body?.branch;
+    // Where this runs comes from the executor's own workspace, never from the
+    // request. A caller-supplied branch could point at a different workspace
+    // than the one the executor belongs to — and completion is attributed via
+    // executor.workspace_id (chat-session-manager.handleExecutorFinished), so
+    // the run would land in workspace B while the notification named A.
+    const workspace = await fastify.storage.workspaceRegistry.getWorkspaceById(executor.workspace_id);
+    if (!workspace) {
+      return reply.code(400).send({ error: "Executor's workspace no longer exists" });
+    }
+    const branch = workspace.branch || null;
 
     // Use explicit target from request if provided, otherwise fall back to project setting
     let executorMode = req.body?.target || project.executor_mode;

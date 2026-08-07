@@ -13,10 +13,6 @@ import type {
 
 const mapExecutor = (row: Selectable<ExecutorsTable>): Executor => ({
   ...row,
-  // The DB column is nullable (legacy DDL), but every real caller supplies a
-  // group_id (routes/executor-routes.ts requires it; scheduler.ts/
-  // process-routes.ts pass ""), so this never actually surfaces null.
-  group_id: row.group_id ?? "",
   executor_type: (row.executor_type || "command") as ExecutorType,
   prompt_provider: (row.prompt_provider as PromptProvider) ?? null,
   pty: fromDbBool(row.pty),
@@ -50,85 +46,24 @@ const mapRemoteExecutorProcess = (row: Selectable<RemoteExecutorProcessesTable>)
 export const createExecutorRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
-): Pick<Storage, "executorGroups" | "executors" | "executorProcesses" | "remoteExecutorProcesses"> => ({
-  executorGroups: {
-    create: async ({ id, project_id, name, branch }) => {
-      await kdb.insertInto("executor_groups").values({ id, project_id, name, branch }).execute();
-      const row = await kdb.selectFrom("executor_groups").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      return row;
-    },
-
-    getByProjectId: async (projectId) => {
-      return kdb.selectFrom("executor_groups").selectAll()
-        .where("project_id", "=", projectId)
-        .orderBy("created_at", "asc")
-        .execute();
-    },
-
-    getById: async (id) => {
-      return kdb.selectFrom("executor_groups").selectAll().where("id", "=", id).executeTakeFirst();
-    },
-
-    getByBranch: async (projectId, branch) => {
-      return kdb.selectFrom("executor_groups").selectAll()
-        .where("project_id", "=", projectId).where("branch", "=", branch)
-        .executeTakeFirst();
-    },
-
-    createIfBranchFree: async ({ id, project_id, name, branch }) => {
-      // DB-level arbitration via the table's UNIQUE(project_id, branch)
-      // index — the old `INSERT OR IGNORE` + re-read, ported to
-      // `.onConflict(...).doNothing()` + re-read. No transaction needed: a
-      // single guarded statement is atomic on its own (see the pg-era note
-      // on executors.setTargetDisabled below for when a transaction IS
-      // required).
-      //
-      // This targets only the (project_id, branch) unique index, not the
-      // `id` primary key. The old `INSERT OR IGNORE` silently swallowed a
-      // conflict on EITHER constraint, but every caller always supplies a
-      // fresh id (crypto.randomUUID()-style), so an `id` collision never
-      // happens in practice; if it somehow did, this port surfaces a
-      // constraint-violation error instead of silently ignoring it, which
-      // is arguably the safer behavior for a bug that should never occur.
-      const result = await kdb.insertInto("executor_groups")
-        .values({ id, project_id, name, branch })
-        .onConflict((oc) => oc.columns(["project_id", "branch"]).doNothing())
-        .executeTakeFirst();
-      const group = await kdb.selectFrom("executor_groups").selectAll()
-        .where("project_id", "=", project_id).where("branch", "=", branch)
-        .executeTakeFirstOrThrow();
-      return { created: (result?.numInsertedOrUpdatedRows ?? 0n) > 0n, group };
-    },
-
-    update: async (id, opts) => {
-      if (opts.name !== undefined) {
-        await kdb.updateTable("executor_groups").set({ name: opts.name }).where("id", "=", id).execute();
-      }
-      return kdb.selectFrom("executor_groups").selectAll().where("id", "=", id).executeTakeFirst();
-    },
-
-    delete: async (id) => {
-      await kdb.deleteFrom("executor_groups").where("id", "=", id).execute();
-    },
-  },
-
+): Pick<Storage, "executors" | "executorProcesses" | "remoteExecutorProcesses"> => ({
   executors: {
-    create: async ({ id, project_id, group_id, name, command, executor_type, prompt_provider, cwd, pty }) => {
+    create: async ({ id, project_id, workspace_id, name, command, executor_type, prompt_provider, cwd, pty }) => {
       // Position assignment pushed into the INSERT itself (a
-      // `coalesce(max(position), -1) + 1` subquery scoped to the group)
+      // `coalesce(max(position), -1) + 1` subquery scoped to the workspace)
       // instead of a JS-side "read max, then write" — that keeps the whole
       // operation a single atomic SQL statement, so unlike
       // setTargetDisabled below, no transaction is needed here even though
       // Kysely's awaits are real microtask yield points.
       await kdb.insertInto("executors").values((eb) => ({
-        id, project_id, group_id, name, command,
+        id, project_id, workspace_id, name, command,
         executor_type: executor_type ?? "command",
         prompt_provider: prompt_provider ?? null,
         cwd: cwd ?? null,
         pty: h.toDbBool(pty !== false),
         position: eb.selectFrom("executors")
           .select(sql<number>`coalesce(max(position), -1) + 1`.as("next_position"))
-          .where("group_id", "=", group_id),
+          .where("workspace_id", "=", workspace_id),
       })).execute();
 
       const row = await kdb.selectFrom("executors").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
@@ -143,9 +78,9 @@ export const createExecutorRepos = (
       return rows.map(mapExecutor);
     },
 
-    getByGroupId: async (groupId) => {
+    getByWorkspaceId: async (workspaceId) => {
       const rows = await kdb.selectFrom("executors").selectAll()
-        .where("group_id", "=", groupId)
+        .where("workspace_id", "=", workspaceId)
         .orderBy("position", "asc")
         .execute();
       return rows.map(mapExecutor);
@@ -211,7 +146,7 @@ export const createExecutorRepos = (
       await kdb.deleteFrom("executors").where("id", "=", id).execute();
     },
 
-    reorder: async (groupId, orderedIds) => {
+    reorder: async (workspaceId, orderedIds) => {
       // Multi-row transaction — already transactional in the old
       // `db.transaction(() => { ... })()` inline code; kept transactional
       // here for the same reason (a partial reorder must never be
@@ -221,7 +156,7 @@ export const createExecutorRepos = (
           await trx.updateTable("executors")
             .set({ position: i })
             .where("id", "=", orderedIds[i])
-            .where("group_id", "=", groupId)
+            .where("workspace_id", "=", workspaceId)
             .execute();
         }
       });

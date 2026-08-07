@@ -12,7 +12,6 @@ import projectRoutes from "./routes/project-routes.js";
 import remoteServerRoutes from "./routes/remote-server-routes.js";
 import workerStatsRoutes from "./routes/worker-stats-routes.js";
 import projectRemoteRoutes from "./routes/project-remote-routes.js";
-import executorGroupRoutes from "./routes/executor-group-routes.js";
 import executorRoutes from "./routes/executor-routes.js";
 import processRoutes from "./routes/process-routes.js";
 import worktreeRoutes from "./routes/worktree-routes.js";
@@ -353,7 +352,6 @@ export const createServer = async (opts: {
   server.register(workerStatsRoutes);
   server.register(projectRemoteRoutes);
   server.register(searchRoutes);
-  server.register(executorGroupRoutes);
   server.register(executorRoutes);
   server.register(scheduleRoutes);
   server.register(processRoutes);

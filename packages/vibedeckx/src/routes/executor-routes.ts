@@ -19,8 +19,8 @@ function normalizeSqlTimestamp(value: string | null | undefined): string | null 
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
-  // Get executors — optionally scoped to a group
-  fastify.get<{ Params: { projectId: string }; Querystring: { groupId?: string } }>(
+  // Get executors — optionally scoped to one workspace (branch)
+  fastify.get<{ Params: { projectId: string }; Querystring: { branch?: string } }>(
     "/api/projects/:projectId/executors",
     async (req, reply) => {
       const userId = requireAuth(req, reply);
@@ -31,9 +31,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
       }
 
-      const executors = req.query.groupId
-        ? await fastify.storage.executors.getByGroupId(req.query.groupId)
-        : await fastify.storage.executors.getByProjectId(req.params.projectId);
+      // `branch` absent = every executor in the project; present (including the
+      // "" main-workspace sentinel) = just that workspace's. A branch with no
+      // workspace row yet simply has no executors — not an error.
+      let executors;
+      if (req.query.branch === undefined) {
+        executors = await fastify.storage.executors.getByProjectId(req.params.projectId);
+      } else {
+        const workspace = await fastify.storage.workspaceRegistry.getWorkspaceByProjectBranch(
+          req.params.projectId,
+          req.query.branch,
+        );
+        executors = workspace
+          ? await fastify.storage.executors.getByWorkspaceId(workspace.id)
+          : [];
+      }
 
       // Build a per-target "Last run" map for each executor so the UI can show
       // the correct timestamp when the user switches between local/remote tabs
@@ -86,7 +98,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create Executor
   fastify.post<{
     Params: { projectId: string };
-    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; group_id: string };
+    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; branch?: string };
   }>("/api/projects/:projectId/executors", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -96,9 +108,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { name, command, executor_type, prompt_provider, cwd, pty, group_id } = req.body;
-    if (!group_id) {
-      return reply.code(400).send({ error: "group_id is required" });
+    const { name, command, executor_type, prompt_provider, cwd, pty, branch } = req.body;
+    if (branch === undefined) {
+      return reply.code(400).send({ error: "branch is required" });
+    }
+
+    // The workspace is registered before its branch can be selected in the UI,
+    // so a miss here means the caller named a branch that does not exist as a
+    // workspace — fail loudly rather than conjuring a row for it.
+    const workspace = await fastify.storage.workspaceRegistry.getWorkspaceByProjectBranch(
+      req.params.projectId,
+      branch,
+    );
+    if (!workspace) {
+      return reply.code(400).send({ error: "No workspace for this branch" });
     }
 
     const parsedType = (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType;
@@ -108,7 +131,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const executor = await fastify.storage.executors.create({
       id,
       project_id: req.params.projectId,
-      group_id,
+      workspace_id: workspace.id,
       name,
       command,
       executor_type: parsedType,
@@ -189,10 +212,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reply.code(200).send({ success: true });
   });
 
-  // Reorder Executors within a group
+  // Reorder Executors within a workspace
   fastify.put<{
     Params: { projectId: string };
-    Body: { orderedIds: string[]; groupId: string };
+    Body: { orderedIds: string[]; branch?: string };
   }>("/api/projects/:projectId/executors/reorder", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -202,23 +225,33 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { orderedIds, groupId } = req.body;
+    const { orderedIds, branch } = req.body;
     if (!Array.isArray(orderedIds)) {
       return reply.code(400).send({ error: "orderedIds must be an array" });
     }
-    if (!groupId) {
-      return reply.code(400).send({ error: "groupId is required" });
+    if (branch === undefined) {
+      return reply.code(400).send({ error: "branch is required" });
     }
 
-    const existingExecutors = await fastify.storage.executors.getByGroupId(groupId);
+    const workspace = await fastify.storage.workspaceRegistry.getWorkspaceByProjectBranch(
+      req.params.projectId,
+      branch,
+    );
+    if (!workspace) {
+      return reply.code(400).send({ error: "No workspace for this branch" });
+    }
+
+    // Membership check before the write: `reorder` scopes its UPDATE to the
+    // workspace, so a foreign id would silently no-op rather than report.
+    const existingExecutors = await fastify.storage.executors.getByWorkspaceId(workspace.id);
     const existingIds = new Set(existingExecutors.map(e => e.id));
     for (const id of orderedIds) {
       if (!existingIds.has(id)) {
-        return reply.code(400).send({ error: `Executor ${id} not found in group` });
+        return reply.code(400).send({ error: `Executor ${id} not found in workspace` });
       }
     }
 
-    await fastify.storage.executors.reorder(groupId, orderedIds);
+    await fastify.storage.executors.reorder(workspace.id, orderedIds);
     return reply.code(200).send({ success: true });
   });
 };

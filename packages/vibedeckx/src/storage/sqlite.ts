@@ -323,20 +323,10 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     CREATE INDEX IF NOT EXISTS idx_project_chat_operations_thread_status_created_id
       ON project_chat_operations(thread_id, status, created_at, id);
 
-    CREATE TABLE IF NOT EXISTS executor_groups (
-      id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      branch TEXT NOT NULL DEFAULT '',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(project_id, branch),
-      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-    );
-
     CREATE TABLE IF NOT EXISTS executors (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
-      group_id TEXT,
+      workspace_id TEXT NOT NULL,
       name TEXT NOT NULL,
       command TEXT NOT NULL,
       executor_type TEXT DEFAULT 'command',
@@ -347,7 +337,7 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
       disabled_targets TEXT DEFAULT '[]',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-      FOREIGN KEY (group_id) REFERENCES executor_groups(id) ON DELETE CASCADE
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS executor_processes (
@@ -909,35 +899,6 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   // sentinel. Project Chat uses the non-empty "local" principal, so normalize
   // those legacy rows once at open rather than weakening scoped authorization.
   db.exec("UPDATE projects SET user_id = 'local' WHERE user_id = ''");
-
-  // Migration: add executor_groups table and group_id column to executors
-  const hasGroupIdColumn = tableInfo.some((col) => col.name === "group_id");
-  if (!hasGroupIdColumn) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS executor_groups (
-        id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        branch TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(project_id, branch),
-        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-      )
-    `);
-    db.exec("ALTER TABLE executors ADD COLUMN group_id TEXT REFERENCES executor_groups(id) ON DELETE CASCADE");
-
-    // Create a "Default" group for each project and assign existing executors to it
-    const projects = db.prepare("SELECT DISTINCT project_id FROM executors").all() as { project_id: string }[];
-    for (const { project_id } of projects) {
-      const groupId = `default-${project_id}`;
-      db.prepare(
-        "INSERT OR IGNORE INTO executor_groups (id, project_id, name, branch) VALUES (@id, @project_id, 'Default', '')"
-      ).run({ id: groupId, project_id });
-      db.prepare(
-        "UPDATE executors SET group_id = @group_id WHERE project_id = @project_id AND group_id IS NULL"
-      ).run({ group_id: groupId, project_id });
-    }
-  }
 
   // Migration: add assigned_branch column to tasks table
   const taskTableInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
@@ -1932,6 +1893,110 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
     db.prepare(`DELETE FROM global_settings WHERE key IN (${placeholders})`).run(...USER_LEVEL_KEYS);
   });
   migrateUserSettings();
+
+  // Migration: executors hang off the workspace registry instead of the
+  // removed executor_groups table. A group was keyed UNIQUE(project_id,
+  // branch) — exactly the key `workspaces` uses — so this is a 1:1 remap of
+  // the same scope, not a merge: no executor changes which branch it belongs
+  // to and positions stay within their original bucket.
+  //
+  // Deliberately last in the migration chain: it copies every executor column,
+  // so each earlier ALTER that adds one (pty/position/executor_type/
+  // prompt_provider above, disabled_targets further up) must already have run.
+  const executorColsForWorkspace = db.prepare("PRAGMA table_info(executors)").all() as { name: string }[];
+  if (executorColsForWorkspace.some((col) => col.name === "group_id")) {
+    db.transaction(() => {
+      const ensureWorkspace = db.prepare(
+        `INSERT INTO workspaces (id, project_id, branch, status, error)
+         VALUES (@id, @project_id, @branch, 'archived', NULL)
+         ON CONFLICT(project_id, branch) DO NOTHING`,
+      );
+
+      // Every group that owns executors needs its workspace to exist. Most
+      // already do (the registry registers one per worktree); the rest get an
+      // "archived" row — no live checkout — which recomputeWorkspace promotes
+      // to ready the first time a real checkout is registered for it.
+      const groups = db.prepare(`
+        SELECT DISTINCT g.project_id AS project_id, g.branch AS branch
+          FROM executor_groups g
+          JOIN executors e ON e.group_id = g.id
+          JOIN projects p ON p.id = g.project_id
+      `).all() as { project_id: string; branch: string }[];
+      for (const group of groups) {
+        ensureWorkspace.run({ id: crypto.randomUUID(), project_id: group.project_id, branch: group.branch });
+      }
+
+      // Executors whose group_id is NULL or dangling (the column was nullable,
+      // and a group deleted while FK enforcement was off could orphan its rows)
+      // land in the project's main workspace rather than being dropped by the
+      // join below.
+      const orphanProjects = db.prepare(`
+        SELECT DISTINCT e.project_id AS project_id
+          FROM executors e
+          JOIN projects p ON p.id = e.project_id
+         WHERE e.group_id IS NULL
+            OR NOT EXISTS (SELECT 1 FROM executor_groups g WHERE g.id = e.group_id)
+      `).all() as { project_id: string }[];
+      for (const { project_id } of orphanProjects) {
+        ensureWorkspace.run({ id: crypto.randomUUID(), project_id, branch: "" });
+      }
+
+      db.exec(`
+        CREATE TABLE executors_workspace_new (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          command TEXT NOT NULL,
+          executor_type TEXT DEFAULT 'command',
+          prompt_provider TEXT,
+          cwd TEXT,
+          pty INTEGER DEFAULT 1,
+          position INTEGER DEFAULT 0,
+          disabled_targets TEXT DEFAULT '[]',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO executors_workspace_new
+          (id, project_id, workspace_id, name, command, executor_type,
+           prompt_provider, cwd, pty, position, disabled_targets, created_at)
+        SELECT e.id, e.project_id, w.id, e.name, e.command, e.executor_type,
+               e.prompt_provider, e.cwd, e.pty,
+               ROW_NUMBER() OVER (
+                 PARTITION BY w.id ORDER BY e.position, e.created_at, e.id
+               ) - 1,
+               e.disabled_targets, e.created_at
+          FROM executors e
+          LEFT JOIN executor_groups g ON g.id = e.group_id
+          JOIN workspaces w
+            ON w.project_id = e.project_id AND w.branch = COALESCE(g.branch, '');
+      `);
+
+      // Renumbering above is per workspace, so orphans merging into an already
+      // populated main workspace can't collide on position.
+      const dropped = (db.prepare(
+        "SELECT COUNT(*) AS n FROM executors WHERE id NOT IN (SELECT id FROM executors_workspace_new)",
+      ).get() as { n: number }).n;
+      if (dropped > 0) {
+        // Only reachable for rows whose project row itself is gone — already
+        // unreachable through every route. Logged rather than dropped silently.
+        console.warn(`[storage] executor→workspace migration skipped ${dropped} executor(s) with no surviving project`);
+      }
+
+      db.exec(`
+        DROP TABLE executors;
+        ALTER TABLE executors_workspace_new RENAME TO executors;
+        DROP TABLE IF EXISTS executor_groups;
+      `);
+    })();
+  }
+
+  // Created here rather than in the DDL block above: on a pre-migration
+  // database that block runs while `executors` still has group_id and no
+  // workspace_id, so indexing the new column there would throw at open.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_executors_workspace ON executors(workspace_id, position)");
 
   // Re-enable FK enforcement for runtime operations
   db.pragma("foreign_keys = ON");

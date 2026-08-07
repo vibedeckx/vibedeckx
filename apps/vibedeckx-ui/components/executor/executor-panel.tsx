@@ -2,12 +2,11 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Plus, Terminal, FolderPlus, Monitor } from "lucide-react";
+import { Plus, Terminal, Monitor } from "lucide-react";
 import { ExecutorItem } from "./executor-item";
 import { ExecutorForm } from "./executor-form";
 import { ExecutorLogsProvider } from "@/hooks/executor-logs-context";
 import { useExecutors } from "@/hooks/use-executors";
-import { useExecutorGroups } from "@/hooks/use-executor-groups";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
@@ -112,7 +111,6 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     executorTargets.push({ id: r.remote_server_id, label: r.server_name, icon: remoteConnectionIcon(r) });
   }
 
-  const { activeGroup, loading: groupLoading, createGroup } = useExecutorGroups(projectId, selectedBranch);
   const {
     executors,
     loading: executorsLoading,
@@ -123,9 +121,9 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     stopExecutor,
     markProcessFinished,
     reorderExecutors,
-  } = useExecutors(projectId, activeGroup?.id, project?.executor_mode);
+  } = useExecutors(projectId, selectedBranch, project?.executor_mode);
 
-  const loading = groupLoading || executorsLoading;
+  const loading = executorsLoading;
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -173,7 +171,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
         <div className="flex items-center gap-2">
           <h2 className="text-xs font-semibold flex items-center gap-2 text-foreground">
             <Terminal className="h-3.5 w-3.5" />
-            {activeGroup ? activeGroup.name : "Executors"}
+            Executors
           </h2>
           {executorTargets.length > 1 && onExecutorModeChange && (
             <ExecutionModeToggle
@@ -183,12 +181,10 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
             />
           )}
         </div>
-        {activeGroup && (
-          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setCreateDialogOpen(true)}>
-            <Plus className="h-3 w-3 mr-1" />
-            Add
-          </Button>
-        )}
+        <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setCreateDialogOpen(true)}>
+          <Plus className="h-3 w-3 mr-1" />
+          Add
+        </Button>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -196,20 +192,6 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
           {loading ? (
             <div className="text-center text-muted-foreground py-8">
               Loading executors...
-            </div>
-          ) : !activeGroup ? (
-            <div className="text-center text-muted-foreground py-8">
-              <p>No executor group for this branch</p>
-              <p className="text-sm mt-1 mb-4">
-                Create a group to start adding executors
-              </p>
-              <Button
-                size="sm"
-                onClick={() => createGroup(selectedBranch ? `Executors (${selectedBranch})` : "Default")}
-              >
-                <FolderPlus className="h-4 w-4 mr-1" />
-                Create Group
-              </Button>
             </div>
           ) : executors.length === 0 ? (
             <div className="text-center text-muted-foreground py-8">
@@ -239,7 +221,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
                       if (open) next.add(executor.id); else next.delete(executor.id);
                       return next;
                     })}
-                    onStart={() => startExecutor(executor.id, selectedBranch)}
+                    onStart={() => startExecutor(executor.id)}
                     onStop={(processId) => stopExecutor(executor.id, processId || executor.currentProcessId || undefined)}
                     onUpdate={(data) => updateExecutor(executor.id, data)}
                     onDelete={() => deleteExecutor(executor.id)}

@@ -34,7 +34,7 @@ describe("ProcessManager preallocated process identity", () => {
   it("reuses only the identical effect for a preallocated process identity", async () => {
     const pm = new ProcessManager(null as never);
     const executor: Executor = {
-      id: "schedule-s1", project_id: "p1", group_id: "", name: "scheduled",
+      id: "schedule-s1", project_id: "p1", workspace_id: "", name: "scheduled",
       command: "sleep 5", executor_type: "command", prompt_provider: null,
       cwd: null, pty: true, position: 0, disabled_targets: [],
       created_at: new Date().toISOString(),
@@ -59,7 +59,7 @@ describe("ProcessManager preallocated process identity", () => {
   it("replays an identical preallocated effect after fast completion while logs are retained", async () => {
     const pm = new ProcessManager(null as never);
     const executor: Executor = {
-      id: "schedule-fast", project_id: "p1", group_id: "", name: "fast",
+      id: "schedule-fast", project_id: "p1", workspace_id: "", name: "fast",
       command: "true", executor_type: "command", prompt_provider: null,
       cwd: null, pty: true, position: 0, disabled_targets: [],
       created_at: new Date().toISOString(),
