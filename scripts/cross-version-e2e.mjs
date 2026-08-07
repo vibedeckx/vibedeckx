@@ -433,12 +433,15 @@ await smoke("session-find", ["http:POST /api/path/agent-sessions"], async () => 
 });
 let sessionId;
 await smoke("session-create", ["http:POST /api/path/agent-sessions/new"], async () => {
-  const created = await api("POST", `${P}/agent-sessions/new`, { branch: "main", permissionMode: "edit", agentType: "claude-code" });
+  // The main checkout's stable identity is a null branch ("" in the DB), not
+  // whichever branch it has checked out — a literal "main" names a worktree
+  // workspace that was never registered, so the bound create finds no checkout.
+  const created = await api("POST", `${P}/agent-sessions/new`, { branch: null, permissionMode: "edit", agentType: "claude-code" });
   sessionId = created.session?.id ?? created.id;
   assert(typeof sessionId === "string" && sessionId.startsWith("remote-"), `unexpected session id: ${JSON.stringify(created).slice(0, 150)}`);
 });
 await smoke("session-list", ["http:GET /api/path/agent-sessions"], async () => {
-  const r = await api("GET", `${P}/agent-sessions?branch=main`);
+  const r = await api("GET", `${P}/agent-sessions?branch=`);
   assert(Array.isArray(r.sessions), "no sessions array");
 });
 const sessionSmoke = (label, keys, fn) => smoke(label, keys, async () => {
