@@ -44,6 +44,13 @@ describe("worktreesEqual", () => {
       [{ branch: "dev", currentBranch: "agent/work" }],
     )).toBe(false);
   });
+
+  it("detects a re-anchored root whose live branch did not move", () => {
+    expect(worktreesEqual(
+      [{ branch: null, currentBranch: "hotfix", expectedBranch: "main" }],
+      [{ branch: null, currentBranch: "hotfix", expectedBranch: "master" }],
+    )).toBe(false);
+  });
 });
 
 describe("preserveSelectedWorkspace", () => {

@@ -145,7 +145,7 @@ describe("worktree routes persisted identity", () => {
 
     expect(listed.statusCode).toBe(200);
     expect(listed.json().worktrees).toEqual([
-      { branch: null },
+      { branch: null, expectedBranch: "main" },
       { branch: "dev", currentBranch: "agent/experiment" },
     ]);
   });

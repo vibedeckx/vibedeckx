@@ -365,6 +365,11 @@ export function AppSidebar({
                   const branchKey = wt.branch === null ? "" : wt.branch;
                   const hasBranchDrift = wt.currentBranch !== undefined;
                   const currentBranchLabel = wt.currentBranch ?? "detached HEAD";
+                  // The root workspace has no branch identity to print. "main"
+                  // is a generic stand-in that reads fine alone, but beside the
+                  // live branch it would look like a real comparison — so use
+                  // the anchored branch the server names whenever it sends one.
+                  const branchLabel = wt.branch ?? wt.expectedBranch ?? "main";
                   const liveSessions = residentSessions?.get(branchKey) ?? [];
                   const dotStatus = workspaceDotStatus(workspaceStatuses?.get(branchKey), liveSessions.length > 0);
                   return (
@@ -388,7 +393,7 @@ export function AppSidebar({
                             >
                               <StatusDot status={dotStatus} />
                               <span className="truncate text-left">
-                                {wt.branch ?? "main"}
+                                {branchLabel}
                                 {hasBranchDrift && (
                                   <span className="text-amber-600 dark:text-amber-400">
                                     {" → "}{currentBranchLabel}
@@ -399,8 +404,8 @@ export function AppSidebar({
                           </TooltipTrigger>
                           <TooltipContent side="right">
                             {hasBranchDrift
-                              ? `Workspace branch: ${wt.branch ?? "main"}; currently checked out: ${currentBranchLabel}`
-                              : (wt.branch ?? "main")}
+                              ? `Workspace branch: ${branchLabel}; currently checked out: ${currentBranchLabel}`
+                              : branchLabel}
                           </TooltipContent>
                         </Tooltip>
                         {wt.branch !== null && mergeStatuses?.get(wt.branch) && (

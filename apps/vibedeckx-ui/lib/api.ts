@@ -301,6 +301,8 @@ export interface Worktree {
   branch: string | null;
   /** Live checkout when it differs from `branch`; null means detached HEAD. */
   currentBranch?: string | null;
+  /** Display name for the root workspace, whose `branch` identity is null. */
+  expectedBranch?: string;
 }
 
 export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";

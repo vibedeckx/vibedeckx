@@ -16,6 +16,12 @@ export interface WorktreeBranch {
   branch: string | null;
   /** Present only when this worktree is no longer checked out on `branch`. */
   currentBranch?: string | null;
+  /**
+   * Display-only name of the branch the root workspace is anchored to, whose
+   * `branch` identity is deliberately null. Absent when the registry holds no
+   * real branch for it — never registered, or still on the "" placeholder.
+   */
+  expectedBranch?: string;
 }
 
 const worktreeListCache = new Map<string, CachedWorktreeList>();
@@ -187,20 +193,25 @@ export function reconcileWorktreeBranches(
 
   const rootEntry = entries[0];
   const rootAnchor = rootEntry ? registryByPath.get(path.resolve(rootEntry.path)) : undefined;
+  // An empty expected branch is the "unknown" placeholder recorded on the
+  // other side — the root was registered before the directory became a
+  // repository — so it names nothing and is not an expectation either.
+  const rootExpectedBranch = rootAnchor?.expectedBranch || undefined;
   // Drift is only claimable when Git actually names a branch. A root with no
   // branch (detached HEAD, or a project directory that is not a repository)
   // has nothing to compare against — reporting it as drifted would be a
-  // permanent false positive for non-git projects. An empty expected branch is
-  // the same "unknown" placeholder recorded on the other side: the root was
-  // registered before the directory became a repository, so a branch appearing
+  // permanent false positive for non-git projects, and a branch appearing
   // later (git init → main) is adoption, not drift.
-  const rootDrifted = Boolean(rootAnchor)
-    && rootAnchor!.expectedBranch !== ""
+  const rootDrifted = rootExpectedBranch !== undefined
     && rootEntry?.branch != null
-    && rootEntry.branch !== rootAnchor!.expectedBranch;
-  const worktrees: WorktreeBranch[] = [rootDrifted
-    ? { branch: null, currentBranch: rootEntry?.branch ?? null }
-    : { branch: null }];
+    && rootEntry.branch !== rootExpectedBranch;
+  const root: WorktreeBranch = { branch: null };
+  // Named whenever the registry holds a real branch, drifted or not: a label
+  // that only materializes on drift would appear to rename the workspace at
+  // the very moment the user is comparing it against the live branch.
+  if (rootExpectedBranch) root.expectedBranch = rootExpectedBranch;
+  if (rootDrifted) root.currentBranch = rootEntry?.branch ?? null;
+  const worktrees: WorktreeBranch[] = [root];
   // The first entry is the project/main worktree. Its stable API identity is
   // deliberately null and is not derived from whichever branch it has checked
   // out, matching the existing workspace model.

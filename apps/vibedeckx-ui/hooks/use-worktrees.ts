@@ -30,6 +30,7 @@ export function worktreesEqual(left: Worktree[], right: Worktree[]): boolean {
   return left.length === right.length && left.every((worktree, index) =>
     worktree.branch === right[index].branch
     && worktree.currentBranch === right[index].currentBranch
+    && worktree.expectedBranch === right[index].expectedBranch
   );
 }
 

@@ -64,7 +64,31 @@ describe("reconcileWorktreeBranches", () => {
     expect(reconcileWorktreeBranches(projectPath, [
       { path: projectPath, branch: "agent/experiment" },
     ], [], [{ branch: "", worktreePath: projectPath, expectedBranch: "main" }])).toEqual([
-      { branch: null, currentBranch: "agent/experiment" },
+      { branch: null, currentBranch: "agent/experiment", expectedBranch: "main" },
+    ]);
+  });
+
+  it("names an undrifted root by its anchor, so the label does not appear on drift", () => {
+    expect(reconcileWorktreeBranches(projectPath, [
+      { path: projectPath, branch: "master" },
+    ], [], [{ branch: "", worktreePath: projectPath, expectedBranch: "master" }])).toEqual([
+      { branch: null, expectedBranch: "master" },
+    ]);
+  });
+
+  it("leaves the root unnamed while its anchor still holds the unknown placeholder", () => {
+    expect(reconcileWorktreeBranches(projectPath, [
+      { path: projectPath, branch: "master" },
+    ], [], [{ branch: "", worktreePath: projectPath, expectedBranch: "" }])).toEqual([
+      { branch: null },
+    ]);
+  });
+
+  it("names the drifted root by its own anchor rather than a main placeholder", () => {
+    expect(reconcileWorktreeBranches(projectPath, [
+      { path: projectPath, branch: "hotfix" },
+    ], [], [{ branch: "", worktreePath: projectPath, expectedBranch: "master" }])).toEqual([
+      { branch: null, currentBranch: "hotfix", expectedBranch: "master" },
     ]);
   });
 });

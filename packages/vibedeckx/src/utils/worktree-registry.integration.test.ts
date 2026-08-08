@@ -40,12 +40,15 @@ describe("non-git project", () => {
       await storage.projects.create({ id: "p1", name: "p", path: dir });
       await getRegisteredWorktreeBranches(storage, "p1", dir);
 
-      execFileSync("git", ["init", "-b", "main", dir]);
+      // A non-default branch name proves the adopted value is the repository's
+      // own, not the "main" the UI falls back to when nothing is anchored.
+      execFileSync("git", ["init", "-b", "master", dir]);
       invalidateWorktreeListCache(dir);
 
-      expect(await getRegisteredWorktreeBranches(storage, "p1", dir)).toEqual([{ branch: null }]);
+      expect(await getRegisteredWorktreeBranches(storage, "p1", dir))
+        .toEqual([{ branch: null, expectedBranch: "master" }]);
       expect((await storage.workspaceRegistry.getByProjectBranch("p1", "", "local"))?.checkout)
-        .toMatchObject({ worktree_path: dir, expected_branch: "main", status: "ready" });
+        .toMatchObject({ worktree_path: dir, expected_branch: "master", status: "ready" });
     } finally {
       await storage.close();
       rmSync(dir, { recursive: true, force: true });
@@ -83,7 +86,7 @@ describe("persisted worktree identity", () => {
 
   it("adopts an existing worktree once and keeps its original branch after drift", async () => {
     expect(await getRegisteredWorktreeBranches(storage, "p1", projectPath)).toEqual([
-      { branch: null },
+      { branch: null, expectedBranch: "main" },
       { branch: "dev" },
     ]);
     expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
@@ -93,7 +96,7 @@ describe("persisted worktree identity", () => {
     invalidateWorktreeListCache(projectPath);
 
     expect(await getRegisteredWorktreeBranches(storage, "p1", projectPath)).toEqual([
-      { branch: null },
+      { branch: null, expectedBranch: "main" },
       { branch: "dev", currentBranch: "agent/experiment" },
     ]);
   });
@@ -103,7 +106,8 @@ describe("persisted worktree identity", () => {
     execFileSync("git", ["-C", projectPath, "worktree", "remove", "--force", worktreePath]);
     invalidateWorktreeListCache(projectPath);
 
-    expect(await getRegisteredWorktreeBranches(storage, "p1", projectPath)).toEqual([{ branch: null }]);
+    expect(await getRegisteredWorktreeBranches(storage, "p1", projectPath))
+      .toEqual([{ branch: null, expectedBranch: "main" }]);
     expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
       .toMatchObject({ status: "error", error: "Worktree is missing" });
   });
