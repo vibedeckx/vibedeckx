@@ -12,8 +12,9 @@ vi.mock("../utils/remote-proxy.js", () => ({
   proxyStatus: (result: { status: number }, fallback = 502) => result.status > 0 ? result.status : fallback,
 }));
 
+import { ProcessManager } from "../process-manager.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
-import type { Storage } from "../storage/types.js";
+import type { Executor, Storage } from "../storage/types.js";
 import {
   conventionalWorktreePath,
   getWorktreeBaseForProject,
@@ -21,12 +22,41 @@ import {
 } from "../utils/worktree-paths.js";
 import worktreeRoutes from "./worktree-routes.js";
 
+const pidIsAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 describe("worktree routes persisted identity", () => {
   let app: FastifyInstance;
   let storage: Storage;
   let dir: string;
   let projectPath: string;
   let worktreePath: string;
+  let liveSessionIds: Array<{ projectId: string; branch: string | null; sessionId: string }>;
+  let stopSession: ReturnType<typeof vi.fn>;
+  // A real ProcessManager, so the delete path is exercised against actual
+  // child processes rather than a double that can only prove a call happened.
+  let processManager: ProcessManager;
+  let stopProcess: ReturnType<typeof vi.spyOn>;
+
+  const startProcessIn = async (cwd: string, command = "sleep 30"): Promise<number> => {
+    const executor: Executor = {
+      id: `e-${cwd}`, project_id: "p1", workspace_id: "", name: "run",
+      command, executor_type: "command", prompt_provider: null,
+      cwd: null, pty: true, position: 0, disabled_targets: [],
+      created_at: new Date().toISOString(),
+    };
+    const processId = await processManager.start(executor, cwd, true);
+    const tracked = (processManager as unknown as {
+      processes: Map<string, { process: { pid: number } }>;
+    }).processes.get(processId);
+    return tracked!.process.pid;
+  };
 
   const registerRemoteCheckout = async () => {
     await storage.projects.create({ id: "remote-project", name: "remote", path: null });
@@ -59,10 +89,25 @@ describe("worktree routes persisted identity", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "p1", name: "project", path: projectPath });
 
+    liveSessionIds = [];
+    stopSession = vi.fn(async () => true);
+    processManager = new ProcessManager(null as never);
+    stopProcess = vi.spyOn(processManager, "stopAndWait");
+
     app = Fastify({ logger: false });
     app.decorate("authEnabled", false);
     app.decorate("storage", storage);
     app.decorate("reverseConnectManager", { isConnected: () => false } as never);
+    // Sessions stay a double: a real one would have to spawn an agent CLI,
+    // which these offline tests cannot do.
+    app.decorate("agentSessionManager", {
+      getLiveSessionIdsForBranch: (projectId: string, branch: string | null) =>
+        liveSessionIds
+          .filter((row) => row.projectId === projectId && row.branch === branch)
+          .map((row) => row.sessionId),
+      stopSessionAndWait: stopSession,
+    } as never);
+    app.decorate("processManager", processManager as never);
     await app.register(worktreeRoutes);
     await app.ready();
   });
@@ -70,6 +115,7 @@ describe("worktree routes persisted identity", () => {
   afterEach(async () => {
     await app.close();
     await storage.close();
+    processManager.shutdown();
     if (existsSync(worktreePath)) {
       execFileSync("git", ["-C", projectPath, "worktree", "remove", "--force", worktreePath]);
     }
@@ -122,6 +168,118 @@ describe("worktree routes persisted identity", () => {
     expect(deleted.statusCode).toBe(409);
     expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
       .toMatchObject({ status: "ready", error: null });
+  });
+
+  it("removes the worktree only after the real process in it has exited", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+
+    liveSessionIds = [{ projectId: "p1", branch: "dev", sessionId: "s1" }];
+    const pid = await startProcessIn(worktreePath);
+    expect(pidIsAlive(pid)).toBe(true);
+
+    // The guarantee is about ordering against the filesystem, so sample the
+    // tree at the moment of each stop rather than only asserting a call.
+    const worktreeAliveAtStop: boolean[] = [];
+    stopSession.mockImplementation(async () => {
+      worktreeAliveAtStop.push(existsSync(worktreePath));
+      return true;
+    });
+    stopProcess.mockImplementation(async (processId: string) => {
+      worktreeAliveAtStop.push(existsSync(worktreePath));
+      // Still the real stop — the spy only adds the sample point.
+      return ProcessManager.prototype.stopAndWait.call(processManager, processId);
+    });
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(deleted.statusCode).toBe(200);
+    expect(stopSession).toHaveBeenCalledWith("s1", { note: expect.stringContaining("worktree") });
+    expect(stopProcess).toHaveBeenCalledTimes(1);
+    expect(worktreeAliveAtStop).toEqual([true, true]);
+    // The process is gone at the OS level, not merely signalled, and it went
+    // before git touched the directory.
+    expect(pidIsAlive(pid)).toBe(false);
+    expect(existsSync(worktreePath)).toBe(false);
+  });
+
+  it("refuses the delete and keeps the worktree when a process cannot be confirmed dead", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    await startProcessIn(worktreePath);
+    // Stands in for a process that survives even SIGKILL (uninterruptible I/O),
+    // which cannot be produced reliably in a test.
+    stopProcess.mockResolvedValue(false);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(deleted.statusCode).toBe(409);
+    expect(deleted.json().error).toMatch(/could not be stopped/);
+    expect(existsSync(worktreePath)).toBe(true);
+    // The checkout is healthy — the operation was refused, not the checkout.
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ status: "ready", error: null });
+  });
+
+  it("leaves sessions and processes running when dirty files refuse the delete", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    writeFileSync(path.join(worktreePath, "dirty.txt"), "keep me");
+    liveSessionIds = [{ projectId: "p1", branch: "dev", sessionId: "s1" }];
+    const pid = await startProcessIn(worktreePath);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    // A refused delete must not cost the user a running agent.
+    expect(deleted.statusCode).toBe(409);
+    expect(stopSession).not.toHaveBeenCalled();
+    expect(stopProcess).not.toHaveBeenCalled();
+    expect(pidIsAlive(pid)).toBe(true);
+  });
+
+  it("stops a path-route session registered under the path pseudo project", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    // projects.path carries no UNIQUE constraint, so getByPath resolving to p1
+    // does not mean the worker registered the session under p1.
+    liveSessionIds = [{ projectId: `path:${projectPath}`, branch: "dev", sessionId: "s-path" }];
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/path/worktrees",
+      payload: { path: projectPath, branch: "dev" },
+    });
+
+    expect(deleted.statusCode).toBe(200);
+    expect(stopSession).toHaveBeenCalledWith("s-path", { note: expect.stringContaining("worktree") });
   });
 
   it("retains a tombstone and creates a new incarnation after a clean delete and recreate", async () => {

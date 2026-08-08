@@ -51,6 +51,84 @@ async function syncRemoteWorktreeList(
   });
 }
 
+/**
+ * The worktree still holds something we could not confirm dead, so the delete
+ * was refused. The checkout itself is healthy — this describes the operation,
+ * not the checkout — so callers restore its previous status rather than
+ * marking it in error.
+ */
+class WorktreeBusyError extends Error {}
+
+/**
+ * Kill everything still executing inside a worktree that is about to be
+ * removed, and confirm it is actually gone. Without this, `git worktree
+ * remove` deletes the directory out from under a live agent child process and
+ * any running executor/terminal PTYs, which keep running with a cwd that no
+ * longer exists.
+ *
+ * Called after the uncommitted-changes check, so a refused delete never costs
+ * the user a running agent, and before `git worktree remove`.
+ *
+ * Both stops wait for the process to exit and escalate to SIGKILL rather than
+ * just firing SIGTERM, because a signal that has merely been delivered says
+ * nothing about whether the tree is free yet. Anything still alive after the
+ * escalation raises `WorktreeBusyError`: removing the directory anyway is the
+ * exact orphaning this function exists to prevent, and a retry will normally
+ * succeed since the survivor has by then been SIGKILLed.
+ *
+ * Sessions are matched by (projectId, branch). `projectIds` is a candidate set
+ * rather than one id because `projects.path` carries no UNIQUE constraint: on a
+ * reverse-connect worker a session may be registered under either a real
+ * project row sharing the path or the `path:<path>` pseudo-project, and
+ * `ensurePathProjectId` and `getByPath` can pick different ones. Processes are
+ * matched by cwd — see `getRunningProcessIdsUnderPath` for why branch is not
+ * usable there. Interactive terminals in the worktree are stopped along with
+ * executor runs: their cwd is about to disappear too.
+ */
+async function stopWorkspaceActivity(
+  fastify: FastifyInstance,
+  opts: { projectIds: Array<string | undefined>; branch: string; worktreePath: string },
+): Promise<void> {
+  const sessionIds = [...new Set(
+    opts.projectIds
+      .filter((id): id is string => Boolean(id))
+      .flatMap((id) => fastify.agentSessionManager.getLiveSessionIdsForBranch(id, opts.branch)),
+  )];
+  const processIds = fastify.processManager.getRunningProcessIdsUnderPath(opts.worktreePath);
+  if (sessionIds.length === 0 && processIds.length === 0) return;
+
+  // A stop that throws counts as unconfirmed, same as one that times out —
+  // both leave a process that may still be alive in the tree.
+  const survivors: string[] = [];
+  const confirm = async (label: string, stop: () => Promise<boolean>) => {
+    try {
+      if (!await stop()) survivors.push(label);
+    } catch (error) {
+      console.error(`[worktree] Failed to stop ${label} before delete:`, error);
+      survivors.push(label);
+    }
+  };
+
+  // Sessions first, then processes; within each group concurrently, so the
+  // grace windows overlap instead of summing.
+  await Promise.all(sessionIds.map((sessionId) => confirm(`session ${sessionId}`, () =>
+    fastify.agentSessionManager.stopSessionAndWait(sessionId, {
+      note: "Session stopped: its worktree is being deleted.",
+    }))));
+  await Promise.all(processIds.map((processId) => confirm(`process ${processId}`, () =>
+    fastify.processManager.stopAndWait(processId))));
+
+  if (survivors.length > 0) {
+    throw new WorktreeBusyError(
+      `Worktree still has running work that could not be stopped (${survivors.join(", ")}). `
+      + "Nothing was deleted; retry in a moment.",
+    );
+  }
+  console.log(
+    `[worktree] Stopped ${sessionIds.length} session(s) and ${processIds.length} process(es) in ${opts.worktreePath}`,
+  );
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // ==================== Path-based worktree API ====================
 
@@ -228,6 +306,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Continue with deletion
       }
 
+      await stopWorkspaceActivity(fastify, {
+        projectIds: [pathProject?.id, `path:${projectPath}`],
+        branch,
+        worktreePath: worktreeAbsPath,
+      });
+
       let branchToDelete: string | null = null;
       try {
         const entries = parseGitWorktreeList(projectPath);
@@ -264,11 +348,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(200).send({ success: true });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      // A busy worktree is a refusal, not a broken checkout: restore the prior
+      // status like the uncommitted-changes path does, and report it as a
+      // conflict so the UI does not present it as a server fault.
+      const busy = error instanceof WorktreeBusyError;
       if (registered && !worktreeRemoved) {
         await fastify.storage.workspaceRegistry
-          .setCheckoutStatus(registered.checkout.id, "error", errorMessage)
+          .setCheckoutStatus(registered.checkout.id, busy ? "ready" : "error", busy ? null : errorMessage)
           .catch((registryError) => console.error("[worktree] Failed to record delete error:", registryError));
       }
+      if (busy) return reply.code(409).send({ error: errorMessage });
       return reply.code(500).send({ error: `Failed to delete worktree: ${errorMessage}` });
     }
   });
@@ -537,6 +626,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // If git status fails for other reasons, continue with deletion attempt
         }
 
+        await stopWorkspaceActivity(fastify, {
+          projectIds: [project.id],
+          branch,
+          worktreePath: worktreeAbsPath,
+        });
+
         let branchToDelete: string | null = null;
         try {
           const entries = parseGitWorktreeList(project.path!);
@@ -571,7 +666,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       } catch (error) {
         if (registered && !worktreeRemoved) {
           const message = error instanceof Error ? error.message : "Local deletion failed";
-          const status = message.includes("uncommitted changes") ? "ready" : "error";
+          // A busy worktree joins uncommitted changes as a refusal that leaves
+          // the checkout itself perfectly healthy.
+          const status = message.includes("uncommitted changes") || error instanceof WorktreeBusyError
+            ? "ready"
+            : "error";
           await fastify.storage.workspaceRegistry
             .setCheckoutStatus(registered.checkout.id, status, status === "error" ? message : null)
             .catch((registryError) => console.error("[worktree] Failed to record local delete error:", registryError));
@@ -587,7 +686,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(200).send({ success: true });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        if (errorMessage.includes("uncommitted changes")) {
+        if (errorMessage.includes("uncommitted changes") || error instanceof WorktreeBusyError) {
           return reply.code(409).send({ error: errorMessage });
         }
         return reply.code(500).send({ error: `Failed to delete worktree: ${errorMessage}` });

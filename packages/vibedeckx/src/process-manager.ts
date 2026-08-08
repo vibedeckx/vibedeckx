@@ -1071,6 +1071,110 @@ export class ProcessManager {
   }
 
   /**
+   * Running processes — executor runs and interactive terminals alike — whose
+   * working directory is `root` or below it. Used to clear a worktree before
+   * it is deleted out from under them.
+   *
+   * Matching is by cwd rather than by branch on purpose: only terminals carry
+   * a `branch`, executor runs are always recorded with `branch: null`, and on
+   * a reverse-connect worker they are path-based with no executor row to join
+   * through. The cwd is the one identity every spawn path records.
+   */
+  getRunningProcessIdsUnderPath(root: string): string[] {
+    const resolvedRoot = path.resolve(root);
+    const ids: string[] = [];
+    for (const [id, proc] of this.processes) {
+      const relative = path.relative(resolvedRoot, path.resolve(proc.projectPath));
+      // "" is the root itself. Being outside it means the traversal is a whole
+      // path segment: exactly ".." or ".." followed by a separator. A bare
+      // startsWith("..") would also reject legitimate children whose names
+      // merely begin with two dots (…/dev/..cache). The segment test still
+      // rejects a sibling worktree whose name extends this one's, since
+      // …/dev → …/dev2 relativizes to "../dev2".
+      const outside = relative === ".."
+        || relative.startsWith(`..${path.sep}`)
+        || path.isAbsolute(relative);
+      if (relative !== "" && outside) continue;
+      if (this.isRunning(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  /**
+   * True once the tracked process has genuinely exited (or is no longer
+   * tracked at all).
+   *
+   * Deliberately not `!isRunning()`: that helper treats `ChildProcess.killed`
+   * as exited, and Node sets `killed` the moment a signal is *delivered*, so
+   * it would report success while the process is still winding down. Real
+   * exit is only observable through `exitCode`/`signalCode` for a child, or
+   * the "finished" log the PTY exit handler appends.
+   */
+  private hasExited(processId: string): boolean {
+    const runningProcess = this.processes.get(processId);
+    if (!runningProcess) return true;
+    if (runningProcess.isPty) {
+      return runningProcess.logs[runningProcess.logs.length - 1]?.type === "finished";
+    }
+    const childProcess = runningProcess.process as ChildProcess;
+    return childProcess.exitCode !== null || childProcess.signalCode !== null;
+  }
+
+  private async waitForExit(processId: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (!this.hasExited(processId)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
+  }
+
+  private signalProcessGroup(processId: string, signal: NodeJS.Signals): void {
+    const runningProcess = this.processes.get(processId);
+    if (!runningProcess) return;
+    const pid = runningProcess.isPty
+      ? (runningProcess.process as IPty).pid
+      : (runningProcess.process as ChildProcess).pid;
+    if (!pid) return;
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      // Group signal failed (already reaped, or never a group leader) — fall
+      // back to signalling the process itself.
+      try { process.kill(pid, signal); } catch { /* already dead */ }
+    }
+  }
+
+  /**
+   * Stop a process and confirm it actually exited, escalating to SIGKILL when
+   * SIGTERM is ignored. Returns false if it is still alive after that.
+   *
+   * `stop()` alone is not enough for a caller that needs the working directory
+   * to be free — deleting a worktree — because it reports only that a signal
+   * was delivered. SIGTERM is asynchronous and can be trapped or ignored, so
+   * the process may still be writing into the tree when `stop()` resolves.
+   *
+   * What this confirms is the exit of the tracked process, and with it
+   * whatever else shared its process group. A grandchild that detached into
+   * its own group or session is not observable here and is not covered.
+   */
+  async stopAndWait(
+    processId: string,
+    opts?: { termGraceMs?: number; killGraceMs?: number },
+  ): Promise<boolean> {
+    await this.stop(processId);
+    if (await this.waitForExit(processId, opts?.termGraceMs ?? 3000)) return true;
+
+    console.warn(`[ProcessManager] Process ${processId} ignored SIGTERM, escalating to SIGKILL`);
+    this.signalProcessGroup(processId, "SIGKILL");
+    const exited = await this.waitForExit(processId, opts?.killGraceMs ?? 2000);
+    if (!exited) {
+      console.error(`[ProcessManager] Process ${processId} survived SIGKILL — cannot confirm exit`);
+    }
+    return exited;
+  }
+
+  /**
    * Get all processes for a given executor ID with their status and logs
    */
   getProcessesByExecutorId(executorId: string): Array<{

@@ -1988,6 +1988,22 @@ export class AgentSessionManager {
   }
 
   /**
+   * Ids of the sessions in one workspace that still own a live child process,
+   * whatever their turn status. Deliberately broader than
+   * `getRunningResidentProcesses`, which also demands `status === "running"`:
+   * a resident process idling between turns is exactly the one that would be
+   * orphaned when its worktree is deleted.
+   */
+  getLiveSessionIdsForBranch(projectId: string, branch: string | null): string[] {
+    return [...this.sessions.values()]
+      .filter((session) =>
+        session.projectId === projectId
+        && session.branch === branch
+        && this.isProcessAlive(session))
+      .map((session) => session.id);
+  }
+
+  /**
    * Check if a session is running
    */
   isRunning(sessionId: string): boolean {
@@ -2000,8 +2016,11 @@ export class AgentSessionManager {
    * (like pressing ESC in Claude Code). The session becomes dormant so the
    * next user message will spawn a fresh process with full context replay.
    * The WebSocket stays alive so the UI remains connected.
+   *
+   * `opts.note` overrides the system entry written into the conversation, for
+   * stops the user did not press Stop for (e.g. the worktree being deleted).
    */
-  async stopSession(sessionId: string): Promise<boolean> {
+  async stopSession(sessionId: string, opts?: { note?: string }): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -2031,7 +2050,7 @@ export class AgentSessionManager {
       // Add a system message so the UI shows the stop event in the conversation
       await this.pushEntry(sessionId, {
         type: "system",
-        content: "Session stopped by user.",
+        content: opts?.note ?? "Session stopped by user.",
         timestamp: Date.now(),
       });
 
@@ -2077,6 +2096,52 @@ export class AgentSessionManager {
       console.error(`[AgentSession] Failed to stop session:`, error);
       return false;
     }
+  }
+
+  /**
+   * Stop a session and confirm its agent process actually exited, escalating
+   * to SIGKILL when SIGTERM is ignored. Returns false if the process is still
+   * alive after that.
+   *
+   * `stopSession` returns as soon as the signal has been sent, which is fine
+   * for the Stop button but not for a caller that is about to delete the
+   * session's working directory: an agent that traps SIGTERM to flush state
+   * would keep writing into a tree that no longer exists.
+   *
+   * Confirms the tracked agent process, and with it whatever else shared its
+   * process group. A grandchild that detached into its own group or session
+   * (an MCP server started with `setsid`, say) is not observable here.
+   */
+  async stopSessionAndWait(
+    sessionId: string,
+    opts?: { note?: string; termGraceMs?: number; killGraceMs?: number },
+  ): Promise<boolean> {
+    // Captured up front: stopSession clears session.process before killing, so
+    // afterwards there is no handle left to watch.
+    const proc = this.sessions.get(sessionId)?.process ?? null;
+    const stopped = await this.stopSession(sessionId, { note: opts?.note });
+    if (!stopped || !proc) return stopped;
+
+    if (await this.waitForProcessExit(proc, opts?.termGraceMs ?? 3000)) return true;
+
+    console.warn(`[AgentSession] Session ${sessionId} ignored SIGTERM, escalating to SIGKILL`);
+    this.killProcess(proc, "SIGKILL");
+    const exited = await this.waitForProcessExit(proc, opts?.killGraceMs ?? 2000);
+    if (!exited) {
+      console.error(`[AgentSession] Session ${sessionId} survived SIGKILL — cannot confirm exit`);
+    }
+    return exited;
+  }
+
+  private async waitForProcessExit(proc: ChildProcess, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    // exitCode/signalCode rather than `killed`, which Node sets on signal
+    // delivery rather than on the process actually going away.
+    while (proc.exitCode === null && proc.signalCode === null) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
   }
 
   private async hibernateSession(sessionId: string): Promise<boolean> {
