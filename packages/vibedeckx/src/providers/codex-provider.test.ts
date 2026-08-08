@@ -404,3 +404,109 @@ describe("CodexProvider", () => {
     expect(events).toEqual([{ type: "result", subtype: "success" }]);
   });
 });
+
+// Codex does NOT emit a commandExecution item for a command whose sandbox
+// failed to start — verified live on a host with unprivileged user namespaces
+// restricted: an `ls` that returned exit 1 with "bwrap: loopback: Failed
+// RTM_NEWADDR: Operation not permitted" produced only userMessage /
+// agentMessage / reasoning items, with Code Mode both enabled and disabled.
+// A real reviewer session lost 10 of its 21 tool calls that way and its record
+// showed only the successes, so nothing explained why it gave up. These
+// out-of-band notifications are the only trace of such faults that reaches us.
+describe("CodexProvider environment-fault notifications", () => {
+  const THREAD = "019f5bfb-a05d-71c2-96d8-f2b45e56ea49";
+
+  function provider(): CodexProvider {
+    const p = new CodexProvider();
+    p.onSessionCreated("session-1", "plan");
+    return p;
+  }
+
+  function parse(p: CodexProvider, notification: Record<string, unknown>) {
+    return p.parseStdoutLine(JSON.stringify(notification), "session-1");
+  }
+
+  it("records the sandbox configWarning that would otherwise be the only trace of a broken session", () => {
+    // Payload verbatim from a live codex 0.145.0 run.
+    expect(parse(provider(), {
+      method: "configWarning",
+      params: { summary: "Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.", details: null },
+    })).toEqual([{
+      type: "system",
+      content: "Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.",
+    }]);
+  });
+
+  it("appends warning details when present", () => {
+    expect(parse(provider(), {
+      method: "configWarning",
+      params: { summary: "Sandbox degraded.", details: "Falling back." },
+    })).toEqual([{ type: "system", content: "Sandbox degraded. Falling back." }]);
+  });
+
+  it("keeps a warning whose payload shape is unknown rather than dropping it", () => {
+    const events = parse(provider(), { method: "warning", params: { unexpectedField: "sandbox is on fire" } });
+    expect(events).toHaveLength(1);
+    expect((events[0] as { content: string }).content).toContain("sandbox is on fire");
+  });
+
+  it("records a failed MCP server with its reason", () => {
+    // Verbatim from the same live run — the reviewer's GitHub fallback was
+    // crippled by this and the session record never showed it.
+    expect(parse(provider(), {
+      method: "mcpServer/startupStatus/updated",
+      params: { threadId: THREAD, name: "github", status: "failed", error: "The github MCP server is not logged in. Run `codex mcp login github`.", failureReason: null },
+    })).toEqual([{
+      type: "system",
+      content: 'MCP server "github" failed to start. The github MCP server is not logged in. Run `codex mcp login github`.',
+    }]);
+  });
+
+  it("ignores non-terminal MCP server status updates", () => {
+    const p = provider();
+    for (const status of ["starting", "ready"]) {
+      expect(parse(p, {
+        method: "mcpServer/startupStatus/updated",
+        params: { threadId: THREAD, name: "context7", status, error: null },
+      })).toEqual([]);
+    }
+  });
+
+  it("still drops a subagent thread's MCP failure from the main conversation", () => {
+    const p = provider();
+    p.getSessionState("session-1").threadId = THREAD;
+    expect(parse(p, {
+      method: "mcpServer/startupStatus/updated",
+      params: { threadId: "019f5bfb-d05a-7541-8a6a-b8507b398782", name: "github", status: "failed", error: "nope" },
+    })).toEqual([]);
+  });
+
+  it("keeps the payload of an item type this provider does not model", () => {
+    const events = parse(provider(), {
+      method: "item/completed",
+      params: { turnId: "t1", item: { type: "dynamicToolCall", id: "d1", tool: "exec", arguments: { cmd: "ls" } } },
+    });
+    const content = (events[0] as { content: string }).content;
+    expect(content).toContain("[dynamicToolCall]");
+    expect(content).toContain("exec");
+    expect(content).toContain("ls");
+    expect(content).not.toContain("d1"); // id is noise, and is already the toolUseId elsewhere
+  });
+
+  it("bounds an unmodelled item's payload so a huge one cannot flood the record", () => {
+    const events = parse(provider(), {
+      method: "item/completed",
+      params: { turnId: "t1", item: { type: "contextCompaction", id: "c1", blob: "x".repeat(5000) } },
+    });
+    const content = (events[0] as { content: string }).content;
+    expect(content.length).toBeLessThan(600);
+    expect(content.endsWith("…")).toBe(true);
+  });
+
+  it("emits a bare marker when an unmodelled item carries no payload", () => {
+    expect(parse(provider(), {
+      method: "item/completed",
+      params: { turnId: "t1", item: { type: "enteredReviewMode", id: "r1" } },
+    })).toEqual([{ type: "system", content: "[enteredReviewMode]" }]);
+  });
+});

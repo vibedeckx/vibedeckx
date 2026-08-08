@@ -19,6 +19,36 @@ import {
   CODEX_SUBAGENT_TERMINAL_KINDS,
 } from "../protocol/codex/schema.js";
 
+/** Cap on the payload echoed for an item type this provider does not model. */
+const ITEM_PAYLOAD_SUMMARY_LIMIT = 500;
+
+/** First non-blank string among the candidates, trimmed. */
+function firstText(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return "";
+}
+
+/**
+ * Codex's warning payloads are not in the app-server JSON schema, and the two
+ * shapes seen live differ (`configWarning` carries summary/details; a bare
+ * `warning` was observed without its shape being pinned). Probe the plausible
+ * fields and fall back to the raw JSON rather than dropping the warning — a
+ * warning rendered awkwardly is strictly better than a session that fails with
+ * no recorded reason.
+ */
+function warningText(params: any): string {
+  const head = firstText(params?.summary, params?.message, params?.text, params?.warning);
+  const detail = firstText(params?.details, params?.detail);
+  if (head) return detail ? `${head} ${detail}` : head;
+  return params == null ? "Codex reported a warning." : `Codex warning: ${JSON.stringify(params)}`;
+}
+
+function systemEventFor(content: string): ParsedAgentEvent[] {
+  return content ? [{ type: "system", content }] : [];
+}
+
 interface CodexSessionState {
   threadId: string | null;
   rpcIdCounter: number;
@@ -180,6 +210,17 @@ export class CodexProvider implements AgentProvider {
         return [{ type: "turn_started" }];
       case CODEX_NOTIFICATIONS.tokenUsageUpdated:
         return this.handleTokenUsage(params, sessionId);
+      case CODEX_NOTIFICATIONS.configWarning:
+      case CODEX_NOTIFICATIONS.warning:
+        return systemEventFor(warningText(params));
+      case CODEX_NOTIFICATIONS.mcpServerStatus: {
+        // Only the terminal failure is worth an entry — starting/ready fire
+        // for every server on every session start.
+        if (params?.status !== "failed") return [];
+        const name = params?.name ?? "unknown";
+        const reason = firstText(params?.error, params?.failureReason);
+        return systemEventFor(`MCP server "${name}" failed to start.${reason ? ` ${reason}` : ""}`);
+      }
       default:
         return [];
     }
@@ -290,9 +331,19 @@ export class CodexProvider implements AgentProvider {
         return [];
       }
 
-      default:
+      default: {
         // contextCompaction, enteredReviewMode, exitedReviewMode, dynamicToolCall, etc.
-        return [{ type: "system", content: `[${item.type}]` }];
+        // Some of these are tool calls under a name this switch does not know
+        // yet, so a bare `[type]` marker records that something happened while
+        // discarding what it was. Keep a bounded payload summary instead —
+        // enough to tell a silently-dropped tool call from a mode switch.
+        const { id: _id, type: _type, ...rest } = item;
+        const payload = JSON.stringify(rest);
+        const summary = payload && payload !== "{}"
+          ? ` ${payload.length > ITEM_PAYLOAD_SUMMARY_LIMIT ? `${payload.slice(0, ITEM_PAYLOAD_SUMMARY_LIMIT)}…` : payload}`
+          : "";
+        return [{ type: "system", content: `[${item.type}]${summary}` }];
+      }
     }
   }
 

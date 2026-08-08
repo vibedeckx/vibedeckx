@@ -34,6 +34,16 @@ export const CODEX_NOTIFICATIONS = {
   // sibling threads multiplexed into the same app-server stdout).
   turnStarted: "turn/started",
   tokenUsageUpdated: "thread/tokenUsage/updated",
+  // Environment faults codex reports out-of-band. They matter because codex
+  // does NOT emit a commandExecution item for a command whose sandbox failed
+  // to start (verified live: a `ls` that returned exit 1 with "bwrap:
+  // loopback: Failed RTM_NEWADDR" produced userMessage/agentMessage/reasoning
+  // items and nothing else, with Code Mode both on and off). Without these
+  // notifications the session record shows only the calls that succeeded, so
+  // a session can fail wholesale with no trace of why.
+  configWarning: "configWarning",
+  warning: "warning",
+  mcpServerStatus: "mcpServer/startupStatus/updated",
 } as const;
 
 /**
