@@ -1446,6 +1446,18 @@ export const api = {
     return data.worktrees;
   },
 
+  /** Adopt `branch` as the main workspace's expected branch, clearing its drift warning. */
+  async anchorRootWorkspace(id: string, branch: string, target?: string): Promise<string> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees/anchor`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch, ...(target && target !== "local" ? { target } : {}) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? "Failed to anchor workspace");
+    return data.expectedBranch;
+  },
+
   async getMergeStatus(id: string, comparisons: MergeComparison[]): Promise<MergeStatusBatchResult> {
     try {
       const res = await authFetch(`${getApiBase()}/api/projects/${id}/branches/merge-status`, {

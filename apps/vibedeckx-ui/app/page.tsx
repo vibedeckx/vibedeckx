@@ -874,6 +874,16 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setWorktreeToDelete(wt);
               setDeleteWorktreeDialogOpen(true);
             }}
+            onAnchorRootWorkspace={async (branch) => {
+              if (!currentProject) return;
+              try {
+                await api.anchorRootWorkspace(currentProject.id, branch);
+                toast.success(`Main workspace anchored to ${branch}`);
+              } catch (error) {
+                toast.error(error instanceof Error ? error.message : "Failed to anchor workspace");
+              }
+              refetchWorktrees();
+            }}
             mergeStatuses={mergeStatuses}
             mergeDefaultTarget={mergeDefaultTarget}
             mergeRepositoryLabel={mergeRepositoryLabel}

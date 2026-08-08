@@ -317,3 +317,43 @@ export async function getRegisteredWorktreeBranches(
   }));
   return reconcileWorktreeBranches(projectPath, entries, sessionBranches, anchors);
 }
+
+export type RootAnchorResult =
+  | { anchored: true; expectedBranch: string }
+  | { anchored: false; currentBranch: string | null };
+
+/**
+ * Adopt the branch the main worktree is checked out on as its anchor.
+ *
+ * The root's expected branch is captured once, at first registration, from
+ * whatever Git happened to report then — so a repository sitting on a feature
+ * branch that day is anchored there forever, and every later switch reads as
+ * drift. Drift detection exists to reveal branch changes the user did not
+ * make; this is how the user says "I made this one", without which an
+ * intentional switch leaves a warning that can only be cleared by switching
+ * back.
+ *
+ * `observedBranch` is the branch the caller was shown. Git is re-read here and
+ * the anchor is refused if it has since moved, so the adopted branch is always
+ * the one the user was actually looking at.
+ */
+export async function anchorRootWorkspaceBranch(
+  storage: Storage,
+  projectId: string,
+  projectPath: string,
+  observedBranch: string,
+): Promise<RootAnchorResult> {
+  invalidateWorktreeListCache(projectPath);
+  const rootEntry = readWorktreeListTolerant(projectPath)[0];
+  if (!rootEntry || rootEntry.branch !== observedBranch) {
+    return { anchored: false, currentBranch: rootEntry?.branch ?? null };
+  }
+  await storage.workspaceRegistry.registerReadyCheckout({
+    projectId,
+    branch: "", // The main-workspace identity sentinel; never the branch name.
+    targetId: "local",
+    worktreePath: rootEntry.path,
+    expectedBranch: rootEntry.branch,
+  });
+  return { anchored: true, expectedBranch: rootEntry.branch };
+}

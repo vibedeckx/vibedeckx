@@ -83,6 +83,9 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:GET /api/path/worktrees": { since: "0.2.0", summary: "worktree 列表/状态" },
   "http:POST /api/path/worktrees": { since: "0.2.0", summary: "建 worktree" },
   "http:DELETE /api/path/worktrees": { since: "0.2.0", summary: "删 worktree" },
+  // Additive: a worker below 0.3.13 404s it and the hub answers 501 with an
+  // "update the worker" message instead of proxying the failure through.
+  "http:POST /api/path/worktrees/anchor": { since: "0.3.13", summary: "重锚主工作区分支" },
   "http:GET /api/path/branches": { since: "0.2.0", summary: "分支列表" },
   "http:GET /api/path/branches/activity": { since: "0.2.0", summary: "分支活动概览" },
   "http:POST /api/path/branches/merge-status": { since: "0.2.0", summary: "分支合并状态检测" },

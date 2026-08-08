@@ -150,6 +150,59 @@ describe("worktree routes persisted identity", () => {
     ]);
   });
 
+  it("clears root drift once the user adopts the branch they switched to", async () => {
+    // The first listing is what captures the anchor, here "main".
+    await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    execFileSync("git", ["-C", projectPath, "switch", "-c", "hotfix"]);
+    invalidateWorktreeListCache(projectPath);
+    expect((await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" })).json().worktrees)
+      .toEqual([{ branch: null, expectedBranch: "main", currentBranch: "hotfix" }]);
+
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees/anchor",
+      payload: { branch: "hotfix" },
+    });
+
+    expect(anchored.statusCode).toBe(200);
+    expect(anchored.json()).toEqual({ expectedBranch: "hotfix" });
+    expect((await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" })).json().worktrees)
+      .toEqual([{ branch: null, expectedBranch: "hotfix" }]);
+  });
+
+  it("refuses to anchor a branch the main workspace has already left", async () => {
+    await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    execFileSync("git", ["-C", projectPath, "switch", "-c", "hotfix"]);
+    invalidateWorktreeListCache(projectPath);
+
+    // The client was looking at a listing taken before the switch.
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees/anchor",
+      payload: { branch: "main" },
+    });
+
+    expect(anchored.statusCode).toBe(409);
+    expect(anchored.json()).toMatchObject({ currentBranch: "hotfix" });
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "", "local"))?.checkout)
+      .toMatchObject({ expected_branch: "main" });
+  });
+
+  it("names the stale worker when anchoring a remote workspace it cannot serve", async () => {
+    await registerRemoteCheckout();
+    // Additive route: a worker released before it has no such handler.
+    proxyToRemoteAuto.mockResolvedValue({ ok: false, status: 404, data: { error: "Not Found" } });
+
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/remote-project/worktrees/anchor",
+      payload: { branch: "hotfix" },
+    });
+
+    expect(anchored.statusCode).toBe(501);
+    expect(anchored.json().error).toMatch(/too old/);
+  });
+
   it("restores a checkout to ready when dirty files prevent deletion", async () => {
     const created = await app.inject({
       method: "POST",

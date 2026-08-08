@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
+import { Anchor, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProjectGlyph } from "@/components/project/project-glyph";
@@ -24,6 +24,7 @@ interface AppSidebarProps {
   currentProject?: Project | null;
   onCreateWorktreeOpen?: () => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
+  onAnchorRootWorkspace?: (branch: string) => void;
   mergeStatuses?: Map<string, BranchMergeInfo>;
   mergeDefaultTarget?: string | null;
   mergeRepositoryLabel?: string | null;
@@ -191,6 +192,7 @@ export function AppSidebar({
   currentProject,
   onCreateWorktreeOpen,
   onDeleteWorktree,
+  onAnchorRootWorkspace,
   mergeStatuses,
   mergeDefaultTarget,
   mergeRepositoryLabel,
@@ -408,6 +410,27 @@ export function AppSidebar({
                               : branchLabel}
                           </TooltipContent>
                         </Tooltip>
+                        {/* The main workspace's anchor was captured once, from
+                            whatever branch it sat on when the project was first
+                            listed. Only the user can say a later switch was
+                            deliberate — without this the warning can be cleared
+                            only by switching back. Detached HEAD names no
+                            branch, so there is nothing to adopt. */}
+                        {wt.branch === null && wt.currentBranch && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                onClick={() => onAnchorRootWorkspace?.(wt.currentBranch!)}
+                                className="shrink-0 p-0.5 rounded text-amber-600 dark:text-amber-400 hover:bg-muted transition-colors"
+                              >
+                                <Anchor className="h-3 w-3" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="right">
+                              {`Anchor this workspace to ${wt.currentBranch}`}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
                         {wt.branch !== null && mergeStatuses?.get(wt.branch) && (
                           <WorkspaceMergeBadge
                             info={mergeStatuses.get(wt.branch)!}
