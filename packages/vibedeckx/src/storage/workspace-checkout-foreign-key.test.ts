@@ -110,6 +110,70 @@ describe("workspace checkout foreign key", () => {
     }
   });
 
+  it("carries entry rows through the rebuild — the DROP inside it must never cascade", async () => {
+    // The rebuild DROPs `agent_sessions` while `agent_session_entries` holds an
+    // ON DELETE CASCADE key into it. Two disciplines keep that from wiping the
+    // child rows, and both fail silently when broken: `foreign_keys` must be
+    // OFF for the DROP (or the cascade fires), and the rebuild must go
+    // DROP-old-then-RENAME-new (renaming the old table first would rewrite the
+    // children's REFERENCES to the temporary name). This test exists to turn
+    // both silent failures into a red build.
+    const registered = await registerCheckout("dev");
+    await storage.agentSessions.createBound({
+      id: "s1", project_id: "p1", branch: "dev", target_id: "local",
+      checkout_id: registered.checkout.id,
+    });
+    for (let i = 0; i < 3; i++) {
+      await storage.agentSessions.upsertEntry("s1", i, `{"i":${i}}`);
+    }
+    await storage.close();
+
+    // Strip the checkout key so the tighten migration has a rebuild to run.
+    // The interim table must keep its PRIMARY KEY: without a unique index on
+    // the parent key the child constraint cannot resolve, and the cascade this
+    // test guards against could never fire — passing vacuously.
+    const legacy = openRaw();
+    legacy.pragma("foreign_keys = OFF");
+    legacy.exec(`
+      CREATE TABLE agent_sessions_stash AS SELECT * FROM agent_sessions;
+      DROP TABLE agent_sessions;
+      CREATE TABLE agent_sessions (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '',
+        workspace_checkout_id TEXT DEFAULT NULL, status TEXT NOT NULL DEFAULT 'running',
+        permission_mode TEXT DEFAULT 'edit', agent_type TEXT DEFAULT 'claude-code',
+        title TEXT DEFAULT NULL, model TEXT DEFAULT NULL,
+        created_at TEXT, updated_at TEXT, activity_at INTEGER,
+        last_user_message_at INTEGER, last_completed_at INTEGER, favorited_at INTEGER,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+      INSERT INTO agent_sessions
+        (id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
+         title, model, created_at, updated_at, activity_at, last_user_message_at,
+         last_completed_at, favorited_at)
+        SELECT id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
+               title, model, created_at, updated_at, activity_at, last_user_message_at,
+               last_completed_at, favorited_at
+          FROM agent_sessions_stash;
+      DROP TABLE agent_sessions_stash;
+    `);
+    legacy.close();
+
+    storage = await createSqliteStorage(dbPath);
+
+    const raw = openRaw();
+    try {
+      // The rebuild must actually have run, or the assertions below are vacuous.
+      expect(ddl(raw, "agent_sessions")).toMatch(/REFERENCES workspace_checkouts/);
+      expect(ddl(raw, "agent_session_entries")).toMatch(/REFERENCES agent_sessions\(id\)/);
+      expect(raw.prepare("SELECT count(*) c FROM agent_session_entries").get()).toEqual({ c: 3 });
+      expect(raw.pragma("foreign_key_check")).toEqual([]);
+    } finally {
+      raw.close();
+    }
+    const entries = await storage.agentSessions.getEntries("s1");
+    expect(entries.map((e) => e.data)).toEqual(['{"i":0}', '{"i":1}', '{"i":2}']);
+  });
+
   it("refuses to tighten while a dangling binding exists, and completes once it is resolved", async () => {
     const registered = await registerCheckout("dev");
     await storage.agentSessions.createBound({
