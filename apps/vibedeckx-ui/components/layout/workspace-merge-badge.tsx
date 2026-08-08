@@ -31,6 +31,45 @@ export function mergeBadgeAriaLabel(
   return parts.join(" · ");
 }
 
+export function dirtyDotAriaLabel(repositoryLabel?: string | null): string {
+  const label = "Uncommitted changes";
+  return repositoryLabel ? `${label} · ${repositoryLabel}` : label;
+}
+
+/**
+ * The root workspace's dirty marker. It has no branch identity to compare
+ * against a target, so it carries the merge badge's orange dot alone — same
+ * position, same meaning, without a relationship verdict that would always
+ * read "in sync with itself".
+ */
+export function WorkspaceDirtyDot({
+  repositoryLabel,
+  onClick,
+}: {
+  repositoryLabel?: string | null;
+  onClick: () => void;
+}) {
+  const ariaLabel = dirtyDotAriaLabel(repositoryLabel);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick();
+          }}
+          aria-label={ariaLabel}
+          className="shrink-0 flex items-center justify-center h-4 min-w-4 px-0.5 rounded hover:bg-muted"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-orange-400" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right">{ariaLabel}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function WorkspaceMergeBadge({
   info,
   repositoryLabel,

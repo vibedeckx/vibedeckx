@@ -145,6 +145,22 @@ function ensureLegacyImport(projectId: string): Promise<void> {
 }
 
 /**
+ * The branch the root workspace actually has checked out, which is what its
+ * working tree's dirty state belongs to. The root's workspace identity is
+ * `null` by design, so it never appears in the branch list — but its
+ * uncommitted changes are as worth surfacing as any other workspace's.
+ * `currentBranch` is present only under drift, and an explicit null there
+ * means detached HEAD: no branch names that checkout, so there is nothing to
+ * ask about. Pure — exported for tests.
+ */
+export function rootLiveBranch(worktrees: Worktree[]): string | null {
+  const root = worktrees.find((w) => w.branch === null);
+  if (!root) return null;
+  const live = root.currentBranch === undefined ? root.expectedBranch : root.currentBranch;
+  return live ?? null;
+}
+
+/**
  * Merge status per workspace branch, fetched once per distinct target.
  * Refreshes whenever the observable worktree list changes or after setTarget.
  * Background drift checks preserve the array identity when their payload is
@@ -152,6 +168,7 @@ function ensureLegacyImport(projectId: string): Promise<void> {
  */
 export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) {
   const [statuses, setStatuses] = useState<Map<string, BranchMergeInfo>>(new Map());
+  const [rootDirty, setRootDirty] = useState(false);
   const [defaultTarget, setDefaultTarget] = useState<string | null>(null);
   const [repositoryLabel, setRepositoryLabel] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -163,6 +180,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
   if (projectId !== seenProjectId) {
     setSeenProjectId(projectId);
     setStatuses(new Map());
+    setRootDirty(false);
     setDefaultTarget(null);
     setRepositoryLabel(null);
   }
@@ -175,12 +193,22 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
     const branches = worktrees
       .map((w) => w.branch)
       .filter((b): b is string => b !== null);
+    const requested = new Set(branches);
+    // The root's live branch rides along purely for its dirty flag: the
+    // backend derives dirty from the worktree that has the branch checked
+    // out, which for this branch is the project directory itself.
+    const rootBranch = rootLiveBranch(worktrees);
+    const comparisons = branches.map((branch) => ({ branch }));
+    if (rootBranch !== null && !requested.has(rootBranch)) {
+      comparisons.push({ branch: rootBranch });
+    }
     let cancelled = false;
 
     (async () => {
-      if (!projectId || branches.length === 0) {
+      if (!projectId || comparisons.length === 0) {
         if (!cancelled) {
           setStatuses(new Map());
+          setRootDirty(false);
           setDefaultTarget(null);
           setRepositoryLabel(null);
         }
@@ -192,12 +220,27 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
         if (cancelled) return;
       }
 
-      const comparisons = branches.map((branch) => ({ branch }));
       const result = await api.getMergeStatus(projectId, comparisons);
       if (cancelled) return;
       if (!result.ok) return; // transport/server failure — keep previous statuses, touch nothing
 
-      setStatuses(buildStatusMap(result.entries));
+      // Keep the root's entry out of the badge map, and when a workspace's
+      // stable identity collides with the root's live branch, keep its dirty
+      // out too: only one worktree can hold that branch and it is the root's,
+      // so the flag describes the root's working tree, never that workspace's.
+      // It is already shown on the root row.
+      setStatuses(
+        buildStatusMap(
+          result.entries
+            .filter((e) => requested.has(e.branch))
+            .map((e) => (e.branch === rootBranch ? { ...e, dirty: false } : e)),
+        ),
+      );
+      setRootDirty(
+        rootBranch === null
+          ? false
+          : (result.entries.find((e) => e.branch === rootBranch)?.dirty ?? false),
+      );
       setDefaultTarget(deriveDefaultTarget(result.entries));
       setRepositoryLabel(result.repository.label);
     })();
@@ -217,7 +260,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
     [projectId, refetch],
   );
 
-  return { statuses, defaultTarget, repositoryLabel, setTarget, refetch };
+  return { statuses, rootDirty, defaultTarget, repositoryLabel, setTarget, refetch };
 }
 
 /** Workspace statuses that mean an agent is actively working on the branch. */

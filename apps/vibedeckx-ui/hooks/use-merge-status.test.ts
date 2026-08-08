@@ -5,9 +5,29 @@ import {
   deriveDefaultTarget,
   deserializeBranchSet,
   effectiveTarget,
+  rootLiveBranch,
   serializeBranchSet,
   someActivityEnded,
 } from "./use-merge-status";
+
+describe("rootLiveBranch", () => {
+  it("names the anchored branch when the root has not drifted", () => {
+    expect(rootLiveBranch([{ branch: null, expectedBranch: "main" }, { branch: "dev1" }])).toBe("main");
+  });
+
+  it("prefers the live checkout over the anchor when the root has drifted", () => {
+    // Dirty belongs to the working tree, and the working tree is on dev9.
+    expect(
+      rootLiveBranch([{ branch: null, expectedBranch: "main", currentBranch: "dev9" }]),
+    ).toBe("dev9");
+  });
+
+  it("names nothing for a detached or non-repository root", () => {
+    expect(rootLiveBranch([{ branch: null, expectedBranch: "main", currentBranch: null }])).toBe(null);
+    expect(rootLiveBranch([{ branch: null }])).toBe(null);
+    expect(rootLiveBranch([{ branch: "dev1" }])).toBe(null);
+  });
+});
 
 describe("deriveDefaultTarget", () => {
   it("skips stored targets and takes the first resolved default target", () => {

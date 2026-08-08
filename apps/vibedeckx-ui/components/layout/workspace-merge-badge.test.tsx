@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BranchMergeInfo } from "@/hooks/use-merge-status";
-import { mergeBadgeAriaLabel } from "./workspace-merge-badge";
+import { dirtyDotAriaLabel, mergeBadgeAriaLabel } from "./workspace-merge-badge";
 
 const inSync: BranchMergeInfo = {
   branch: "dev1",
@@ -54,5 +54,14 @@ describe("mergeBadgeAriaLabel", () => {
     expect(mergeBadgeAriaLabel({ ...inSync, dirty: true }, "Local")).toBe(
       "In sync with main · uncommitted changes · Local",
     );
+  });
+});
+
+describe("dirtyDotAriaLabel", () => {
+  it("names uncommitted changes without a merge relationship", () => {
+    // The root workspace compares against nothing, so the label must not
+    // imply a target the way the merge badge's does.
+    expect(dirtyDotAriaLabel("Local")).toBe("Uncommitted changes · Local");
+    expect(dirtyDotAriaLabel()).toBe("Uncommitted changes");
   });
 });

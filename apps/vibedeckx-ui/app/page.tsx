@@ -164,6 +164,7 @@ export default function Home() {
   );
   const {
     statuses: mergeStatuses,
+    rootDirty: mergeRootDirty,
     defaultTarget: mergeDefaultTarget,
     repositoryLabel: mergeRepositoryLabel,
     setTarget: setMergeTarget,
@@ -885,6 +886,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               refetchWorktrees();
             }}
             mergeStatuses={mergeStatuses}
+            mergeRootDirty={mergeRootDirty}
             mergeDefaultTarget={mergeDefaultTarget}
             mergeRepositoryLabel={mergeRepositoryLabel}
             onMergeTargetChange={setMergeTarget}

@@ -287,6 +287,16 @@ describe("merge-status", () => {
       expect(entries[0].status).toBe("no-unique-commits");
     });
 
+    it("reports the root worktree's dirty state for the branch it has checked out", () => {
+      // The sidebar surfaces the root workspace's uncommitted changes by
+      // asking about the branch the project directory has checked out — the
+      // dirty flag has to come from that directory, not from a worktree.
+      writeFileSync(path.join(repo, "base.txt"), "edited but not committed");
+      invalidateWorktreeListCache(repo);
+      const entries = computeMergeStatusPairs(repo, [{ branch: "main" }]);
+      expect(entries[0]).toMatchObject({ status: "no-unique-commits", dirty: true });
+    });
+
     it("returns an empty array for an empty batch", () => {
       expect(computeMergeStatusPairs(repo, [])).toEqual([]);
     });

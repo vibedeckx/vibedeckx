@@ -21,19 +21,20 @@ const setMergeTarget = vi.mocked(api.setMergeTarget);
 
 let latest: {
   statuses: Map<string, BranchMergeInfo>;
+  rootDirty: boolean;
   defaultTarget: string | null;
   repositoryLabel: string | null;
   setTarget: (branch: string, target: string | null) => void;
 } | null = null;
 
 function Probe({ projectId, worktrees }: { projectId: string | null; worktrees: Worktree[] }) {
-  const { statuses, defaultTarget, repositoryLabel, setTarget } = useMergeStatus(projectId, worktrees);
+  const { statuses, rootDirty, defaultTarget, repositoryLabel, setTarget } = useMergeStatus(projectId, worktrees);
   // Capture in an effect (not during render) — react-hooks/globals forbids
   // reassigning module variables mid-render. Effects run inside act(), so
   // `latest` reflects the settled state by the time assertions run.
   useEffect(() => {
-    latest = { statuses, defaultTarget, repositoryLabel, setTarget };
-  }, [statuses, defaultTarget, repositoryLabel, setTarget]);
+    latest = { statuses, rootDirty, defaultTarget, repositoryLabel, setTarget };
+  }, [statuses, rootDirty, defaultTarget, repositoryLabel, setTarget]);
   return null;
 }
 
@@ -74,6 +75,86 @@ afterEach(() => {
   container?.remove();
   container = null;
   localStorage.clear();
+});
+
+describe("useMergeStatus (root workspace dirty)", () => {
+  it("asks about the root's live branch and reports its dirty flag", async () => {
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [
+        { branch: "dev1", target: "main", targetSource: "default", requestedTarget: "main", status: "unmerged", unmergedCount: 2, dirty: false },
+        { branch: "main", target: "main", targetSource: "default", requestedTarget: "main", status: "no-unique-commits", unmergedCount: 0, dirty: true },
+      ],
+    });
+
+    await render("p1", [{ branch: null, expectedBranch: "main" }, { branch: "dev1" }]);
+
+    expect(getMergeStatus).toHaveBeenCalledWith("p1", [{ branch: "dev1" }, { branch: "main" }]);
+    expect(latest!.rootDirty).toBe(true);
+    // The root's own entry must not become a badge — the root row renders the
+    // dirty dot alone, and a "main" badge would belong to a workspace.
+    expect(latest!.statuses.has("main")).toBe(false);
+    expect(latest!.statuses.get("dev1")).toMatchObject({ status: "unmerged" });
+  });
+
+  it("fetches for a project whose only workspace is the root", async () => {
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [
+        { branch: "main", target: "main", targetSource: "default", requestedTarget: "main", status: "no-unique-commits", unmergedCount: 0, dirty: true },
+      ],
+    });
+
+    await render("p1", [{ branch: null, expectedBranch: "main" }]);
+
+    expect(getMergeStatus).toHaveBeenCalledWith("p1", [{ branch: "main" }]);
+    expect(latest!.rootDirty).toBe(true);
+  });
+
+  it("adds no comparison when the root names no branch", async () => {
+    await render("p1", [{ branch: null }, { branch: "dev1" }]);
+
+    expect(getMergeStatus).toHaveBeenCalledWith("p1", [{ branch: "dev1" }]);
+    expect(latest!.rootDirty).toBe(false);
+  });
+
+  it("attributes a colliding branch's dirty to the root, not to the workspace", async () => {
+    // Drift can put the root on a branch that is also some workspace's stable
+    // identity. Git lets only one worktree hold that branch, and it is the
+    // root's — so the dirty flag belongs to the root row alone, and the
+    // workspace badge must not repeat it as its own.
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [
+        { branch: "dev1", target: "main", targetSource: "default", requestedTarget: "main", status: "merged", unmergedCount: 0, dirty: true },
+      ],
+    });
+
+    await render("p1", [{ branch: null, expectedBranch: "main", currentBranch: "dev1" }, { branch: "dev1" }]);
+
+    expect(getMergeStatus).toHaveBeenCalledWith("p1", [{ branch: "dev1" }]);
+    expect(latest!.rootDirty).toBe(true);
+    expect(latest!.statuses.get("dev1")).toMatchObject({ status: "merged", dirty: false });
+  });
+
+  it("clears the root dirty flag on a project switch", async () => {
+    getMergeStatus.mockResolvedValueOnce({
+      ok: true,
+      repository: { kind: "local", label: "Local" },
+      entries: [
+        { branch: "main", target: "main", targetSource: "default", requestedTarget: "main", status: "no-unique-commits", unmergedCount: 0, dirty: true },
+      ],
+    });
+    await render("p1", [{ branch: null, expectedBranch: "main" }]);
+    expect(latest!.rootDirty).toBe(true);
+
+    getMergeStatus.mockResolvedValue({ ok: false, status: 0 });
+    await render("p2", [{ branch: null, expectedBranch: "main" }]);
+    expect(latest!.rootDirty).toBe(false);
+  });
 });
 
 describe("useMergeStatus (project switch reset)", () => {

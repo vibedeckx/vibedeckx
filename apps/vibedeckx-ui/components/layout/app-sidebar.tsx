@@ -5,7 +5,7 @@ import { Anchor, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "l
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProjectGlyph } from "@/components/project/project-glyph";
-import { WorkspaceMergeBadge } from "./workspace-merge-badge";
+import { WorkspaceDirtyDot, WorkspaceMergeBadge } from "./workspace-merge-badge";
 import { WorkspaceRowMenu } from "./workspace-row-menu";
 
 import type { Worktree, Project, Schedule } from "@/lib/api";
@@ -26,10 +26,12 @@ interface AppSidebarProps {
   onDeleteWorktree?: (worktree: Worktree) => void;
   onAnchorRootWorkspace?: (branch: string) => void;
   mergeStatuses?: Map<string, BranchMergeInfo>;
+  /** The root workspace has no branch identity, so its dirty state is separate. */
+  mergeRootDirty?: boolean;
   mergeDefaultTarget?: string | null;
   mergeRepositoryLabel?: string | null;
   onMergeTargetChange?: (branch: string, target: string | null) => void;
-  onMergeBadgeClick?: (branch: string) => void;
+  onMergeBadgeClick?: (branch: string | null) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
   residentSessions?: Map<string, ResidentSidebarSession[]>;
   selectedSessionId?: string | null;
@@ -194,6 +196,7 @@ export function AppSidebar({
   onDeleteWorktree,
   onAnchorRootWorkspace,
   mergeStatuses,
+  mergeRootDirty,
   mergeDefaultTarget,
   mergeRepositoryLabel,
   onMergeTargetChange,
@@ -430,6 +433,12 @@ export function AppSidebar({
                               {`Anchor this workspace to ${wt.currentBranch}`}
                             </TooltipContent>
                           </Tooltip>
+                        )}
+                        {wt.branch === null && mergeRootDirty && (
+                          <WorkspaceDirtyDot
+                            repositoryLabel={mergeRepositoryLabel}
+                            onClick={() => onMergeBadgeClick?.(null)}
+                          />
                         )}
                         {wt.branch !== null && mergeStatuses?.get(wt.branch) && (
                           <WorkspaceMergeBadge
