@@ -190,8 +190,12 @@ export function reconcileWorktreeBranches(
   // Drift is only claimable when Git actually names a branch. A root with no
   // branch (detached HEAD, or a project directory that is not a repository)
   // has nothing to compare against — reporting it as drifted would be a
-  // permanent false positive for non-git projects.
+  // permanent false positive for non-git projects. An empty expected branch is
+  // the same "unknown" placeholder recorded on the other side: the root was
+  // registered before the directory became a repository, so a branch appearing
+  // later (git init → main) is adoption, not drift.
   const rootDrifted = Boolean(rootAnchor)
+    && rootAnchor!.expectedBranch !== ""
     && rootEntry?.branch != null
     && rootEntry.branch !== rootAnchor!.expectedBranch;
   const worktrees: WorktreeBranch[] = [rootDrifted
@@ -261,6 +265,19 @@ export async function getRegisteredWorktreeBranches(
       // Crash recovery: Git exists but the final DB transition did not land.
       if (existing.checkout.status === "creating" || existing.checkout.status === "error") {
         await storage.workspaceRegistry.setCheckoutStatus(existing.checkout.id, "ready");
+      }
+      // The root was registered while Git could not name a branch (the project
+      // was not a repository yet, or was detached), leaving the "" placeholder.
+      // Adopt the branch Git names now so the anchor holds a real expectation
+      // instead of reporting every future listing as drift.
+      if (index === 0 && existing.checkout.expected_branch === "" && entry.branch) {
+        await storage.workspaceRegistry.registerReadyCheckout({
+          projectId,
+          branch: existing.workspace.branch,
+          targetId: "local",
+          worktreePath: entry.path,
+          expectedBranch: entry.branch,
+        });
       }
       continue;
     }

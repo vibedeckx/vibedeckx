@@ -52,6 +52,14 @@ describe("reconcileWorktreeBranches", () => {
     ]);
   });
 
+  it("treats a branch appearing under the unknown placeholder as adoption, not drift", () => {
+    expect(reconcileWorktreeBranches(projectPath, [
+      { path: projectPath, branch: "main" },
+    ], [], [{ branch: "", worktreePath: projectPath, expectedBranch: "" }])).toEqual([
+      { branch: null },
+    ]);
+  });
+
   it("detects drift in the main workspace once its expected branch is registered", () => {
     expect(reconcileWorktreeBranches(projectPath, [
       { path: projectPath, branch: "agent/experiment" },

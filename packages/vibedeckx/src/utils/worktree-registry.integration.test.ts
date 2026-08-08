@@ -32,6 +32,25 @@ describe("non-git project", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("adopts the branch created by a later git init instead of reporting drift", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "vdx-nongit-init-"));
+    const storage = await createSqliteStorage(path.join(dir, "db.sqlite"));
+    try {
+      await storage.projects.create({ id: "p1", name: "p", path: dir });
+      await getRegisteredWorktreeBranches(storage, "p1", dir);
+
+      execFileSync("git", ["init", "-b", "main", dir]);
+      invalidateWorktreeListCache(dir);
+
+      expect(await getRegisteredWorktreeBranches(storage, "p1", dir)).toEqual([{ branch: null }]);
+      expect((await storage.workspaceRegistry.getByProjectBranch("p1", "", "local"))?.checkout)
+        .toMatchObject({ worktree_path: dir, expected_branch: "main", status: "ready" });
+    } finally {
+      await storage.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("persisted worktree identity", () => {
