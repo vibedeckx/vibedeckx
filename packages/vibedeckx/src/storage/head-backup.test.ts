@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -115,5 +115,27 @@ describe("head backup and corruption self-heal", () => {
   it("does not create a backup for a fresh install", async () => {
     storage = await createSqliteStorage(dbPath);
     expect(existsSync(todaysBackup())).toBe(false);
+  });
+
+  it("refreshes the backup on a timer in long-lived processes, and stops on close", async () => {
+    // A worker daemon can run for weeks; the startup-only backup would go
+    // stale. The periodic tick must catch up (fresh install: the db file
+    // exists only after open, so the FIRST backup arrives via the timer).
+    vi.useFakeTimers();
+    try {
+      storage = await createSqliteStorage(dbPath);
+      expect(existsSync(todaysBackup())).toBe(false);
+
+      vi.advanceTimersByTime(6 * 60 * 60 * 1000 + 1);
+      expect(existsSync(todaysBackup())).toBe(true);
+
+      await storage.close();
+      storage = null;
+      rmSync(headBackupDir(dbPath), { recursive: true, force: true });
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+      expect(existsSync(todaysBackup())).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

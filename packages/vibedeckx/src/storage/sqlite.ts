@@ -2089,6 +2089,20 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
   const kdb = new Kysely<DB>({ dialect: new SqliteDialect({ database: db }) });
   const h = sqliteHelpers;
 
+  // Worker daemons run for weeks without a restart, so a startup-only backup
+  // would go stale. Re-check on a sub-daily cadence: maintainHeadBackup is
+  // a no-op when today's file already exists, so the tick is nearly free and
+  // each new calendar day gets its backup within hours. unref() keeps the
+  // timer from holding a finished process (or a test run) alive.
+  const backupTimer = setInterval(() => {
+    try {
+      maintainHeadBackup(dbPath);
+    } catch (err) {
+      console.warn(`[Storage] periodic head backup failed (will retry): ${err}`);
+    }
+  }, 6 * 60 * 60 * 1000);
+  backupTimer.unref();
+
   return {
     ...createCoreRepos(kdb, h),
     ...createWorkspaceRegistryRepo(kdb, h),
@@ -2106,6 +2120,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createProjectChatRepos(kdb),
 
     close: async () => {
+      clearInterval(backupTimer);
       // kdb.destroy() tears down the Kysely driver, which for SqliteDialect
       // calls db.close() on the wrapped better-sqlite3 handle — no separate
       // db.close() needed (verified against kysely's SqliteDriver.destroy()).
