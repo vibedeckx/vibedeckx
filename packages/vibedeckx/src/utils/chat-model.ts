@@ -1,5 +1,6 @@
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createGateway } from "ai";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
 import type { Storage } from "../storage/types.js";
@@ -9,7 +10,7 @@ import type { Storage } from "../storage/types.js";
  * Adding a new provider = add one entry here (and to `ProviderId`); the rest of
  * the app only ever deals with `{ provider, model }` choices.
  */
-export type ProviderId = "deepseek" | "openrouter";
+export type ProviderId = "deepseek" | "openrouter" | "gateway";
 
 export interface ProviderDef {
   id: ProviderId;
@@ -38,6 +39,14 @@ export const PROVIDERS: Record<ProviderId, ProviderDef> = {
     defaultModel: "deepseek/deepseek-chat-v3-0324",
     envKey: "OPENROUTER_API_KEY",
     create: (apiKey, model) => createOpenRouter({ apiKey })(model),
+  },
+  gateway: {
+    id: "gateway",
+    label: "Vercel AI Gateway",
+    models: null,
+    defaultModel: "anthropic/claude-sonnet-5",
+    envKey: "AI_GATEWAY_API_KEY",
+    create: (apiKey, model) => createGateway({ apiKey })(model),
   },
 };
 

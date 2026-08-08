@@ -892,16 +892,20 @@ export interface ProxyConfig {
   port: number;
 }
 
-export type ProviderId = 'deepseek' | 'openrouter';
+export type ProviderId = 'deepseek' | 'openrouter' | 'gateway';
 
 export interface ProviderUiDef {
   id: ProviderId;
   label: string;
+  /** One-line pitch shown on the provider radio card. */
+  description: string;
   /** Fixed model list (rendered as a dropdown), or null for free-form input. */
   models: readonly string[] | null;
   modelLabels?: Record<string, string>;
   defaultModel: string;
   placeholder?: string;
+  /** Placeholder for the API-key input, when the provider's keys aren't `sk-…`. */
+  keyPlaceholder?: string;
   /** Env var name shown in the API-key hint. */
   envKey: string;
 }
@@ -910,6 +914,7 @@ export const PROVIDERS: Record<ProviderId, ProviderUiDef> = {
   deepseek: {
     id: 'deepseek',
     label: 'DeepSeek',
+    description: 'Direct API access — lowest latency',
     models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     modelLabels: {
       'deepseek-v4-flash': 'DeepSeek V4 Flash — faster, lower cost',
@@ -922,14 +927,25 @@ export const PROVIDERS: Record<ProviderId, ProviderUiDef> = {
   openrouter: {
     id: 'openrouter',
     label: 'OpenRouter',
+    description: 'Aggregator routing — many models available',
     models: null,
     defaultModel: 'deepseek/deepseek-chat-v3-0324',
     placeholder: 'deepseek/deepseek-chat-v3-0324',
     envKey: 'OPENROUTER_API_KEY',
   },
+  gateway: {
+    id: 'gateway',
+    label: 'Vercel AI Gateway',
+    description: 'One key, unified billing and failover',
+    models: null,
+    defaultModel: 'anthropic/claude-sonnet-5',
+    placeholder: 'anthropic/claude-sonnet-5',
+    keyPlaceholder: 'vck_...',
+    envKey: 'AI_GATEWAY_API_KEY',
+  },
 };
 
-export const PROVIDER_IDS: ProviderId[] = ['deepseek', 'openrouter'];
+export const PROVIDER_IDS: ProviderId[] = ['deepseek', 'openrouter', 'gateway'];
 
 export interface ModelChoice {
   provider: ProviderId;
@@ -948,10 +964,15 @@ export function defaultModelChoice(provider: ProviderId = 'deepseek'): ModelChoi
 
 export function defaultChatProviderConfig(): ChatProviderConfig {
   return {
-    apiKeys: { deepseek: '', openrouter: '' },
+    apiKeys: emptyByProvider(''),
     main: defaultModelChoice(),
     fast: defaultModelChoice(),
   };
+}
+
+/** `{ deepseek: v, openrouter: v, … }` — keeps callers off hardcoded provider lists. */
+export function emptyByProvider<T>(value: T): Record<ProviderId, T> {
+  return Object.fromEntries(PROVIDER_IDS.map((id) => [id, value])) as Record<ProviderId, T>;
 }
 
 export interface TerminalSettings {

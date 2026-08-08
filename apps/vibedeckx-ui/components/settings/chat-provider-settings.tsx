@@ -16,11 +16,20 @@ import {
   PROVIDER_IDS,
   defaultChatProviderConfig,
   defaultModelChoice,
+  emptyByProvider,
   type ChatProviderConfig,
   type ModelChoice,
   type ProviderId,
 } from "@/lib/api";
-import { CheckCircle2, Loader2, Sparkles, Waypoints, XCircle, type LucideIcon } from "lucide-react";
+import {
+  CheckCircle2,
+  Loader2,
+  Sparkles,
+  Triangle,
+  Waypoints,
+  XCircle,
+  type LucideIcon,
+} from "lucide-react";
 import {
   RadioOption,
   SettingsActions,
@@ -32,15 +41,13 @@ import {
 const PROVIDER_ICONS: Record<ProviderId, LucideIcon> = {
   deepseek: Sparkles,
   openrouter: Waypoints,
+  gateway: Triangle,
 };
 
 const PROVIDER_OPTIONS: ReadonlyArray<RadioOption<ProviderId>> = PROVIDER_IDS.map((id) => ({
   value: id,
   label: PROVIDERS[id].label,
-  description:
-    id === "deepseek"
-      ? "Direct API access — lowest latency"
-      : "Aggregator routing — many models available",
+  description: PROVIDERS[id].description,
   Icon: PROVIDER_ICONS[id],
 }));
 
@@ -93,10 +100,9 @@ export function ChatProviderSettings() {
   const [apiKeys, setApiKeys] = useState<Record<ProviderId, string>>(() =>
     defaultChatProviderConfig().apiKeys,
   );
-  const [keyDirty, setKeyDirty] = useState<Record<ProviderId, boolean>>(() => ({
-    deepseek: false,
-    openrouter: false,
-  }));
+  const [keyDirty, setKeyDirty] = useState<Record<ProviderId, boolean>>(() =>
+    emptyByProvider(false),
+  );
   const [main, setMain] = useState<ModelChoice>(() => defaultModelChoice());
   const [fast, setFast] = useState<ModelChoice>(() => defaultModelChoice());
   const [loading, setLoading] = useState(true);
@@ -111,7 +117,7 @@ export function ChatProviderSettings() {
         setApiKeys(config.apiKeys);
         setMain(config.main);
         setFast(config.fast);
-        setKeyDirty({ deepseek: false, openrouter: false });
+        setKeyDirty(emptyByProvider(false));
       })
       .finally(() => setLoading(false));
   }, []);
@@ -141,7 +147,7 @@ export function ChatProviderSettings() {
       setApiKeys(updated.apiKeys);
       setMain(updated.main);
       setFast(updated.fast);
-      setKeyDirty({ deepseek: false, openrouter: false });
+      setKeyDirty(emptyByProvider(false));
       setSaveMessage("Settings saved");
       setTimeout(() => setSaveMessage(null), 2000);
     } catch (e) {
@@ -185,7 +191,7 @@ export function ChatProviderSettings() {
               <Input
                 type="password"
                 className="font-mono text-[12px]"
-                placeholder={stored && !dirty ? stored : "sk-..."}
+                placeholder={stored && !dirty ? stored : (def.keyPlaceholder ?? "sk-...")}
                 value={dirty ? stored : ""}
                 onChange={(e) => handleKeyChange(id, e.target.value)}
               />
