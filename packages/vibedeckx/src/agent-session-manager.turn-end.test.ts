@@ -69,6 +69,7 @@ function makeHarness(
       updateStatus: vi.fn(async (_id: string, status: AgentSession["status"]) => { ops.push(`status:${status}`); row.status = status; }),
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       markUserMessage: vi.fn(async () => undefined),
+      setNativeSessionId: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async (_id: string, _idx: number, data: string) => {
         const msg = JSON.parse(data) as AgentMessage;
         ops.push(`entry:${msg.type}`);

@@ -67,6 +67,7 @@ function makeHarness(agentType: string = "claude-code") {
       markUserMessage: vi.fn(async (_id: string, ts: number) => {
         row.last_user_message_at = ts;
       }),
+      setNativeSessionId: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async () => undefined),
       touchUpdatedAt: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),

@@ -41,6 +41,7 @@ function makeHarness(permissionMode: "plan" | "edit") {
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       updatePermissionMode: vi.fn(async (_id: string, mode: "plan" | "edit") => { row.permission_mode = mode; }),
       markUserMessage: vi.fn(async () => undefined),
+      setNativeSessionId: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async () => undefined),
       touchUpdatedAt: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
