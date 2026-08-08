@@ -312,9 +312,9 @@ vibedeckx 把两者放进了同一个库，所以每次 schema 变更都要在�
 | 用户的源真相（hub 侧） | 你 | migrate（留库） |
 | 派生 / 缓存 / 日志 | — | discard（换代），别写迁移 |
 
-### 6.1 三条可执行规则
+### 6.1 四条可执行规则
 
-判据之外，下面三条是能在 review 里直接引用的：
+判据之外，下面四条是能在 review 里直接引用的：
 
 1. **新增持久化数据默认走独立文件 + 代号。** 命名 `<name>_1.sqlite`，打开逻辑统一写成
    「文件不存在 → 建空文件 → 从 migration 1 跑起」，并在文件顶部注明**本库允许被丢弃**。
@@ -339,6 +339,16 @@ vibedeckx 把两者放进了同一个库，所以每次 schema 变更都要在�
    **前瞻**：executor / PTY 输出目前不在库里（`executor_processes` 只存
    `pid / status / exit_code`，无日志内容）。若将来要持久化它，它是最可能成为
    "下一个 entries"的东西——必须一开始就是文件或代号库，不能进 `data.sqlite`。
+
+4. **entries 接口纪律（钉住存储形态的切换成本）。**
+   新代码访问会话记录只准走 `storage.agentSessions` 的
+   `getEntries` / `upsertEntry` / `deleteEntries` 接口；
+   **禁止新增直接引用 `agent_session_entries` 表名的 SQL**（含把 FTS5 索引写成
+   `content=agent_session_entries` 的 external-content 绑定——索引输入应是抽取文本的
+   派生投影，不绑介质）。理由：截至 2026-08-08，全部消费调用点都在接口后面
+   （`agent-session-manager.ts` 9 处）+ 仅一处历史遗留的直接 SQL（search-cache 的
+   `EXISTS`）。守住这条，entries 将来是留库还是出文件就只是 repository 层的实现细节，
+   「先想清楚再做」不产生隐性利息。
 
 本仓库把上述判据落到 `agent_session_entries` 的具体路线，见
 [`plans/2026-08-06-session-entries-to-files.md`](./plans/2026-08-06-session-entries-to-files.md)。
