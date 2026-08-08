@@ -175,7 +175,7 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
   // ~20ms after the previous turn's result (measured live), long before the
   // resume's first assistant event (a full LLM roundtrip later), so it is the
   // signal that cancels a grace-held completion in time.
-  it("parses system/init into turn_started", () => {
+  it("parses system/init into turn_started plus the CLI's own session id", () => {
     const line = JSON.stringify({
       type: "system",
       subtype: "init",
@@ -183,6 +183,14 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
       model: "claude-fable-5",
       cwd: "/tmp/scratch",
     });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([
+      { type: "turn_started" },
+      { type: "native_session_id", id: "cdc13acc-4319-48b4-8003-f0fc1ac347b7" },
+    ]);
+  });
+
+  it("still emits turn_started when system/init carries no session_id", () => {
+    const line = JSON.stringify({ type: "system", subtype: "init" });
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([{ type: "turn_started" }]);
   });
 

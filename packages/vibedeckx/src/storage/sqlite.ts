@@ -117,6 +117,7 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
           last_user_message_at INTEGER DEFAULT NULL,
           last_completed_at INTEGER DEFAULT NULL,
           favorited_at INTEGER DEFAULT NULL,
+          native_session_id TEXT DEFAULT NULL,
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
           FOREIGN KEY (workspace_checkout_id) REFERENCES workspace_checkouts(id)
             DEFERRABLE INITIALLY DEFERRED
@@ -124,10 +125,10 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
         INSERT INTO agent_sessions_fk_new
           (id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
            title, model, created_at, updated_at, activity_at, last_user_message_at,
-           last_completed_at, favorited_at)
+           last_completed_at, favorited_at, native_session_id)
           SELECT id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
                  title, model, created_at, updated_at, activity_at, last_user_message_at,
-                 last_completed_at, favorited_at
+                 last_completed_at, favorited_at, native_session_id
             FROM agent_sessions;
         DROP TABLE agent_sessions;
         ALTER TABLE agent_sessions_fk_new RENAME TO agent_sessions;
@@ -997,6 +998,16 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const sessionInfoV7 = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   if (!sessionInfoV7.some(col => col.name === "model")) {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN model TEXT DEFAULT NULL");
+  }
+
+  // Migration: record the agent CLI's own session identity (Claude Code
+  // `system/init` session_id; Codex `thread/start` thread.id, which is also
+  // the uuid in its rollout filename). The CLI's on-disk transcript is the
+  // only copy of a conversation that survives a vibedeckx DB loss — this
+  // column is what joins a session to it.
+  const sessionInfoNativeId = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionInfoNativeId.some(col => col.name === "native_session_id")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN native_session_id TEXT DEFAULT NULL");
   }
 
   // Phase 2: bind sessions to an immutable checkout incarnation. The foreign

@@ -112,6 +112,7 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   last_user_message_at: row.last_user_message_at,
   last_completed_at: row.last_completed_at,
   favorited_at: row.favorited_at,
+  native_session_id: row.native_session_id,
 });
 
 const parseActivityTimestamp = (value: string): number | null => {
@@ -678,6 +679,13 @@ export const createAgentSessionRepos = (
     updateTitle: async (id, title) => {
       await kdb.updateTable("agent_sessions")
         .set({ title, updated_at: h.nowMs(), activity_at: touchActivityAt() })
+        .where("id", "=", id)
+        .execute();
+    },
+
+    setNativeSessionId: async (id, nativeSessionId) => {
+      await kdb.updateTable("agent_sessions")
+        .set({ native_session_id: nativeSessionId })
         .where("id", "=", id)
         .execute();
     },

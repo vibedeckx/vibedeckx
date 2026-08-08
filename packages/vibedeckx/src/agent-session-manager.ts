@@ -144,6 +144,12 @@ interface RunningSession {
    * whenever no turn is in flight (see `setModel`) — never while one is.
    */
   model: string | null;
+  /**
+   * The agent CLI's own session id (Claude Code system/init session_id,
+   * Codex thread/start thread.id). In-memory dedupe only — the durable copy
+   * lives on agent_sessions.native_session_id.
+   */
+  nativeSessionId?: string;
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
   /** Tail of stdout lines that produced no parsed events (reset per spawn). */
   unparsedStdoutTail?: string;
@@ -1405,6 +1411,18 @@ export class AgentSessionManager {
 
       // Handled above (cancels a grace-held completion); no store entry.
       case "turn_started":
+        break;
+
+      // The CLI's own session identity. Fires once per turn (claude) or once
+      // per thread/start (codex); only the first sighting per value hits the
+      // DB. No store entry — this is a join key, not conversation content.
+      case "native_session_id":
+        if (session.nativeSessionId !== event.id) {
+          session.nativeSessionId = event.id;
+          if (!session.skipDb) {
+            await this.storage.agentSessions.setNativeSessionId(session.id, event.id);
+          }
+        }
         break;
 
       case "error":

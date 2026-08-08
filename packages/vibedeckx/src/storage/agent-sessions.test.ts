@@ -697,6 +697,20 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       expect(unfavorited?.favorited_at ?? null).toBeNull();
     });
 
+    it("setNativeSessionId records the CLI's own id without touching updated_at, and is idempotent", async () => {
+      await setupTwoSessions();
+      await storage.agentSessions.setNativeSessionId("s1", "cdc13acc-4319-48b4-8003-f0fc1ac347b7");
+      // Protocol bookkeeping, not user activity — recency ordering unaffected.
+      expect((await storage.agentSessions.getLatestByBranch("p1", "dev"))?.id).toBe("s2");
+      expect((await storage.agentSessions.getById("s1"))?.native_session_id)
+        .toBe("cdc13acc-4319-48b4-8003-f0fc1ac347b7");
+
+      // A respawn under a new CLI session id overwrites — last one wins,
+      // pointing at the newest on-disk transcript.
+      await storage.agentSessions.setNativeSessionId("s1", "second-id");
+      expect((await storage.agentSessions.getById("s1"))?.native_session_id).toBe("second-id");
+    });
+
     it("touchUpdatedAt bumps updated_at without changing any other column", async () => {
       await setupTwoSessions();
       const before = await storage.agentSessions.getById("s1");

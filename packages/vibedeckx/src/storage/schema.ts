@@ -141,6 +141,13 @@ export interface AgentSessionsTable {
   last_user_message_at: number | null;
   last_completed_at: number | null;
   favorited_at: number | null;
+  /**
+   * The agent CLI's own session identity (Claude Code `system/init`
+   * session_id; Codex `thread/start` thread.id — also the uuid in its rollout
+   * filename). Joins a session to the CLI's on-disk transcript, the only copy
+   * of the conversation that survives a vibedeckx DB loss.
+   */
+  native_session_id: string | null;
 }
 
 /**

@@ -44,6 +44,11 @@ export type ParsedAgentEvent =
   // turns too). Cancels a grace-held completion — it beats the resume's
   // first assistant event by an LLM roundtrip.
   | { type: "turn_started" }
+  // The agent CLI's own session identity (Claude Code `system/init`
+  // session_id; Codex `thread/start` thread.id — also the uuid in its rollout
+  // filename). Persisted on agent_sessions so a session can be joined to the
+  // CLI's on-disk transcript. Re-emitted per turn; the write is idempotent.
+  | { type: "native_session_id"; id: string }
   | { type: "approval_request"; requestType: "command"; requestId: string; command: string; cwd?: string }
   | { type: "approval_request"; requestType: "fileChange"; requestId: string; changes: Array<{path: string; diff?: string; kind: string}> }
   | { type: "stdin_write"; content: string };

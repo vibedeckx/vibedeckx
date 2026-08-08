@@ -548,6 +548,13 @@ export interface AgentSession {
   last_completed_at?: number | null;
   /** Epoch ms when the user favorited this session, or null if not favorited. */
   favorited_at?: number | null;
+  /**
+   * The agent CLI's own session id (Claude Code system/init session_id,
+   * Codex thread/start thread.id — the uuid in its rollout filename), or
+   * null before the first turn reports it. Joins this session to the CLI's
+   * on-disk transcript.
+   */
+  native_session_id?: string | null;
 }
 
 export interface SearchCatalogSessionEntry {
@@ -1024,6 +1031,12 @@ export interface Storage {
     updateTitle: (id: string, title: string | null) => Promise<void>;
     /** Mark or unmark the session as favorited. Does not touch updated_at. */
     setFavorited: (id: string, favorited: boolean) => Promise<void>;
+    /**
+     * Record the agent CLI's own session id (see AgentSessionsTable.
+     * native_session_id). Protocol bookkeeping, not user activity — does not
+     * touch updated_at.
+     */
+    setNativeSessionId: (id: string, nativeSessionId: string) => Promise<void>;
     touchUpdatedAt: (id: string) => Promise<void>;
     /** Set last_user_message_at to the given epoch-ms timestamp. */
     markUserMessage: (id: string, timestampMs: number) => Promise<void>;

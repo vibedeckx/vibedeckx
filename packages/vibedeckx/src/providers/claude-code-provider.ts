@@ -135,9 +135,13 @@ export class ClaudeCodeProvider implements AgentProvider {
       }
       // Turn start (fires for auto-resume turns too) — the timely cancel
       // signal for a grace-held completion; the resume's first assistant
-      // event arrives a full LLM roundtrip later.
+      // event arrives a full LLM roundtrip later. init also carries the CLI's
+      // own session_id — the filename of its JSONL under ~/.claude/projects.
       if (systemMsg.subtype === INIT_SUBTYPE) {
-        return [{ type: "turn_started" }];
+        const nativeId = (msg as { session_id?: string }).session_id;
+        return nativeId
+          ? [{ type: "turn_started" }, { type: "native_session_id", id: nativeId }]
+          : [{ type: "turn_started" }];
       }
       if (systemMsg.message) {
         return [{ type: "system", content: systemMsg.message }];

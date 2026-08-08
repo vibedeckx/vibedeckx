@@ -149,14 +149,20 @@ export class CodexProvider implements AgentProvider {
         }
         if (reqMethod === CODEX_CLIENT_METHODS.threadStart && result?.thread?.id) {
           state.threadId = result.thread.id;
+          // thread.id is also the uuid in the rollout filename under
+          // ~/.codex/sessions — surface it for persistence.
+          const events: ParsedAgentEvent[] = [
+            { type: "native_session_id", id: result.thread.id },
+          ];
           // Send buffered first turn now that we have threadId
           if (state.pendingTurnContent !== null) {
             const content = state.pendingTurnContent;
             state.pendingTurnContent = null;
             const id = state.rpcIdCounter++;
             state.pendingRequests.set(id, CODEX_CLIENT_METHODS.turnStart);
-            return [{ type: "stdin_write", content: buildTurnStart(id, state.threadId, content) }];
+            events.push({ type: "stdin_write", content: buildTurnStart(id, state.threadId, content) });
           }
+          return events;
         }
         return [];
       }

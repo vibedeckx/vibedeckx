@@ -161,6 +161,25 @@ describe("CodexProvider", () => {
     ]);
   });
 
+  it("surfaces thread/start's thread.id as native_session_id, before any buffered-turn flush", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+
+    // First user input arrives before thread/start responds — it gets buffered.
+    provider.getInitializationMessages("session-1");
+    provider.formatUserInput("hello", "session-1");
+
+    const events = provider.parseStdoutLine(
+      JSON.stringify({ jsonrpc: "2.0", id: 2, result: { thread: { id: "019fe07f-9454-77f1-8551-32618b50f2b2" } } }),
+      "session-1",
+    );
+
+    expect(events[0]).toEqual({ type: "native_session_id", id: "019fe07f-9454-77f1-8551-32618b50f2b2" });
+    // The buffered first turn still flushes, after the identity event.
+    expect(events[1]).toMatchObject({ type: "stdin_write" });
+    expect(events).toHaveLength(2);
+  });
+
   it("surfaces JSON-RPC error responses as error results", () => {
     const provider = new CodexProvider();
     provider.onSessionCreated("session-1", "edit");
