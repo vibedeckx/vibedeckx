@@ -1,6 +1,6 @@
 # Plan: 会话记录出库 —— entries → 文件 + worker 存储分层
 
-> 状态：设计完成，**未实施**。2026-08-06。
+> 状态：见 **§0.0 当前状态**（最近更新 2026-08-08）。设计完成，代码未实施。
 >
 > 判据与背景见 [`../state-storage-and-migration.md`](../state-storage-and-migration.md)（下称「存储经验文」），
 > 本文不重复其中的论证，只给路线、落地方式和判据。
@@ -10,6 +10,47 @@
 > §10.1 的速查清单是该模型在本项目的具体取值。
 >
 > 一句话：把 worker 库里挤在一起的三层数据分开——**源真相进文件、关系型头留库、派生态进可换代的独立库**。
+
+## 0.0 当前状态（截至 2026-08-08）
+
+**这一节是接手入口。** 想知道"下一步做什么"，读到 §0.0 结束即可。
+
+| 步 | 状态 | 说明 |
+|---|---|---|
+| 0 判据入库 | ✅ **完成**（2026-08-08） | 判据已落进存储经验文 §6（Q4）+ §6.1（三条可执行规则）。**判据以经验文为准**，本文 §4/§10 保留推导 |
+| 1 `search_1.sqlite` 样板 | ⏸️ **搁置** | 三张表实测 0 行，收益是纯样板；其唯一正当动机 worker FTS5 联邦搜索**近期无排期**（2026-08-08 确认）。§6.1 的约定留给下一个真正新增的派生库即可 |
+| 2 `native_session_id` | 🟢 **就绪，未做** | 唯一无条件值得做的一步。前置调研已完成，见下 |
+| 3 entries 出库 | ⏳ **等产品决定** | 见下 |
+
+### 下一步
+
+**第 2 步可以直接开工，协议层已经不需要任何新工作**（2026-08-08 查实）：
+
+- claude：`protocol/claude-code/schema.ts` 已解析 `session_id`（4 处），只是没存下来
+- codex：`ThreadStartResultSchema`（`thread/start` 返回）已解析 `thread.id`
+- **两者对齐**：codex 的 `thread.id` 就是 rollout 文件名里的 uuid。实测本机
+  `~/.codex/state_5.sqlite` 的 `threads` 表：
+  `019fe07f-…-32618b50f2b2` → `sessions/2026/08/08/rollout-…-019fe07f-…-32618b50f2b2.jsonl`
+  （原 §6 标注的"codex 待确认"由此消解）
+
+改动范围：`agent_sessions` 加一列 `native_session_id TEXT`（纯 expand，老 worker 无感）
++ 两个 provider 各一处赋值。详见 §6。
+
+**第 3 步等的不是技术条件，是一个产品决定**：
+
+> 要不要在 Remote Servers 页面显示各 worker 的磁盘占用，并提供清理会话的功能？
+
+这个决定一旦为「做」，第 3 步就有了明确终点与顺序（§7.0.1 解释了为什么只有它构成
+真触发条件，§7.0.2 是它的两个前置约束）。决定为「不做」，第 3 步继续欠着——
+405 MiB 不会自己变成故障，它只是让每次涉及 `agent_sessions` 的迁移更贵。
+
+**已明确不构成触发条件**：单纯想控制体积增长（分批 `DELETE` 就够，成本低两个数量级）。
+
+### 相关提交
+
+文档线全部已提交在 `dev6`：`ce178da`（经验文）、`573ee78..8bfbec5`（本计划 + 通用模型）。
+**代码零改动**——`native_session_id` / `search_1.sqlite` / `entries.jsonl` /
+`entries_location` 在代码库中均无任何实现。
 
 ## 0. 目标与非目标
 
@@ -157,9 +198,9 @@ search_1.sqlite    有代号  →  纯派生,允许丢弃,需要重建表就 bum
 | 步 | 内容 | 成本 | 何时做 |
 |---|---|---|---|
 | 0 | 判据入库（文档 + review 检查点） | 零代码 | ✅ **已完成** 2026-08-08 |
-| 1 | 立一个可换代库的样板 | 低 | 跟着 worker FTS5 搜索走 |
-| 2 | 记录 `native_session_id` | 极低 | 立刻，独立有价值 |
-| 3 | entries 出库 + 搬迁 | 高 | **有触发条件才做**，见 §7.0 |
+| 1 | 立一个可换代库的样板 | 低 | ⏸️ 搁置——FTS5 近期无排期（见 §0.0） |
+| 2 | 记录 `native_session_id` | 极低 | 🟢 就绪，立刻可做，独立有价值 |
+| 3 | entries 出库 + 搬迁 | 高 | ⏳ **有触发条件才做**，见 §7.0 |
 
 第 0、2 步做完，增量的债就止住了。存量债可以一直欠着，只要它不再长。
 
@@ -232,6 +273,10 @@ search_1.sqlite    有代号  →  纯派生,允许丢弃,需要重建表就 bum
 
 ## 5. 第 1 步：第一个可换代库
 
+> ⏸️ **搁置**（2026-08-08）。worker FTS5 联邦搜索近期无排期，本步失去唯一正当动机。
+> 三张表实测 0 行，单独做没有任何即时收益。§6.1 的代号约定不依赖本步存在——
+> 留给下一个真正新增的派生库即可。下面内容保留，待 FTS5 重新排期时直接使用。
+
 **对象**：`session_search_cache` / `workspace_search_cache` / `search_catalog_sync_state`
 ——名字里就写着 cache，纯派生，丢了能重建。**三张表 2026-08-06 实测均为 0 行。**
 
@@ -275,10 +320,16 @@ search_1.sqlite    有代号  →  纯派生,允许丢弃,需要重建表就 bum
 
 **动作**：`agent_sessions` 加一列 `native_session_id TEXT`（可空），记录 CLI 侧的 session id。
 
-**可行性**：claude 的 stream-json 里 `session_id` 协议层**已经在解析**
-（`src/protocol/claude-code/schema.ts` 多处）；codex 的 rollout 头 `session_meta` 也带 `session_id`，
-但**需要确认它是否出现在 stdout 流里**——只在磁盘日志里的话这条对 codex 不成立，
-届时留空即可，不阻塞。
+**可行性：两家都已就绪，协议层不需要任何新工作**（2026-08-08 查实）：
+
+- **claude**：`src/protocol/claude-code/schema.ts` 已解析 `session_id`（4 处），只是没存下来。
+- **codex**：`ThreadStartResultSchema`（`thread/start` 的返回）已解析 `thread.id`。
+  它**就是 rollout 文件名里的 uuid**——实测 `~/.codex/state_5.sqlite` 的 `threads` 表
+  （该表同时存 `id` 与 `rollout_path`）：
+  `019fe07f-…-32618b50f2b2` → `sessions/2026/08/08/rollout-…-019fe07f-…-32618b50f2b2.jsonl`。
+
+  （本节原先标注"需确认 codex 的 session_id 是否出现在 stdout 流里"，
+  该疑问由上述实测消解：不必依赖磁盘日志里的 `session_meta`，`thread.id` 已在流里。）
 
 **性质**：纯 expand。老 worker 无感，写入点一行。
 
