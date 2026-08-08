@@ -1107,6 +1107,22 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(session_id, entry_index),
       FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+    );
+
+    -- One vibedeckx session spans MANY native CLI sessions over its life:
+    -- every wake/mode-switch/restart spawns a fresh CLI process (claude runs
+    -- without --resume; codex re-sends thread/start), each with its own
+    -- on-disk transcript. agent_sessions.native_session_id keeps only the
+    -- newest; this table keeps them all, so a DB-loss recovery can find every
+    -- transcript a session ever wrote. Rows are append-only and tiny (one per
+    -- process spawn); included in the relational-head backup like any table.
+    CREATE TABLE IF NOT EXISTS agent_session_native_ids (
+      session_id TEXT NOT NULL,
+      native_session_id TEXT NOT NULL,
+      agent_type TEXT NOT NULL,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+      PRIMARY KEY (session_id, native_session_id),
+      FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
     )
   `);
 

@@ -683,10 +683,28 @@ export const createAgentSessionRepos = (
         .execute();
     },
 
-    setNativeSessionId: async (id, nativeSessionId) => {
-      await kdb.updateTable("agent_sessions")
-        .set({ native_session_id: nativeSessionId })
-        .where("id", "=", id)
+    setNativeSessionId: async (id, nativeSessionId, agentType) => {
+      await kdb.transaction().execute(async (trx) => {
+        await trx.updateTable("agent_sessions")
+          .set({ native_session_id: nativeSessionId })
+          .where("id", "=", id)
+          .execute();
+        // Append-only history: a wake/mode-switch/restart spawns a fresh CLI
+        // process with a NEW native session — the older transcripts still
+        // hold the turns that ran in them, so their associations must never
+        // be overwritten, only added to.
+        await trx.insertInto("agent_session_native_ids")
+          .values({ session_id: id, native_session_id: nativeSessionId, agent_type: agentType })
+          .onConflict((oc) => oc.columns(["session_id", "native_session_id"]).doNothing())
+          .execute();
+      });
+    },
+
+    getNativeSessionIds: async (id) => {
+      return kdb.selectFrom("agent_session_native_ids")
+        .select(["native_session_id", "agent_type", "created_at"])
+        .where("session_id", "=", id)
+        .orderBy("created_at", "asc")
         .execute();
     },
 

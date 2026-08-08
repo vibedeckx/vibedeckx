@@ -32,7 +32,7 @@ describe("head backup and corruption self-heal", () => {
     storage = await createSqliteStorage(dbPath);
     await storage.projects.create({ id: "p1", name: "p", path: "/tmp/p" });
     await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev" });
-    await storage.agentSessions.setNativeSessionId("s1", "native-uuid-1");
+    await storage.agentSessions.setNativeSessionId("s1", "native-uuid-1", "claude-code");
     await storage.agentSessions.upsertEntry("s1", 0, '{"seq":0}');
     await storage.agentSessions.upsertEntry("s1", 1, '{"seq":1}');
     await storage.close();
@@ -58,6 +58,10 @@ describe("head backup and corruption self-heal", () => {
       expect(backup.prepare("SELECT id FROM projects").all()).toEqual([{ id: "p1" }]);
       expect(backup.prepare("SELECT native_session_id FROM agent_sessions WHERE id='s1'").get())
         .toEqual({ native_session_id: "native-uuid-1" });
+      // The native-id history rides along — recovery needs every transcript
+      // association, not just the newest.
+      expect(backup.prepare("SELECT native_session_id FROM agent_session_native_ids WHERE session_id='s1'").all())
+        .toEqual([{ native_session_id: "native-uuid-1" }]);
     } finally {
       backup.close();
     }

@@ -1415,12 +1415,14 @@ export class AgentSessionManager {
 
       // The CLI's own session identity. Fires once per turn (claude) or once
       // per thread/start (codex); only the first sighting per value hits the
-      // DB. No store entry — this is a join key, not conversation content.
+      // DB, where it both updates the newest-pointer column and appends to
+      // the native-id history (older transcripts keep their association).
+      // No store entry — this is a join key, not conversation content.
       case "native_session_id":
         if (session.nativeSessionId !== event.id) {
           session.nativeSessionId = event.id;
           if (!session.skipDb) {
-            await this.storage.agentSessions.setNativeSessionId(session.id, event.id);
+            await this.storage.agentSessions.setNativeSessionId(session.id, event.id, session.agentType);
           }
         }
         break;

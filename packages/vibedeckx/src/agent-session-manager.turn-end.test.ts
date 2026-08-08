@@ -675,3 +675,39 @@ describe("session result milestones", () => {
     expect(outbox).toHaveLength(0);
   });
 });
+
+describe("native session id persistence", () => {
+  const initLine = (id: string) =>
+    JSON.stringify({ type: "system", subtype: "init", session_id: id }) + "\n";
+
+  it("records every native id a session spawns — a later id appends, it never replaces the write for an earlier one", async () => {
+    const { storage } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { feed } = await liveSession(manager, null);
+
+    await feed(initLine("native-a"));
+    // claude re-emits the same id on every turn's init — deduped in memory.
+    await feed(initLine("native-a"));
+    // A wake/mode-switch/restart spawns a fresh CLI process with a new id.
+    // Both ids must reach storage: the earlier transcript still holds the
+    // turns that ran in it.
+    await feed(initLine("native-b"));
+
+    expect((storage.agentSessions.setNativeSessionId as ReturnType<typeof vi.fn>).mock.calls)
+      .toEqual([
+        [SESSION_ID, "native-a", "claude-code"],
+        [SESSION_ID, "native-b", "claude-code"],
+      ]);
+  });
+
+  it("skips the DB write for skipDb (remote path) sessions", async () => {
+    const { storage } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session, feed } = await liveSession(manager, null);
+    (session as { skipDb?: boolean }).skipDb = true;
+
+    await feed(initLine("native-a"));
+
+    expect(storage.agentSessions.setNativeSessionId).not.toHaveBeenCalled();
+  });
+});

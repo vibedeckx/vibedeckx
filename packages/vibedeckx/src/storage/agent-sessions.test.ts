@@ -697,18 +697,30 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       expect(unfavorited?.favorited_at ?? null).toBeNull();
     });
 
-    it("setNativeSessionId records the CLI's own id without touching updated_at, and is idempotent", async () => {
+    it("setNativeSessionId keeps the newest pointer AND the full history of native ids", async () => {
       await setupTwoSessions();
-      await storage.agentSessions.setNativeSessionId("s1", "cdc13acc-4319-48b4-8003-f0fc1ac347b7");
+      await storage.agentSessions.setNativeSessionId("s1", "first-native-id", "claude-code");
       // Protocol bookkeeping, not user activity — recency ordering unaffected.
       expect((await storage.agentSessions.getLatestByBranch("p1", "dev"))?.id).toBe("s2");
-      expect((await storage.agentSessions.getById("s1"))?.native_session_id)
-        .toBe("cdc13acc-4319-48b4-8003-f0fc1ac347b7");
+      expect((await storage.agentSessions.getById("s1"))?.native_session_id).toBe("first-native-id");
 
-      // A respawn under a new CLI session id overwrites — last one wins,
-      // pointing at the newest on-disk transcript.
-      await storage.agentSessions.setNativeSessionId("s1", "second-id");
-      expect((await storage.agentSessions.getById("s1"))?.native_session_id).toBe("second-id");
+      // A wake/mode-switch/restart spawns a fresh CLI session. The column
+      // moves to the newest transcript, but the old association MUST survive:
+      // the earlier transcript still holds the turns that ran in it, and if
+      // the new process dies before receiving context, the old pointer is the
+      // only usable one.
+      await storage.agentSessions.setNativeSessionId("s1", "second-native-id", "claude-code");
+      expect((await storage.agentSessions.getById("s1"))?.native_session_id).toBe("second-native-id");
+      // Re-recording the current id (claude re-emits it every turn) is a no-op.
+      await storage.agentSessions.setNativeSessionId("s1", "second-native-id", "claude-code");
+
+      expect((await storage.agentSessions.getNativeSessionIds("s1")).map((r) => r.native_session_id))
+        .toEqual(["first-native-id", "second-native-id"]);
+
+      // History is scoped per session and cascades with it.
+      expect(await storage.agentSessions.getNativeSessionIds("s2")).toEqual([]);
+      await storage.agentSessions.delete("s1");
+      expect(await storage.agentSessions.getNativeSessionIds("s1")).toEqual([]);
     });
 
     it("touchUpdatedAt bumps updated_at without changing any other column", async () => {

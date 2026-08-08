@@ -358,6 +358,16 @@ search_1.sqlite    有代号  →  纯派生,允许丢弃,需要重建表就 bum
 
 **动作**：`agent_sessions` 加一列 `native_session_id TEXT`（可空），记录 CLI 侧的 session id。
 
+> ⚠️ **实施后修正（2026-08-08，review 发现）**：单列覆盖写不够。一个 vibedeckx 会话
+> 一生会产生**多个**原生会话——每次休眠唤醒 / 模式切换 / 重启都会起新 CLI 进程
+> （claude 不带 `--resume`；codex 重发 `thread/start`），旧 transcript 里仍然装着
+> 在它里面跑过的那些轮次；唤醒时的上下文注入还在 500ms 延迟回调里、失败仅记日志，
+> 存在"新 id 已落库、新 transcript 却是空的"的窗口。
+> 因此实际实现为**列 + 历史表**：列 `native_session_id` 只是最新指针；
+> `agent_session_native_ids(session_id, native_session_id, agent_type, created_at)`
+> append-only 保留全部关联（`setNativeSessionId` 同一事务里两处都写，
+> INSERT OR IGNORE 幂等），随关系型头备份一起带走。
+
 **可行性：两家都已就绪，协议层不需要任何新工作**（2026-08-08 查实）：
 
 - **claude**：`src/protocol/claude-code/schema.ts` 已解析 `session_id`（4 处），只是没存下来。

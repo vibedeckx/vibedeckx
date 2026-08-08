@@ -1032,11 +1032,20 @@ export interface Storage {
     /** Mark or unmark the session as favorited. Does not touch updated_at. */
     setFavorited: (id: string, favorited: boolean) => Promise<void>;
     /**
-     * Record the agent CLI's own session id (see AgentSessionsTable.
-     * native_session_id). Protocol bookkeeping, not user activity — does not
-     * touch updated_at.
+     * Record the agent CLI's own session id: updates the newest-pointer
+     * column AND appends to the one-to-many history table (every
+     * wake/mode-switch/restart spawns a fresh CLI session; older transcripts
+     * still hold the turns that ran in them, so associations accumulate and
+     * are never overwritten). Protocol bookkeeping, not user activity — does
+     * not touch updated_at.
      */
-    setNativeSessionId: (id: string, nativeSessionId: string) => Promise<void>;
+    setNativeSessionId: (id: string, nativeSessionId: string, agentType: string) => Promise<void>;
+    /** Every native CLI session this session has spawned, oldest first. */
+    getNativeSessionIds: (id: string) => Promise<Array<{
+      native_session_id: string;
+      agent_type: string;
+      created_at: string;
+    }>>;
     touchUpdatedAt: (id: string) => Promise<void>;
     /** Set last_user_message_at to the given epoch-ms timestamp. */
     markUserMessage: (id: string, timestampMs: number) => Promise<void>;

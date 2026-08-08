@@ -145,9 +145,24 @@ export interface AgentSessionsTable {
    * The agent CLI's own session identity (Claude Code `system/init`
    * session_id; Codex `thread/start` thread.id — also the uuid in its rollout
    * filename). Joins a session to the CLI's on-disk transcript, the only copy
-   * of the conversation that survives a vibedeckx DB loss.
+   * of the conversation that survives a vibedeckx DB loss. Holds only the
+   * NEWEST native session; the full one-to-many history lives in
+   * agent_session_native_ids.
    */
   native_session_id: string | null;
+}
+
+/**
+ * Append-only history of every native CLI session a vibedeckx session has
+ * spawned (each wake/mode-switch/restart starts a fresh CLI process with its
+ * own transcript). agent_sessions.native_session_id is just the newest entry
+ * here; recovery needs them all.
+ */
+export interface AgentSessionNativeIdsTable {
+  session_id: string;
+  native_session_id: string;
+  agent_type: string;
+  created_at: Generated<string>;
 }
 
 /**
@@ -545,6 +560,7 @@ export interface DB {
   machine_identity: MachineIdentityTable;
   agent_sessions: AgentSessionsTable;
   agent_session_entries: AgentSessionEntriesTable;
+  agent_session_native_ids: AgentSessionNativeIdsTable;
   agent_instruction_deliveries: AgentInstructionDeliveriesTable;
   tasks: TasksTable;
   project_chat_threads: ProjectChatThreadsTable;
