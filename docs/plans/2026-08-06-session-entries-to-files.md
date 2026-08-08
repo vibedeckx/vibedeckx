@@ -637,6 +637,10 @@ Rn   DROP TABLE agent_session_entries     ← 合法迁移,不需要重建表
 
 ## 9. 独立事项：retention 与 VACUUM
 
+> ✅ retention 已于 2026-08-08 拍板（超期未加星的 session 整个删除）并单独成案：
+> [`2026-08-08-session-retention.md`](./2026-08-08-session-retention.md)。
+> 本节保留当时的论证；判据与调度以那份文档为准。
+
 这两件事**不属于本计划**，但会被顺带问到，先记清楚：
 
 **Retention（超期自动清理会话）** 是产品决策，不是存储优化。两个参考数据点（2026-08-05 实测本机）：
