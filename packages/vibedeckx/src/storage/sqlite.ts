@@ -6,6 +6,12 @@ import path from "path";
 import crypto from "crypto";
 import type { Storage } from "./types.js";
 import type { DB } from "./schema.js";
+import {
+  isCorruptionError,
+  maintainHeadBackup,
+  quarantineCorruptDatabase,
+  restoreLatestHeadBackup,
+} from "./head-backup.js";
 import { sqliteHelpers } from "./dialect.js";
 import { createScheduledRepos } from "./repositories/scheduled.js";
 import { createCoreRepos } from "./repositories/core.js";
@@ -169,6 +175,19 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
 
 const createDatabase = (dbPath: string): BetterSqlite3Database => {
   const db = new Database(dbPath);
+  try {
+    initializeSchema(db);
+    return db;
+  } catch (err) {
+    // Close before rethrowing so the corruption self-heal in
+    // createSqliteStorage can rename the file (an open handle blocks the
+    // rename on Windows).
+    try { db.close(); } catch { /* already unusable */ }
+    throw err;
+  }
+};
+
+const initializeSchema = (db: BetterSqlite3Database): void => {
   db.pragma("journal_mode = WAL");
   // Disable FK enforcement during schema creation/migration to avoid errors
   // when DROP TABLE + recreate migrations run on existing databases with FK references
@@ -2011,13 +2030,41 @@ const createDatabase = (dbPath: string): BetterSqlite3Database => {
 
   // Re-enable FK enforcement for runtime operations
   db.pragma("foreign_keys = ON");
-
-  return db;
 };
 
 export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
   await mkdir(path.dirname(dbPath), { recursive: true });
-  const db = createDatabase(dbPath); // legacy DDL/migrations, kept verbatim
+
+  // Best-effort head backup BEFORE the database is opened for real: what it
+  // captures is the last state a known-good binary left behind, so this
+  // binary's own migrations can't poison today's backup on the way in.
+  // A backup failure must never block startup.
+  try {
+    maintainHeadBackup(dbPath);
+  } catch (err) {
+    console.warn(`[Storage] head backup failed (continuing without): ${err}`);
+  }
+
+  let db: BetterSqlite3Database;
+  try {
+    db = createDatabase(dbPath); // legacy DDL/migrations, kept verbatim
+  } catch (err) {
+    if (!isCorruptionError(err)) throw err;
+    // The file can no longer be trusted. Preserve it for post-mortem, put
+    // the newest head backup in place, and open that instead. Conversation
+    // entries are not part of the head backup — the table comes back empty;
+    // native_session_id still points at the CLI-side transcripts.
+    const quarantined = quarantineCorruptDatabase(dbPath);
+    const restored = restoreLatestHeadBackup(dbPath);
+    console.error(
+      `[Storage] DATABASE CORRUPT (${(err as Error).message}). `
+      + `Moved the damaged file to ${quarantined}. `
+      + (restored
+        ? `Restored projects/sessions/executors/settings from ${restored}; conversation entries could not be restored.`
+        : "No head backup was found — starting with an empty database."),
+    );
+    db = createDatabase(dbPath);
+  }
   // Kysely wraps the same better-sqlite3 handle. Every repository group
   // (see storage/repositories/*.ts) consumes kdb/h via a factory function
   // spread into the returned object below — the query layer is fully on
