@@ -213,6 +213,32 @@ describe("SessionRetentionSweeper", () => {
     });
   });
 
+  it("yields to the event loop before every delete, not once per batch", async () => {
+    // better-sqlite3 is synchronous, so back-to-back deletes freeze the whole
+    // server. Measured at 3k entries/session: ~916ms of dead event loop when
+    // yielding per batch of 20, ~36ms when yielding per session.
+    const h = makeHarness({ sessions: [aged("a", 300), aged("b", 200), aged("c", 100)], batchSize: 20 });
+    const ticksSeen: number[] = [];
+    const sweeper = h.sweeper as unknown as {
+      deleteIfExpired: (id: string, cutoff: number) => Promise<boolean>;
+    };
+    const real = sweeper.deleteIfExpired;
+    let macrotasks = 0;
+    const bump = () => { macrotasks++; setImmediate(bump); };
+    setImmediate(bump);
+    sweeper.deleteIfExpired = async (id, cutoff) => {
+      ticksSeen.push(macrotasks);
+      return real(id, cutoff);
+    };
+
+    await h.sweeper.sweep();
+
+    // All three landed in one batch (batchSize 20), yet each ran on a
+    // different macrotask turn — i.e. the loop gave the runtime a chance to
+    // serve traffic between them.
+    expect(new Set(ticksSeen).size).toBe(3);
+  });
+
   it("isolates a failing candidate instead of starving everything behind it", async () => {
     // Every sweep restarts from the oldest session, so one candidate that
     // always throws would block the whole tail forever if it aborted the round.
@@ -246,6 +272,76 @@ describe("SessionRetentionSweeper", () => {
     const result = await h.sweeper.sweep();
     expect(result.budgetExhausted).toBe(true);
     expect(h.state.deleted.length).toBeLessThan(3);
+  });
+
+  describe("logging", () => {
+    // Retention destroys conversation history unattended. The log is the only
+    // place a user can later find out what happened to a session.
+    const captureLogs = () => {
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        lines.push(args.join(" "));
+      });
+      return { lines, restore: () => spy.mockRestore() };
+    };
+
+    it("names every session it deletes, and summarizes the sweep", async () => {
+      const h = makeHarness({ sessions: [aged("s-alpha", 300), aged("s-beta", 400)] });
+      const log = captureLogs();
+      try {
+        await h.sweeper.sweep();
+      } finally {
+        log.restore();
+      }
+
+      expect(log.lines.filter((l) => l.includes("deleted session s-alpha"))).toHaveLength(1);
+      expect(log.lines.filter((l) => l.includes("deleted session s-beta"))).toHaveLength(1);
+      // Identifying detail, not just an id: project, branch, and staleness.
+      expect(log.lines.find((l) => l.includes("s-beta"))).toMatch(/project=p1 branch=dev, inactive 400 days/);
+      expect(log.lines.some((l) => /deleted 2 expired session\(s\) of 2 candidate\(s\)/.test(l))).toBe(true);
+      expect(log.lines.some((l) => l.includes("retention window 90 days"))).toBe(true);
+    });
+
+    it("says nothing at all on a tick that deletes nothing", async () => {
+      // Runs every 6 hours on every machine, hub included. A heartbeat line
+      // here would only teach people to filter the channel out.
+      const h = makeHarness({ sessions: [aged("fresh", 10)] });
+      const log = captureLogs();
+      try {
+        await h.sweeper.sweep();
+      } finally {
+        log.restore();
+      }
+      expect(log.lines).toEqual([]);
+    });
+
+    it("says nothing when retention is disabled", async () => {
+      const h = makeHarness({ sessions: [aged("ancient", 5000)], settingValue: "" });
+      const log = captureLogs();
+      try {
+        await h.sweeper.sweep();
+      } finally {
+        log.restore();
+      }
+      expect(log.lines).toEqual([]);
+    });
+
+    it("flags that work remains when the budget cut the sweep short", async () => {
+      let clock = Date.now();
+      const h = makeHarness({
+        sessions: [aged("a", 300), aged("b", 200), aged("c", 100)],
+        batchSize: 1,
+        tickBudgetMs: 50,
+        now: () => { clock += 60_000; return clock; },
+      });
+      const log = captureLogs();
+      try {
+        await h.sweeper.sweep();
+      } finally {
+        log.restore();
+      }
+      expect(log.lines.some((l) => l.includes("more remain for the next tick"))).toBe(true);
+    });
   });
 
   describe("single-flight", () => {

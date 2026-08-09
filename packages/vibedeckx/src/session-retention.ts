@@ -1,5 +1,6 @@
 import type { Storage } from "./storage/types.js";
 import {
+  MS_PER_DAY,
   parseRetentionDays,
   retentionCutoff,
   SESSION_RETENTION_SETTING_KEY,
@@ -141,11 +142,28 @@ export class SessionRetentionSweeper {
     const startedAt = this.now();
     let scanned = 0;
     let deleted = 0;
+    let windowDays: number | null = null;
     // Keyset cursor, alive for THIS sweep only and never persisted. Without
     // it a batch whose 20 candidates were all skipped (mid-wake, or rescued
     // between scan and delete) would be re-read until the time budget ran
     // out, starving every older-but-deletable session behind it (§1.3).
     let after: { activityAt: number; id: string } | undefined;
+
+    // Deleting conversation history is irreversible and happens with nobody
+    // watching, so a sweep that removed anything has to say so — the log is
+    // the only place a user can later find out why a session is gone. A sweep
+    // that removed nothing stays completely silent: this runs every 6 hours on
+    // every machine, and a heartbeat line would just train people to ignore it.
+    const finish = (result: SweepResult): SweepResult => {
+      if (result.deleted > 0) {
+        console.log(
+          `[SessionRetention] deleted ${result.deleted} expired session(s) `
+          + `of ${result.scanned} candidate(s) examined (retention window ${windowDays} days)`
+          + `${result.budgetExhausted ? "; more remain for the next tick" : ""}`,
+        );
+      }
+      return result;
+    };
 
     for (;;) {
       // Re-read the configuration at every batch boundary. A sweep can run
@@ -154,8 +172,9 @@ export class SessionRetentionSweeper {
       // would permanently delete data under an intent they already withdrew.
       const days = parseRetentionDays(await this.storage.settings.get(SESSION_RETENTION_SETTING_KEY));
       if (days === null) {
-        return { scanned, deleted, budgetExhausted: false, disabled: true };
+        return finish({ scanned, deleted, budgetExhausted: false, disabled: true });
       }
+      windowDays = days;
       const cutoff = retentionCutoff(days, this.now());
 
       const candidates = await this.storage.agentSessions.listRetentionCandidates({
@@ -166,13 +185,33 @@ export class SessionRetentionSweeper {
       // The steady-state exit: on virtually every tick the very first query
       // returns nothing and the whole sweep costs one indexed SELECT.
       if (candidates.length === 0) {
-        return { scanned, deleted, budgetExhausted: false, disabled: false };
+        return finish({ scanned, deleted, budgetExhausted: false, disabled: false });
       }
 
       for (const candidate of candidates) {
         scanned++;
+        // Yield before EVERY delete, not once per batch. better-sqlite3 is
+        // synchronous: the `await` below resolves an already-settled promise,
+        // and the CASCADE runs on the main thread. Yielding per batch let 20
+        // deletes run back-to-back and froze the event loop for ~0.9s at 3k
+        // entries/session (measured) — no WebSocket frames, no HTTP, no agent
+        // stdout parsing for that whole window. Per-session yielding caps the
+        // stall at one statement, which is the same exposure as any ordinary
+        // query the app already makes.
+        await new Promise<void>((resolve) => setImmediate(resolve));
         try {
-          if (await this.deleteIfExpired(candidate.id, cutoff)) deleted++;
+          if (await this.deleteIfExpired(candidate.id, cutoff)) {
+            deleted++;
+            // One line per session, naming it the way the user would recognize
+            // it and how stale it was. This is the audit record of what was
+            // destroyed; the per-sweep summary alone can't answer "which one".
+            const idleDays = Math.floor((this.now() - candidate.activity_at) / MS_PER_DAY);
+            console.log(
+              `[SessionRetention] deleted session ${candidate.id} `
+              + `(project=${candidate.project_id} branch=${candidate.branch ?? "main"}, `
+              + `inactive ${idleDays} days)`,
+            );
+          }
         } catch (error) {
           // Isolate per candidate. Letting one bad session abort the round
           // would starve every older-but-deletable session behind it forever,
@@ -187,15 +226,8 @@ export class SessionRetentionSweeper {
       const last = candidates[candidates.length - 1];
       after = { activityAt: last.activity_at, id: last.id };
 
-      // Yield between batches so a worker that is actively serving WebSocket
-      // traffic doesn't feel the sweep.
-      await new Promise<void>((resolve) => setImmediate(resolve));
-
       if (this.now() - startedAt > this.tickBudgetMs) {
-        console.log(
-          `[SessionRetention] tick budget reached (scanned=${scanned} deleted=${deleted}); resuming next tick`,
-        );
-        return { scanned, deleted, budgetExhausted: true, disabled: false };
+        return finish({ scanned, deleted, budgetExhausted: true, disabled: false });
       }
     }
   }
