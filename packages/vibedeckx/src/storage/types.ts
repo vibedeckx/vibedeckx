@@ -1074,6 +1074,39 @@ export interface Storage {
     getEntries: (sessionId: string) => Promise<Array<{ entry_index: number; data: string }>>;
     deleteEntries: (sessionId: string) => Promise<void>;
     countEntries: () => Promise<Array<{ session_id: string; cnt: number }>>;
+    /**
+     * One bounded page of retention candidates, oldest first
+     * (docs/plans/2026-08-08-session-retention.md §1.2). The predicate —
+     * expired, not favorited, not running, not a participant of an active
+     * workflow run — lives in SQL so it can be reused verbatim by
+     * `deleteIfExpired`, which is what makes the TOCTOU re-check exact.
+     *
+     * `after` is a keyset cursor within ONE sweep: pass the previous page's
+     * last `(activity_at, id)` so skipped candidates can't be re-read forever
+     * (§1.3). It is never persisted.
+     */
+    listRetentionCandidates: (opts: {
+      cutoff: number;
+      limit: number;
+      after?: { activityAt: number; id: string };
+    }) => Promise<Array<{ id: string; project_id: string; branch: string | null; activity_at: number }>>;
+    /**
+     * Conditional single-statement delete: removes the session row (children
+     * follow via ON DELETE CASCADE) only while it still satisfies the full
+     * retention predicate. Returns false when the row was rescued in the
+     * meantime — favorited, woken, retitled, or enrolled in a workflow run —
+     * in which case the caller must skip every side effect (§1.5).
+     */
+    deleteIfExpired: (id: string, cutoff: number) => Promise<boolean>;
+    /**
+     * Every session id this project owns — the hub-reconciliation source of
+     * truth (§3.1). Deliberately unfiltered: no sidebar-visibility rule, no
+     * "has entries" test. The search catalog looks like the same data but is
+     * NOT usable here — it requires `EXISTS agent_session_entries`, so a
+     * freshly created session is absent from it and would be reconciled away
+     * as if the worker had deleted it.
+     */
+    listIdsByProject: (projectId: string) => Promise<string[]>;
   };
   agentInstructionDeliveries: {
     claim: (opts: {
@@ -1131,8 +1164,23 @@ export interface Storage {
      * sweep, which must still recover durable events produced during downtime.
      */
     getNotificationSyncCandidates: (opts: { now: number; includeExpired: boolean }, consumer?: WorkspaceBindingReadConsumer) => Promise<RemoteSessionMapping[]>;
-    /** Also deletes the mapping's notification sync cursor. */
-    delete: (localSessionId: string) => Promise<void>;
+    /**
+     * Also deletes the mapping's notification sync cursor. Returns whether a
+     * row was actually removed.
+     *
+     * `expect` makes the delete conditional on the mapping still pointing at
+     * exactly that remote session — the linearization point reconciliation
+     * needs (docs/plans/2026-08-08-session-retention.md §3.1). Checking the
+     * triple in the caller and then deleting unconditionally is not enough: a
+     * reconnect can re-map the same local id in between, and the unconditional
+     * delete would take the fresh mapping down with the stale one. Callers
+     * that genuinely mean "forget this handle whatever it points at" (the user
+     * pressing delete) omit `expect`.
+     */
+    delete: (
+      localSessionId: string,
+      expect?: { remoteServerId: string; remoteSessionId: string },
+    ) => Promise<boolean>;
     isTitleResolved: (localSessionId: string) => Promise<boolean>;
     markTitleResolved: (localSessionId: string) => Promise<void>;
   };

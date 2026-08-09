@@ -21,6 +21,14 @@ import {
   normalizeAgentProcessSettings,
   type AgentProcessSettings,
 } from "../resident-agent-processes.js";
+import {
+  parseRetentionDays,
+  SESSION_RETENTION_DAYS_MAX,
+  SESSION_RETENTION_DAYS_MIN,
+  SESSION_RETENTION_SETTING_KEY,
+  SESSION_RETENTION_SUGGESTED_DAYS,
+} from "../session-retention-config.js";
+import { pushRetentionToWorkers } from "../session-retention-downlink.js";
 
 /** Thrown by the chat-provider PUT handler's merge callback to abort the
  * atomic settings.update() write and surface a 400 with the given message. */
@@ -154,6 +162,73 @@ const routes: FastifyPluginAsync = async (fastify) => {
     await fastify.storage.settings.set("agentProcesses", JSON.stringify(config));
     return reply.code(200).send(config);
   });
+
+  // ---- Session retention ----
+  //
+  // Server-level (not per-user) and global across workers: one window for the
+  // whole deployment (docs/plans/2026-08-08-session-retention.md §3). `days:
+  // null` means retention is off, which is also the default.
+
+  fastify.get("/api/settings/session-retention", async (req, reply) => {
+    if (requireAuth(req, reply) === null) return;
+    const days = parseRetentionDays(await fastify.storage.settings.get(SESSION_RETENTION_SETTING_KEY));
+    return reply.code(200).send({
+      days,
+      suggestedDays: SESSION_RETENTION_SUGGESTED_DAYS,
+      minDays: SESSION_RETENTION_DAYS_MIN,
+      maxDays: SESSION_RETENTION_DAYS_MAX,
+    });
+  });
+
+  fastify.put<{ Body: { days: number | null } }>(
+    "/api/settings/session-retention",
+    async (req, reply) => {
+      if (requireAuth(req, reply) === null) return;
+      const raw: unknown = req.body?.days;
+      // Reject rather than silently coerce. Storing an unparseable value would
+      // read back as "off", and an operator who typed 90.5 deserves to be told
+      // that retention did not turn on.
+      const disabling = raw === null || raw === undefined || raw === "";
+      const days = disabling ? null : parseRetentionDays(raw);
+      if (!disabling && days === null) {
+        return reply.code(400).send({
+          error: `days must be null (off) or an integer between ${SESSION_RETENTION_DAYS_MIN} and ${SESSION_RETENTION_DAYS_MAX}`,
+        });
+      }
+
+      await fastify.storage.settings.set(SESSION_RETENTION_SETTING_KEY, days === null ? "" : String(days));
+      console.log(`[Settings] Session retention ${days === null ? "disabled" : `set to ${days} days`}`);
+
+      // Fan the value out to the workers, where the sessions actually live.
+      // Failures are reported, not thrown: an offline worker picks the value
+      // up when it reconnects.
+      const workers = await pushRetentionToWorkers(
+        { storage: fastify.storage, reverseConnectManager: fastify.reverseConnectManager },
+        days,
+      );
+
+      // Run this server's own sweep immediately so the operator sees the
+      // effect in seconds instead of concluding the setting did nothing. It is
+      // single-flight, so this joins any sweep already in progress.
+      void fastify.sessionRetention.sweep();
+
+      return reply.code(200).send({ days, workers });
+    },
+  );
+
+  // Worker-side receiver for the hub's downlink. Same storage key the local
+  // sweeper reads, so a worker needs no separate notion of "pushed" config.
+  fastify.put<{ Body: { days: number | null } }>(
+    "/api/settings/session-retention/apply",
+    async (req, reply) => {
+      if (requireAuth(req, reply) === null) return;
+      const days = parseRetentionDays(req.body?.days);
+      await fastify.storage.settings.set(SESSION_RETENTION_SETTING_KEY, days === null ? "" : String(days));
+      console.log(`[Settings] Session retention downlink applied: ${days === null ? "off" : `${days} days`}`);
+      void fastify.sessionRetention.sweep();
+      return reply.code(200).send({ days });
+    },
+  );
 
   // Get proxy settings
   fastify.get("/api/settings/proxy", async (req, reply) => {

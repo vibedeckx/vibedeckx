@@ -18,6 +18,7 @@ import worktreeRoutes from "./routes/worktree-routes.js";
 import diffRoutes from "./routes/diff-routes.js";
 import fileRoutes from "./routes/file-routes.js";
 import agentSessionRoutes from "./routes/agent-session-routes.js";
+import sessionInventoryRoutes from "./routes/session-inventory-routes.js";
 import branchActivityRoutes from "./routes/branch-activity-routes.js";
 import mergeStatusRoutes from "./routes/merge-status-routes.js";
 import chatSessionRoutes from "./routes/chat-session-routes.js";
@@ -359,6 +360,7 @@ export const createServer = async (opts: {
   server.register(diffRoutes);
   server.register(fileRoutes);
   server.register(agentSessionRoutes);
+  server.register(sessionInventoryRoutes);
   server.register(branchActivityRoutes);
   server.register(mergeStatusRoutes);
   server.register(chatSessionRoutes);

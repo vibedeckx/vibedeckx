@@ -59,6 +59,15 @@ const COVERED_BY = {
   "http:POST /api/workflow-runs/:param/gate": { file: "packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts", marker: "/gate" },
   "http:POST /api/workflow-runs/:param/cancel": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "cancel" },
   "http:GET /api/executor-processes/running": { file: "packages/vibedeckx/src/routes/process-routes.auth.test.ts", marker: "/api/executor-processes/running" },
+  // Registered by "anchor main workspace to its current branch" without a
+  // coverage entry here, which left this list unsatisfiable. Local route test.
+  "http:POST /api/path/worktrees/anchor": { file: "packages/vibedeckx/src/routes/worktree-registry-routes.test.ts", marker: "/worktrees/anchor" },
+  // Only ever called by the hub's reconciliation timer, which has no
+  // operator-facing trigger to drive from here. Both halves are tested: the
+  // worker endpoint's contract (full listing + `complete`) in the route test
+  // below, and the hub's refusal to clean anything on a 404 in
+  // remote-session-reconcile.test.ts.
+  "http:GET /api/path/session-ids": { file: "packages/vibedeckx/src/routes/session-retention-routes.test.ts", marker: "/api/path/session-ids" },
 };
 
 // The irreducible remainder — no smoke and no existing test. Each reason names
@@ -424,6 +433,24 @@ await smoke("terminals", ["http:POST /api/path/terminals"], async () => {
 });
 await smoke("search-catalog", ["http:GET /api/path/search-catalog"], async () => {
   await api("POST", "/api/search/refresh");
+});
+await smoke("retention-downlink", ["http:PUT /api/settings/session-retention/apply"], async () => {
+  // The hub's settings PUT fans the window out over the tunnel and reports one
+  // row per worker instead of failing the request — an offline or too-old
+  // worker must not block the operator's save. Re-raise "needs_upgrade" as the
+  // 404 it came from, so the version-gap policy above judges it like any other
+  // additive capability. Restored to "off" afterwards.
+  try {
+    const r = await api("PUT", "/api/settings/session-retention", { days: 90 });
+    const row = (r.workers ?? []).find((w) => w.remoteServerId === record.id);
+    assert(row, `no downlink result for ${record.id}: ${JSON.stringify(r).slice(0, 150)}`);
+    if (row.status === "needs_upgrade") {
+      throw new HttpError("PUT", "/api/settings/session-retention/apply", 404, "worker predates retention");
+    }
+    assert(row.status === "applied", `downlink status ${row.status}: ${row.detail ?? ""}`);
+  } finally {
+    await api("PUT", "/api/settings/session-retention", { days: null }).catch(() => { /* best effort */ });
+  }
 });
 
 // --- agent-session round, driven by the PATH-stub `claude` on the worker ---

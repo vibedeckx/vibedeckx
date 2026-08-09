@@ -1,4 +1,4 @@
-import { sql, type Kysely, type Selectable } from "kysely";
+import { sql, type Kysely, type Selectable, type SqlBool } from "kysely";
 import type { DB, AgentSessionsTable, RemoteSessionMappingsTable, RemoteSessionCreationIntentsTable, RemoteReviewerCreationIntentsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type {
@@ -18,6 +18,7 @@ import {
   recordWorkspaceBindingRead,
   type WorkspaceBindingReadConsumer,
 } from "../../workspace-binding-metrics.js";
+import { WORKFLOW_ACTIVE_STATUSES } from "../workflow-run-status.js";
 // NotificationOutboxEvent is referenced only through Storage's method
 // signatures, which this factory's return type already pins.
 
@@ -367,6 +368,34 @@ const mapRemoteReviewerCreationIntent = (
 
 const nowActivityAt = () => sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`;
 const touchActivityAt = () => sql<number>`max(activity_at, ${nowActivityAt()})`;
+
+/**
+ * The session-retention predicate, in ONE place
+ * (docs/plans/2026-08-08-session-retention.md §1.2). Both the candidate scan
+ * and the conditional delete embed this same fragment, which is what makes
+ * the pre-delete re-check exact rather than approximate: a candidate rescued
+ * between the two statements simply fails the DELETE's own WHERE and the
+ * caller sees zero affected rows (§1.5).
+ *
+ * `activity_at` (not `created_at`) is the semantic max of every activity
+ * source, so a session created a year ago but used last week is not expired.
+ * `status <> 'running'` is near-impossible to hit past the day threshold and
+ * is kept anyway — a defensive predicate costs nothing. The workflow clause
+ * is load-bearing: `workflow_runs.source_session_id` / `reviewer_session_id`
+ * carry no foreign key, and an active run's participants are routinely
+ * `stopped` while waiting for the reviewer, so without it retention would
+ * delete a session the engine is still delivering to.
+ */
+const retentionPredicate = (cutoff: number) => sql<SqlBool>`
+  activity_at < ${cutoff}
+  AND favorited_at IS NULL
+  AND status <> 'running'
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_runs wr
+    WHERE wr.status IN (${sql.join(WORKFLOW_ACTIVE_STATUSES.map((s) => sql`${s}`))})
+      AND (wr.source_session_id = agent_sessions.id OR wr.reviewer_session_id = agent_sessions.id)
+  )
+`;
 
 const mapWorkspaceCheckout = (row: {
   id: string;
@@ -790,6 +819,43 @@ export const createAgentSessionRepos = (
         .groupBy("session_id")
         .execute();
     },
+
+    listRetentionCandidates: async ({ cutoff, limit, after }) => {
+      let query = kdb.selectFrom("agent_sessions")
+        .select(["id", "project_id", "branch", "activity_at"])
+        .where(retentionPredicate(cutoff));
+      if (after) {
+        // Keyset, matching the ORDER BY below exactly: strictly after
+        // (activity_at, id) so a page of skipped candidates can never be
+        // re-read within the same sweep.
+        query = query.where(sql<SqlBool>`
+          (activity_at > ${after.activityAt}
+            OR (activity_at = ${after.activityAt} AND id > ${after.id}))
+        `);
+      }
+      return query
+        .orderBy("activity_at", "asc")
+        .orderBy("id", "asc")
+        .limit(limit)
+        .execute();
+    },
+
+    deleteIfExpired: async (id, cutoff) => {
+      const result = await kdb.deleteFrom("agent_sessions")
+        .where("id", "=", id)
+        .where(retentionPredicate(cutoff))
+        .executeTakeFirst();
+      return (result.numDeletedRows ?? 0n) > 0n;
+    },
+
+    listIdsByProject: async (projectId) => {
+      const rows = await kdb.selectFrom("agent_sessions")
+        .select("id")
+        .where("project_id", "=", projectId)
+        .orderBy("id", "asc")
+        .execute();
+      return rows.map((r) => r.id);
+    },
   },
 
   agentInstructionDeliveries: {
@@ -1040,19 +1106,28 @@ export const createAgentSessionRepos = (
     // The cursor is deleted with the mapping: without a mapping the front has
     // no local target for the worker's events, so a stale cursor would only
     // suppress a legitimate re-mapping's from_start replay.
-    delete: async (localSessionId) => {
-      await kdb.transaction().execute(async (trx) => {
+    delete: async (localSessionId, expect) => {
+      return kdb.transaction().execute(async (trx) => {
         const row = await trx.selectFrom("remote_session_mappings")
           .select(["remote_server_id", "remote_session_id"])
           .where("local_session_id", "=", localSessionId)
           .executeTakeFirst();
-        await trx.deleteFrom("remote_session_mappings").where("local_session_id", "=", localSessionId).execute();
+        // Read and delete share one transaction, so `expect` is a real
+        // compare-and-delete rather than another check-then-act.
+        if (expect && (!row
+          || row.remote_server_id !== expect.remoteServerId
+          || row.remote_session_id !== expect.remoteSessionId)) {
+          return false;
+        }
+        const result = await trx.deleteFrom("remote_session_mappings")
+          .where("local_session_id", "=", localSessionId).executeTakeFirst();
         if (row) {
           await trx.deleteFrom("notification_sync_cursors")
             .where("remote_server_id", "=", row.remote_server_id)
             .where("remote_session_id", "=", row.remote_session_id)
             .execute();
         }
+        return (result.numDeletedRows ?? 0n) > 0n;
       });
     },
 

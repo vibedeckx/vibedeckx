@@ -1,6 +1,8 @@
 # Plan: Session Retention —— 过期会话自动删除
 
-> 状态：设计完成，**未实施**。2026-08-08。
+> 状态：**Phase 1 + Phase 2 已实施**（2026-08-09）。落点见文末 §8。
+>
+> 设计定稿 2026-08-08。
 >
 > 决策背景见 [`2026-08-06-session-entries-to-files.md`](./2026-08-06-session-entries-to-files.md) §9
 > （retention 与 VACUUM 为什么是独立事项）。本方案**不依赖** entries 出库（第 3 步），
@@ -132,7 +134,8 @@ stop-first 的——第一步就 `stopSession()`，与 §1.5 「条件 DELETE �
 
 retention 走专用路径 `deleteDormantSessionIfExpired(id)`，只允许删除同时满足：
 
-1. 内存态：`process === null` 且 `wakeInProgress === false`（§1.5）——
+1. 内存态：`process === null` 且 `processStartsInFlight === 0`（§1.5，
+   计数器覆盖 wake 与 restart 两条起进程路径）——
    retention 只删无进程的 dormant session，**永远不 stop 任何东西**。
    有活进程的 session 一律跳过：常驻池的 LRU 迟早把它休眠成 dormant，下轮再删。
 2. 条件 DELETE（附带完整谓词）命中 1 行。
@@ -175,14 +178,27 @@ retention 走专用路径 `deleteDormantSessionIfExpired(id)`，只允许删除�
 > → wake 恢复，起进程 → 孤儿进程 + 内存/DB 不一致 + 后续写入失败
 > ```
 >
-> **封闭方式（二审建议，采纳）**：`RunningSession` 加 `wakeInProgress` 标志——
-> `wakeDormantSession` 在**第一个 `await` 之前同步**置 `true`，`finally` 中复位；
-> sweep 重验时见 `wakeInProgress === true` 即跳过。配合 §1.4 的
-> `deleteDormantSessionIfExpired`（只删 `process === null && !wakeInProgress`、
-> 条件 DELETE 命中后才做副作用），窗口即被封死：flag 的置位是同步的，sweep 与
+> **封闭方式（二审建议，采纳）**：`RunningSession` 加 in-flight 标记——
+> `wakeDormantSession` 在**第一个 `await` 之前同步**置位，`finally` 中复位；
+> sweep 重验时见到即跳过。配合 §1.4 的
+> `deleteDormantSessionIfExpired`（只删无进程、无 in-flight 启动的 session、
+> 条件 DELETE 命中后才做副作用），窗口即被封死：置位是同步的，sweep 与
 > wake 之间不存在两者都看不见对方的时刻。
-> **不做**统一 lifecycle gate（把 send/rename/favorite/restart 全改造进闸门）——
-> rename/favorite 只改 DB 行，条件 DELETE 的谓词已经挡住它们，过度工程。
+>
+> **实施期两处修正（2026-08-09 review）：**
+> 1. **必须是计数器 `processStartsInFlight`，不能是布尔 `wakeInProgress`**。
+>    `dormant` 要到 checkout 查完才清，所以两条消息可以**同时**进入 wake；
+>    布尔情况下先结束的那次会在 `finally` 里把标记清掉，而第二次还悬在
+>    await 上——retention 正好拿到一个仍在启动进程路上的 session。
+> 2. **`restartSession` 也必须进闸门**。原文把它和 rename/favorite 一起划到
+>    「不做统一 lifecycle gate」里，但那条的理由（「只改 DB 行，条件 DELETE 的
+>    谓词已经挡住」）对 restart **不成立**——restart 会 `spawnAgent`，而且在
+>    `resolveSessionWorktreePath` / `deleteEntries` 上悬挂时同样是「无进程」态。
+>    retention 在这个窗口删掉行，restart 醒来照样起进程 → 孤儿进程 + 后续写入
+>    全部 FK 失败。两条起进程的路径（wake / restart）共用
+>    `beginProcessStart()`：同步认领、`finally` 释放、被 retention 认领时拒绝。
+> rename/favorite/setModel/switchAgentType **仍然不进闸门**——它们不起进程，
+> 条件 DELETE 的谓词确实挡得住。
 
 **反向竞态也要封（三审①）**：`wakeInProgress` 只防「wake 先开始」，防不了
 「retention 先开始」——内存重验通过后，条件 DELETE 是一次 `await`（storage 全异步，
@@ -287,6 +303,18 @@ worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 �
 新的远端 session（重连/重建），只按 local id 清理会把新映射一起误删。
 复核捕获值即可，不需要给 mapping 加 generation 或时间戳字段。
 
+**实施期修正（2026-08-09 review）：「复核」必须是 compare-and-delete，不能是
+先查后删。** 原文的写法仍是 check-then-act：`getByLocal` 复核通过之后再无条件
+按 local id 清理，重映射可以正好落在这个缝里。而且**内存 map 比持久化行更早**
+——`remote-agent-sessions.ts` 先 `remoteSessionMap.set` 再 `bindRemoteSessionMapping`
+（为了让 agent 的第一次工具调用可路由），所以重映射中途会出现「map 已指向新
+session、行还指向旧 session」的状态，此时按 local id 删 map 会**切断用户刚建的
+会话**。落地做法：
+- `remoteSessionMappings.delete(localId, expect?)` 带上捕获的三元组做**同事务的
+  条件删除**，这一条就是线性化点；
+- `forgetRemoteSession` 先做这个条件删除，**命中后**才动其余三件套；
+- 内存 map 那一步再单独校验 map 里当前的 remote id 仍等于捕获值，否则不删。
+
 1→2 的顺序封掉一个竞态（二审发现④）：若先发请求再捕获集合，请求飞行期间新建的
 远端 session 不在 worker 生成快照时的清单里，会被旧快照误判为「已删」而清掉——
 一个刚创建的会话立刻变成死 handle。先捕获、只清捕获集，飞行期间的新 mapping
@@ -330,8 +358,11 @@ worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 �
 - **TOCTOU 竞态**：主动制造「候选 SELECT 后、删除前」加星 / 唤醒的时序，断言跳过；
   条件删除 affected rows = 0 时不执行后续清理。
 - **wake 竞态**（二审①）：dormant wake 停在前置 await 时 sweep 到达，断言
-  `wakeInProgress` 挡住删除、wake 正常完成、无孤儿进程；有活进程的 session 永不被
-  retention 停掉（sweep 全程零 `stopSession` 调用）。
+  `processStartsInFlight` 挡住删除、wake 正常完成、无孤儿进程；有活进程的 session
+  永不被 retention 停掉（sweep 全程零 `stopSession` 调用）。
+- **重叠 wake / restart 竞态**（2026-08-09 实施期 review）：两次 wake 同时进入时
+  先结束的那次不得清掉守卫；restart 悬在前置 await 时 sweep 被挡；
+  retention 认领后 restart 在**碰任何东西之前**被拒（不查 checkout、不删正文）。
 - **反向竞态**（三审①）：retention 停在条件 DELETE 的异步边界时尝试 wake，断言
   `retentionDeleting` 拒绝 wake、不起进程、DB 与内存最终一致；DELETE 未命中时
   `finally` 移除 id 后 wake 恢复可用。
@@ -369,13 +400,36 @@ worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 �
 - ✅ **默认天数：90**（2026-08-08 拍板）。界面预填值；开关本身默认仍为关闭
   （§3：`session_retention_days` 为空 = 关闭），90 只是用户打开开关时看到的初始值。
 - ✅ **Phase 2 作用域：全局统一天数，不做 per-worker**（2026-08-08 拍板，见 §3）。
-- 候选扫描的索引：现有索引以 `project_id` / `updated_at` 开头，没有正好覆盖
-  `activity_at ASC + favorited_at IS NULL` 的组合。千行量级全扫无所谓，实施时用
-  `EXPLAIN QUERY PLAN` 验证一次；确有必要再加
-  `CREATE INDEX ... ON agent_sessions(activity_at) WHERE favorited_at IS NULL`
-  之类的部分索引——先测再加，别预防性建索引。
-- workflow 豁免的四个 active 状态抽成共享常量，retention 与 WorkflowEngine 引同一份，
-  防定义漂移（二审非阻断建议；「排除所有非终态」的写法留给将来真加了新状态再说）。
+- ✅ **候选扫描的索引：实测后决定不加**（2026-08-09）。`EXPLAIN QUERY PLAN` 如预期是
+  `SCAN agent_sessions` + `USE TEMP B-TREE FOR ORDER BY` + 每行一次
+  `CORRELATED SCALAR SUBQUERY`（`SCAN wr`）。2000 个 session 实测 **0.8 ms**，
+  workflow_runs 填到 500 行后仍是 0.8 ms。一次 6 小时的后台维护作业花不到 1 ms,
+  加索引纯属预防性——按本条原来的「先测再加」结论，不加。真到十万量级再补
+  `CREATE INDEX ... ON agent_sessions(activity_at) WHERE favorited_at IS NULL`。
+- ✅ workflow 豁免的四个 active 状态已抽成共享常量
+  （`storage/workflow-run-status.ts` 的 `WORKFLOW_ACTIVE_STATUSES`），
+  `workflowRuns` 仓库与 retention 谓词引同一份，防定义漂移。
 - 启用前预估删除数量 / 二次确认属产品增强，非 v1 正确性要求，不做。
 - **明确不引入**（两轮 review 一致）：通用任务取消框架、全局删除状态机、持久化扫描
   进度、mapping generation——四个正确性问题都有局部解，别扩大成基础设施。
+
+## 8. 实施落点（2026-08-09）
+
+Phase 1 与 Phase 2 一并实施。**隧道契约变更：纯加法**——两个新 capability，
+老 worker 一律 404，hub 侧全部降级（对账把 404 当离线处理、什么都不清；
+下发把 404 报成「需升级 worker」显示在设置页）。
+
+| 关注点 | 落点 |
+|---|---|
+| §1.6 前置：原子删除 | `agent-session-manager.ts` `deleteSession` 改为单条父行 DELETE（靠 CASCADE） |
+| §1.2 判据 | `storage/repositories/agent-sessions.ts` 的 `retentionPredicate()`，被 `listRetentionCandidates` 与 `deleteIfExpired` 共用 |
+| §1.3 循环批 + 游标 + 时间预算 + 每批重读配置 | `session-retention.ts` `SessionRetentionSweeper` |
+| §1.4 无 stop 删除路径 | `agent-session-manager.ts` `deleteDormantSessionIfExpired` |
+| §1.5 双向竞态保护 | `beginProcessStart()`（wake 与 restart 共用，计数器 `RunningSession.processStartsInFlight`）+ manager 的 `retentionDeleting` 集合 |
+| §2 三触发点 | 启动延迟 90s / 6h interval（均 `unref`）在 `SessionRetentionSweeper.start`；设置变更在设置路由里 `void sweep()` |
+| §3 配置 | `session-retention-config.ts`（键 `session_retention_days`、1..3650、空=关）+ `routes/settings-routes.ts` + 设置页 History 分区 |
+| §3 Phase 2 下发 | `session-retention-downlink.ts` → worker `PUT /api/settings/session-retention/apply`（与操作者面 PUT 分开，否则 worker 会再次扇出）；worker 上线时重推 |
+| §3.1 对账 | `remote-session-reconcile.ts`（先捕获三元组、再拉清单、按三元组 compare-and-delete）+ `remote-session-reconcile-service.ts`（1h 定时、single-flight） |
+| §3.1 存活清单端点 | `routes/session-inventory-routes.ts` `GET /api/path/session-ids`（全量 + `complete: true`，非 search catalog） |
+| §3.1 幂等清理四件套 | `remote-session-cleanup.ts` `forgetRemoteSession`，手动删除 / 对账 / 死 handle 兜底三处共用 |
+| §5 测试 | `storage/session-retention.test.ts`(22)、`session-retention.test.ts`(22)、`agent-session-manager.retention.test.ts`(9)、`remote-session-reconcile.test.ts`(9)、`routes/session-retention-routes.test.ts`(12) |

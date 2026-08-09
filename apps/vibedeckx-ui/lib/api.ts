@@ -1253,6 +1253,49 @@ export async function updateAgentProcessSettings(settings: AgentProcessSettings)
   return res.json();
 }
 
+// ---- Session retention ----
+// Deletes sessions that have been inactive past the window, unless favorited.
+// One global value for the whole deployment; the server fans it out to every
+// worker, because a session is deleted by the machine that holds it.
+
+export interface SessionRetentionSettings {
+  /** null = retention off (the default). */
+  days: number | null;
+  /** Prefill for the input when the operator first turns retention on. */
+  suggestedDays: number;
+  minDays: number;
+  maxDays: number;
+}
+
+/** Per-worker outcome of pushing the window down the tunnel. */
+export interface SessionRetentionWorkerResult {
+  remoteServerId: string;
+  name: string;
+  status: "applied" | "needs_upgrade" | "unreachable" | "error";
+  detail?: string;
+}
+
+export async function getSessionRetentionSettings(): Promise<SessionRetentionSettings> {
+  const res = await authFetch(`${getApiBase()}/api/settings/session-retention`);
+  if (!res.ok) throw new Error(`getSessionRetentionSettings failed: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSessionRetentionSettings(
+  days: number | null,
+): Promise<{ days: number | null; workers: SessionRetentionWorkerResult[] }> {
+  const res = await authFetch(`${getApiBase()}/api/settings/session-retention`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `updateSessionRetentionSettings failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // Branch an agent session: creates a new session that copies the source
 // session's conversation history ("Branch - <title>"). Optionally switches
 // the coding agent for the new session.

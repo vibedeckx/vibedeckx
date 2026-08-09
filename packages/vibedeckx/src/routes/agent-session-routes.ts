@@ -19,6 +19,7 @@ import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-re
 import { createHash, randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
 import { WorkspaceCheckoutUnavailableError } from "../agent-session-manager.js";
+import { forgetRemoteSession } from "../remote-session-cleanup.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -999,6 +1000,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
             },
           });
         }
+        // Dead-handle belt (docs/plans/2026-08-08-session-retention.md §3.1):
+        // the worker says this session is gone — most likely its own retention
+        // sweep reclaimed it — so forget it here and now instead of waiting
+        // for the next reconciliation round. Only on a definitive 404: an
+        // unreachable or erroring worker proves nothing about deletion.
+        if (result.status === 404) {
+          await forgetRemoteSession(fastify, req.params.sessionId);
+          return reply.code(404).send({
+            errorCode: "session_cleaned_up",
+            error: "This session has been cleaned up",
+          });
+        }
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
@@ -1798,15 +1811,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "DELETE",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
-        fastify.remoteSessionMap.delete(req.params.sessionId);
-        await fastify.storage.remoteSessionMappings.delete(req.params.sessionId);
-        fastify.remotePatchCache.delete(req.params.sessionId);
-        // Search-cache write-through: drop the session from Cmd+K now. Done
-        // unconditionally, mirroring the map/mapping cleanup above — if the
-        // worker-side delete actually failed, the next snapshot (collected
-        // after this write) resurrects the row.
-        await fastify.storage.searchCache.noteSessionDeleted(req.params.sessionId)
-          .catch((err) => console.error("[API] search-cache delete write-through failed:", err));
+        // One idempotent cleanup shared with reconciliation and the dead-handle
+        // belt (remote-session-cleanup.ts) — three call sites each clearing a
+        // different subset is exactly the drift that leaves ghost handles.
+        // Done unconditionally: if the worker-side delete actually failed, the
+        // next catalog snapshot resurrects the row.
+        await forgetRemoteSession(fastify, req.params.sessionId);
         return reply.code(proxyStatus(result)).send(result.data);
       }
 

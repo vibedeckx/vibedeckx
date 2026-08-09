@@ -131,6 +131,21 @@ interface RunningSession {
   checkoutPath: string | null;
   process: ChildProcess | null;
   dormant: boolean; // true when restored from DB (no process yet)
+  /**
+   * How many operations are currently on their way to spawning a process for
+   * this session — a wake, or a restart. Incremented SYNCHRONOUSLY before the
+   * operation's first `await`, so a retention sweep can never observe the
+   * "still dormant, no process" window such an operation is already committed
+   * to leaving (docs/plans/2026-08-08-session-retention.md §1.5). The
+   * mirror-image guard, `retentionDeleting`, lives on the manager.
+   *
+   * A COUNT, not a flag: two messages can wake the same dormant session
+   * concurrently (both see `dormant === true`, since it is only cleared after
+   * the checkout lookup), and with a boolean the first one to finish would
+   * clear the guard out from under the second — handing retention a session
+   * that is still mid-spawn. Same for a wake overlapping a restart.
+   */
+  processStartsInFlight: number;
   store: MessageStore;
   subscribers: Set<WebSocket>;
   status: AgentSessionStatus;
@@ -254,6 +269,15 @@ export class AgentSessionManager {
    */
   suppressTitleGeneration: boolean = false;
   private capacityQueue: Promise<void> = Promise.resolve();
+  /**
+   * Sessions whose retention delete has passed its re-check and is in flight.
+   * The mirror image of `RunningSession.processStartsInFlight`: together they
+   * cover both orderings of the race, because each side plants its marker
+   * synchronously before its own first `await`, so there is no instant at
+   * which neither can see the other
+   * (docs/plans/2026-08-08-session-retention.md §1.5).
+   */
+  private retentionDeleting: Set<string> = new Set();
   /** Grace window before committing a held completion (injectable for tests). */
   private readonly completionGraceMs: number;
   private workflowSuppressionCheck: ((sessionId: string) => boolean) | null = null;
@@ -452,6 +476,35 @@ export class AgentSessionManager {
 
   private touchSession(session: RunningSession): void {
     session.lastActiveAt = Date.now();
+  }
+
+  /**
+   * Claim a session for an operation that will spawn a process for it — a
+   * wake or a restart. Both begin on a session that looks exactly like a
+   * retention candidate (no process, status "stopped") and stay that way
+   * across several awaits before `spawnAgent` runs, so without this claim a
+   * sweep landing in that window deletes the row underneath them and leaves
+   * an orphan process whose every subsequent write fails on the foreign key.
+   *
+   * Returns null when retention has already claimed the session — the caller
+   * must abandon the operation and report it as gone. Otherwise it returns a
+   * release function; call it in a `finally`.
+   *
+   * MUST be called synchronously, before the caller's first `await`. That is
+   * the entire guarantee: paired with `retentionDeleting` (planted before
+   * retention's own first await), there is no instant at which a sweep and a
+   * process start can both fail to see each other
+   * (docs/plans/2026-08-08-session-retention.md §1.5).
+   */
+  private beginProcessStart(session: RunningSession): (() => void) | null {
+    if (this.retentionDeleting.has(session.id)) return null;
+    session.processStartsInFlight++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      session.processStartsInFlight--;
+    };
   }
 
   private emitProcessAlive(session: RunningSession, alive: boolean): void {
@@ -717,6 +770,7 @@ export class AgentSessionManager {
       checkoutPath: absoluteWorktreePath,
       process: null,
       dormant: false,
+      processStartsInFlight: 0,
       store,
       subscribers: new Set(),
       status: "running",
@@ -1810,8 +1864,7 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Cannot wake dormant session ${sessionId} without projectPath`);
         return false;
       }
-      await this.wakeDormantSession(session, projectPath, content, userId, opts?.origin, disposition);
-      return true;
+      return this.wakeDormantSession(session, projectPath, content, userId, opts?.origin, disposition);
     }
 
     // A resident CLI can survive after its worktree was removed. Revalidate
@@ -2208,12 +2261,13 @@ export class AgentSessionManager {
    *
    * Steps (in spec order):
    * 1. stopSession — kills the process and transitions to dormant (no-op if already stopped)
-   * 2. deleteEntries — clear entry rows from DB (skipped for remote sessions)
-   * 3. delete — delete the session row from DB (skipped for remote sessions)
-   * 4. broadcastRaw({finished: true}) — signal subscribers to disconnect cleanly
+   * 2. delete — ONE parent-row DELETE; the children (entries, turn_snapshots,
+   *    native_ids, instruction deliveries) go with it via ON DELETE CASCADE
+   *    (skipped for remote sessions)
+   * 3. broadcastRaw({finished: true}) — signal subscribers to disconnect cleanly
    *    (must happen before sessions.delete because broadcastRaw looks up the
    *    session by id to reach its subscriber set).
-   * 5. sessions.delete — remove from in-memory map
+   * 4. sessions.delete — remove from in-memory map
    */
   async deleteSession(sessionId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
@@ -2225,20 +2279,25 @@ export class AgentSessionManager {
     // 1. Stop the process (safe if already stopped/dormant)
     await this.stopSession(sessionId);
 
-    // 2-3. Clear DB rows (skip for remote path-based sessions)
+    // 2. Clear DB rows (skip for remote path-based sessions). Deliberately a
+    //    SINGLE statement: the old two-step (deleteEntries then delete) could
+    //    fail after step one and leave a header row whose conversation was
+    //    permanently gone — a state that contradicts "delete the whole
+    //    session". Every child table declares ON DELETE CASCADE and the
+    //    runtime opens the database with `foreign_keys = ON`, so the parent
+    //    DELETE is both sufficient and atomic.
     if (!session.skipDb) {
-      await this.storage.agentSessions.deleteEntries(sessionId);
       await this.storage.agentSessions.delete(sessionId);
     }
 
-    // 4. Signal terminal state so subscribers stop reconnecting — must run
+    // 3. Signal terminal state so subscribers stop reconnecting — must run
     //    before sessions.delete() since broadcastRaw reads this.sessions.
     this.broadcastRaw(sessionId, { finished: true });
 
-    // 5. Remove from in-memory map
+    // 4. Remove from in-memory map
     this.sessions.delete(sessionId);
 
-    // 6. Re-derive branch activity — deleting the latest session can change
+    // 5. Re-derive branch activity — deleting the latest session can change
     //    which session is now "latest" for the branch, so the activity might
     //    flip (e.g. removing the only stopped session, leaving a completed
     //    one, should turn the dot green). Dedupe handles the no-change case.
@@ -2246,6 +2305,55 @@ export class AgentSessionManager {
       await this.emitDerivedBranchActivity(session.projectId, session.branch);
     }
     return true;
+  }
+
+  /**
+   * Retention's own delete path (docs/plans/2026-08-08-session-retention.md
+   * §1.4). Deliberately NOT a call into `deleteSession`: that one is
+   * stop-first, so a candidate the user woke a moment ago would be killed
+   * mid-turn even when the conditional DELETE then declines to remove it.
+   * Retention never stops anything — a session with a live process is simply
+   * skipped, and the resident-pool LRU will hibernate it into a later sweep.
+   *
+   * Order is load-bearing: re-check in memory, claim the id, DELETE with the
+   * full predicate, and only then produce side effects. A miss (0 rows) means
+   * the session was rescued between the scan and now, and nothing at all has
+   * happened to it.
+   *
+   * Returns true only when the row was actually deleted.
+   */
+  async deleteDormantSessionIfExpired(sessionId: string, cutoff: number): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    // In-memory re-check. `skipDb` sessions (the hub's remote mirrors) own no
+    // local row and are never retention candidates; a live process, or any
+    // in-flight wake/restart, means someone is using this session right now.
+    if (session && (session.skipDb || session.process !== null || session.processStartsInFlight > 0)) {
+      return false;
+    }
+    if (this.retentionDeleting.has(sessionId)) return false;
+    // Claim BEFORE the first await: from here on `wakeDormantSession` refuses
+    // this id, so a wake can no longer slip in while the DELETE is in flight
+    // and end up owning a process whose session row is gone.
+    this.retentionDeleting.add(sessionId);
+    try {
+      const deleted = await this.storage.agentSessions.deleteIfExpired(sessionId, cutoff);
+      if (!deleted) return false;
+
+      // Side effects only after the row is gone for good. Same shape as the
+      // manual delete: subscribers get a terminal `finished` so an open
+      // window stops reconnecting and reports the session as cleaned up.
+      if (session) {
+        getProvider(session.agentType).onSessionDestroyed?.(sessionId);
+        this.broadcastRaw(sessionId, { finished: true });
+        this.sessions.delete(sessionId);
+        await this.emitDerivedBranchActivity(session.projectId, session.branch);
+      }
+      return true;
+    } finally {
+      // Released last, after the map entry is gone — releasing it earlier
+      // would reopen the very gap the claim exists to close.
+      this.retentionDeleting.delete(sessionId);
+    }
   }
 
   /**
@@ -2257,6 +2365,29 @@ export class AgentSessionManager {
     if (!session) {
       return false;
     }
+    // Restarting a long-dormant session is the second path that spawns a
+    // process for a row retention considers expired, and it stays
+    // process-less across several awaits below. Claim it synchronously, the
+    // same way a wake does (§1.5) — otherwise a sweep can delete the row
+    // while this is suspended and the respawn below produces an orphan.
+    const release = this.beginProcessStart(session);
+    if (!release) {
+      console.log(`[AgentSession] Refusing to restart ${sessionId}: retention is deleting it`);
+      return false;
+    }
+    try {
+      return await this.restartSessionInner(session, sessionId, projectPath, agentType);
+    } finally {
+      release();
+    }
+  }
+
+  private async restartSessionInner(
+    session: RunningSession,
+    sessionId: string,
+    projectPath: string,
+    agentType?: AgentType,
+  ): Promise<boolean> {
     // Validate the bound incarnation before killing a healthy process or
     // clearing history. A tombstoned checkout makes restart a no-op failure.
     const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
@@ -2674,7 +2805,10 @@ export class AgentSessionManager {
   }
 
   /**
-   * Wake a dormant session: spawn process, send full context + user message
+   * Wake a dormant session: spawn process, send full context + user message.
+   * Returns false when the session is being reclaimed by retention right now
+   * — see the `retentionDeleting` / `processStartsInFlight` pair in
+   * `beginProcessStart`.
    */
   private async wakeDormantSession(
     session: RunningSession,
@@ -2683,9 +2817,33 @@ export class AgentSessionManager {
     userId: string = "local",
     origin?: "workflow",
     notificationDisposition: NotificationDisposition = "result",
-  ): Promise<void> {
+  ): Promise<boolean> {
+    // Claimed synchronously, before every `await` below — see beginProcessStart.
+    const release = this.beginProcessStart(session);
+    if (!release) {
+      console.log(`[AgentSession] Refusing to wake ${session.id}: retention is deleting it`);
+      return false;
+    }
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
+    try {
+      await this.wakeDormantSessionInner(
+        session, projectPath, userMessage, userId, origin, notificationDisposition,
+      );
+      return true;
+    } finally {
+      release();
+    }
+  }
+
+  private async wakeDormantSessionInner(
+    session: RunningSession,
+    projectPath: string,
+    userMessage: string | ContentPart[],
+    userId: string,
+    origin: "workflow" | undefined,
+    notificationDisposition: NotificationDisposition,
+  ): Promise<void> {
     const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
 
     await this.ensureResidentCapacity(
@@ -2940,6 +3098,7 @@ export class AgentSessionManager {
         checkoutPath: restoredCheckout?.checkout.worktree_path ?? null,
         process: null,
         dormant: true,
+        processStartsInFlight: 0,
         store,
         subscribers: new Set(),
         status: "stopped",
@@ -3135,6 +3294,7 @@ export class AgentSessionManager {
       checkoutPath: bound.checkout.worktree_path,
       process: null,
       dormant: true,
+      processStartsInFlight: 0,
       store,
       subscribers: new Set(),
       status: "stopped",

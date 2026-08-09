@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
+import { Archive, Bot, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
 import { PageHeader } from "@/components/layout";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { getPersistedConfig } from "@/lib/api";
@@ -10,6 +10,7 @@ import { ChatProviderSettings } from "./chat-provider-settings";
 import { ProxySettings } from "./proxy-settings";
 import { TerminalSettingsSection } from "./terminal-settings";
 import { AgentProcessSettingsSection } from "./agent-process-settings";
+import { SessionRetentionSettingsSection } from "./session-retention-settings";
 import {
   SettingsLayout,
   SettingsSection,
@@ -20,6 +21,7 @@ const NAV: SettingsNavItem[] = [
   { id: "appearance", label: "Appearance", Icon: Palette },
   { id: "ai-chat", label: "AI Chat", Icon: Sparkles },
   { id: "agents", label: "Agents", Icon: Bot },
+  { id: "retention", label: "History", Icon: Archive },
   { id: "terminal", label: "Terminal", Icon: TerminalSquare },
   { id: "proxy", label: "Proxy", Icon: Network },
 ];
@@ -73,6 +75,14 @@ export function SettingsView() {
           description="Resident coding-agent process limits per workspace branch."
         >
           <AgentProcessSettingsSection />
+        </SettingsSection>
+
+        <SettingsSection
+          id="retention"
+          label="History"
+          description="How long finished sessions are kept before they are deleted."
+        >
+          <SessionRetentionSettingsSection />
         </SettingsSection>
 
         <SettingsSection

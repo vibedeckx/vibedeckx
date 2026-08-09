@@ -12,6 +12,8 @@ import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { SchedulerService } from "./scheduler.js";
 import type { NotificationService } from "./notification-service.js";
 import type { RemoteNotificationSync } from "./remote-notification-sync.js";
+import type { SessionRetentionSweeper } from "./session-retention.js";
+import type { RemoteSessionReconciler } from "./remote-session-reconcile-service.js";
 
 export interface RemoteExecutorInfo {
   remoteServerId: string;
@@ -49,6 +51,8 @@ declare module "fastify" {
     scheduler: SchedulerService;
     notificationService: NotificationService;
     remoteNotificationSync: RemoteNotificationSync;
+    sessionRetention: SessionRetentionSweeper;
+    remoteSessionReconciler: RemoteSessionReconciler;
     workflowEngine: import("./workflow-engine.js").WorkflowEngine;
   }
 }

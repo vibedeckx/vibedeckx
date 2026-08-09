@@ -1,10 +1,11 @@
 import { sql, type Kysely } from "kysely";
 import type { DB } from "../schema.js";
-import type { Storage, WorkflowRun, WorkflowRunStatus } from "../types.js";
+import type { Storage, WorkflowRun } from "../types.js";
+import { WORKFLOW_ACTIVE_STATUSES } from "../workflow-run-status.js";
 // NotificationOutboxEvent flows in through Storage["workflowRuns"] signatures,
 // which this factory's return type pins.
 
-const ACTIVE: WorkflowRunStatus[] = ["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"];
+const ACTIVE = [...WORKFLOW_ACTIVE_STATUSES];
 
 const asRun = (row: unknown): WorkflowRun => row as WorkflowRun;
 

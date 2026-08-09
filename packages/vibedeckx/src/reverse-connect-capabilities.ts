@@ -103,6 +103,14 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/path/upload": { since: "0.2.0", summary: "文件上传" },
   "http:DELETE /api/path/delete": { since: "0.2.0", summary: "删除文件" },
 
+  // --- Session retention (docs/plans/2026-08-08-session-retention.md §3) ---
+  // Both additive. A worker below 0.3.14 404s them; the hub reports the worker
+  // as "needs upgrade" in the retention settings UI and — critically — the
+  // reconciliation pass treats a 404 exactly like an offline worker and cleans
+  // NOTHING, so an old worker can never look like it deleted its sessions.
+  "http:PUT /api/settings/session-retention/apply": { since: "0.3.14", summary: "下发会话保留天数" },
+  "http:GET /api/path/session-ids": { since: "0.3.14", summary: "会话 id 全量清单(对账用)" },
+
   // --- Search / notifications / cross-remote ---
   "http:GET /api/path/search-catalog": { since: "0.2.0", summary: "搜索目录快照" },
   // Empirically probed: 0.2.15 → 404, 0.2.16 → 400 (route exists).

@@ -20,6 +20,10 @@ import { NotificationService } from "../notification-service.js";
 import { RemoteNotificationSync } from "../remote-notification-sync.js";
 import { createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction, recoverPendingRemoteAgentSessions } from "../remote-agent-sessions.js";
 import { formatBackfillSummary, healWorkspaceBindings } from "../workspace-binding-backfill.js";
+import { SessionRetentionSweeper } from "../session-retention.js";
+import { readRetentionDays } from "../session-retention-config.js";
+import { pushRetentionToWorker } from "../session-retention-downlink.js";
+import { RemoteSessionReconciler } from "../remote-session-reconcile-service.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -398,6 +402,47 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   scheduler.setEventBus(eventBus);
   await scheduler.start();
 
+  // Session retention (docs/plans/2026-08-08-session-retention.md). Runs on
+  // every server: whichever machine holds a session is the machine that
+  // deletes it. Off unless the operator sets a window, and a tick with nothing
+  // expired is a single SELECT — which is why there is no hub/worker branch.
+  const sessionRetention = new SessionRetentionSweeper({
+    storage: opts.storage,
+    deleteIfExpired: (sessionId, cutoff) =>
+      agentSessionManager.deleteDormantSessionIfExpired(sessionId, cutoff),
+  });
+  fastify.decorate("sessionRetention", sessionRetention);
+  sessionRetention.start();
+
+  // Converges the hub's remote-session mappings after a worker's own retention
+  // sweep deleted sessions. Nothing to do when there are no remote servers.
+  const remoteSessionReconciler = new RemoteSessionReconciler({
+    storage: opts.storage,
+    reverseConnectManager,
+    remoteSessionMap,
+    remotePatchCache,
+  });
+  fastify.decorate("remoteSessionReconciler", remoteSessionReconciler);
+  remoteSessionReconciler.start();
+
+  // A worker that was offline when the window was last changed — or that has
+  // never heard it at all — gets the current value the moment it connects.
+  // Idempotent, so re-sending on every reconnect costs nothing.
+  reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
+    if (status !== "online") return;
+    void (async () => {
+      const server = await opts.storage.remoteServers.getById(remoteServerId);
+      if (!server) return;
+      const days = await readRetentionDays(opts.storage);
+      const result = await pushRetentionToWorker(
+        { storage: opts.storage, reverseConnectManager }, server, days,
+      );
+      if (result.status === "needs_upgrade") {
+        console.warn(`[SessionRetention] worker ${result.name} is too old to receive the retention window`);
+      }
+    })().catch((error) => console.warn("[SessionRetention] downlink on connect failed:", error));
+  });
+
   // Startup drain closes the crash window: a milestone committed just before the
   // previous process died has no live nudge to ride, so it is recovered here.
   notificationService.start();
@@ -412,6 +457,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
 
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {
+    await sessionRetention.close();
+    await remoteSessionReconciler.close();
     scheduler.shutdown();
     notificationService.shutdown();
     remoteNotificationSync.shutdown();
