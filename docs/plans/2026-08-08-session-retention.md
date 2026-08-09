@@ -246,6 +246,12 @@ hub 不参与：
 （Claude Code 8.5 个月 2082 个 jsonl、Codex 1393 个 rollout）都永久保留，
 默认开启会吓到人；操作者按需开启（界面预填建议值 **90**，2026-08-08 拍板）。
 
+**作用域：全局一个值，不做 per-worker**（2026-08-08 拍板）。同一个操作者名下的
+多台 worker 用同一个 `session_retention_days`；Phase 2 下发的是这一个全局值，
+不提供 per-worker 覆盖。per-worker 差异化是过度设计——没有已知场景需要一台机器
+30 天、另一台 365 天，加了只会多一层配置源头要读（本地 settings vs 下发值的
+优先级）却没有对应需求。
+
 retention 必须跑在 session 所在的机器上，于是配置下发分两期：
 
 | | 内容 | 覆盖 | 量级 |
@@ -362,7 +368,7 @@ worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 �
 
 - ✅ **默认天数：90**（2026-08-08 拍板）。界面预填值；开关本身默认仍为关闭
   （§3：`session_retention_days` 为空 = 关闭），90 只是用户打开开关时看到的初始值。
-- Phase 2 里 per-worker 还是全局统一天数（倾向全局一个值，per-worker 是过度设计）。
+- ✅ **Phase 2 作用域：全局统一天数，不做 per-worker**（2026-08-08 拍板，见 §3）。
 - 候选扫描的索引：现有索引以 `project_id` / `updated_at` 开头，没有正好覆盖
   `activity_at ASC + favorited_at IS NULL` 的组合。千行量级全扫无所谓，实施时用
   `EXPLAIN QUERY PLAN` 验证一次；确有必要再加
