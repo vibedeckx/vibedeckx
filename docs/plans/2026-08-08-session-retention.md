@@ -14,6 +14,14 @@
 > ① active workflow 参与者豁免（§1.2）；② SELECT→DELETE 的 TOCTOU 竞态（§1.5）；
 > ③ 现有 `deleteSession` 两段式删除不原子，列为前置任务（§1.6）；
 > ④ 远端 worker 删除后 hub 侧 mapping 的收敛契约（§3 Phase 2）。
+>
+> **二审修订（2026-08-08，第二轮 review）**：4 处均核实成立并已修订，其中第 1 处
+> 推翻了初审修订里的一个错误断言——
+> ① wake 竞态：`sendUserMessage`/`wakeDormantSession` **不走** `eventChain` 串行队列
+> （初审版 §1.5 声称由它封闭窗口，勘误），改用 `wakeInProgress` 标志 + retention 专用
+> 无 stop 删除路径（§1.4/§1.5）；② sweep 每批重读配置（§1.3）；③ 轮内 keyset 游标
+> 防饥饿（§1.3）；④ 对账先捕获 mapping 集合再拉清单、worker 端点契约、
+> 禁用 search catalog 当存活清单（§3.1）。
 
 ## 0. 一句话
 
@@ -69,13 +77,28 @@ LIMIT 20
 
 ```
 tick:
+  cursor = (-∞, "")                      ← 本轮 sweep 内的 keyset 游标，不持久化
   loop:
-    候选 = 上面那条 SELECT (LIMIT 20)
+    重读 retention 配置（二审②）：已关闭 → 立即结束本轮；天数变了 → 用新 cutoff
+    候选 = SELECT ... AND (activity_at, id) > cursor
+           ORDER BY activity_at ASC, id ASC LIMIT 20
     没有候选 → 结束     ← 稳态下 99% 的 tick 到这一步就返回，近乎免费
     逐个删除（每个删除前重新验证谓词，见 §1.5）
+    cursor = 本批最后一个候选的 (activity_at, id)   ← 删没删成都推进（二审③）
     批间让出事件循环（setImmediate），减小对正在服务的 WS 的干扰
     本 tick 已用时 > 30s → 结束，剩余留给下个 tick
 ```
+
+两处是二审补上的正确性修正：
+
+- **每批重读配置**：sweep 可能跑几十秒，期间用户把 30 天改成 365 天、或直接关闭
+  ——旧 sweep 若继续用启动时捕获的 cutoff，就是在按用户已经撤回的意愿永久删数据。
+  批边界重读即可；已同步进入条件 DELETE 的单条删除是线性化边界，无需撤回。
+- **keyset 游标防饥饿**：固定「取最老 20 条」时，若这 20 条全被跳过（wake 进行中 /
+  重验失败），下一次 SELECT 还是同一批——本轮 sweep 空转到时间预算耗尽，排在后面
+  的可删 session 永远轮不到。游标无论删除还是跳过都推进，一轮内每条至多被考虑一次。
+  游标只活在单轮 sweep 内（跳过的候选下一轮重新参选），**仍然不需要持久化 watermark**
+  ——§1.3 标题里那句承诺不变。
 
 「循环批 + 时间预算」而不是固定单批，是为**首次启用**设计的：一台跑了一年的机器
 第一次开 90 天保留，可能一次性上千个过期 session；固定 20 个/tick 要拖十几天，
@@ -86,13 +109,25 @@ tick:
 （数千 entries）做一次删除耗时压测，若单删可能秒级，考虑对 entries 特别多的
 session 先分批 `DELETE ... LIMIT` 正文再删父行。
 
-### 1.4 删除路径：走 manager，不直删 storage
+### 1.4 删除路径：retention 专用的无 stop 删除，不复用 `deleteSession`
 
-老 session 启动时被 restore 进内存 map（dormant 态），只删 DB 会留幽灵。所以：
+老 session 启动时被 restore 进内存 map（dormant 态），只删 DB 会留幽灵，所以删除
+必须经过 manager。但**不能复用现有 `deleteSession()`**（二审发现①的一半）：它是
+stop-first 的——第一步就 `stopSession()`，与 §1.5 「条件 DELETE 未命中则什么都不做」
+存在顺序冲突：一个候选查出后刚被唤醒的 session，会先被 sweep 停掉，即使随后的
+条件 DELETE 未命中、行没删，用户也已经被打断了。
 
-- 优先 `manager.deleteSession(id)`——清内存 map、广播 `finished` 让开着的 UI 刷新、
-  然后删 DB 行（CASCADE）。
-- 不在 map 里的兜底走 `storage.agentSessions.delete(id)`。
+retention 走专用路径 `deleteDormantSessionIfExpired(id)`，只允许删除同时满足：
+
+1. 内存态：`process === null` 且 `wakeInProgress === false`（§1.5）——
+   retention 只删无进程的 dormant session，**永远不 stop 任何东西**。
+   有活进程的 session 一律跳过：常驻池的 LRU 迟早把它休眠成 dormant，下轮再删。
+2. 条件 DELETE（附带完整谓词）命中 1 行。
+
+**顺序是先条件 DELETE、命中后才做副作用**：广播 `finished`、清内存 map、
+重算 branch activity。DELETE 未命中（期间被救活）→ 什么都不碰。
+不在 map 里的兜底仍走同一条件 DELETE。
+
 - `skipDb`（hub 上的 remote 镜像会话）**天然不在候选里**——它们没有本地 DB 行；
   远端会话的清理由 worker 自己的 sweep 负责（见 §3 Phase 2）。
 
@@ -113,9 +148,28 @@ session 先分批 `DELETE ... LIMIT` 正文再删父行。
    `status` / 是否有进程）——任一不再满足即跳过，本轮不删。
 3. **最终删除带谓词**：父行 DELETE 附带完整谓词（`WHERE id = ? AND favorited_at
    IS NULL AND activity_at < ? ...`）并检查 affected rows；0 行 = 期间被救活，
-   跳过后续清理。重验（2）和条件删除（3）之间的残余窗口由 RunningSession 的
-   **per-session 串行工作队列**封闭：sweep 的删除动作与 wake/send 走同一队列，
-   不可能交错。
+   跳过后续清理。
+
+> ⚠️ **二审勘误（2026-08-08）**：初版声称「残余窗口由 per-session 串行工作队列封闭」
+> ——**不成立**。核实代码：`eventChain`（`enqueueSessionWork`）只包着 stdout 处理
+> 和内部探针（agent-session-manager.ts:911/926/1063），`sendUserMessage` 和
+> `wakeDormantSession` **都不走这条队列**。真实竞态在 dormant 唤醒的异步准备段：
+>
+> ```
+> sendUserMessage → 发现 dormant → wake 开始，停在某个前置 await
+> → sweep 重验看到 process=null、status=stopped（谓词全过）
+> → sweep 删 DB 行、清内存 map
+> → wake 恢复，起进程 → 孤儿进程 + 内存/DB 不一致 + 后续写入失败
+> ```
+>
+> **封闭方式（二审建议，采纳）**：`RunningSession` 加 `wakeInProgress` 标志——
+> `wakeDormantSession` 在**第一个 `await` 之前同步**置 `true`，`finally` 中复位；
+> sweep 重验时见 `wakeInProgress === true` 即跳过。配合 §1.4 的
+> `deleteDormantSessionIfExpired`（只删 `process === null && !wakeInProgress`、
+> 条件 DELETE 命中后才做副作用），窗口即被封死：flag 的置位是同步的，sweep 与
+> wake 之间不存在两者都看不见对方的时刻。
+> **不做**统一 lifecycle gate（把 send/rename/favorite/restart 全改造进闸门）——
+> rename/favorite 只改 DB 行，条件 DELETE 的谓词已经挡住它们，过度工程。
 
 ### 1.6 前置任务：先把 `deleteSession` 改成原子删除
 
@@ -169,14 +223,34 @@ retention 必须跑在 session 所在的机器上，于是配置下发分两期�
 全部场景，不需要额外协议状态：
 
 ```
-hub 定期（或打开某 remote 项目时）向 worker 拉该项目的存活 session-id 清单
-  （新增 capability，加法；联邦搜索的 catalog 通路已有近似形状可参考）
-  → mapping 中 worker 不再报告的 → 清理四件套
-worker 不可达 → 本轮跳过，什么都不清（缺勤 ≠ 已删除）
+hub 对账一轮：
+  1. 先捕获本轮待检查的 mapping 集合          ← 顺序是关键（二审④）
+  2. 再向 worker 拉该项目的存活 session-id 清单（新增 capability，加法）
+  3. 只对第 1 步捕获的、且不在清单里的 mapping → 清理四件套
+     （请求期间新建的 mapping 不参与本轮，下轮再查）
+worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 ≠ 已删除）
 ```
 
-**兜底（belt）**：用户打开一个死 handle、worker 返回 session 不存在时，就地清理
-该 mapping 的四件套并提示「会话已被清理」。对账没跑到之前，死 handle 至多存在
+1→2 的顺序封掉一个竞态（二审发现④）：若先发请求再捕获集合，请求飞行期间新建的
+远端 session 不在 worker 生成快照时的清单里，会被旧快照误判为「已删」而清掉——
+一个刚创建的会话立刻变成死 handle。先捕获、只清捕获集，飞行期间的新 mapping
+天然免疫，不需要给 mapping 加 generation 或时间戳比对。
+
+**worker 端点的契约**（实现时按此写，不达标不许清理）：
+
+- 返回该项目**全部数据库 session id**，不做侧边栏可见性等任何 UI 过滤；
+- 结果必须完整，不可静默截断——若分页，全部页拉完才允许执行清理，
+  半途失败 = 本轮作废；
+- **不能拿联邦搜索的 catalog 当存活清单**：已核实它用
+  `EXISTS agent_session_entries` 过滤（search-cache.ts:591-617），
+  一个还没有任何 entry 的新 session 不在 catalog 里，会被误判为已删。
+  形状可以参考，数据源必须是专用端点。
+
+清理动作收敛到**一个幂等函数**（持久化 mapping、内存 map、patch cache、搜索缓存
+四件套一起），手动删除、对账、兜底三条路径共用——避免三处各清一部分的漂移。
+
+**兜底（belt）**：用户打开一个死 handle、worker 返回 session 不存在时，就地调用
+同一个清理函数并提示「会话已被清理」。对账没跑到之前，死 handle 至多存在
 一个对账周期，且点开即自愈。
 
 ## 4. 三条边界（提前说清，避免被当成 bug 报回来）
@@ -199,8 +273,15 @@ worker 不可达 → 本轮跳过，什么都不清（缺勤 ≠ 已删除）
   run 到 `completed` 后同一 session 恢复可删。
 - **TOCTOU 竞态**：主动制造「候选 SELECT 后、删除前」加星 / 唤醒的时序，断言跳过；
   条件删除 affected rows = 0 时不执行后续清理。
+- **wake 竞态**（二审①）：dormant wake 停在前置 await 时 sweep 到达，断言
+  `wakeInProgress` 挡住删除、wake 正常完成、无孤儿进程；有活进程的 session 永不被
+  retention 停掉（sweep 全程零 `stopSession` 调用）。
 - **并发触发**：设置变更与定时 tick 同时到达，断言 single-flight（同一批候选只被
   处理一次）。
+- **sweep 中途改配置**（二审②）：批处理进行中关闭 retention → 后续批次零删除；
+  改天数 → 下一批用新 cutoff。
+- **防饥饿**（二审③）：前 20 个候选全被跳过时，游标推进、后面的候选仍在本轮被处理；
+  同一候选一轮内至多被考虑一次。
 - 最老优先 + 批次封顶 + 软时间预算提前退出。
 - 内存一致性：map 里的 dormant session 被删后不留幽灵、订阅者收到 `finished`。
 - 幂等：连续两次 tick，第二次零动作。
@@ -211,7 +292,9 @@ worker 不可达 → 本轮跳过，什么都不清（缺勤 ≠ 已删除）
 - 配置校验：0 / 负数 / 非数值 / 超上限一律等同关闭，零删除。
 - hub 无害：没有本地 session 的机器上 tick 是一次空 SELECT（对齐 entries 计划
   §0.1.0 的「自然空操作」约束——不出现 `if (isHub)`）。
-- Phase 2：对账清掉 worker 已删的 mapping；worker 断线时不清；死 handle 点开即自愈。
+- Phase 2：对账清掉 worker 已删的 mapping；worker 断线时不清；死 handle 点开即自愈；
+  **对账飞行期间新建的 mapping 存活**（先捕获集合、只清捕获集，二审④）；
+  清单分页半途失败 → 本轮零清理。
 
 ## 6. 与 entries 出库计划的关系
 
@@ -231,3 +314,8 @@ worker 不可达 → 本轮跳过，什么都不清（缺勤 ≠ 已删除）
   `EXPLAIN QUERY PLAN` 验证一次；确有必要再加
   `CREATE INDEX ... ON agent_sessions(activity_at) WHERE favorited_at IS NULL`
   之类的部分索引——先测再加，别预防性建索引。
+- workflow 豁免的四个 active 状态抽成共享常量，retention 与 WorkflowEngine 引同一份，
+  防定义漂移（二审非阻断建议；「排除所有非终态」的写法留给将来真加了新状态再说）。
+- 启用前预估删除数量 / 二次确认属产品增强，非 v1 正确性要求，不做。
+- **明确不引入**（两轮 review 一致）：通用任务取消框架、全局删除状态机、持久化扫描
+  进度、mapping generation——四个正确性问题都有局部解，别扩大成基础设施。
