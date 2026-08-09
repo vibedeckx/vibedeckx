@@ -22,6 +22,13 @@
 > 无 stop 删除路径（§1.4/§1.5）；② sweep 每批重读配置（§1.3）；③ 轮内 keyset 游标
 > 防饥饿（§1.3）；④ 对账先捕获 mapping 集合再拉清单、worker 端点契约、
 > 禁用 search catalog 当存活清单（§3.1）。
+>
+> **三审修订（2026-08-08，第三轮 review）**：① 反向竞态——`wakeInProgress` 防不了
+> 「retention 先开始、DELETE 在飞行中被 wake 插入」，补 `retentionDeleting` 集合组成
+> 双向保护（§1.5）；② 删除初版「大 session 先分批删正文」备选——与 §1.6 原子原则
+> 冲突（等于两段式从后门回来），v1 一律单条父行 DELETE，接受偶尔超软预算；
+> 顺手：§1.2 排序对齐 keyset、§3.1 对账捕获完整三元组并在清理前复核。
+> 结论：**可进入实施。**
 
 ## 0. 一句话
 
@@ -53,7 +60,7 @@ AND NOT EXISTS (                        -- active workflow 参与者豁免（rev
     AND (wr.source_session_id = agent_sessions.id
          OR wr.reviewer_session_id = agent_sessions.id)
 )
-ORDER BY activity_at ASC                -- 最老的先删
+ORDER BY activity_at ASC, id ASC        -- 最老的先删；与 §1.3 keyset 游标同序
 LIMIT 20
 ```
 
@@ -106,8 +113,14 @@ tick:
 
 **30s 是软预算**（review 修订）：只在批边界检查，单个超大 session 的同步 SQLite
 删除本身可能超过预算——预算封的是"批的数量"，不是硬上限。实施时对大 session
-（数千 entries）做一次删除耗时压测，若单删可能秒级，考虑对 entries 特别多的
-session 先分批 `DELETE ... LIMIT` 正文再删父行。
+（数千 entries）做一次删除耗时压测。
+
+> ~~初版此处曾建议「entries 特别多的 session 先分批 `DELETE ... LIMIT` 正文再删父行」~~
+> **已删除（三审②）**：这与 §1.6 的原子删除原则直接冲突——分批中途失败留下正文
+> 半截的 session、分批期间可能被加星/唤醒、最终条件 DELETE 未命中时已删的 entries
+> 无法恢复，等于把刚废除的两段式路径从后门请回来。**v1 始终单条父行 DELETE + CASCADE，
+> 接受偶尔超过 30s 软预算**；压测若证明真有性能问题，作为独立事项另行设计，
+> 不在本方案内衍生渐进删除协议。
 
 ### 1.4 删除路径：retention 专用的无 stop 删除，不复用 `deleteSession`
 
@@ -171,6 +184,37 @@ retention 走专用路径 `deleteDormantSessionIfExpired(id)`，只允许删除�
 > **不做**统一 lifecycle gate（把 send/rename/favorite/restart 全改造进闸门）——
 > rename/favorite 只改 DB 行，条件 DELETE 的谓词已经挡住它们，过度工程。
 
+**反向竞态也要封（三审①）**：`wakeInProgress` 只防「wake 先开始」，防不了
+「retention 先开始」——内存重验通过后，条件 DELETE 是一次 `await`（storage 全异步，
+`agent-sessions.ts:739`），期间 session 还在 map 里，`sendUserMessage` 照样能取到它
+并启动 wake：
+
+```
+retention 重验通过（process=null, !wakeInProgress）
+→ await 条件 DELETE（session 尚未移出 map）
+→ 新的 wake 从 map 取得 session，起进程
+→ DELETE 命中，行已删 → 孤儿进程 + 后续写入失败
+```
+
+最小修复：manager 内一个局部集合 `retentionDeleting = new Set<string>()`——
+
+- retention 重验通过后、**第一个 `await` 之前**同步加入；
+- `wakeDormantSession` 入口发现 id 在集合中 → 拒绝 wake（对调用方表现为
+  「会话已被清理」，与 §1.4 边界情况同一提示）；
+- 条件 DELETE 未命中或抛错 → `finally` 移除；
+- DELETE 命中 → **先**广播 `finished`、清内存 map，**再**移除 id
+  （否则移除与清 map 之间又开一条缝）。
+
+两个标志组成双向保护，各自都在自己一侧的第一个 `await` 前同步置位，
+不存在双方都看不见对方的时刻：
+
+```
+wake 先开始      → wakeInProgress   挡住 retention
+retention 先开始 → retentionDeleting 挡住 wake
+```
+
+仍然只是局部竞态保护，不改造其他 manager 操作。
+
 ### 1.6 前置任务：先把 `deleteSession` 改成原子删除
 
 现有 `deleteSession()` 是两段式：先 `deleteEntries(sessionId)`、再 `delete(sessionId)`
@@ -225,11 +269,17 @@ retention 必须跑在 session 所在的机器上，于是配置下发分两期�
 ```
 hub 对账一轮：
   1. 先捕获本轮待检查的 mapping 集合          ← 顺序是关键（二审④）
+     捕获完整三元组 (local_session_id, remote_server_id, remote_session_id)
   2. 再向 worker 拉该项目的存活 session-id 清单（新增 capability，加法）
-  3. 只对第 1 步捕获的、且不在清单里的 mapping → 清理四件套
-     （请求期间新建的 mapping 不参与本轮，下轮再查）
+  3. 只对第 1 步捕获的、且不在清单里的 mapping → 清理前再校验当前 mapping
+     仍与捕获的三元组一致，一致才清理四件套
+     （请求期间新建或被重新映射的 mapping 不参与本轮，下轮再查）
 worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 ≠ 已删除）
 ```
+
+第 3 步的三元组复核是三审补的：请求飞行期间，同一 local id 可能被**重新映射**到
+新的远端 session（重连/重建），只按 local id 清理会把新映射一起误删。
+复核捕获值即可，不需要给 mapping 加 generation 或时间戳字段。
 
 1→2 的顺序封掉一个竞态（二审发现④）：若先发请求再捕获集合，请求飞行期间新建的
 远端 session 不在 worker 生成快照时的清单里，会被旧快照误判为「已删」而清掉——
@@ -276,6 +326,9 @@ worker 不可达 / 结果不完整 → 本轮跳过，什么都不清（缺勤 �
 - **wake 竞态**（二审①）：dormant wake 停在前置 await 时 sweep 到达，断言
   `wakeInProgress` 挡住删除、wake 正常完成、无孤儿进程；有活进程的 session 永不被
   retention 停掉（sweep 全程零 `stopSession` 调用）。
+- **反向竞态**（三审①）：retention 停在条件 DELETE 的异步边界时尝试 wake，断言
+  `retentionDeleting` 拒绝 wake、不起进程、DB 与内存最终一致；DELETE 未命中时
+  `finally` 移除 id 后 wake 恢复可用。
 - **并发触发**：设置变更与定时 tick 同时到达，断言 single-flight（同一批候选只被
   处理一次）。
 - **sweep 中途改配置**（二审②）：批处理进行中关闭 retention → 后续批次零删除；
