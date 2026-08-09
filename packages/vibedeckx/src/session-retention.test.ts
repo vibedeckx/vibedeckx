@@ -223,15 +223,22 @@ describe("SessionRetentionSweeper", () => {
       deleteIfExpired: (id: string, cutoff: number) => Promise<boolean>;
     };
     const real = sweeper.deleteIfExpired;
+    // Self-rescheduling probe: must be stopped, or it keeps burning CPU and
+    // leaking macrotask work into every test that runs after this one.
+    let probing = true;
     let macrotasks = 0;
-    const bump = () => { macrotasks++; setImmediate(bump); };
+    const bump = () => { if (!probing) return; macrotasks++; setImmediate(bump); };
     setImmediate(bump);
     sweeper.deleteIfExpired = async (id, cutoff) => {
       ticksSeen.push(macrotasks);
       return real(id, cutoff);
     };
 
-    await h.sweeper.sweep();
+    try {
+      await h.sweeper.sweep();
+    } finally {
+      probing = false;
+    }
 
     // All three landed in one batch (batchSize 20), yet each ran on a
     // different macrotask turn — i.e. the loop gave the runtime a chance to
