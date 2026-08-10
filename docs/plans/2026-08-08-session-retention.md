@@ -69,6 +69,15 @@ LIMIT 20
 - `activity_at` 是现成的语义最大值列（四个活跃时间源的 max，专为此类查询回填过），
   不用新造。半年前创建但上周还在用的 session 不会被删。
 - `status != 'running'` 在 N 天门槛下几乎不可能命中，仍要守——防御性谓词的成本是零。
+  ⚠️ **「几乎不可能命中」被实测证伪（2026-08-09，真实 worker）**：命中 63 行，
+  且没有一行是活的。根因不在 retention：`create` 在 **spawn 之前**就把行写成
+  `running`，所以从未产出 entry 的会话永远停在这个值；而
+  `restoreSessionsFromDb` 的 `if (entries.length === 0) continue` 排在崩溃状态
+  回写**之前**，于是没有任何东西会来修它。谓词本身仍然正确（真在跑的不能删），
+  只是它挡住的不是活会话，而是记账残留——在 restore 的顺序修好之前，这些行
+  被永久豁免。修 restore 时必须只对 `status === "running"` 的 0-entry 行回写，
+  不能无条件回写：`error` 状态会在 error entry 落库**之前**先持久化
+  （`agent-session-manager.ts` spawn 失败路径），无条件回写会把它抹成 `stopped`。
 - 加星是唯一的用户侧豁免。想保留的会话，加星即可，不另设「保留标记」。
 - **workflow 豁免为什么必须有**（2026-08-08 核实）：active review workflow 的参与者
   session 完全可能是 `stopped`（等 reviewer / 等反馈 / discussing 期间），而
