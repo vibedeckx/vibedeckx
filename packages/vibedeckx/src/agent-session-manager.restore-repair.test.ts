@@ -30,11 +30,20 @@ function makeHarness(status: AgentSession["status"], rows: Row[]) {
   const outboxIds = new Set<string>();
   const storage = {
     agentSessions: {
-      getAll: async () => [row],
+      // A COPY, matching production: `getAll` reads rows out of SQL, so the
+      // snapshot `restoreSessionsFromDb` holds goes stale as the loop writes
+      // statuses back. Handing out the live object instead would hide the
+      // orphan-repair pass's map check behind an already-updated status.
+      getAll: async () => [{ ...row }],
       getEntries: async () => [...rows],
       getById: async () => row,
       listByBranch: async () => [row],
       updateStatusPreservingTimestamp: vi.fn(async (_id: string, s: AgentSession["status"]) => { row.status = s; }),
+      // Present only so a test can assert it is NEVER used here. The plain
+      // setter also bumps `activity_at`, which would push every session's
+      // retention deadline forward on every boot — silently, since retention
+      // would simply keep finding nothing expired.
+      updateStatus: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async (_id: string, index: number, data: string) => {
         const msg = JSON.parse(data) as AgentMessage;
         upserts.push({ index, msg });
@@ -273,5 +282,64 @@ describe("restore-time turn repair: snapshot at the repair boundary", () => {
       rmSync(repoDir, { recursive: true, force: true });
       rmSync(dbDir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Orphan repair: a row the DB still calls "running" that this process does not
+ * own gets reset to "stopped".
+ *
+ * `create` writes `running` before the process is spawned, so anything that
+ * dies before the first entry lands leaves such a row — and the restore loop
+ * above skips zero-entry sessions before it resets crashed statuses, so those
+ * rows were never repaired at all. Measured on a real worker: 63 of them, the
+ * oldest four months old, each permanently exempt from session retention and
+ * counted as live on the project dashboard.
+ */
+describe("restore-time orphan repair", () => {
+  it("resets a zero-entry running row without resurrecting it as a session", async () => {
+    const h = makeHarness("running", []);
+    const manager = new AgentSessionManager(h.storage);
+
+    await manager.restoreSessionsFromDb();
+
+    expect(h.row.status).toBe("stopped");
+    // Repaired, not restored: with no history there is nothing to rebuild, and
+    // a phantom entry in the map would surface in the sidebar and the history
+    // dropdown as a session the user never had.
+    expect(manager.getSession("s1")).toBeNull();
+    expect(h.upserts).toHaveLength(0);
+  });
+
+  it("preserves timestamps — the plain setter would break retention silently", async () => {
+    const h = makeHarness("running", []);
+
+    await new AgentSessionManager(h.storage).restoreSessionsFromDb();
+
+    expect(vi.mocked(h.storage.agentSessions.updateStatusPreservingTimestamp))
+      .toHaveBeenCalledWith("s1", "stopped");
+    // `updateStatus` also bumps `activity_at`. Using it here would reset every
+    // session's retention deadline on every boot, so a machine that restarts
+    // regularly would expire nothing — and nothing would ever error.
+    expect(vi.mocked(h.storage.agentSessions.updateStatus)).not.toHaveBeenCalled();
+  });
+
+  it("leaves a row alone once the session is in memory", async () => {
+    // The snapshot still reads "running" for this row (the loop's write-back
+    // does not rewrite it), so only the ownership check can stop a second
+    // write. That check is `this.sessions.has(id)` rather than
+    // `process === null` on purpose: a session that is spawning or waking sits
+    // in the map with a null process and must not be touched either.
+    const h = makeHarness("running", [
+      entry(0, { type: "user", content: "go", timestamp: 1 }),
+      entry(1, { type: "turn_end", timestamp: 2, durationMs: 1, outcome: "completed" }),
+    ]);
+    const manager = new AgentSessionManager(h.storage);
+
+    await manager.restoreSessionsFromDb();
+
+    expect(manager.getSession("s1")).toBeDefined();
+    expect(vi.mocked(h.storage.agentSessions.updateStatusPreservingTimestamp))
+      .toHaveBeenCalledTimes(1); // the restore loop's own reset, not a second one
   });
 });

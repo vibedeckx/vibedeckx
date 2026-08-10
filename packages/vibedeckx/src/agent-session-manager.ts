@@ -3129,8 +3129,63 @@ export class AgentSessionManager {
       restoredCount++;
     }
 
+    await this.repairOrphanedRunningRows(allSessions);
+
     if (restoredCount > 0) {
       console.log(`[AgentSession] Restored ${restoredCount} dormant session(s) from database`);
+    }
+  }
+
+  /**
+   * Reconcile rows the database still calls "running" against what this
+   * process actually owns.
+   *
+   * `create` writes `status='running'` BEFORE the process is spawned, so any
+   * path that dies between the INSERT and the first entry leaves a row
+   * claiming to run forever. The restore loop above is supposed to be the
+   * backstop, but it skips zero-entry rows before it resets crashed statuses
+   * — so precisely the sessions that died earliest are the ones nothing ever
+   * repairs. Measured on a real worker (2026-08-10): 63 such rows, the oldest
+   * four months old, every one of them permanently exempt from session
+   * retention (`status <> 'running'`) and inflating the project dashboard's
+   * running count (46 reported, 1 real).
+   *
+   * Reconciliation rather than prevention, deliberately: a DB row and an OS
+   * process are two resources with no atomic commit between them, so a kill
+   * landing between the INSERT and the spawn leaves the same row no matter
+   * how careful `create` becomes. Prevention narrows the window; only
+   * reconciliation closes it. Same argument the retention plan's §3.1 makes
+   * for snapshot reconciliation over delete events.
+   *
+   * The ownership test is "not in `this.sessions`", NOT `process === null`: a
+   * session that is spawning or waking sits in the map with a null process,
+   * and resetting it would be the same class of bug as the wake/retention
+   * race in `deleteDormantSessionIfExpired`.
+   *
+   * STARTUP ONLY. `createNewSession` INSERTs the row before it puts the
+   * session in the map, so a few milliseconds exist in which a perfectly
+   * healthy session looks orphaned. That window is unreachable from here (no
+   * requests are served yet); a periodic caller would first have to add an
+   * age threshold.
+   *
+   * @param snapshot the row list read at the top of `restoreSessionsFromDb`.
+   * Rows the loop already reset read as stale "running" here — the map check
+   * is what excludes them, which is why it must come after the loop.
+   */
+  private async repairOrphanedRunningRows(snapshot: AgentSessionRow[]): Promise<void> {
+    let repaired = 0;
+    for (const row of snapshot) {
+      if (row.status !== "running") continue;
+      if (this.sessions.has(row.id)) continue;
+      // Timestamp-preserving on purpose: this is bookkeeping, not activity.
+      // `updateStatus` would push `activity_at` forward on every boot, and a
+      // machine that restarts regularly would then never expire anything —
+      // a silent failure, since retention would just keep finding nothing.
+      await this.storage.agentSessions.updateStatusPreservingTimestamp(row.id, "stopped");
+      repaired++;
+    }
+    if (repaired > 0) {
+      console.log(`[AgentSession] Reset ${repaired} orphaned session row(s) left as "running"`);
     }
   }
 

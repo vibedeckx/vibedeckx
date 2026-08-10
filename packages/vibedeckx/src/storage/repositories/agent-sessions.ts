@@ -383,11 +383,14 @@ const touchActivityAt = () => sql<number>`max(activity_at, ${nowActivityAt()})`;
  * matches past the day threshold". Measured on a real worker (2026-08-09) it
  * matched 63 rows, none of them live: `create` writes `running` BEFORE the
  * process is spawned, so a session that never produced an entry keeps that
- * value forever — `restoreSessionsFromDb` skips zero-entry rows before it
- * resets crashed statuses, so nothing ever repairs them. The clause is still
- * correct (a genuinely running session must not be deleted); what it is NOT
- * is rare, and until that restore ordering is fixed it permanently exempts
- * those rows from retention. The workflow clause
+ * value forever. Those rows are now reconciled at startup by
+ * `AgentSessionManager.repairOrphanedRunningRows`, which is what makes them
+ * reachable by retention at all — but the clause stays, and stays load-
+ * bearing: it is the SQL-side half of "never delete a session someone is
+ * using", the other half being the in-memory check in
+ * `deleteDormantSessionIfExpired`. Do not drop it on the grounds that the
+ * memory check already covers it; deletion is irreversible and the two
+ * checks fail differently. The workflow clause
  * is load-bearing: `workflow_runs.source_session_id` / `reviewer_session_id`
  * carry no foreign key, and an active run's participants are routinely
  * `stopped` while waiting for the reviewer, so without it retention would
