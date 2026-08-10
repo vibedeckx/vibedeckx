@@ -24,7 +24,9 @@ describe("GET /api/path/search-catalog", () => {
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-search-routes-"));
     repoDir = path.join(dir, "repo");
-    execSync(`git init -q "${repoDir}"`, { stdio: "ignore" });
+    // Pin the branch name: the root workspace is anchored to whatever branch
+    // git reports, and the runner's init.defaultBranch is not ours to assume.
+    execSync(`git init -q -b main "${repoDir}"`, { stdio: "ignore" });
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "p1", name: "proj", path: repoDir });
 
@@ -51,7 +53,8 @@ describe("GET /api/path/search-catalog", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.snapshotAt).toBeGreaterThan(0);
-    expect(body.workspaces).toEqual([{ branch: null, worktreePath: repoDir }]); // additive worker path protocol
+    // additive worker path protocol; expectedBranch is the root's anchor
+    expect(body.workspaces).toEqual([{ branch: null, expectedBranch: "main", worktreePath: repoDir }]);
     expect(body.sessions).toHaveLength(1);
     expect(body.sessions[0]).toMatchObject({
       id: "s1", branch: null, title: "Investigate flaky test", entryCount: 1,
