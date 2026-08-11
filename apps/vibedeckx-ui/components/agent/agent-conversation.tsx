@@ -60,6 +60,7 @@ import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
 import { SessionHistoryDropdown } from "./session-history-dropdown";
+import { InstantHistoryScroll } from "./instant-history-scroll";
 import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
 
@@ -999,6 +1000,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             )}
           </ConversationContent>
           <ConversationScrollButton />
+          <InstantHistoryScroll messageCount={messages.length} />
         </Conversation>
         <UserInputMarkers messages={messages} contentRef={messagesRef} />
         <QuotePopover containerRef={messagesRef} onQuote={handleQuote} />
