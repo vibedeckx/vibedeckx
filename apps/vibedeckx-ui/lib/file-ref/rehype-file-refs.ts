@@ -1,4 +1,3 @@
-import type { FileRefIndex } from "./file-ref-index";
 import { scanFileRefs, parseFileHref } from "./parse-file-ref";
 
 interface HastNode {
@@ -9,11 +8,20 @@ interface HastNode {
   children?: HastNode[];
 }
 
-export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
-  const resolve = (p: string): string[] => (opts.index ? opts.index.resolve(p) : []);
-
+// Marks every path-shaped reference as a `.file-ref` anchor carrying the RAW
+// path (`dataFileRaw`); whether it resolves to a real file is decided at
+// render time by FileRefLink, which reads the file-ref index from context.
+//
+// Deliberately index-free: an index-dependent plugin forced AgentMarkdown to
+// remount the whole Streamdown tree when the index arrived (Streamdown's memo
+// ignores rehypePlugins), and the remount collapses every markdown message to
+// its placeholder height for a frame — the field-captured "content jump" when
+// opening a session whose index loads late. With the decision deferred, the
+// plugin (and thus the rendered tree) never depends on the index; a late index
+// only restyles the anchors in place via a context re-render.
+export function rehypeFileRefs() {
   function makeAnchor(
-    paths: string[],
+    rawPath: string,
     line: number | null,
     children: HastNode[],
   ): HastNode {
@@ -23,7 +31,7 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
       properties: {
         className: ["file-ref"],
         href: "#file-ref",
-        dataFilePaths: JSON.stringify(paths),
+        dataFileRaw: rawPath,
         ...(line != null ? { dataFileLine: String(line) } : {}),
       },
       children,
@@ -35,17 +43,12 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
     if (refs.length === 0) return [{ type: "text", value }];
     const out: HastNode[] = [];
     let pos = 0;
-    let linked = false;
     for (const r of refs) {
-      const matches = resolve(r.rawPath);
-      if (matches.length === 0) continue;
       if (r.start > pos) out.push({ type: "text", value: value.slice(pos, r.start) });
       const display = r.display ?? value.slice(r.start, r.end);
-      out.push(makeAnchor(matches, r.line, [{ type: "text", value: display }]));
+      out.push(makeAnchor(r.rawPath, r.line, [{ type: "text", value: display }]));
       pos = r.end;
-      linked = true;
     }
-    if (!linked) return [{ type: "text", value }];
     if (pos < value.length) out.push({ type: "text", value: value.slice(pos) });
     return out;
   }
@@ -54,9 +57,7 @@ export function rehypeFileRefs(opts: { index: FileRefIndex | null }) {
     const href = String(node.properties?.href ?? "");
     const parsed = parseFileHref(href);
     if (!parsed) return [node]; // external / anchor link — leave as-is
-    const matches = resolve(parsed.rawPath);
-    if (matches.length === 0) return node.children ?? []; // unwrap broken file link
-    return [makeAnchor(matches, parsed.line, node.children ?? [])];
+    return [makeAnchor(parsed.rawPath, parsed.line, node.children ?? [])];
   }
 
   function processChildren(parent: HastNode, insidePre: boolean = false): void {

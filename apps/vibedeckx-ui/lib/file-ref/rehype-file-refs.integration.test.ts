@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { defaultRehypePlugins } from "streamdown";
 import { rehypeFileRefs } from "./rehype-file-refs";
-import { buildFileRefIndex } from "./file-ref-index";
 
 // End-to-end guard: run rehypeFileRefs inside streamdown's REAL rehype chain
 // (sanitize + harden), in the SAME order AgentMarkdown uses, against hand-built
@@ -15,14 +14,9 @@ const el = (tagName: string, properties: any, children: HNode[]): HNode => ({ ty
 const txt = (value: string): HNode => ({ type: "text", value });
 const p = (...kids: HNode[]): HNode => ({ type: "root", children: [el("p", {}, kids)] });
 
-const index = buildFileRefIndex([
-  "packages/eve/src/execution/compaction.ts",
-  "packages/eve/src/runtime/framework-tools/todo.ts",
-]);
-
 function runChain(tree: HNode): HNode {
   const { harden, raw, ...beforeHarden } = defaultRehypePlugins as any;
-  const chain = [...Object.values(beforeHarden), [rehypeFileRefs, { index }], ...(harden ? [harden] : [])];
+  const chain = [...Object.values(beforeHarden), rehypeFileRefs, ...(harden ? [harden] : [])];
   let t = tree;
   for (const plugin of chain) {
     const [fn, ...opts] = Array.isArray(plugin) ? plugin : [plugin];
@@ -50,7 +44,7 @@ describe("rehypeFileRefs in streamdown's real rehype chain", () => {
     const [a] = anchors(tree);
     expect(a.className).toEqual(["file-ref"]);
     expect(a.href).toBe("#file-ref");
-    expect(JSON.parse(a.dataFilePaths)).toEqual(["packages/eve/src/execution/compaction.ts"]);
+    expect(a.dataFileRaw).toBe("packages/eve/src/execution/compaction.ts");
     expect(a.dataFileLine).toBe("18");
     expect(hasBlockedSpan(tree)).toBe(false);
   });
@@ -58,14 +52,17 @@ describe("rehypeFileRefs in streamdown's real rehype chain", () => {
   it("uses the link's path even when the display text is a symbol, not a filename", () => {
     const tree = runChain(p(el("a", { href: "packages/eve/src/runtime/framework-tools/todo.ts:56" }, [txt("getTodoCompactionMessage")])));
     const [a] = anchors(tree);
-    expect(JSON.parse(a.dataFilePaths)).toEqual(["packages/eve/src/runtime/framework-tools/todo.ts"]);
+    expect(a.dataFileRaw).toBe("packages/eve/src/runtime/framework-tools/todo.ts");
     expect(a.dataFileLine).toBe("56");
     expect(textOf(tree)).toContain("getTodoCompactionMessage");
   });
 
-  it("de-links a markdown link whose path does not resolve to clean text (no blocked span)", () => {
+  it("carries an unresolvable path as a raw-path anchor with clean text (no blocked span)", () => {
+    // Resolution is deferred to FileRefLink, which renders a no-match anchor
+    // as its plain children — the de-linking happens at render time now.
     const tree = runChain(p(txt("see "), el("a", { href: "a/b/does-not-exist.ts:9" }, [txt("x")]), txt(" end")));
-    expect(anchors(tree)).toHaveLength(0);
+    const [a] = anchors(tree);
+    expect(a.dataFileRaw).toBe("a/b/does-not-exist.ts");
     expect(hasBlockedSpan(tree)).toBe(false);
     expect(textOf(tree)).toBe("see x end");
   });
@@ -73,7 +70,7 @@ describe("rehypeFileRefs in streamdown's real rehype chain", () => {
   it("linkifies a bare path sitting in prose text", () => {
     const tree = runChain(p(txt("最后在 packages/eve/src/execution/compaction.ts:18 里")));
     const [a] = anchors(tree);
-    expect(JSON.parse(a.dataFilePaths)).toEqual(["packages/eve/src/execution/compaction.ts"]);
+    expect(a.dataFileRaw).toBe("packages/eve/src/execution/compaction.ts");
     expect(a.dataFileLine).toBe("18");
   });
 
@@ -81,6 +78,6 @@ describe("rehypeFileRefs in streamdown's real rehype chain", () => {
     const tree = runChain(p(el("a", { href: "https://example.com/x" }, [txt("docs")])));
     const [a] = anchors(tree);
     expect(String(a.href)).toContain("example.com");
-    expect(a.dataFilePaths).toBeUndefined();
+    expect(a.dataFileRaw).toBeUndefined();
   });
 });

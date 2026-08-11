@@ -5,39 +5,36 @@ import type React from "react";
 import { Streamdown, defaultRehypePlugins } from "streamdown";
 import { rehypeFileRefs } from "@/lib/file-ref/rehype-file-refs";
 import { FileRefLink } from "./file-ref-link";
-import { useFileNavigation } from "./file-navigation-context";
 
 // Assistant markdown renderer. Mirrors MessageResponse's wrapper class, but
-// injects the file-ref rehype plugin and overrides the <a> renderer. `index`
-// comes from context, so this re-renders when the index loads even though memo
-// only compares `children`.
+// injects the file-ref rehype plugin and overrides the <a> renderer.
 //
 // Plugin order matters: rehypeFileRefs must run AFTER streamdown's `sanitize`
 // (so the file-ref anchors and data-* it injects survive sanitization) but
 // BEFORE `harden`. harden rewrites/blocks relative hrefs, so an agent's
 // `[text](path:line)` markdown link must be converted into an in-app
 // `#file-ref` anchor before harden ever sees it.
-export const AgentMarkdown = memo(function AgentMarkdown({ children }: { children: string }) {
-  const { index } = useFileNavigation();
-  const { harden, ...beforeHarden } = defaultRehypePlugins as Record<string, unknown>;
-  const rehypePlugins = [
-    ...Object.values(beforeHarden),
-    [rehypeFileRefs, { index }],
-    ...(harden ? [harden] : []),
-  ] as unknown as React.ComponentProps<typeof Streamdown>["rehypePlugins"];
+//
+// The chain is a module constant: rehypeFileRefs no longer takes the file-ref
+// index (FileRefLink resolves from context at render time), so nothing here
+// varies with the index and no remount `key` is needed. The previous
+// key=index.version remount collapsed every message to placeholder height for
+// a frame when the index arrived late — the field-captured content jump.
+const { harden, ...beforeHarden } = defaultRehypePlugins as Record<string, unknown>;
+const REHYPE_PLUGINS = [
+  ...Object.values(beforeHarden),
+  rehypeFileRefs,
+  ...(harden ? [harden] : []),
+] as unknown as React.ComponentProps<typeof Streamdown>["rehypePlugins"];
 
-  // Keying on the index identity forces a re-mount when the file-ref index
-  // arrives (or changes). Streamdown's memo comparator only diffs `children`
-  // (plus theme/animating/mode) and deliberately ignores `rehypePlugins`, so a
-  // late-loaded index — same message text, new plugin options — would otherwise
-  // be dropped and refs would stay plain text until a manual source↔rendered
-  // toggle re-mounted the subtree. `null` while loading, stable per index after.
+const COMPONENTS = { a: FileRefLink };
+
+export const AgentMarkdown = memo(function AgentMarkdown({ children }: { children: string }) {
   return (
     <Streamdown
-      key={index?.version ?? "no-file-ref-index"}
       className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-      rehypePlugins={rehypePlugins}
-      components={{ a: FileRefLink }}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={COMPONENTS}
     >
       {children}
     </Streamdown>

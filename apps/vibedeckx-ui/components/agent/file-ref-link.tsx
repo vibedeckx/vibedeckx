@@ -15,9 +15,15 @@ type AnchorProps = ComponentProps<"a"> & { node?: { properties?: Record<string, 
 const REF_CLASS =
   "text-primary underline decoration-dotted underline-offset-2 cursor-pointer hover:decoration-solid";
 
+// Resolution happens HERE, at render time, against the index from context —
+// not in the rehype plugin. A late-arriving index therefore upgrades refs from
+// plain text to links via an in-place re-render; the Streamdown tree is never
+// remounted (see rehype-file-refs.ts for the jump this avoids). Until the
+// index resolves a ref, it renders as its plain children — no element, no
+// link affordance.
 export function FileRefLink({ node, children, href, ...rest }: AnchorProps) {
-  const { openFile } = useFileNavigation();
-  const raw = node?.properties?.dataFilePaths as string | undefined;
+  const { openFile, index } = useFileNavigation();
+  const raw = node?.properties?.dataFileRaw as string | undefined;
 
   // Not one of our file refs — render a normal link.
   if (!raw) {
@@ -36,23 +42,20 @@ export function FileRefLink({ node, children, href, ...rest }: AnchorProps) {
     );
   }
 
-  let paths: string[] = [];
-  try {
-    paths = JSON.parse(raw) as string[];
-  } catch {
-    paths = [];
-  }
   const lineStr = node?.properties?.dataFileLine as string | undefined;
   const line = lineStr != null ? Number(lineStr) : null;
+  const paths = index ? index.resolve(raw) : [];
 
-  if (paths.length <= 1) {
+  if (paths.length === 0) return <>{children}</>;
+
+  if (paths.length === 1) {
     return (
       <a
         href="#"
         className={REF_CLASS}
         onClick={(e) => {
           e.preventDefault();
-          if (paths[0]) openFile(paths[0], line);
+          openFile(paths[0], line);
         }}
       >
         {children}

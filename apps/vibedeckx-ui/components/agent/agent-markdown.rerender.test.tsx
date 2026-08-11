@@ -51,6 +51,8 @@ describe("AgentMarkdown re-render when the file-ref index arrives late", () => {
     });
     expect(container.querySelectorAll("a")).toHaveLength(0);
     expect(container.textContent).toContain("src/app/foo.ts:3");
+    const paragraphBefore = container.querySelector("p");
+    expect(paragraphBefore).not.toBeNull();
 
     // 2. `/list-files` resolves and the index arrives, same message text.
     const index = buildFileRefIndex(["src/app/foo.ts"]);
@@ -62,5 +64,10 @@ describe("AgentMarkdown re-render when the file-ref index arrives late", () => {
     const anchor = container.querySelector("a");
     expect(anchor).not.toBeNull();
     expect(anchor?.textContent).toContain("src/app/foo.ts:3");
+
+    // The upgrade must be an in-place re-render, NOT a remount: a remount
+    // collapses every message to placeholder height for a frame (the captured
+    // "content jump" when opening a session whose index loads late).
+    expect(container.querySelector("p")).toBe(paragraphBefore);
   });
 });
