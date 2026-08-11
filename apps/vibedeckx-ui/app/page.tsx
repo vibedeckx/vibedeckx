@@ -1023,6 +1023,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         projectId={currentProject?.id ?? null}
                         branch={selectedBranch}
                         sessionId={urlSessionId}
+                        navPending={sessionNavPending}
                         setSessionUrlParam={setSessionUrlParam}
                         onActiveSessionChange={setRenderedSessionId}
                         project={currentProject}

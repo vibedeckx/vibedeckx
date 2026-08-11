@@ -378,6 +378,11 @@ function deduplicatePatches(patches: Patch[]): Patch {
 
 interface UseAgentSessionOptions {
   sessionId?: string | null; // Explicit session to load; when undefined/null -> latest-for-branch behavior
+  // True while the caller is mid-navigation and the (branch, sessionId) pair is
+  // not final yet (cross-project session jump: branch is nulled until the target
+  // project's worktrees load). Blocks auto-start so we never fetch — and flash —
+  // the default branch's latest session for a workspace the user didn't pick.
+  suspended?: boolean;
   onTaskCompleted?: () => void;
   onSessionStarted?: (session: AgentSession) => void;
   onTitleUpdated?: (title: string, sessionId: string | null) => void;
@@ -385,6 +390,7 @@ interface UseAgentSessionOptions {
 
 export function useAgentSession(projectId: string | null, branch: string | null, agentMode?: string, agentType?: AgentType, options?: UseAgentSessionOptions) {
   const explicitSessionId = options?.sessionId ?? null;
+  const suspended = options?.suspended ?? false;
   const [session, setSession] = useState<AgentSession | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [status, setStatus] = useState<AgentSessionStatus>("stopped");
@@ -1393,6 +1399,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {
+    // Mid-navigation: (branch, sessionId) aren't final — starting now would load
+    // the default branch's latest session and flash it before the real target.
+    // shouldAutoStartRef stays true, so we start once suspension lifts.
+    if (suspended) return;
     const inPlaceholder =
       projectId !== null
       && hasPlaceholder(workspaceKey(projectId, branch, agentMode));
@@ -1401,7 +1411,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       console.log(`[AgentSession] Auto-start: projectId=${projectId}, branch=${branch}, agentMode=${agentMode}`);
       startSession();
     }
-  }, [projectId, branch, agentMode, session, isLoading, startSession]);
+  }, [projectId, branch, agentMode, session, isLoading, startSession, suspended]);
 
   // Reconnect when tab becomes visible again (browser may suspend timers when backgrounded)
   useEffect(() => {

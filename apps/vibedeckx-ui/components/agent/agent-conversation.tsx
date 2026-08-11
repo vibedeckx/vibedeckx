@@ -102,6 +102,12 @@ interface AgentConversationProps {
   projectId: string | null;
   branch: string | null;
   sessionId?: string | null;
+  /**
+   * True while a cross-project session jump is still resolving (branch nulled,
+   * target session not yet selected). Suspends session auto-load so the window
+   * shows a loading state instead of flashing the default branch's session.
+   */
+  navPending?: boolean;
   setSessionUrlParam?: (id: string | null) => void;
   project?: Project | null;
   onAgentModeChange?: (mode: ExecutionMode) => void;
@@ -152,7 +158,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -214,6 +220,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     residentLimitPrompt,
   } = useAgentSession(projectId, branch, project?.agent_mode, agentType, {
     sessionId,
+    suspended: navPending,
     onTaskCompleted,
     onSessionStarted,
     onTitleUpdated: (title: string, titleSessionId: string | null) => {
