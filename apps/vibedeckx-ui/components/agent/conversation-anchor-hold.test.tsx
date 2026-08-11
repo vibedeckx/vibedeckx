@@ -7,15 +7,18 @@ import type { FileRefIndex } from "@/lib/file-ref/file-ref-index";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const scrollToBottom = vi.fn();
-const stickCtx = { scrollToBottom, isAtBottom: true };
+const stickCtx = {
+  scrollToBottom,
+  isAtBottom: true,
+  scrollRef: { current: null },
+  contentRef: { current: null },
+};
 vi.mock("use-stick-to-bottom", () => ({
   useStickToBottomContext: () => stickCtx,
 }));
 
-import { InstantHistoryScroll } from "./instant-history-scroll";
+import { ConversationAnchorHold, shouldHoldBottom } from "./conversation-anchor-hold";
 import { FileNavigationProvider } from "./file-navigation-context";
-
-const INSTANT_PIN = { animation: "instant", duration: expect.any(Number) };
 
 function fakeIndex(version: string): FileRefIndex {
   return { version, resolve: () => [] } as unknown as FileRefIndex;
@@ -26,7 +29,6 @@ let root: Root | null = null;
 
 beforeEach(() => {
   scrollToBottom.mockClear();
-  stickCtx.isAtBottom = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -39,83 +41,73 @@ afterEach(() => {
   root = null;
 });
 
-async function renderWith(count: number, index: FileRefIndex | null = null) {
+async function renderWith(count: number, index: FileRefIndex | null = null, turnInFlight = false) {
   await act(async () => {
     root!.render(
       <FileNavigationProvider value={{ openFile: () => {}, index }}>
-        <InstantHistoryScroll messageCount={count} />
+        <ConversationAnchorHold messageCount={count} turnInFlight={turnInFlight} />
       </FileNavigationProvider>
     );
   });
 }
 
-describe("InstantHistoryScroll — history fill", () => {
+describe("ConversationAnchorHold — history fill pin", () => {
   it("pins instantly when history fills from empty in one flush (cache-hit Ready path)", async () => {
     await renderWith(0);
     expect(scrollToBottom).not.toHaveBeenCalled();
 
     await renderWith(42);
     expect(scrollToBottom).toHaveBeenCalledTimes(1);
-    expect(scrollToBottom).toHaveBeenCalledWith(INSTANT_PIN);
+    expect(scrollToBottom).toHaveBeenCalledWith({ animation: "instant" });
+  });
+
+  it("pins on fill regardless of a turn being in flight (active-session deep-link)", async () => {
+    await renderWith(0, null, true);
+    await renderWith(42, null, true);
+    expect(scrollToBottom).toHaveBeenCalledTimes(1);
   });
 
   it("does not re-fire on subsequent growth (live streaming stays smooth)", async () => {
     await renderWith(0);
     await renderWith(5);
     await renderWith(6);
-    await renderWith(7);
     expect(scrollToBottom).toHaveBeenCalledTimes(1);
   });
 
   it("re-arms after the reset effect clears messages (session/workspace switch)", async () => {
     await renderWith(0);
     await renderWith(10);
-    expect(scrollToBottom).toHaveBeenCalledTimes(1);
-
-    await renderWith(0); // reset effect: setMessages([])
-    await renderWith(20); // next session's history fills in
+    await renderWith(0);
+    await renderWith(20);
     expect(scrollToBottom).toHaveBeenCalledTimes(2);
   });
 
-  it("fires when mounted with history already present", async () => {
+  it("does not scroll on index arrival alone — mid-list readers must not be yanked", async () => {
+    await renderWith(0);
     await renderWith(10);
-    expect(scrollToBottom).toHaveBeenCalledTimes(1);
+    scrollToBottom.mockClear();
+
+    await renderWith(10, fakeIndex("idx-1"));
+    await renderWith(10, fakeIndex("idx-2"));
+    expect(scrollToBottom).not.toHaveBeenCalled();
   });
 });
 
-describe("InstantHistoryScroll — file-ref index arrival", () => {
-  it("re-pins instantly when the index version changes while at the bottom", async () => {
-    await renderWith(0);
-    await renderWith(10); // fill pin
-    scrollToBottom.mockClear();
-
-    await renderWith(10, fakeIndex("idx-1")); // late index → markdown remount
-    expect(scrollToBottom).toHaveBeenCalledTimes(1);
-    expect(scrollToBottom).toHaveBeenCalledWith(INSTANT_PIN);
-
-    await renderWith(10, fakeIndex("idx-2")); // index refresh → remount again
-    expect(scrollToBottom).toHaveBeenCalledTimes(2);
+describe("shouldHoldBottom — hold vs smooth-follow decision", () => {
+  it("holds during settle even while a turn is in flight (opening a running session)", () => {
+    expect(shouldHoldBottom({ settling: true, turnInFlight: true, wasAtBottom: true })).toBe(true);
   });
 
-  it("does not yank down a user who scrolled up to read", async () => {
-    await renderWith(0);
-    await renderWith(10);
-    scrollToBottom.mockClear();
-
-    stickCtx.isAtBottom = false;
-    await renderWith(10, fakeIndex("idx-1"));
-    expect(scrollToBottom).not.toHaveBeenCalled();
+  it("holds any post-settle growth when no turn is in flight (late images/highlighting)", () => {
+    expect(shouldHoldBottom({ settling: false, turnInFlight: false, wasAtBottom: true })).toBe(true);
   });
 
-  it("ignores index arrival while the conversation is still empty", async () => {
-    await renderWith(0);
-    await renderWith(0, fakeIndex("idx-1"));
-    expect(scrollToBottom).not.toHaveBeenCalled();
+  it("leaves streaming into a stable view to the smooth follow", () => {
+    expect(shouldHoldBottom({ settling: false, turnInFlight: true, wasAtBottom: true })).toBe(false);
   });
 
-  it("does not fire when mounting with the index already present", async () => {
-    await renderWith(0, fakeIndex("idx-1"));
-    await renderWith(10, fakeIndex("idx-1")); // fill pin only
-    expect(scrollToBottom).toHaveBeenCalledTimes(1);
+  it("never forces a mid-list reader to the bottom", () => {
+    expect(shouldHoldBottom({ settling: true, turnInFlight: false, wasAtBottom: false })).toBe(false);
+    expect(shouldHoldBottom({ settling: false, turnInFlight: false, wasAtBottom: false })).toBe(false);
   });
 });

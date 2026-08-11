@@ -60,7 +60,7 @@ import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
 import { SessionHistoryDropdown } from "./session-history-dropdown";
-import { InstantHistoryScroll } from "./instant-history-scroll";
+import { ConversationAnchorHold } from "./conversation-anchor-hold";
 import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
 
@@ -413,6 +413,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
     return -1;
   }, [messages]);
+
+  // A trailing turn_end marks "no turn in flight". Drives the resize animation
+  // choice and the anchor hold: streaming into a stable view keeps the smooth
+  // follow; all other pinned-state growth snaps (see ConversationAnchorHold).
+  const turnInFlight =
+    status === "running" && messages.length > 0 && messages[messages.length - 1].type !== "turn_end";
 
   // 本 session 是否为某活跃 review run 的 reviewer(讨论态才显示终稿按钮)。
   // frame-wins:WS 帧驱动为主,REST 只在种子期间没有任何帧到达时落地——见
@@ -923,7 +929,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
 
       {/* Messages area */}
       <div className="flex-1 min-h-0 relative">
-        <Conversation className="h-full" initial="instant">
+        {/* Smooth resize-follow is only wanted while a turn is streaming into
+            a stable view. All other pinned-state growth is a load artifact and
+            is corrected pre-paint by ConversationAnchorHold; this prop switch
+            is the fallback layer for anything the hold's observer misses (the
+            library reads the resize option per event). */}
+        <Conversation
+          className="h-full"
+          initial="instant"
+          resize={turnInFlight ? "smooth" : "instant"}
+        >
           <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar">
             {!session && messages.length === 0 ? (
               <div className="text-center py-16">
@@ -1000,7 +1015,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             )}
           </ConversationContent>
           <ConversationScrollButton />
-          <InstantHistoryScroll messageCount={messages.length} />
+          <ConversationAnchorHold messageCount={messages.length} turnInFlight={turnInFlight} />
         </Conversation>
         <UserInputMarkers messages={messages} contentRef={messagesRef} />
         <QuotePopover containerRef={messagesRef} onQuote={handleQuote} />
