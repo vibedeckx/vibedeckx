@@ -7,6 +7,8 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:DELETE /api/path/worktrees",
   "http:GET /api/agent-sessions/:param",
   "http:GET /api/agent-sessions/:param/brief-source",
+  "http:GET /api/agent-sessions/:param/history-head",
+  "http:GET /api/agent-sessions/:param/history-window",
   "http:GET /api/browse",
   "http:GET /api/executor-processes/running",
   "http:GET /api/path/agent-sessions",

@@ -871,6 +871,7 @@ export function connectPersistentRemoteWs(
   eventBus?: EventBus,
   agentSessionManager?: AgentSessionManager,
   storage?: Storage,
+  requestedHistory?: { afterEntryIndex?: number; historyEpoch?: number },
 ): void {
   const hasCachedData = cache.hasData(sessionId);
   console.log(`[AgentWS] Opening persistent remote WS for ${sessionId} (cached=${hasCachedData})`);
@@ -884,7 +885,20 @@ export function connectPersistentRemoteWs(
   }
 
   const channelId = randomUUID();
-  const wsPath = `/api/agent-sessions/${remoteInfo.remoteSessionId}/stream`;
+  const cachedHead = cache.get(sessionId);
+  const upstreamEpoch = requestedHistory?.historyEpoch ?? cachedHead?.historyEpoch ?? undefined;
+  const upstreamAfter = requestedHistory?.afterEntryIndex ?? (
+    upstreamEpoch !== undefined ? cachedHead?.lastTurnEndEntryIndex ?? undefined : undefined
+  );
+  const upstreamParams = new URLSearchParams();
+  if (upstreamEpoch !== undefined && upstreamAfter !== undefined) {
+    upstreamParams.set("after", String(upstreamAfter));
+    upstreamParams.set("epoch", String(upstreamEpoch));
+  }
+  const usesBoundedReplay = upstreamParams.size > 0;
+  const wsPath = `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}/stream${
+    usesBoundedReplay ? `?${upstreamParams}` : ""
+  }`;
 
   const adapter = new VirtualWsAdapter(
     (data) => reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),
@@ -940,6 +954,7 @@ export function connectPersistentRemoteWs(
       cache.broadcast(sessionId, raw);
       const statusEvent = statusEventFromRemotePatch(parsed, sessionId, remoteInfo);
       if (statusEvent) {
+        cache.setSessionStatus(sessionId, statusEvent.status);
         let activityReady: true | "stale" | false = true;
         if (storage) {
           activityReady = await persistRemoteSessionActivityFrame(storage, sessionId, remoteInfo, parsed)
@@ -957,6 +972,11 @@ export function connectPersistentRemoteWs(
       cache.setFinished(sessionId);
       cache.broadcast(sessionId, raw);
     } else if ("taskCompleted" in parsed) {
+      cache.setSessionStatus(sessionId, "stopped");
+      const turnEndIndex = (parsed.taskCompleted as { turnEndEntryIndex?: unknown }).turnEndEntryIndex;
+      if (typeof turnEndIndex === "number" && Number.isInteger(turnEndIndex)) {
+        cache.setLastTurnEndEntryIndex(sessionId, turnEndIndex);
+      }
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
       let activityReady: true | "stale" | false = true;
@@ -1028,6 +1048,7 @@ export function connectPersistentRemoteWs(
         }
       }
     } else if ("error" in parsed) {
+      cache.setSessionStatus(sessionId, "error");
       cache.appendMessage(sessionId, raw, false);
       cache.broadcast(sessionId, raw);
       let activityReady: true | "stale" | false = true;
@@ -1052,6 +1073,15 @@ export function connectPersistentRemoteWs(
         cache.setFinished(sessionId);
       }
     } else if ("Ready" in parsed) {
+      const epoch = (parsed as { historyEpoch?: unknown }).historyEpoch;
+      if (typeof epoch === "number" && Number.isInteger(epoch)) cache.setHistoryEpoch(sessionId, epoch);
+      cache.broadcast(sessionId, raw);
+    } else if ("HistorySync" in parsed) {
+      const sync = parsed.HistorySync as { historyEpoch?: unknown; reset?: unknown };
+      if (typeof sync.historyEpoch === "number" && Number.isInteger(sync.historyEpoch)) {
+        if (sync.reset === true) cache.resetHistory(sessionId, sync.historyEpoch);
+        else cache.setHistoryEpoch(sessionId, sync.historyEpoch);
+      }
       cache.broadcast(sessionId, raw);
     }
   };
@@ -1106,9 +1136,16 @@ export function connectPersistentRemoteWs(
         syncing = false;
         const currentEntry = cache.get(sessionId)!;
         const cachedSeq = entryPatchFrames(currentEntry.messages);
-        const extendsCache = isSequencePrefix(cachedSeq, replayBuffer);
+        const extendsCache = !usesBoundedReplay && isSequencePrefix(cachedSeq, replayBuffer);
 
-        if (extendsCache && replayBuffer.length > cachedSeq.length) {
+        if (usesBoundedReplay) {
+          // The worker replayed only the namespace after the last sealed turn.
+          // Replace that mutable tail by absolute index; a partial history
+          // window is intentionally not a prefix of the worker's full store.
+          cache.replaceEntryTail(sessionId, upstreamAfter!, replayBuffer);
+          for (const msg of replayBuffer) cache.broadcast(sessionId, msg);
+          cache.broadcast(sessionId, raw);
+        } else if (extendsCache && replayBuffer.length > cachedSeq.length) {
           // Remote has newer data — send delta + update cache
           const delta = replayBuffer.slice(cachedSeq.length);
           console.log(`[AgentWS] Sync delta: ${delta.length} new entry patches for ${sessionId} (remote=${replayBuffer.length}, cached=${cachedSeq.length})`);

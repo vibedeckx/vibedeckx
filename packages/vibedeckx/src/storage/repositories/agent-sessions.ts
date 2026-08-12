@@ -114,6 +114,7 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   last_completed_at: row.last_completed_at,
   favorited_at: row.favorited_at,
   native_session_id: row.native_session_id,
+  history_epoch: row.history_epoch,
 });
 
 const parseActivityTimestamp = (value: string): number | null => {
@@ -773,6 +774,15 @@ export const createAgentSessionRepos = (
       await kdb.updateTable("agent_sessions")
         .set({ last_completed_at: timestampMs, activity_at: sql<number>`max(activity_at, ${timestampMs})` })
         .where("id", "=", id).execute();
+    },
+
+    incrementHistoryEpoch: async (id) => {
+      await kdb.updateTable("agent_sessions")
+        .set({ history_epoch: sql<number>`history_epoch + 1` })
+        .where("id", "=", id).execute();
+      const row = await kdb.selectFrom("agent_sessions")
+        .select("history_epoch").where("id", "=", id).executeTakeFirstOrThrow();
+      return row.history_epoch;
     },
 
     delete: async (id) => {

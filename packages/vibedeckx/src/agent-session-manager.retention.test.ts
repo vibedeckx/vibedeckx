@@ -120,6 +120,19 @@ function fakeSocket(frames: string[]) {
 }
 
 describe("retention delete path", () => {
+  it("replays only entries after the client's sealed boundary", async () => {
+    const h = await makeHarness();
+    const frames: string[] = [];
+    h.manager.subscribe("s1", fakeSocket(frames), { afterEntryIndex: 0, historyEpoch: 0 });
+    const entryPaths = frames.flatMap((raw) => {
+      const parsed = JSON.parse(raw) as { JsonPatch?: Array<{ path: string }> };
+      return parsed.JsonPatch?.map((op) => op.path).filter((path) => path.startsWith("/entries/")) ?? [];
+    });
+    expect(entryPaths).toEqual(["/entries/1"]);
+    expect(frames.map((raw) => JSON.parse(raw)).find((frame) => frame.HistorySync)?.HistorySync)
+      .toEqual({ historyEpoch: 0, reset: false });
+  });
+
   it("deletes a dormant session and tells its subscribers it is finished", async () => {
     const h = await makeHarness();
     const frames: string[] = [];

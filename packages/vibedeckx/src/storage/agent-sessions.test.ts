@@ -749,6 +749,15 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       expect((await storage.agentSessions.getLatestByBranch("p1", "dev"))?.id).toBe("s2");
       expect((await storage.agentSessions.getById("s1"))?.last_completed_at).toBe(67890);
     });
+
+    it("increments the history epoch without touching existing entries", async () => {
+      await setupTwoSessions();
+      await storage.agentSessions.upsertEntry("s1", 0, JSON.stringify({ type: "user", content: "old" }));
+      expect((await storage.agentSessions.getById("s1"))?.history_epoch).toBe(0);
+      expect(await storage.agentSessions.incrementHistoryEpoch("s1")).toBe(1);
+      expect(await storage.agentSessions.incrementHistoryEpoch("s1")).toBe(2);
+      expect((await storage.agentSessions.getEntries("s1"))).toHaveLength(1);
+    });
   });
 
   describe("agentSessions.delete", () => {

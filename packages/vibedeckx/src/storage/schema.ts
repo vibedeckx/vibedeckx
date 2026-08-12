@@ -150,6 +150,8 @@ export interface AgentSessionsTable {
    * agent_session_native_ids.
    */
   native_session_id: string | null;
+  /** Increments whenever this session's entry-index namespace is reset. */
+  history_epoch: Generated<number>;
 }
 
 /**

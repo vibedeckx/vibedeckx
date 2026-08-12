@@ -20,6 +20,7 @@ import { createHash, randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
 import { WorkspaceCheckoutUnavailableError } from "../agent-session-manager.js";
 import { forgetRemoteSession } from "../remote-session-cleanup.js";
+import { buildHistoryWindow } from "../session-history-window.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -268,9 +269,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Start agent session at a path (path-based, for remote execution)
   fastify.post<{
-    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; model?: string | null };
+    Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; model?: string | null; historyTurns?: number };
   }>("/api/path/agent-sessions", async (req, reply) => {
-    const { path: projectPath, branch, permissionMode, agentType, force, model } = req.body;
+    const { path: projectPath, branch, permissionMode, agentType, force, model, historyTurns } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
@@ -320,6 +321,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
+      const epoch = fastify.agentSessionManager.getHistoryEpoch(sessionId) ?? 0;
+      const historyWindow = historyTurns
+        ? buildHistoryWindow(fastify.agentSessionManager.getRawMessages(sessionId), epoch, { turns: historyTurns })
+        : undefined;
       const projection = await fastify.storage.agentSessions.getActivityById(sessionId, "session-detail");
       if (session?.workspaceCheckoutId && !projection) {
         return reply.code(409).send({
@@ -347,7 +352,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
           checkoutDeletedAt: projection?.checkoutDeletedAt ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
         },
-        messages,
+        messages: historyWindow ? historyWindow.entries.map((entry) => entry.message) : messages,
+        ...(historyWindow ? { historyWindow } : {}),
       });
     } catch (error) {
       console.error("[API] Failed to load path-based agent session:", error);
@@ -678,7 +684,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Load existing Agent Session for a branch (no auto-create)
   fastify.post<{
     Params: { projectId: string };
-    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; model?: string | null };
+    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; model?: string | null; historyTurns?: number };
   }>("/api/projects/:projectId/agent-sessions", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -687,7 +693,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { branch, permissionMode, agentType, model } = req.body;
+    const { branch, permissionMode, agentType, model, historyTurns } = req.body;
 
     let agentMode = project.agent_mode;
     let useRemoteAgent = agentMode !== 'local';
@@ -735,14 +741,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
           agentMode,
           "POST",
           `/api/path/agent-sessions`,
-          { path: remoteConfig.remote_path, branch, permissionMode, agentType, model }
+          { path: remoteConfig.remote_path, branch, permissionMode, agentType, model, historyTurns }
         );
 
         console.log(`[API] Remote proxy result: ok=${result.ok}, status=${result.status}, ` +
           `data=${JSON.stringify(result.data).substring(0, 500)}`);
 
         if (result.ok) {
-          const remoteData = result.data as { session: { id: string } | null; messages: unknown[] };
+          const remoteData = result.data as {
+            session: { id: string } | null;
+            messages: unknown[];
+            historyWindow?: ReturnType<typeof buildHistoryWindow>;
+          };
           if (!remoteData.session) {
             // Remote has no existing session for this branch — pass through.
             return reply.code(200).send({ session: null, messages: [] });
@@ -769,9 +779,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
           if (remoteData.messages && remoteData.messages.length > 0) {
             const cacheEntry = fastify.remotePatchCache.getOrCreate(localSessionId);
             if (cacheEntry.messages.length === 0) {
-              for (let i = 0; i < remoteData.messages.length; i++) {
-                const patch = ConversationPatch.addEntry(i, remoteData.messages[i] as AgentMessage);
+              const seededEntries = remoteData.historyWindow?.entries
+                ?? remoteData.messages.map((message, entryIndex) => ({ entryIndex, message: message as AgentMessage }));
+              for (const { entryIndex, message } of seededEntries) {
+                const patch = ConversationPatch.addEntry(entryIndex, message as AgentMessage);
                 fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
+              }
+              if (remoteData.historyWindow) {
+                fastify.remotePatchCache.setHistoryEpoch(localSessionId, remoteData.historyWindow.historyEpoch);
+                if (remoteData.historyWindow.lastTurnEndEntryIndex !== null) {
+                  fastify.remotePatchCache.setLastTurnEndEntryIndex(localSessionId, remoteData.historyWindow.lastTurnEndEntryIndex);
+                }
+              }
+              const seededStatus = (remoteData.session as Record<string, unknown>).status;
+              if (seededStatus === "running" || seededStatus === "stopped" || seededStatus === "error") {
+                fastify.remotePatchCache.setSessionStatus(localSessionId, seededStatus);
               }
               console.log(`[API] findExisting proxy: seeded cache with ${remoteData.messages.length} msgs for ${localSessionId}`);
             } else {
@@ -788,6 +810,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               projectId: req.params.projectId,
             },
             messages: remoteData.messages,
+            ...(remoteData.historyWindow ? { historyWindow: remoteData.historyWindow } : {}),
           });
         }
         return reply.code(proxyStatus(result)).send(result.data);
@@ -819,6 +842,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const session = fastify.agentSessionManager.getSession(sessionId);
       const messages = fastify.agentSessionManager.getMessages(sessionId);
+      const epoch = fastify.agentSessionManager.getHistoryEpoch(sessionId) ?? 0;
+      const historyWindow = historyTurns
+        ? buildHistoryWindow(fastify.agentSessionManager.getRawMessages(sessionId), epoch, { turns: historyTurns })
+        : undefined;
 
       const effectiveStatus = session?.status || "stopped";
 
@@ -833,7 +860,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
               model: session?.model ?? null,
               processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
             },
-        messages,
+        messages: historyWindow ? historyWindow.entries.map((entry) => entry.message) : messages,
+        ...(historyWindow ? { historyWindow } : {}),
       });
     } catch (error) {
       console.error("[API] Failed to load agent session:", error);
@@ -1048,6 +1076,137 @@ const routes: FastifyPluginAsync = async (fastify) => {
         messages,
       });
     }
+  );
+
+  /**
+   * Bounded, turn-boundary-aligned conversation window. This is the primary
+   * UI history path; the legacy detail route remains additive compatibility
+   * for older workers and non-windowed consumers.
+   */
+  fastify.get<{
+    Params: { sessionId: string };
+    Querystring: { before?: string; turns?: string };
+  }>("/api/agent-sessions/:sessionId/history-window", async (req, reply) => {
+    const beforeRaw = req.query.before === undefined ? undefined : Number(req.query.before);
+    const turnsRaw = req.query.turns === undefined ? undefined : Number(req.query.turns);
+    const before = Number.isInteger(beforeRaw) && beforeRaw! >= 0 ? beforeRaw : undefined;
+    const turns = Number.isInteger(turnsRaw) ? Math.max(1, Math.min(turnsRaw!, 20)) : 5;
+
+    if (req.params.sessionId.startsWith("remote-")) {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+      if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
+      const params = new URLSearchParams({ turns: String(turns) });
+      if (before !== undefined) params.set("before", String(before));
+      const result = await proxyAuto(
+        remoteInfo.remoteServerId,
+        "GET",
+        `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}/history-window?${params}`,
+      );
+      if (result.ok) {
+        const data = result.data as Record<string, unknown> & { session?: Record<string, unknown> };
+        return reply.code(200).send({
+          ...data,
+          session: data.session ? {
+            ...data.session,
+            id: req.params.sessionId,
+            projectId: projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
+            branch: remoteInfo.branch ?? null,
+          } : undefined,
+        });
+      }
+
+      // Old workers do not expose windows. One full fetch preserves
+      // compatibility, then the hub still returns a bounded payload to the UI.
+      if (result.status === 404) {
+        const legacy = await proxyAuto(
+          remoteInfo.remoteServerId,
+          "GET",
+          `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}`,
+        );
+        if (!legacy.ok) return reply.code(proxyStatus(legacy)).send(legacy.data);
+        const data = legacy.data as { session?: { status?: string }; messages?: AgentMessage[] };
+        const messages = data.messages ?? [];
+        return reply.code(200).send({
+          ...buildHistoryWindow(messages, 0, { before, turns }),
+          status: data.session?.status ?? "stopped",
+          legacyFallback: true,
+        });
+      }
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    const session = fastify.agentSessionManager.getSession(req.params.sessionId);
+    if (!session) return reply.code(404).send({ error: "Session not found" });
+    const epoch = fastify.agentSessionManager.getHistoryEpoch(req.params.sessionId) ?? 0;
+    return reply.code(200).send({
+      ...buildHistoryWindow(fastify.agentSessionManager.getRawMessages(req.params.sessionId), epoch, { before, turns }),
+      status: session.status,
+      session: {
+        id: session.id,
+        projectId: session.projectId,
+        branch: session.branch,
+        status: session.status,
+        permissionMode: session.permissionMode,
+        agentType: session.agentType,
+        model: session.model,
+        processAlive: fastify.agentSessionManager.getSessionProcessAlive(session.id),
+      },
+    });
+  });
+
+  fastify.get<{ Params: { sessionId: string } }>(
+    "/api/agent-sessions/:sessionId/history-head",
+    async (req, reply) => {
+      if (req.params.sessionId.startsWith("remote-")) {
+        const userId = requireAuth(req, reply);
+        if (userId === null) return;
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
+        const cached = fastify.remotePatchCache.get(req.params.sessionId);
+        if (cached?.historyEpoch !== null && cached?.lastTurnEndEntryIndex !== null && cached?.sessionStatus) {
+          return reply.code(200).send({
+            historyEpoch: cached.historyEpoch,
+            latestEntryIndex: cached.latestEntryIndex,
+            lastTurnEndEntryIndex: cached.lastTurnEndEntryIndex,
+            status: cached.sessionStatus,
+          });
+        }
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          "GET",
+          `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}/history-head`,
+        );
+        if (result.ok) return reply.code(200).send(result.data);
+        if (result.status !== 404) return reply.code(proxyStatus(result)).send(result.data);
+        const legacy = await proxyAuto(
+          remoteInfo.remoteServerId,
+          "GET",
+          `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}`,
+        );
+        if (!legacy.ok) return reply.code(proxyStatus(legacy)).send(legacy.data);
+        const data = legacy.data as { session?: { status?: string }; messages?: AgentMessage[] };
+        const head = buildHistoryWindow(data.messages ?? [], 0, { turns: 1 });
+        return reply.code(200).send({
+          historyEpoch: head.historyEpoch,
+          latestEntryIndex: head.latestEntryIndex,
+          lastTurnEndEntryIndex: head.lastTurnEndEntryIndex,
+          status: data.session?.status ?? "stopped",
+        });
+      }
+
+      const session = fastify.agentSessionManager.getSession(req.params.sessionId);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+      const epoch = fastify.agentSessionManager.getHistoryEpoch(req.params.sessionId) ?? 0;
+      const head = buildHistoryWindow(fastify.agentSessionManager.getRawMessages(req.params.sessionId), epoch, { turns: 1 });
+      return reply.code(200).send({
+        historyEpoch: head.historyEpoch,
+        latestEntryIndex: head.latestEntryIndex,
+        lastTurnEndEntryIndex: head.lastTurnEndEntryIndex,
+        status: session.status,
+      });
+    },
   );
 
   /**

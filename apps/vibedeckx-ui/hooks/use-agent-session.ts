@@ -11,6 +11,7 @@ import {
   addPlaceholder,
   removePlaceholder,
 } from "@/lib/placeholder-workspaces";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 // ============ Content Part Types (for image attachments) ============
 
@@ -69,7 +70,8 @@ export type RemoteConnectionStatus = "connected" | "reconnecting" | "disconnecte
 // WebSocket message types
 type AgentWsMessage =
   | { JsonPatch: Patch }
-  | { Ready: true }
+  | { HistorySync: { historyEpoch: number; reset: boolean } }
+  | { Ready: true; historyEpoch?: number }
   | { finished: true }
   | { error: string }
   | { taskCompleted: { duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number } }
@@ -83,9 +85,34 @@ type AgentWsMessage =
 
 // Container for patch target
 interface PatchContainer {
-  entries: AgentMessage[];
+  entries: Record<number, AgentMessage>;
   status: AgentSessionStatus;
 }
+
+export interface WindowedAgentEntry {
+  entryIndex: number;
+  message: AgentMessage;
+}
+
+interface SessionHistoryWindow {
+  historyEpoch: number;
+  latestEntryIndex: number | null;
+  lastTurnEndEntryIndex: number | null;
+  entries: WindowedAgentEntry[];
+  previousCursor: number | null;
+  hasMore: boolean;
+  status: AgentSessionStatus;
+  session?: AgentSession;
+}
+
+interface SessionHistoryHead {
+  historyEpoch: number;
+  latestEntryIndex: number | null;
+  lastTurnEndEntryIndex: number | null;
+  status: AgentSessionStatus;
+}
+
+const INITIAL_HISTORY_TURNS = 5;
 
 // ============ API Functions ============
 
@@ -106,11 +133,11 @@ async function loadExistingSession(
   branch: string | null,
   permissionMode?: "plan" | "edit",
   agentType?: AgentType
-): Promise<{ session: AgentSession | null; messages: AgentMessage[] }> {
+): Promise<{ session: AgentSession | null; messages: AgentMessage[]; historyWindow?: SessionHistoryWindow }> {
   const response = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ branch, permissionMode, agentType }),
+    body: JSON.stringify({ branch, permissionMode, agentType, historyTurns: INITIAL_HISTORY_TURNS }),
   });
 
   if (!response.ok) {
@@ -273,21 +300,149 @@ async function acceptPlanApi(sessionId: string, planContent: string): Promise<vo
 }
 
 // ============ Session Cache ============
-// Module-level cache: avoids 14s remote proxy call when switching back to a previously visited workspace.
-// Key: "projectId:branch:sessionId" (sessionId = "latest" when caller hasn't specified an explicit id),
-// Value: session object from last successful REST response.
-const sessionCache = new Map<string, AgentSession>();
+// A small, page-lifetime LRU. A stopped snapshot is reused after a lightweight
+// head check; changed or running sessions fetch only the latest bounded window.
+// The WebSocket then reconciles the active tail after the last sealed turn.
+//
+// This deliberately is not localStorage: transcripts can contain large tool
+// output, images, and sensitive source code. Keeping it in memory bounds both
+// persistence and exposure.
+interface CachedSessionSnapshot {
+  session: AgentSession;
+  history: SessionHistoryWindow;
+}
+
+const MAX_SESSION_CACHE_KEYS = 16;
+const sessionCache = new Map<string, CachedSessionSnapshot>();
+const historyFetches = new Map<string, Promise<SessionHistoryWindow>>();
 
 function getCacheKey(projectId: string, branch: string | null, sessionId?: string | null): string {
   return `${projectId}:${branch ?? ""}:${sessionId ?? "latest"}`;
 }
 
-async function getSessionById(sessionId: string): Promise<{ session: AgentSession; messages: AgentMessage[] }> {
-  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}`);
+function readSessionCache(key: string): CachedSessionSnapshot | undefined {
+  const cached = sessionCache.get(key);
+  if (!cached) return undefined;
+  // Map insertion order is our LRU order.
+  sessionCache.delete(key);
+  sessionCache.set(key, cached);
+  return cached;
+}
+
+function writeSessionCache(key: string, snapshot: CachedSessionSnapshot): void {
+  sessionCache.delete(key);
+  sessionCache.set(key, snapshot);
+  while (sessionCache.size > MAX_SESSION_CACHE_KEYS) {
+    const oldest = sessionCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    sessionCache.delete(oldest);
+  }
+}
+
+function cacheSessionSnapshot(
+  projectId: string,
+  branch: string | null,
+  requestedSessionId: string | null,
+  session: AgentSession,
+  history: SessionHistoryWindow,
+): void {
+  const snapshot = { session, history: { ...history, entries: [...history.entries] } };
+  writeSessionCache(getCacheKey(projectId, branch, requestedSessionId), snapshot);
+  writeSessionCache(getCacheKey(projectId, branch, session.id), snapshot);
+}
+
+function updateCachedSessionMetadata(
+  projectId: string,
+  branch: string | null,
+  requestedSessionId: string | null,
+  session: AgentSession,
+): void {
+  const cached = readSessionCache(getCacheKey(projectId, branch, session.id))
+    ?? readSessionCache(getCacheKey(projectId, branch, requestedSessionId));
+  if (!cached) return;
+  cacheSessionSnapshot(projectId, branch, requestedSessionId, session, cached.history);
+}
+
+async function getHistoryWindow(sessionId: string, before?: number | null): Promise<SessionHistoryWindow> {
+  const params = new URLSearchParams({ turns: String(INITIAL_HISTORY_TURNS) });
+  if (before !== undefined && before !== null) params.set("before", String(before));
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/history-window?${params}`);
   if (!response.ok) {
     throw new Error(`Session ${sessionId} not found`);
   }
-  return response.json();
+  const data = await response.json() as Partial<SessionHistoryWindow> & {
+    messages?: AgentMessage[];
+    session?: AgentSession;
+  };
+  if (Array.isArray(data.entries)) return data as SessionHistoryWindow;
+  // Test doubles and pre-window servers may answer with the legacy detail
+  // shape. Normalize it here; production remote fallback is normally handled
+  // by the hub so the browser still receives a bounded response.
+  const messages = data.messages ?? [];
+  return {
+    historyEpoch: 0,
+    latestEntryIndex: messages.length > 0 ? messages.length - 1 : null,
+    lastTurnEndEntryIndex: messages.reduce<number | null>(
+      (last, message, index) => message.type === "turn_end" ? index : last,
+      null,
+    ),
+    entries: messages.map((message, entryIndex) => ({ entryIndex, message })),
+    previousCursor: null,
+    hasMore: false,
+    status: data.session?.status ?? "stopped",
+    session: data.session,
+  };
+}
+
+function getLatestHistoryWindow(sessionId: string): Promise<SessionHistoryWindow> {
+  const existing = historyFetches.get(sessionId);
+  if (existing) return existing;
+  const request = getHistoryWindow(sessionId).finally(() => historyFetches.delete(sessionId));
+  historyFetches.set(sessionId, request);
+  return request;
+}
+
+async function getHistoryHead(sessionId: string): Promise<SessionHistoryHead> {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/history-head`);
+  if (!response.ok) throw new Error(`Session ${sessionId} not found`);
+  const data = await response.json() as Partial<SessionHistoryHead> & {
+    messages?: AgentMessage[];
+    session?: AgentSession;
+  };
+  if (typeof data.historyEpoch === "number") return data as SessionHistoryHead;
+  const messages = data.messages ?? [];
+  return {
+    historyEpoch: 0,
+    latestEntryIndex: messages.length > 0 ? messages.length - 1 : null,
+    lastTurnEndEntryIndex: messages.reduce<number | null>(
+      (last, message, index) => message.type === "turn_end" ? index : last,
+      null,
+    ),
+    status: data.session?.status ?? "stopped",
+  };
+}
+
+function entriesRecord(entries: WindowedAgentEntry[]): Record<number, AgentMessage> {
+  return Object.fromEntries(entries.map(({ entryIndex, message }) => [entryIndex, message]));
+}
+
+function denseEntries(container: PatchContainer): WindowedAgentEntry[] {
+  return Object.entries(container.entries)
+    .map(([entryIndex, message]) => ({ entryIndex: Number(entryIndex), message }))
+    .sort((a, b) => a.entryIndex - b.entryIndex);
+}
+
+function emptyHistory(session: AgentSession): SessionHistoryWindow {
+  return {
+    historyEpoch: 0,
+    latestEntryIndex: null,
+    lastTurnEndEntryIndex: null,
+    entries: [],
+    previousCursor: null,
+    hasMore: false,
+    status: session.status,
+    session,
+  };
 }
 
 // ============ Patch Application ============
@@ -305,7 +460,7 @@ function applyPatch(container: PatchContainer, patch: Patch): PatchContainer {
         // Check if it's the special clearAll marker
         if (value?.type === "ENTRY" && value.content?.type === "system" && value.content?.content === "__CLEAR_ALL__") {
           console.log("[JsonPatch] Received clearAll signal - clearing all entries");
-          draft.entries = [];
+          draft.entries = {};
           continue;
         }
       }
@@ -328,14 +483,11 @@ function applyPatch(container: PatchContainer, patch: Patch): PatchContainer {
         switch (op) {
           case "add":
             // Ensure array is large enough
-            while (draft.entries.length <= index) {
-              draft.entries.push(null as unknown as AgentMessage);
-            }
             draft.entries[index] = value.content;
             break;
 
           case "replace":
-            if (index < draft.entries.length) {
+            if (draft.entries[index] !== undefined) {
               draft.entries[index] = value.content;
             } else {
               console.warn(`[JsonPatch] Replace index out of bounds: ${index}`);
@@ -343,10 +495,7 @@ function applyPatch(container: PatchContainer, patch: Patch): PatchContainer {
             break;
 
           case "remove":
-            if (index < draft.entries.length) {
-              // Mark as removed (filter later if needed)
-              draft.entries.splice(index, 1);
-            }
+            delete draft.entries[index];
             break;
         }
       } else if (path === "/status") {
@@ -406,7 +555,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const openSocketRef = useRef<(sessionId: string) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
-  const containerRef = useRef<PatchContainer>({ entries: [], status: "stopped" });
+  const containerRef = useRef<PatchContainer>({ entries: {}, status: "stopped" });
+  const historyRef = useRef<SessionHistoryWindow | null>(null);
+  const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
+  const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
+  const sessionRef = useRef<AgentSession | null>(null);
   const finishedRef = useRef(false);
   const shouldAutoStartRef = useRef(true); // Auto-start on mount and worktree switch
   const connectionStartTimeRef = useRef<number | null>(null);
@@ -446,6 +599,30 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     projectIdRef.current = projectId;
     branchRef.current = branch;
     explicitSessionIdRef.current = explicitSessionId;
+    sessionRef.current = session;
+  });
+
+  // Durable completion notifications are a latency hint: while the user is
+  // looking elsewhere, refresh any warm window for the completed session.
+  // A missed SSE is harmless because startSession always revalidates the
+  // bounded server window before displaying it.
+  useGlobalEventStream((data) => {
+    if (data.type !== "notification:created") return;
+    const notification = (data as {
+      notification?: { kind?: string; session_id?: string | null };
+    }).notification;
+    const sessionId = notification?.session_id;
+    if (!sessionId || (notification.kind !== "session_result_ready" && notification.kind !== "session_failed")) return;
+    const warm = [...sessionCache.entries()].filter(([, value]) => value.session.id === sessionId);
+    if (warm.length === 0) return;
+    void getLatestHistoryWindow(sessionId)
+      .then((history) => {
+        for (const [key, value] of warm) {
+          const nextSession = history.session ?? { ...value.session, status: history.status };
+          writeSessionCache(key, { session: nextSession, history });
+        }
+      })
+      .catch((error) => console.warn(`[AgentSession] completion prefetch failed for ${sessionId}:`, error));
   });
 
   // WebSocket reconnection constants
@@ -535,6 +712,38 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       sessionCache.delete(getCacheKey(pid, br, null));
     };
 
+    const persistCurrentSnapshot = () => {
+      const pid = projectIdRef.current;
+      const currentSession = sessionRef.current;
+      if (!pid || !currentSession || currentSession.id !== sessionId) return;
+      const nextSession = currentSession.status === containerRef.current.status
+        ? currentSession
+        : { ...currentSession, status: containerRef.current.status };
+      sessionRef.current = nextSession;
+      const existingHistory = historyRef.current;
+      if (!existingHistory) return;
+      const windowEntries = denseEntries(containerRef.current);
+      const latestEntryIndex = windowEntries.at(-1)?.entryIndex ?? null;
+      const lastTurnEndEntryIndex = [...windowEntries].reverse()
+        .find((entry) => entry.message.type === "turn_end")?.entryIndex
+        ?? existingHistory.lastTurnEndEntryIndex;
+      const nextHistory = {
+        ...existingHistory,
+        status: containerRef.current.status,
+        latestEntryIndex,
+        lastTurnEndEntryIndex,
+        entries: windowEntries,
+      };
+      historyRef.current = nextHistory;
+      cacheSessionSnapshot(
+        pid,
+        branchRef.current,
+        explicitSessionIdRef.current,
+        nextSession,
+        nextHistory,
+      );
+    };
+
     // If WS is open/connecting for a DIFFERENT session, close it first
     if (wsRef.current && wsSessionIdRef.current !== sessionId) {
       console.log(`[AgentSession] Closing stale WS for ${wsSessionIdRef.current}, switching to ${sessionId}`);
@@ -550,13 +759,20 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     }
 
     // Only reset container if it has no existing data (preserve REST-provided messages)
-    if (containerRef.current.entries.filter(Boolean).length === 0) {
-      containerRef.current = { entries: [], status: "running" };
+    if (Object.keys(containerRef.current.entries).length === 0) {
+      containerRef.current = { entries: {}, status: "running" };
     }
     finishedRef.current = false;
     isReplayingRef.current = true; // Buffer patches until Ready signal
 
-    const wsUrl = getWebSocketUrl(`/api/agent-sessions/${sessionId}/stream`);
+    const history = historyRef.current;
+    const syncParams = new URLSearchParams();
+    if (history?.lastTurnEndEntryIndex !== null && history?.lastTurnEndEntryIndex !== undefined) {
+      syncParams.set("after", String(history.lastTurnEndEntryIndex));
+      syncParams.set("epoch", String(history.historyEpoch));
+    }
+    const suffix = syncParams.size > 0 ? `?${syncParams}` : "";
+    const wsUrl = getWebSocketUrl(`/api/agent-sessions/${sessionId}/stream${suffix}`);
     console.log("[AgentSession] Connecting to WebSocket:", wsUrl);
 
     const ws = new WebSocket(wsUrl);
@@ -593,6 +809,25 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // Liveness-only frame — already accounted for above.
         if ("keepalive" in msg) return;
 
+        if ("HistorySync" in msg) {
+          if (msg.HistorySync.reset || (historyRef.current && historyRef.current.historyEpoch !== msg.HistorySync.historyEpoch)) {
+            containerRef.current = { entries: {}, status: containerRef.current.status };
+            historyRef.current = historyRef.current
+              ? {
+                  ...historyRef.current,
+                  historyEpoch: msg.HistorySync.historyEpoch,
+                  latestEntryIndex: null,
+                  lastTurnEndEntryIndex: null,
+                  entries: [],
+                  previousCursor: null,
+                  hasMore: false,
+                }
+              : null;
+            setHasEarlierHistory(false);
+          }
+          return;
+        }
+
         // Handle JsonPatch messages
         if ("JsonPatch" in msg) {
           const patch = msg.JsonPatch;
@@ -602,14 +837,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
           // During replay, skip React state updates to avoid scroll jump
           if (!isReplayingRef.current) {
-            setMessages([...containerRef.current.entries.filter(Boolean)]);
+            const nextMessages = denseEntries(containerRef.current).map((entry) => entry.message);
+            setMessages(nextMessages);
             console.log("[AgentSession] setStatus(live) →", containerRef.current.status);
             setStatus(containerRef.current.status);
-
-            // Invalidate cache when session becomes stopped/error so next startSession does a fresh REST call
-            if (containerRef.current.status === "stopped" || containerRef.current.status === "error") {
-              invalidateSessionCache();
-            }
+            persistCurrentSnapshot();
           } else {
             console.log("[AgentSession] /status patch applied during replay (no setStatus), container.status =", containerRef.current.status);
           }
@@ -621,17 +853,19 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           console.log("[AgentSession] Received Ready signal - history complete, status=", containerRef.current.status);
           isReplayingRef.current = false;
           // Flush accumulated state to React in a single update
-          setMessages([...containerRef.current.entries.filter(Boolean)]);
+          setMessages(denseEntries(containerRef.current).map((entry) => entry.message));
           setStatus(containerRef.current.status);
           setIsInitialized(true);
+          persistCurrentSnapshot();
           return;
         }
 
-        // Handle finished signal - don't reconnect, invalidate cache so next startSession does a fresh REST call
+        // Handle finished signal. Keep the final snapshot: stopped history is
+        // exactly the content users most often switch back to.
         if ("finished" in msg) {
-          console.log("[AgentSession] Received finished signal, invalidating cache");
+          console.log("[AgentSession] Received finished signal, preserving cached snapshot");
           finishedRef.current = true;
-          invalidateSessionCache();
+          persistCurrentSnapshot();
           ws.close(1000, "finished");
           return;
         }
@@ -797,27 +1031,60 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsInitialized(false);
     lastStartFailedRef.current = false;
 
-    // Try cached session first — skip the slow REST call if we already know the session ID
+    // A cache hit avoids rendering and parsing the old full transcript, but is
+    // not shown until the bounded server window confirms its current head.
     const cacheKey = getCacheKey(projectId, branch, explicitSessionId);
-    const cached = sessionCache.get(cacheKey);
-    if (cached) {
-      console.log(`[AgentSession] Cache hit for ${cacheKey}, reconnecting WebSocket directly`);
-      setSession(cached);
-      setStatus(cached.status);
-      connectWebSocket(cached.id);
-      onSessionStartedRef.current?.(cached);
-      startingRef.current = false;
-      return cached;
-    }
-
-    // Cache miss — need the slow REST call
+    const cached = readSessionCache(cacheKey);
     setIsLoading(true);
 
     try {
       console.log(`[AgentSession] Starting REST call: projectId=${projectId}, branch=${branch}, sessionId=${explicitSessionId ?? "latest"}, agentType=${agentType}, generation=${generation}`);
-      const { session: newSession, messages: initialMessages } = explicitSessionId
-        ? await getSessionById(explicitSessionId)
-        : await loadExistingSession(projectId, branch, permissionMode, agentType);
+      let newSession: AgentSession | null;
+      let initialMessages: AgentMessage[];
+      let historyWindow: SessionHistoryWindow | undefined;
+      if (explicitSessionId) {
+        const head = cached ? await getHistoryHead(explicitSessionId) : null;
+        const cacheIsCurrent = cached && head
+          && head.status === "stopped"
+          && head.historyEpoch === cached.history.historyEpoch
+          && head.lastTurnEndEntryIndex === cached.history.lastTurnEndEntryIndex;
+        historyWindow = cacheIsCurrent
+          ? { ...cached.history, status: head.status, latestEntryIndex: head.latestEntryIndex }
+          : await getLatestHistoryWindow(explicitSessionId);
+        newSession = historyWindow.session ?? cached?.session ?? null;
+        initialMessages = historyWindow.entries.map((entry) => entry.message);
+      } else if (cached) {
+        // Workspace navigation normally omits ?session=. Reuse the warm
+        // latest-session snapshot after the same lightweight sealed-head
+        // validation used by explicit history navigation. If it changed (or
+        // vanished), fall back to resolving the branch's latest session.
+        let head: SessionHistoryHead | null = null;
+        try {
+          head = await getHistoryHead(cached.session.id);
+        } catch {
+          // The cached handle may have expired; the branch lookup below is the
+          // authoritative way to discover its current latest session.
+        }
+        const cacheIsCurrent = head
+          && head.status === "stopped"
+          && head.historyEpoch === cached.history.historyEpoch
+          && head.lastTurnEndEntryIndex === cached.history.lastTurnEndEntryIndex;
+        if (cacheIsCurrent) {
+          historyWindow = { ...cached.history, status: head.status, latestEntryIndex: head.latestEntryIndex };
+          newSession = { ...cached.session, status: head.status };
+          initialMessages = historyWindow.entries.map((entry) => entry.message);
+        } else {
+          const loaded = await loadExistingSession(projectId, branch, permissionMode, agentType);
+          newSession = loaded.session;
+          initialMessages = loaded.messages;
+          historyWindow = loaded.historyWindow;
+        }
+      } else {
+        const loaded = await loadExistingSession(projectId, branch, permissionMode, agentType);
+        newSession = loaded.session;
+        initialMessages = loaded.messages;
+        historyWindow = loaded.historyWindow;
+      }
 
       // If branch/project changed while the API call was in flight, discard the result
       if (sessionGenerationRef.current !== generation) {
@@ -833,7 +1100,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         setSession(null);
         setStatus("stopped");
         setMessages([]);
-        containerRef.current = { entries: [], status: "stopped" };
+        containerRef.current = { entries: {}, status: "stopped" };
+        historyRef.current = null;
+        setHasEarlierHistory(false);
         setIsInitialized(true);
         return null;
       }
@@ -841,22 +1110,40 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       console.log(`[AgentSession] REST response: sessionId=${newSession.id}, msgCount=${initialMessages?.length ?? 0}, status=${newSession.status}, explicitSessionIdRequested=${explicitSessionId ?? "<null>"}`);
 
       // Cache the session for future workspace switches (cache under both the explicit id key and the latest key)
-      sessionCache.set(cacheKey, newSession);
-      if (explicitSessionId) {
-        sessionCache.set(getCacheKey(projectId, branch, newSession.id), newSession);
-      }
+      const normalizedHistory: SessionHistoryWindow = historyWindow ? {
+        ...historyWindow,
+        status: newSession.status,
+        session: newSession,
+      } : {
+        historyEpoch: 0,
+        latestEntryIndex: initialMessages.length > 0 ? initialMessages.length - 1 : null,
+        lastTurnEndEntryIndex: initialMessages.reduce<number | null>(
+          (last, message, index) => message.type === "turn_end" ? index : last,
+          null,
+        ),
+        entries: initialMessages.map((message, entryIndex) => ({ entryIndex, message })),
+        previousCursor: null,
+        hasMore: false,
+        status: newSession.status,
+        session: newSession,
+      };
+      cacheSessionSnapshot(projectId, branch, explicitSessionId, newSession, normalizedHistory);
 
       setSession(newSession);
+      sessionRef.current = newSession;
+      historyRef.current = normalizedHistory;
+      setHasEarlierHistory(normalizedHistory.hasMore);
       setStatus(newSession.status);
 
-      // Pre-populate messages from REST response for immediate display
-      // (WebSocket replay will update containerRef in the background and flush on Ready)
+      // Pre-populate the bounded REST window; WebSocket replay only reconciles
+      // the active tail after its sealed boundary.
       if (initialMessages && initialMessages.length > 0) {
         setMessages(initialMessages);
-        containerRef.current = { entries: [...initialMessages], status: newSession.status };
+        containerRef.current = { entries: entriesRecord(normalizedHistory.entries), status: newSession.status };
       }
+      setIsInitialized(true);
 
-      // Connect WebSocket - it will receive history via patches
+      // Connect WebSocket for the active tail and subsequent live patches.
       connectWebSocket(newSession.id);
 
       // Notify caller that session has started (e.g. to refetch workspace statuses)
@@ -1010,8 +1297,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         if (!prev) return prev;
         const updated = { ...prev, agentType, model: null };
         if (projectId) {
-          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
-          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+          updateCachedSessionMetadata(projectId, branch, explicitSessionId, updated);
         }
         return updated;
       });
@@ -1054,8 +1340,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         if (!prev || prev.id !== targetSessionId) return prev;
         const updated = { ...prev, model: stored };
         if (projectId) {
-          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
-          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+          updateCachedSessionMetadata(projectId, branch, explicitSessionId, updated);
         }
         return updated;
       });
@@ -1080,8 +1365,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         if (!prev) return prev;
         const updated = { ...prev, permissionMode: mode };
         if (projectId) {
-          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
-          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+          updateCachedSessionMetadata(projectId, branch, explicitSessionId, updated);
         }
         return updated;
       });
@@ -1105,8 +1389,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         if (!prev) return prev;
         const updated = { ...prev, permissionMode: "edit" as const };
         if (projectId) {
-          sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), updated);
-          sessionCache.set(getCacheKey(projectId, branch, updated.id), updated);
+          updateCachedSessionMetadata(projectId, branch, explicitSessionId, updated);
         }
         return updated;
       });
@@ -1153,7 +1436,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setError(null);
     setRemoteStatus(null);
     setMessages([]);
-    containerRef.current = { entries: [], status: "stopped" };
+    containerRef.current = { entries: {}, status: "stopped" };
+    historyRef.current = null;
+    setHasEarlierHistory(false);
     // Mark this workspace as "in placeholder mode" so auto-start skips it,
     // and so switching away and back (or refreshing) preserves the empty
     // placeholder. Cleared when the user picks a session from history or
@@ -1268,9 +1553,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           model: data.session.model ?? null,
           processAlive: data.session.processAlive ?? true,
         };
-        sessionCache.set(getCacheKey(projectId, branch, explicitSessionId), newSession);
-        sessionCache.set(getCacheKey(projectId, branch, newSession.id), newSession);
+        const history = emptyHistory(newSession);
+        cacheSessionSnapshot(projectId, branch, explicitSessionId, newSession, history);
         setSession(newSession);
+        sessionRef.current = newSession;
+        historyRef.current = history;
         setStatus(newSession.status);
         setIsInitialized(true);
         // No longer in placeholder mode — a real session exists now.
@@ -1306,6 +1593,44 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     return promise;
   }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket]);
 
+  const loadEarlierHistory = useCallback(async (): Promise<void> => {
+    const currentSession = sessionRef.current;
+    const currentHistory = historyRef.current;
+    if (!currentSession || !currentHistory?.hasMore || currentHistory.previousCursor === null || isLoadingEarlier) return;
+    setIsLoadingEarlier(true);
+    try {
+      const older = await getHistoryWindow(currentSession.id, currentHistory.previousCursor);
+      if (sessionRef.current?.id !== currentSession.id) return;
+      if (older.historyEpoch !== currentHistory.historyEpoch) {
+        historyRef.current = older;
+        containerRef.current = { entries: entriesRecord(older.entries), status: older.status };
+      } else {
+        const merged = new Map<number, AgentMessage>();
+        for (const entry of older.entries) merged.set(entry.entryIndex, entry.message);
+        for (const entry of denseEntries(containerRef.current)) merged.set(entry.entryIndex, entry.message);
+        const entries = [...merged].sort((a, b) => a[0] - b[0])
+          .map(([entryIndex, message]) => ({ entryIndex, message }));
+        historyRef.current = {
+          ...currentHistory,
+          entries,
+          previousCursor: older.previousCursor,
+          hasMore: older.hasMore,
+        };
+        containerRef.current = { entries: entriesRecord(entries), status: containerRef.current.status };
+      }
+      const nextHistory = historyRef.current!;
+      setMessages(nextHistory.entries.map((entry) => entry.message));
+      setHasEarlierHistory(nextHistory.hasMore);
+      if (projectId) cacheSessionSnapshot(projectId, branch, explicitSessionId, currentSession, nextHistory);
+    } catch (e) {
+      toast.error("Failed to load earlier conversation", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setIsLoadingEarlier(false);
+    }
+  }, [projectId, branch, explicitSessionId, isLoadingEarlier]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -1325,6 +1650,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // "No" so a suspended ensureSession caller doesn't hang forever.
       sessionGenerationRef.current += 1;
       cancelResidentLimitPrompt();
+      // The cache belongs to this conversation UI lifetime. Clearing it on
+      // unmount avoids retaining transcripts after the user leaves the page
+      // (and prevents a later mount from inheriting another user's snapshot).
+      sessionCache.clear();
     };
   }, [cancelResidentLimitPrompt, clearSilenceTimer]);
 
@@ -1371,6 +1700,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     // Reset all state
     setSession(null);
+    sessionRef.current = null;
     setStatus("stopped");
     setIsConnected(false);
     setIsInitialized(stayingInPlaceholder);
@@ -1378,7 +1708,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsLoading(false);
     setRemoteStatus(null);
     setMessages([]); // Clear stale messages to prevent scroll jump on workspace switch
-    containerRef.current = { entries: [], status: "stopped" };
+    containerRef.current = { entries: {}, status: "stopped" };
+    historyRef.current = null;
+    setHasEarlierHistory(false);
     finishedRef.current = false;
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;
@@ -1389,8 +1721,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Auto-start the session unless the user explicitly asked for an empty
     // placeholder via New Conversation.
     shouldAutoStartRef.current = !stayingInPlaceholder;
-    // Invalidate session cache — branch or mode changed, cached session is stale
-    if (projectId) sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
+    // Keep other workspaces' snapshots warm. Their WebSockets will reconcile
+    // anything that changed while they were not selected.
     // Note: agentType is intentionally NOT in this dependency array.
     // Agent type changes are handled by restartSession() which keeps the WebSocket
     // connected so it can receive the clearAll patch and new messages from the backend.
@@ -1453,6 +1785,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     error,
     remoteStatus,
     workflowRunUpdate,
+    messageEntryIndices: denseEntries(containerRef.current).map((entry) => entry.entryIndex),
+    hasEarlierHistory,
+    isLoadingEarlier,
+    loadEarlierHistory,
     startSession,
     sendMessage,
     uploadPaste,

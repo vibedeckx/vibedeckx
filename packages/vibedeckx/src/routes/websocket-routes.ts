@@ -14,6 +14,19 @@ import { attachWsHeartbeat } from "../utils/ws-heartbeat.js";
 import { ProjectChatNotFoundError } from "../project-chat-manager.js";
 import "../server-types.js";
 
+export function resolveRemoteReplayCursor(
+  clientEpoch: number | undefined,
+  cachedEpoch: number | null,
+  afterEntryIndex: number | undefined,
+): { epochMatches: boolean; replayAfter: number } {
+  const epochMatches = clientEpoch === undefined
+    || (cachedEpoch !== null && clientEpoch === cachedEpoch);
+  return {
+    epochMatches,
+    replayAfter: epochMatches ? (afterEntryIndex ?? -1) : -1,
+  };
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // When a reverse-connect tunnel comes back online, re-establish persistent
   // remote WS connections for any cached sessions that belong to that server.
@@ -237,11 +250,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     );
 
     // Agent Session WebSocket
-    fastify.get<{ Params: { sessionId: string }; Querystring: { token?: string } }>(
+    fastify.get<{ Params: { sessionId: string }; Querystring: { token?: string; after?: string; epoch?: string } }>(
       "/api/agent-sessions/:sessionId/stream",
       { websocket: true },
       async (socket, req) => {
         const { sessionId } = req.params;
+        const afterEntryIndex = Number.isInteger(Number(req.query.after)) ? Number(req.query.after) : undefined;
+        const historyEpoch = Number.isInteger(Number(req.query.epoch)) ? Number(req.query.epoch) : undefined;
 
         // Log before auth check for visibility
         console.log(`[AgentWS] Connection attempt for session ${sessionId} (auth=${fastify.authEnabled})`);
@@ -309,11 +324,34 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           // --- Phase 1: Replay cached data to this frontend ---
           if (cacheEntry.messages.length > 0) {
-            console.log(`[AgentWS] Replaying ${cacheEntry.messages.length} cached msgs for ${sessionId}`);
+            const { epochMatches, replayAfter } = resolveRemoteReplayCursor(
+              historyEpoch, cacheEntry.historyEpoch, afterEntryIndex,
+            );
+            console.log(`[AgentWS] Replaying cached msgs for ${sessionId} after=${replayAfter}`);
+            try {
+              socket.send(JSON.stringify({
+                HistorySync: {
+                  historyEpoch: cacheEntry.historyEpoch ?? historyEpoch ?? 0,
+                  reset: !epochMatches,
+                },
+              }));
+            } catch { /* client gone */ }
             for (const raw of cacheEntry.messages) {
+              if (replayAfter >= 0) {
+                try {
+                  const parsed = JSON.parse(raw) as { JsonPatch?: Array<{ path?: string }> };
+                  if (Array.isArray(parsed.JsonPatch)) {
+                    const indices = parsed.JsonPatch.flatMap((op) => {
+                      const match = op.path?.match(/^\/entries\/(\d+)$/);
+                      return match ? [Number(match[1])] : [];
+                    });
+                    if (indices.length > 0 && indices.every((index) => index <= replayAfter)) continue;
+                  }
+                } catch { /* non-patch cached frame */ }
+              }
               try { socket.send(raw); } catch { /* client gone */ }
             }
-            try { socket.send(JSON.stringify({ Ready: true })); } catch { /* client gone */ }
+            try { socket.send(JSON.stringify({ Ready: true, historyEpoch: cacheEntry.historyEpoch ?? undefined })); } catch { /* client gone */ }
 
             if (cacheEntry.finished) {
               try { socket.send(JSON.stringify({ finished: true })); } catch { /* noop */ }
@@ -335,6 +373,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             connectPersistentRemoteWs(
               sessionId, remoteInfo, cache, fastify.reverseConnectManager,
               fastify.eventBus, fastify.agentSessionManager, fastify.storage,
+              { afterEntryIndex, historyEpoch },
             );
           }
 
@@ -367,7 +406,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         }
 
         // Local session handling
-        const unsubscribe = fastify.agentSessionManager.subscribe(sessionId, socket);
+        const unsubscribe = fastify.agentSessionManager.subscribe(sessionId, socket, { afterEntryIndex, historyEpoch });
 
         if (!unsubscribe) {
           console.log(`[AgentWS] Session ${sessionId} not found`);

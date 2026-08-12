@@ -12,6 +12,26 @@
 
 import type WebSocket from "ws";
 
+function patchEntryMetadata(raw: string): { latest: number | null; lastTurnEnd: number | null } {
+  let latest: number | null = null;
+  let lastTurnEnd: number | null = null;
+  try {
+    const parsed = JSON.parse(raw) as {
+      JsonPatch?: Array<{ path?: string; value?: { type?: string; content?: { type?: string } } }>;
+    };
+    for (const op of parsed.JsonPatch ?? []) {
+      const match = op.path?.match(/^\/entries\/(\d+)$/);
+      if (!match) continue;
+      const index = Number(match[1]);
+      latest = Math.max(latest ?? -1, index);
+      if (op.value?.type === "ENTRY" && op.value.content?.type === "turn_end") {
+        lastTurnEnd = Math.max(lastTurnEnd ?? -1, index);
+      }
+    }
+  } catch { /* raw frames are best-effort cache metadata */ }
+  return { latest, lastTurnEnd };
+}
+
 export interface CacheEntry {
   /** Raw serialized WS messages (JsonPatch, taskCompleted, error, etc.) */
   messages: string[];
@@ -29,6 +49,11 @@ export interface CacheEntry {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   /** Current reconnection attempt count (reset on successful stable connection) */
   reconnectAttempt: number;
+  /** Worker-reported entry-index namespace, when supported. */
+  historyEpoch: number | null;
+  latestEntryIndex: number | null;
+  lastTurnEndEntryIndex: number | null;
+  sessionStatus: "running" | "stopped" | "error" | null;
 }
 
 export class RemotePatchCache {
@@ -46,6 +71,10 @@ export class RemotePatchCache {
         reconnecting: false,
         reconnectTimer: null,
         reconnectAttempt: 0,
+        historyEpoch: null,
+        latestEntryIndex: null,
+        lastTurnEndEntryIndex: null,
+        sessionStatus: null,
       };
       this.cache.set(sessionId, entry);
     }
@@ -71,6 +100,11 @@ export class RemotePatchCache {
     entry.messages.push(raw);
     if (isJsonPatch) {
       entry.patchCount++;
+      const metadata = patchEntryMetadata(raw);
+      if (metadata.latest !== null) entry.latestEntryIndex = Math.max(entry.latestEntryIndex ?? -1, metadata.latest);
+      if (metadata.lastTurnEnd !== null) {
+        entry.lastTurnEndEntryIndex = Math.max(entry.lastTurnEndEntryIndex ?? -1, metadata.lastTurnEnd);
+      }
     }
   }
 
@@ -83,6 +117,15 @@ export class RemotePatchCache {
     const reconnecting = existing?.reconnecting ?? false;
     const reconnectTimer = existing?.reconnectTimer ?? null;
     const reconnectAttempt = existing?.reconnectAttempt ?? 0;
+    const historyEpoch = existing?.historyEpoch ?? null;
+    let latestEntryIndex: number | null = null;
+    let lastTurnEndEntryIndex: number | null = null;
+    for (const raw of messages) {
+      const metadata = patchEntryMetadata(raw);
+      if (metadata.latest !== null) latestEntryIndex = Math.max(latestEntryIndex ?? -1, metadata.latest);
+      if (metadata.lastTurnEnd !== null) lastTurnEndEntryIndex = Math.max(lastTurnEndEntryIndex ?? -1, metadata.lastTurnEnd);
+    }
+    const sessionStatus = existing?.sessionStatus ?? null;
     this.cache.set(sessionId, {
       messages,
       patchCount,
@@ -92,7 +135,43 @@ export class RemotePatchCache {
       reconnecting,
       reconnectTimer,
       reconnectAttempt,
+      historyEpoch,
+      latestEntryIndex,
+      lastTurnEndEntryIndex,
+      sessionStatus,
     });
+  }
+
+  /**
+   * Replace only the unsealed entry tail. Completed entries at or before the
+   * cursor and non-entry lifecycle frames stay cached; replayed tail frames
+   * become the authoritative copy after a tunnel reconnect.
+   */
+  replaceEntryTail(sessionId: string, afterEntryIndex: number, tail: string[]): void {
+    const entry = this.getOrCreate(sessionId);
+    const kept = entry.messages.filter((raw) => {
+      try {
+        const parsed = JSON.parse(raw) as { JsonPatch?: Array<{ path?: string }> };
+        if (!Array.isArray(parsed.JsonPatch)) return true;
+        const indices = parsed.JsonPatch.flatMap((op) => {
+          const match = op.path?.match(/^\/entries\/(\d+)$/);
+          return match ? [Number(match[1])] : [];
+        });
+        return indices.length === 0 || indices.some((index) => index <= afterEntryIndex);
+      } catch {
+        return true;
+      }
+    });
+    const messages = [...kept, ...tail];
+    const patchCount = messages.reduce((count, raw) => {
+      try {
+        const parsed = JSON.parse(raw) as { JsonPatch?: unknown };
+        return count + (Array.isArray(parsed.JsonPatch) ? 1 : 0);
+      } catch {
+        return count;
+      }
+    }, 0);
+    this.replaceAll(sessionId, messages, patchCount);
   }
 
   setFinished(sessionId: string): void {
@@ -100,6 +179,29 @@ export class RemotePatchCache {
     if (entry) {
       entry.finished = true;
     }
+  }
+
+  setHistoryEpoch(sessionId: string, epoch: number): void {
+    this.getOrCreate(sessionId).historyEpoch = epoch;
+  }
+
+  /** Start a fresh entry-index namespace without dropping live connections. */
+  resetHistory(sessionId: string, epoch: number): void {
+    const entry = this.getOrCreate(sessionId);
+    entry.messages = [];
+    entry.patchCount = 0;
+    entry.finished = false;
+    entry.historyEpoch = epoch;
+    entry.latestEntryIndex = null;
+    entry.lastTurnEndEntryIndex = null;
+  }
+
+  setLastTurnEndEntryIndex(sessionId: string, index: number): void {
+    this.getOrCreate(sessionId).lastTurnEndEntryIndex = index;
+  }
+
+  setSessionStatus(sessionId: string, status: "running" | "stopped" | "error"): void {
+    this.getOrCreate(sessionId).sessionStatus = status;
   }
 
   /** Store a persistent remote WebSocket connection. */

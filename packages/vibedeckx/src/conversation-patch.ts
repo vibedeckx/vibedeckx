@@ -37,7 +37,8 @@ export type AgentSessionStatus = "running" | "stopped" | "error";
  */
 export type AgentWsMessage =
   | { JsonPatch: Patch }
-  | { Ready: true }
+  | { HistorySync: { historyEpoch: number; reset: boolean } }
+  | { Ready: true; historyEpoch?: number }
   | { finished: true }
   | { error: string }
   | { taskCompleted: { duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number; summaryText?: string; turnEndEntryIndex?: number; workflowSuppressed?: boolean } }

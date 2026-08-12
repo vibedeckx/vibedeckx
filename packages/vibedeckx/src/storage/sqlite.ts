@@ -124,6 +124,7 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
           last_completed_at INTEGER DEFAULT NULL,
           favorited_at INTEGER DEFAULT NULL,
           native_session_id TEXT DEFAULT NULL,
+          history_epoch INTEGER NOT NULL DEFAULT 0,
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
           FOREIGN KEY (workspace_checkout_id) REFERENCES workspace_checkouts(id)
             DEFERRABLE INITIALLY DEFERRED
@@ -131,10 +132,10 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
         INSERT INTO agent_sessions_fk_new
           (id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
            title, model, created_at, updated_at, activity_at, last_user_message_at,
-           last_completed_at, favorited_at, native_session_id)
+           last_completed_at, favorited_at, native_session_id, history_epoch)
           SELECT id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
                  title, model, created_at, updated_at, activity_at, last_user_message_at,
-                 last_completed_at, favorited_at, native_session_id
+                 last_completed_at, favorited_at, native_session_id, history_epoch
             FROM agent_sessions;
         DROP TABLE agent_sessions;
         ALTER TABLE agent_sessions_fk_new RENAME TO agent_sessions;
@@ -414,6 +415,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       -- Drives the workspace-status derivation; see plans/branch-activity-refactor.md.
       last_user_message_at INTEGER DEFAULT NULL,
       last_completed_at INTEGER DEFAULT NULL,
+      history_epoch INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
@@ -1027,6 +1029,14 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   const sessionInfoNativeId = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   if (!sessionInfoNativeId.some(col => col.name === "native_session_id")) {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN native_session_id TEXT DEFAULT NULL");
+  }
+
+  // Version the entry-index namespace. A destructive session restart clears
+  // entries and reuses index 0; cached windows from the prior namespace must
+  // never be spliced into the new conversation.
+  const sessionHistoryEpochInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionHistoryEpochInfo.some(col => col.name === "history_epoch")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN history_epoch INTEGER NOT NULL DEFAULT 0");
   }
 
   // Phase 2: bind sessions to an immutable checkout incarnation. The foreign

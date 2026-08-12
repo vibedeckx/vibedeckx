@@ -208,6 +208,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     error,
     remoteStatus,
     workflowRunUpdate,
+    messageEntryIndices: loadedMessageEntryIndices,
+    hasEarlierHistory,
+    isLoadingEarlier,
+    loadEarlierHistory,
     sendMessage,
     uploadPaste,
     stopSession,
@@ -233,6 +237,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       setPendingTitleSessionId(null);
     },
   });
+  // Older test doubles/plugins may not expose window metadata yet.
+  const messageEntryIndices = loadedMessageEntryIndices ?? messages.map((_, index) => index);
 
   // Surface a commander-spawned session into this open window (auto-swap).
   useSurfaceCommanderSession(
@@ -977,17 +983,31 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   tabIndex={-1}
                   onKeyDown={onMarkerKeyDown}
                 >
+                  {hasEarlierHistory && (
+                    <div className="flex justify-center pb-3">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={isLoadingEarlier}
+                        onClick={() => void loadEarlierHistory()}
+                      >
+                        {isLoadingEarlier ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
+                        Load earlier turns
+                      </Button>
+                    </div>
+                  )}
                   {messages.map((msg, index) =>
                     msg?.type === "turn_end" ? (
                       <TurnEndDivider
-                        key={index}
+                        key={messageEntryIndices[index] ?? index}
                         durationMs={msg.durationMs}
                         outcome={msg.outcome}
                         emphasis={index === lastTurnEndIndex ? "normal" : "subtle"}
                         agentType={agentType}
                         currentAgentName={currentAgentName}
                         alternateProviders={alternateBranchProviders}
-                        onBranch={(t) => handleBranch(t, index)}
+                        onBranch={(t) => handleBranch(t, messageEntryIndices[index] ?? index)}
                         disabled={isBranching}
                         showFinalize={index === lastTurnEndIndex && reviewerRun?.status === "discussing"}
                         finalizeBusy={isFinalizing}
@@ -995,7 +1015,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       />
                     ) : (
                       <div
-                        key={index}
+                        key={messageEntryIndices[index] ?? index}
                         data-message-idx={index}
                         {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
                         className="scroll-mt-2"

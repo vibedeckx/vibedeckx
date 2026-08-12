@@ -555,6 +555,8 @@ export interface AgentSession {
    * on-disk transcript.
    */
   native_session_id?: string | null;
+  /** Entry-index namespace generation; changes only when history is reset. */
+  history_epoch?: number;
 }
 
 export interface SearchCatalogSessionEntry {
@@ -1051,6 +1053,8 @@ export interface Storage {
     markUserMessage: (id: string, timestampMs: number) => Promise<void>;
     /** Set last_completed_at to the given epoch-ms timestamp. */
     markCompleted: (id: string, timestampMs: number) => Promise<void>;
+    /** Atomically advance the entry-index namespace before destructive clear. */
+    incrementHistoryEpoch: (id: string) => Promise<number>;
     delete: (id: string) => Promise<void>;
     upsertEntry: (sessionId: string, entryIndex: number, data: string) => Promise<void>;
     /**

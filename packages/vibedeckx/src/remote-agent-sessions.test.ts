@@ -210,6 +210,60 @@ describe("reconnect reconciliation", () => {
     cache.setFinished(sessionId);
     cache.shutdown();
   });
+
+  it("reconciles a window-seeded cache with a bounded upstream tail", () => {
+    const cache = new RemotePatchCache();
+    for (let index = 120; index <= 160; index++) {
+      cache.appendMessage(sessionId, entryPatch(index, `e${index}`), true);
+    }
+    cache.setHistoryEpoch(sessionId, 3);
+    cache.setLastTurnEndEntryIndex(sessionId, 150);
+    const received: string[] = [];
+    cache.addSubscriber(sessionId, { send: (raw: string) => received.push(raw) } as never);
+
+    let adapter: VirtualWsAdapter | undefined;
+    const reverse = {
+      isConnected: () => true,
+      setChannelAdapter: (_s: string, _c: string, value: VirtualWsAdapter) => { adapter = value; },
+      openVirtualChannel: vi.fn(),
+      sendChannelData: vi.fn(),
+      closeChannel: vi.fn(),
+    };
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, reverse as never);
+
+    expect(reverse.openVirtualChannel).toHaveBeenCalledWith(
+      "server-1", expect.any(String), "/api/agent-sessions/worker-session/stream?after=150&epoch=3",
+    );
+    adapter!.deliverMessage(entryPatch(151, "current-tail"));
+    adapter!.deliverMessage(JSON.stringify({ Ready: true, historyEpoch: 3 }));
+
+    expect(received.some((raw) => raw.includes("__CLEAR_ALL__"))).toBe(false);
+    expect(received.filter((raw) => raw.includes("/entries/151"))).toHaveLength(1);
+    expect(entryPatchFrames(cache.get(sessionId)!.messages).some((raw) => raw.includes("current-tail"))).toBe(true);
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  it("passes a browser cursor upstream on a cold cache", () => {
+    const cache = new RemotePatchCache();
+    const reverse = {
+      isConnected: () => true,
+      setChannelAdapter: vi.fn(),
+      openVirtualChannel: vi.fn(),
+      sendChannelData: vi.fn(),
+      closeChannel: vi.fn(),
+    };
+    connectPersistentRemoteWs(
+      sessionId, remoteInfo, cache, reverse as never,
+      undefined, undefined, undefined,
+      { afterEntryIndex: 40, historyEpoch: 2 },
+    );
+    expect(reverse.openVirtualChannel).toHaveBeenCalledWith(
+      "server-1", expect.any(String), "/api/agent-sessions/worker-session/stream?after=40&epoch=2",
+    );
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
 });
 
 describe("createRemoteAgentSession", () => {

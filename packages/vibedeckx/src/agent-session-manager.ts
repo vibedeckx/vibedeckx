@@ -146,6 +146,8 @@ interface RunningSession {
    * that is still mid-spawn. Same for a wake overlapping a restart.
    */
   processStartsInFlight: number;
+  /** Durable generation of this session's entry-index namespace. */
+  historyEpoch: number;
   store: MessageStore;
   subscribers: Set<WebSocket>;
   status: AgentSessionStatus;
@@ -771,6 +773,7 @@ export class AgentSessionManager {
       process: null,
       dormant: false,
       processStartsInFlight: 0,
+      historyEpoch: stored?.history_epoch ?? 0,
       store,
       subscribers: new Set(),
       status: "running",
@@ -1991,7 +1994,11 @@ export class AgentSessionManager {
   /**
    * Subscribe to session updates (WebSocket connection)
    */
-  subscribe(sessionId: string, ws: WebSocket): (() => void) | null {
+  subscribe(
+    sessionId: string,
+    ws: WebSocket,
+    opts: { afterEntryIndex?: number; historyEpoch?: number } = {},
+  ): (() => void) | null {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return null;
@@ -1999,14 +2006,33 @@ export class AgentSessionManager {
 
     session.subscribers.add(ws);
 
-    // Send all historical patches to replay state
+    // A mismatched epoch means the client is naming an old index namespace;
+    // replay the replacement conversation from its beginning.
+    const after = opts.historyEpoch === undefined || opts.historyEpoch === session.historyEpoch
+      ? (opts.afterEntryIndex ?? -1)
+      : -1;
+    ws.send(JSON.stringify({
+      HistorySync: {
+        historyEpoch: session.historyEpoch,
+        reset: opts.historyEpoch !== undefined && opts.historyEpoch !== session.historyEpoch,
+      },
+    }));
+
+    // Send historical entry patches after the client's sealed boundary. Keep
+    // every replace for the active tail: multiple patches may target the same
+    // entry index while assistant text streams.
     for (const patch of session.store.patches) {
+      const entryIndices = patch.flatMap((op) => {
+        const match = op.path.match(/^\/entries\/(\d+)$/);
+        return match ? [Number(match[1])] : [];
+      });
+      if (entryIndices.length > 0 && entryIndices.every((index) => index <= after)) continue;
       const msg: AgentWsMessage = { JsonPatch: patch };
       ws.send(JSON.stringify(msg));
     }
 
     // Send Ready signal to indicate history is complete
-    ws.send(JSON.stringify({ Ready: true }));
+    ws.send(JSON.stringify({ Ready: true, historyEpoch: session.historyEpoch }));
 
     // Send current status
     const statusPatch = ConversationPatch.updateStatus(session.status);
@@ -2029,6 +2055,10 @@ export class AgentSessionManager {
   /** Raw sparse entries (holes preserved) — index space matches entry indices. */
   getRawMessages(sessionId: string): AgentMessage[] {
     return this.sessions.get(sessionId)?.store.entries ?? [];
+  }
+
+  getHistoryEpoch(sessionId: string): number | undefined {
+    return this.sessions.get(sessionId)?.historyEpoch;
   }
 
   /**
@@ -2415,6 +2445,9 @@ export class AgentSessionManager {
     // 2. Clear persisted entries
     if (!session.skipDb) {
       await this.storage.agentSessions.deleteEntries(sessionId);
+      session.historyEpoch = await this.storage.agentSessions.incrementHistoryEpoch(sessionId);
+    } else {
+      session.historyEpoch += 1;
     }
 
     // 3. Clear message store
@@ -2430,6 +2463,9 @@ export class AgentSessionManager {
     this.touchSession(session);
 
     // 4. Broadcast clear signal to all subscribers
+    this.broadcastRaw(sessionId, {
+      HistorySync: { historyEpoch: session.historyEpoch, reset: true },
+    });
     const clearPatch = ConversationPatch.clearAll();
     this.broadcastPatch(sessionId, clearPatch);
 
@@ -3111,6 +3147,7 @@ export class AgentSessionManager {
         process: null,
         dormant: true,
         processStartsInFlight: 0,
+        historyEpoch: dbSession.history_epoch ?? 0,
         store,
         subscribers: new Set(),
         status: "stopped",
@@ -3362,6 +3399,7 @@ export class AgentSessionManager {
       process: null,
       dormant: true,
       processStartsInFlight: 0,
+      historyEpoch: 0,
       store,
       subscribers: new Set(),
       status: "stopped",
