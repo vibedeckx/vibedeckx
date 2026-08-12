@@ -43,13 +43,14 @@ type HookApi = ReturnType<typeof useAgentSession>;
 let latest: HookApi | null = null;
 
 interface ProbeProps {
+  projectId?: string;
   branch: string | null;
   sessionId: string | null;
   suspended: boolean;
 }
 
-function Probe({ branch, sessionId, suspended }: ProbeProps) {
-  const hook = useAgentSession("p1", branch, undefined, undefined, { sessionId, suspended });
+function Probe({ projectId = "p1", branch, sessionId, suspended }: ProbeProps) {
+  const hook = useAgentSession(projectId, branch, undefined, undefined, { sessionId, suspended });
   useEffect(() => {
     latest = hook;
   });
@@ -112,5 +113,28 @@ describe("suspended navigation gate", () => {
     await render({ branch: null, sessionId: null, suspended: false });
     const urls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(urls.some((u) => u.includes("/api/projects/p1/agent-sessions"))).toBe(true);
+  });
+
+  it("does not preview a warm default-branch snapshot while suspended", async () => {
+    // Warm the (p1, branch=null, latest) cache key by visiting the project
+    // normally — this is main's latest session, the exact snapshot that must
+    // not flash during a later cross-project jump. The component stays mounted
+    // throughout (unmount clears the module cache, which never happens during
+    // a jump — only props change).
+    await render({ projectId: "p1", branch: null, sessionId: null, suspended: false });
+    expect(latest!.session?.id).toBe("s-target");
+
+    // Move to another project.
+    await render({ projectId: "p2", branch: "dev", sessionId: "s-other", suspended: false });
+    fetchMock.mockClear();
+
+    // Ctrl+K jump back into p1: mid-jump window renders (branch=null,
+    // sessionId=null) suspended. The warm snapshot aliases main's latest
+    // session — it must stay hidden until the staged target lands.
+    await render({ projectId: "p1", branch: null, sessionId: null, suspended: true });
+    expect(latest!.session).toBeNull();
+    expect(latest!.isCachePreview).toBe(false);
+    expect(latest!.isInitialized).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

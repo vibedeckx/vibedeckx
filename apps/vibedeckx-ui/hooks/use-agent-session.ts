@@ -572,6 +572,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const lastStartFailedRef = useRef(false); // Prevents auto-restart loop after session creation failure
   const startingRef = useRef(false); // Reentrancy guard for startSession
   const cachePreviewRef = useRef(false);
+  // Read via ref in the reset effect: suspension lifting must NOT re-run the
+  // reset (it would tear down the freshly-started target session).
+  const suspendedRef = useRef(suspended);
   // Serializes model changes so they reach the server in the order picked and
   // the last reply to land is the last pick (see setModel).
   const modelChangeChain = useRef<Promise<void>>(Promise.resolve());
@@ -602,6 +605,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     branchRef.current = branch;
     explicitSessionIdRef.current = explicitSessionId;
     sessionRef.current = session;
+    suspendedRef.current = suspended;
   });
 
   // Durable completion notifications are a latency hint: while the user is
@@ -1702,7 +1706,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // the conversation while the lightweight head check runs. For a running
     // session, only its sealed prefix is safe to preview; the mutable tail is
     // fetched again before it is shown.
-    const warmSnapshot = !stayingInPlaceholder && projectId
+    //
+    // Never preview while suspended: mid-cross-project-jump this effect fires
+    // with (branch=null, sessionId=null), whose cache key aliases the target
+    // project's default-workspace latest session — previewing it flashes main's
+    // conversation before the real target lands (the same flash the suspended
+    // gate on auto-start exists to prevent). Once the staged branch+session
+    // apply, this effect re-runs with the real key.
+    const warmSnapshot = !stayingInPlaceholder && projectId && !suspendedRef.current
       ? readSessionCache(getCacheKey(projectId, branch, explicitSessionId))
       : undefined;
     const sealedThrough = warmSnapshot?.history.lastTurnEndEntryIndex ?? null;
