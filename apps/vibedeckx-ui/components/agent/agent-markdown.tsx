@@ -29,10 +29,28 @@ const REHYPE_PLUGINS = [
 
 const COMPONENTS = { a: FileRefLink };
 
-export const AgentMarkdown = memo(function AgentMarkdown({ children }: { children: string }) {
+// `mode` is the difference between "the markdown is on screen in the first
+// painted frame" and "the message paints as an empty 46px stub and fills in
+// ~100ms later". Streamdown's default (`streaming`) holds the parsed blocks in
+// state and commits them from an effect wrapped in startTransition, so the very
+// first paint of every instance renders zero blocks — on a session switch that
+// is 28+ messages all collapsing to header height and then growing back, which
+// reads as a flash even though no data moved. `static` derives the blocks in a
+// useMemo instead, so they are there on the first paint.
+//
+// Only the message a turn is actively streaming into wants `streaming`, where
+// deferring the re-parse of an ever-growing string keeps typing responsive.
+export const AgentMarkdown = memo(function AgentMarkdown({
+  children,
+  streaming = false,
+}: {
+  children: string;
+  streaming?: boolean;
+}) {
   return (
     <Streamdown
       className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+      mode={streaming ? "streaming" : "static"}
       rehypePlugins={REHYPE_PLUGINS}
       components={COMPONENTS}
     >

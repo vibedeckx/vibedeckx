@@ -112,7 +112,7 @@ export function ExitPlanModeUI({ input, messageIndex }: ExitPlanModeUIProps) {
               className="prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
               style={{ fontSize: "var(--conv-font-size, 14px)" }}
             >
-              <MessageResponse>{planContent}</MessageResponse>
+              <MessageResponse mode="static">{planContent}</MessageResponse>
             </div>
           </div>
         </details>
@@ -136,7 +136,7 @@ export function ExitPlanModeUI({ input, messageIndex }: ExitPlanModeUIProps) {
             className="prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words max-h-96 overflow-y-auto"
             style={{ fontSize: "var(--conv-font-size, 14px)" }}
           >
-            <MessageResponse>{planContent}</MessageResponse>
+            <MessageResponse mode="static">{planContent}</MessageResponse>
           </div>
         )}
       </div>

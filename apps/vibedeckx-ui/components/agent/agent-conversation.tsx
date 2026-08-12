@@ -1021,7 +1021,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                         {...(msg.type === "user" ? { "data-user-msg-idx": index } : {})}
                         className="scroll-mt-2"
                       >
-                        <AgentMessageItem message={msg} messageIndex={index} />
+                        <AgentMessageItem
+                          message={msg}
+                          messageIndex={index}
+                          streaming={
+                            msg.type === "assistant" && turnInFlight && index === messages.length - 1
+                          }
+                        />
                       </div>
                     )
                   )}

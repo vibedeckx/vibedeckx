@@ -33,6 +33,9 @@ import { Fragment, useState } from "react";
 interface AgentMessageProps {
   message: AgentMessage;
   messageIndex: number;
+  // True only for the message a turn is currently streaming into; see the
+  // `mode` note in agent-markdown.tsx.
+  streaming?: boolean;
 }
 
 function formatTimestamp(ts: number): string {
@@ -48,8 +51,8 @@ function formatTimestamp(ts: number): string {
   return `${date} ${time}`;
 }
 
-export function AgentMessageItem({ message, messageIndex }: AgentMessageProps) {
-  const body = renderBody(message, messageIndex);
+export function AgentMessageItem({ message, messageIndex, streaming = false }: AgentMessageProps) {
+  const body = renderBody(message, messageIndex, streaming);
   if (!body) return null;
   return (
     <div className="group relative">
@@ -61,13 +64,17 @@ export function AgentMessageItem({ message, messageIndex }: AgentMessageProps) {
   );
 }
 
-function renderBody(message: AgentMessage, messageIndex: number) {
+function renderBody(message: AgentMessage, messageIndex: number, streaming: boolean) {
   switch (message.type) {
+    // A workflow-injected user turn is machine-authored markdown that is
+    // complete the moment it lands, so it never wants the deferred path — not
+    // even as the tail message of a running turn, where `streaming` is true for
+    // the session but nothing is being appended to THIS message.
     case "user":
       return <UserMessage content={message.content} origin={message.origin} />;
 
     case "assistant":
-      return <AssistantMessage content={message.content} agentType={message.agentType} />;
+      return <AssistantMessage content={message.content} agentType={message.agentType} streaming={streaming} />;
 
     case "tool_use":
       return <ToolUseMessage tool={message.tool} input={message.input} messageIndex={messageIndex} />;
@@ -143,7 +150,13 @@ function renderTextWithVPaste(text: string) {
   );
 }
 
-function UserMessage({ content, origin }: { content: string | ContentPart[]; origin?: "workflow" }) {
+function UserMessage({
+  content,
+  origin,
+}: {
+  content: string | ContentPart[];
+  origin?: "workflow";
+}) {
   // Workflow-injected prompts are machine-authored markdown — render them as
   // such, visually distinct from what the user actually typed.
   if (origin === "workflow" && typeof content === "string") {
@@ -205,7 +218,15 @@ function useAgentType(): string {
   }
 }
 
-function AssistantMessage({ content, agentType: messageAgentType }: { content: string; agentType?: string }) {
+function AssistantMessage({
+  content,
+  agentType: messageAgentType,
+  streaming = false,
+}: {
+  content: string;
+  agentType?: string;
+  streaming?: boolean;
+}) {
   const currentAgentType = useAgentType();
   const agentType = messageAgentType ?? currentAgentType;
   const isCodex = agentType === "codex";
@@ -246,7 +267,7 @@ function AssistantMessage({ content, agentType: messageAgentType }: { content: s
             className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
             style={{ fontSize: "var(--conv-font-size, 14px)" }}
           >
-            <AgentMarkdown>{content ?? ""}</AgentMarkdown>
+            <AgentMarkdown streaming={streaming}>{content ?? ""}</AgentMarkdown>
           </div>
         )}
       </div>
