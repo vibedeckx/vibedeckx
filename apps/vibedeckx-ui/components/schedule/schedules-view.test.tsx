@@ -63,6 +63,7 @@ const schedule: Schedule = {
 const makeRun = (id: string, startedAt: string, output?: string): ScheduleRun => ({
   id,
   schedule_id: schedule.id,
+  project_id: schedule.project_id,
   status: "completed",
   exit_code: 0,
   output,

@@ -1058,13 +1058,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // latest-session snapshot after the same lightweight sealed-head
         // validation used by explicit history navigation. If it changed (or
         // vanished), fall back to resolving the branch's latest session.
-        let head: SessionHistoryHead | null = null;
-        try {
-          head = await getHistoryHead(cached.session.id);
-        } catch {
-          // The cached handle may have expired; the branch lookup below is the
-          // authoritative way to discover its current latest session.
-        }
+        // The cached handle may have expired; the branch lookup below is the
+        // authoritative way to discover its current latest session.
+        const head: SessionHistoryHead | null = await getHistoryHead(cached.session.id).catch(() => null);
         const cacheIsCurrent = head
           && head.status === "stopped"
           && head.historyEpoch === cached.history.historyEpoch
