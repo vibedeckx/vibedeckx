@@ -23,8 +23,13 @@ export interface SpawnConfig {
 
 export type ParsedAgentEvent =
   | { type: "text"; content: string }
-  | { type: "tool_use"; tool: string; input: unknown; toolUseId: string }
-  | { type: "tool_result"; tool: string; output: string; toolUseId: string }
+  // `outOfTurn`: the provider attributed this event to an already-completed
+  // turn (e.g. a codex backgrounded exec whose item/completed lands after
+  // turn/completed, with no follow-up turn behind it). The session manager
+  // persists and broadcasts it but runs none of the turn-lifecycle side
+  // effects — opening a turn on it would leave that turn open forever.
+  | { type: "tool_use"; tool: string; input: unknown; toolUseId: string; outOfTurn?: true }
+  | { type: "tool_result"; tool: string; output: string; toolUseId: string; outOfTurn?: true }
   | { type: "thinking"; content: string }
   | { type: "system"; content: string }
   | { type: "error"; message: string }

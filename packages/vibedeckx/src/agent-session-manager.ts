@@ -1256,6 +1256,15 @@ export class AgentSessionManager {
     const timestamp = Date.now();
     session.lastActiveAt = timestamp;
 
+    // Late output the provider attributed to an already-completed turn (a
+    // codex backgrounded exec finishing after turn/completed, with no
+    // follow-up turn behind it). It is persisted and broadcast below like any
+    // tool activity, but must sit out every turn-lifecycle decision in this
+    // method: discarding a grace-held completion would eat the milestone, and
+    // opening a turn / flipping to running would stick forever — nothing is
+    // coming to close it.
+    const outOfTurn = (event.type === "tool_use" || event.type === "tool_result") && event.outOfTurn === true;
+
     // Turn activity while a completion candidate is held for grace means the
     // previous `result` was intermediate — an auto-resume turn is running and
     // its own result will become the new candidate. Discard the held one
@@ -1267,12 +1276,13 @@ export class AgentSessionManager {
     // cancelling on an event that has no result behind it would drop the
     // completion entirely.)
     if (
-      event.type === "turn_started" ||
-      event.type === "text" ||
-      event.type === "thinking" ||
-      event.type === "tool_use" ||
-      event.type === "tool_result" ||
-      event.type === "approval_request"
+      !outOfTurn &&
+      (event.type === "turn_started" ||
+        event.type === "text" ||
+        event.type === "thinking" ||
+        event.type === "tool_use" ||
+        event.type === "tool_result" ||
+        event.type === "approval_request")
     ) {
       this.applyCompletionTimerAction(session, session.completion.noteTurnActivity());
     }
@@ -1303,6 +1313,7 @@ export class AgentSessionManager {
     // disposition alone, exactly as before.
     if (
       session.turnOpenSince === null &&
+      !outOfTurn &&
       (event.type === "turn_started" ||
         event.type === "text" ||
         event.type === "thinking" ||
@@ -1325,6 +1336,7 @@ export class AgentSessionManager {
     // stopped process can't reach here — handleStdout drops dormant output.
     if (
       session.status !== "running" &&
+      !outOfTurn &&
       (event.type === "text" ||
         event.type === "thinking" ||
         event.type === "tool_use" ||

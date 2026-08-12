@@ -529,3 +529,99 @@ describe("CodexProvider environment-fault notifications", () => {
     })).toEqual([{ type: "system", content: "[enteredReviewMode]" }]);
   });
 });
+
+/**
+ * Late items from completed turns. A backgrounded exec (unified exec with
+ * yield_time_ms, polled via `wait`) can finish after codex already sent
+ * turn/completed: the CLI then emits a lone item/completed carrying the old
+ * turnId — no turn/started before it, no turn/completed after (observed live,
+ * codex 0.147). Classification is by turnId attribution, NOT arrival time: a
+ * temporal "between turns" window would misclassify a live item whose
+ * turn/started was lost, and miss a late item landing mid-next-turn.
+ */
+describe("CodexProvider late items from completed turns", () => {
+  function feed(provider: CodexProvider, obj: unknown) {
+    return provider.parseStdoutLine(JSON.stringify(obj), "session-1");
+  }
+
+  function execItem(turnId: string) {
+    return {
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        turnId,
+        item: { type: "commandExecution", id: "exec-late-1", command: "npm test", aggregatedOutput: "ok\n", status: "completed" },
+      },
+    };
+  }
+
+  function completedTurn(provider: CodexProvider, turnId: string) {
+    feed(provider, {
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: { turnId, item: { type: "agentMessage", id: "m1", text: "done", phase: "final_answer" } },
+    });
+    feed(provider, {
+      jsonrpc: "2.0",
+      method: "turn/completed",
+      params: { turn: { id: turnId, status: "completed" } },
+    });
+  }
+
+  it("flags an exec item arriving after its turn completed as outOfTurn, without re-arming the interrupt target", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+    completedTurn(provider, "turn-1");
+    expect(provider.getSessionState("session-1").currentTurnId).toBeNull(); // cleared by turn/completed
+
+    const events = feed(provider, execItem("turn-1"));
+
+    expect(events).toEqual([
+      { type: "tool_use", tool: "Bash", input: { command: "npm test" }, toolUseId: "exec-late-1", outOfTurn: true },
+      { type: "tool_result", tool: "Bash", output: "ok\n", toolUseId: "exec-late-1", outOfTurn: true },
+    ]);
+    // The dead turn must not become the interrupt target again.
+    expect(provider.getSessionState("session-1").currentTurnId).toBeNull();
+  });
+
+  it("treats an item of an unknown turn as live activity (a lost turn/started must not be misclassified)", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+    completedTurn(provider, "turn-1");
+
+    const events = feed(provider, execItem("turn-2"));
+
+    expect(events).toEqual([
+      { type: "tool_use", tool: "Bash", input: { command: "npm test" }, toolUseId: "exec-late-1" },
+      { type: "tool_result", tool: "Bash", output: "ok\n", toolUseId: "exec-late-1" },
+    ]);
+    expect(provider.getSessionState("session-1").currentTurnId).toBe("turn-2");
+  });
+
+  it("a late final message does not re-add its completed turn to turnsWithFinalMessage", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+    completedTurn(provider, "turn-1");
+
+    feed(provider, {
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: { turnId: "turn-1", item: { type: "agentMessage", id: "m2", text: "late", phase: "final_answer" } },
+    });
+
+    expect(provider.getSessionState("session-1").turnsWithFinalMessage.has("turn-1")).toBe(false);
+  });
+
+  it("bounds the completed-turn memory with FIFO eviction", () => {
+    const provider = new CodexProvider();
+    provider.onSessionCreated("session-1", "edit");
+    for (let i = 0; i < 40; i++) {
+      completedTurn(provider, `t${i}`);
+    }
+    const ids = provider.getSessionState("session-1").completedTurnIds;
+    expect(ids.size).toBe(32);
+    expect(ids.has("t7")).toBe(false); // 40 completed, oldest 8 evicted
+    expect(ids.has("t8")).toBe(true);
+    expect(ids.has("t39")).toBe(true);
+  });
+});

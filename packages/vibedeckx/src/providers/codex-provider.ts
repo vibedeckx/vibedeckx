@@ -22,6 +22,16 @@ import {
 /** Cap on the payload echoed for an item type this provider does not model. */
 const ITEM_PAYLOAD_SUMMARY_LIMIT = 500;
 
+/**
+ * How many completed turn UUIDs to remember per session, for attributing late
+ * item notifications (a backgrounded exec can complete after its turn ends).
+ * Late items realistically trail their turn by one or two turns; the bound
+ * only stops an immortal session from growing the set forever. An item whose
+ * turn was evicted degrades to being treated as live turn activity — the
+ * pre-existing behavior.
+ */
+const MAX_COMPLETED_TURN_IDS = 32;
+
 /** First non-blank string among the candidates, trimmed. */
 function firstText(...candidates: unknown[]): string {
   for (const c of candidates) {
@@ -66,6 +76,13 @@ interface CodexSessionState {
    * `turn/interrupt { threadId, turnId }`. Cleared on turn/completed.
    */
   currentTurnId: string | null;
+  /**
+   * Recently completed main-thread turn UUIDs (insertion order, capped at
+   * MAX_COMPLETED_TURN_IDS). An item/completed whose turnId is in here is
+   * late output of a finished turn — persisted but stripped of every
+   * turn-lifecycle meaning. See handleItemCompleted.
+   */
+  completedTurnIds: Set<string>;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -237,19 +254,50 @@ export class CodexProvider implements AgentProvider {
   private handleItemCompleted(params: any, sessionId: string): ParsedAgentEvent[] {
     const item = params?.item;
     if (!item?.type) return [];
+    const state = this.getSessionState(sessionId);
 
-    // Every item notification carries the in-flight turn's UUID — keep it
-    // fresh so formatInterrupt can target the turn (covers sessions where the
-    // turn/start response was missed, e.g. state re-created mid-turn).
-    if (params?.turnId != null) {
-      this.getSessionState(sessionId).currentTurnId = String(params.turnId);
+    // A backgrounded exec (unified exec with yield_time_ms, polled via
+    // `wait`) can outlive its turn: codex sends turn/completed when the model
+    // answers without waiting, then a lone item/completed for the command
+    // when it finally exits — no turn/started before it, no turn/completed
+    // after (observed live, codex 0.147). Attribute by turnId rather than
+    // arrival time: a temporal "between turns" window would misclassify a
+    // live item whose turn/started was lost, and miss a late item landing
+    // after the next turn already began.
+    const itemTurnId = params?.turnId != null ? String(params.turnId) : null;
+    const outOfTurn = itemTurnId !== null && state.completedTurnIds.has(itemTurnId);
+
+    // Every live item notification carries the in-flight turn's UUID — keep
+    // it fresh so formatInterrupt can target the turn (covers sessions where
+    // the turn/start response was missed, e.g. state re-created mid-turn). A
+    // late item must not re-arm the interrupt target with its dead turn.
+    if (itemTurnId !== null && !outOfTurn) {
+      state.currentTurnId = itemTurnId;
     }
 
+    const events = this.itemEvents(item, itemTurnId, outOfTurn, state);
+    if (!outOfTurn) return events;
+    // Tag the renderable payload so the session manager persists and
+    // broadcasts it without any turn-lifecycle side effects (grace discard,
+    // turn open, stopped→running flip) — an opened turn would never close.
+    return events.map((e) =>
+      e.type === "tool_use" || e.type === "tool_result" ? { ...e, outOfTurn: true as const } : e,
+    );
+  }
+
+  private itemEvents(
+    item: any,
+    itemTurnId: string | null,
+    outOfTurn: boolean,
+    state: CodexSessionState,
+  ): ParsedAgentEvent[] {
     switch (item.type) {
       case "agentMessage": {
-        if (params?.turnId && (item.phase === "final_answer" || item.text)) {
-          const state = this.getSessionState(sessionId);
-          state.turnsWithFinalMessage.add(String(params.turnId));
+        // An out-of-turn final message must not re-add its completed turn to
+        // turnsWithFinalMessage — turn/completed already removed it, and
+        // nothing would ever delete it again.
+        if (itemTurnId && !outOfTurn && (item.phase === "final_answer" || item.text)) {
+          state.turnsWithFinalMessage.add(itemTurnId);
         }
         return [{ type: "text", content: item.text ?? "" }];
       }
@@ -363,6 +411,13 @@ export class CodexProvider implements AgentProvider {
     const hadFinalMessage = turnId != null && state.turnsWithFinalMessage.has(turnId);
     if (turnId != null) {
       state.turnsWithFinalMessage.delete(turnId);
+      // From now on, items carrying this turnId are late output (backgrounded
+      // exec finishing post-turn) — recorded even on the suppressed path
+      // below, since the turn is over either way. Bounded FIFO eviction.
+      state.completedTurnIds.add(turnId);
+      while (state.completedTurnIds.size > MAX_COMPLETED_TURN_IDS) {
+        state.completedTurnIds.delete(state.completedTurnIds.values().next().value!);
+      }
     }
     // Turn is over (one turn in flight per thread) — nothing left to interrupt.
     state.currentTurnId = null;
@@ -523,6 +578,7 @@ export class CodexProvider implements AgentProvider {
       lastTokenUsage: {},
       turnsWithFinalMessage: new Set(),
       currentTurnId: null,
+      completedTurnIds: new Set(),
     });
   }
 
@@ -544,6 +600,7 @@ export class CodexProvider implements AgentProvider {
         lastTokenUsage: {},
         turnsWithFinalMessage: new Set(),
         currentTurnId: null,
+        completedTurnIds: new Set(),
       };
       this.sessions.set(sessionId, state);
     }

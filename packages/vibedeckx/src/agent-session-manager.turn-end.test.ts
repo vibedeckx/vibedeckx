@@ -394,6 +394,151 @@ describe("codex buffered first turn", () => {
 });
 
 /**
+ * Late output from a completed codex turn. A backgrounded exec (unified exec
+ * with yield_time_ms, polled via `wait`) can finish after codex already sent
+ * turn/completed: the CLI then emits a lone item/completed carrying the OLD
+ * turnId — no turn/started before it, no turn/completed after (observed live,
+ * codex 0.147). The provider tags it `outOfTurn`; here we pin that it renders
+ * into the conversation but carries no turn-lifecycle meaning. Before this,
+ * the process-driven turn open latched onto it and the session stuck at
+ * "running" forever (blue dot) — nothing ever closes a turn opened on it.
+ */
+describe("codex late item from a completed turn", () => {
+  type FakeProcess = { stdin: { write: (s: string) => boolean }; exitCode: null; pid: number };
+
+  async function codexSession(manager: AgentSessionManager) {
+    const { internals, session } = await liveSession(manager, null);
+    (session as unknown as { process: FakeProcess }).process = {
+      stdin: { write: () => true }, exitCode: null, pid: 1234,
+    };
+    const provider = getProvider("codex");
+    provider.onSessionDestroyed?.(SESSION_ID);
+    provider.onSessionCreated?.(SESSION_ID, "edit");
+    const init = provider.getInitializationMessages!(SESSION_ID)!;
+    const threadStartId = init.trim().split("\n").map((l) => JSON.parse(l) as { id: number; method: string })
+      .find((m) => m.method === "thread/start")!.id;
+    const feed = (obj: unknown) => internals.handleStdout(session, JSON.stringify(obj) + "\n");
+    return { session, threadStartId, feed };
+  }
+
+  function lateExec(turnId: string) {
+    return {
+      jsonrpc: "2.0", method: "item/completed",
+      params: {
+        threadId: "th-1", turnId,
+        item: { type: "commandExecution", id: "exec-late-1", command: "npm test && npx tsc --noEmit", aggregatedOutput: "failed\n", status: "completed" },
+      },
+    };
+  }
+
+  async function runTurn(feed: (obj: unknown) => Promise<void>, turnId: string) {
+    await feed({ jsonrpc: "2.0", method: "item/completed", params: { threadId: "th-1", turnId, item: { type: "agentMessage", id: `msg-${turnId}`, text: "done" } } });
+    await feed({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "th-1", turn: { id: turnId, status: "completed" } } });
+  }
+
+  async function firstCompletedTurn(
+    manager: AgentSessionManager,
+    feed: (obj: unknown) => Promise<void>,
+    threadStartId: number,
+  ) {
+    await manager.sendUserMessage(SESSION_ID, "fix it");
+    await feed({ jsonrpc: "2.0", id: threadStartId, result: { thread: { id: "th-1" } } });
+    await runTurn(feed, "turn-1");
+    await settle(GRACE_MS * 5);
+  }
+
+  it("between turns: renders the output but neither opens a turn nor flips the session back to running", async () => {
+    const { storage, ops, turnEnds, outbox } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session, threadStartId, feed } = await codexSession(manager);
+    await firstCompletedTurn(manager, feed, threadStartId);
+    expect(turnEnds).toHaveLength(1);
+    expect(session.status).toBe("stopped");
+    const markUserMessageCalls =
+      (storage.agentSessions.markUserMessage as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await feed(lateExec("turn-1"));
+    await settle(GRACE_MS * 5);
+
+    // The output reached the conversation, after the stop…
+    expect(ops.indexOf("entry:tool_use")).toBeGreaterThan(ops.indexOf("status:stopped"));
+    expect(ops).toContain("entry:tool_result");
+    // …with no lifecycle side effects: no phantom turn, no running flip, no
+    // workspace-dot bump, no extra turn_end or milestone.
+    expect(session.status).toBe("stopped");
+    expect(session.turnOpenSince).toBeNull();
+    expect((storage.agentSessions.markUserMessage as ReturnType<typeof vi.fn>).mock.calls.length)
+      .toBe(markUserMessageCalls);
+    expect(turnEnds).toHaveLength(1);
+    expect(outbox).toHaveLength(1);
+  });
+
+  it("inside the grace window: the held completion still commits its turn_end and milestone", async () => {
+    const { storage, turnEnds, outbox } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session, threadStartId, feed } = await codexSession(manager);
+    await manager.sendUserMessage(SESSION_ID, "fix it");
+    await feed({ jsonrpc: "2.0", id: threadStartId, result: { thread: { id: "th-1" } } });
+    await runTurn(feed, "turn-1");
+
+    // Lands before the grace commit — noteTurnActivity would discard the held
+    // completion candidate and the turn would end silently, stuck running.
+    await feed(lateExec("turn-1"));
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(1);
+    expect(turnEnds[0].outcome).toBe("completed");
+    expect(outbox.map((o) => o.kind)).toEqual(["session_result_ready"]);
+    expect(session.status).toBe("stopped");
+  });
+
+  it("during the next turn: leaves that turn's clock and boundary untouched", async () => {
+    const { storage, turnEnds } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session, threadStartId, feed } = await codexSession(manager);
+    await firstCompletedTurn(manager, feed, threadStartId);
+
+    const beforeSecond = Date.now();
+    await manager.sendUserMessage(SESSION_ID, "and the migration");
+    const openedAt = session.turnOpenSince;
+    expect(openedAt).not.toBeNull();
+
+    await feed(lateExec("turn-1"));
+    expect(session.turnOpenSince).toBe(openedAt); // clock not restarted
+
+    await runTurn(feed, "turn-2");
+    await settle(GRACE_MS * 5);
+
+    expect(turnEnds).toHaveLength(2);
+    // The second turn's duration covers only itself — not the late output of
+    // the first, and not the idle gap between the turns.
+    expect(turnEnds[1].timestamp - turnEnds[1].durationMs!).toBeGreaterThanOrEqual(beforeSecond);
+  });
+
+  it("an item of an unknown turn still opens one (queued-message turn / lost turn-started)", async () => {
+    const { storage } = makeHarness("codex");
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const { session, threadStartId, feed } = await codexSession(manager);
+    await firstCompletedTurn(manager, feed, threadStartId);
+    expect(session.status).toBe("stopped");
+
+    // Same shape as the late item, but for a turnId this session never saw
+    // complete — e.g. a queued message running as its own turn whose
+    // turn/started was lost. Must keep the pre-existing behavior: open.
+    await feed({
+      jsonrpc: "2.0", method: "item/completed",
+      params: {
+        threadId: "th-1", turnId: "turn-2",
+        item: { type: "commandExecution", id: "exec-live-1", command: "npm test", aggregatedOutput: "ok\n", status: "completed" },
+      },
+    });
+
+    expect(session.turnOpenSince).not.toBeNull();
+    expect(session.status).toBe("running");
+  });
+});
+
+/**
  * Per-turn notification disposition. The decision of whether a turn's outcome
  * deserves a user-facing notification is made when the turn is *started* and
  * PERSISTED on the opening user entry — not held in process memory — because
