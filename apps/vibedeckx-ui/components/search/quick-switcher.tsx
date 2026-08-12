@@ -162,14 +162,13 @@ export function QuickSwitcher({
       title="Quick Switcher"
       description="Search projects, workspaces, and sessions"
       shouldFilter={false}
+      instantClose
       // Full height is 48px input + 300px list + 2px border; anchor by half
       // that height so filtering shrinks only the bottom edge.
       // Session navigation can repaint the cached conversation before the
-      // dialog's default 200ms exit animation finishes. Radix keeps the closed
-      // content mounted for that animation, so the repaint can make the
-      // closing palette look as if it reopened for one frame. Quick switching
-      // should dismiss immediately; the opening animation remains unchanged.
-      className="top-[max(1rem,calc(50%_-_175px))] translate-y-0 data-[state=closed]:animate-none"
+      // dialog's default 200ms exit animation finishes. `instantClose` removes
+      // both the content and overlay exit animations; opening is unchanged.
+      className="top-[max(1rem,calc(50%_-_175px))] translate-y-0"
     >
       <CommandInput
         placeholder="Search projects, workspaces, sessions…"
