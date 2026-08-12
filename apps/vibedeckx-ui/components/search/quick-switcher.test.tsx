@@ -71,5 +71,6 @@ describe("QuickSwitcher", () => {
     expect(dialog!.classList.contains("translate-y-0")).toBe(true);
     expect(dialog!.classList.contains("top-[50%]")).toBe(false);
     expect(dialog!.classList.contains("translate-y-[-50%]")).toBe(false);
+    expect(dialog!.classList.contains("data-[state=closed]:animate-none")).toBe(true);
   });
 });
