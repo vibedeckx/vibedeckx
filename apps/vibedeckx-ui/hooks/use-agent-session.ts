@@ -546,6 +546,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const [isConnected, setIsConnected] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isCachePreview, setIsCachePreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteConnectionStatus | null>(null);
   const [workflowRunUpdate, setWorkflowRunUpdate] = useState<WorkflowRun | null>(null);
@@ -570,6 +571,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const sessionGenerationRef = useRef(0); // Incremented on branch/project change to discard stale API responses
   const lastStartFailedRef = useRef(false); // Prevents auto-restart loop after session creation failure
   const startingRef = useRef(false); // Reentrancy guard for startSession
+  const cachePreviewRef = useRef(false);
   // Serializes model changes so they reach the server in the order picked and
   // the last reply to land is the last pick (see setModel).
   const modelChangeChain = useRef<Promise<void>>(Promise.resolve());
@@ -1028,7 +1030,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
     setError(null);
     setRemoteStatus(null);
-    setIsInitialized(false);
+    if (!cachePreviewRef.current) setIsInitialized(false);
     lastStartFailedRef.current = false;
 
     // A cache hit avoids rendering and parsing the old full transcript, but is
@@ -1166,6 +1168,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // Only clear loading if this is still the current generation
       if (sessionGenerationRef.current === generation) {
         setIsLoading(false);
+        setIsCachePreview(false);
+        cachePreviewRef.current = false;
       }
     }
   }, [projectId, branch, agentType, explicitSessionId, connectWebSocket]);
@@ -1694,19 +1698,42 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       !explicitSessionId && currentWorkspaceKey !== null
       && hasPlaceholder(currentWorkspaceKey);
 
-    // Reset all state
-    setSession(null);
-    sessionRef.current = null;
-    setStatus("stopped");
+    // Restore a warm target snapshot synchronously so switching does not blank
+    // the conversation while the lightweight head check runs. For a running
+    // session, only its sealed prefix is safe to preview; the mutable tail is
+    // fetched again before it is shown.
+    const warmSnapshot = !stayingInPlaceholder && projectId
+      ? readSessionCache(getCacheKey(projectId, branch, explicitSessionId))
+      : undefined;
+    const sealedThrough = warmSnapshot?.history.lastTurnEndEntryIndex ?? null;
+    const previewEntries = warmSnapshot?.session.status === "running"
+      ? warmSnapshot.history.entries.filter(
+          (entry) => sealedThrough !== null && entry.entryIndex <= sealedThrough,
+        )
+      : warmSnapshot?.history.entries ?? [];
+    const previewHistory = warmSnapshot ? {
+      ...warmSnapshot.history,
+      entries: previewEntries,
+      latestEntryIndex: previewEntries.at(-1)?.entryIndex ?? null,
+    } : null;
+
+    setSession(warmSnapshot?.session ?? null);
+    sessionRef.current = warmSnapshot?.session ?? null;
+    setStatus(warmSnapshot?.session.status ?? "stopped");
     setIsConnected(false);
-    setIsInitialized(stayingInPlaceholder);
+    setIsInitialized(stayingInPlaceholder || Boolean(warmSnapshot));
     setError(null);
     setIsLoading(false);
+    setIsCachePreview(Boolean(warmSnapshot));
+    cachePreviewRef.current = Boolean(warmSnapshot);
     setRemoteStatus(null);
-    setMessages([]); // Clear stale messages to prevent scroll jump on workspace switch
-    containerRef.current = { entries: {}, status: "stopped" };
-    historyRef.current = null;
-    setHasEarlierHistory(false);
+    setMessages(previewEntries.map((entry) => entry.message));
+    containerRef.current = {
+      entries: entriesRecord(previewEntries),
+      status: warmSnapshot?.session.status ?? "stopped",
+    };
+    historyRef.current = previewHistory;
+    setHasEarlierHistory(previewHistory?.hasMore ?? false);
     finishedRef.current = false;
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;
@@ -1734,7 +1761,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const inPlaceholder =
       projectId !== null
       && hasPlaceholder(workspaceKey(projectId, branch, agentMode));
-    if (shouldAutoStartRef.current && projectId && !session && !isLoading && !lastStartFailedRef.current && !inPlaceholder) {
+    if (shouldAutoStartRef.current && projectId && (!session || cachePreviewRef.current) && !isLoading && !lastStartFailedRef.current && !inPlaceholder) {
       shouldAutoStartRef.current = false;
       console.log(`[AgentSession] Auto-start: projectId=${projectId}, branch=${branch}, agentMode=${agentMode}`);
       startSession();
@@ -1778,6 +1805,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     isConnected,
     isInitialized,
     isLoading,
+    isCachePreview,
     error,
     remoteStatus,
     workflowRunUpdate,

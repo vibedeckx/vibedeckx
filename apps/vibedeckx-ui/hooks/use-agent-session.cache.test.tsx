@@ -69,6 +69,45 @@ afterEach(async () => {
 });
 
 describe("agent session window cache", () => {
+  it("restores a cached session before its head revalidation completes", async () => {
+    let releaseHead!: () => void;
+    const headGate = new Promise<void>((resolve) => { releaseHead = resolve; });
+    fetchMock.mockImplementation(async (url) => {
+      const id = String(url).match(/agent-sessions\/(cache-session-[ab])/)?.[1] ?? "unknown";
+      if (String(url).endsWith("/history-head")) {
+        await headGate;
+        return {
+          ok: true,
+          json: async () => ({
+            historyEpoch: 0,
+            latestEntryIndex: 0,
+            lastTurnEndEntryIndex: null,
+            status: "stopped",
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          session: { id, projectId: "cache-project", branch: "main", status: "stopped" },
+          messages: [{ type: "assistant", content: `history-${id}`, timestamp: 1 }],
+        }),
+      } as Response;
+    });
+
+    await render("cache-session-a");
+    await render("cache-session-b");
+    await render("cache-session-a");
+
+    expect(latest!.session?.id).toBe("cache-session-a");
+    expect(latest!.messages).toMatchObject([{ content: "history-cache-session-a" }]);
+    expect(latest!.isInitialized).toBe(true);
+    expect(latest!.isCachePreview).toBe(true);
+
+    await act(async () => { releaseHead(); });
+    expect(latest!.isCachePreview).toBe(false);
+  });
+
   it("revalidates a previously visited session and renders the current bounded window", async () => {
     await render("cache-session-a");
     expect(latest!.messages).toMatchObject([{ content: "history-cache-session-a" }]);

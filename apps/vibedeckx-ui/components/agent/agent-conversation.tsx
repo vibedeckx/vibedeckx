@@ -205,6 +205,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     isConnected,
     isInitialized,
     isLoading,
+    isCachePreview,
     error,
     remoteStatus,
     workflowRunUpdate,
@@ -1027,7 +1028,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   {isLoading && (
                     <div className="flex items-center gap-2 py-4 text-muted-foreground">
                       <Loader className="h-4 w-4" />
-                      <span className="text-sm">Connecting to agent...</span>
+                      <span className="text-sm">
+                        {isCachePreview ? "Checking for newer output..." : "Connecting to agent..."}
+                      </span>
                     </div>
                   )}
                 </div>
