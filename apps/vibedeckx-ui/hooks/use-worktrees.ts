@@ -50,6 +50,15 @@ export function preserveSelectedWorkspace(
   return preserved;
 }
 
+// Page-lifetime cache of the last fetched worktree list per project. A
+// revisited project is seeded from it synchronously (render-phase, below), so
+// cross-project navigation can apply a staged workspace/session selection
+// immediately instead of waiting a network round-trip (remote projects list
+// worktrees over the tunnel); the regular fetch then revalidates. Values are
+// server truth from the last completed fetch — never the
+// preserveSelectedWorkspace hybrid.
+const worktreeListCache = new Map<string, Worktree[]>();
+
 export function useWorktrees(
   projectId: string | null,
   selectedBranch?: string | null,
@@ -58,6 +67,34 @@ export function useWorktrees(
   const [fetching, setFetching] = useState(true);
   // The project the current `worktrees` list was fetched for.
   const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
+  // Mirror for reads inside fetchWorktrees: its deps must stay [projectId]
+  // (the fetch effect keys off its identity), so the state value would be a
+  // stale closure there.
+  const loadedProjectIdRef = useRef<string | null>(null);
+  const markLoadedFor = (pid: string | null) => {
+    loadedProjectIdRef.current = pid;
+    setLoadedProjectId(pid);
+  };
+
+  // Seed a revisited project's list from cache DURING render — same pattern
+  // as page.tsx's render-phase branch reset — so sibling effects in the very
+  // first commit after a project switch already see a non-stale list.
+  const [seededProjectId, setSeededProjectId] = useState<string | null>(null);
+  if (projectId !== seededProjectId) {
+    setSeededProjectId(projectId);
+    const cached = projectId ? worktreeListCache.get(projectId) : undefined;
+    if (cached) {
+      setWorktrees(cached);
+      markLoadedFor(projectId);
+      // The project-change revalidation is about to start, but the fetch
+      // effect's own setFetching(true) is invisible to sibling effects in
+      // this first commit. Set it here, synchronously, or that commit exposes
+      // (stale=false, loading=false) — an "authoritative" list — and
+      // page.tsx's pending-apply effect would DROP a staged branch that is
+      // newer than this cache instead of waiting for the fresh list.
+      setFetching(true);
+    }
+  }
   const requestGeneration = useRef(0);
   const requestController = useRef<AbortController | null>(null);
   const previousSelectionRef = useRef<{ projectId: string | null; branch: string | null | undefined } | null>(null);
@@ -73,7 +110,7 @@ export function useWorktrees(
     if (!projectId) {
       requestController.current = null;
       setWorktrees([]);
-      setLoadedProjectId(null);
+      markLoadedFor(null);
       setFetching(false);
       return;
     }
@@ -82,6 +119,7 @@ export function useWorktrees(
     try {
       const data = await api.getProjectWorktrees(projectId, undefined, controller.signal);
       if (generation !== requestGeneration.current) return;
+      worktreeListCache.set(projectId, data);
       setWorktrees((previous) => {
         const next = background
           ? preserveSelectedWorkspace(previous, data, selectedBranchRef.current)
@@ -93,11 +131,14 @@ export function useWorktrees(
       if (error instanceof Error && error.name === "AbortError") return;
       console.error("Failed to fetch worktrees:", error);
       // A background health refresh must not erase a valid workspace list on a
-      // transient network failure.
-      if (!background) setWorktrees([{ branch: null }]);
+      // transient network failure — and neither should a failed revalidation
+      // of a cache-seeded list (the seed is a better answer than the stub).
+      if (!background && loadedProjectIdRef.current !== projectId) {
+        setWorktrees([{ branch: null }]);
+      }
     } finally {
       if (generation !== requestGeneration.current || requestController.current !== controller) return;
-      setLoadedProjectId(projectId);
+      markLoadedFor(projectId);
       if (!background) setFetching(false);
       requestController.current = null;
     }

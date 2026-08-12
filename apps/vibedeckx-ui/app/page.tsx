@@ -426,7 +426,13 @@ export default function Home() {
 
   // Auto-select first worktree if current selection is not in the list
   useEffect(() => {
-    if (worktreesLoading || worktrees.length === 0) return;
+    // A cache-seeded list (stale=false, fetch still revalidating) is good
+    // enough to APPLY a pending selection — that is what makes a jump into a
+    // previously-visited project instant. It is NOT good enough to DROP one:
+    // the target branch may have been created after the cache was written, so
+    // a miss is only authoritative once the fresh fetch settles (loading
+    // false). The fallback auto-select stays fresh-list-only too.
+    if (worktreesStale || worktrees.length === 0) return;
     // Honor a pending cross-project workspace selection before any fallback.
     const pending = pendingWorkspaceRef.current;
     if (pending !== undefined) {
@@ -444,6 +450,7 @@ export default function Home() {
         setBranchNavPending(false);
         return;
       }
+      if (worktreesLoading) return;
       // Target branch isn't in the freshly-loaded project — drop it and fall
       // through to the normal auto-select. Release the pins too, since no
       // selection will complete for this navigation.
@@ -451,10 +458,11 @@ export default function Home() {
       setSessionNavPending(false);
       setBranchNavPending(false);
     }
+    if (worktreesLoading) return;
     if (!worktrees.some(w => w.branch === selectedBranch)) {
       setSelectedBranch(worktrees[0].branch);
     }
-  }, [worktrees, worktreesLoading, selectedBranch, selectBranchSession]);
+  }, [worktrees, worktreesLoading, worktreesStale, selectedBranch, selectBranchSession]);
 
   // Safety net for the Agent-tab pin. sessionNavPending only exists to bridge
   // the window where a cross-project session jump has nulled selectedBranch and
