@@ -26,24 +26,52 @@ import type { RemoteExecutorInfo } from "./server-types.js";
  * registry + one dedupe guard.
  */
 export class RemoteExecutorMonitor {
-  /** localProcessId → cleanup function */
-  private monitors = new Map<string, () => void>();
+  /**
+   * Processes that still need a terminal observation.  This registry is
+   * deliberately separate from the currently-open virtual channels: a control
+   * connection can disappear while the remote process keeps running.
+   */
+  private watched = new Map<string, RemoteExecutorInfo>();
+
+  /** localProcessId → cleanup for the currently-open virtual channel */
+  private activeMonitors = new Map<string, () => void>();
 
   constructor(
     private readonly reverseConnectManager: ReverseConnectManager,
     private readonly eventBus: EventBus,
     private readonly storage: Storage,
     private readonly remoteExecutorMap: Map<string, RemoteExecutorInfo>,
-  ) {}
+  ) {
+    // A reverse-connect outage closes every virtual channel.  Keep the watch
+    // intent above and re-open those channels when the worker reconnects so a
+    // `finished` frame produced during the outage is replayed from the worker's
+    // ProcessManager buffer.
+    this.reverseConnectManager.setStatusChangeHandler((_remoteServerId, status) => {
+      if (status !== "online") return;
+      for (const [localProcessId, info] of this.watched) {
+        // Ask the manager instead of comparing the online event's server id:
+        // this resumes every currently-routable watch, including aliases that
+        // were already registered before this transition.
+        if (this.reverseConnectManager.isConnected(info.remoteServerId)) {
+          this.attach(localProcessId, info);
+        }
+      }
+    });
+  }
 
   watch(localProcessId: string, remoteInfo: RemoteExecutorInfo): void {
-    // Idempotent — also avoids a second connection when the on-demand log proxy
-    // is already attached.
-    if (this.monitors.has(localProcessId)) return;
+    this.watched.set(localProcessId, remoteInfo);
+    this.attach(localProcessId, remoteInfo);
+  }
+
+  private attach(localProcessId: string, remoteInfo: RemoteExecutorInfo): void {
+    // Idempotent for the active transport.  The durable watch intent remains in
+    // `watched` until a real terminal frame arrives or the caller unwatches it.
+    if (this.activeMonitors.has(localProcessId)) return;
 
     const rcm = this.reverseConnectManager;
     if (!rcm.isConnected(remoteInfo.remoteServerId)) {
-      console.log(`[RemoteExecutorMonitor] remote ${remoteInfo.remoteServerId} not connected for ${localProcessId}, skipping`);
+      console.log(`[RemoteExecutorMonitor] remote ${remoteInfo.remoteServerId} not connected for ${localProcessId}, deferring`);
       return;
     }
 
@@ -58,9 +86,14 @@ export class RemoteExecutorMonitor {
     const remoteWs: VirtualWsAdapter = adapter;
     setTimeout(() => adapter.emit("open"), 0);
 
-    const cleanup = () => {
-      this.monitors.delete(localProcessId);
-      try { remoteWs.close(); } catch { /* already closed */ }
+    let cleanedUp = false;
+    const cleanupActive = (closeChannel: boolean) => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      this.activeMonitors.delete(localProcessId);
+      if (closeChannel) {
+        try { remoteWs.close(); } catch { /* already closed */ }
+      }
     };
 
     // Collect output so the executor:stopped event can carry a tail (mirrors the
@@ -74,7 +107,15 @@ export class RemoteExecutorMonitor {
           outputChunks.push(parsed.data);
         }
         if (parsed.type === "finished") {
+          this.watched.delete(localProcessId);
           const info = this.remoteExecutorMap.get(localProcessId);
+          // A worker that restarted or already purged its in-memory process
+          // buffer answers with `finished(exitCode: null)`.  That proves only
+          // that the process is gone, not that it succeeded.  Event consumers
+          // require a numeric code, so report failure while persisting the more
+          // precise `killed` terminal state below.
+          const hasKnownExitCode = typeof parsed.exitCode === "number";
+          const eventExitCode = hasKnownExitCode ? parsed.exitCode : 1;
           if (info && !info.stoppedEmitted) {
             info.stoppedEmitted = true;
             let raw = outputChunks.join("");
@@ -85,7 +126,7 @@ export class RemoteExecutorMonitor {
               projectId: info.projectId ?? "",
               executorId: info.executorId,
               processId: localProcessId,
-              exitCode: parsed.exitCode ?? 0,
+              exitCode: eventExitCode,
               target: info.remoteServerId,
               tailOutput,
               // Structured final message forwarded by the remote's finished
@@ -96,34 +137,39 @@ export class RemoteExecutorMonitor {
           this.remoteExecutorMap.delete(localProcessId);
           // Soft-delete: keep the DB row so "Last run" + post-finish log replay
           // survive past the process's lifecycle.
-          this.storage.remoteExecutorProcesses.markFinished(
-            localProcessId,
-            typeof parsed.exitCode === "number" ? parsed.exitCode : 0,
-          ).catch((err) => {
+          const markFinished = hasKnownExitCode
+            ? this.storage.remoteExecutorProcesses.markFinished(localProcessId, parsed.exitCode)
+            : this.storage.remoteExecutorProcesses.markFinished(localProcessId, undefined, "killed");
+          markFinished.catch((err) => {
             console.error(`[RemoteExecutorMonitor] Failed to mark process ${localProcessId} finished:`, err);
           });
-          cleanup();
+          cleanupActive(true);
         }
       } catch { /* ignore parse errors */ }
     });
 
-    remoteWs.on("close", () => { cleanup(); });
+    // Transport close is not process completion.  Drop only the active channel;
+    // the watch intent stays registered and will reconnect on the next online
+    // status notification.
+    remoteWs.on("close", () => { cleanupActive(false); });
 
     remoteWs.on("error", (error) => {
       console.error(`[RemoteExecutorMonitor] error for ${localProcessId}:`, error);
-      cleanup();
+      cleanupActive(true);
     });
 
-    this.monitors.set(localProcessId, cleanup);
+    this.activeMonitors.set(localProcessId, () => cleanupActive(true));
     console.log(`[RemoteExecutorMonitor] watching ${localProcessId}`);
   }
 
   unwatch(localProcessId: string): void {
-    this.monitors.get(localProcessId)?.();
+    this.watched.delete(localProcessId);
+    this.activeMonitors.get(localProcessId)?.();
   }
 
   shutdown(): void {
-    for (const cleanup of this.monitors.values()) cleanup();
-    this.monitors.clear();
+    this.watched.clear();
+    for (const cleanup of [...this.activeMonitors.values()]) cleanup();
+    this.activeMonitors.clear();
   }
 }
