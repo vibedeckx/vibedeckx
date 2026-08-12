@@ -64,7 +64,7 @@ export function shouldHoldBottom({ settling, turnInFlight, wasAtBottom }: Anchor
  * scrollTop synchronously inside the callback means the displaced position is
  * never painted.
  *
- * Anchoring rules:
+ * Anchoring rules, for height changes within an open transcript:
  * - Pinned at the bottom → stay glued to the bottom.
  * - Mid-list (user scrolled up, or returned to a preserved position) → during
  *   the settle window, keep the topmost visible message at a fixed viewport
@@ -73,15 +73,20 @@ export function shouldHoldBottom({ settling, turnInFlight, wasAtBottom }: Anchor
  *   loses its anchor there because the inner nodes are replaced). Never
  *   scrolls a mid-list reader to the bottom.
  *
- * The settle window arms on history fill and on file-ref index arrival, and
- * closes after SETTLE_QUIET_MS without height changes.
+ * Opening a transcript is a separate question and answered separately: a
+ * conversation always opens at its latest turn (see the pin effect below).
+ *
+ * The settle window arms on history fill, on a session switch and on file-ref
+ * index arrival, and closes after SETTLE_QUIET_MS without height changes.
  */
 export function ConversationAnchorHold({
   messageCount,
   turnInFlight,
+  sessionId,
 }: {
   messageCount: number;
   turnInFlight: boolean;
+  sessionId: string | null;
 }) {
   const { scrollToBottom, scrollRef, contentRef } = useStickToBottomContext();
   const { index } = useFileNavigation();
@@ -109,17 +114,42 @@ export function ConversationAnchorHold({
 
   const wasEmptyRef = useRef(true);
   const lastVersionRef = useRef(version);
+  const lastSessionRef = useRef(sessionId);
 
-  // History fill: one-shot instant pin (the content goes 0 → full, so there is
-  // no meaningful prior position to preserve) + open the settle window.
+  // Opening a transcript — the one-shot instant pin. Two triggers, one landing:
+  //
+  // - History fill (0 → full): the classic path, nothing to preserve.
+  // - Session switch into a warm cache: session and messages are swapped in a
+  //   single commit, so the count never passes through 0 and the fill trigger
+  //   never arms. The outgoing session's scroll offset survives into a taller
+  //   transcript, the browser's own anchoring lands somewhere mid-conversation,
+  //   and the library's rAF-based correction only reaches the bottom frames
+  //   later — the wrong part of the conversation gets painted first.
+  //
+  // A cache hit and a cache miss must land in the same place, so neither
+  // trigger consults where the reader was. The retained scrollTop is a pixel
+  // offset into a DIFFERENT transcript — honouring it is not "preserving the
+  // reader's position", it is landing at an arbitrary point in a conversation
+  // they have not read yet. Mid-list protection is about height changes WITHIN
+  // an open transcript (the ResizeObserver below); it does not survive a swap
+  // of the transcript itself.
+  //
+  // Assigning scrollTop is what actually prevents the painted frame — it runs
+  // in the switch's own commit, before paint. scrollToBottom then keeps the
+  // library's own isAtBottom in agreement, so it follows the mutable tail that
+  // lands after the head check.
   useLayoutEffect(() => {
-    if (wasEmptyRef.current && messageCount > 0) {
-      armSettle();
-      diag("fill", { messageCount });
-      scrollToBottom({ animation: "instant" });
-    }
+    const switched = sessionId !== lastSessionRef.current;
+    const filled = wasEmptyRef.current && messageCount > 0;
+    lastSessionRef.current = sessionId;
     wasEmptyRef.current = messageCount === 0;
-  }, [messageCount, scrollToBottom]);
+    if (!filled && !(switched && messageCount > 0)) return;
+    armSettle();
+    diag(filled ? "fill" : "session-switch", { sessionId, messageCount });
+    const scroller = scrollRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    scrollToBottom({ animation: "instant" });
+  }, [messageCount, sessionId, scrollToBottom, scrollRef]);
 
   // File-ref index arrival: the remount's height churn is about to start.
   useLayoutEffect(() => {

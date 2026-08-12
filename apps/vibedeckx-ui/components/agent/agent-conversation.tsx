@@ -1051,7 +1051,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             )}
           </ConversationContent>
           <ConversationScrollButton />
-          <ConversationAnchorHold messageCount={messages.length} turnInFlight={turnInFlight} />
+          <ConversationAnchorHold
+            messageCount={messages.length}
+            turnInFlight={turnInFlight}
+            sessionId={session?.id ?? null}
+          />
         </Conversation>
         <UserInputMarkers messages={messages} contentRef={messagesRef} />
         <QuotePopover containerRef={messagesRef} onQuote={handleQuote} />
