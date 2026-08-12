@@ -848,7 +848,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             let statusIcon = <WifiOff className="h-3 w-3" />;
             let statusText = "Disconnected";
 
-            if (!isConnected) {
+            if (isCachePreview) {
+              // A warm transcript is already visible while its sealed head is
+              // revalidated. Keep this transient state in the header instead
+              // of appending a loader to the conversation itself.
+              statusColor = "text-muted-foreground";
+              statusIcon = <Loader2 className="h-3 w-3 animate-spin" />;
+              statusText = "Checking for newer output...";
+            } else if (!isConnected) {
               // Distinguish initial handshake from a lost connection: until the
               // WS has opened at least once for this session, treat it as
               // "Connecting..." instead of "Disconnected" so we don't flash a
@@ -1031,12 +1038,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       </div>
                     )
                   )}
-                  {isLoading && (
+                  {isLoading && !isCachePreview && (
                     <div className="flex items-center gap-2 py-4 text-muted-foreground">
                       <Loader className="h-4 w-4" />
-                      <span className="text-sm">
-                        {isCachePreview ? "Checking for newer output..." : "Connecting to agent..."}
-                      </span>
+                      <span className="text-sm">Connecting to agent...</span>
                     </div>
                   )}
                 </div>
