@@ -125,6 +125,12 @@ export default function Home() {
   // persisted tab (e.g. Executors). Cleared the moment the pending selection is
   // consumed (see selectBranchSession and the worktrees-loaded effect).
   const [sessionNavPending, setSessionNavPending] = useState(false);
+  // Branch-only sibling of sessionNavPending: suspends the agent session hook
+  // across the same cross-project window but does NOT pin the Agent tab
+  // (branch-only jumps keep the target workspace's persisted tab). Without it
+  // a workspace jump auto-starts at (newProject, branch=null) and loads /
+  // previews main's latest session before the target branch lands.
+  const [branchNavPending, setBranchNavPending] = useState(false);
   const agentRef = useRef<AgentConversationHandle>(null);
   // The project id we last reset the branch for. State (not a ref) so the
   // render-time reset below is concurrent-safe.
@@ -158,7 +164,7 @@ export default function Home() {
     setBranchResetProjectId(currentProject?.id);
   }
 
-  const { worktrees, loading: worktreesLoading, refetch: refetchWorktrees } = useWorktrees(
+  const { worktrees, loading: worktreesLoading, stale: worktreesStale, refetch: refetchWorktrees } = useWorktrees(
     currentProject?.id ?? null,
     selectedBranch,
   );
@@ -431,13 +437,19 @@ export default function Home() {
         } else {
           setSelectedBranch(pending.branch);
         }
+        // Lift the suspension in the SAME batch the target branch lands: the
+        // agent hook's reset effect runs once per (branch, sessionId) change
+        // and never re-runs on suspension lift alone, so clearing a render
+        // later would permanently skip the target's warm cache preview.
+        setBranchNavPending(false);
         return;
       }
       // Target branch isn't in the freshly-loaded project — drop it and fall
-      // through to the normal auto-select. Release the Agent-tab pin too, since
-      // no session selection will complete for this navigation.
+      // through to the normal auto-select. Release the pins too, since no
+      // selection will complete for this navigation.
       pendingWorkspaceRef.current = undefined;
       setSessionNavPending(false);
+      setBranchNavPending(false);
     }
     if (!worktrees.some(w => w.branch === selectedBranch)) {
       setSelectedBranch(worktrees[0].branch);
@@ -455,11 +467,12 @@ export default function Home() {
   // against, the pin's job is done. It never fires during the window we need
   // (selectedBranch is null and worktrees are still loading / non-empty then).
   useEffect(() => {
-    if (!sessionNavPending) return;
+    if (!sessionNavPending && !branchNavPending) return;
     if (selectedBranch !== null || (!worktreesLoading && worktrees.length === 0)) {
       setSessionNavPending(false);
+      setBranchNavPending(false);
     }
-  }, [sessionNavPending, selectedBranch, worktreesLoading, worktrees]);
+  }, [sessionNavPending, branchNavPending, selectedBranch, worktreesLoading, worktrees]);
 
   // Jump to the workspace a completion notification points at. Same project →
   // select the branch (and, when known, the exact completed session) directly;
@@ -479,8 +492,10 @@ export default function Home() {
       const target = projects.find((p) => p.id === projectId);
       if (!target) return;
       // Same cross-project Agent-tab pin as the quick switcher, but only when a
-      // specific session is targeted (branch-only jumps keep their persisted tab).
+      // specific session is targeted (branch-only jumps keep their persisted
+      // tab — they suspend the agent hook via branchNavPending instead).
       if (sessionId) setSessionNavPending(true);
+      else setBranchNavPending(true);
       pendingWorkspaceRef.current = { branch, sessionId };
       selectProject(target);
     },
@@ -649,7 +664,10 @@ export default function Home() {
         // be nulled and then overridden by the auto-select-first-worktree
         // effect. Stage the target in pendingWorkspaceRef instead (same
         // mechanism as the notification deep-link) and let the worktrees-
-        // loaded effect apply it.
+        // loaded effect apply it. Suspend the agent hook across the window —
+        // without this it auto-starts at branch=null and loads/previews the
+        // new project's MAIN session before the target branch lands.
+        setBranchNavPending(true);
         pendingWorkspaceRef.current = { branch: w.branch, sessionId: null };
         selectProject(project);
       }
@@ -867,6 +885,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setActiveView(view);
             }}
             worktrees={worktrees}
+            worktreesStale={worktreesStale}
             selectedBranch={selectedBranch}
             onBranchChange={setSelectedBranch}
             currentProject={currentProject}
@@ -1023,7 +1042,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         projectId={currentProject?.id ?? null}
                         branch={selectedBranch}
                         sessionId={urlSessionId}
-                        navPending={sessionNavPending}
+                        navPending={sessionNavPending || branchNavPending}
                         setSessionUrlParam={setSessionUrlParam}
                         onActiveSessionChange={setRenderedSessionId}
                         project={currentProject}

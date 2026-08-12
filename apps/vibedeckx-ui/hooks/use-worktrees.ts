@@ -180,6 +180,11 @@ export function useWorktrees(
   return {
     worktrees,
     loading: isWorktreesLoading(fetching, loadedProjectId, projectId),
+    // Narrower than `loading`: true only while the list on hand belongs to a
+    // DIFFERENT project (the cross-project navigation window). Same-project
+    // refetches keep it false, so consumers can gate selection highlights on
+    // it without blinking them on every refresh.
+    stale: loadedProjectId !== projectId,
     refetch,
   };
 }

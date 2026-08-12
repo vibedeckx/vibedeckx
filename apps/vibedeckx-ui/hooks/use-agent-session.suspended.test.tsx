@@ -137,4 +137,44 @@ describe("suspended navigation gate", () => {
     expect(latest!.isInitialized).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("previews the last session-keyed snapshot on a branch-only return", async () => {
+    // Visit branch "dev" pinned to an explicit session — snapshots persist
+    // under sid-shaped keys only (`p1:dev:s-target`), never `p1:dev:latest`.
+    await render({ branch: "dev", sessionId: "s-target", suspended: false });
+    expect(latest!.session?.id).toBe("s-target");
+
+    // Leave for another workspace, then return branch-only with the network
+    // hung: only the key-shape fallback can produce content.
+    await render({ branch: "other", sessionId: null, suspended: false });
+    fetchMock.mockImplementation(() => new Promise<never>(() => {}));
+    await render({ branch: "dev", sessionId: null, suspended: false });
+
+    expect(latest!.isCachePreview).toBe(true);
+    expect(latest!.session?.id).toBe("s-target");
+  });
+
+  it("restores the root-workspace preview when suspension lifts without an identity change", async () => {
+    // Visit project A's root workspace to warm the (p1, null, latest) key.
+    await render({ projectId: "p1", branch: null, sessionId: null, suspended: false });
+    expect(latest!.session?.id).toBe("s-target");
+
+    // Move to another project, then hang the network: from here on only the
+    // cache can produce content.
+    await render({ projectId: "p2", branch: "dev", sessionId: "s-other", suspended: false });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(() => new Promise<never>(() => {}));
+
+    // Jump back to A's ROOT workspace. The mid-jump identity (p1, null, null)
+    // IS the target identity, so the reset effect will not re-run when
+    // suspension lifts — the lift itself must restore the preview.
+    await render({ projectId: "p1", branch: null, sessionId: null, suspended: true });
+    expect(latest!.session).toBeNull();
+    expect(latest!.isCachePreview).toBe(false);
+
+    await render({ projectId: "p1", branch: null, sessionId: null, suspended: false });
+    expect(latest!.isCachePreview).toBe(true);
+    expect(latest!.session?.id).toBe("s-target");
+    expect(latest!.isInitialized).toBe(true);
+  });
 });

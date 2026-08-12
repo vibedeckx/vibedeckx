@@ -329,6 +329,22 @@ function readSessionCache(key: string): CachedSessionSnapshot | undefined {
   return cached;
 }
 
+// Most-recently-used snapshot for a workspace, whatever session id it was
+// keyed under. A branch-only arrival asks for `<pid>:<branch>:latest`, but a
+// previous visit pinned to ?session=<id> persisted only sid-shaped keys — an
+// exact-key miss there does not mean the workspace is cold. The previewed
+// session may differ from what latest-for-branch resolves to; startSession
+// revalidates and replaces it. Prefix matching is unambiguous: git ref names
+// cannot contain ":".
+function readLatestWorkspaceSnapshot(projectId: string, branch: string | null): CachedSessionSnapshot | undefined {
+  const prefix = `${projectId}:${branch ?? ""}:`;
+  let latestKey: string | undefined;
+  for (const key of sessionCache.keys()) {
+    if (key.startsWith(prefix)) latestKey = key;
+  }
+  return latestKey ? readSessionCache(latestKey) : undefined;
+}
+
 function writeSessionCache(key: string, snapshot: CachedSessionSnapshot): void {
   sessionCache.delete(key);
   sessionCache.set(key, snapshot);
@@ -1661,6 +1677,46 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
   }, [cancelResidentLimitPrompt, clearSilenceTimer]);
 
+  // Read the warm snapshot for a workspace identity and apply it as a cache
+  // preview. Returns false on a cache miss. For a running session, only its
+  // sealed prefix is safe to preview; the mutable tail is fetched again before
+  // it is shown. Shared by the workspace-reset effect and the suspension-lift
+  // effect below it.
+  const applyWarmPreview = useCallback((
+    projectId: string,
+    branch: string | null,
+    explicitSessionId: string | null | undefined,
+  ): boolean => {
+    const warmSnapshot = readSessionCache(getCacheKey(projectId, branch, explicitSessionId))
+      ?? (explicitSessionId ? undefined : readLatestWorkspaceSnapshot(projectId, branch));
+    if (!warmSnapshot) return false;
+    const sealedThrough = warmSnapshot.history.lastTurnEndEntryIndex ?? null;
+    const previewEntries = warmSnapshot.session.status === "running"
+      ? warmSnapshot.history.entries.filter(
+          (entry) => sealedThrough !== null && entry.entryIndex <= sealedThrough,
+        )
+      : warmSnapshot.history.entries;
+    const previewHistory = {
+      ...warmSnapshot.history,
+      entries: previewEntries,
+      latestEntryIndex: previewEntries.at(-1)?.entryIndex ?? null,
+    };
+    setSession(warmSnapshot.session);
+    sessionRef.current = warmSnapshot.session;
+    setStatus(warmSnapshot.session.status);
+    setIsInitialized(true);
+    setIsCachePreview(true);
+    cachePreviewRef.current = true;
+    setMessages(previewEntries.map((entry) => entry.message));
+    containerRef.current = {
+      entries: entriesRecord(previewEntries),
+      status: warmSnapshot.session.status,
+    };
+    historyRef.current = previewHistory;
+    setHasEarlierHistory(previewHistory.hasMore ?? false);
+    return true;
+  }, []);
+
   // Reset session when projectId or branch changes
   useEffect(() => {
     // Close existing WebSocket with code 1000 to prevent onclose reconnect handler
@@ -1703,48 +1759,35 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       && hasPlaceholder(currentWorkspaceKey);
 
     // Restore a warm target snapshot synchronously so switching does not blank
-    // the conversation while the lightweight head check runs. For a running
-    // session, only its sealed prefix is safe to preview; the mutable tail is
-    // fetched again before it is shown.
+    // the conversation while the lightweight head check runs.
     //
     // Never preview while suspended: mid-cross-project-jump this effect fires
     // with (branch=null, sessionId=null), whose cache key aliases the target
     // project's default-workspace latest session — previewing it flashes main's
     // conversation before the real target lands (the same flash the suspended
     // gate on auto-start exists to prevent). Once the staged branch+session
-    // apply, this effect re-runs with the real key.
-    const warmSnapshot = !stayingInPlaceholder && projectId && !suspendedRef.current
-      ? readSessionCache(getCacheKey(projectId, branch, explicitSessionId))
-      : undefined;
-    const sealedThrough = warmSnapshot?.history.lastTurnEndEntryIndex ?? null;
-    const previewEntries = warmSnapshot?.session.status === "running"
-      ? warmSnapshot.history.entries.filter(
-          (entry) => sealedThrough !== null && entry.entryIndex <= sealedThrough,
-        )
-      : warmSnapshot?.history.entries ?? [];
-    const previewHistory = warmSnapshot ? {
-      ...warmSnapshot.history,
-      entries: previewEntries,
-      latestEntryIndex: previewEntries.at(-1)?.entryIndex ?? null,
-    } : null;
-
-    setSession(warmSnapshot?.session ?? null);
-    sessionRef.current = warmSnapshot?.session ?? null;
-    setStatus(warmSnapshot?.session.status ?? "stopped");
+    // apply, this effect re-runs with the real key — except when the target
+    // identity IS (branch=null, sessionId=null); the suspension-lift effect
+    // below restores the preview for that case.
+    const previewed = !stayingInPlaceholder && projectId && !suspendedRef.current
+      ? applyWarmPreview(projectId, branch, explicitSessionId)
+      : false;
+    if (!previewed) {
+      setSession(null);
+      sessionRef.current = null;
+      setStatus("stopped");
+      setIsInitialized(stayingInPlaceholder);
+      setIsCachePreview(false);
+      cachePreviewRef.current = false;
+      setMessages([]);
+      containerRef.current = { entries: entriesRecord([]), status: "stopped" };
+      historyRef.current = null;
+      setHasEarlierHistory(false);
+    }
     setIsConnected(false);
-    setIsInitialized(stayingInPlaceholder || Boolean(warmSnapshot));
     setError(null);
     setIsLoading(false);
-    setIsCachePreview(Boolean(warmSnapshot));
-    cachePreviewRef.current = Boolean(warmSnapshot);
     setRemoteStatus(null);
-    setMessages(previewEntries.map((entry) => entry.message));
-    containerRef.current = {
-      entries: entriesRecord(previewEntries),
-      status: warmSnapshot?.session.status ?? "stopped",
-    };
-    historyRef.current = previewHistory;
-    setHasEarlierHistory(previewHistory?.hasMore ?? false);
     finishedRef.current = false;
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;
@@ -1761,7 +1804,22 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // Agent type changes are handled by restartSession() which keeps the WebSocket
     // connected so it can receive the clearAll patch and new messages from the backend.
     // Including agentType here would close the WebSocket and race with restartSession.
-  }, [projectId, branch, agentMode, explicitSessionId, cancelResidentLimitPrompt, clearSilenceTimer]);
+  }, [projectId, branch, agentMode, explicitSessionId, applyWarmPreview, cancelResidentLimitPrompt, clearSilenceTimer]);
+
+  // A jump whose TARGET identity equals the mid-navigation identity — a cross-
+  // project jump to the root workspace, (branch=null, sessionId=null) — never
+  // re-runs the reset effect when the staged selection lands: no dep changes,
+  // only `suspended` flips. The reset above ran suspended and skipped the
+  // preview, so restore it here. Declared before the auto-start effect so
+  // startSession sees cachePreviewRef and keeps the preview visible while it
+  // revalidates. On non-degenerate lifts this re-runs after the reset effect
+  // and no-ops (preview applied → cachePreviewRef set; miss → misses again).
+  useEffect(() => {
+    if (suspended || !projectId) return;
+    if (!shouldAutoStartRef.current || cachePreviewRef.current || sessionRef.current) return;
+    if (hasPlaceholder(workspaceKey(projectId, branch, agentMode))) return;
+    applyWarmPreview(projectId, branch, explicitSessionId);
+  }, [suspended, projectId, branch, agentMode, explicitSessionId, applyWarmPreview]);
 
   // Auto-start session after mount or worktree switch
   useEffect(() => {

@@ -19,6 +19,13 @@ interface AppSidebarProps {
   activeView: ActiveView;
   onViewChange: (view: ActiveView) => void;
   worktrees?: Worktree[];
+  /**
+   * True while `worktrees` still belongs to a previous project (cross-project
+   * navigation window). Suppresses selection highlights: selectedBranch is
+   * null then, and the root workspace's branch identity is ALSO null, so the
+   * old project's main row would light up.
+   */
+  worktreesStale?: boolean;
   selectedBranch?: string | null;
   onBranchChange?: (branch: string | null) => void;
   currentProject?: Project | null;
@@ -189,6 +196,7 @@ export function AppSidebar({
   activeView,
   onViewChange,
   worktrees,
+  worktreesStale,
   selectedBranch,
   onBranchChange,
   currentProject,
@@ -366,7 +374,7 @@ export function AppSidebar({
             <TooltipProvider delayDuration={300}>
               <div className="flex flex-col gap-px">
                 {worktrees.map((wt) => {
-                  const isActive = activeView === "workspace" && selectedBranch === wt.branch;
+                  const isActive = activeView === "workspace" && !worktreesStale && selectedBranch === wt.branch;
                   const branchKey = wt.branch === null ? "" : wt.branch;
                   const hasBranchDrift = wt.currentBranch !== undefined;
                   const currentBranchLabel = wt.currentBranch ?? "detached HEAD";
