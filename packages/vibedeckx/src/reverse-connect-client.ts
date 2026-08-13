@@ -13,7 +13,24 @@ const MACHINE_KEY_SETTING = "reverse_machine_private_key";
 
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
-const NO_PING_TIMEOUT_MS = 60_000;
+/**
+ * How long to wait for a hub ping before assuming the tunnel is dead.
+ *
+ * The hub pings every 30s (PING_INTERVAL_MS in reverse-connect-manager), so
+ * this allows 10s of scheduling jitter on top of one interval. It does not ride
+ * out a fully missed ping — neither did the previous 60s, which sat exactly on
+ * the two-interval boundary and so raced the next ping anyway.
+ *
+ * This is the dominant term in user-visible recovery after a hub restart: when
+ * the hub dies without a clean close reaching the worker — killed container, a
+ * proxy in between — the worker notices only when this fires, and until then
+ * the browser re-subscribes to a hub whose tunnel is still down.
+ *
+ * The cost of lowering it is that a hub event-loop stall longer than the slack
+ * disconnects every worker at once. 10s of stall would already be pathological,
+ * but if that ever shows up as a reconnect storm, this is the knob.
+ */
+const NO_PING_TIMEOUT_MS = 40_000;
 
 // The hub accepts the WebSocket upgrade and only *then* closes with one of these
 // when it rejects the connect token or the machine identity. So `open` firing
@@ -399,7 +416,7 @@ export class ReverseConnectClient {
   private resetNoPingTimer(): void {
     this.clearNoPingTimer();
     this.noPingTimer = setTimeout(() => {
-      console.log("[ReverseClient] No ping received in 60s, reconnecting...");
+      console.log(`[ReverseClient] No ping received in ${NO_PING_TIMEOUT_MS / 1000}s, reconnecting...`);
       if (this.ws) {
         this.ws.close(1000, "No ping timeout");
       }

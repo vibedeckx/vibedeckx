@@ -54,6 +54,13 @@ interface RunningProcess {
   isTerminal: boolean;
   name: string;
   logs: LogMessage[];
+  /** Running sum of `logs` payload lengths — the budget below is enforced on it. */
+  logBytes: number;
+  /** Output not yet appended to `logs`, waiting for the coalescing window. */
+  pending: { type: "stdout" | "stderr" | "pty"; data: string } | null;
+  pendingTimer: ReturnType<typeof setTimeout> | null;
+  /** Whether this buffer has already dropped output, so we log that once. */
+  trimmed: boolean;
   subscribers: Set<LogSubscriber>;
   executorId: string;
   projectId: string;
@@ -64,6 +71,32 @@ interface RunningProcess {
 
 const LOG_RETENTION_MS = 30 * 60 * 1000; // keep a finished process's logs replayable for 30 min after exit
 const TERMINAL_MAX_LOG_ENTRIES = 5000;
+/**
+ * The entry cap alone bounds nothing: a chunk is whatever one read returned, up
+ * to tens of KB, so 5000 of them can be hundreds of MB. This is the cap that
+ * actually holds, in UTF-16 code units of payload (≈ bytes for ASCII output).
+ */
+const TERMINAL_MAX_LOG_BYTES = 4 * 1024 * 1024;
+/**
+ * Trim down to this fraction of the caps rather than to exactly the cap, so a
+ * process that sits at the limit pays for the shift once per 10% of churn
+ * instead of on every single append.
+ */
+const LOG_TRIM_TARGET = 0.9;
+/**
+ * Output arriving within this window is concatenated into one entry. A noisy
+ * build emits hundreds of small chunks per second; each one otherwise costs a
+ * LogMessage object, a subscriber broadcast and a WebSocket frame. Short enough
+ * to stay under a frame, so interactive echo is unaffected.
+ */
+const LOG_COALESCE_MS = 8;
+/**
+ * Flush the coalescing buffer once it reaches this size instead of waiting out
+ * the window. Without it a fast producer could merge megabytes into a single
+ * entry, which the trim cannot then shrink (it only drops whole entries) and
+ * which arrives at the browser as one huge frame.
+ */
+const LOG_COALESCE_MAX_BYTES = 128 * 1024;
 
 /**
  * node-pty on macOS uses a `spawn-helper` binary in prebuilds/.
@@ -101,6 +134,135 @@ export class ProcessManager {
 
   constructor(storage: Storage) {
     this.storage = storage;
+  }
+
+  /** Payload size of one entry; `finished` carries an uncapped finalResult. */
+  private static logMessageBytes(msg: LogMessage): number {
+    const data = (msg as { data?: string }).data;
+    const finalResult = (msg as { finalResult?: string }).finalResult;
+    return (typeof data === "string" ? data.length : 0)
+      + (typeof finalResult === "string" ? finalResult.length : 0);
+  }
+
+  /**
+   * Drop entries from the head until the buffer is back under both caps.
+   *
+   * `splice` rather than the `slice(-N)` this replaces: same shift, but it
+   * mutates in place instead of allocating a fresh 5000-element array on every
+   * over-cap append.
+   */
+  private trimLogs(processId: string, rp: RunningProcess): void {
+    const maxEntries = Math.floor(TERMINAL_MAX_LOG_ENTRIES * LOG_TRIM_TARGET);
+    const maxBytes = Math.floor(TERMINAL_MAX_LOG_BYTES * LOG_TRIM_TARGET);
+
+    let drop = 0;
+    let bytes = rp.logBytes;
+    while (
+      // Never drop the newest entry, even when it alone exceeds the budget.
+      // Emptying the buffer would take the `finished` marker with it, and
+      // isRunning() reads an empty buffer as "no finished entry ⇒ still
+      // running" — a dead process pinned to Running for the whole retention
+      // window. One oversized entry over budget is the cheaper failure.
+      drop < rp.logs.length - 1
+      && (rp.logs.length - drop > maxEntries || bytes > maxBytes)
+    ) {
+      bytes -= ProcessManager.logMessageBytes(rp.logs[drop]);
+      drop++;
+    }
+    if (drop === 0) return;
+
+    rp.logs.splice(0, drop);
+    rp.logBytes = bytes;
+    if (!rp.trimmed) {
+      rp.trimmed = true;
+      console.log(`[ProcessManager] Log buffer for ${processId} hit its cap; oldest output is being dropped`);
+    }
+  }
+
+  /**
+   * Append one entry and fan it out. Every write to `logs` goes through here so
+   * the byte accounting and the caps cannot be bypassed.
+   */
+  private appendLog(processId: string, rp: RunningProcess, msg: LogMessage): void {
+    const last = rp.logs[rp.logs.length - 1];
+    if (msg.type !== "finished" && last?.type === "finished") {
+      // A PTY can deliver output AFTER onExit — that is exactly why the drain
+      // mechanism in startPtyProcess exists. Appending it would leave the exit
+      // marker in the middle of the buffer, and isRunning() decides a PTY
+      // process is alive by checking whether the LAST entry is `finished`, so
+      // one late chunk pinned a dead executor to "Running" for the whole
+      // retention window (and left replay clients waiting for an exit that had
+      // already happened). Keep the marker last; live subscribers still get
+      // the chunk in arrival order via the broadcast below.
+      rp.logs.splice(rp.logs.length - 1, 0, msg);
+    } else {
+      rp.logs.push(msg);
+    }
+    rp.logBytes += ProcessManager.logMessageBytes(msg);
+    if (rp.logs.length > TERMINAL_MAX_LOG_ENTRIES || rp.logBytes > TERMINAL_MAX_LOG_BYTES) {
+      this.trimLogs(processId, rp);
+    }
+    this.broadcast(processId, msg);
+  }
+
+  /** Commit any coalesced output. Safe to call when nothing is pending. */
+  private flushPending(processId: string, rp: RunningProcess): void {
+    if (rp.pendingTimer) {
+      clearTimeout(rp.pendingTimer);
+      rp.pendingTimer = null;
+    }
+    const pending = rp.pending;
+    if (!pending) return;
+    rp.pending = null;
+    this.appendLog(processId, rp, pending as LogMessage);
+  }
+
+  /**
+   * Buffer a chunk of process output for up to LOG_COALESCE_MS.
+   *
+   * Chunks of different types never merge, so stdout/stderr interleaving is
+   * preserved exactly as it was observed.
+   */
+  private appendOutput(
+    processId: string,
+    rp: RunningProcess,
+    type: "stdout" | "stderr" | "pty",
+    data: string,
+  ): void {
+    if (rp.pending && rp.pending.type === type) {
+      rp.pending.data += data;
+      if (rp.pending.data.length >= LOG_COALESCE_MAX_BYTES) this.flushPending(processId, rp);
+      return; // otherwise the already-armed timer will flush it
+    }
+    this.flushPending(processId, rp);
+    if (data.length >= LOG_COALESCE_MAX_BYTES) {
+      // Already big enough on its own — no point holding it for more.
+      this.appendLog(processId, rp, { type, data } as LogMessage);
+      return;
+    }
+    rp.pending = { type, data };
+    rp.pendingTimer = setTimeout(() => {
+      rp.pendingTimer = null;
+      const proc = this.processes.get(processId);
+      if (proc === rp) this.flushPending(processId, rp);
+    }, LOG_COALESCE_MS);
+    rp.pendingTimer.unref?.();
+  }
+
+  /**
+   * Append a terminal `finished` entry, flushing buffered output first.
+   *
+   * Ordering is load-bearing twice over: replay must not show the exit before
+   * the output that preceded it, and `isRunning()` decides a PTY process is
+   * alive by checking whether the LAST entry is `finished`, so buffered output
+   * must never jump ahead of it.
+   *
+   * Output that arrives *after* the exit is handled on the other side, in
+   * appendLog: it is spliced in ahead of the marker so the marker stays last.
+   */
+  private appendFinished(processId: string, rp: RunningProcess, msg: LogMessage): void {
+    this.flushPending(processId, rp);
+    this.appendLog(processId, rp, msg);
   }
 
   /**
@@ -300,6 +462,10 @@ export class ProcessManager {
       isTerminal: true,
       name,
       logs: [],
+      logBytes: 0,
+      pending: null,
+      pendingTimer: null,
+      trimmed: false,
       subscribers: new Set(),
       executorId: "",
       projectId,
@@ -313,20 +479,13 @@ export class ProcessManager {
     if (usePty) {
       const ptyProc = proc as IPty;
       ptyProc.onData((data: string) => {
-        const msg: LogMessage = { type: "pty", data };
-        runningProcess.logs.push(msg);
-        if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-          runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-        }
-        this.broadcast(processId, msg);
+        this.appendOutput(processId, runningProcess, "pty", data);
       });
 
       ptyProc.onExit(({ exitCode }) => {
         const code = exitCode ?? 0;
         console.log(`[ProcessManager] Terminal ${processId} exited with code ${code}`);
-        const msg: LogMessage = { type: "finished", exitCode: code };
-        runningProcess.logs.push(msg);
-        this.broadcast(processId, msg);
+        this.appendFinished(processId, runningProcess, { type: "finished", exitCode: code });
         setTimeout(() => {
           this.processes.delete(processId);
           this.processEffects.delete(processId);
@@ -335,27 +494,15 @@ export class ProcessManager {
     } else {
       const childProc = proc as ChildProcess;
       childProc.stdout?.on("data", (data: Buffer) => {
-        const msg: LogMessage = { type: "pty", data: data.toString() };
-        runningProcess.logs.push(msg);
-        if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-          runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-        }
-        this.broadcast(processId, msg);
+        this.appendOutput(processId, runningProcess, "pty", data.toString());
       });
       childProc.stderr?.on("data", (data: Buffer) => {
-        const msg: LogMessage = { type: "pty", data: data.toString() };
-        runningProcess.logs.push(msg);
-        if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-          runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-        }
-        this.broadcast(processId, msg);
+        this.appendOutput(processId, runningProcess, "pty", data.toString());
       });
       childProc.on("close", (code) => {
         const exitCode = code ?? 0;
         console.log(`[ProcessManager] Terminal ${processId} exited with code ${exitCode}`);
-        const msg: LogMessage = { type: "finished", exitCode };
-        runningProcess.logs.push(msg);
-        this.broadcast(processId, msg);
+        this.appendFinished(processId, runningProcess, { type: "finished", exitCode });
         setTimeout(() => {
           this.processes.delete(processId);
           this.processEffects.delete(processId);
@@ -399,6 +546,10 @@ export class ProcessManager {
       isTerminal: false,
       name: "",
       logs: [],
+      logBytes: 0,
+      pending: null,
+      pendingTimer: null,
+      trimmed: false,
       subscribers: new Set(),
       executorId: executor.id,
       projectId: executor.project_id,
@@ -423,6 +574,9 @@ export class ProcessManager {
       const { code } = exitPending;
       exitPending = null;
       drainHandle = null;
+      // The drain runs on setImmediate, which fires well before the coalescing
+      // window — without this the tail would be missing the final chunks.
+      this.flushPending(processId, runningProcess);
       const tailOutput = this.snapshotTailOutput(runningProcess.logs);
       this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: code, target: "local", tailOutput, finalResult });
     };
@@ -434,12 +588,7 @@ export class ProcessManager {
 
     // Handle PTY data output
     ptyProcess.onData((data: string) => {
-      const msg: LogMessage = { type: "pty", data };
-      runningProcess.logs.push(msg);
-      if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-      }
-      this.broadcast(processId, msg);
+      this.appendOutput(processId, runningProcess, "pty", data);
 
       // If exit is pending, reset drain — more data may follow
       if (exitPending) {
@@ -462,9 +611,7 @@ export class ProcessManager {
       }
 
       finalResult = this.consumeFinalResultFile(finalResultFile);
-      const msg: LogMessage = { type: "finished", exitCode: code, finalResult };
-      runningProcess.logs.push(msg);
-      this.broadcast(processId, msg);
+      this.appendFinished(processId, runningProcess, { type: "finished", exitCode: code, finalResult });
 
       // Start drain — will emit once no more onData callbacks arrive
       exitPending = { code };
@@ -497,6 +644,10 @@ export class ProcessManager {
       isTerminal: false,
       name: "",
       logs: [],
+      logBytes: 0,
+      pending: null,
+      pendingTimer: null,
+      trimmed: false,
       subscribers: new Set(),
       executorId: executor.id,
       projectId: executor.project_id,
@@ -510,23 +661,29 @@ export class ProcessManager {
 
     // Handle stdout
     childProcess.stdout?.on("data", (data: Buffer) => {
-      const msg: LogMessage = { type: "stdout", data: data.toString() };
-      runningProcess.logs.push(msg);
-      if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-      }
-      this.broadcast(processId, msg);
+      this.appendOutput(processId, runningProcess, "stdout", data.toString());
     });
 
     // Handle stderr
     childProcess.stderr?.on("data", (data: Buffer) => {
-      const msg: LogMessage = { type: "stderr", data: data.toString() };
-      runningProcess.logs.push(msg);
-      if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-      }
-      this.broadcast(processId, msg);
+      this.appendOutput(processId, runningProcess, "stderr", data.toString());
     });
+
+    // Exactly-once terminal path. Both 'close' and 'error' can reach it, and a
+    // spawn failure emits both — without the guard each would append its own
+    // `finished`, emit a second stopped event and arm a second cleanup timer.
+    let finalized = false;
+    const finalize = (exitCode: number, finalResult?: string) => {
+      if (finalized) return;
+      finalized = true;
+      this.appendFinished(processId, runningProcess, { type: "finished", exitCode, finalResult });
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
+      setTimeout(() => {
+        console.log(`[ProcessManager] Cleaning up process ${processId}`);
+        this.processes.delete(processId);
+        this.processEffects.delete(processId);
+      }, LOG_RETENTION_MS);
+    };
 
     // Handle process exit
     childProcess.on("close", (code) => {
@@ -541,26 +698,23 @@ export class ProcessManager {
         });
       }
 
-      const finalResult = this.consumeFinalResultFile(finalResultFile);
-      const msg: LogMessage = { type: "finished", exitCode, finalResult };
-      runningProcess.logs.push(msg);
-      this.broadcast(processId, msg);
       // close event guarantees all stdio is flushed — safe to snapshot now
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
-
-      // Schedule cleanup after retention period
-      setTimeout(() => {
-        console.log(`[ProcessManager] Cleaning up process ${processId}`);
-        this.processes.delete(processId);
-        this.processEffects.delete(processId);
-      }, LOG_RETENTION_MS);
+      finalize(exitCode, this.consumeFinalResultFile(finalResultFile));
     });
 
-    // Handle spawn errors
     childProcess.on("error", (error) => {
-      const msg: LogMessage = { type: "stderr", data: `Error: ${error.message}` };
-      runningProcess.logs.push(msg);
-      this.broadcast(processId, msg);
+      this.appendOutput(processId, runningProcess, "stderr", `Error: ${error.message}`);
+
+      // 'error' does NOT imply the child is gone — Node also emits it when a
+      // kill or an IPC send fails, and that child is still running. Declaring
+      // it finished there would lie to the UI and, now that finalize schedules
+      // cleanup, would drop a live process out of the map after the retention
+      // window. A spawn that never happened is the one case nothing else will
+      // report, and it is identifiable: no pid was ever assigned.
+      if (childProcess.pid !== undefined) {
+        console.warn(`[ProcessManager] Process ${processId} reported an error while still alive: ${error.message}`);
+        return;
+      }
 
       if (!skipDb) {
         this.storage.executorProcesses.updateStatus(processId, "failed", 1).catch((err) => {
@@ -568,10 +722,7 @@ export class ProcessManager {
         });
       }
 
-      const finishMsg: LogMessage = { type: "finished", exitCode: 1 };
-      runningProcess.logs.push(finishMsg);
-      this.broadcast(processId, finishMsg);
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
+      finalize(1);
     });
   }
 
@@ -600,6 +751,10 @@ export class ProcessManager {
       isTerminal: false,
       name: '',
       logs: [],
+      logBytes: 0,
+      pending: null,
+      pendingTimer: null,
+      trimmed: false,
       subscribers: new Set(),
       executorId: executor.id,
       projectId: executor.project_id,
@@ -632,12 +787,7 @@ export class ProcessManager {
     const BOLD = '\x1b[1m';
 
     const pushLog = (data: string) => {
-      const msg: LogMessage = { type: 'stdout', data };
-      runningProcess.logs.push(msg);
-      if (runningProcess.logs.length > TERMINAL_MAX_LOG_ENTRIES) {
-        runningProcess.logs = runningProcess.logs.slice(-TERMINAL_MAX_LOG_ENTRIES);
-      }
-      this.broadcast(processId, msg);
+      this.appendOutput(processId, runningProcess, 'stdout', data);
     };
 
     // Parse stream-json stdout into formatted terminal output
@@ -732,6 +882,20 @@ export class ProcessManager {
     // Ignore stderr (Claude Code uses it for progress/debug info)
     childProcess.stderr?.on('data', () => {});
 
+    // Exactly-once terminal path — see startRegularProcess for why.
+    let finalized = false;
+    const finalize = (exitCode: number) => {
+      if (finalized) return;
+      finalized = true;
+      this.appendFinished(processId, runningProcess, { type: 'finished', exitCode, finalResult });
+      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
+      setTimeout(() => {
+        console.log(`[ProcessManager] Cleaning up process ${processId}`);
+        this.processes.delete(processId);
+        this.processEffects.delete(processId);
+      }, LOG_RETENTION_MS);
+    };
+
     // Handle process exit
     childProcess.on('close', (code) => {
       const exitCode = code ?? 0;
@@ -745,25 +909,19 @@ export class ProcessManager {
         });
       }
 
-      const msg: LogMessage = { type: 'finished', exitCode, finalResult };
-      runningProcess.logs.push(msg);
-      this.broadcast(processId, msg);
       // close event guarantees all stdio is flushed — safe to snapshot now
-      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
-
-      // Schedule cleanup after retention period
-      setTimeout(() => {
-        console.log(`[ProcessManager] Cleaning up process ${processId}`);
-        this.processes.delete(processId);
-        this.processEffects.delete(processId);
-      }, LOG_RETENTION_MS);
+      finalize(exitCode);
     });
 
-    // Handle spawn errors
     childProcess.on('error', (error) => {
-      const msg: LogMessage = { type: 'stderr', data: `Error: ${error.message}` };
-      runningProcess.logs.push(msg);
-      this.broadcast(processId, msg);
+      this.appendOutput(processId, runningProcess, 'stderr', `Error: ${error.message}`);
+
+      // Only a spawn that never happened (no pid) is terminal here — see
+      // startRegularProcess.
+      if (childProcess.pid !== undefined) {
+        console.warn(`[ProcessManager] Stream process ${processId} reported an error while still alive: ${error.message}`);
+        return;
+      }
 
       if (!skipDb) {
         this.storage.executorProcesses.updateStatus(processId, 'failed', 1).catch((err) => {
@@ -771,10 +929,7 @@ export class ProcessManager {
         });
       }
 
-      const finishMsg: LogMessage = { type: 'finished', exitCode: 1 };
-      runningProcess.logs.push(finishMsg);
-      this.broadcast(processId, finishMsg);
-      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode: 1, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs) });
+      finalize(1);
     });
   }
 
@@ -986,7 +1141,12 @@ export class ProcessManager {
    */
   getLogs(processId: string): LogMessage[] {
     const runningProcess = this.processes.get(processId);
-    return runningProcess?.logs ?? [];
+    if (!runningProcess) return [];
+    // Commit buffered output first so a client attaching mid-stream replays
+    // everything produced so far, instead of seeing the last few milliseconds
+    // arrive as "live" after history_end.
+    this.flushPending(processId, runningProcess);
+    return runningProcess.logs;
   }
 
   /**
@@ -1020,17 +1180,11 @@ export class ProcessManager {
 
     for (const proc of this.processes.values()) {
       if (proc.isTerminal) terminals++;
-      let procBytes = 0;
-      for (const log of proc.logs) {
-        // Output chunks carry `data`; the terminating `finished` carries
-        // `finalResult` — the agent's last message, read whole from the
-        // final-result file with no size cap (consumeFinalResultFile), so it
-        // can dwarf the chunks that precede it.
-        const data = (log as { data?: string }).data;
-        if (typeof data === "string") procBytes += data.length;
-        const finalResult = (log as { finalResult?: string }).finalResult;
-        if (typeof finalResult === "string") procBytes += finalResult.length;
-      }
+      // `logBytes` is the same sum this used to recompute per call, maintained
+      // on the append path (it covers both `data` and the uncapped
+      // `finalResult` on the terminating entry). Plus whatever is still sitting
+      // in the coalescing buffer, which is memory too.
+      const procBytes = proc.logBytes + (proc.pending?.data.length ?? 0);
       logEntries += proc.logs.length;
       approxBytes += procBytes;
       if (procBytes > maxProcessApproxBytes) maxProcessApproxBytes = procBytes;
@@ -1254,6 +1408,7 @@ export class ProcessManager {
    */
   shutdown(): void {
     for (const [id, proc] of this.processes) {
+      if (proc.pendingTimer) clearTimeout(proc.pendingTimer);
       try {
         if (proc.isPty) {
           (proc.process as IPty).kill();

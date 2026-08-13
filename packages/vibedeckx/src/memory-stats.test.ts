@@ -11,22 +11,42 @@ const frame = (index: number) => JSON.stringify({
   JsonPatch: ConversationPatch.addEntry(index, { type: "assistant", content: "text", timestamp: 1 }),
 });
 
-/** Seed the process map without spawning: logBufferStats only reads buffers. */
+type PrivateManager = {
+  processes: Map<string, { logs: unknown[] }>;
+  appendLog: (processId: string, rp: unknown, msg: unknown) => void;
+};
+
+/**
+ * Seed the process map without spawning. Entries go in through the real
+ * appendLog so the byte accounting under test is the production one rather
+ * than something this helper made up.
+ */
 function seedProcess(pm: ProcessManager, id: string, chunks: string[], isTerminal = false) {
-  const processes = (pm as unknown as { processes: Map<string, unknown> }).processes;
-  processes.set(id, {
+  const priv = pm as unknown as PrivateManager;
+  priv.processes.set(id, {
     process: { killed: true, exitCode: 0 },
     isPty: false,
     isTerminal,
     name: id,
-    logs: chunks.map((data) => ({ type: "pty" as const, data })),
+    logs: [],
+    logBytes: 0,
+    pending: null,
+    pendingTimer: null,
+    trimmed: false,
     subscribers: new Set(),
     executorId: "e1",
     projectId: "p1",
     projectPath: "/repo",
     branch: null,
     skipDb: false,
-  });
+  } as never);
+  for (const data of chunks) appendRaw(pm, id, { type: "pty", data });
+}
+
+/** Append one already-formed entry through the production path. */
+function appendRaw(pm: ProcessManager, id: string, msg: Record<string, unknown>) {
+  const priv = pm as unknown as PrivateManager;
+  priv.appendLog(id, priv.processes.get(id), msg);
 }
 
 describe("ProcessManager.logBufferStats", () => {
@@ -58,8 +78,7 @@ describe("ProcessManager.logBufferStats", () => {
   it("counts a bare finished marker as an entry with no payload", () => {
     const pm = new ProcessManager(null as never);
     seedProcess(pm, "p", ["ab"]);
-    const proc = (pm as unknown as { processes: Map<string, { logs: unknown[] }> }).processes.get("p")!;
-    proc.logs.push({ type: "finished", exitCode: 0 });
+    appendRaw(pm, "p", { type: "finished", exitCode: 0 });
 
     expect(pm.logBufferStats()).toMatchObject({ log_entries: 2, approx_bytes: 2 });
   });
@@ -67,10 +86,9 @@ describe("ProcessManager.logBufferStats", () => {
   it("counts finalResult, which prompt executors attach to the finished marker", () => {
     const pm = new ProcessManager(null as never);
     seedProcess(pm, "p", ["ab"]);
-    const proc = (pm as unknown as { processes: Map<string, { logs: unknown[] }> }).processes.get("p")!;
     // consumeFinalResultFile reads the agent's last message whole, uncapped —
     // ignoring it would hide the largest single item in the buffer.
-    proc.logs.push({ type: "finished", exitCode: 0, finalResult: "r".repeat(500) });
+    appendRaw(pm, "p", { type: "finished", exitCode: 0, finalResult: "r".repeat(500) });
 
     expect(pm.logBufferStats()).toMatchObject({
       log_entries: 2,

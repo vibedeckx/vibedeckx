@@ -225,9 +225,24 @@ history needs the worker" state instead.
 
 ## 6. Adjacent, not gated on this data
 
-Worker-side `ProcessManager` log buffers are capped by **entry count only**
+Worker-side `ProcessManager` log buffers were capped by **entry count only**
 (`TERMINAL_MAX_LOG_ENTRIES = 5000`, 30-minute retention after exit), with no byte
-budget — a high-throughput process can hold hundreds of MB on a user's machine.
-That work needs no hub measurements and can proceed independently: per-process
-byte budget, chunk coalescing, a real ring buffer instead of `slice(-N)`, and a
-cleanup timer on the `childProcess.on("error")` path.
+budget — a high-throughput process could hold hundreds of MB on a user's
+machine. Done 2026-08-13, independently of any hub measurement:
+
+- `TERMINAL_MAX_LOG_BYTES = 4 MB` per process, enforced on the append path.
+- Output coalesced over an 8 ms window (flushed early at 128 KB), cutting entry
+  count, per-entry object overhead and WebSocket frames by an order of
+  magnitude on noisy output.
+- In-place `splice` with 90% hysteresis instead of `slice(-N)`. Not the ring
+  buffer this plan originally called for: `logs` stays a plain array so every
+  reader (`isRunning`, replay, tail snapshot) keeps working unchanged, and
+  amortising the trim to once per ~10% of churn removes the per-append
+  allocation that actually mattered.
+- Trim never empties the buffer, so a single oversized entry — an agent
+  `finalResult` larger than the whole budget — is kept rather than dropped;
+  losing it would take the `finished` marker with it and pin a dead process to
+  Running.
+- One idempotent terminal path per process: `error` no longer fabricates an
+  exit for a child that is still alive (a failed kill also raises it), and
+  retention cleanup is armed exactly once.
