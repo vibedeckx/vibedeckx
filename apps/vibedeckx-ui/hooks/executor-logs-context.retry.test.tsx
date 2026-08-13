@@ -87,6 +87,10 @@ const deliver = (ws: FakeWebSocket, message: Record<string, unknown>) =>
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
+  // Pin the backoff jitter to zero so delays are exactly 1/2/4/8/15/15…s.
+  // With jitter live, a 15s step can land at 18.75s and slip past a fixed
+  // advance, which makes any cumulative-timing assertion flaky.
+  vi.spyOn(Math, "random").mockReturnValue(0);
   FakeWebSocket.instances = [];
   observed = { status: "closed", logs: 0 };
 });
@@ -125,16 +129,36 @@ describe("executor log mux — retryable errors", () => {
     expect(ws.subscribeCount()).toBe(2);
   });
 
-  it("gives up after the attempt budget instead of retrying forever", async () => {
+  it("outlasts the worst-case tunnel recovery before giving up", async () => {
     const ws = await render();
+    const offline = { type: "error", message: "offline", retryable: true };
+    // Backoff schedule with jitter pinned off. Cumulative: 1,3,7,15,30,45,60,
+    // 75,90,105,120,135s.
+    const delaysMs = [1, 2, 4, 8, 15, 15, 15, 15, 15, 15, 15, 15].map((s) => s * 1000);
 
-    for (let i = 0; i < 12; i++) {
-      await deliver(ws, { type: "error", message: "offline", retryable: true });
-      await tick(20_000);
+    // Worst case the tunnel stays down ~90s: the worker sits out its 60s
+    // no-ping timeout, then re-dials on a backoff capped at 30s.
+    await deliver(ws, offline);
+    let elapsed = 0;
+    let step = 0;
+    while (elapsed < 90_000) {
+      await tick(delaysMs[step]); // the scheduled retry fires
+      elapsed += delaysMs[step];
+      step++;
+      await deliver(ws, offline); // still offline — schedules the next one
     }
+    // 9 retries land within 90s, so the cycle is still alive when the worker
+    // would realistically come back.
+    expect(observed.status).toBe("connecting");
+    expect(ws.subscribeCount()).toBe(10); // 1 initial + 9 retries
 
-    // 1 initial + 8 retries, then the state settles as a real error.
-    expect(ws.subscribeCount()).toBe(9);
+    // ...but the budget is finite, not an infinite retry loop.
+    while (step < delaysMs.length) {
+      await tick(delaysMs[step]);
+      step++;
+      await deliver(ws, offline);
+    }
+    expect(ws.subscribeCount()).toBe(13); // 1 initial + 12 retries
     expect(observed.status).toBe("error");
   });
 

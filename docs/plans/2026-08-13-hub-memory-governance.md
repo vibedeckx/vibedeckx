@@ -120,15 +120,24 @@ hub can plausibly exceed the cap.
 
 The `memory-stats` lines themselves are negligible (~600 B × 288/day ≈ 170 KB/day);
 it is everything else in the shared log that evicts them. So before starting the
-window, tee them out to a file nothing rotates:
+window, tee them out to a file nothing rotates. Set this up as an hourly
+**scheduled task** targeting the hub (the logs are local to it), not a crontab
+entry, so the export is visible and editable in the product:
 
 ```bash
-# crontab: hourly, append-only, dedup-safe (sort -u on the whole line)
-grep -h '"mod":"memory-stats"' ~/.vibedeckx/logs/*.log \
-  >> ~/memory-stats-series.ndjson && sort -u -o ~/memory-stats-series.ndjson ~/memory-stats-series.ndjson
+touch "$HOME/memory-stats-series.ndjson"; grep -h '"mod":"memory-stats"' "$HOME"/.vibedeckx/logs/*.log >> "$HOME/memory-stats-series.ndjson"; sort -u -o "$HOME/memory-stats-series.ndjson" "$HOME/memory-stats-series.ndjson"; wc -l < "$HOME/memory-stats-series.ndjson"
 ```
 
-Check at the halfway point that the earliest retained line is still older than
+Append-then-dedup rather than tracking a cursor: re-reading the whole retained
+window every hour costs nothing at this volume, and `sort -u` over identical
+whole lines makes the job idempotent, so a missed or double run cannot corrupt
+the series. Timestamps come from pino's `time`, so ordering survives the sort.
+The `;` separators and the leading `touch` matter — until the hub restarts onto
+a build with the reporter there are no matching lines, and `grep` exiting 1
+would otherwise mark every run failed. The trailing `wc -l` makes each run's
+output the running line count, so the schedule history shows the series growing.
+
+Check at the halfway point that the earliest exported line is still older than
 the window start; if not, the export is the dataset and the raw logs are not.
 
 Read the series for four things:

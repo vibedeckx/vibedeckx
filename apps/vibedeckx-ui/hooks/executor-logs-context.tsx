@@ -14,7 +14,12 @@ const RECONNECT_MAX_DELAY_MS = 15000;
 // here, it is the tunnel behind it that is down, so nothing else will ever
 // prompt a retry — without this the process stays in `error` until the item
 // remounts or the socket happens to drop.
-const RESUBSCRIBE_MAX_ATTEMPTS = 8;
+// The budget has to outlast the worst-case tunnel recovery, or the retries run
+// out just before the worker comes back and we are stuck again. That worst case
+// is ~90s: the worker waits out its 60s no-ping timeout before noticing the hub
+// went away, then re-dials on a backoff capped at 30s. 12 attempts of
+// 1/2/4/8/15/15... cover ~135s (~170s with jitter).
+const RESUBSCRIBE_MAX_ATTEMPTS = 12;
 const RESUBSCRIBE_BASE_DELAY_MS = 1000;
 const RESUBSCRIBE_MAX_DELAY_MS = 15000;
 
