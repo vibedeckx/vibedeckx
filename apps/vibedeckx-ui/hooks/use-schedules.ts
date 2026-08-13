@@ -17,9 +17,29 @@ import { useGlobalEventStream } from "@/hooks/global-event-stream";
  * current — this also covers a mutation's refetch() call whose promise
  * chain started against an older project before a switch.
  */
+// Page-lifetime cache of each project's schedule list — same pattern as
+// use-worktrees / use-resident-sessions. A revisited project's schedules show
+// instantly (sidebar section + SchedulesView) while the project-change load
+// revalidates; a never-visited project seeds [] instead of showing the
+// previous project's rows until the fetch lands. The generation guard below
+// already discards cross-project late responses, so writes stay clean.
+const scheduleListCache = new Map<string, Schedule[]>();
+
 export function useSchedules(projectId: string | null) {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Seed on project change DURING render (same pattern as useWorktrees).
+  const [seededProjectId, setSeededProjectId] = useState<string | null>(null);
+  if (projectId !== seededProjectId) {
+    setSeededProjectId(projectId);
+    setSchedules(projectId ? scheduleListCache.get(projectId) ?? [] : []);
+  }
+
+  // Write-through so the next visit to this project can seed.
+  useEffect(() => {
+    if (projectId) scheduleListCache.set(projectId, schedules);
+  }, [projectId, schedules]);
 
   const projectIdRef = useRef(projectId);
   const generationRef = useRef(0);
