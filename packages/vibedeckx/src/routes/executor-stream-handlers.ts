@@ -13,7 +13,17 @@ export type StreamMessage =
   | LogMessage
   | { type: "init"; isPty: boolean }
   | { type: "history_end" }
-  | { type: "error"; message: string };
+  /**
+   * `retryable` marks a failure that is about the transport, not the process:
+   * the process may well still be alive and streaming on its worker, we just
+   * cannot reach it right now. Clients may re-subscribe on a backoff instead
+   * of showing a dead terminal. Absent (or false) means authoritative — the
+   * process is gone and re-subscribing will never help.
+   *
+   * Hub→browser only. Errors forwarded from a worker arrive without the flag,
+   * which is correct: the worker answering at all means the tunnel is fine.
+   */
+  | { type: "error"; message: string; retryable?: boolean };
 
 export interface ProcessStreamHandle {
   /** 停止该进程的流（取消订阅 / 关闭上游）。可安全多次调用。 */
@@ -129,7 +139,10 @@ export function attachRemoteProcessStream(
     const info = remoteInfo;
 
     if (!fastify.reverseConnectManager.isConnected(info.remoteServerId)) {
-      send({ type: "error", message: "Remote server not reachable (reverse-connect offline)" });
+      // Transient by nature: after a hub restart the browser reconnects in
+      // ~1-15s while the worker may take up to its 60s no-ping timeout to
+      // notice and re-dial, so this is the common ordering, not the rare one.
+      send({ type: "error", message: "Remote server not reachable (reverse-connect offline)", retryable: true });
       onTerminal();
       return;
     }
@@ -211,7 +224,11 @@ export function attachRemoteProcessStream(
       console.error(`[ExecutorStream] Remote connection error:`, error);
       console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream ERROR processId=${processId} terminalSignalSent=${terminalSignalSent} — ${terminalSignalSent ? "no fabricated signal" : "will send error (non-terminal for isRunning)"}`);
       if (!terminalSignalSent) {
-        send({ type: "error", message: "Remote connection error" });
+        // Also transport, not process: the virtual channel broke mid-stream.
+        // Re-subscribing opens a fresh channel and replays from the worker's
+        // buffer, so this is worth retrying for the same reason the
+        // tunnel-offline case above is.
+        send({ type: "error", message: "Remote connection error", retryable: true });
         terminalSignalSent = true;
       }
       onTerminal();

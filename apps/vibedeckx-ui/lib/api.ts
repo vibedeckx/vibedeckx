@@ -421,7 +421,9 @@ export type LogMessage =
   | { type: "pty"; data: string; historical?: boolean }
   | { type: "finished"; exitCode: number | null }
   | { type: "init"; isPty: boolean }
-  | { type: "error"; message: string }
+  // `retryable` means the transport failed, not the process — the server could
+  // not reach the worker. Re-subscribing later may well succeed.
+  | { type: "error"; message: string; retryable?: boolean }
   | { type: "history_end" };
 
 export type InputMessage =

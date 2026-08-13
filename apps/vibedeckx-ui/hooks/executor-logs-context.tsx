@@ -9,6 +9,15 @@ const RECONNECT_MAX_ATTEMPTS = 8;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 15000;
 
+// Re-subscription after a `retryable` error (the server could not reach the
+// worker). Separate from the socket-level backoff above: the mux WS is fine
+// here, it is the tunnel behind it that is down, so nothing else will ever
+// prompt a retry — without this the process stays in `error` until the item
+// remounts or the socket happens to drop.
+const RESUBSCRIBE_MAX_ATTEMPTS = 8;
+const RESUBSCRIBE_BASE_DELAY_MS = 1000;
+const RESUBSCRIBE_MAX_DELAY_MS = 15000;
+
 export interface ProcessLogState {
   logs: LogMessage[];
   status: ConnectionStatus;
@@ -71,11 +80,52 @@ export function ExecutorLogsProvider({
     notify(processId);
   }, [notify]);
 
+  // Pending per-process re-subscriptions after a retryable error.
+  const resubscribeTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const resubscribeAttemptsRef = useRef(new Map<string, number>());
+
   const sendRaw = useCallback((msg: MuxClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg));
     }
   }, []);
+
+  const cancelResubscribe = useCallback((processId: string) => {
+    const timer = resubscribeTimersRef.current.get(processId);
+    if (timer) clearTimeout(timer);
+    resubscribeTimersRef.current.delete(processId);
+    resubscribeAttemptsRef.current.delete(processId);
+  }, []);
+
+  /**
+   * Re-send `subscribe` on a backoff. Safe to repeat: the server only records
+   * a subscription once the stream is actually attached, so a subscribe that
+   * ended in a retryable error left no state behind to collide with.
+   */
+  const scheduleResubscribe = useCallback((processId: string) => {
+    const existing = resubscribeTimersRef.current.get(processId);
+    if (existing) clearTimeout(existing);
+
+    const attempt = resubscribeAttemptsRef.current.get(processId) ?? 0;
+    if (attempt >= RESUBSCRIBE_MAX_ATTEMPTS) {
+      resubscribeTimersRef.current.delete(processId);
+      update(processId, { status: "error" });
+      return;
+    }
+    resubscribeAttemptsRef.current.set(processId, attempt + 1);
+
+    const delay = Math.min(RESUBSCRIBE_MAX_DELAY_MS, RESUBSCRIBE_BASE_DELAY_MS * 2 ** attempt);
+    const totalDelay = delay + delay * Math.random() * 0.25;
+    // Not an error while a retry is pending — the worker is expected back.
+    update(processId, { status: "connecting" });
+
+    const timer = setTimeout(() => {
+      resubscribeTimersRef.current.delete(processId);
+      if (!desiredRef.current.has(processId)) return; // unsubscribed meanwhile
+      sendRaw({ type: "subscribe", processId });
+    }, totalDelay);
+    resubscribeTimersRef.current.set(processId, timer);
+  }, [sendRaw, update]);
 
   const applyServerMessage = useCallback((m: MuxServerMessage) => {
     const { processId } = m;
@@ -89,6 +139,8 @@ export function ExecutorLogsProvider({
     // console.log("[diag:mux] recv", m.type, processId, detail);
     void detail;
     if (m.type === "init") {
+      // The stream attached — any retry cycle for this process is over.
+      cancelResubscribe(processId);
       update(processId, { isPty: m.isPty, replayingHistory: true, logs: [], status: "connected" });
     } else if (m.type === "history_end") {
       update(processId, { replayingHistory: false });
@@ -96,8 +148,13 @@ export function ExecutorLogsProvider({
       console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received FINISHED processId=${processId} exitCode=${m.exitCode} — will trigger markProcessFinished → button flips to Start`);
       update(processId, { exitCode: m.exitCode, status: "closed" });
     } else if (m.type === "error") {
-      console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received ERROR processId=${processId} — status=error, does NOT flip isRunning`);
-      update(processId, { status: "error" });
+      console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received ERROR processId=${processId} retryable=${!!m.retryable} — does NOT flip isRunning`);
+      if (m.retryable) {
+        scheduleResubscribe(processId);
+      } else {
+        cancelResubscribe(processId);
+        update(processId, { status: "error" });
+      }
     } else {
       const prev = statesRef.current.get(processId) ?? EMPTY_STATE;
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -109,7 +166,7 @@ export function ExecutorLogsProvider({
         logs: [...prev.logs, { ...logMsg, historical: prev.replayingHistory } as LogMessage],
       });
     }
-  }, [update]);
+  }, [update, cancelResubscribe, scheduleResubscribe]);
 
   // 连接：projectId 变化时重建（整段连接 + 重连逻辑都在 effect 内）
   useEffect(() => {
@@ -128,8 +185,10 @@ export function ExecutorLogsProvider({
         reconnectAttemptRef.current = 0;
         // [diag:mux] WS 新连接/重连建立 —— 若“空”发生在这之后，是 WS 重连；若没有这条，则是旧连接上的重订阅
         console.log("[diag:mux] WS open, resubscribing", [...desiredRef.current]);
-        // 重连后重新订阅所有期望进程
+        // 重连后重新订阅所有期望进程。这一轮 subscribe 覆盖了所有 pending 的
+        // 重试，把退避计数清零 —— 否则一次 WS 重连会白白吃掉几次重试额度。
         for (const pid of desiredRef.current) {
+          cancelResubscribe(pid);
           ws.send(JSON.stringify({ type: "subscribe", processId: pid } satisfies MuxClientMessage));
         }
       };
@@ -183,14 +242,19 @@ export function ExecutorLogsProvider({
 
     connect();
 
+    const pendingResubscribes = resubscribeTimersRef.current;
+    const resubscribeAttempts = resubscribeAttemptsRef.current;
     return () => {
       cancelled = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
+      for (const timer of pendingResubscribes.values()) clearTimeout(timer);
+      pendingResubscribes.clear();
+      resubscribeAttempts.clear();
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [projectId, applyServerMessage, update]);
+  }, [projectId, applyServerMessage, update, cancelResubscribe]);
 
   // 稳定的 store（依赖均引用稳定 → store 身份稳定，避免消费者重订阅抖动）
   const store = useMemo<ExecutorLogsStore>(() => ({
@@ -206,6 +270,7 @@ export function ExecutorLogsProvider({
     unsubscribeProcess: (processId) => {
       if (!desiredRef.current.has(processId)) return;
       desiredRef.current.delete(processId);
+      cancelResubscribe(processId);
       console.log("[diag:mux] send unsubscribe", processId);
       sendRaw({ type: "unsubscribe", processId });
       // 保留 state（收起/展开不丢历史），只停止接收
@@ -219,7 +284,7 @@ export function ExecutorLogsProvider({
       return () => { set?.delete(cb); };
     },
     getProcessState: (processId) => statesRef.current.get(processId) ?? EMPTY_STATE,
-  }), [notify, sendRaw]);
+  }), [notify, sendRaw, cancelResubscribe]);
 
   return <ExecutorLogsContext.Provider value={store}>{children}</ExecutorLogsContext.Provider>;
 }
