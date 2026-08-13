@@ -24,6 +24,7 @@ import { SessionRetentionSweeper } from "../session-retention.js";
 import { readRetentionDays } from "../session-retention-config.js";
 import { pushRetentionToWorker } from "../session-retention-downlink.js";
 import { RemoteSessionReconciler } from "../remote-session-reconcile-service.js";
+import { MemoryStatsReporter } from "../memory-stats.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
 
@@ -455,8 +456,18 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   remoteNotificationSync.start();
   remoteNotificationSync.enqueue(() => remoteNotificationSync.syncAll({ includeExpired: true }));
 
+  // Periodic memory snapshot into the rotating logs. The patch cache below is
+  // unbounded by design today (see memory-stats.ts); this is what turns "it
+  // might grow" into a measured curve before any cap is chosen.
+  const memoryStatsReporter = new MemoryStatsReporter({
+    remotePatchCache,
+    processManager,
+  });
+  memoryStatsReporter.start();
+
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {
+    memoryStatsReporter.close();
     await sessionRetention.close();
     await remoteSessionReconciler.close();
     scheduler.shutdown();

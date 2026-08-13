@@ -3,6 +3,7 @@ import fp from "fastify-plugin";
 import { MIN_WORKER_VERSION, WORKER_VERSION_REPORTING_SINCE } from "../constants.js";
 import { compareVersionStrings } from "../update-check.js";
 import { getWorkspaceBindingReadMetrics } from "../workspace-binding-metrics.js";
+import { collectMemoryStats } from "../memory-stats.js";
 import "../server-types.js";
 
 // Operator-only fleet aggregates (docs/server-worker-compat-design.md §2
@@ -63,6 +64,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
       reads: getWorkspaceBindingReadMetrics(),
       database: await fastify.storage.workspaceBindingMigration.diagnose(),
     });
+  });
+
+  // GET /api/admin/memory-stats — point read of the hub's in-memory footprint.
+  // Same operator gate and same aggregate-only rule as the version stats: it
+  // spans tenants, so it reports counts and byte totals and never a session id.
+  fastify.get("/api/admin/memory-stats", async (request, reply) => {
+    if (!isOperatorRequest(request)) return reply.code(404).send({ error: "Not found" });
+    return reply.send(collectMemoryStats({
+      remotePatchCache: fastify.remotePatchCache,
+      processManager: fastify.processManager,
+    }));
   });
 
   // GET /api/admin/worker-version-stats — operator gate, then aggregates.

@@ -32,9 +32,44 @@ function patchEntryMetadata(raw: string): { latest: number | null; lastTurnEnd: 
   return { latest, lastTurnEnd };
 }
 
+/** Nearest-rank percentile over an ascending array. 0 when empty. */
+function percentile(sorted: number[], fraction: number): number {
+  if (sorted.length === 0) return 0;
+  const rank = Math.ceil(fraction * sorted.length);
+  return sorted[Math.min(sorted.length, Math.max(1, rank)) - 1];
+}
+
+export interface RemotePatchCacheStats {
+  sessions: number;
+  messages: number;
+  approx_bytes: number;
+  /** Sessions still holding a persistent WS to their worker. */
+  with_remote_ws: number;
+  with_subscribers: number;
+  subscribers: number;
+  /** Sessions the worker reported finished — no further frames will arrive. */
+  finished_sessions: number;
+  finished_approx_bytes: number;
+  /** Sessions with no browser attached right now. */
+  unwatched_sessions: number;
+  unwatched_approx_bytes: number;
+  per_session_approx_bytes: { p50: number; p95: number; p99: number; max: number };
+}
+
 export interface CacheEntry {
   /** Raw serialized WS messages (JsonPatch, taskCompleted, error, etc.) */
   messages: string[];
+  /**
+   * Running size of `messages` in UTF-16 code units, kept O(1) to maintain
+   * (unlike Buffer.byteLength on every frame). This is NOT a byte count:
+   * conversation text is frequently non-ASCII (CJK costs 3 UTF-8 bytes per
+   * unit) and it ignores V8's per-string and per-object overhead. Any budget
+   * derived from it must be calibrated in this same unit rather than treated
+   * as bytes or as heap footprint. Maintained here rather than summed on read
+   * because the per-session budget this cache needs next has to consult it on
+   * the append path.
+   */
+  approxBytes: number;
   /** Count of JsonPatch messages only */
   patchCount: number;
   /** Whether the remote sent { finished: true } */
@@ -64,6 +99,7 @@ export class RemotePatchCache {
     if (!entry) {
       entry = {
         messages: [],
+        approxBytes: 0,
         patchCount: 0,
         finished: false,
         remoteWs: null,
@@ -98,6 +134,7 @@ export class RemotePatchCache {
   appendMessage(sessionId: string, raw: string, isJsonPatch: boolean): void {
     const entry = this.getOrCreate(sessionId);
     entry.messages.push(raw);
+    entry.approxBytes += raw.length;
     if (isJsonPatch) {
       entry.patchCount++;
       const metadata = patchEntryMetadata(raw);
@@ -128,6 +165,7 @@ export class RemotePatchCache {
     const sessionStatus = existing?.sessionStatus ?? null;
     this.cache.set(sessionId, {
       messages,
+      approxBytes: messages.reduce((sum, raw) => sum + raw.length, 0),
       patchCount,
       finished: false,
       remoteWs,
@@ -189,6 +227,7 @@ export class RemotePatchCache {
   resetHistory(sessionId: string, epoch: number): void {
     const entry = this.getOrCreate(sessionId);
     entry.messages = [];
+    entry.approxBytes = 0;
     entry.patchCount = 0;
     entry.finished = false;
     entry.historyEpoch = epoch;
@@ -277,6 +316,70 @@ export class RemotePatchCache {
   resetReconnectAttempt(sessionId: string): void {
     const entry = this.cache.get(sessionId);
     if (entry) entry.reconnectAttempt = 0;
+  }
+
+  /**
+   * Aggregate capacity snapshot for the operator memory endpoint.
+   *
+   * Deliberately aggregate-only — no session ids, no server names, no user ids
+   * — because the surface that exposes it spans tenants (same constraint as
+   * worker-version-stats).
+   *
+   * The two breakdowns are the ones that decide whether a cap is worth
+   * building: `finished_*` is memory held for sessions that will never receive
+   * another frame, and `unwatched_*` is memory held with no browser attached.
+   * Both are pure retention cost — a large share in either is the signal that
+   * per-session budgets and LRU eviction are needed rather than optional.
+   */
+  stats(): RemotePatchCacheStats {
+    let approxBytes = 0;
+    let messages = 0;
+    let withRemoteWs = 0;
+    let subscribers = 0;
+    let withSubscribers = 0;
+    let finishedSessions = 0;
+    let finishedApproxBytes = 0;
+    let unwatchedSessions = 0;
+    let unwatchedApproxBytes = 0;
+    const sizes: number[] = [];
+
+    for (const entry of this.cache.values()) {
+      approxBytes += entry.approxBytes;
+      messages += entry.messages.length;
+      sizes.push(entry.approxBytes);
+      if (entry.remoteWs) withRemoteWs++;
+      subscribers += entry.subscribers.size;
+      if (entry.subscribers.size > 0) {
+        withSubscribers++;
+      } else {
+        unwatchedSessions++;
+        unwatchedApproxBytes += entry.approxBytes;
+      }
+      if (entry.finished) {
+        finishedSessions++;
+        finishedApproxBytes += entry.approxBytes;
+      }
+    }
+
+    sizes.sort((a, b) => a - b);
+    return {
+      sessions: this.cache.size,
+      messages,
+      approx_bytes: approxBytes,
+      with_remote_ws: withRemoteWs,
+      with_subscribers: withSubscribers,
+      subscribers,
+      finished_sessions: finishedSessions,
+      finished_approx_bytes: finishedApproxBytes,
+      unwatched_sessions: unwatchedSessions,
+      unwatched_approx_bytes: unwatchedApproxBytes,
+      per_session_approx_bytes: {
+        p50: percentile(sizes, 0.5),
+        p95: percentile(sizes, 0.95),
+        p99: percentile(sizes, 0.99),
+        max: sizes.length > 0 ? sizes[sizes.length - 1] : 0,
+      },
+    };
   }
 
   /** Broadcast a raw message to all subscribers, auto-removing dead ones. */

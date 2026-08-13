@@ -23,6 +23,17 @@ export type LogMessage =
 
 export class ProcessEffectConflictError extends Error {}
 
+export interface ProcessLogBufferStats {
+  /** Live + retained-after-exit entries in the process map. */
+  processes: number;
+  running: number;
+  terminals: number;
+  log_entries: number;
+  /** Sum of chunk payloads in UTF-16 code units — see the caveat on CacheEntry.approxBytes. */
+  approx_bytes: number;
+  max_process_approx_bytes: number;
+}
+
 export type InputMessage =
   | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number };
@@ -990,6 +1001,49 @@ export class ProcessManager {
     let raw = tail.map((l) => (l as { data: string }).data).join("");
     raw = raw.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "");
     return raw.length > 10000 ? raw.slice(-10000) : raw;
+  }
+
+  /**
+   * Aggregate log-buffer footprint, for the operator memory endpoint.
+   *
+   * On a SaaS hub this is expected to be near-zero: remote executor output is
+   * proxied frame-by-frame and never lands here (see attachRemoteProcessStream).
+   * A number that is NOT near-zero means local processes — /api/path/execute
+   * temporaries, local-target scheduler runs, hub terminals — are accumulating,
+   * which is worth knowing before sizing anything else.
+   */
+  logBufferStats(): ProcessLogBufferStats {
+    let logEntries = 0;
+    let approxBytes = 0;
+    let terminals = 0;
+    let maxProcessApproxBytes = 0;
+
+    for (const proc of this.processes.values()) {
+      if (proc.isTerminal) terminals++;
+      let procBytes = 0;
+      for (const log of proc.logs) {
+        // Output chunks carry `data`; the terminating `finished` carries
+        // `finalResult` — the agent's last message, read whole from the
+        // final-result file with no size cap (consumeFinalResultFile), so it
+        // can dwarf the chunks that precede it.
+        const data = (log as { data?: string }).data;
+        if (typeof data === "string") procBytes += data.length;
+        const finalResult = (log as { finalResult?: string }).finalResult;
+        if (typeof finalResult === "string") procBytes += finalResult.length;
+      }
+      logEntries += proc.logs.length;
+      approxBytes += procBytes;
+      if (procBytes > maxProcessApproxBytes) maxProcessApproxBytes = procBytes;
+    }
+
+    return {
+      processes: this.processes.size,
+      running: this.getRunningProcessIds().length,
+      terminals,
+      log_entries: logEntries,
+      approx_bytes: approxBytes,
+      max_process_approx_bytes: maxProcessApproxBytes,
+    };
   }
 
   /**
