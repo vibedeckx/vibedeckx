@@ -529,6 +529,30 @@ await sessionSmoke("session-brief-source", ["http:GET /api/agent-sessions/:param
   assert(types.every((t) => t === "user" || t === "assistant"), `unprojected entry types: ${types.join(", ")}`);
   assert(JSON.stringify(json.messages).includes("hello stub"), "the sent user message is missing from the projection");
 });
+await sessionSmoke("session-history-window", ["http:GET /api/agent-sessions/:param/history-window"], async () => {
+  const r = await api("GET", `/api/agent-sessions/${sessionId}/history-window?turns=2`);
+  assert(Array.isArray(r.entries), `no history entries array: ${JSON.stringify(r).slice(0, 120)}`);
+  assert(Number.isInteger(r.historyEpoch), `invalid history epoch: ${r.historyEpoch}`);
+  assert(Number.isInteger(r.latestEntryIndex), `invalid latest entry index: ${r.latestEntryIndex}`);
+  const expectsLegacyFallback = workerVersion !== null && versionOlderThan(
+    workerVersion,
+    sinceByKey.get("http:GET /api/agent-sessions/:param/history-window") ?? "0.0.0",
+  );
+  assert(
+    expectsLegacyFallback ? r.legacyFallback === true : r.legacyFallback !== true,
+    `unexpected history-window fallback for worker@${workerVersion ?? "local-bin"}: ${r.legacyFallback}`,
+  );
+});
+await sessionSmoke("session-history-head", ["http:GET /api/agent-sessions/:param/history-head"], async () => {
+  const r = await api("GET", `/api/agent-sessions/${sessionId}/history-head`);
+  assert(Number.isInteger(r.historyEpoch), `invalid history epoch: ${r.historyEpoch}`);
+  assert(Number.isInteger(r.latestEntryIndex), `invalid latest entry index: ${r.latestEntryIndex}`);
+  assert(
+    r.lastTurnEndEntryIndex === null || Number.isInteger(r.lastTurnEndEntryIndex),
+    `invalid last turn-end entry index: ${r.lastTurnEndEntryIndex}`,
+  );
+  assert(typeof r.status === "string", `invalid session status: ${r.status}`);
+});
 await sessionSmoke("session-paste", ["http:POST /api/agent-sessions/:param/paste"], async () => {
   await api("POST", `/api/agent-sessions/${sessionId}/paste`, { content: "pasted-by-xver" });
 });

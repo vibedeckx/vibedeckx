@@ -43,8 +43,8 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/path/agent-sessions": { since: "0.2.0", summary: "创建会话" },
   "http:POST /api/path/agent-sessions/new": { since: "0.2.0", summary: "创建会话(指定 ID)" },
   "http:GET /api/agent-sessions/:param": { since: "0.2.0", summary: "读会话详情/对话" },
-  "http:GET /api/agent-sessions/:param/history-window": { since: "0.4.0", summary: "按 turn 边界读取会话窗口" },
-  "http:GET /api/agent-sessions/:param/history-head": { since: "0.4.0", summary: "读取会话历史游标" },
+  "http:GET /api/agent-sessions/:param/history-window": { since: "0.3.18", summary: "按 turn 边界读取会话窗口" },
+  "http:GET /api/agent-sessions/:param/history-head": { since: "0.3.18", summary: "读取会话历史游标" },
   // Additive: a worker below 0.3.6 404s it and the hub's intent-brief
   // distillation degrades to the deterministic excerpt (tier 2).
   "http:GET /api/agent-sessions/:param/brief-source": { since: "0.3.6", summary: "读会话对话(仅蒸馏用文本)" },
