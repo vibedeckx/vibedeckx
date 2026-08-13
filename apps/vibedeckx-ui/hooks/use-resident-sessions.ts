@@ -111,6 +111,15 @@ export function isReconnectTransition(
   return next === "live" && everLive && previous !== "live";
 }
 
+// Page-lifetime cache of each project's resident-session rows — same pattern
+// as use-worktrees' list cache. A revisited project's sidebar sessions show
+// instantly from the last visit while refresh() revalidates; a never-visited
+// project seeds [] instead of leaking the previous project's rows under
+// same-named branches until the first fetch lands. Row staleness (status,
+// title) self-heals via the refresh and the SSE channels;
+// mergeRefreshedSessions keeps membership authoritative.
+const residentSessionListCache = new Map<string, ResidentSidebarSession[]>();
+
 export function useResidentSessions(
   projectId: string | null,
   worktrees: Worktree[] | undefined,
@@ -121,6 +130,24 @@ export function useResidentSessions(
     [worktrees],
   );
   const [sessions, setSessions] = useState<ResidentSidebarSession[]>([]);
+
+  // Seed on project change DURING render (same pattern as useWorktrees), so
+  // the first commit after a switch already shows this project's rows.
+  const [seededProjectId, setSeededProjectId] = useState<string | null>(null);
+  if (projectId !== seededProjectId) {
+    setSeededProjectId(projectId);
+    setSessions(projectId ? residentSessionListCache.get(projectId) ?? [] : []);
+  }
+  // Guards async writes below: a refresh started for the previous project
+  // must not land its rows into the new project's state (and, via the
+  // write-through effect, poison its cache entry).
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+
+  // Write-through so the next visit to this project can seed.
+  useEffect(() => {
+    if (projectId) residentSessionListCache.set(projectId, sessions);
+  }, [projectId, sessions]);
 
   const refresh = useCallback(async () => {
     if (!projectId || branches.length === 0) {
@@ -143,6 +170,7 @@ export function useResidentSessions(
           }));
       }),
     );
+    if (projectIdRef.current !== projectId) return;
     // Functional update so we reconcile against the freshest state: a
     // `session:title` event that landed while this fetch was in flight must not
     // be clobbered by the pre-title snapshot this request returned.
