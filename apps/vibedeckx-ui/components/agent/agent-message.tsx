@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye } from "lucide-react";
+import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { AgentMarkdown } from "./agent-markdown";
 import { useAgentConversation } from "./agent-conversation";
@@ -27,6 +27,7 @@ import { WebSearchToolUseUI, WebSearchToolResultUI } from "./web-search-tools";
 import { SkillToolUseUI, SkillToolResultUI } from "./skill-tools";
 import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools";
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
+import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { VPasteChip, splitVPasteMarkers } from "./vpaste-chip";
 import { Fragment, useState } from "react";
 
@@ -77,7 +78,14 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
       return <AssistantMessage content={message.content} agentType={message.agentType} streaming={streaming} />;
 
     case "tool_use":
-      return <ToolUseMessage tool={message.tool} input={message.input} messageIndex={messageIndex} />;
+      return (
+        <ToolUseMessage
+          tool={message.tool}
+          input={message.input}
+          messageIndex={messageIndex}
+          toolUseId={message.toolUseId}
+        />
+      );
 
     case "tool_result":
       return <ToolResultMessage tool={message.tool} output={message.output} />;
@@ -275,7 +283,23 @@ function AssistantMessage({
   );
 }
 
-function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: unknown; messageIndex: number }) {
+function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string; input: unknown; messageIndex: number; toolUseId?: string }) {
+  // Both CLIs report this under the canonical name (the Codex provider
+  // normalizes onto it), so one branch serves both.
+  if (tool === PROPOSE_SCHEDULE_TOOL) {
+    return (
+      <div className="flex gap-3 py-3">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center">
+          <CalendarClock className="w-4 h-4 text-amber-500" />
+        </div>
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <p className="text-sm font-medium text-amber-500 mb-1">Suggested scheduled check</p>
+          <ScheduleProposalUI input={input} toolUseId={toolUseId} />
+        </div>
+      </div>
+    );
+  }
+
   if (tool === "ImageView") {
     const path =
       typeof input === "object" && input !== null && "path" in input && typeof input.path === "string"
@@ -545,6 +569,10 @@ function ToolUseMessage({ tool, input, messageIndex }: { tool: string; input: un
 }
 
 function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
+  // The proposal's result is a fixed acknowledgement written for the agent, not
+  // for the user — the card above already says everything a reader needs.
+  if (tool === PROPOSE_SCHEDULE_TOOL) return null;
+
   // Task tool results get custom rendering
   const isTaskTool = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"].includes(tool);
   if (isTaskTool) {

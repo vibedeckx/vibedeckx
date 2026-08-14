@@ -567,4 +567,90 @@ describe("scheduledTasks storage", () => {
     expect(updated?.target).toBe("remote-server-2");
     expect((await storage.scheduledTasks.getById("s1"))?.target).toBe("remote-server-2");
   });
+
+  describe("agent proposal provenance", () => {
+    const source = { session_id: "sess-1", tool_use_id: "toolu_1" };
+    const proposed = (id: string, over: { source?: { session_id: string; tool_use_id: string }; name?: string } = {}) =>
+      storage.scheduledTasks.create({
+        id,
+        project_id: projectId,
+        name: over.name ?? "watch it",
+        cron_expr: "0 9 * * *",
+        timezone: "UTC",
+        run_type: "prompt",
+        prompt_provider: "codex",
+        content: "check the thing",
+        cwd_mode: "branch",
+        source: over.source ?? source,
+      });
+
+    it("round-trips the source pair and leaves hand-made schedules null", async () => {
+      const created = await proposed("p1");
+      expect(created.source_session_id).toBe("sess-1");
+      expect(created.source_tool_use_id).toBe("toolu_1");
+
+      const manual = await createTask("m1");
+      expect(manual.source_session_id).toBeNull();
+      expect(manual.source_tool_use_id).toBeNull();
+    });
+
+    it("returns the existing row instead of creating a second one for the same proposal", async () => {
+      const first = await proposed("p1");
+      const replay = await proposed("p2", { name: "edited after the fact" });
+
+      expect(replay.id).toBe(first.id);
+      expect(replay.name).toBe("watch it");
+      expect(await storage.scheduledTasks.getById("p2")).toBeUndefined();
+      expect((await storage.scheduledTasks.getByProjectId(projectId)).length).toBe(1);
+    });
+
+    it("holds under concurrent confirmations (two tabs, one schedule)", async () => {
+      const results = await Promise.all([proposed("c1"), proposed("c2"), proposed("c3")]);
+      const ids = new Set(results.map((r) => r.id));
+      expect(ids.size).toBe(1);
+      expect((await storage.scheduledTasks.getByProjectId(projectId)).length).toBe(1);
+    });
+
+    it("constrains only proposals — any number of schedules may have no source", async () => {
+      await createTask("m1");
+      await createTask("m2");
+      expect((await storage.scheduledTasks.getByProjectId(projectId)).length).toBe(2);
+    });
+
+    it("treats a different tool_use in the same session as a distinct proposal", async () => {
+      await proposed("p1");
+      const other = await proposed("p2", { source: { session_id: "sess-1", tool_use_id: "toolu_2" } });
+      expect(other.id).toBe("p2");
+    });
+
+    it("adds the source columns and unique index to a database created before them", async () => {
+      await createTask("legacy-schedule");
+      await storage.close();
+
+      const legacy = new Database(dbPath);
+      try {
+        legacy.exec(`
+          DROP INDEX IF EXISTS idx_scheduled_tasks_source;
+          ALTER TABLE scheduled_tasks DROP COLUMN source_session_id;
+          ALTER TABLE scheduled_tasks DROP COLUMN source_tool_use_id;
+        `);
+      } finally {
+        legacy.close();
+      }
+
+      storage = await createSqliteStorage(dbPath);
+      // Pre-existing rows are untouched (both columns NULL) and the partial
+      // index tolerates any number of them.
+      expect((await storage.scheduledTasks.getById("legacy-schedule"))?.source_tool_use_id).toBeNull();
+      const first = await proposed("p1");
+      expect((await proposed("p2")).id).toBe(first.id);
+    });
+
+    it("looks a proposal up by source, scoped to its project", async () => {
+      await proposed("p1");
+      expect((await storage.scheduledTasks.getBySource(projectId, "sess-1", "toolu_1"))?.id).toBe("p1");
+      expect(await storage.scheduledTasks.getBySource("other-project", "sess-1", "toolu_1")).toBeUndefined();
+      expect(await storage.scheduledTasks.getBySource(projectId, "sess-1", "toolu_x")).toBeUndefined();
+    });
+  });
 });

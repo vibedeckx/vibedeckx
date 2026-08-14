@@ -20,6 +20,7 @@ import {
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import { mintSessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
@@ -270,6 +271,14 @@ export class AgentSessionManager {
    * Set to true from `vibedeckx connect` after `createServer`.
    */
   suppressTitleGeneration: boolean = false;
+  /**
+   * Loopback base URL of this process's own HTTP server (e.g.
+   * "http://127.0.0.1:5173"), set by server.start/startLocal once bound. Agent
+   * processes are spawned by this same process, so this is how they reach the
+   * session-scoped MCP tools. Null until the server listens, and under local
+   * TLS termination — in both cases the tools are simply not offered.
+   */
+  localApiOrigin: string | null = null;
   private capacityQueue: Promise<void> = Promise.resolve();
   /**
    * Sessions whose retention delete has passed its re-check and is in flight.
@@ -915,7 +924,20 @@ export class AgentSessionManager {
       return;
     }
 
-    const config = provider.buildSpawnConfig(cwd, session.permissionMode, session.crossRemoteMcp, session.model);
+    // Minted per spawn, never persisted: the token is only usable by the
+    // process about to be started, on this machine's loopback endpoint.
+    const sessionToolsMcp = await mintSessionToolsMcpConfig(
+      { storage: this.storage },
+      { sessionId: session.id, origin: this.localApiOrigin },
+    ).catch((err) => {
+      // A missing tool surface must never block the session itself.
+      console.error(`[AgentSession] Failed to mint session tools MCP config for ${session.id}:`, err);
+      return undefined;
+    });
+
+    const config = provider.buildSpawnConfig(
+      cwd, session.permissionMode, session.crossRemoteMcp, session.model, sessionToolsMcp,
+    );
 
     // Log the agent CLI version once per binary so protocol failures can be
     // attributed to an agent version. npx runs are logged as such (probing

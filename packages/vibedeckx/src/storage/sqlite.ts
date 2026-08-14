@@ -1493,6 +1493,8 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       directory TEXT,
       timeout_seconds INTEGER NOT NULL DEFAULT 1800,
       next_run_at TEXT,
+      source_session_id TEXT,
+      source_tool_use_id TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -1641,6 +1643,13 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   }
   if (!scheduledTaskCols.some((c) => c.name === "next_run_at")) {
     db.exec("ALTER TABLE scheduled_tasks ADD COLUMN next_run_at TEXT");
+  }
+  // Provenance of an agent-proposed schedule (propose_schedule tool).
+  if (!scheduledTaskCols.some((c) => c.name === "source_session_id")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN source_session_id TEXT");
+  }
+  if (!scheduledTaskCols.some((c) => c.name === "source_tool_use_id")) {
+    db.exec("ALTER TABLE scheduled_tasks ADD COLUMN source_tool_use_id TEXT");
   }
 
   // Add scheduled_task_runs.report for DBs created before run reports.
@@ -1854,6 +1863,14 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       ON scheduled_tasks(project_id, created_at ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project_enabled_next_run
       ON scheduled_tasks(project_id, enabled, next_run_at ASC);
+    -- Idempotency for agent-proposed schedules: confirming the same proposal
+    -- twice (double click, two tabs) can only ever produce one row. Partial so
+    -- ordinary schedules — both columns NULL — stay unconstrained explicitly,
+    -- rather than relying on a dialect's NULL-distinctness rules. Doubles as
+    -- the lookup index for the card's state recovery.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_source
+      ON scheduled_tasks(source_session_id, source_tool_use_id)
+      WHERE source_tool_use_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_schedule_started_id
       ON scheduled_task_runs(schedule_id, started_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_project_started_id

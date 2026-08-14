@@ -23,7 +23,14 @@ interface ScheduleBody {
   directory?: string | null;
   timeout_seconds?: number;
   target?: string;
+  /** Provenance of an agent proposal (propose_schedule); makes create idempotent. */
+  source?: { session_id?: string; tool_use_id?: string } | null;
 }
+
+const SOURCE_ID_MAX = 200;
+
+const validSourceId = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= SOURCE_ID_MAX && value.trim() === value;
 
 interface ManualRunBody {
   requestId?: string;
@@ -130,8 +137,35 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: "Unknown remote target" });
       }
 
+      let source: { session_id: string; tool_use_id: string } | null = null;
+      if (b.source) {
+        if (!validSourceId(b.source.session_id) || !validSourceId(b.source.tool_use_id)) {
+          return reply.code(400).send({ error: "Invalid source" });
+        }
+        // The source pair is the GLOBAL idempotency key, so the caller must own
+        // the session it names. Otherwise one project could squat the key that
+        // another project's confirmation needs: its insert would hit the unique
+        // index, find no row of its own, and fail — the real proposal could
+        // never be accepted.
+        //
+        // Both kinds of session must be checked. A local session is a row in
+        // agent_sessions; a remote one is not — the server holds it as a
+        // remote_session_mappings row keyed by the `remote-` local id, resolved
+        // here through the project-scoped lookup. A source that resolves to
+        // neither is rejected rather than trusted.
+        const sourceSession = await fastify.storage.agentSessions.getById(b.source.session_id);
+        const owned = sourceSession
+          ? sourceSession.project_id === req.params.projectId
+          : !!(await fastify.storage.remoteSessionMappings.getAuthorizedByLocal(
+            b.source.session_id, req.params.projectId,
+          ));
+        if (!owned) return reply.code(400).send({ error: "Invalid source" });
+        source = { session_id: b.source.session_id, tool_use_id: b.source.tool_use_id };
+      }
+
+      const newId = randomUUID();
       const schedule = await fastify.storage.scheduledTasks.create({
-        id: randomUUID(),
+        id: newId,
         project_id: req.params.projectId,
         name: b.name.trim(),
         cron_expr: resolved.cron_expr,
@@ -145,9 +179,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
         timeout_seconds: resolved.timeout_seconds,
         enabled: b.enabled ?? true,
         target,
+        source,
       });
       await fastify.scheduler.reschedule(schedule.id);
-      return reply.code(201).send({ schedule });
+      // A different id back means the source pair already had a schedule: this
+      // is a replayed confirmation, not a new creation. 200 (not 201) says so,
+      // and the edits carried by the replay are deliberately ignored — the
+      // first confirmation wins, so the outcome doesn't depend on arrival order.
+      return reply.code(schedule.id === newId ? 201 : 200).send({ schedule });
     }
   );
 

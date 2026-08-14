@@ -1,8 +1,8 @@
 # Schedule 提议工具（propose_schedule）设计
 
-> 状态：**设计定稿，未实现**（2026-08-14；同日评审后修订：提议幂等与状态恢复
-> §3.2、字段映射表 §3、跨 Provider 工具名 §4 第 7 条、V1 非目标 §4.1）。
-> 本文记录"agent 主动提议创建定时检查"
+> 状态：**V1 已实现**（2026-08-14；设计同日评审后修订：提议幂等与状态恢复
+> §3.2、字段映射表 §3、跨 Provider 工具名 §4 第 7 条、V1 非目标 §4.1；
+> 实现记录见 §7）。本文记录"agent 主动提议创建定时检查"
 > 功能的产品决策与架构设计。依赖已合并的 scheduled tasks 功能与
 > cross-remote MCP gateway 的注入基建；不改动 reverse-connect tunnel 契约
 > （见 [`server-worker-compat-design.md`](./server-worker-compat-design.md)）。
@@ -286,3 +286,46 @@ worker 版本无关。
   "用户已确认"回报给 agent）。
 - **Hub 替 worker 回答 pending tool call**：不可能——CLI 阻塞等的是 worker
   loopback 上的 MCP HTTP 响应，tool_result 只能由拥有工具的 MCP server 返回。
+
+---
+
+## 7. 实现记录（2026-08-14）
+
+§4 的七件事全部落地，落点如下（V1 非目标 §4.1 一件未做）：
+
+| 清单项 | 落点 |
+|---|---|
+| MCP 端点 | `routes/session-mcp-routes.ts`（手写 initialize / ping / tools/list / tools/call） |
+| 契约与工具语义 | `session-tools-mcp.ts`（路径、工具名、description、参数校验、mint）——不依赖 Fastify，故 provider 层可直接 import |
+| Token | `utils/session-tools-token.ts`，独立 secret（`session_tools_token_secret`）与 cross-remote 完全隔离 |
+| 注入 | Claude：`protocol/claude-code/cli.ts` 的 `buildClaudeMcpConfigArg`（多 server 合并）+ `--allowedTools`；Codex：`protocol/codex/cli.ts` 的 `mcp_servers.vibedeckx`；exec 模式未注入 |
+| 端口 plumbing | `server.ts` 的 `start` / `startLocal` 绑定后写 `agentSessionManager.localApiOrigin`；spawn 时在 `startProcess` 内 mint（token 随进程生灭，不持久化） |
+| 幂等与状态恢复 | `scheduled_tasks.source_session_id/source_tool_use_id` + 部分唯一索引 `idx_scheduled_tasks_source`；create 路由 replay 返回 200 |
+| 前端卡片 | `components/agent/schedule-proposal.tsx` + `hooks/use-proposed-schedule.ts`（按 project 共享一次拉取，schedule:* 事件失效重取） |
+| 跨 Provider 工具名 | provider 层归一 + 离线 fixture 契约测试 `protocol/session-mcp-tool-name.test.ts` |
+
+三处与设计文本的偏离/补充，都是实现时才能确定的事实：
+
+1. **Codex 的上报形状已实测钉死**：`{ server: "vibedeckx", tool: "propose_schedule" }`
+   ——裸工具名 + 独立 server 字段（codex-cli 0.147.0）。因此归一函数
+   `canonicalizeSessionToolName(tool, server?)` 在有 server 时以 server 为准，
+   别家 server 的同名 `propose_schedule` 不会被冒认。Claude 侧实测即
+   `mcp__vibedeckx__propose_schedule`（claude 2.1.231）。两端各录一份真实
+   transcript 进 `__fixtures__/session-mcp-tool-call.jsonl`，另有 live 探针
+   CC-7b / CX-SM1（`pnpm test:compat`）。
+2. **本机 TLS 终止时不注入**：`--tls` 的 hub 上 loopback 只有 https，公网证书
+   过不了 hostname 校验，故 `localApiOrigin` 置 null、工具不提供（该 hub 的
+   remote 会话不受影响——worker 永远是明文 loopback）。这是 §2 "端点永远在本机
+   loopback"的唯一例外。
+3. **source 必须解析到本项目的会话，两种会话都要查**：source 二元组是**全局**
+   幂等键，若不校验，A 项目可占用 B 项目会话的键位——真正的确认插入撞唯一索引、
+   又查不到自己那行，提议永远无法被接受。local 会话是 `agent_sessions` 行；
+   remote 会话在 hub 上**没有** `agent_sessions` 行，只有
+   `remote_session_mappings`（按 `remote-` 前缀的 local id 存），所以要走
+   `getAuthorizedByLocal(sessionId, projectId)`（它同时要求 project→remote
+   关联仍在）。两处都解析不到即拒绝，不放行。仓储层的 source 查询也按 project
+   收窄。
+
+验收（§4.2）覆盖情况：状态恢复、幂等（含并发）、失败重试、双 Provider、
+老 worker 降级均有自动化测试；remote 端到端（提议 → 确认 → 到点在 worker 执行）
+仍需一次人工验证。

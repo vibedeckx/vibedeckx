@@ -8,6 +8,15 @@ import { buildApprovalResponse } from "../codex/codec.js";
 import { buildCodexExecCommand } from "../codex/cli.js";
 import { detectBinary } from "../shared/binary.js";
 import { codexBinaryAvailable, compatRequired, runCodexAppServer, runOneShot } from "./runner.js";
+import { startStubMcpServer } from "./stub-mcp-server.js";
+import { buildCodexAppServerSpawnConfig } from "../codex/cli.js";
+import {
+  CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_SCHEDULE_DESCRIPTION,
+  PROPOSE_SCHEDULE_INPUT_SCHEMA,
+  PROPOSE_SCHEDULE_TOOL,
+  canonicalizeSessionToolName,
+} from "../../session-tools-mcp.js";
 
 const available = codexBinaryAvailable();
 if (!available && compatRequired()) {
@@ -174,5 +183,56 @@ describe.skipIf(!available)("codex live probes (approval round-trip)", () => {
     expect(r.outcome).toBe("ok");
     const cmds = items(r.incoming, "commandExecution").filter((c) => String(c.aggregatedOutput ?? "").includes("should-not-run"));
     expect(cmds.length, "declined command still produced output").toBe(0);
+  });
+});
+
+/**
+ * The propose_schedule card is dispatched on ONE canonical tool name
+ * (mcp__vibedeckx__propose_schedule). Claude reports MCP tools in that shape
+ * already; codex reports its own, which this probe pins to a recorded
+ * transcript rather than a guess — canonicalizeSessionToolName must map
+ * whatever codex actually says onto the canonical name, or the card silently
+ * degrades to a generic tool rendering. See
+ * docs/schedule-proposal-tool-design.md §4 item 7.
+ */
+describe.skipIf(!available)("codex live probes (session tools MCP)", () => {
+  it("CX-SM1: reports our MCP tool under a name the provider canonicalizes", async () => {
+    const stub = await startStubMcpServer({
+      name: PROPOSE_SCHEDULE_TOOL,
+      description: PROPOSE_SCHEDULE_DESCRIPTION,
+      inputSchema: PROPOSE_SCHEDULE_INPUT_SCHEMA,
+    });
+    try {
+      const spawnConfig = buildCodexAppServerSpawnConfig(
+        detectBinary("codex"), undefined, undefined, { url: stub.url, token: "session-probe-token" },
+      );
+      const r = await runCodexAppServer({
+        turns: [
+          "Call the propose_schedule MCP tool exactly once with name=\"Watch it\", "
+          + "cron_expr=\"0 9 * * *\" and prompt=\"check the thing\". Then reply DONE. "
+          + "Do not run any commands.",
+        ],
+        spawnOverride: { command: spawnConfig.command, args: spawnConfig.args, env: spawnConfig.env },
+        timeoutMs: 120_000,
+        recordAs: "cxsm1-session-mcp",
+      });
+
+      expect(r.outcome).toBe("ok");
+      expect(stub.toolCalls, "codex never invoked the MCP tool — mcp_servers override drifted?").toBeGreaterThan(0);
+      expect(
+        stub.authHeaders.filter(Boolean).every((h) => h === "Bearer session-probe-token"),
+        `unexpected Authorization headers: ${JSON.stringify([...new Set(stub.authHeaders)])}`,
+      ).toBe(true);
+
+      const calls = items(r.incoming, "mcpToolCall");
+      expect(calls.length, "no mcpToolCall item — item shape drifted?").toBeGreaterThan(0);
+      const reported = String(calls[0].tool ?? "");
+      expect(
+        canonicalizeSessionToolName(reported),
+        `codex reported the tool as ${JSON.stringify(reported)}, which the provider does not canonicalize`,
+      ).toBe(CANONICAL_PROPOSE_SCHEDULE_TOOL);
+    } finally {
+      await stub.close();
+    }
   });
 });

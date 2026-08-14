@@ -1,6 +1,7 @@
 import type { AgentType, ContentPart } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
+import { canonicalizeSessionToolName, type SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import {
   buildApprovalResponse,
@@ -114,13 +115,19 @@ export class CodexProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig, model?: string | null): SpawnConfig {
+  buildSpawnConfig(
+    _cwd: string,
+    permissionMode: "plan" | "edit",
+    crossRemoteMcp?: CrossRemoteMcpConfig,
+    model?: string | null,
+    sessionToolsMcp?: SessionToolsMcpConfig,
+  ): SpawnConfig {
     // Store permissionMode for use in formatUserInput's turn/start params
     this.lastPermissionMode = permissionMode;
     // NOTE: `model` is deliberately NOT stored on `this`. It only affects the
     // process being spawned right now; this provider instance is shared by
     // every session in the server.
-    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp, model);
+    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp, model, sessionToolsMcp);
   }
 
   // ============ Task 5.5: parseStdoutLine — JSON-RPC message routing ============
@@ -354,7 +361,10 @@ export class CodexProvider implements AgentProvider {
 
       case "mcpToolCall": {
         const id = item.id ?? this.generateId();
-        const toolName = item.tool ?? "MCP";
+        // Normalize vibedeckx's own tools onto the canonical `mcp__server__tool`
+        // name Claude reports, so the frontend matches one name per tool rather
+        // than tracking whatever shape each CLI version happens to emit.
+        const toolName = item.tool ? canonicalizeSessionToolName(item.tool, item.server) : "MCP";
         const output = item.error?.message ?? (item.result ? JSON.stringify(item.result) : "");
         return [
           { type: "tool_use", tool: toolName, input: item.arguments, toolUseId: id },

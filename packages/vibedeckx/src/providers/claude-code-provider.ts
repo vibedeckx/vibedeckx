@@ -1,10 +1,19 @@
 import type { AgentType, ContentPart } from "../agent-types.js";
 import type { ClaudeContentBlock } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
-import { buildMcpConfigArg, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
+import { type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
+import {
+  CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  SESSION_TOOLS_MCP_SERVER_NAME,
+  type SessionToolsMcpConfig,
+} from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { parseClaudeLine, serializeUserInput } from "../protocol/claude-code/codec.js";
-import { buildClaudeSessionSpawnConfig } from "../protocol/claude-code/cli.js";
+import {
+  buildClaudeMcpConfigArg,
+  buildClaudeSessionSpawnConfig,
+  type ClaudeHttpMcpServer,
+} from "../protocol/claude-code/cli.js";
 import {
   BACKGROUND_TASKS_CHANGED_SUBTYPE,
   CLAUDE_BINARY_NAME,
@@ -38,12 +47,23 @@ export class ClaudeCodeProvider implements AgentProvider {
     return true;
   }
 
-  buildSpawnConfig(_cwd: string, permissionMode: "plan" | "edit", crossRemoteMcp?: CrossRemoteMcpConfig, model?: string | null): SpawnConfig {
+  buildSpawnConfig(
+    _cwd: string,
+    permissionMode: "plan" | "edit",
+    crossRemoteMcp?: CrossRemoteMcpConfig,
+    model?: string | null,
+    sessionToolsMcp?: SessionToolsMcpConfig,
+  ): SpawnConfig {
+    const mcpServers: Record<string, ClaudeHttpMcpServer> = {};
+    if (crossRemoteMcp) mcpServers["cross-remote"] = crossRemoteMcp;
+    if (sessionToolsMcp) mcpServers[SESSION_TOOLS_MCP_SERVER_NAME] = sessionToolsMcp;
+
     return buildClaudeSessionSpawnConfig(
       this.detectBinary(),
       permissionMode,
-      crossRemoteMcp ? buildMcpConfigArg(crossRemoteMcp) : undefined,
+      Object.keys(mcpServers).length > 0 ? buildClaudeMcpConfigArg(mcpServers) : undefined,
       model,
+      sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL] : undefined,
     );
   }
 

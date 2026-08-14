@@ -110,6 +110,40 @@ describe("codex CLI builders", () => {
     expect(config.env).toEqual({ VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" });
   });
 
+  it("injects the session-tools MCP server alongside cross-remote, token in env only", () => {
+    const config = buildCodexAppServerSpawnConfig(
+      "/bin/codex",
+      { url: "https://app.example.com/api/cross-remote-mcp", token: "cross-token" },
+      null,
+      { url: "http://127.0.0.1:5173/api/session-mcp", token: "session-token" },
+    );
+    expect(config.args).toEqual([
+      "app-server",
+      "-c",
+      'mcp_servers.cross-remote={ url = "https://app.example.com/api/cross-remote-mcp", bearer_token_env_var = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN", default_tools_approval_mode = "approve" }',
+      "-c",
+      'mcp_servers.vibedeckx={ url = "http://127.0.0.1:5173/api/session-mcp", bearer_token_env_var = "VIBEDECKX_SESSION_MCP_TOKEN", default_tools_approval_mode = "approve" }',
+    ]);
+    expect(config.env).toEqual({
+      VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "cross-token",
+      VIBEDECKX_SESSION_MCP_TOKEN: "session-token",
+    });
+    expect(JSON.stringify(config.args)).not.toContain("session-token");
+  });
+
+  it("injects the session-tools MCP server on its own (the common case: no cross-remote)", () => {
+    const config = buildCodexAppServerSpawnConfig("/bin/codex", undefined, undefined, {
+      url: "http://127.0.0.1:5173/api/session-mcp",
+      token: "session-token",
+    });
+    expect(config.args).toEqual([
+      "app-server",
+      "-c",
+      'mcp_servers.vibedeckx={ url = "http://127.0.0.1:5173/api/session-mcp", bearer_token_env_var = "VIBEDECKX_SESSION_MCP_TOKEN", default_tools_approval_mode = "approve" }',
+    ]);
+    expect(config.env).toEqual({ VIBEDECKX_SESSION_MCP_TOKEN: "session-token" });
+  });
+
   it("quotes a model name containing a double quote so the TOML value stays well-formed", () => {
     expect(buildCodexAppServerSpawnConfig("/bin/codex", undefined, 'we"ird').args).toEqual([
       "app-server",

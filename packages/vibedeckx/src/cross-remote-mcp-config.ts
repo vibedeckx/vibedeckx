@@ -1,6 +1,7 @@
 import type { Storage } from "./storage/types.js";
 import { getCrossRemoteSecret, signCrossRemoteToken } from "./utils/cross-remote-token.js";
 import { CROSS_REMOTE_MCP_PATH } from "./cross-remote-access.js";
+import { buildClaudeMcpConfigArg } from "./protocol/claude-code/cli.js";
 
 export interface CrossRemoteMcpConfig {
   url: string;
@@ -12,16 +13,9 @@ export function crossRemoteMcpEnabled(): boolean {
   return !!process.env.VIBEDECKX_PUBLIC_URL?.trim();
 }
 
+/** Kept for the cross-remote-only call sites (live protocol probes); the CLI serialization lives in protocol/. */
 export function buildMcpConfigArg(config: CrossRemoteMcpConfig): string {
-  return JSON.stringify({
-    mcpServers: {
-      "cross-remote": {
-        type: "http",
-        url: config.url,
-        headers: { Authorization: `Bearer ${config.token}` },
-      },
-    },
-  });
+  return buildClaudeMcpConfigArg({ "cross-remote": config });
 }
 
 /**

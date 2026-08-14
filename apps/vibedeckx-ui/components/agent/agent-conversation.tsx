@@ -88,6 +88,20 @@ interface AgentConversationContextValue {
   permissionMode: "plan" | "edit";
   agentType: AgentType;
   sessionId: string | null;
+  /**
+   * The session's authoritative bindings, for tool cards that create server
+   * state from a conversation (schedule proposals). Deliberately sourced here
+   * rather than from tool arguments — a model-supplied project/branch/target
+   * could be stale or invented.
+   */
+  projectId: string | null;
+  branch: string | null;
+  /** Execution target: "local" or a remote_server_id. */
+  target: string;
+  /** Human-readable name of that target, for display only. */
+  targetLabel: string;
+  /** Navigate to the Schedules view (a specific schedule, or the list). */
+  openSchedule?: (scheduleId: string | null) => void;
 }
 
 const AgentConversationContext = createContext<AgentConversationContextValue | null>(null);
@@ -127,6 +141,8 @@ interface AgentConversationProps {
   onSessionSelected?: (sessionId: string) => void;
   onStatusChange?: () => void;
   onNewConversation?: () => void;
+  /** Open the Schedules view — a specific schedule, or the list when null. */
+  onOpenSchedule?: (scheduleId: string | null) => void;
 }
 
 export interface AgentConversationHandle {
@@ -158,7 +174,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onOpenSchedule }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -197,6 +213,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   for (const r of remotes) {
     agentTargets.push({ id: r.remote_server_id, label: r.server_name, icon: remoteConnectionIcon(r) });
   }
+
+  // Where this window's sessions run: the same value that keys useAgentSession
+  // below, so it describes the displayed session rather than some other mode.
+  const sessionTarget = project?.agent_mode ?? "local";
+  const sessionTargetLabel =
+    agentTargets.find((t) => t.id === sessionTarget)?.label
+    ?? (sessionTarget === "local" ? "Local" : sessionTarget);
 
   const {
     session,
@@ -984,7 +1007,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 )}
               </div>
             ) : (
-              <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null }}>
+              <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null, projectId, branch, target: sessionTarget, targetLabel: sessionTargetLabel, openSchedule: onOpenSchedule }}>
                 <div
                   className="space-y-1 outline-none"
                   ref={messagesRef}

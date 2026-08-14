@@ -1,8 +1,9 @@
 /**
  * Minimal streamable-HTTP MCP server for the CC-7 probe. Serves one tool
- * (`compat_ping`) and records every request's Authorization header so the
- * test can assert the CLI presented the exact bearer token from
- * buildMcpConfigArg. Stateless: no session ids.
+ * (`compat_ping` by default, overridable so a probe can stand in for a real
+ * vibedeckx tool) and records every request's Authorization header so the test
+ * can assert the CLI presented the exact bearer token from buildMcpConfigArg.
+ * Stateless: no session ids.
  */
 import http from "http";
 import type { AddressInfo } from "net";
@@ -15,7 +16,19 @@ export interface StubMcpServer {
   close: () => Promise<void>;
 }
 
-export async function startStubMcpServer(): Promise<StubMcpServer> {
+export interface StubMcpTool {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}
+
+const DEFAULT_TOOL: StubMcpTool = {
+  name: "compat_ping",
+  description: "Returns pong. Call this to verify MCP connectivity.",
+  inputSchema: { type: "object", properties: {} },
+};
+
+export async function startStubMcpServer(tool: StubMcpTool = DEFAULT_TOOL): Promise<StubMcpServer> {
   const state: Omit<StubMcpServer, "url" | "close"> = { authHeaders: [], requests: [], toolCalls: 0 };
 
   const server = http.createServer((req, res) => {
@@ -50,7 +63,7 @@ export async function startStubMcpServer(): Promise<StubMcpServer> {
           });
           return;
         case "tools/list":
-          reply({ tools: [{ name: "compat_ping", description: "Returns pong. Call this to verify MCP connectivity.", inputSchema: { type: "object", properties: {} } }] });
+          reply({ tools: [tool] });
           return;
         case "tools/call":
           state.toolCalls++;

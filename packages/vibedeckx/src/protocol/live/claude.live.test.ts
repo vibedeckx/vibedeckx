@@ -4,6 +4,13 @@ import { detectBinary } from "../shared/binary.js";
 import { buildMcpConfigArg } from "../../cross-remote-mcp-config.js";
 import { claudeBinaryAvailable, compatRequired, runClaudeSession, runOneShot } from "./runner.js";
 import { startStubMcpServer } from "./stub-mcp-server.js";
+import { ClaudeCodeProvider } from "../../providers/claude-code-provider.js";
+import {
+  CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_SCHEDULE_DESCRIPTION,
+  PROPOSE_SCHEDULE_INPUT_SCHEMA,
+  PROPOSE_SCHEDULE_TOOL,
+} from "../../session-tools-mcp.js";
 
 const MODEL_ARGS = ["--model", "claude-haiku-4-5-20251001"];
 const available = claudeBinaryAvailable();
@@ -153,6 +160,49 @@ describe.skipIf(!available)("claude live probes (mcp-config)", () => {
         `unexpected Authorization headers: ${JSON.stringify([...new Set(stub.authHeaders)])}`,
       ).toBe(true);
       expect(stub.toolCalls, "MCP transport connected but the tool was never invoked").toBeGreaterThan(0);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  /**
+   * Pins the reported tool name the propose_schedule card dispatches on. Claude
+   * prefixes `mcp__<server>__`; if that ever changes, the card silently
+   * degrades to a generic tool rendering. See
+   * docs/schedule-proposal-tool-design.md §4 item 7.
+   */
+  it("CC-7b: reports a vibedeckx MCP tool under the canonical mcp__server__tool name", async () => {
+    const stub = await startStubMcpServer({
+      name: PROPOSE_SCHEDULE_TOOL,
+      description: PROPOSE_SCHEDULE_DESCRIPTION,
+      inputSchema: PROPOSE_SCHEDULE_INPUT_SCHEMA,
+    });
+    try {
+      const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "edit", undefined, null, {
+        url: stub.url,
+        token: "session-probe-token",
+      });
+      const r = await runClaudeSession({
+        turns: [
+          'Call the propose_schedule MCP tool exactly once with name="Watch it", '
+          + 'cron_expr="0 9 * * *" and prompt="check the thing". Then reply DONE.',
+        ],
+        spawnOverride: { command: config.command, args: config.args },
+        extraArgs: MODEL_ARGS,
+        recordAs: "cc7b-session-mcp",
+      });
+
+      expect(r.outcome).toBe("ok");
+      expect(stub.toolCalls, "claude never invoked the MCP tool").toBeGreaterThan(0);
+      const toolNames = r.messages.flatMap((m) => {
+        const am = m as { type: string; message?: { content?: Array<{ type: string; name?: string }> } };
+        if (am.type !== "assistant" || !Array.isArray(am.message?.content)) return [];
+        return am.message.content.filter((b) => b.type === "tool_use").map((b) => b.name ?? "");
+      });
+      expect(
+        toolNames,
+        `claude reported MCP tools as ${JSON.stringify(toolNames)} — the card matches only the canonical name`,
+      ).toContain(CANONICAL_PROPOSE_SCHEDULE_TOOL);
     } finally {
       await stub.close();
     }

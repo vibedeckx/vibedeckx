@@ -8,6 +8,7 @@
 
 import type { AgentType, ContentPart } from "./agent-types.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import type { SessionToolsMcpConfig } from "./session-tools-mcp.js";
 export type { AgentType };
 
 // ============ SpawnConfig (task 1.3) ============
@@ -79,12 +80,17 @@ export interface AgentProvider {
    * Implementations must pass it straight into the spawn arguments and must
    * NOT store it on the provider instance — providers are singletons shared
    * by every session.
+   *
+   * `sessionToolsMcp` points at this process's own loopback MCP endpoint and is
+   * minted per spawn (the token dies with the process); undefined means the
+   * session-scoped tools are simply not offered.
    */
   buildSpawnConfig(
     cwd: string,
     permissionMode: "plan" | "edit",
     crossRemoteMcp?: CrossRemoteMcpConfig,
     model?: string | null,
+    sessionToolsMcp?: SessionToolsMcpConfig,
   ): SpawnConfig;
 
   /** Parse a single stdout line into zero or more agent events. */

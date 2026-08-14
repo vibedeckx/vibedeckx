@@ -133,6 +133,8 @@ export const WebSearchItemSchema = z.looseObject({
 export const McpToolCallItemSchema = z.looseObject({
   type: z.literal("mcpToolCall"),
   id: idish.optional(),
+  /** MCP server the tool belongs to; `tool` is the bare name within it. */
+  server: z.string().optional(),
   tool: z.string().optional(),
   arguments: z.unknown().optional(),
   result: z.unknown().optional(),

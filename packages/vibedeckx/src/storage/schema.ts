@@ -470,6 +470,10 @@ export interface ScheduledTasksTable {
   directory: string | null;
   timeout_seconds: Generated<number>;
   next_run_at: string | null;
+  /** Agent session that proposed this schedule (propose_schedule tool); null for hand-made ones. */
+  source_session_id: string | null;
+  /** tool_use id of the proposal — with source_session_id, the idempotency key. */
+  source_tool_use_id: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

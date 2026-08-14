@@ -7,6 +7,27 @@ import { CLAUDE_NPM_PACKAGE } from "./schema.js";
 
 const STREAM_JSON_ARGS = ["--output-format=stream-json", "--input-format=stream-json"] as const;
 
+export interface ClaudeHttpMcpServer {
+  url: string;
+  token: string;
+}
+
+/**
+ * Serializes `--mcp-config`'s JSON for a set of bearer-authenticated HTTP MCP
+ * servers, keyed by the server name the CLI reports tools under
+ * (`mcp__<name>__<tool>`).
+ */
+export function buildClaudeMcpConfigArg(servers: Record<string, ClaudeHttpMcpServer>): string {
+  return JSON.stringify({
+    mcpServers: Object.fromEntries(
+      Object.entries(servers).map(([name, { url, token }]) => [
+        name,
+        { type: "http", url, headers: { Authorization: `Bearer ${token}` } },
+      ]),
+    ),
+  });
+}
+
 function withNpxFallback(nativeBinary: string | null, args: string[]): SpawnConfig {
   if (nativeBinary) {
     return { command: nativeBinary, args };
@@ -20,6 +41,7 @@ export function buildClaudeSessionSpawnConfig(
   permissionMode: "plan" | "edit",
   mcpConfigArg?: string,
   model?: string | null,
+  allowedTools?: string[],
 ): SpawnConfig {
   const permissionFlag = permissionMode === "plan"
     ? "--permission-mode=plan"
@@ -50,6 +72,14 @@ export function buildClaudeSessionSpawnConfig(
 
   if (mcpConfigArg) {
     args.push("--mcp-config", mcpConfigArg);
+  }
+
+  // An allowlist, not a restriction: named tools skip the permission prompt,
+  // everything else keeps the mode's default handling. Needed so vibedeckx's
+  // own MCP tools don't stall on a prompt in plan mode (edit mode already runs
+  // with --dangerously-skip-permissions).
+  if (allowedTools?.length) {
+    args.push("--allowedTools", allowedTools.join(","));
   }
 
   return withNpxFallback(nativeBinary, args);

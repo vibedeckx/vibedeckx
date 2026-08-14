@@ -58,6 +58,8 @@ export interface ContractIssue {
 export interface SpawnOverride {
   command: string;
   args: string[];
+  /** Merged over the inherited environment — MCP bearer tokens travel this way. */
+  env?: Record<string, string>;
 }
 
 const AUTH_STDERR = /invalid api key|not logged in|please run \/login|log in|authenticat|unauthorized|credential|expired/i;
@@ -213,7 +215,7 @@ function checkClaudeContentBlocks(msg: ClaudeOutputMessage, line: string, contra
 
 export async function runClaudeSession(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
   const timeoutMs = opts.timeoutMs ?? 90_000;
-  const base = opts.spawnOverride
+  const base: SpawnOverride = opts.spawnOverride
     ?? (() => {
       const c = buildClaudeSessionSpawnConfig(detectBinary(CLAUDE_BINARY_NAME), opts.permissionMode ?? "edit", opts.mcpConfigArg);
       return { command: c.command, args: c.args };
@@ -222,7 +224,7 @@ export async function runClaudeSession(opts: ClaudeRunOptions): Promise<ClaudeRu
     cwd: opts.cwd ?? freshCwd(),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-    env: process.env,
+    env: { ...process.env, ...(base.env ?? {}) },
   });
   const pump = startPump(proc);
 
@@ -319,7 +321,7 @@ const KNOWN_THREAD_ITEM_TYPES = new Set(
 
 export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRunResult> {
   const timeoutMs = opts.timeoutMs ?? 90_000;
-  const base = opts.spawnOverride
+  const base: SpawnOverride = opts.spawnOverride
     ?? (() => {
       const c = buildCodexAppServerSpawnConfig(detectBinary(CODEX_BINARY_NAME));
       return { command: c.command, args: c.args };
@@ -328,7 +330,7 @@ export async function runCodexAppServer(opts: CodexRunOptions): Promise<CodexRun
     cwd: opts.cwd ?? freshCwd(),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-    env: process.env,
+    env: { ...process.env, ...(base.env ?? {}) },
   });
   const pump = startPump(proc);
 

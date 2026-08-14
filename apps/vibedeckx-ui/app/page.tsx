@@ -1019,6 +1019,10 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         onSessionSelected={touchRecentSessionOpen}
                         onStatusChange={handleStatusChange}
                         onNewConversation={handleNewConversation}
+                        onOpenSchedule={(scheduleId) => {
+                          setSelectedScheduleId(scheduleId);
+                          setActiveView("schedules");
+                        }}
                       />
                     }
                   />

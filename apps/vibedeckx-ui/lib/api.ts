@@ -511,6 +511,9 @@ export interface Schedule {
   branch: string | null;
   directory: string | null;
   timeout_seconds: number;
+  /** Set when this schedule came from an agent's propose_schedule card. */
+  source_session_id?: string | null;
+  source_tool_use_id?: string | null;
   created_at: string;
   updated_at: string;
   // Enriched by GET /api/projects/:id/schedules
@@ -532,6 +535,12 @@ export interface ScheduleInput {
   branch?: string | null;
   directory?: string | null;
   timeout_seconds?: number;
+  /**
+   * Provenance of an agent proposal. Sending it makes creation idempotent: the
+   * same (session, tool_use) pair can only ever produce one schedule, and a
+   * replay returns the existing one.
+   */
+  source?: { session_id: string; tool_use_id: string };
 }
 
 // ============ Project Activity / Project Chat ============

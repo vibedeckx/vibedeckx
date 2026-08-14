@@ -134,6 +134,15 @@ export interface ScheduledTask {
   timeout_seconds: number;
   /** Persisted scheduler projection used for an indexed project-wide minimum. */
   next_run_at: string | null;
+  /**
+   * Provenance of an agent-proposed schedule (propose_schedule tool): the
+   * session and the tool_use id of the proposal. Null for hand-made schedules.
+   * The pair is uniquely indexed, which is what makes confirming a proposal
+   * idempotent and lets the card recover its "already created" state after a
+   * reload. See docs/schedule-proposal-tool-design.md §3.2.
+   */
+  source_session_id: string | null;
+  source_tool_use_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -873,7 +882,15 @@ export interface Storage {
     markKilledIfRunning: (id: string) => Promise<void>;
   };
   scheduledTasks: {
-    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string }) => Promise<ScheduledTask>;
+    /**
+     * Insert a schedule. When `source` is given the write is idempotent: a
+     * second create for the same (session, tool_use) pair inserts nothing and
+     * returns the existing row (recognizable by `id !== opts.id`), enforced by
+     * a partial unique index rather than a racy check-then-insert.
+     */
+    create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string; source?: { session_id: string; tool_use_id: string } | null }) => Promise<ScheduledTask>;
+    /** Project-scoped provenance lookup backing the proposal card's state recovery. */
+    getBySource: (projectId: string, sessionId: string, toolUseId: string) => Promise<ScheduledTask | undefined>;
     getByProjectId: (projectId: string) => Promise<ScheduledTask[]>;
     /** Stable project-scoped list capped in SQL. */
     listByProject: (projectId: string, limit: number) => Promise<ScheduledTask[]>;

@@ -38,6 +38,7 @@ import browserRoutes from "./routes/browser-routes.js";
 import browserProxyRoutes from "./routes/browser-proxy-routes.js";
 import crossRemoteTargetRoutes from "./routes/cross-remote-target-routes.js";
 import crossRemoteMcpRoutes from "./routes/cross-remote-mcp-routes.js";
+import sessionMcpRoutes from "./routes/session-mcp-routes.js";
 import scheduleRoutes from "./routes/schedule-routes.js";
 import searchRoutes from "./routes/search-routes.js";
 import notificationRoutes from "./routes/notification-routes.js";
@@ -380,6 +381,7 @@ export const createServer = async (opts: {
   server.register(browserProxyRoutes);
   server.register(crossRemoteTargetRoutes);
   server.register(crossRemoteMcpRoutes);
+  server.register(sessionMcpRoutes);
 
   // 提供静态 UI 文件（reverse-connect worker / --no-ui 模式下不提供）
   if (UI_ROOT) {
@@ -445,6 +447,14 @@ export const createServer = async (opts: {
     start: async (port: number, host: string = "127.0.0.1") => {
       await server.listen({ port, host });
       const protocol = tls ? "https" : "http";
+      // Loopback base URL for agent-facing local endpoints (session MCP tools).
+      // Every bind includes loopback, so 127.0.0.1 is always reachable from the
+      // agent processes this instance spawns. Left null under TLS: a loopback
+      // https URL can't pass hostname verification against a public cert, and
+      // the tool degrades to simply not being offered.
+      const boundAddr = server.server.address();
+      const boundPort = typeof boundAddr === "object" && boundAddr ? boundAddr.port : port;
+      server.agentSessionManager.localApiOrigin = tls ? null : `http://127.0.0.1:${boundPort}`;
       // Wildcard binds include loopback, so localhost is the friendly URL.
       // A specific interface IP isn't reachable via localhost, so show it as-is.
       const displayHost = host === "0.0.0.0" || host === "::" ? "localhost" : host;
@@ -454,6 +464,9 @@ export const createServer = async (opts: {
       await server.listen({ port, host: "127.0.0.1" });
       const addr = server.server.address();
       const actualPort = typeof addr === "object" && addr ? addr.port : port;
+      // Reverse-connect workers spawn their own agent processes; this is the
+      // origin those processes reach the session MCP tools on (see `start`).
+      server.agentSessionManager.localApiOrigin = `http://127.0.0.1:${actualPort}`;
       return { url: `http://127.0.0.1:${actualPort}`, port: actualPort, instance: server };
     },
     close: async () => {

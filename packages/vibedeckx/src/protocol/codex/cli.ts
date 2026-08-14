@@ -5,14 +5,21 @@
  */
 import type { SpawnConfig } from "../../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../../cross-remote-mcp-config.js";
+import { SESSION_TOOLS_MCP_SERVER_NAME, type SessionToolsMcpConfig } from "../../session-tools-mcp.js";
 import { CODEX_NPM_PACKAGE } from "./schema.js";
 
 const CROSS_REMOTE_MCP_TOKEN_ENV = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN";
+const SESSION_TOOLS_MCP_TOKEN_ENV = "VIBEDECKX_SESSION_MCP_TOKEN";
+
+/** `-c mcp_servers.<name>={…}` — TOML inline table; JSON.stringify yields valid TOML basic strings. */
+const mcpServerOverride = (name: string, url: string, tokenEnvVar: string): string =>
+  `mcp_servers.${name}={ url = ${JSON.stringify(url)}, bearer_token_env_var = ${JSON.stringify(tokenEnvVar)}, default_tools_approval_mode = "approve" }`;
 
 export function buildCodexAppServerSpawnConfig(
   nativeBinary: string | null,
   crossRemoteMcp?: CrossRemoteMcpConfig,
   model?: string | null,
+  sessionToolsMcp?: SessionToolsMcpConfig,
 ): SpawnConfig {
   const args = ["app-server"];
 
@@ -27,20 +34,25 @@ export function buildCodexAppServerSpawnConfig(
   }
 
   if (crossRemoteMcp) {
+    args.push("-c", mcpServerOverride("cross-remote", crossRemoteMcp.url, CROSS_REMOTE_MCP_TOKEN_ENV));
+  }
+
+  if (sessionToolsMcp) {
     args.push(
       "-c",
-      `mcp_servers.cross-remote={ url = ${JSON.stringify(crossRemoteMcp.url)}, bearer_token_env_var = ${JSON.stringify(CROSS_REMOTE_MCP_TOKEN_ENV)}, default_tools_approval_mode = "approve" }`,
+      mcpServerOverride(SESSION_TOOLS_MCP_SERVER_NAME, sessionToolsMcp.url, SESSION_TOOLS_MCP_TOKEN_ENV),
     );
   }
 
-  const env = crossRemoteMcp
-    ? { [CROSS_REMOTE_MCP_TOKEN_ENV]: crossRemoteMcp.token }
-    : undefined;
+  const env: Record<string, string> = {};
+  if (crossRemoteMcp) env[CROSS_REMOTE_MCP_TOKEN_ENV] = crossRemoteMcp.token;
+  if (sessionToolsMcp) env[SESSION_TOOLS_MCP_TOKEN_ENV] = sessionToolsMcp.token;
+  const hasEnv = Object.keys(env).length > 0;
 
   if (nativeBinary) {
-    return { command: nativeBinary, args, ...(env ? { env } : {}), shell: false };
+    return { command: nativeBinary, args, ...(hasEnv ? { env } : {}), shell: false };
   }
-  return { command: "npx", args: ["-y", CODEX_NPM_PACKAGE, ...args], ...(env ? { env } : {}), shell: false };
+  return { command: "npx", args: ["-y", CODEX_NPM_PACKAGE, ...args], ...(hasEnv ? { env } : {}), shell: false };
 }
 
 /**

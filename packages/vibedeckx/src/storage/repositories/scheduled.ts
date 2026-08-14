@@ -84,6 +84,10 @@ export const createScheduledRepos = (
 ): Pick<Storage, "scheduledTasks" | "scheduledTaskRuns"> => ({
   scheduledTasks: {
     create: async (opts) => {
+      // DO NOTHING (not check-then-insert) so two concurrent confirmations of
+      // the same proposal race into the partial unique index instead of into a
+      // window between a SELECT and an INSERT. Any conflict lands us on the
+      // "row not inserted" branch below, which resolves the winner by source.
       await kdb.insertInto("scheduled_tasks").values({
         id: opts.id,
         project_id: opts.project_id,
@@ -100,9 +104,32 @@ export const createScheduledRepos = (
         directory: opts.directory ?? null,
         timeout_seconds: opts.timeout_seconds ?? 1800,
         next_run_at: computeNextRunAt(opts.cron_expr, opts.timezone, opts.enabled !== false),
-      }).execute();
-      const row = await kdb.selectFrom("scheduled_tasks").selectAll().where("id", "=", opts.id).executeTakeFirstOrThrow();
-      return mapTask(row);
+        source_session_id: opts.source?.session_id ?? null,
+        source_tool_use_id: opts.source?.tool_use_id ?? null,
+      }).onConflict((oc) => oc.doNothing()).execute();
+
+      const row = await kdb.selectFrom("scheduled_tasks").selectAll().where("id", "=", opts.id).executeTakeFirst();
+      if (row) return mapTask(row);
+
+      if (opts.source) {
+        const existing = await kdb.selectFrom("scheduled_tasks").selectAll()
+          .where("project_id", "=", opts.project_id)
+          .where("source_session_id", "=", opts.source.session_id)
+          .where("source_tool_use_id", "=", opts.source.tool_use_id)
+          .executeTakeFirst();
+        if (existing) return mapTask(existing);
+      }
+      // Neither inserted nor resolvable: a conflict on something other than the
+      // source pair (or a row that vanished). Never silently swallow it.
+      throw new Error(`Failed to create schedule ${opts.id}`);
+    },
+    getBySource: async (projectId, sessionId, toolUseId) => {
+      const row = await kdb.selectFrom("scheduled_tasks").selectAll()
+        .where("project_id", "=", projectId)
+        .where("source_session_id", "=", sessionId)
+        .where("source_tool_use_id", "=", toolUseId)
+        .executeTakeFirst();
+      return row ? mapTask(row) : undefined;
     },
     getByProjectId: async (projectId) => {
       const rows = await kdb.selectFrom("scheduled_tasks").selectAll()

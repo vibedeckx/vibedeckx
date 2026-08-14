@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildClaudeMcpConfigArg,
   buildClaudePrintCommand,
   buildClaudeSessionSpawnConfig,
   buildClaudeStreamExecutorSpawn,
@@ -103,6 +104,45 @@ describe("claude CLI builders", () => {
     expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit", undefined, "totally-made-up").args).toContain(
       "totally-made-up",
     );
+  });
+
+  it("appends an allowlist after --mcp-config so MCP tools skip the permission prompt", () => {
+    const args = buildClaudeSessionSpawnConfig(
+      "/bin/claude", "plan", '{"mcpServers":{}}', null, ["mcp__vibedeckx__propose_schedule"],
+    ).args;
+    expect(args.slice(-4)).toEqual([
+      "--mcp-config",
+      '{"mcpServers":{}}',
+      "--allowedTools",
+      "mcp__vibedeckx__propose_schedule",
+    ]);
+  });
+
+  it("omits --allowedTools entirely when nothing is allowlisted", () => {
+    expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit", undefined, null, []).args)
+      .not.toContain("--allowedTools");
+    expect(buildClaudeSessionSpawnConfig("/bin/claude", "edit").args).not.toContain("--allowedTools");
+  });
+
+  it("serializes multiple HTTP MCP servers into one --mcp-config payload", () => {
+    const arg = buildClaudeMcpConfigArg({
+      "cross-remote": { url: "https://app.example.com/api/cross-remote-mcp", token: "cross-token" },
+      vibedeckx: { url: "http://127.0.0.1:5173/api/session-mcp", token: "session-token" },
+    });
+    expect(JSON.parse(arg)).toEqual({
+      mcpServers: {
+        "cross-remote": {
+          type: "http",
+          url: "https://app.example.com/api/cross-remote-mcp",
+          headers: { Authorization: "Bearer cross-token" },
+        },
+        vibedeckx: {
+          type: "http",
+          url: "http://127.0.0.1:5173/api/session-mcp",
+          headers: { Authorization: "Bearer session-token" },
+        },
+      },
+    });
   });
 
   it("combines --model with --mcp-config", () => {

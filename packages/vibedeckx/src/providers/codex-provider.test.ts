@@ -15,6 +15,53 @@ describe("CodexProvider", () => {
     expect(config.env).toEqual({ VIBEDECKX_CROSS_REMOTE_MCP_TOKEN: "secret-token" });
   });
 
+  it("forwards session-tools MCP configuration with its own token env var", () => {
+    const config = new CodexProvider().buildSpawnConfig("/tmp", "edit", undefined, null, {
+      url: "http://127.0.0.1:5173/api/session-mcp",
+      token: "session-token",
+    });
+
+    expect(config.args.join(" ")).toContain("mcp_servers.vibedeckx");
+    expect(config.args.join(" ")).not.toContain("session-token");
+    expect(config.env).toEqual({ VIBEDECKX_SESSION_MCP_TOKEN: "session-token" });
+  });
+
+  it("normalizes its MCP tool name onto the canonical one the UI matches", () => {
+    const provider = new CodexProvider();
+    const events = provider.parseStdoutLine(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        turnId: "turn-1",
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-1",
+          tool: "propose_schedule",
+          arguments: { name: "Watch it", cron_expr: "0 9 * * *", prompt: "check" },
+          result: { content: [{ type: "text", text: "ok" }] },
+        },
+      },
+    }), "s1");
+
+    expect(events.map((e) => (e as { tool: string }).tool)).toEqual([
+      "mcp__vibedeckx__propose_schedule",
+      "mcp__vibedeckx__propose_schedule",
+    ]);
+  });
+
+  it("leaves other MCP servers' tool names untouched", () => {
+    const events = new CodexProvider().parseStdoutLine(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        turnId: "turn-1",
+        item: { type: "mcpToolCall", id: "mcp-2", tool: "remote_bash", arguments: {}, result: {} },
+      },
+    }), "s1");
+
+    expect((events[0] as { tool: string }).tool).toBe("remote_bash");
+  });
+
   function commandExecutionCompleted(id = "cmd-1") {
     return {
       jsonrpc: "2.0",
