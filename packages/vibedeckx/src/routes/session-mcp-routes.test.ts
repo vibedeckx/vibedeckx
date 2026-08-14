@@ -104,6 +104,12 @@ describe("session tools MCP endpoint", () => {
     expect(await storage.scheduledTasks.getAllEnabled()).toEqual([]);
   });
 
+  it("acknowledges a command proposal too", async () => {
+    const { prompt: _prompt, ...rest } = validArgs;
+    const res = await propose(tokenFor(), { ...rest, command: "pnpm test --run flaky" });
+    expect(res.json().result.isError).toBeUndefined();
+  });
+
   it("rejects an invalid cron expression so the agent can fix it in the same turn", async () => {
     const res = await propose(tokenFor(), { ...validArgs, cron_expr: "not a cron" });
     expect(res.json().result.isError).toBe(true);

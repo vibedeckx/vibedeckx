@@ -28,6 +28,7 @@ describe("manual schedule run route", () => {
     app.decorate("authEnabled", true);
     app.decorate("storage", storage);
     app.decorate("scheduler", { runNow } as unknown as SchedulerService);
+    app.decorate("eventBus", { emit: vi.fn() } as never);
     await app.register(scheduleRoutes);
     await app.ready();
   };

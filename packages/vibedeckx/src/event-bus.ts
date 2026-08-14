@@ -14,6 +14,11 @@ export type GlobalEvent =
   | { type: "executor:started"; projectId: string; executorId: string; processId: string; target?: string }
   | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string; finalResult?: string }
   | { type: "merge-target:updated"; projectId: string; branch: string }
+  // A schedule was created, edited or removed. Consumers of the project's
+  // schedule list refetch on it, so a schedule created from a surface that
+  // doesn't own that list (the agent window's propose_schedule card) still
+  // shows up everywhere without a reload — and so do other tabs and devices.
+  | { type: "schedule:changed"; projectId: string; scheduleId: string; change: "created" | "updated" | "deleted" }
   | { type: "schedule:run-started"; projectId: string; scheduleId: string; runId: string }
   | { type: "schedule:run-finished"; projectId: string; scheduleId: string; runId: string; status: string; exitCode: number | null }
   | { type: "workflow:run-updated"; projectId: string; branch: string | null; run: import("./storage/types.js").WorkflowRun }

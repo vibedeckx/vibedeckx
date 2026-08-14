@@ -14,6 +14,7 @@ import scheduleRoutes from "./schedule-routes.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 import type { SchedulerService } from "../scheduler.js";
+import type { GlobalEvent } from "../event-bus.js";
 
 /** Confirming an agent's propose_schedule card (see docs/schedule-proposal-tool-design.md §3.2). */
 describe("schedule create from an agent proposal", () => {
@@ -21,6 +22,7 @@ describe("schedule create from an agent proposal", () => {
   let storage: Storage;
   let dir: string;
   const reschedule = vi.fn(async () => {});
+  let emitted: GlobalEvent[];
 
   const body = (over: Record<string, unknown> = {}) => ({
     name: "Watch flakiness",
@@ -45,6 +47,7 @@ describe("schedule create from an agent proposal", () => {
   beforeEach(async () => {
     auth.currentUserId = "user-1";
     reschedule.mockClear();
+    emitted = [];
     dir = mkdtempSync(path.join(tmpdir(), "vdx-schedule-proposal-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "project-1", name: "Mine", path: "/tmp/mine" }, "user-1");
@@ -65,6 +68,7 @@ describe("schedule create from an agent proposal", () => {
     app.decorate("authEnabled", true);
     app.decorate("storage", storage);
     app.decorate("scheduler", { reschedule, nextRunAt: () => null, isRunning: () => false } as unknown as SchedulerService);
+    app.decorate("eventBus", { emit: (e: GlobalEvent) => emitted.push(e) } as never);
     await app.register(scheduleRoutes);
     await app.ready();
   });
@@ -104,6 +108,22 @@ describe("schedule create from an agent proposal", () => {
     await create(body());
     const list = await app.inject({ method: "GET", url: "/api/projects/project-1/schedules" });
     expect(list.json().schedules[0]).toMatchObject({ source_session_id: "sess-1", source_tool_use_id: "toolu_1" });
+  });
+
+  it("announces the creation, so schedule lists it didn't come from refresh themselves", async () => {
+    // The card creates the schedule from the agent window, which doesn't own
+    // the sidebar's list — without this event that list stays stale until a
+    // page reload. A replay changed nothing, so it announces nothing.
+    const first = await create(body());
+    expect(emitted).toEqual([{
+      type: "schedule:changed",
+      projectId: "project-1",
+      scheduleId: first.json().schedule.id,
+      change: "created",
+    }]);
+
+    await create(body());
+    expect(emitted).toHaveLength(1);
   });
 
   it("rejects a source naming a session from another project", async () => {

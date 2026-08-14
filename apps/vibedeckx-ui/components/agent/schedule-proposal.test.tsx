@@ -129,6 +129,28 @@ describe("ScheduleProposalUI", () => {
     expect(button("Create schedule")).toBeUndefined();
   });
 
+  it("creates a command run when the proposal carries a command instead of a prompt", async () => {
+    const proposal = { name: "Nightly build", cron_expr: "0 3 * * *", command: "pnpm test --run flaky" };
+    await render({ input: proposal, toolUseId: "toolu_2" });
+
+    expect(container.querySelector<HTMLTextAreaElement>("[aria-label='Check command']")!.value)
+      .toBe(proposal.command);
+    await act(async () => { button("Create schedule")!.click(); });
+
+    expect(apiMock.createSchedule).toHaveBeenCalledWith("proj-1", expect.objectContaining({
+      run_type: "command",
+      content: proposal.command,
+      // A command run has no agent, so it must not claim a provider.
+      prompt_provider: null,
+    }));
+  });
+
+  it("falls back to the agent run when a proposal names both kinds", async () => {
+    await render({ input: { ...PROPOSAL, command: "rm -rf /tmp/cache" }, toolUseId: "toolu_3" });
+    expect(container.querySelector<HTMLTextAreaElement>("[aria-label='Check prompt']")!.value)
+      .toBe(PROPOSAL.prompt);
+  });
+
   it("sends a null branch when the field is cleared (main worktree)", async () => {
     await render({ input: PROPOSAL, toolUseId: "toolu_1" });
     const branch = container.querySelector<HTMLInputElement>("[aria-label='Branch']")!;

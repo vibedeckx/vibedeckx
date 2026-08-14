@@ -326,6 +326,15 @@ worker 版本无关。
    关联仍在）。两处都解析不到即拒绝，不放行。仓储层的 source 查询也按 project
    收窄。
 
+4. **创建必须广播**（实测补丁）：schedule 的增删改此前不发任何全局事件——只有
+   run 的开始/结束发。侧边栏那份列表由 `useSchedules` 持有，卡片是从 agent
+   窗口直接调 create REST 的，不经过它，所以新 schedule 要刷新页面才出现。
+   现在 create / update / delete 各发一条
+   `schedule:changed { projectId, scheduleId, change }`；前端两个消费者
+   （`useSchedules`、`useProposedSchedule`）本来就按 `schedule:` 前缀 + projectId
+   重取，无需前端改动，顺带让多标签页/多设备也同步。幂等 replay 什么都没改，
+   不发事件。
+
 验收（§4.2）覆盖情况：状态恢复、幂等（含并发）、失败重试、双 Provider、
 老 worker 降级均有自动化测试；remote 端到端（提议 → 确认 → 到点在 worker 执行）
 仍需一次人工验证。

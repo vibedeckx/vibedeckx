@@ -41,9 +41,17 @@ export const PROPOSE_SCHEDULE_DESCRIPTION = [
   "itself and this call does not wait for the user. Say you have SUGGESTED a scheduled check",
   "(never that you created one) and continue.",
   "",
+  "Give EXACTLY ONE of `prompt` or `command`:",
+  "- `command` runs a shell command in the project directory. Prefer it when the check is",
+  "  mechanical and its output speaks for itself (a test suite, a health request, a disk",
+  "  check). It is cheaper and its result is unambiguous.",
+  "- `prompt` starts a fresh agent. Use it when the check needs judgement — reading logs,",
+  "  comparing behaviour, deciding whether something counts as a regression.",
+  "",
   "`prompt` must be self-contained: the scheduled run is a fresh agent with none of this",
   "conversation's context. Spell out what to check, how to tell pass from fail, and what to",
-  "write in the report when something regressed.",
+  "write in the report when something regressed. A `command` should likewise be non-interactive",
+  "and exit non-zero when the check fails.",
   "",
   "Project, execution target and branch are taken from this session — do not describe them here.",
 ].join("\n");
@@ -53,10 +61,11 @@ export const PROPOSE_SCHEDULE_INPUT_SCHEMA = {
   properties: {
     name: { type: "string", description: "Short label for the scheduled check, e.g. \"Watch nightly build flakiness\"" },
     cron_expr: { type: "string", description: "5-field cron expression, e.g. \"0 9 * * *\" for every day at 09:00" },
-    prompt: { type: "string", description: "Self-contained instructions for the scheduled agent run" },
+    prompt: { type: "string", description: "Self-contained instructions for a scheduled agent run. Give this OR command, not both." },
+    command: { type: "string", description: "Non-interactive shell command to run for the check, e.g. \"pnpm test --run flaky\". Give this OR prompt, not both." },
     timezone: { type: "string", description: "Optional IANA timezone for the cron expression, e.g. \"Asia/Shanghai\". Defaults to the user's browser timezone." },
   },
-  required: ["name", "cron_expr", "prompt"],
+  required: ["name", "cron_expr"],
 } as const;
 
 export const PROPOSE_SCHEDULE_ACK =
@@ -67,13 +76,16 @@ export const PROPOSE_SCHEDULE_ACK =
 export interface ProposeScheduleArgs {
   name: string;
   cron_expr: string;
-  prompt: string;
+  /** Which kind of run the proposal is for; mirrors ScheduledTask.run_type. */
+  run_type: "prompt" | "command";
+  /** The agent instructions or the shell command, per run_type. */
+  content: string;
   timezone?: string;
 }
 
 const NAME_MAX = 200;
 const CRON_MAX = 200;
-const PROMPT_MAX = 20_000;
+const CONTENT_MAX = 20_000;
 const TIMEZONE_MAX = 100;
 
 const str = (value: unknown): string | null => (typeof value === "string" ? value.trim() : null);
@@ -94,16 +106,24 @@ export function parseProposeScheduleArgs(
   if (!cronExpr) return { ok: false, error: "cron_expr is required" };
   if (cronExpr.length > CRON_MAX) return { ok: false, error: `cron_expr must be at most ${CRON_MAX} characters` };
 
-  const prompt = typeof args.prompt === "string" ? args.prompt : null;
-  if (!prompt?.trim()) return { ok: false, error: "prompt is required" };
-  if (prompt.length > PROMPT_MAX) return { ok: false, error: `prompt must be at most ${PROMPT_MAX} characters` };
+  // The run kind is derived from which content field was given rather than
+  // asked for separately: one field can't contradict the other that way.
+  const prompt = typeof args.prompt === "string" && args.prompt.trim() ? args.prompt : null;
+  const command = typeof args.command === "string" && args.command.trim() ? args.command : null;
+  if (prompt && command) return { ok: false, error: "give either prompt or command, not both" };
+  if (!prompt && !command) return { ok: false, error: "either prompt or command is required" };
+  const run_type = prompt ? "prompt" as const : "command" as const;
+  const content = (prompt ?? command)!;
+  if (content.length > CONTENT_MAX) {
+    return { ok: false, error: `${run_type} must be at most ${CONTENT_MAX} characters` };
+  }
 
   const timezone = str(args.timezone) ?? undefined;
   if (timezone && timezone.length > TIMEZONE_MAX) {
     return { ok: false, error: `timezone must be at most ${TIMEZONE_MAX} characters` };
   }
 
-  return { ok: true, value: { name, cron_expr: cronExpr, prompt, ...(timezone ? { timezone } : {}) } };
+  return { ok: true, value: { name, cron_expr: cronExpr, run_type, content, ...(timezone ? { timezone } : {}) } };
 }
 
 /**

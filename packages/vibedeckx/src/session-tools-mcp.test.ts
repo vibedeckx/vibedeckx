@@ -25,7 +25,25 @@ describe("parseProposeScheduleArgs", () => {
 
   it("accepts and trims a valid proposal", () => {
     const result = parseProposeScheduleArgs({ ...valid, name: "  Watch it  ", timezone: " UTC " });
-    expect(result).toEqual({ ok: true, value: { ...valid, timezone: "UTC" } });
+    expect(result).toEqual({
+      ok: true,
+      value: { name: "Watch it", cron_expr: valid.cron_expr, run_type: "prompt", content: valid.prompt, timezone: "UTC" },
+    });
+  });
+
+  it("derives a command run from the command field", () => {
+    const result = parseProposeScheduleArgs({ name: "Nightly build", cron_expr: "0 9 * * *", command: "pnpm test" });
+    expect(result).toEqual({
+      ok: true,
+      value: { name: "Nightly build", cron_expr: "0 9 * * *", run_type: "command", content: "pnpm test" },
+    });
+  });
+
+  it("rejects a proposal that is both kinds at once, or neither", () => {
+    // Two contents can contradict each other; one field decides the kind.
+    expect(parseProposeScheduleArgs({ ...valid, command: "pnpm test" }).ok).toBe(false);
+    expect(parseProposeScheduleArgs({ name: "x", cron_expr: "0 9 * * *" }).ok).toBe(false);
+    expect(parseProposeScheduleArgs({ name: "x", cron_expr: "0 9 * * *", command: "   " }).ok).toBe(false);
   });
 
   it("omits timezone when not supplied — the card falls back to the browser's", () => {
@@ -46,6 +64,7 @@ describe("parseProposeScheduleArgs", () => {
 
   it("caps field lengths", () => {
     expect(parseProposeScheduleArgs({ ...valid, prompt: "x".repeat(20_001) }).ok).toBe(false);
+    expect(parseProposeScheduleArgs({ name: "x", cron_expr: "0 9 * * *", command: "x".repeat(20_001) }).ok).toBe(false);
     expect(parseProposeScheduleArgs({ ...valid, name: "x".repeat(201) }).ok).toBe(false);
   });
 });

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { noteScheduleCreated, useProposedSchedule } from "@/hooks/use-proposed-schedule";
 import { useAgentConversation } from "./agent-conversation";
 
@@ -25,7 +26,9 @@ interface ScheduleProposalUIProps {
 interface ProposalFields {
   name: string;
   cronExpr: string;
-  prompt: string;
+  /** Agent instructions or a shell command, per runType. */
+  content: string;
+  runType: "prompt" | "command";
   timezone: string;
 }
 
@@ -41,10 +44,17 @@ function readProposal(input: unknown): ProposalFields {
   const raw = typeof input === "string" ? tryParse(input) : input;
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const str = (value: unknown): string => (typeof value === "string" ? value : "");
+  const prompt = str(obj.prompt);
+  const command = str(obj.command);
+  // The tool rejects a proposal carrying both, but the card renders from the
+  // tool_use message either way — so fall back to the agent run, which is the
+  // milder thing to hand someone a confirm button for.
+  const runType = prompt.trim() || !command.trim() ? "prompt" : "command";
   return {
     name: str(obj.name).trim(),
     cronExpr: str(obj.cron_expr).trim(),
-    prompt: str(obj.prompt),
+    runType,
+    content: runType === "prompt" ? prompt : command,
     // The model may suggest a timezone; absent one, the cron means what the
     // person reading the card would assume it means.
     timezone: str(obj.timezone).trim() || browserTimezone(),
@@ -80,6 +90,7 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
   const [error, setError] = useState<string | null>(null);
 
   const { schedule: created, loading } = useProposedSchedule(projectId, sessionId, toolUseId);
+  const isCommand = fields.runType === "command";
 
   // Missing identity means there is nothing to create against (or nothing to
   // recover state by) — show the proposal as plain text rather than a button
@@ -96,11 +107,14 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
         cron_expr: fields.cronExpr,
         timezone: fields.timezone,
         target,
-        run_type: "prompt",
+        run_type: fields.runType,
         // Codex sessions must not create Claude-provider runs: the follow-up
-        // check should be run by the same agent that proposed it.
-        prompt_provider: agentType === "codex" ? "codex" : "claude",
-        content: fields.prompt,
+        // check should be run by the same agent that proposed it. A command run
+        // has no agent, so it has no provider either.
+        prompt_provider: fields.runType === "command"
+          ? null
+          : agentType === "codex" ? "codex" : "claude",
+        content: fields.content,
         cwd_mode: "branch",
         branch: branchValue.trim() ? branchValue.trim() : null,
         source: { session_id: sessionId, tool_use_id: toolUseId },
@@ -122,6 +136,7 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
             <p className="text-sm font-medium text-foreground break-words">{created.name}</p>
             <p className="mt-0.5 font-mono text-xs text-muted-foreground break-all">
               {created.cron_expr} · {created.timezone}
+              {created.run_type === "command" ? " · command" : ""}
               {created.branch ? ` · ${created.branch}` : ""}
             </p>
           </div>
@@ -166,17 +181,17 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
           />
         </div>
         <Textarea
-          value={fields.prompt}
-          onChange={(e) => setFields((f) => ({ ...f, prompt: e.target.value }))}
-          placeholder="What the scheduled agent should check"
-          className="min-h-24 text-xs"
-          aria-label="Check prompt"
+          value={fields.content}
+          onChange={(e) => setFields((f) => ({ ...f, content: e.target.value }))}
+          placeholder={isCommand ? "Command to run" : "What the scheduled agent should check"}
+          className={cn("text-xs", isCommand ? "min-h-16 font-mono" : "min-h-24")}
+          aria-label={isCommand ? "Check command" : "Check prompt"}
           disabled={submitting}
         />
       </div>
 
       <p className="mt-2 text-xs text-muted-foreground">
-        Runs on {targetLabel} · {fields.timezone}
+        {isCommand ? "Runs as a command" : "Runs as an agent"} on {targetLabel} · {fields.timezone}
       </p>
 
       {error && <p className="mt-2 text-xs text-red-500 break-words">{error}</p>}

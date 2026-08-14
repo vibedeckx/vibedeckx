@@ -186,7 +186,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // is a replayed confirmation, not a new creation. 200 (not 201) says so,
       // and the edits carried by the replay are deliberately ignored — the
       // first confirmation wins, so the outcome doesn't depend on arrival order.
-      return reply.code(schedule.id === newId ? 201 : 200).send({ schedule });
+      const created = schedule.id === newId;
+      if (created) {
+        fastify.eventBus.emit({
+          type: "schedule:changed", projectId: req.params.projectId, scheduleId: schedule.id, change: "created",
+        });
+      }
+      return reply.code(created ? 201 : 200).send({ schedule });
     }
   );
 
@@ -246,6 +252,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         target: b.target,
       });
       await fastify.scheduler.reschedule(req.params.id);
+      fastify.eventBus.emit({
+        type: "schedule:changed", projectId: existing.project_id, scheduleId: req.params.id, change: "updated",
+      });
       return reply.code(200).send({ schedule });
     }
   );
@@ -260,6 +269,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       fastify.scheduler.unschedule(req.params.id);
       await fastify.storage.scheduledTasks.delete(req.params.id);
+      fastify.eventBus.emit({
+        type: "schedule:changed", projectId: existing.project_id, scheduleId: req.params.id, change: "deleted",
+      });
       return reply.code(204).send();
     }
   );

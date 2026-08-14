@@ -61,6 +61,7 @@ describe("no-auth user-facing project child routes", () => {
     app.decorate("scheduler", {
       nextRunAt: vi.fn(() => null), isRunning: vi.fn(() => false),
     });
+    app.decorate("eventBus", { emit: vi.fn() } as never);
     app.decorate("browserManager", { getSession: getBrowserSession });
     app.decorate("agentSessionManager", {
       getSession: getAgentSession, getSessionProcessAlive,
