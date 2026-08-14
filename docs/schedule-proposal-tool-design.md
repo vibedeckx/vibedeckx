@@ -53,10 +53,17 @@ spawn CLI 讲 stream-json，走不了）；hooks 是拦截器不是工具。
 工具语义：
 
 ```
-propose_schedule { name, cron_expr, prompt, timezone? }
+propose_schedule { name, cron_expr, prompt | command, timezone? }
 ```
 
-参数**只包含模型创造性内容**（叫什么、多久跑一次、检查什么）。项目、target、
+`prompt` 与 `command` **二选一**，对应 `ScheduledTask.run_type` 的两种取值：
+`command` 是直接跑一条 shell 命令（跑测试、打健康检查、看磁盘这类机械检查，
+更便宜且结果无歧义），`prompt` 是起一个全新 agent（需要判断力的检查）。
+run_type 由"给了哪个字段"推导，而不是再要一个枚举参数——两个字段就不可能
+互相矛盾；两个都给或都不给都是参数错误。command 型 schedule 没有 agent，
+故 `prompt_provider` 置 null。
+
+其余参数**只包含模型创造性内容**（叫什么、多久跑一次、检查什么）。项目、target、
 branch 一律不从模型参数取——模型给的 branch 可能过期或幻觉。它们从**会话的
 权威绑定**派生：卡片渲染在会话视图里，前端本来就持有该会话的 project /
 branch / target（local 或 remote_server_id），直接预填；branch 在卡片上可改
@@ -131,9 +138,9 @@ agent ──MCP──▶ worker loopback(校验 cron 等,立即返回 "shown to 
    | ScheduledTask 字段 | 来源 |
    |---|---|
    | `name` / `cron_expr` | 工具参数（卡片可改） |
-   | `content` | 工具参数 `prompt`（卡片可改） |
-   | `run_type` | 固定 `'prompt'` |
-   | `prompt_provider` | **当前会话的 agent 类型**（Codex 会话 → codex；不能省略，否则落到默认 provider） |
+   | `content` | 工具参数 `prompt` 或 `command`（卡片可改） |
+   | `run_type` | 由给了哪个内容字段推导：`prompt` → `'prompt'`，`command` → `'command'` |
+   | `prompt_provider` | prompt 型：**当前会话的 agent 类型**（Codex 会话 → codex；不能省略，否则落到默认 provider）；command 型：null |
    | `cwd_mode` / `branch` | `'branch'` + 会话绑定的 branch（卡片可改；null = 主 worktree） |
    | `target` | 会话所在处：local 会话 → `'local'`，remote 会话 → 其 remote_server_id |
    | `project_id` | 会话所属项目（前端会话上下文持有） |
@@ -334,6 +341,13 @@ worker 版本无关。
    （`useSchedules`、`useProposedSchedule`）本来就按 `schedule:` 前缀 + projectId
    重取，无需前端改动，顺带让多标签页/多设备也同步。幂等 replay 什么都没改，
    不发事件。
+
+5. **command 型提议**（后补）：v1 初版只能提 prompt 型，但 `ScheduledTask`
+   本来就支持 command。工具改为 `prompt | command` 二选一（见 §2），卡片按
+   kind 切换输入框（command 用等宽、占位文案不同）并在确认时带上对应的
+   `run_type` / `prompt_provider`。若模型两个字段都给了，工具报错；而卡片仍会
+   渲染（卡片来自 tool_use 消息，与校验结果无关），此时**回退到 prompt**——
+   给一个含糊提议配一个"直接建 shell 命令"的确认按钮不合适。
 
 验收（§4.2）覆盖情况：状态恢复、幂等（含并发）、失败重试、双 Provider、
 老 worker 降级均有自动化测试；remote 端到端（提议 → 确认 → 到点在 worker 执行）
