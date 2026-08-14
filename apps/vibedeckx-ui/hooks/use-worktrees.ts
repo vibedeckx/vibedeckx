@@ -7,23 +7,25 @@ import { useGlobalEventStream } from "@/hooks/global-event-stream";
 export const WORKTREE_DRIFT_BACKSTOP_MS = 5 * 60_000;
 
 /**
- * True while the worktree list can't be trusted for `projectId` — a fetch is
- * in flight, or the list on hand was loaded for a different project. Pure —
- * exported for tests.
+ * True while the worktree list can't be trusted for `scope` — a fetch is in
+ * flight, or no fetch for this scope (project + target) has SUCCEEDED yet.
+ * Pure — exported for tests.
  *
  * The second clause is what closes the cross-project navigation race: a
  * `setFetching(true)` from the fetch effect isn't visible to sibling effects
  * in the same commit, so a flag alone would let page.tsx's auto-select effect
- * consume a pending workspace selection against the PREVIOUS project's
+ * consume a pending workspace selection against the PREVIOUS scope's
  * worktrees and fall back to the main workspace. Deriving loading from the
- * list's owning project holds in the very render the project changes.
+ * last-validated scope holds in the very render the scope changes — and keeps
+ * a failed revalidation (kept seed / error stub) non-authoritative, so a
+ * transient tunnel failure can never justify DROPPING a pending selection.
  */
 export function isWorktreesLoading(
   fetching: boolean,
-  loadedProjectId: string | null,
-  projectId: string | null,
+  validatedScope: string | null,
+  scope: string | null,
 ): boolean {
-  return fetching || loadedProjectId !== projectId;
+  return fetching || validatedScope !== scope;
 }
 
 export function worktreesEqual(left: Worktree[], right: Worktree[]): boolean {
@@ -50,42 +52,59 @@ export function preserveSelectedWorkspace(
   return preserved;
 }
 
-// Page-lifetime cache of the last fetched worktree list per project. A
-// revisited project is seeded from it synchronously (render-phase, below), so
-// cross-project navigation can apply a staged workspace/session selection
-// immediately instead of waiting a network round-trip (remote projects list
-// worktrees over the tunnel); the regular fetch then revalidates. Values are
-// server truth from the last completed fetch — never the
-// preserveSelectedWorkspace hybrid.
+// Page-lifetime cache of the last fetched worktree list per scope
+// (project + agent target). A revisited scope is seeded from it synchronously
+// (render-phase, below), so cross-project navigation can apply a staged
+// workspace/session selection immediately instead of waiting a network
+// round-trip (remote projects list worktrees over the tunnel); the regular
+// fetch then revalidates. Values are server truth from the last completed
+// fetch — never the preserveSelectedWorkspace hybrid.
 const worktreeListCache = new Map<string, Worktree[]>();
 
 export function useWorktrees(
   projectId: string | null,
   selectedBranch?: string | null,
+  agentMode?: string | null,
 ) {
+  // Worktree lists are per (project, target): the server routes the fetch by
+  // the project's CURRENT agent_mode, so a mode switch must invalidate the
+  // list on hand — otherwise navigation gets validated against the previous
+  // target's branches.
+  const scope = projectId ? `${projectId}::${agentMode ?? "local"}` : null;
   const [worktrees, setWorktrees] = useState<Worktree[]>([]);
   const [fetching, setFetching] = useState(true);
-  // The project the current `worktrees` list was fetched for.
-  const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
-  // Mirror for reads inside fetchWorktrees: its deps must stay [projectId]
-  // (the fetch effect keys off its identity), so the state value would be a
-  // stale closure there.
-  const loadedProjectIdRef = useRef<string | null>(null);
-  const markLoadedFor = (pid: string | null) => {
-    loadedProjectIdRef.current = pid;
-    setLoadedProjectId(pid);
+  // The scope the current `worktrees` list was fetched for (ownership: drives
+  // `stale`, seed reuse, and the error-stub decision).
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  // The scope whose fetch last SUCCEEDED (authority: drives `loading`). A
+  // failed revalidation settles `fetching` but never validates, so consumers
+  // keep treating the kept seed / error stub as non-authoritative.
+  const [validatedScope, setValidatedScope] = useState<string | null>(null);
+  // Mirror for reads inside fetchWorktrees: its deps must stay [projectId,
+  // scope] (the fetch effect keys off its identity), so the state value would
+  // be a stale closure there.
+  const loadedScopeRef = useRef<string | null>(null);
+  const markLoadedFor = (s: string | null) => {
+    loadedScopeRef.current = s;
+    setLoadedScope(s);
   };
 
-  // Seed a revisited project's list from cache DURING render — same pattern
+  // Seed a revisited scope's list from cache DURING render — same pattern
   // as page.tsx's render-phase branch reset — so sibling effects in the very
   // first commit after a project switch already see a non-stale list.
-  const [seededProjectId, setSeededProjectId] = useState<string | null>(null);
-  if (projectId !== seededProjectId) {
-    setSeededProjectId(projectId);
-    const cached = projectId ? worktreeListCache.get(projectId) : undefined;
+  const [seededScope, setSeededScope] = useState<string | null>(null);
+  if (scope !== seededScope) {
+    setSeededScope(scope);
+    // Authority never survives a scope switch — even back to a scope that
+    // validated earlier this page lifetime: branches created while we were
+    // away wouldn't be in that old result, so DROP decisions must wait for a
+    // success in the CURRENT visit. (Same-scope failures don't clear this,
+    // so a refresh failing after this visit's success keeps authority.)
+    setValidatedScope(null);
+    const cached = scope ? worktreeListCache.get(scope) : undefined;
     if (cached) {
       setWorktrees(cached);
-      markLoadedFor(projectId);
+      markLoadedFor(scope);
       // The project-change revalidation is about to start, but the fetch
       // effect's own setFetching(true) is invisible to sibling effects in
       // this first commit. Set it here, synchronously, or that commit exposes
@@ -107,10 +126,11 @@ export function useWorktrees(
     const controller = new AbortController();
     requestController.current = controller;
     const generation = requestGeneration.current;
-    if (!projectId) {
+    if (!projectId || !scope) {
       requestController.current = null;
       setWorktrees([]);
       markLoadedFor(null);
+      setValidatedScope(null);
       setFetching(false);
       return;
     }
@@ -119,7 +139,8 @@ export function useWorktrees(
     try {
       const data = await api.getProjectWorktrees(projectId, undefined, controller.signal);
       if (generation !== requestGeneration.current) return;
-      worktreeListCache.set(projectId, data);
+      worktreeListCache.set(scope, data);
+      setValidatedScope(scope);
       setWorktrees((previous) => {
         const next = background
           ? preserveSelectedWorkspace(previous, data, selectedBranchRef.current)
@@ -133,16 +154,16 @@ export function useWorktrees(
       // A background health refresh must not erase a valid workspace list on a
       // transient network failure — and neither should a failed revalidation
       // of a cache-seeded list (the seed is a better answer than the stub).
-      if (!background && loadedProjectIdRef.current !== projectId) {
+      if (!background && loadedScopeRef.current !== scope) {
         setWorktrees([{ branch: null }]);
       }
     } finally {
       if (generation !== requestGeneration.current || requestController.current !== controller) return;
-      markLoadedFor(projectId);
+      markLoadedFor(scope);
       if (!background) setFetching(false);
       requestController.current = null;
     }
-  }, [projectId]);
+  }, [projectId, scope]);
 
   useEffect(() => {
     void fetchWorktrees();
@@ -154,18 +175,18 @@ export function useWorktrees(
   }, [fetchWorktrees]);
 
   // Selecting another workspace is a natural point to verify its physical
-  // checkout. Do not duplicate the initial/project-change fetch above.
+  // checkout. Do not duplicate the initial/scope-change fetch above.
   useEffect(() => {
     const previous = previousSelectionRef.current;
-    previousSelectionRef.current = { projectId, branch: selectedBranch };
+    previousSelectionRef.current = { projectId: scope, branch: selectedBranch };
     if (
       previous
-      && previous.projectId === projectId
+      && previous.projectId === scope
       && previous.branch !== selectedBranch
     ) {
       void fetchWorktrees(true);
     }
-  }, [projectId, selectedBranch, fetchWorktrees]);
+  }, [scope, selectedBranch, fetchWorktrees]);
 
   // Agent turns and executors are the normal sources of Git changes. Refresh
   // when they finish instead of spawning Git processes every few seconds.
@@ -220,12 +241,12 @@ export function useWorktrees(
 
   return {
     worktrees,
-    loading: isWorktreesLoading(fetching, loadedProjectId, projectId),
+    loading: isWorktreesLoading(fetching, validatedScope, scope),
     // Narrower than `loading`: true only while the list on hand belongs to a
-    // DIFFERENT project (the cross-project navigation window). Same-project
-    // refetches keep it false, so consumers can gate selection highlights on
-    // it without blinking them on every refresh.
-    stale: loadedProjectId !== projectId,
+    // DIFFERENT scope (the cross-project/cross-target navigation window).
+    // Same-scope refetches keep it false, so consumers can gate selection
+    // highlights on it without blinking them on every refresh.
+    stale: loadedScope !== scope,
     refetch,
   };
 }

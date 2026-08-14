@@ -28,8 +28,8 @@ let latest: HookApi | null = null;
 // at the post-act value.
 let commits: Array<{ loading: boolean; stale: boolean }> = [];
 
-function Probe({ projectId }: { projectId: string | null }) {
-  const hook = useWorktrees(projectId, null);
+function Probe({ projectId, agentMode }: { projectId: string | null; agentMode?: string | null }) {
+  const hook = useWorktrees(projectId, null, agentMode);
   latest = hook;
   useEffect(() => {
     commits.push({ loading: hook.loading, stale: hook.stale });
@@ -41,9 +41,9 @@ describe("useWorktrees list cache", () => {
   let root: Root;
   let container: HTMLElement;
 
-  const render = async (projectId: string | null) => {
+  const render = async (projectId: string | null, agentMode?: string | null) => {
     await act(async () => {
-      root.render(<Probe projectId={projectId} />);
+      root.render(<Probe projectId={projectId} agentMode={agentMode} />);
       await Promise.resolve();
     });
   };
@@ -139,7 +139,68 @@ describe("useWorktrees list cache", () => {
     expect(latest!.loading).toBe(false);
   });
 
-  it("keeps the seeded list when revalidation fails", async () => {
+  it("a prior visit's validation cannot authorize a failed revalidation (A→B→A)", async () => {
+    // validatedScope is per-VISIT: A validating earlier this page lifetime
+    // says nothing about branches created while the user was away on B, so a
+    // failed return-visit revalidation must not re-arm the DROP path.
+    listsByProject({
+      g1: [{ branch: null }, { branch: "dev" }],
+      g2: [{ branch: null }],
+    });
+    await render("g1"); // A validates
+    getProjectWorktrees.mockRejectedValue(new Error("tunnel down"));
+    await render("g2"); // B fails — never validated
+
+    commits = [];
+    await render("g1"); // back to A: seeded, revalidation fails
+    expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "dev" }]);
+    expect(latest!.stale).toBe(false);
+    expect(latest!.loading).toBe(true);
+    expect(commits.filter((c) => !c.stale && !c.loading)).toEqual([]);
+
+    // Only a success in the CURRENT visit restores authority.
+    listsByProject({ g1: [{ branch: null }, { branch: "dev" }, { branch: "new" }] });
+    await act(async () => {
+      await latest!.refetch();
+    });
+    expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "dev" }, { branch: "new" }]);
+    expect(latest!.loading).toBe(false);
+  });
+
+  it("distrusts the list across an agent_mode switch (per-target scoping)", async () => {
+    // Cross-target same-project jump: the worktree list on hand belongs to the
+    // PREVIOUS target. Trusting it would let page.tsx's auto-select stomp a
+    // just-applied branch that only exists on the new target.
+    listsByProject({ f1: [{ branch: null }, { branch: "local-only" }] });
+    await render("f1", "local");
+    expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "local-only" }]);
+
+    let resolveFetch!: (worktrees: Worktree[]) => void;
+    getProjectWorktrees.mockImplementation(
+      () => new Promise<Worktree[]>((resolve) => { resolveFetch = resolve; }),
+    );
+    commits = [];
+    await render("f1", "remote-1");
+    // No commit may present the local list as authoritative for the remote target.
+    expect(commits.length).toBeGreaterThan(0);
+    expect(commits.filter((c) => !c.stale && !c.loading)).toEqual([]);
+
+    await act(async () => {
+      resolveFetch([{ branch: null }, { branch: "remote-only" }]);
+    });
+    expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "remote-only" }]);
+    expect(latest!.loading).toBe(false);
+
+    // The cache is scoped per target too: coming back to local seeds the
+    // local list, not the remote one.
+    getProjectWorktrees.mockImplementation(() => new Promise<never>(() => {}));
+    await render("f1", "local");
+    expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "local-only" }]);
+    expect(latest!.stale).toBe(false);
+    expect(latest!.loading).toBe(true); // revalidation in flight
+  });
+
+  it("keeps the seeded list non-authoritative when revalidation fails", async () => {
     listsByProject({
       d1: [{ branch: null }, { branch: "dev" }],
       d2: [{ branch: null }],
@@ -148,9 +209,25 @@ describe("useWorktrees list cache", () => {
     await render("d2");
 
     getProjectWorktrees.mockRejectedValue(new Error("tunnel down"));
+    commits = [];
     await render("d1");
+    // The seed survives the failure (better answer than the stub) and may
+    // still APPLY a pending selection…
     expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "dev" }]);
     expect(latest!.stale).toBe(false);
+    // …but a failed fetch must never authorize it: page.tsx's pending-apply
+    // effect DROPS a staged branch on any !stale && !loading commit, and the
+    // cache may simply predate that branch. No such commit may exist — not
+    // during the attempt, and not after the failure settles.
+    expect(latest!.loading).toBe(true);
+    expect(commits.filter((c) => !c.stale && !c.loading)).toEqual([]);
+
+    // A later successful fetch is what settles authority.
+    listsByProject({ d1: [{ branch: null }, { branch: "dev" }, { branch: "new" }] });
+    await act(async () => {
+      await latest!.refetch();
+    });
+    expect(latest!.worktrees).toEqual([{ branch: null }, { branch: "dev" }, { branch: "new" }]);
     expect(latest!.loading).toBe(false);
   });
 });

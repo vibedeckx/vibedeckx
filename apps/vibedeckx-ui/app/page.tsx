@@ -55,11 +55,6 @@ import {
   computeWorkspaceStatuses,
 } from '@/lib/workspace-status';
 import {
-  matchesPendingSessionSelection,
-  shouldClearSessionAfterWorkspaceChange,
-  type PendingSessionSelection,
-} from '@/lib/session-url-sync';
-import {
   usePlaceholderWorkspaces,
   workspaceKey,
 } from '@/lib/placeholder-workspaces';
@@ -70,31 +65,40 @@ export default function Home() {
   const { projectId: urlProject, tab: urlTab, branch: urlBranch, threadId: urlThreadId } = useUrlState();
   const { config } = useAppConfig();
 
-  // ?session=<id> param is orthogonal to the path-based URL state (projectId/tab/branch).
-  // We keep it here as reactive state so changes via setSessionUrlParam propagate to children.
-  const [urlSessionId, setUrlSessionIdState] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null;
-    return new URLSearchParams(window.location.search).get('session');
-  });
+  // The workspace selection is ONE atomic value: the branch on screen plus an
+  // optionally pinned session (?session=<id>). A session is scoped to its
+  // branch, so every navigation must state both fields together — workspace
+  // navigation pins nothing (sessionId: null), a session jump pins its id.
+  // Keeping them in a single state means no effect ever has to infer whether
+  // a branch change was "supposed to" keep the pin.
+  const [selection, setSelection] = useState<{ branch: string | null; sessionId: string | null }>(() => ({
+    branch: urlBranch,
+    sessionId: typeof window === 'undefined'
+      ? null
+      : new URLSearchParams(window.location.search).get('session'),
+  }));
+  const selectedBranch = selection.branch;
+  const urlSessionId = selection.sessionId;
+  // Workspace navigation: a branch change never carries a session pin.
+  const selectWorkspace = useCallback((branch: string | null) => {
+    setSelection({ branch, sessionId: null });
+  }, []);
+  // Pin/unpin a session within the current workspace (session picker, New
+  // Conversation, commander auto-surface). The URL itself is written by the
+  // URL-sync effect below.
+  const setSessionUrlParam = useCallback((sessionId: string | null) => {
+    setSelection((prev) => (prev.sessionId === sessionId ? prev : { ...prev, sessionId }));
+  }, []);
   const [residentSessionSeed, setResidentSessionSeed] = useState<ResidentSidebarSession | null>(null);
 
-  const setSessionUrlParam = useCallback((sessionId: string | null) => {
-    setUrlSessionIdState(sessionId);
-    if (typeof window === 'undefined') return;
-    const url = new URL(window.location.href);
-    if (sessionId) url.searchParams.set('session', sessionId);
-    else url.searchParams.delete('session');
-    window.history.replaceState(null, '', url.toString());
-  }, []);
-
-  // Keep urlSessionId in sync with browser back/forward navigation. replaceState
-  // doesn't fire popstate, but a pushState elsewhere + browser back could leave
-  // the URL showing ?session=<A> while React state still holds <B>.
+  // Keep the pinned session in sync with browser back/forward navigation.
+  // replaceState doesn't fire popstate, but a pushState elsewhere + browser
+  // back could leave the URL showing ?session=<A> while state still holds <B>.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const onPop = () => {
       const next = new URLSearchParams(window.location.search).get('session');
-      setUrlSessionIdState(next);
+      setSelection((prev) => (prev.sessionId === next ? prev : { ...prev, sessionId: next }));
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -113,7 +117,6 @@ export default function Home() {
   const [createWorktreeDialogOpen, setCreateWorktreeDialogOpen] = useState(false);
   const [deleteWorktreeDialogOpen, setDeleteWorktreeDialogOpen] = useState(false);
   const [worktreeToDelete, setWorktreeToDelete] = useState<Worktree | null>(null);
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(urlBranch);
   const [activeView, setActiveView] = useState<ActiveView>(urlTab);
   const [selectedProjectChatThreadId, setSelectedProjectChatThreadId] = useState<string | null>(urlThreadId);
   const [activateAgentTabNonce, setActivateAgentTabNonce] = useState(0);
@@ -159,7 +162,10 @@ export default function Home() {
   // Skip the initial undefined→id load so a URL-restored branch survives.
   if (currentProject?.id !== branchResetProjectId) {
     if (branchResetProjectId !== undefined) {
-      setSelectedBranch(null);
+      // Branch names (and session ids) are per-project — neither may leak
+      // across a project switch. Cross-project jumps re-apply their target via
+      // pendingWorkspaceRef once the new project's worktrees load.
+      setSelection({ branch: null, sessionId: null });
     }
     setBranchResetProjectId(currentProject?.id);
   }
@@ -167,6 +173,10 @@ export default function Home() {
   const { worktrees, loading: worktreesLoading, stale: worktreesStale, refetch: refetchWorktrees } = useWorktrees(
     currentProject?.id ?? null,
     selectedBranch,
+    // Worktree lists are per-target: switching agent_mode must invalidate the
+    // list (and its cache entry), or a cross-target jump gets validated
+    // against the previous target's branches.
+    currentProject?.agent_mode ?? null,
   );
   const {
     statuses: mergeStatuses,
@@ -296,26 +306,16 @@ export default function Home() {
     setOptimisticActivity(selectedBranch, "working");
   }, [selectedBranch, setOptimisticActivity]);
 
-  const pendingSessionSelectionRef = useRef<PendingSessionSelection | null>(null);
-
   // Task panel refresh — sidebar dot is driven by useBranchActivity directly,
   // so this handler no longer has any branch-activity side effect.
   const handleTaskCompleted = useCallback(() => {
     refetchTasks();
   }, [refetchTasks]);
 
-  // Select a specific session in the given branch: the pending-selection ref
-  // keeps the URL-sync effect from stripping ?session= on the branch change
-  // it causes. Shared by the sidebar resident-session click and the
-  // completion-notification click-through.
-  const selectBranchSession = useCallback((branch: string | null, sessionId: string, projectId?: string) => {
-    pendingSessionSelectionRef.current = {
-      projectId: projectId ?? currentProject?.id,
-      branch,
-      sessionId,
-    };
-    setSelectedBranch(branch);
-    setSessionUrlParam(sessionId);
+  // Select a specific session in the given branch. Shared by the sidebar
+  // resident-session click and the completion-notification click-through.
+  const selectBranchSession = useCallback((branch: string | null, sessionId: string) => {
+    setSelection({ branch, sessionId });
     setActivateAgentTabNonce((nonce) => nonce + 1);
     // Selection resolved — end any pending-nav Agent-tab pin (the nonce bump
     // above now owns keeping the Agent tab active).
@@ -324,7 +324,7 @@ export default function Home() {
     // MRU-by-open), even if no activity ever bumps it server-side. Id-only:
     // callers holding a full search row (quick switcher) touch it themselves.
     touchRecentSessionOpen(sessionId);
-  }, [currentProject?.id, setSessionUrlParam]);
+  }, []);
 
   const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
     selectBranchSession(resident.branch, resident.id);
@@ -441,7 +441,7 @@ export default function Home() {
         if (pending.sessionId) {
           selectBranchSession(pending.branch, pending.sessionId);
         } else {
-          setSelectedBranch(pending.branch);
+          selectWorkspace(pending.branch);
         }
         // Lift the suspension in the SAME batch the target branch lands: the
         // agent hook's reset effect runs once per (branch, sessionId) change
@@ -457,12 +457,20 @@ export default function Home() {
       pendingWorkspaceRef.current = undefined;
       setSessionNavPending(false);
       setBranchNavPending(false);
+      toast.warning(`Workspace "${pending.branch ?? 'main'}" no longer exists`);
     }
     if (worktreesLoading) return;
     if (!worktrees.some(w => w.branch === selectedBranch)) {
-      setSelectedBranch(worktrees[0].branch);
+      // The selected workspace vanished from the authoritative list (deleted
+      // worktree, or a jump targeted a branch that's gone). Fall back to the
+      // first workspace; a pinned session can't outlive its branch, so say so
+      // instead of silently showing a different conversation.
+      if (urlSessionId) {
+        toast.warning(`Workspace "${selectedBranch ?? 'main'}" no longer exists`);
+      }
+      selectWorkspace(worktrees[0].branch);
     }
-  }, [worktrees, worktreesLoading, worktreesStale, selectedBranch, selectBranchSession]);
+  }, [worktrees, worktreesLoading, worktreesStale, selectedBranch, urlSessionId, selectBranchSession, selectWorkspace]);
 
   // Safety net for the Agent-tab pin. sessionNavPending only exists to bridge
   // the window where a cross-project session jump has nulled selectedBranch and
@@ -493,7 +501,7 @@ export default function Home() {
         if (sessionId) {
           selectBranchSession(branch, sessionId);
         } else {
-          setSelectedBranch(branch);
+          selectWorkspace(branch);
         }
         return;
       }
@@ -507,7 +515,7 @@ export default function Home() {
       pendingWorkspaceRef.current = { branch, sessionId };
       selectProject(target);
     },
-    [currentProject?.id, projects, selectProject, selectBranchSession],
+    [currentProject?.id, projects, selectProject, selectBranchSession, selectWorkspace],
   );
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -565,9 +573,9 @@ export default function Home() {
     getScheduleRun: api.getScheduleRun,
     getSchedules: api.getSchedules,
     runScheduleNow: runScheduleNow,
-    selectAgentSession: (branch, sessionId, projectId) => {
+    selectAgentSession: (branch, sessionId) => {
       setActiveView("workspace");
-      selectBranchSession(branch, sessionId, projectId);
+      selectBranchSession(branch, sessionId);
     },
     openScheduleRun: (scheduleId, runId) => {
       setSelectedScheduleId(scheduleId);
@@ -597,13 +605,12 @@ export default function Home() {
     getTask: api.getTask,
     resolveProjectForTarget,
     openTask: setProjectChatContextTask,
-    selectAgentSession: (branch, sessionId, projectId) => {
+    selectAgentSession: (branch, sessionId) => {
       setActiveView("workspace");
-      selectBranchSession(branch, sessionId, projectId);
+      selectBranchSession(branch, sessionId);
     },
     selectWorkspace: (branch) => {
-      setSessionUrlParam(null);
-      setSelectedBranch(branch);
+      selectWorkspace(branch);
       setActiveView("workspace");
     },
     selectSchedule: (scheduleId) => {
@@ -618,10 +625,9 @@ export default function Home() {
 
   const openProjectChatThread = useCallback((threadId: string) => {
     setSelectedProjectChatThreadId(threadId);
-    setSelectedBranch(null);
-    setSessionUrlParam(null);
+    selectWorkspace(null);
     setActiveView("project-chat");
-  }, [setSessionUrlParam]);
+  }, [selectWorkspace]);
 
   const showProjectOverview = useCallback(() => {
     setSelectedProjectChatThreadId(null);
@@ -635,10 +641,9 @@ export default function Home() {
     setActiveView(urlTab);
     setSelectedProjectChatThreadId(urlTab === "project-chat" ? urlThreadId : null);
     if (urlTab === "project-chat") {
-      setSelectedBranch(null);
-      setSessionUrlParam(null);
+      selectWorkspace(null);
     }
-  }, [urlTab, urlThreadId, setSessionUrlParam]);
+  }, [urlTab, urlThreadId, selectWorkspace]);
 
   const handleScheduleRunOpened = useCallback((runId: string) => {
     setSelectedScheduleRunId((current) => current === runId ? null : current);
@@ -664,8 +669,7 @@ export default function Home() {
       if (project.id === currentProject?.id) {
         // Same project: the render-phase branch reset only fires on a project
         // *id* change, so setting the branch synchronously is safe.
-        setSelectedBranch(w.branch);
-        setSessionUrlParam(null);
+        selectWorkspace(w.branch);
       } else {
         // Cross-project: selectProject triggers the render-phase branch reset
         // and a worktree refetch — setting the branch synchronously here would
@@ -685,7 +689,7 @@ export default function Home() {
     } finally {
       switcherNavigationInFlightRef.current = false;
     }
-  }, [currentProject?.id, resolveProjectForTarget, selectProject, setSessionUrlParam]);
+  }, [currentProject?.id, resolveProjectForTarget, selectProject, selectWorkspace]);
 
   const handleSwitcherSession = useCallback(async (s: SearchResultSession) => {
     if (switcherNavigationInFlightRef.current) return;
@@ -701,12 +705,11 @@ export default function Home() {
       touchRecentSessionOpen(s.sessionId, s);
       setActiveView("workspace");
       if (project.id === currentProject?.id) {
-        selectBranchSession(s.branch, s.sessionId, s.projectId);
+        selectBranchSession(s.branch, s.sessionId);
       } else {
         // Cross-project session jump: stage branch + session and let the
         // worktrees-loaded effect call selectBranchSession once the target
-        // project is current — it then stamps pendingSessionSelectionRef with
-        // the *new* project id, so the URL-sync effect keeps ?session=.
+        // project is current.
         // Pin the Agent tab for the whole load window so the new project's
         // persisted tab (e.g. Executors) never shows before the session lands.
         setSessionNavPending(true);
@@ -721,55 +724,11 @@ export default function Home() {
     }
   }, [currentProject?.id, resolveProjectForTarget, selectProject, selectBranchSession]);
 
-  // Track previous (projectId, branch) so we can detect switches.
-  // sessionId is scoped to one (projectId, branch); on switch we must drop it,
-  // otherwise the Agent hook would keep loading the prior workspace's session
-  // into the new one (cross-workspace content bleed).
-  const prevBranchRef = useRef(selectedBranch);
-  const prevProjectIdRef = useRef(currentProject?.id);
-  // Distinguish the first post-loading effect pass from a real user switch.
-  // Without this, `undefined -> <real id>` on initial project load is treated
-  // as a project change and strips ?session= from the URL.
-  const hasInitializedUrlSyncRef = useRef(false);
-
-  // Sync state to URL
+  // Sync state to URL. Pure serialization: `selection` is atomic (every
+  // navigation states branch AND sessionId together), so there is no
+  // change-detection or ?session=-stripping to do here.
   useEffect(() => {
     if (projectsLoading || routeProjectPending || routeProjectNotFound) return;
-
-    const isInitial = !hasInitializedUrlSyncRef.current;
-    const branchChanged = !isInitial && prevBranchRef.current !== selectedBranch;
-    const projectChanged = !isInitial && prevProjectIdRef.current !== currentProject?.id;
-    prevBranchRef.current = selectedBranch;
-    prevProjectIdRef.current = currentProject?.id;
-    hasInitializedUrlSyncRef.current = true;
-
-    const pendingSessionSelection = pendingSessionSelectionRef.current;
-    const matchesPendingSession = matchesPendingSessionSelection(
-      pendingSessionSelection,
-      currentProject?.id,
-      selectedBranch,
-      urlSessionId,
-    );
-
-    if (matchesPendingSession) {
-      pendingSessionSelectionRef.current = null;
-    }
-
-    if (
-      shouldClearSessionAfterWorkspaceChange({
-        branchChanged,
-        projectChanged,
-        urlSessionId,
-        pendingSessionSelection,
-        currentProjectId: currentProject?.id,
-        selectedBranch,
-      })
-    ) {
-      pendingSessionSelectionRef.current = null;
-      // Clearing state re-triggers this effect; the URL update happens there.
-      setSessionUrlParam(null);
-      return;
-    }
 
     const url = buildUrl({
       projectId: currentProject?.id,
@@ -777,7 +736,6 @@ export default function Home() {
       branch: selectedBranch,
       threadId: selectedProjectChatThreadId,
     });
-    // Preserve ?session=<id> on tab changes within the same (projectId, branch).
     if (urlSessionId) {
       const u = new URL(url, window.location.origin);
       u.searchParams.set('session', urlSessionId);
@@ -785,12 +743,12 @@ export default function Home() {
     } else {
       window.history.replaceState(null, '', url);
     }
-  }, [currentProject?.id, activeView, selectedBranch, selectedProjectChatThreadId, projectsLoading, routeProjectPending, routeProjectNotFound, urlSessionId, setSessionUrlParam]);
+  }, [currentProject?.id, activeView, selectedBranch, selectedProjectChatThreadId, projectsLoading, routeProjectPending, routeProjectNotFound, urlSessionId]);
 
   const handleWorktreeCreated = useCallback((branch: string) => {
     refetchWorktrees();
-    setSelectedBranch(branch);
-  }, [refetchWorktrees]);
+    selectWorkspace(branch);
+  }, [refetchWorktrees, selectWorkspace]);
 
   const handleSyncPrompt = useCallback((prompt: string, executionMode: ExecutionMode) => {
     if (currentProject && executionMode !== currentProject.agent_mode) {
@@ -895,7 +853,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             worktrees={worktrees}
             worktreesStale={worktreesStale}
             selectedBranch={selectedBranch}
-            onBranchChange={setSelectedBranch}
+            onBranchChange={selectWorkspace}
             currentProject={currentProject}
             onCreateWorktreeOpen={() => setCreateWorktreeDialogOpen(true)}
             onDeleteWorktree={(wt) => {
@@ -918,7 +876,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             mergeRepositoryLabel={mergeRepositoryLabel}
             onMergeTargetChange={setMergeTarget}
             onMergeBadgeClick={(branch) => {
-              setSelectedBranch(branch);
+              selectWorkspace(branch);
               setActiveView("workspace");
               setDiffCompareNonce((n) => n + 1);
             }}

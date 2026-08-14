@@ -1506,7 +1506,10 @@ export const api = {
     const query = params.toString() ? `?${params.toString()}` : "";
     const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees${query}`, { signal });
     if (!res.ok) {
-      return [{ branch: null }];
+      // Throw instead of fabricating a root-only list: callers must be able
+      // to tell "the server says there is only main" from "the fetch failed"
+      // (useWorktrees keeps failed results non-authoritative).
+      throw new Error(`Failed to fetch worktrees: ${res.status}`);
     }
     const data = await res.json();
     return data.worktrees;
