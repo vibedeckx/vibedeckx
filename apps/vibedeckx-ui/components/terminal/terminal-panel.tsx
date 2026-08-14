@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef, type Ref } from "react";
 import { Plus, X, Terminal, Monitor, Cloud } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { ExecutorOutput } from "@/components/executor/executor-output";
+import { ExecutorOutput, type TerminalFocusHandle } from "@/components/executor/executor-output";
 import { useTerminals } from "@/hooks/use-terminals";
 import { useExecutorLogs } from "@/hooks/use-executor-logs";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
@@ -14,14 +14,20 @@ interface TerminalPanelProps {
   projectId: string | null;
   selectedBranch?: string | null;
   project?: Project | null;
+  // Whether the Terminal tab is the one on screen. The panel stays mounted
+  // (hidden via CSS) behind other tabs, so this is what tells it when to hand
+  // keyboard focus to the active shell.
+  active?: boolean;
 }
 
 function TerminalInstance({
   terminalId,
   onExit,
+  focusHandle,
 }: {
   terminalId: string;
   onExit: (id: string) => void;
+  focusHandle: Ref<TerminalFocusHandle>;
 }) {
   const { logs, sendInput, sendResize, exitCode, replayingHistory } = useExecutorLogs(terminalId);
 
@@ -40,11 +46,12 @@ function TerminalInstance({
       onInput={sendInput}
       onResize={sendResize}
       muteInput={replayingHistory}
+      focusHandle={focusHandle}
     />
   );
 }
 
-export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPanelProps) {
+export function TerminalPanel({ projectId, selectedBranch, project, active = true }: TerminalPanelProps) {
   const {
     terminals,
     activeTerminalId,
@@ -55,6 +62,19 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
   } = useTerminals(projectId, selectedBranch);
 
   const { remotes } = useProjectRemotesContext();
+
+  // Give the visible shell keyboard focus when the tab is opened (⌃⇧T /
+  // Ctrl+Alt+T or a click on the tab button) and whenever the shown terminal
+  // changes while the tab is open — switching or creating a terminal should
+  // leave you able to type right away instead of needing a click. Nothing
+  // happens while the panel is hidden, so background terminals never grab
+  // focus from the composer. The tab's `hidden` class is already off the DOM
+  // by the time effects run, so focus() lands on a visible textarea.
+  const focusHandleRef = useRef<TerminalFocusHandle | null>(null);
+  useEffect(() => {
+    if (!active || !activeTerminalId) return;
+    focusHandleRef.current?.focus();
+  }, [active, activeTerminalId]);
 
   const [showLocationMenu, setShowLocationMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -200,6 +220,7 @@ export function TerminalPanel({ projectId, selectedBranch, project }: TerminalPa
             key={activeTerminalId}
             terminalId={activeTerminalId}
             onExit={handleExit}
+            focusHandle={focusHandleRef}
           />
         ) : (
           <div className="h-full flex items-center justify-center text-muted-foreground">

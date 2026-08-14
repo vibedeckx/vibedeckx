@@ -215,6 +215,7 @@ export function RightPanel({
             projectId={projectId}
             selectedBranch={selectedBranch}
             project={project}
+            active={active && displayTab === 'terminal'}
           />
         </div>
         <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'preview' && 'hidden')}>

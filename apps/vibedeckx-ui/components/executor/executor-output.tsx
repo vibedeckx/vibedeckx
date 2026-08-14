@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -29,6 +29,11 @@ function stripAnsi(input: string): string {
   return input.replace(ANSI_REGEX, "");
 }
 
+export interface TerminalFocusHandle {
+  /** Give the xterm instance keyboard focus. No-op for read-only output. */
+  focus: () => void;
+}
+
 interface ExecutorOutputProps {
   logs: LogMessage[];
   isPty: boolean;
@@ -36,6 +41,10 @@ interface ExecutorOutputProps {
   onInput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   muteInput?: boolean;
+  // Lets the host move keyboard focus into the terminal (e.g. when the
+  // Terminal tab is opened). Imperative rather than a prop flag because
+  // focusing is a one-shot action, not a state the panel should re-assert.
+  focusHandle?: Ref<TerminalFocusHandle>;
   // Debug/identification metadata for the process this window is rendering.
   // Surfaced via the info button so the processId can be matched against the
   // `[diag:mux]` / SSE console logs and the `/api/executor-logs/stream` frames.
@@ -54,6 +63,7 @@ export function ExecutorOutput({
   onInput,
   onResize,
   muteInput,
+  focusHandle,
   processId,
   executorId,
   target,
@@ -292,6 +302,15 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       // Ignore fit errors
     }
   }, [terminalSettings.fontSize, terminalSettings.fontFamily, terminalSettings.scrollback]);
+
+  // Only PTY windows take focus — read-only output has no stdin to type into.
+  // The terminal is created in an effect, so a host calling focus() from its
+  // own effect is safe: child effects run first.
+  useImperativeHandle(focusHandle, () => ({
+    focus: () => {
+      if (isPty) terminalRef.current?.focus();
+    },
+  }), [isPty]);
 
   // Handle container resize
   useEffect(() => {
