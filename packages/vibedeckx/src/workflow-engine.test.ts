@@ -240,6 +240,21 @@ describe("buildReviewerPrompt verdict & settled semantics", () => {
     expect(prompt).not.toContain("looks good");
   });
 
+  // Re-review is the loop's convergence point: "treat the changed areas as new
+  // code" invites new findings, so without a scope guard the reviewer can keep
+  // the loop alive by escalating polish into blockers.
+  it("rereviewer prompt forbids scope escalation so the loop converges", () => {
+    const prompt = buildRereviewerPrompt({
+      taskContext: null,
+      authorSelfReport: null,
+      reviewFocus: null,
+      target,
+    });
+    expect(prompt).toMatch(/do not expand scope/i);
+    expect(prompt).toMatch(/abstractions for hypothetical cases/i);
+    expect(prompt).toMatch(/real defect the fix introduced or exposed/i);
+  });
+
   // The suppression is scoped to the *choice itself*: a settled "no retries"
   // must not silence a data-loss consequence that choice turns out to cause.
   it("with a brief: settled choices are not re-raised, but their consequences must be reported", () => {

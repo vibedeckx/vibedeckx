@@ -303,6 +303,7 @@ export function buildRereviewerPrompt(opts: {
     "- Verify whether your previous feedback was addressed correctly.",
     "- Treat the changed areas as new code: look for bugs the fix itself may have introduced, not only whether your old items were closed.",
     "- Check for regressions and remaining correctness or test gaps.",
+    "- Do not expand scope: no new enhancement asks, refactors, or abstractions for hypothetical cases. A new blocking finding must be a real defect the fix introduced or exposed — anything else is at most a non-blocking note.",
     "- Do NOT modify files — remain in read-only review mode.",
     reviewTargetPromptLine(opts.target),
     ...VERDICT_INSTRUCTIONS,
