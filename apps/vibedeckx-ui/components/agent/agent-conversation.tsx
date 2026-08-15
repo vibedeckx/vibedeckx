@@ -53,6 +53,7 @@ import { useReviewerRun } from "@/hooks/use-reviewer-run";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
+import { useAgentTabActive } from "@/hooks/agent-tab-active-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText, branchAgentSession, api } from "@/lib/api";
@@ -484,6 +485,26 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
   }, [reviewerRun]);
 
+  // preventScroll because this panel has a history of scroll-jump regressions;
+  // the composer sits outside the transcript's scroll container, so focusing it
+  // should never move the transcript.
+  const focusComposer = useCallback(() => {
+    textareaWrapperRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+  }, []);
+
+  // Land the cursor in the composer whenever the Agent tab comes on screen, so
+  // ⌃⇧A lets you type immediately — the same deal the Terminal tab gives its
+  // shell. Only fires on an explicit switch to the tab (shortcut, tab click,
+  // activateAgentTabNonce, or first paint with Agent as the persisted tab);
+  // session changes while already on the tab deliberately don't refocus, since
+  // those also happen during sidebar/cross-project jumps where grabbing focus
+  // would feel like a steal.
+  const agentTabActive = useAgentTabActive();
+  useEffect(() => {
+    if (!agentTabActive) return;
+    focusComposer();
+  }, [agentTabActive, focusComposer]);
+
   const handleQuote = useCallback((text: string) => {
     setInput(appendQuote(input, text));
     requestAnimationFrame(() => {
@@ -518,8 +539,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // Land the cursor in the input so typing can start immediately —
     // covers both the header button and the ⌘⇧O shortcut. The textarea
     // stays mounted through the reset, so a plain focus is enough.
-    textareaWrapperRef.current?.querySelector("textarea")?.focus();
-  }, [isLoading, session, startNewConversation, onNewConversation, setSessionUrlParam]);
+    focusComposer();
+  }, [isLoading, session, startNewConversation, onNewConversation, setSessionUrlParam, focusComposer]);
 
   useImperativeHandle(ref, () => ({
     startNewConversation: handleNewConversation,

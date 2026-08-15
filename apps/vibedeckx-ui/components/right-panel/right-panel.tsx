@@ -12,6 +12,7 @@ import type { Project, ExecutionMode } from '@/lib/api';
 import { FileNavigationProvider } from '@/components/agent/file-navigation-context';
 import { matchTabShortcut, isMacPlatform, tabShortcutHint, TAB_SHORTCUTS, type TabShortcutTarget } from '@/lib/tab-shortcuts';
 import { useFileRefIndex } from '@/hooks/use-file-ref-index';
+import { AgentTabActiveProvider } from '@/hooks/agent-tab-active-context';
 
 interface RightPanelProps {
   projectId: string | null;
@@ -190,7 +191,19 @@ export function RightPanel({
             displayTab !== 'agent' && 'invisible pointer-events-none'
           )}
         >
-          {agentSlot}
+          {/* visibility:hidden also blurs the composer on the way out, so the
+              agent panel needs to be told when it comes back — same contract as
+              the terminal's `active` prop below, delivered by context because
+              agentSlot is created in page.tsx but rendered here.
+              Gated on projectId too: page.tsx keeps this panel mounted but
+              display:none until a project resolves (its `needsProject`), and
+              passes projectId=null over exactly that window. Without the gate
+              the flag would turn true during the cold-load render, focus would
+              no-op against a display:none textarea, and nothing would fire
+              again once the project landed. */}
+          <AgentTabActiveProvider value={active && projectId !== null && displayTab === 'agent'}>
+            {agentSlot}
+          </AgentTabActiveProvider>
         </div>
         <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'executors' && 'hidden')}>
           <ExecutorPanel

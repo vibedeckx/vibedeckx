@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, useEffect, useRef, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RightPanel } from "./right-panel";
+import { useAgentTabActive } from "@/hooks/agent-tab-active-context";
 
 vi.mock("@/hooks/use-file-ref-index", () => ({
   useFileRefIndex: () => null,
@@ -56,25 +57,46 @@ function pressKey(init: KeyboardEventInit) {
   });
 }
 
-function renderPanel(activateAgentTabNonce: number, active = true) {
+function renderPanel(
+  activateAgentTabNonce: number,
+  active = true,
+  agentSlot: ReactNode = <div>Agent panel</div>,
+  projectId: string | null = "project-1",
+) {
   act(() => {
     root!.render(
       <RightPanel
-        projectId="project-1"
+        projectId={projectId}
         selectedBranch="dev"
         activateAgentTabNonce={activateAgentTabNonce}
-        agentSlot={<div>Agent panel</div>}
+        agentSlot={agentSlot}
         active={active}
       />,
     );
   });
 }
 
-function mountPanel(active = true) {
+function mountPanel(active = true, agentSlot?: ReactNode, projectId: string | null = "project-1") {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  renderPanel(0, active);
+  renderPanel(0, active, agentSlot, projectId);
+}
+
+// Stands in for AgentConversation's composer: same focus-on-activation effect
+// shape, so this covers the context wiring the real component depends on.
+function ComposerProbe() {
+  const agentTabActive = useAgentTabActive();
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (!agentTabActive) return;
+    ref.current?.focus({ preventScroll: true });
+  }, [agentTabActive]);
+  return <textarea ref={ref} data-slot="composer" />;
+}
+
+function composer() {
+  return container!.querySelector('textarea[data-slot="composer"]');
 }
 
 describe("RightPanel", () => {
@@ -150,6 +172,49 @@ describe("RightPanel", () => {
       pressKey({ code: "KeyE", ctrlKey: true, altKey: true });
       renderPanel(0, true);
       expect(activeTabLabel()).toBe("Agent");
+    });
+  });
+
+  describe("agent composer focus", () => {
+    it("focuses the composer when the Agent tab is the one on screen", () => {
+      setPlatform("Win32");
+      mountPanel(true, <ComposerProbe />);
+
+      expect(document.activeElement).toBe(composer());
+    });
+
+    it("does not steal focus back while another tab is showing", () => {
+      setPlatform("Win32");
+      mountPanel(true, <ComposerProbe />);
+
+      // The browser blurs the composer when the panel goes visibility:hidden;
+      // jsdom doesn't, so do it by hand and check nothing pulls focus back.
+      pressKey({ code: "KeyT", ctrlKey: true, altKey: true });
+      act(() => (composer() as HTMLTextAreaElement).blur());
+      renderPanel(0, true, <ComposerProbe />);
+      expect(document.activeElement).not.toBe(composer());
+
+      pressKey({ code: "KeyA", ctrlKey: true, altKey: true });
+      expect(document.activeElement).toBe(composer());
+    });
+
+    it("does not focus the composer while the workspace view is off screen", () => {
+      setPlatform("Win32");
+      mountPanel(false, <ComposerProbe />);
+
+      expect(document.activeElement).not.toBe(composer());
+    });
+
+    it("waits for the project to resolve before focusing", () => {
+      setPlatform("Win32");
+      // Cold load: page.tsx keeps the whole workspace display:none until a
+      // project resolves, so focusing here would be a silent no-op with no
+      // second chance once it lands.
+      mountPanel(true, <ComposerProbe />, null);
+      expect(document.activeElement).not.toBe(composer());
+
+      renderPanel(0, true, <ComposerProbe />, "project-1");
+      expect(document.activeElement).toBe(composer());
     });
   });
 });
