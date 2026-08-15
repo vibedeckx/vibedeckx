@@ -1000,13 +1000,17 @@ export class WorkflowEngine {
       // 下一轮终稿会重新计算。整段包 try/catch:never-throws 契约覆盖 storage
       // 异常本身,不止 CAS 落败——异常冒出会阻断 /message 路由的消息投递。
       try {
-        const moved =
-          (await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null })) ||
-          (await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null }));
-        if (moved) {
-          const updated = await this.storage.workflowRuns.getById(p.runId);
-          if (updated) this.emitRunUpdated(updated);
-        }
+        await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null })
+          || await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null });
+        // Broadcast regardless of whether the CAS moved anything. The run is
+        // already `discussing` on every message after the first one, and
+        // gating the frame on the transition left that case with no frame at
+        // all — a client that missed the one frame we did send had nothing to
+        // recover from. Re-broadcasting the current row is idempotent on both
+        // consumers (the panel just refreshes; useReviewerRun re-sets the same
+        // value), so unconditional delivery costs nothing and closes the hole.
+        const updated = await this.storage.workflowRuns.getById(p.runId);
+        if (updated) this.emitRunUpdated(updated);
       } catch (err) {
         console.error(
           `[WorkflowEngine] handleExternalUserMessage: failed moving run ${p.runId} to discussing; swallowed to honor never-throws contract`,

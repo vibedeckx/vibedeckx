@@ -36,8 +36,8 @@ function makeRun(overrides: Partial<WorkflowRun>): WorkflowRun {
   };
 }
 
-function Probe({ runUpdate }: { runUpdate: WorkflowRun | null }) {
-  const run = useReviewerRun("p1", "dev", "s-rev", runUpdate);
+function Probe({ runUpdate, streamEpoch = 0 }: { runUpdate: WorkflowRun | null; streamEpoch?: number }) {
+  const run = useReviewerRun("p1", "dev", "s-rev", runUpdate, streamEpoch);
   return <div data-status>{run?.status ?? "none"}</div>;
 }
 
@@ -106,11 +106,38 @@ describe("useReviewerRun", () => {
     expect(container.textContent).toBe("waiting_feedback");
   });
 
+  it("re-seeds on a stream epoch bump, recovering a frame lost while disconnected", async () => {
+    // The transition happens while the socket is down: broadcastRaw writes to
+    // an empty subscriber set and subscribe() never replays that frame, so the
+    // hook sees no runUpdate at all — exactly the bug where the finalize button
+    // stayed missing until the user switched sessions. The reconnect's Ready
+    // bumps streamEpoch, which must re-read the authoritative REST state.
+    // Not mockResolvedValueOnce: an unconsumed once-value would survive
+    // clearAllMocks and leak into the next test if the re-seed regressed away.
+    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ status: "waiting_feedback" })));
+
+    await act(async () => {
+      root.render(<Probe runUpdate={null} streamEpoch={0} />);
+    });
+    expect(container.textContent).toBe("waiting_feedback");
+
+    // Server moved the run to `discussing` while nobody was subscribed.
+    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ status: "discussing" })));
+
+    await act(async () => {
+      root.render(<Probe runUpdate={null} streamEpoch={1} />);
+    });
+
+    expect(getActiveWorkflowRuns).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toBe("discussing");
+  });
+
   it("a terminal-status frame clears the run", async () => {
     // Never resolves — mount settles on the seed's initial "none" and stays
     // there, so only frame transitions (not the seed) drive this test. The
-    // seed effect only re-runs on projectId/branch/sessionId changes, none of
-    // which happen across these rerenders, so it can't race the frames.
+    // seed effect only re-runs on projectId/branch/sessionId/streamEpoch
+    // changes, none of which happen across these rerenders, so it can't race
+    // the frames.
     getActiveWorkflowRuns.mockReturnValue(new Promise<WorkflowRun[]>(() => {}));
 
     await act(async () => {

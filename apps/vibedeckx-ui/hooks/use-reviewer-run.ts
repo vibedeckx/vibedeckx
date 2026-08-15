@@ -17,12 +17,21 @@ const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing"
  * 做法同 components/diff/diff-panel.tsx 的 seenCompareNonce/seenBranch。帧
  * 序号本身则不能在渲染期读写 ref(react-hooks/refs),所以单独放进一个只做
  * ref 递增、不调用 setState 的 effect 里——这是该规则明确允许的写法。
+ *
+ * `streamEpoch` 是丢帧的唯一兜底。`workflowRunUpdated` 走 broadcastRaw:
+ * 不入 MessageStore、重连不回放、服务端也不会补发(状态没再翻转时连第二帧
+ * 都没有)。所以 socket 断着的那一刻发生的迁移会永久错过——症状是分隔线上
+ * 的终稿按钮不出现,而左侧面板(有 5s 轮询)显示正常。把 epoch 放进种子依赖,
+ * 等于把"每次 socket 连上"变成一次对账,断线/僵尸 socket/dormant 唤醒/服务
+ * 端重启都一并覆盖。首连会多种一次(挂载一次 + Ready 一次),幂等,故意保留:
+ * 无条件对账比"判断这次是不是重连"更不容易出错。
  */
 export function useReviewerRun(
   projectId: string | null,
   branch: string | null,
   sessionId: string | null,
   runUpdate: WorkflowRun | null,
+  streamEpoch: number,
 ): WorkflowRun | null {
   const [run, setRun] = useState<WorkflowRun | null>(null);
   const frameSeqRef = useRef(0);
@@ -70,7 +79,7 @@ export function useReviewerRun(
       })
       .catch(() => { /* transient — 帧仍会驱动 */ });
     return () => { stale = true; };
-  }, [projectId, branch, sessionId]);
+  }, [projectId, branch, sessionId, streamEpoch]);
 
   return run;
 }

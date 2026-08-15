@@ -232,6 +232,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     error,
     remoteStatus,
     workflowRunUpdate,
+    streamEpoch,
     messageEntryIndices: loadedMessageEntryIndices,
     hasEarlierHistory,
     isLoadingEarlier,
@@ -460,8 +461,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // 本 session 是否为某活跃 review run 的 reviewer(讨论态才显示终稿按钮)。
   // frame-wins:WS 帧驱动为主,REST 只在种子期间没有任何帧到达时落地——见
   // useReviewerRun 里的详细说明。远程会话两侧 id 均已按 remote- 前缀映射,
-  // 直接比对。
-  const reviewerRun = useReviewerRun(projectId, branch, activeSessionId, workflowRunUpdate);
+  // 直接比对。streamEpoch 让每次 socket 连上都重新对账一次,补掉断线期间
+  // 丢掉的帧(该帧不入 store、重连不回放)。
+  const reviewerRun = useReviewerRun(projectId, branch, activeSessionId, workflowRunUpdate, streamEpoch);
   const [isFinalizing, setIsFinalizing] = useState(false);
 
   const handleFinalize = useCallback(async () => {

@@ -566,6 +566,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const [error, setError] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteConnectionStatus | null>(null);
   const [workflowRunUpdate, setWorkflowRunUpdate] = useState<WorkflowRun | null>(null);
+  // Bumped once per completed subscribe (every `Ready`). Out-of-band frames
+  // like `workflowRunUpdated` are fire-and-forget: `broadcastRaw` writes to the
+  // subscribers alive at that instant, and `subscribe()` replays entry patches
+  // but never re-sends them. So any consumer of such a frame needs a
+  // reconciliation point that doesn't depend on having been connected — this
+  // counter is it. Consumers put it in their fetch effect's deps to re-read the
+  // authoritative REST state on every (re)connect.
+  const [streamEpoch, setStreamEpoch] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
@@ -879,6 +887,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           setStatus(containerRef.current.status);
           setIsInitialized(true);
           persistCurrentSnapshot();
+          // The stream is now caught up on everything that replays. Signal the
+          // reconciliation point for the state that doesn't (see streamEpoch).
+          setStreamEpoch((epoch) => epoch + 1);
           return;
         }
 
@@ -1878,6 +1889,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     error,
     remoteStatus,
     workflowRunUpdate,
+    streamEpoch,
     messageEntryIndices: denseEntries(containerRef.current).map((entry) => entry.entryIndex),
     hasEarlierHistory,
     isLoadingEarlier,
