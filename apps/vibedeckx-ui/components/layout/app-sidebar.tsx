@@ -223,11 +223,19 @@ export function AppSidebar({
   onCreateScheduleOpen,
 }: AppSidebarProps) {
   const selectedProjectRef = useRef<HTMLButtonElement | null>(null);
+  const selectedScheduleRef = useRef<HTMLButtonElement | null>(null);
 
   // Keep the current project visible in the scrollable projects list
   useEffect(() => {
     selectedProjectRef.current?.scrollIntoView({ block: "nearest" });
   }, [currentProject?.id, projects]);
+
+  // Same for the schedule list — selecting one from elsewhere (a notification,
+  // the schedules view) must scroll it into view. The ref is only attached to
+  // the active row, so this no-ops unless a schedule is actually selected.
+  useEffect(() => {
+    selectedScheduleRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedScheduleId, activeView, schedules]);
 
   return (
     <nav className="w-[220px] border-r border-border bg-sidebar flex flex-col overflow-hidden">
@@ -322,12 +330,13 @@ export function AppSidebar({
           Schedule
         </SectionLabel>
         {currentProject && schedules && schedules.length > 0 && (
-          <div className="flex flex-col gap-px">
+          <div className="flex flex-col gap-px max-h-40 overflow-y-auto">
             {schedules.map((s) => {
               const isActive = activeView === "schedules" && selectedScheduleId === s.id;
               return (
                 <button
                   key={s.id}
+                  ref={isActive ? selectedScheduleRef : undefined}
                   onClick={() => onScheduleSelect?.(s.id)}
                   className={cn(
                     "w-full min-w-0 flex items-center gap-2 rounded-[5px] px-2 py-1 text-[11.5px] transition-colors overflow-hidden",
