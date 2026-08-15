@@ -1,6 +1,6 @@
 import path from "path";
 import { createHash } from "crypto";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import type { Storage, RegisteredWorkspaceCheckout } from "../storage/types.js";
 
 const WORKTREE_BASE_DIR = "/var/tmp/vibedeckx/worktrees";
@@ -356,4 +356,78 @@ export async function anchorRootWorkspaceBranch(
     expectedBranch: rootEntry.branch,
   });
   return { anchored: true, expectedBranch: rootEntry.branch };
+}
+
+/**
+ * Branch names arrive from request bodies — never interpolate one into a shell.
+ *
+ * `show-ref --verify` matches the ref path exactly. `rev-parse --verify` would
+ * instead parse it as a revision, so `dev8^{commit}`, `dev8@{0}` and `main~0`
+ * all "exist" — anchoring to one writes an expected branch that can never match
+ * a live checkout, leaving the workspace permanently drifted.
+ */
+function localBranchExists(projectPath: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
+      cwd: projectPath,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type SetAnchorResult =
+  | { anchored: true; expectedBranch: string }
+  | { anchored: false; reason: "not-a-repository" | "unknown-branch" | "branch-is-another-workspace" };
+
+/**
+ * Point the main workspace's anchor at any branch of the repository, whether or
+ * not it is the one checked out right now.
+ *
+ * `anchorRootWorkspaceBranch` answers "the switch you are looking at was
+ * deliberate", so it must match the live branch. This answers a different
+ * question — "this workspace belongs to <branch>" — for a project whose anchor
+ * was captured from whatever branch it happened to sit on when it was first
+ * listed. Without it the only way to correct that anchor is to check the branch
+ * out first, which is a Git operation the user may not want yet (the current
+ * branch can hold commits and uncommitted work).
+ *
+ * A mismatch against the live checkout is therefore the expected outcome here,
+ * not a failure: it surfaces as ordinary drift (`main → feat/x`) until the user
+ * merges or switches on their own.
+ */
+export async function setRootWorkspaceAnchor(
+  storage: Storage,
+  projectId: string,
+  projectPath: string,
+  branch: string,
+): Promise<SetAnchorResult> {
+  invalidateWorktreeListCache(projectPath);
+  const entries = readWorktreeListTolerant(projectPath);
+  const rootEntry = entries[0];
+  // Tolerant listing fabricates a branch-less root for a non-repository, which
+  // has no branches to choose from — reject before asking Git about one.
+  if (!rootEntry || !localBranchExists(projectPath, branch)) {
+    return { anchored: false, reason: rootEntry ? "unknown-branch" : "not-a-repository" };
+  }
+  // Another workspace already carries this branch as its identity. Anchoring
+  // the root to it too would print two rows under one name, and the sessions
+  // bound to each would be indistinguishable in the sidebar.
+  const registered = await storage.workspaceRegistry.listByProject(projectId, "local");
+  const takenByWorkspace = registered.some((row) => row.workspace.branch !== "" && row.workspace.branch === branch);
+  const takenByWorktree = entries.slice(1).some((entry) => entry.branch === branch);
+  if (takenByWorkspace || takenByWorktree) {
+    return { anchored: false, reason: "branch-is-another-workspace" };
+  }
+  await storage.workspaceRegistry.registerReadyCheckout({
+    projectId,
+    branch: "", // The main-workspace identity sentinel; never the branch name.
+    targetId: "local",
+    worktreePath: rootEntry.path,
+    expectedBranch: branch,
+  });
+  return { anchored: true, expectedBranch: branch };
 }

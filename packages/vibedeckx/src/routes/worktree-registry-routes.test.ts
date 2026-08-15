@@ -188,6 +188,106 @@ describe("worktree routes persisted identity", () => {
       .toMatchObject({ expected_branch: "main" });
   });
 
+  it("anchors the main workspace to a branch it is not checked out on", async () => {
+    await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    execFileSync("git", ["-C", projectPath, "switch", "-c", "feat/passage-finder"]);
+    invalidateWorktreeListCache(projectPath);
+    // The anchor was captured as "main"; the user now wants the workspace named
+    // after the feature branch without switching the checkout back.
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees/anchor-branch",
+      payload: { branch: "main" },
+    });
+    expect(anchored.statusCode).toBe(200);
+
+    execFileSync("git", ["-C", projectPath, "switch", "main"]);
+    execFileSync("git", ["-C", projectPath, "switch", "feat/passage-finder"]);
+    invalidateWorktreeListCache(projectPath);
+    const renamed = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees/anchor-branch",
+      payload: { branch: "feat/passage-finder" },
+    });
+
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json()).toEqual({ expectedBranch: "feat/passage-finder" });
+    // Re-anchoring to a branch that is not checked out is deliberate, so the
+    // listing reports it as drift rather than refusing the change.
+    execFileSync("git", ["-C", projectPath, "switch", "main"]);
+    invalidateWorktreeListCache(projectPath);
+    expect((await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" })).json().worktrees)
+      .toEqual([{ branch: null, expectedBranch: "feat/passage-finder", currentBranch: "main" }]);
+  });
+
+  it("rejects an anchor branch that does not exist", async () => {
+    await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees/anchor-branch",
+      payload: { branch: "no-such-branch" },
+    });
+
+    expect(anchored.statusCode).toBe(400);
+    expect(anchored.json().error).toMatch(/does not exist/);
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "", "local"))?.checkout)
+      .toMatchObject({ expected_branch: "main" });
+  });
+
+  it("rejects a revision expression that resolves but names no branch", async () => {
+    await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+
+    // `git rev-parse --verify refs/heads/main^{commit}` succeeds; anchoring to
+    // it would record an expected branch no checkout can ever match.
+    for (const branch of ["main^{commit}", "main@{0}", "main~0"]) {
+      const anchored = await app.inject({
+        method: "POST",
+        url: "/api/projects/p1/worktrees/anchor-branch",
+        payload: { branch },
+      });
+      expect(anchored.statusCode, branch).toBe(400);
+      expect(anchored.json().error).toMatch(/does not exist/);
+    }
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "", "local"))?.checkout)
+      .toMatchObject({ expected_branch: "main" });
+  });
+
+  it("refuses an anchor branch that is already its own workspace", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    invalidateWorktreeListCache(projectPath);
+
+    // Two rows named "dev" — the root and the real worktree — would make the
+    // sessions bound to each indistinguishable in the sidebar.
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees/anchor-branch",
+      payload: { branch: "dev" },
+    });
+
+    expect(anchored.statusCode).toBe(409);
+    expect(anchored.json().error).toMatch(/already has its own workspace/);
+  });
+
+  it("names the stale worker when changing a remote workspace's anchor branch", async () => {
+    await registerRemoteCheckout();
+    proxyToRemoteAuto.mockResolvedValue({ ok: false, status: 404, data: { error: "Not Found" } });
+
+    const anchored = await app.inject({
+      method: "POST",
+      url: "/api/projects/remote-project/worktrees/anchor-branch",
+      payload: { branch: "main" },
+    });
+
+    expect(anchored.statusCode).toBe(501);
+    expect(anchored.json().error).toMatch(/too old/);
+  });
+
   it("names the stale worker when anchoring a remote workspace it cannot serve", async () => {
     await registerRemoteCheckout();
     // Additive route: a worker released before it has no such handler.

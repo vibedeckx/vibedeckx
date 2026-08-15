@@ -870,6 +870,16 @@ Please proceed step by step and let me know if there are any issues or conflicts
               }
               refetchWorktrees();
             }}
+            onSetRootWorkspaceBranch={async (branch) => {
+              if (!currentProject) return;
+              try {
+                await api.setRootWorkspaceBranch(currentProject.id, branch);
+                toast.success(`Main workspace anchored to ${branch}`);
+              } catch (error) {
+                toast.error(error instanceof Error ? error.message : "Failed to change workspace branch");
+              }
+              refetchWorktrees();
+            }}
             mergeStatuses={mergeStatuses}
             mergeRootDirty={mergeRootDirty}
             mergeDefaultTarget={mergeDefaultTarget}

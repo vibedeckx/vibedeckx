@@ -7,6 +7,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { ProjectGlyph } from "@/components/project/project-glyph";
 import { WorkspaceDirtyDot, WorkspaceMergeBadge } from "./workspace-merge-badge";
 import { WorkspaceRowMenu } from "./workspace-row-menu";
+import { RootWorkspaceMenu } from "./root-workspace-menu";
 
 import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
@@ -32,6 +33,8 @@ interface AppSidebarProps {
   onCreateWorktreeOpen?: () => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
   onAnchorRootWorkspace?: (branch: string) => void;
+  /** Anchor the main workspace to a branch picked from the list, checked out or not. */
+  onSetRootWorkspaceBranch?: (branch: string) => void;
   mergeStatuses?: Map<string, BranchMergeInfo>;
   /** The root workspace has no branch identity, so its dirty state is separate. */
   mergeRootDirty?: boolean;
@@ -203,6 +206,7 @@ export function AppSidebar({
   onCreateWorktreeOpen,
   onDeleteWorktree,
   onAnchorRootWorkspace,
+  onSetRootWorkspaceBranch,
   mergeStatuses,
   mergeRootDirty,
   mergeDefaultTarget,
@@ -465,6 +469,13 @@ export function AppSidebar({
                             info={mergeStatuses.get(wt.branch)!}
                             repositoryLabel={mergeRepositoryLabel}
                             onClick={() => onMergeBadgeClick?.(wt.branch!)}
+                          />
+                        )}
+                        {wt.branch === null && currentProject && (
+                          <RootWorkspaceMenu
+                            projectId={currentProject.id}
+                            anchoredBranch={wt.expectedBranch ?? null}
+                            onAnchorChange={(b) => onSetRootWorkspaceBranch?.(b)}
                           />
                         )}
                         {wt.branch !== null && currentProject && (

@@ -1536,6 +1536,22 @@ export const api = {
     return data.expectedBranch;
   },
 
+  /**
+   * Re-anchor the main workspace to `branch` regardless of what is checked out
+   * there — the branch it now differs from shows up as drift, which the user
+   * resolves with Git on their own terms.
+   */
+  async setRootWorkspaceBranch(id: string, branch: string, target?: string): Promise<string> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees/anchor-branch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch, ...(target && target !== "local" ? { target } : {}) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? "Failed to change workspace branch");
+    return data.expectedBranch;
+  },
+
   async getMergeStatus(id: string, comparisons: MergeComparison[]): Promise<MergeStatusBatchResult> {
     try {
       const res = await authFetch(`${getApiBase()}/api/projects/${id}/branches/merge-status`, {

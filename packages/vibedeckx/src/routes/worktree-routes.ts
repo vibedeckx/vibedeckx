@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { mkdir } from "fs/promises";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { resolveWorktreePath, conventionalWorktreePath, getWorktreeBaseForProject, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache } from "../utils/worktree-paths.js";
+import { resolveWorktreePath, conventionalWorktreePath, getWorktreeBaseForProject, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, type SetAnchorResult } from "../utils/worktree-paths.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
 import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
@@ -26,6 +26,21 @@ async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): 
 async function getRemoteConfig(fastify: FastifyInstance, project: Project): Promise<RemoteConfig | null> {
   const all = await getAllRemoteConfigs(fastify, project);
   return all.length > 0 ? all[0] : null;
+}
+
+/** HTTP shape of an explicit anchor that Git or the workspace list refused. */
+function anchorFailure(
+  reason: Extract<SetAnchorResult, { anchored: false }>["reason"],
+  branch: string,
+): { code: number; error: string } {
+  switch (reason) {
+    case "unknown-branch":
+      return { code: 400, error: `Branch '${branch}' does not exist in this repository` };
+    case "branch-is-another-workspace":
+      return { code: 409, error: `'${branch}' already has its own workspace` };
+    case "not-a-repository":
+      return { code: 400, error: "The main workspace is not a Git repository" };
+  }
 }
 
 async function ensurePathProject(fastify: FastifyInstance, projectPath: string): Promise<Project> {
@@ -388,6 +403,32 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Set the main workspace's anchor to a branch the user picked, which need not
+  // be the one checked out — the resulting drift is the point (see
+  // setRootWorkspaceAnchor). Separate from /anchor so an old worker 404s it
+  // instead of applying that route's live-branch guard to a different intent.
+  fastify.post<{
+    Body: { path: string; branch: string };
+  }>("/api/path/worktrees/anchor-branch", async (req, reply) => {
+    const { path: projectPath, branch } = req.body ?? {};
+    if (!projectPath || !branch) {
+      return reply.code(400).send({ error: "Path and branch are required" });
+    }
+
+    try {
+      const project = await ensurePathProject(fastify, projectPath);
+      const result = await setRootWorkspaceAnchor(fastify.storage, project.id, projectPath, branch);
+      if (!result.anchored) {
+        const failure = anchorFailure(result.reason, branch);
+        return reply.code(failure.code).send({ error: failure.error });
+      }
+      return reply.code(200).send({ expectedBranch: result.expectedBranch });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      return reply.code(500).send({ error: `Failed to anchor workspace: ${errorMessage}` });
+    }
+  });
+
   // ==================== Project-based worktree API ====================
 
   // 获取项目的 worktrees
@@ -504,6 +545,69 @@ const routes: FastifyPluginAsync = async (fastify) => {
           error: `The main workspace is on '${result.currentBranch ?? "detached HEAD"}', not '${branch}'`,
           currentBranch: result.currentBranch,
         });
+      }
+      return reply.code(200).send({ expectedBranch: result.expectedBranch });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      return reply.code(500).send({ error: `Failed to anchor workspace: ${errorMessage}` });
+    }
+  });
+
+  // Rename the main workspace to a branch the user picked from its branch list,
+  // independent of what is checked out there.
+  fastify.post<{
+    Params: { id: string };
+    Body: { branch: string; target?: string };
+  }>("/api/projects/:id/worktrees/anchor-branch", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+
+    const project = await fastify.storage.projects.getById(req.params.id, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
+    }
+
+    const branch = req.body?.branch;
+    if (!branch) return reply.code(400).send({ error: "Branch is required" });
+
+    const requestedTarget = req.body.target ?? "local";
+    let remoteConfig: RemoteConfig | null;
+    if (requestedTarget === "local") {
+      // A project with no local path is remote-only: "local" means its remote.
+      remoteConfig = project.path ? null : await getRemoteConfig(fastify, project);
+    } else {
+      const targetRemote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, requestedTarget);
+      if (!targetRemote) return reply.code(400).send({ error: "Unknown remote target" });
+      remoteConfig = { serverId: targetRemote.remote_server_id, remotePath: targetRemote.remote_path };
+    }
+
+    if (remoteConfig) {
+      const result = await proxyToRemoteAuto(
+        remoteConfig.serverId,
+        "POST",
+        "/api/path/worktrees/anchor-branch",
+        { path: remoteConfig.remotePath, branch },
+        { reverseConnectManager: fastify.reverseConnectManager }
+      );
+      // Additive route: a worker that predates it 404s. Say so, rather than
+      // letting the UI report the workspace as missing.
+      if (result.status === 404) {
+        return reply.code(501).send({
+          error: "This remote worker is too old to change a workspace branch. Update it and try again.",
+        });
+      }
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    if (!project.path) {
+      return reply.code(400).send({ error: "Project has no local path" });
+    }
+
+    try {
+      const result = await setRootWorkspaceAnchor(fastify.storage, project.id, project.path, branch);
+      if (!result.anchored) {
+        const failure = anchorFailure(result.reason, branch);
+        return reply.code(failure.code).send({ error: failure.error });
       }
       return reply.code(200).send({ expectedBranch: result.expectedBranch });
     } catch (error) {
