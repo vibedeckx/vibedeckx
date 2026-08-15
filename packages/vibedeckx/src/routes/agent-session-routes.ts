@@ -1382,10 +1382,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const deliver = async () => {
-      // Human takeover (workflow spec §3.4): a user message into a session that
-      // belongs to an active review run ends that run. The engine's own feedback
-      // relay calls sendUserMessage directly on the manager, not this route, so
-      // it never self-triggers.
+      // Let the workflow engine distinguish participant roles. Messages to a
+      // reviewer start a discussion round; messages to the source session leave
+      // the snapshot-based review running independently.
       await fastify.workflowEngine.handleExternalUserMessage(req.params.sessionId);
       return fastify.agentSessionManager.sendUserMessage(
         req.params.sessionId, content, projectPathForWake, userId,

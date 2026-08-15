@@ -926,11 +926,22 @@ describe("WorkflowEngine", () => {
     expect(after?.status).toBe("sending_feedback"); // untouched by the failed cancel
   });
 
-  it("handleExternalUserMessage on the SOURCE ends the run (human takeover)", async () => {
+  it("keeps review running when the user continues the source conversation", async () => {
     const run = await start();
     await engine.handleExternalUserMessage("s-src");
-    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("cancelled");
-    expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(false);
+    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_reviewer");
+    expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(true);
+
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    await vi.waitFor(async () => {
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
+    });
+
+    const updated = await storage.workflowRuns.getById(run.id);
+    expect(updated?.feedback_snapshot).toBe("Feedback: rename X; add test for Y");
+    const reviewReady = (await storage.notificationOutbox.listAfter(0, 10)).filter((row) => row.kind === "review_ready");
+    expect(reviewReady).toHaveLength(1);
+    expect(reviewReady[0].workflow_run_id).toBe(run.id);
   });
 
   it("a user message to the reviewer moves waiting_feedback → discussing instead of cancelling", async () => {
@@ -1030,14 +1041,14 @@ describe("WorkflowEngine", () => {
 
   it("handleExternalUserMessage never throws when storage rejects during the reviewer transition", async () => {
     // 本方法在 /message 路由投递前内联调用:异常冒出会阻断用户消息的投递,
-    // 所以 reviewer 分支的 storage 失败也必须吞掉(同 source 分支的契约)。
+    // 所以 reviewer 分支的 storage 失败必须吞掉。
     const run = await start();
     vi.spyOn(storage.workflowRuns, "transition").mockRejectedValueOnce(new Error("db locked"));
     await expect(engine.handleExternalUserMessage("s-rev")).resolves.toBeUndefined();
     expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_reviewer"); // 原状态未动
   });
 
-  it("handleExternalUserMessage never throws when the run is mid-send (sending_feedback bad-state race)", async () => {
+  it("a reviewer message leaves a mid-send run unchanged", async () => {
     const run = await start();
     bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
     await vi.waitFor(async () => {
@@ -1045,15 +1056,13 @@ describe("WorkflowEngine", () => {
     });
     // Simulate approveFeedback having claimed the run (mid-send, still
     // awaiting agentOps.sendUserMessage) via its own CAS — same setup as the
-    // cancelRun CAS test above, but here we drive the takeover path, which
-    // must swallow cancelRun's bad-state throw rather than propagate it (it
-    // runs inline before the user's own message is delivered).
+    // cancelRun CAS test above. A discussion cannot interrupt that send.
     const claimed = await storage.workflowRuns.transition(run.id, "waiting_feedback", "sending_feedback");
     expect(claimed).toBe(true);
 
     await expect(engine.handleExternalUserMessage("s-rev")).resolves.toBeUndefined();
     const after = await storage.workflowRuns.getById(run.id);
-    expect(after?.status).toBe("sending_feedback"); // unchanged — takeover cancel was skipped
+    expect(after?.status).toBe("sending_feedback");
   });
 
   it("boot recovery: sending_feedback → waiting_feedback with unknown-send warning", async () => {

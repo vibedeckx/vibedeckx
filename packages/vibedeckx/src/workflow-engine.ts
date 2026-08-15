@@ -976,22 +976,18 @@ export class WorkflowEngine {
   }
 
   /**
-   * Human takeover (spec §3.4): user sent a message directly to a run session.
+   * Handle a user message sent directly to a review participant.
    *
-   * Reviewer 分流:向 reviewer 发消息不再是接管——它开启一轮讨论,把 run
-   * 移入 `discussing`(gate 收起),等待显式的 requestFinalVerdict 重新出稿。
-   * 只有向 source session 发消息才算接管,结束 run。
+   * Reviewer 分流:向 reviewer 发消息会开启一轮讨论,把 run 移入
+   * `discussing`(gate 收起),等待显式的 requestFinalVerdict 重新出稿。
+   * 向 source session 发消息不改变 review run:review 针对启动时捕获的
+   * 快照继续独立运行,只有显式取消操作才会结束它。
    *
    * Never-throws contract: this is called inline from the agent-session
    * `/message` route BEFORE the user's message is delivered
    * (agentOps.sendUserMessage). A throw here would abort delivery of that
-   * message, so this method must never throw — any error from cancelRun is
-   * caught and swallowed, never rethrown. `bad-state` is the expected case:
-   * it means the run is mid-send (approveFeedback's own CAS holds it in
-   * `sending_feedback`), a transient race, so we just log and let the
-   * takeover no-op; the run resolves on its own via approveFeedback's
-   * completion/rollback. Any other error is unexpected but still swallowed
-   * to honor the contract, with a louder log so it isn't silently lost.
+   * message, so this method must never throw. Storage errors from the reviewer
+   * transition are caught and swallowed so they cannot block message delivery.
    */
   async handleExternalUserMessage(sessionId: string): Promise<void> {
     const p = this.participants.get(sessionId);
@@ -1019,20 +1015,9 @@ export class WorkflowEngine {
       }
       return;
     }
-    try {
-      await this.cancelRun(p.runId, "用户接管：直接向 source session 发送了消息，review 已结束。");
-    } catch (err) {
-      if (err instanceof WorkflowError && err.code === "bad-state") {
-        console.warn(
-          `[WorkflowEngine] handleExternalUserMessage: run ${p.runId} is mid-send (sending_feedback); skipping takeover cancel`,
-        );
-      } else {
-        console.error(
-          `[WorkflowEngine] handleExternalUserMessage: unexpected error cancelling run ${p.runId}; swallowed to honor never-throws contract`,
-          err,
-        );
-      }
-    }
+    // Source and reviewer are independent after the review snapshot is
+    // captured. Continuing the source conversation must not implicitly cancel
+    // the review or discard a verdict that is already in flight.
   }
 
   private emitRunUpdated(run: WorkflowRun): void {
