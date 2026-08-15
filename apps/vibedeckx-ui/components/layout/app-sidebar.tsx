@@ -360,8 +360,10 @@ export function AppSidebar({
         )}
       </SidebarSection>
 
-      {/* Workspace Section — branches as mono tree */}
-      <SidebarSection className="flex-1 overflow-y-auto">
+      {/* Workspace Section — branches as mono tree. The section itself doesn't
+          scroll; only the tree below does, so the "Workspace" label and its +
+          button stay pinned like the other sections' labels. */}
+      <SidebarSection className="flex-1 min-h-0 flex flex-col">
         <SectionLabel
           action={
             currentProject ? (
@@ -378,6 +380,7 @@ export function AppSidebar({
           Workspace
         </SectionLabel>
 
+        <div className="flex-1 min-h-0 overflow-y-auto">
         {currentProject && worktrees && worktrees.length > 0 && (
           <>
             <TooltipProvider delayDuration={300}>
@@ -523,6 +526,7 @@ export function AppSidebar({
             />
           </div>
         )}
+        </div>
       </SidebarSection>
 
       {/* Bottom Section */}
