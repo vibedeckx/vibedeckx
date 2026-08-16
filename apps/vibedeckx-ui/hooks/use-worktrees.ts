@@ -5,6 +5,17 @@ import { api, type Worktree } from "@/lib/api";
 import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 export const WORKTREE_DRIFT_BACKSTOP_MS = 5 * 60_000;
+// Returning to the page is a resync point, not a change notification. The two
+// events that mean it — visibilitychange→visible and window focus — are
+// dispatched separately, and fetchWorktrees' in-flight guard only collapses
+// them while the first request is still airborne (tens of milliseconds for a
+// local project), so in practice the pair became two full round-trips of a
+// route that is not cheap: `git worktree prune` + `list --porcelain` + a
+// registry reconciliation, or a tunnel round-trip for a remote project. A
+// second return trigger this soon after a successful fetch is therefore
+// dropped. Only the return triggers are gated — a long absence always
+// refreshes, since the cooldown can only bite when the list was just fetched.
+export const RETURN_REFRESH_COOLDOWN_MS = 15_000;
 
 /**
  * True while the worktree list can't be trusted for `scope` — a fetch is in
@@ -116,6 +127,15 @@ export function useWorktrees(
   }
   const requestGeneration = useRef(0);
   const requestController = useRef<AbortController | null>(null);
+  // Epoch ms of the last fetch that SUCCEEDED; gates the return triggers only.
+  // Failures deliberately don't count: the cooldown asserts "the list on
+  // screen is this fresh", and a failed fetch didn't refresh it. Stamping
+  // there would let one transient error at the moment of return suppress the
+  // focus refresh that follows it, and nothing is scheduled when a cooldown
+  // expires — the list would stay stale until an SSE event, an explicit
+  // refetch, or the five-minute backstop. Cleared when a fetch is accepted
+  // (below), so the stamp only ever describes the request that last landed.
+  const lastSettledAtRef = useRef(0);
   const previousSelectionRef = useRef<{ projectId: string | null; branch: string | null | undefined } | null>(null);
   const selectedBranchRef = useRef(selectedBranch);
   selectedBranchRef.current = selectedBranch;
@@ -125,6 +145,13 @@ export function useWorktrees(
     requestController.current?.abort();
     const controller = new AbortController();
     requestController.current = controller;
+    // An accepted fetch invalidates the freshness stamp up front: from here
+    // until this request succeeds, nothing on screen is known to be current.
+    // Without it an earlier success would keep gating the return triggers
+    // through a failed load — including one for a different scope (project A
+    // succeeded, project B's load failed) or one that a change notification
+    // asked for, which is exactly when a return refresh must be allowed.
+    lastSettledAtRef.current = 0;
     const generation = requestGeneration.current;
     if (!projectId || !scope) {
       requestController.current = null;
@@ -136,11 +163,13 @@ export function useWorktrees(
     }
 
     if (!background) setFetching(true);
+    let succeeded = false;
     try {
       const data = await api.getProjectWorktrees(projectId, undefined, controller.signal);
       if (generation !== requestGeneration.current) return;
       worktreeListCache.set(scope, data);
       setValidatedScope(scope);
+      succeeded = true;
       setWorktrees((previous) => {
         const next = background
           ? preserveSelectedWorkspace(previous, data, selectedBranchRef.current)
@@ -159,11 +188,28 @@ export function useWorktrees(
       }
     } finally {
       if (generation !== requestGeneration.current || requestController.current !== controller) return;
+      if (succeeded) lastSettledAtRef.current = Date.now();
       markLoadedFor(scope);
       if (!background) setFetching(false);
       requestController.current = null;
     }
   }, [projectId, scope]);
+
+  /**
+   * The single entry point for "the user came back". Both signals below feed
+   * it because neither subsumes the other — `focus` alone misses a window that
+   * was uncovered without being clicked (and mobile backgrounding), while
+   * `visibilitychange` alone misses alt-tabbing to another app with the window
+   * still on screen — but they mean the same thing, so only the first one
+   * through fetches. Gating here rather than inside fetchWorktrees keeps every
+   * other caller unthrottled: the scope load, the selection refresh, the SSE
+   * handlers (a `taskCompleted` is a change notification and must never be
+   * dropped), the backstop poll, and the explicit `refetch()`.
+   */
+  const refreshOnReturn = useCallback(() => {
+    if (Date.now() - lastSettledAtRef.current < RETURN_REFRESH_COOLDOWN_MS) return;
+    void fetchWorktrees(true);
+  }, [fetchWorktrees]);
 
   useEffect(() => {
     void fetchWorktrees();
@@ -217,10 +263,10 @@ export function useWorktrees(
       stop();
       timer = window.setInterval(() => void fetchWorktrees(true), WORKTREE_DRIFT_BACKSTOP_MS);
     };
-    const onFocus = () => void fetchWorktrees(true);
+    const onFocus = () => refreshOnReturn();
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        void fetchWorktrees(true);
+        refreshOnReturn();
         start();
       } else {
         stop();
@@ -235,7 +281,7 @@ export function useWorktrees(
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [fetchWorktrees]);
+  }, [fetchWorktrees, refreshOnReturn]);
 
   const refetch = useCallback(() => fetchWorktrees(false), [fetchWorktrees]);
 

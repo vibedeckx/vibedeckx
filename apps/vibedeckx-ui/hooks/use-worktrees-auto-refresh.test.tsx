@@ -13,7 +13,11 @@ vi.mock("@/hooks/global-event-stream", () => ({
   },
 }));
 
-import { useWorktrees, WORKTREE_DRIFT_BACKSTOP_MS } from "./use-worktrees";
+import {
+  useWorktrees,
+  RETURN_REFRESH_COOLDOWN_MS,
+  WORKTREE_DRIFT_BACKSTOP_MS,
+} from "./use-worktrees";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -96,12 +100,87 @@ describe("useWorktrees drift refresh triggers", () => {
     expect(getProjectWorktrees).not.toHaveBeenCalled();
   });
 
-  it("refreshes on focus", async () => {
+  it("refreshes on focus once the return cooldown has elapsed", async () => {
+    vi.useFakeTimers();
     await render("dev");
     getProjectWorktrees.mockClear();
 
+    // The initial load has just landed: the list on screen is already this
+    // fresh, so a return trigger inside the cooldown fetches nothing.
     await act(async () => {
       window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(getProjectWorktrees).not.toHaveBeenCalled();
+
+    // Past the cooldown — the case the focus trigger exists for (the user was
+    // away long enough for Git to have moved) — it refreshes as before.
+    await act(async () => {
+      vi.advanceTimersByTime(RETURN_REFRESH_COOLDOWN_MS + 1);
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(getProjectWorktrees).toHaveBeenCalledTimes(1);
+  });
+
+  it("collapses the visibilitychange + focus pair on return into one request", async () => {
+    vi.useFakeTimers();
+    await render("dev");
+    await act(async () => {
+      vi.advanceTimersByTime(RETURN_REFRESH_COOLDOWN_MS + 1);
+      await Promise.resolve();
+    });
+    getProjectWorktrees.mockClear();
+
+    // Browsers dispatch these as separate tasks, and the first request settles
+    // long before the second event lands (tens of ms for a local project), so
+    // the in-flight guard alone cannot collapse them.
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+
+    expect(getProjectWorktrees).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a return trigger retry after a failed refresh", async () => {
+    vi.useFakeTimers();
+    await render("dev");
+    getProjectWorktrees.mockClear();
+    getProjectWorktrees.mockRejectedValueOnce(new Error("tunnel down"));
+
+    // The background refresh a finished turn asked for fails, so the list on
+    // screen is no longer known to be current — the initial load's success
+    // must not go on gating the return triggers.
+    await act(async () => {
+      capturedListener?.({ type: "session:taskCompleted", projectId: "p1" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getProjectWorktrees).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(getProjectWorktrees).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not apply the return cooldown to change events", async () => {
+    vi.useFakeTimers();
+    await render("dev");
+    getProjectWorktrees.mockClear();
+
+    // A finished turn is a change notification, not a return trigger: dropping
+    // it would hide a branch the agent just created until the backstop poll.
+    await act(async () => {
+      capturedListener?.({ type: "session:taskCompleted", projectId: "p1" });
       await Promise.resolve();
     });
 
