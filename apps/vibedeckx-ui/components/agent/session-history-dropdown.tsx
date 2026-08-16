@@ -38,6 +38,12 @@ import {
 // generation latency and aligned with the parent's pending-title safety net.
 const TITLE_GENERATION_WINDOW_MS = 30_000;
 
+/** Identity of the workspace a fetched session list belongs to. */
+function workspaceListKey(projectId: string, branch: string | null): string {
+  // `:` is unambiguous: a git refname cannot contain one.
+  return `${projectId}:${branch ?? ""}`;
+}
+
 interface SessionHistoryDropdownProps {
   projectId: string;
   branch: string | null;
@@ -102,14 +108,27 @@ export function SessionHistoryDropdown({
   // brand-new session's row arrives via `refreshKey` once its title is written;
   // until then the parent shows a "Generating title…" loader, so the row's
   // absence is already covered without a refetch here.
+  // The workspace whose fetch has settled. Until it matches the current one,
+  // `sessions` still describes a DIFFERENT workspace, so "the session isn't in
+  // it" means "its list hasn't arrived", not "it doesn't exist" — the
+  // distinction the self-heal below has to make. Set on failure too: a settled
+  // failure leaves the list wrong in a way the self-heal can legitimately
+  // retry, whereas a request still in flight is nothing to react to.
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const listKey = workspaceListKey(projectId, branch);
+
   useEffect(() => {
     let ignore = false;
     listBranchSessions(projectId, branch)
       .then((data) => {
-        if (!ignore) setSessions(data.sessions);
+        if (ignore) return;
+        setSessions(data.sessions);
+        setSettledKey(workspaceListKey(projectId, branch));
       })
       .catch((e) => {
-        if (!ignore) console.error("[SessionHistoryDropdown] refresh failed:", e);
+        if (ignore) return;
+        console.error("[SessionHistoryDropdown] refresh failed:", e);
+        setSettledKey(workspaceListKey(projectId, branch));
       });
     return () => {
       ignore = true;
@@ -130,6 +149,11 @@ export function SessionHistoryDropdown({
   const missingSessionReloadRef = useRef<string | null>(null);
   useEffect(() => {
     if (!currentSessionId) return;
+    // Wait for this workspace's own list. Every workspace switch that also
+    // changes the session would otherwise self-heal against the PREVIOUS
+    // workspace's list — the session is legitimately absent from it — turning
+    // one navigation into two identical requests.
+    if (settledKey !== listKey) return;
     if (sessions.some((s) => s.id === currentSessionId)) {
       missingSessionReloadRef.current = null;
       return;
@@ -142,6 +166,7 @@ export function SessionHistoryDropdown({
       .then((data) => {
         if (ignore) return;
         setSessions(data.sessions);
+        setSettledKey(workspaceListKey(projectId, branch));
         // A self-healed row that landed without a title is a freshly
         // created/surfaced session whose AI title generation is still in
         // flight (its one-shot `titleUpdated` either hasn't fired yet or won't
@@ -161,7 +186,7 @@ export function SessionHistoryDropdown({
     return () => {
       ignore = true;
     };
-  }, [currentSessionId, sessions, projectId, branch, aiTitleOverride]);
+  }, [currentSessionId, sessions, projectId, branch, listKey, settledKey, aiTitleOverride]);
 
   // The marker needs no explicit clear-on-resolve / clear-on-switch effect:
   // `isAwaitingTitle` already returns false once the row has a resolved title
