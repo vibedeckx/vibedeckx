@@ -338,7 +338,6 @@ export class ChatSessionManager {
           console.error(`[ChatSession] handleExecutorFinished unhandled error:`, err);
         });
       } else if (event.type === "session:taskCompleted") {
-        console.log(`[ChatSession] EventBus received session:taskCompleted for project=${event.projectId} branch=${event.branch}`);
         this.handleSessionTaskCompleted(event);
       } else if (event.type === "workflow:run-updated") {
         this.handleWorkflowRunUpdated(event);
@@ -367,16 +366,15 @@ export class ChatSessionManager {
 
       // Find a chat session for this project+branch that has event listening enabled
       const key = `${event.projectId}:${event.branch ?? ""}`;
-      console.log(`[ChatSession] handleSessionTaskCompleted: key=${key}, sessionIndex keys=[${[...this.sessionIndex.keys()].join(", ")}]`);
       const sessionId = this.sessionIndex.get(key);
       if (!sessionId) {
-        console.log(`[ChatSession] handleSessionTaskCompleted: no chat session found for key=${key}`);
+        console.debug(`[ChatSession] handleSessionTaskCompleted: no chat session for key="${key}", indexed=[${[...this.sessionIndex.keys()].join(", ")}]`);
         return;
       }
 
       const session = this.sessions.get(sessionId);
       if (!session) {
-        console.log(`[ChatSession] handleSessionTaskCompleted: session object not found for id=${sessionId}`);
+        console.debug(`[ChatSession] handleSessionTaskCompleted: session object not found for id=${sessionId}`);
         return;
       }
       // Record which agent session this workspace is working with, regardless
@@ -384,7 +382,7 @@ export class ChatSessionManager {
       // it by exact identity rather than guessing from (projectId, branch).
       session.lastAgentSessionId = event.sessionId;
       if (!session.eventListeningEnabled) {
-        console.log(`[ChatSession] handleSessionTaskCompleted: eventListening disabled for session ${sessionId}`);
+        console.debug(`[ChatSession] handleSessionTaskCompleted: eventListening disabled for session ${sessionId}`);
         return;
       }
 
@@ -440,15 +438,13 @@ export class ChatSessionManager {
 
   private async handleExecutorFinished(event: Extract<GlobalEvent, { type: "executor:stopped" }>): Promise<void> {
     try {
-      console.log(`[ChatSession] handleExecutorFinished: executorId=${event.executorId}, projectId=${event.projectId}, exitCode=${event.exitCode}`);
-
       // Look up executor metadata
       const executor = await this.storage.executors.getById(event.executorId);
-      if (!executor) { console.log(`[ChatSession] handleExecutorFinished: executor not found`); return; }
+      if (!executor) { console.debug(`[ChatSession] handleExecutorFinished: executor ${event.executorId} not found`); return; }
 
       // Look up the owning workspace to get branch
       const workspace = await this.storage.workspaceRegistry.getWorkspaceById(executor.workspace_id);
-      if (!workspace) { console.log(`[ChatSession] handleExecutorFinished: workspace not found for executor.workspace_id=${executor.workspace_id}`); return; }
+      if (!workspace) { console.debug(`[ChatSession] handleExecutorFinished: workspace not found for executor.workspace_id=${executor.workspace_id}`); return; }
 
       const branch = workspace.branch || null;
 
@@ -456,15 +452,13 @@ export class ChatSessionManager {
       const key = `${event.projectId}:${branch ?? ""}`;
       const sessionId = this.sessionIndex.get(key);
       if (!sessionId) {
-        console.log(`[ChatSession] handleExecutorFinished: no session for key="${key}", sessionIndex keys=[${[...this.sessionIndex.keys()].join(", ")}]`);
+        console.debug(`[ChatSession] handleExecutorFinished: no chat session for key="${key}", indexed=[${[...this.sessionIndex.keys()].join(", ")}]`);
         return;
       }
 
       const session = this.sessions.get(sessionId);
-      if (!session) { console.log(`[ChatSession] handleExecutorFinished: session object not found for id=${sessionId}`); return; }
-      if (!session.eventListeningEnabled) { console.log(`[ChatSession] handleExecutorFinished: eventListening disabled for session ${sessionId}`); return; }
-
-      console.log(`[ChatSession] handleExecutorFinished: processing event, session=${sessionId}, subscribers=${session.subscribers.size}`);
+      if (!session) { console.debug(`[ChatSession] handleExecutorFinished: session object not found for id=${sessionId}`); return; }
+      if (!session.eventListeningEnabled) { console.debug(`[ChatSession] handleExecutorFinished: eventListening disabled for session ${sessionId}`); return; }
 
       // Use tail output included in the event (snapshotted by process-manager at emit time)
       const tailOutput = event.tailOutput ?? "";
@@ -787,7 +781,7 @@ export class ChatSessionManager {
     }
 
     if (!branchMatch && fallback) {
-      console.log(`[ChatSession] findRemoteSessionForProject: no exact branch match for branch=${branch ?? "null"}, using fallback session=${fallback.localSessionId} (branch=${fallback.info.branch ?? "null"})`);
+      console.debug(`[ChatSession] findRemoteSessionForProject: no exact branch match for branch=${branch ?? "null"}, using fallback session=${fallback.localSessionId} (branch=${fallback.info.branch ?? "null"})`);
     }
     return branchMatch ?? fallback;
   }
@@ -798,7 +792,7 @@ export class ChatSessionManager {
    */
   private extractMessagesFromCache(sessionId: string): AgentMessage[] {
     const cacheEntry = this.remotePatchCache.get(sessionId);
-    console.log(`[ChatSession] extractMessagesFromCache: sessionId=${sessionId}, cacheExists=${!!cacheEntry}, cachedMsgCount=${cacheEntry?.messages.length ?? 0}, patchCount=${cacheEntry?.patchCount ?? 0}, finished=${cacheEntry?.finished ?? "N/A"}, remoteWsState=${cacheEntry?.remoteWs?.readyState ?? "null"}, subscribers=${cacheEntry?.subscribers.size ?? 0}`);
+    console.debug(`[ChatSession] extractMessagesFromCache: sessionId=${sessionId}, cacheExists=${!!cacheEntry}, cachedMsgCount=${cacheEntry?.messages.length ?? 0}, patchCount=${cacheEntry?.patchCount ?? 0}, finished=${cacheEntry?.finished ?? "N/A"}, remoteWsState=${cacheEntry?.remoteWs?.readyState ?? "null"}, subscribers=${cacheEntry?.subscribers.size ?? 0}`);
     if (!cacheEntry || cacheEntry.messages.length === 0) return [];
 
     const result: AgentMessage[] = [];
@@ -843,7 +837,7 @@ export class ChatSessionManager {
     }
 
     const filtered = result.filter(Boolean);
-    console.log(`[ChatSession] extractMessagesFromCache: extracted ${filtered.length} messages from ${cacheEntry.messages.length} cached raw messages. Patch breakdown: entry=${entryCount}, status=${statusCount}, ready=${readyCount}, finished=${finishedCount}, other=${otherCount}, nonJsonPatch=${nonJsonPatchCount}, parseErrors=${parseErrorCount}`);
+    console.debug(`[ChatSession] extractMessagesFromCache: extracted ${filtered.length} messages from ${cacheEntry.messages.length} cached raw messages. Patch breakdown: entry=${entryCount}, status=${statusCount}, ready=${readyCount}, finished=${finishedCount}, other=${otherCount}, nonJsonPatch=${nonJsonPatchCount}, parseErrors=${parseErrorCount}`);
     return filtered;
   }
 
@@ -902,12 +896,9 @@ export class ChatSessionManager {
     };
 
     const flush = () => {
-      if (!state.outputBuffer.trim()) {
-        console.log(`[ChatSession] terminal watcher flush: empty buffer, skipping (terminal=${terminalId})`);
-        return;
-      }
+      if (!state.outputBuffer.trim()) return;
 
-      console.log(`[ChatSession] terminal watcher flush: ${state.outputBuffer.length} bytes (terminal=${terminalId})`);
+      console.debug(`[ChatSession] terminal watcher flush: ${state.outputBuffer.length} bytes (terminal=${terminalId})`);
 
       // Strip ANSI codes
       let output = state.outputBuffer.replace(
@@ -944,8 +935,6 @@ export class ChatSessionManager {
     };
 
     const unsubscribe = this.processManager.subscribe(terminalId, (msg) => {
-      console.log(`[ChatSession] watcher subscriber fired: terminal=${terminalId} type=${msg.type} bufferLen=${state.outputBuffer.length}`);
-
       if (msg.type === "finished") {
         // Terminal exited — flush what we have
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -959,10 +948,7 @@ export class ChatSessionManager {
 
         // Reset debounce timer
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
-        state.debounceTimer = setTimeout(() => {
-          console.log(`[ChatSession] debounce timer fired for terminal=${terminalId}, bufferLen=${state.outputBuffer.length}`);
-          flush();
-        }, DEBOUNCE_MS);
+        state.debounceTimer = setTimeout(flush, DEBOUNCE_MS);
 
         // Reset idle timer
         clearTimeout(state.idleTimer);
@@ -971,7 +957,7 @@ export class ChatSessionManager {
     });
 
     if (!unsubscribe) {
-      console.log(`[ChatSession] Cannot watch terminal ${terminalId} — not found in processManager`);
+      console.warn(`[ChatSession] Cannot watch terminal ${terminalId} — not found in processManager`);
       clearTimeout(state.idleTimer);
       return;
     }
@@ -982,7 +968,7 @@ export class ChatSessionManager {
       sessionId,
     });
 
-    console.log(`[ChatSession] Started terminal watcher for terminal=${terminalId} session=${sessionId}`);
+    console.debug(`[ChatSession] Started terminal watcher for terminal=${terminalId} session=${sessionId}`);
   }
 
   private stopTerminalWatcher(terminalId: string): void {
@@ -993,7 +979,7 @@ export class ChatSessionManager {
     if (watcher.state.debounceTimer) clearTimeout(watcher.state.debounceTimer);
     clearTimeout(watcher.state.idleTimer);
     this.terminalWatchers.delete(terminalId);
-    console.log(`[ChatSession] Stopped terminal watcher for terminal=${terminalId}`);
+    console.debug(`[ChatSession] Stopped terminal watcher for terminal=${terminalId}`);
   }
 
   /**
@@ -1026,12 +1012,9 @@ export class ChatSessionManager {
       const buffered = state.outputBuffer;
       state.outputBuffer = ""; // Clear immediately to prevent double-flush
 
-      if (!buffered.trim()) {
-        console.log(`[ChatSession] remote terminal watcher flush: empty buffer, skipping (terminal=${terminalId})`);
-        return;
-      }
+      if (!buffered.trim()) return;
 
-      console.log(`[ChatSession] remote terminal watcher flush: ${buffered.length} bytes (terminal=${terminalId})`);
+      console.debug(`[ChatSession] remote terminal watcher flush: ${buffered.length} bytes (terminal=${terminalId})`);
 
       // Strip ANSI codes
       let output = buffered.replace(
@@ -1068,7 +1051,7 @@ export class ChatSessionManager {
 
     // Open a virtual channel over the existing reverse-connect WebSocket.
     if (!this.reverseConnectManager?.isConnected(remoteInfo.remoteServerId)) {
-      console.log(`[ChatSession] Remote terminal watcher: remote ${remoteInfo.remoteServerId} not connected, skipping`);
+      console.debug(`[ChatSession] Remote terminal watcher: remote ${remoteInfo.remoteServerId} not connected, skipping`);
       this.stopTerminalWatcher(terminalId);
       return;
     }
@@ -1082,7 +1065,7 @@ export class ChatSessionManager {
     this.reverseConnectManager.setChannelAdapter(remoteInfo.remoteServerId, channelId, adapter);
     this.reverseConnectManager.openVirtualChannel(remoteInfo.remoteServerId, channelId, wsPath);
     const remoteWs: VirtualWsAdapter = adapter;
-    console.log(`[ChatSession] Remote terminal watcher: virtual channel opened for ${remoteInfo.remoteProcessId}`);
+    console.debug(`[ChatSession] Remote terminal watcher: virtual channel opened for ${remoteInfo.remoteProcessId}`);
     setTimeout(() => adapter.emit("open"), 0);
 
     const closeWs = () => {
@@ -1118,7 +1101,6 @@ export class ChatSessionManager {
         // Reset debounce timer
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
         state.debounceTimer = setTimeout(() => {
-          console.log(`[ChatSession] remote debounce timer fired for terminal=${terminalId}, bufferLen=${state.outputBuffer.length}`);
           flush();
           closeWs();
         }, DEBOUNCE_MS);
@@ -1130,7 +1112,7 @@ export class ChatSessionManager {
     });
 
     remoteWs.on("close", () => {
-      console.log(`[ChatSession] Remote terminal watcher: connection closed for terminal=${terminalId}`);
+      console.debug(`[ChatSession] Remote terminal watcher: connection closed for terminal=${terminalId}`);
       // If we still have buffered output, flush it
       if (state.outputBuffer.trim() && this.terminalWatchers.has(terminalId)) {
         if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -1153,7 +1135,7 @@ export class ChatSessionManager {
       sessionId,
     });
 
-    console.log(`[ChatSession] Started remote terminal watcher for terminal=${terminalId} session=${sessionId}`);
+    console.debug(`[ChatSession] Started remote terminal watcher for terminal=${terminalId} session=${sessionId}`);
   }
 
   // ---- Session lifecycle ----
@@ -1230,7 +1212,7 @@ export class ChatSessionManager {
   markCompleted(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.log(`[ChatSession] markCompleted: session ${sessionId} not found`);
+      console.debug(`[ChatSession] markCompleted: session ${sessionId} not found`);
       return false;
     }
     session.taskCompleted = true;
@@ -1248,7 +1230,7 @@ export class ChatSessionManager {
     );
     if (shouldEmitMainCompleted(session.eventDrivenTurn, currentDot)) {
       this.emitChatActivity(session, "main-completed");
-      console.log(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} (eventDriven=${session.eventDrivenTurn}, dotWas=${currentDot ?? "none"})`);
+      console.debug(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} (eventDriven=${session.eventDrivenTurn}, dotWas=${currentDot ?? "none"})`);
     }
     return true;
   }
@@ -1532,7 +1514,7 @@ export class ChatSessionManager {
           if (!remote) {
             remote = this.findRemoteSessionForProject(projectId, branch);
           }
-          console.log(`[ChatSession] getAgentConversation: projectId=${projectId}, branch=${branch ?? "null"}, tracked=${trackedId ?? "null"}, remote=${remote ? remote.localSessionId : "null"}, remoteBranch=${remote?.info.branch ?? "null"}`);
+          console.debug(`[ChatSession] getAgentConversation: projectId=${projectId}, branch=${branch ?? "null"}, tracked=${trackedId ?? "null"}, remote=${remote ? remote.localSessionId : "null"}, remoteBranch=${remote?.info.branch ?? "null"}`);
           if (remote) {
             try {
               const result = await proxyToRemoteAuto(
@@ -1542,11 +1524,9 @@ export class ChatSessionManager {
                 undefined,
                 { reverseConnectManager: this.reverseConnectManager ?? undefined },
               );
-              console.log(`[ChatSession] getAgentConversation: remote proxy result ok=${result.ok}, status=${result.status}`);
               if (result.ok) {
                 const data = result.data as { session: { status: string }; messages: AgentMessage[] };
                 let allMessages = data.messages ?? [];
-                console.log(`[ChatSession] getAgentConversation: remote returned ${allMessages.length} messages, session.status=${data.session?.status}`);
 
                 // Fallback: if remote returned no messages, extract from local cache
                 if (allMessages.length === 0) {
@@ -1557,16 +1537,15 @@ export class ChatSessionManager {
                 // to allow time for ENTRY patches to arrive via WebSocket
                 if (allMessages.length === 0 && data.session?.status === "running") {
                   const cacheState = this.remotePatchCache.get(remote.localSessionId);
-                  console.log(`[ChatSession] getAgentConversation: 0 messages for running session, starting retry. Cache state: wsState=${cacheState?.remoteWs?.readyState ?? "null"}, cachedMsgs=${cacheState?.messages.length ?? 0}, patchCount=${cacheState?.patchCount ?? 0}, finished=${cacheState?.finished ?? "N/A"}, reconnecting=${cacheState?.reconnecting ?? "N/A"}`);
+                  console.debug(`[ChatSession] getAgentConversation: 0 messages for running session, starting retry. Cache state: wsState=${cacheState?.remoteWs?.readyState ?? "null"}, cachedMsgs=${cacheState?.messages.length ?? 0}, patchCount=${cacheState?.patchCount ?? 0}, finished=${cacheState?.finished ?? "N/A"}, reconnecting=${cacheState?.reconnecting ?? "N/A"}`);
                   for (let attempt = 0; attempt < 3; attempt++) {
                     await new Promise(resolve => setTimeout(resolve, 1000));
                     allMessages = this.extractMessagesFromCache(remote.localSessionId);
-                    console.log(`[ChatSession] getAgentConversation: retry attempt ${attempt + 1}/3, extracted ${allMessages.length} messages`);
                     if (allMessages.length > 0) break;
                   }
                   if (allMessages.length === 0) {
                     const finalCache = this.remotePatchCache.get(remote.localSessionId);
-                    console.log(`[ChatSession] getAgentConversation: all retries exhausted, still 0 messages. Final cache: wsState=${finalCache?.remoteWs?.readyState ?? "null"}, cachedMsgs=${finalCache?.messages.length ?? 0}, patchCount=${finalCache?.patchCount ?? 0}`);
+                    console.warn(`[ChatSession] getAgentConversation: all retries exhausted, still 0 messages. Final cache: wsState=${finalCache?.remoteWs?.readyState ?? "null"}, cachedMsgs=${finalCache?.messages.length ?? 0}, patchCount=${finalCache?.patchCount ?? 0}`);
                   }
                 }
 
@@ -2476,7 +2455,7 @@ export class ChatSessionManager {
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.log(`[ChatSession] enqueueOrSend: session ${sessionId} not found, dropping message`);
+      console.warn(`[ChatSession] enqueueOrSend: session ${sessionId} not found, dropping message`);
       return;
     }
 
@@ -2495,18 +2474,17 @@ export class ChatSessionManager {
       if (content.startsWith(BROWSER_EVENT_PREFIX)) {
         const queuedBrowserEvents = queue.filter((item) => item.content.startsWith(BROWSER_EVENT_PREFIX)).length;
         if (queuedBrowserEvents >= MAX_QUEUED_BROWSER_EVENTS) {
-          console.log(`[ChatSession] Dropping browser event for session ${sessionId} (queued browser-event limit ${MAX_QUEUED_BROWSER_EVENTS} reached)`);
+          console.warn(`[ChatSession] Dropping browser event for session ${sessionId} (queued browser-event limit ${MAX_QUEUED_BROWSER_EVENTS} reached)`);
           return;
         }
       }
 
       queue.push({ content, eventDriven, eventMeta });
-      console.log(`[ChatSession] Queued message for session ${sessionId} (queue length: ${queue.length})`);
+      console.debug(`[ChatSession] Queued message for session ${sessionId} (queue length: ${queue.length})`);
       return;
     }
 
     // No active stream — send immediately
-    console.log(`[ChatSession] enqueueOrSend: sending immediately for session ${sessionId} (abortController=null)`);
     this.sendMessage(sessionId, content, eventDriven, eventMeta).catch((err) => {
       console.error(`[ChatSession] enqueueOrSend sendMessage error:`, err);
     });
@@ -2522,7 +2500,7 @@ export class ChatSessionManager {
     const next = queue.shift()!;
     if (queue.length === 0) this.messageQueue.delete(sessionId);
 
-    console.log(`[ChatSession] Draining queued message for session ${sessionId}`);
+    console.debug(`[ChatSession] Draining queued message for session ${sessionId}`);
     this.sendMessage(sessionId, next.content, next.eventDriven, next.eventMeta).catch((err) => {
       console.error(`[ChatSession] drainQueue sendMessage error:`, err);
     });
@@ -2549,18 +2527,13 @@ export class ChatSessionManager {
   ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.log(`[ChatSession] sendMessage: session ${sessionId} not found`);
+      console.warn(`[ChatSession] sendMessage: session ${sessionId} not found, dropping message`);
       return false;
     }
-    const isExecutorEvent = content.includes("[Executor Event");
-    console.log(`[ChatSession] sendMessage called: session=${sessionId}, contentLen=${content.length}, isExecutorEvent=${isExecutorEvent}, isTerminalEvent=${content.includes("[Terminal Event]")}, subscribers=${session.subscribers.size}`);
 
     // 1. Push user message
     const userMsg: AgentMessage = { type: "user", content, timestamp: Date.now(), ...(eventMeta ? { event: eventMeta } : {}) };
     this.pushEntry(session, userMsg);
-    if (isExecutorEvent) {
-      console.log(`[ChatSession] Executor event user message pushed at index ${session.store.nextIndex - 1}, broadcasting to ${session.subscribers.size} subscribers`);
-    }
 
     // 2. Update status to running
     session.status = "running";
@@ -2943,7 +2916,7 @@ export class ChatSessionManager {
       if (session.pendingApproval) {
         // Turn suspended awaiting user approval — keep abortController set so
         // concurrent events queue (drained on resume); skip status/turn_end/drain.
-        console.log(`[ChatSession] runStream parked for approval ${sessionId}`);
+        console.debug(`[ChatSession] runStream parked for approval ${sessionId}`);
       } else {
         session.abortController = null;
         session.status = "stopped";
@@ -2961,8 +2934,6 @@ export class ChatSessionManager {
         }
 
         // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
-        const queueLen = this.messageQueue.get(sessionId)?.length ?? 0;
-        console.log(`[ChatSession] sendMessage finished for ${sessionId}, draining queue (${queueLen} items), subscribers=${session.subscribers.size}`);
         this.drainQueue(sessionId);
       }
     }
@@ -3047,23 +3018,22 @@ export class ChatSessionManager {
   }
 
   private broadcastPatch(session: ChatSession, patch: Patch): void {
-    if (session.subscribers.size === 0) {
-      // Check if this is an ENTRY patch (new message) — log it since no one will receive it
-      const hasEntry = patch.some(p => p.value?.type === "ENTRY");
-      if (hasEntry) {
-        console.log(`[ChatSession] broadcastPatch: ENTRY patch but 0 subscribers for session ${session.id}`);
-      }
+    // A new message with nobody listening isn't lost (subscribe() replays the
+    // patch log on reconnect), but it's the first thing to check when a client
+    // reports a missing message.
+    if (session.subscribers.size === 0 && patch.some(p => p.value?.type === "ENTRY")) {
+      console.debug(`[ChatSession] broadcastPatch: ENTRY patch but 0 subscribers for session ${session.id}`);
     }
     const raw = JSON.stringify({ JsonPatch: patch });
     for (const ws of session.subscribers) {
       try {
         if (ws.readyState !== 1 /* OPEN */) {
-          console.log(`[ChatSession] broadcastPatch: subscriber ws.readyState=${ws.readyState} (not OPEN), skipping`);
+          console.debug(`[ChatSession] broadcastPatch: subscriber ws.readyState=${ws.readyState} (not OPEN), skipping`);
           continue;
         }
         ws.send(raw);
       } catch (err) {
-        console.log(`[ChatSession] broadcastPatch: send failed:`, err);
+        console.warn(`[ChatSession] broadcastPatch: send failed:`, err);
       }
     }
   }

@@ -258,25 +258,18 @@ export function useChatSession(projectId: string | null, branch: string | null) 
         const msg = JSON.parse(event.data) as AgentWsMessage;
 
         if ("JsonPatch" in msg) {
-          const prevCount = containerRef.current.entries.filter(Boolean).length;
           containerRef.current = applyPatch(containerRef.current, msg.JsonPatch);
-          const newCount = containerRef.current.entries.filter(Boolean).length;
+          // During replay the server streams the whole history patch-by-patch;
+          // state is flushed once on Ready instead of re-rendering per entry.
           if (!isReplayingRef.current) {
-            if (newCount !== prevCount) {
-              console.log(`[ChatSession] New message via WS patch (${prevCount} → ${newCount}), calling setMessages`);
-            }
             setMessages([...containerRef.current.entries.filter(Boolean)]);
             setStatus(containerRef.current.status);
-          } else if (newCount !== prevCount) {
-            console.log(`[ChatSession] WS patch added message (${prevCount} → ${newCount}) but isReplaying=true, state NOT updated`);
           }
           return;
         }
 
         if ("Ready" in msg) {
           isReplayingRef.current = false;
-          const count = containerRef.current.entries.filter(Boolean).length;
-          console.log(`[ChatSession] Ready received, isReplaying → false, ${count} messages`);
           setMessages([...containerRef.current.entries.filter(Boolean)]);
           setStatus(containerRef.current.status);
           setIsInitialized(true);
@@ -564,9 +557,6 @@ export function useChatSession(projectId: string | null, branch: string | null) 
       if (!session?.id || finishedRef.current) return;
 
       const ws = wsRef.current;
-      const msgCount = containerRef.current.entries.filter(Boolean).length;
-      console.log(`[ChatSession] Tab visible: ws.readyState=${ws?.readyState ?? "null"}, isReplaying=${isReplayingRef.current}, messages=${msgCount}`);
-
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         // WebSocket already closed — the onclose reconnect logic will handle it
         return;
