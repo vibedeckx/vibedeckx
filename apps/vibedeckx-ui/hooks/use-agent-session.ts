@@ -578,6 +578,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
   const openSocketRef = useRef<(sessionId: string) => void>(() => {});
+  const replaceSilentSocketRef = useRef<(socket: WebSocket) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
   const containerRef = useRef<PatchContainer>({ entries: {}, status: "stopped" });
@@ -667,7 +668,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // server broadcasts from then on is lost and the conversation freezes
   // mid-turn while the sidebar (fed by SSE) keeps updating. The server sends a
   // `keepalive` frame every 30s, so three missed intervals means the socket is
-  // gone; close it ourselves to fall into the normal reconnect + replay path.
+  // gone; retire it and immediately open a replacement. Do not wait for the
+  // dead socket's close handshake: a half-open connection can remain CLOSING
+  // indefinitely and never deliver the `onclose` that used to schedule recovery.
   // Browsers never expose pong events to JS, which is why this watches for
   // application-level frames rather than the protocol-level heartbeat.
   const SILENCE_TIMEOUT_MS = 95000;
@@ -686,9 +689,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       silenceTimerRef.current = null;
       if (ws.readyState !== WebSocket.OPEN) return;
       console.warn(`[AgentSession] No frames for ${SILENCE_TIMEOUT_MS}ms — assuming dead socket, forcing reconnect`);
-      // Not 1000: that code is reserved for intentional closes, which onclose
-      // treats as "do not reconnect".
-      try { ws.close(4000, "silence watchdog"); } catch { /* already gone */ }
+      replaceSilentSocketRef.current(ws);
     }, SILENCE_TIMEOUT_MS);
   }, []);
 
@@ -809,7 +810,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     wsRef.current = ws;
     wsSessionIdRef.current = sessionId;
 
+    // A retired socket may deliver events long after its replacement is live.
+    // Only the socket currently owned by wsRef may mutate shared React/ref state.
+    const isCurrentSocket = () => wsRef.current === ws;
+
     ws.onopen = () => {
+      if (!isCurrentSocket()) return;
       console.log("[AgentSession] WebSocket connected");
       setIsConnected(true);
       setError(null);
@@ -824,6 +830,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         clearTimeout(stabilityTimeoutRef.current);
       }
       stabilityTimeoutRef.current = setTimeout(() => {
+        if (!isCurrentSocket()) return;
         console.log("[AgentSession] Connection stable, resetting backoff counter");
         reconnectAttemptRef.current = 0;
         shortLivedConnectionsRef.current = 0;
@@ -831,6 +838,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     ws.onmessage = (event) => {
+      if (!isCurrentSocket()) return;
       // Any frame proves the socket is alive, whatever it turns out to be.
       armSilenceTimer(ws);
       try {
@@ -933,7 +941,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
         // Handle session title (set asynchronously after the first user message)
         if ("titleUpdated" in msg) {
-          onTitleUpdatedRef.current?.(msg.titleUpdated.title, wsSessionIdRef.current);
+          onTitleUpdatedRef.current?.(msg.titleUpdated.title, sessionId);
           return;
         }
 
@@ -964,7 +972,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     ws.onclose = (event) => {
+      if (!isCurrentSocket()) return;
       console.log("[AgentSession] WebSocket disconnected", event.code, event.reason);
+      wsRef.current = null;
       setIsConnected(false);
       clearSilenceTimer();
 
@@ -1036,6 +1046,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     ws.onerror = (error) => {
+      if (!isCurrentSocket()) return;
       console.error("[AgentSession] WebSocket error:", error);
     };
   }, [connectWebSocket, armSilenceTimer, clearSilenceTimer]);
@@ -1045,6 +1056,36 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   useEffect(() => {
     openSocketRef.current = openSocket;
   }, [openSocket]);
+
+  // A silence timeout proves the old socket can no longer be trusted. Detach it
+  // from shared state before calling close(), then reconnect immediately. This
+  // deliberately does not depend on the old socket ever reaching CLOSED.
+  useEffect(() => {
+    replaceSilentSocketRef.current = (silentSocket: WebSocket) => {
+      if (wsRef.current !== silentSocket) return;
+      const sessionId = wsSessionIdRef.current;
+      wsRef.current = null;
+      setIsConnected(false);
+
+      if (stabilityTimeoutRef.current) {
+        clearTimeout(stabilityTimeoutRef.current);
+        stabilityTimeoutRef.current = null;
+      }
+      connectionStartTimeRef.current = null;
+
+      // Code 4000 remains useful in browser diagnostics if the close event is
+      // eventually emitted. Its handler is harmless because socket identity
+      // guards prevent it from touching the replacement connection.
+      try { silentSocket.close(4000, "silence watchdog"); } catch { /* already gone */ }
+
+      if (sessionId && !finishedRef.current) {
+        connectWebSocket(sessionId, true);
+      }
+    };
+    return () => {
+      replaceSilentSocketRef.current = () => {};
+    };
+  }, [connectWebSocket]);
 
   // Start or get existing session - returns the session for immediate use
   const startSession = useCallback(async (permissionMode?: "plan" | "edit"): Promise<AgentSession | null> => {
