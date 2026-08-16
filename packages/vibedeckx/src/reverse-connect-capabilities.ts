@@ -40,6 +40,10 @@ export interface WorkerCapability {
 export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // --- Agent sessions ---
   "http:GET /api/path/agent-sessions": { since: "0.2.0", summary: "会话列表(按路径)" },
+  // Additive: a worker below 0.3.22 404s it and the hub answers
+  // `complete: false`, whereupon the UI falls back to the per-branch listing
+  // above — i.e. exactly the behavior it had before this route existed.
+  "http:GET /api/path/agent-sessions/alive": { since: "0.3.22", summary: "存活会话列表(全分支)" },
   "http:POST /api/path/agent-sessions": { since: "0.2.0", summary: "创建会话" },
   "http:POST /api/path/agent-sessions/new": { since: "0.2.0", summary: "创建会话(指定 ID)" },
   "http:GET /api/agent-sessions/:param": { since: "0.2.0", summary: "读会话详情/对话" },

@@ -83,6 +83,20 @@ export interface RunningResidentProcess {
   lastActiveAt: number;
 }
 
+/**
+ * One session that currently holds a live agent process — the unit the sidebar
+ * shows under a workspace. Deliberately NOT `RunningResidentProcess`: that one
+ * serves eviction bookkeeping and demands `status === "running"`, whereas an
+ * idle-but-alive session is exactly what the sidebar must keep listing.
+ */
+export interface AliveAgentSession {
+  id: string;
+  projectId: string;
+  branch: string | null;
+  status: AgentSessionStatus;
+  lastActiveAt: number;
+}
+
 export class ResidentProcessLimitError extends Error {
   readonly errorCode = "resident_limit_reached";
   readonly maxResidentAgentProcesses: number;

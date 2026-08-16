@@ -1185,6 +1185,33 @@ export async function listBranchSessions(
   return res.json();
 }
 
+// Deliberately minimal: a sidebar row's name, the workspace it hangs under,
+// and its dot. No timestamp — the list arrives most-recently-active first.
+export interface AliveSessionSummary {
+  id: string;
+  branch: string | null;
+  title?: string | null;
+  status: string;
+}
+
+/**
+ * Every session in the project that currently holds a live agent process — one
+ * request for the whole sidebar, instead of one per workspace. Rows come back
+ * most recently active first.
+ *
+ * `complete: false` means the answer couldn't be enumerated (a remote worker
+ * too old to serve the endpoint); the caller must fall back to
+ * `listBranchSessions` per branch. A worker that is merely offline/erroring
+ * REJECTS instead, so the caller keeps the rows it already has.
+ */
+export async function listAliveSessions(
+  projectId: string
+): Promise<{ sessions: AliveSessionSummary[]; complete: boolean }> {
+  const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/agent-sessions/alive`);
+  if (!res.ok) throw new Error(`listAliveSessions failed: ${res.status}`);
+  return res.json();
+}
+
 // Explicitly create a new agent session (never reuses an existing one)
 export async function createNewAgentSession(
   projectId: string,

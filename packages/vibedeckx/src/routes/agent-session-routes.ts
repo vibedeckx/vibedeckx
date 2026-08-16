@@ -14,7 +14,7 @@ import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { bindRemoteSessionMapping, createRemoteAgentSession, createRemoteBranchedSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
-import { ResidentProcessLimitError, shouldShowBranchSessionInList } from "../resident-agent-processes.js";
+import { ResidentProcessLimitError, shouldShowBranchSessionInList, type AliveAgentSession } from "../resident-agent-processes.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { createHash, randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
@@ -89,6 +89,65 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return proxyToRemoteAuto(remoteServerId, method, apiPath, body, {
       reverseConnectManager: fastify.reverseConnectManager,
     });
+  }
+
+  /**
+   * Display rows for the sessions that currently hold a live agent process.
+   * The manager owns liveness and status; storage supplies title/branch, read
+   * once per ALIVE session — a handful, bounded by the resident-process limit —
+   * instead of the branch listing's "every session of every branch, then throw
+   * away the dead ones" (the sidebar's actual question).
+   */
+  async function hydrateAliveSessions(alive: AliveAgentSession[]) {
+    return Promise.all(alive.map(async (session) => {
+      const row = await fastify.storage.agentSessions.getById(session.id);
+      const registered = row?.workspace_checkout_id
+        ? await fastify.storage.workspaceRegistry.getCheckoutById(row.workspace_checkout_id)
+        : undefined;
+      // Checkout-first identity, matching how the branch listing projects it:
+      // a re-anchored workspace moves its sessions, the snapshot columns don't.
+      const branch = registered
+        ? (registered.workspace.branch === "" ? null : registered.workspace.branch)
+        : row
+          ? (row.branch === "" ? null : row.branch)
+          : session.branch;
+      return {
+        id: session.id,
+        projectId: registered?.workspace.project_id ?? row?.project_id ?? session.projectId,
+        branch,
+        title: row?.title ?? null,
+        // In-memory status is authoritative for a session whose process is up.
+        status: session.status,
+        processAlive: true as const,
+        updated_at: row?.updated_at,
+        worktreePath: registered?.checkout.worktree_path ?? null,
+      };
+    }));
+  }
+
+  /**
+   * Public shape of an alive session: a row's name, the workspace it hangs
+   * under, and its dot. Nothing else belongs in a project-scoped contract we
+   * then have to keep — the identity fields (`projectId`, `worktreePath`,
+   * `processAlive`) stay on the worker→hub hop, which needs them to bind a
+   * remote session's mapping.
+   *
+   * No timestamp either: the list arrives most-recently-active first
+   * (`listAliveSessions`, preserved through hydration and the proxy), so the
+   * client renders the order it is given instead of re-deriving it.
+   */
+  function aliveSessionSummary(session: {
+    id: string;
+    branch: string | null;
+    title: string | null;
+    status: string;
+  }) {
+    return {
+      id: session.id,
+      branch: session.branch,
+      title: session.title,
+      status: session.status,
+    };
   }
 
   /**
@@ -418,6 +477,31 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Path-based: the sessions on this machine that currently hold a live agent
+  // process, across ALL branches of one project. Used by the remote-proxy
+  // branch of GET /api/projects/:projectId/agent-sessions/alive — see there for
+  // why the sidebar asks this instead of listing every branch.
+  fastify.get<{ Querystring: { path?: string } }>(
+    "/api/path/agent-sessions/alive",
+    async (req, reply) => {
+      const projectPath = req.query.path;
+      if (!projectPath) {
+        return reply.code(400).send({ error: "path is required" });
+      }
+      const existing = await fastify.storage.projects.getByPath(projectPath);
+      // A session may carry the `path:` pseudo project id (created before a
+      // real project row existed at that path), so accept both identities
+      // rather than silently reporting the workspace as idle.
+      const projectIds = [`path:${projectPath}`];
+      if (existing) projectIds.push(existing.id);
+      const sessions = await hydrateAliveSessions(
+        fastify.agentSessionManager.listAliveSessions(projectIds),
+      );
+      // Liveness is read from one in-memory map: the answer is never truncated.
+      return reply.code(200).send({ sessions, complete: true });
+    },
+  );
+
   // Path-based: always create a new session (for remote `/new` proxy target)
   fastify.post<{
   Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null };
@@ -678,6 +762,115 @@ const routes: FastifyPluginAsync = async (fastify) => {
           processAlive: s.processAlive,
         }));
       return reply.code(200).send({ sessions });
+    }
+  );
+
+  /**
+   * Whole-project liveness for the sidebar: which sessions currently hold a
+   * process, in ONE request. The branch-filtered listing above answers the same
+   * question per branch, so the sidebar used to fan out a request per workspace
+   * on every project switch — each one returning a branch's entire history for
+   * the sake of a boolean, and on a remote project costing a tunnel round-trip
+   * plus a mapping write per listed session.
+   *
+   * `complete: false` is "this answer could not be enumerated" — a worker too
+   * old to serve the route — and asks the caller to fall back to that fan-out.
+   * Enumeration FAILURES (offline worker, worker error) propagate as an error
+   * status instead, so the caller keeps the rows it has rather than blanking
+   * the sidebar or re-trying N times against the same dead tunnel.
+   */
+  fastify.get<{ Params: { projectId: string } }>(
+    "/api/projects/:projectId/agent-sessions/alive",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+
+      if (project.agent_mode === "local") {
+        if (!project.path) {
+          return reply.code(200).send({ sessions: [], complete: true });
+        }
+        const alive = await hydrateAliveSessions(
+          fastify.agentSessionManager.listAliveSessions([project.id]),
+        );
+        return reply.code(200).send({ sessions: alive.map(aliveSessionSummary), complete: true });
+      }
+
+      const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, project.agent_mode);
+      if (!remoteConfig) {
+        // Remote misconfigured — no sessions can be alive there, and a fan-out
+        // would find nothing either (that path returns [] for the same reason).
+        return reply.code(200).send({ sessions: [], complete: true });
+      }
+      const result = await proxyAuto(
+        project.agent_mode,
+        "GET",
+        `/api/path/agent-sessions/alive?path=${encodeURIComponent(remoteConfig.remote_path)}`
+      );
+      if (result.status === 404) {
+        // Additive route: a worker below the version that ships it 404s here.
+        return reply.code(200).send({ sessions: [], complete: false });
+      }
+      if (!result.ok) {
+        console.error("[API] Remote alive-sessions proxy error:", result.status, result.data);
+        return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      const data = result.data as { sessions?: unknown };
+      // Order comes from the worker (most recently active first) and is
+      // preserved: Promise.all keeps the input order.
+      const rows = Array.isArray(data?.sessions)
+        ? data.sessions as Array<{ id: string; branch?: string | null; title?: string | null; status?: string; worktreePath?: string | null }>
+        : [];
+      const mapped = await Promise.all(rows.map(async (s) => {
+        const localSessionId = `remote-${project.agent_mode}-${project.id}-${s.id}`;
+        const unbound = aliveSessionSummary({
+          id: localSessionId,
+          branch: s.branch ?? null,
+          title: s.title ?? null,
+          status: s.status ?? "stopped",
+        });
+        // Same discovery-and-bind as the branch listing, but only for the live
+        // sessions — that listing binds every historical session of every
+        // branch just to render a handful of sidebar rows.
+        if (!fastify.remoteSessionMap.has(localSessionId)) {
+          fastify.remoteSessionMap.set(localSessionId, {
+            remoteServerId: project.agent_mode,
+            remoteSessionId: s.id,
+            branch: s.branch ?? null,
+          });
+        }
+        try {
+          await bindRemoteSessionMapping(fastify.storage, {
+            localSessionId, projectId: project.id, remoteServerId: project.agent_mode,
+            remoteSessionId: s.id, branch: s.branch ?? null,
+            remotePath: remoteConfig.remote_path,
+            reportedWorktreePath: s.worktreePath ?? null,
+            notificationSyncStart: "from_now",
+          });
+        } catch (error) {
+          // One session with a conflicting workspace identity must not empty
+          // the whole sidebar — this is a single request now, not N.
+          console.warn(`[API] alive-sessions mapping bind failed for ${localSessionId}:`, error);
+          return unbound;
+        }
+        const mapping = await fastify.storage.remoteSessionMappings.getAuthorizedByLocal(
+          localSessionId, project.id, "session-list",
+        );
+        const registered = mapping?.workspace_checkout_id
+          ? await fastify.storage.workspaceRegistry.getCheckoutById(mapping.workspace_checkout_id)
+          : undefined;
+        return {
+          ...unbound,
+          branch: registered
+            ? (registered.workspace.branch === "" ? null : registered.workspace.branch)
+            : (mapping?.branch ?? s.branch ?? null),
+        };
+      }));
+      return reply.code(200).send({ sessions: mapped, complete: true });
     }
   );
 

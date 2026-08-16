@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listBranchSessions, type BranchSessionSummary, type Worktree } from "@/lib/api";
+import { listAliveSessions, listBranchSessions, type Worktree } from "@/lib/api";
 import {
   useConnectionStatus,
   useGlobalEventStream,
@@ -91,8 +91,62 @@ export function updateResidentSessionTitle(
   );
 }
 
-function sessionTitle(session: BranchSessionSummary): string {
+function sessionTitle(session: { title?: string | null }): string {
   return session.title?.trim() || "New Session";
+}
+
+/**
+ * The sidebar's rows for one project: the sessions holding a live process.
+ * Returns null when no answer could be produced — the caller must then keep
+ * the rows it has, since "we don't know" is not "nothing is running".
+ *
+ * One whole-project request, deliberately independent of the workspace list:
+ * liveness is a property of the project, so it must not wait on (or be scoped
+ * by) a worktree fetch. The fallback — one listing per branch, of which
+ * everything but the live rows is discarded — is what this hook used to do
+ * unconditionally, and is still the only thing a remote worker older than the
+ * `/alive` endpoint can answer (`complete: false`); only that path needs
+ * `branches`. A worker that is offline or erroring makes the request REJECT,
+ * and the caller keeps its current rows.
+ */
+async function fetchResidentSessions(
+  projectId: string,
+  branches: Array<string | null>,
+): Promise<ResidentSidebarSession[] | null> {
+  const alive = await listAliveSessions(projectId);
+  if (alive.complete) {
+    // No `updated_at`: these arrive most-recently-active first and the grouping
+    // below keeps that order (its sort is stable, and a row without a timestamp
+    // never reorders against its peers).
+    return alive.sessions.map((session) => ({
+      id: session.id,
+      projectId,
+      branch: session.branch,
+      title: sessionTitle(session),
+      status: session.status,
+      processAlive: true,
+    }));
+  }
+  // Fallback only: with no workspace list yet there is nothing to enumerate,
+  // and an empty fan-out result would read as "no live sessions".
+  if (branches.length === 0) return null;
+  const perBranch = await Promise.all(
+    branches.map(async (branch) => {
+      const data = await listBranchSessions(projectId, branch);
+      return data.sessions
+        .filter((session) => session.processAlive)
+        .map((session) => ({
+          id: session.id,
+          projectId,
+          branch,
+          title: sessionTitle(session),
+          status: session.status,
+          processAlive: true,
+          updated_at: session.updated_at,
+        }));
+    }),
+  );
+  return perBranch.flat();
 }
 
 /**
@@ -150,31 +204,19 @@ export function useResidentSessions(
   }, [projectId, sessions]);
 
   const refresh = useCallback(async () => {
-    if (!projectId || branches.length === 0) {
+    if (!projectId) {
       setSessions([]);
       return;
     }
-    const results = await Promise.all(
-      branches.map(async (branch) => {
-        const data = await listBranchSessions(projectId, branch);
-        return data.sessions
-          .filter((session) => session.processAlive)
-          .map((session) => ({
-            id: session.id,
-            projectId,
-            branch,
-            title: sessionTitle(session),
-            status: session.status,
-            processAlive: true,
-            updated_at: session.updated_at,
-          }));
-      }),
-    );
+    const rows = await fetchResidentSessions(projectId, branches);
+    // null = the answer could not be produced (see fetchResidentSessions);
+    // hold the rows we have rather than reporting the project as idle.
+    if (rows === null) return;
     if (projectIdRef.current !== projectId) return;
     // Functional update so we reconcile against the freshest state: a
     // `session:title` event that landed while this fetch was in flight must not
     // be clobbered by the pre-title snapshot this request returned.
-    setSessions((prev) => mergeRefreshedSessions(prev, results.flat()));
+    setSessions((prev) => mergeRefreshedSessions(prev, rows));
   }, [branches, projectId]);
 
   useEffect(() => {
@@ -263,6 +305,9 @@ export function useResidentSessions(
       byBranch.set(key, list);
     }
     for (const list of byBranch.values()) {
+      // Newest first. Rows from the whole-project endpoint carry no timestamp
+      // — they are already in that order, and a stable sort over equal keys
+      // leaves them in it.
       list.sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
     }
     return byBranch;

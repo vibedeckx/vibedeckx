@@ -38,6 +38,7 @@ import {
   normalizeAgentProcessSettings,
   pickIdleResidentEvictionCandidate,
   ResidentProcessLimitError,
+  type AliveAgentSession,
   type ResidentProcessScope,
   type RunningResidentProcess,
 } from "./resident-agent-processes.js";
@@ -532,6 +533,36 @@ export class AgentSessionManager {
   getSessionProcessAlive(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
     return session ? this.isProcessAlive(session) : false;
+  }
+
+  /**
+   * Every session with a live process belonging to one of `projectIds` — the
+   * whole-project answer behind GET /api/projects/:id/agent-sessions/alive.
+   * Callers pass more than one id only on the worker, where a project reached
+   * by path can be known under both its registered id and the `path:` pseudo id.
+   *
+   * Alive, not running: a session sitting idle between turns still owns a
+   * process the user can resume instantly, which is precisely what the sidebar
+   * marks. `getRunningResidentProcesses` answers a different question.
+   *
+   * Most recently active FIRST — the order the sidebar renders in. Sorting here
+   * rather than shipping the timestamp keeps recency a server decision (and
+   * `getRunningResidentProcesses` sorts the other way on purpose: it is looking
+   * for the stalest process to evict).
+   */
+  listAliveSessions(projectIds: string[]): AliveAgentSession[] {
+    const scope = new Set(projectIds);
+    return [...this.sessions.values()]
+      .filter((session) => scope.has(session.projectId) && this.isProcessAlive(session))
+      .map((session) => ({
+        id: session.id,
+        projectId: session.projectId,
+        // "" is the main-branch sentinel in storage; the API speaks null.
+        branch: session.branch === "" ? null : session.branch,
+        status: session.status,
+        lastActiveAt: session.lastActiveAt,
+      }))
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }
 
   getRunningResidentProcesses(scope?: ResidentProcessScope): RunningResidentProcess[] {

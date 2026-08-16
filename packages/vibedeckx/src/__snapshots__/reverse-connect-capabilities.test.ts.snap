@@ -12,6 +12,7 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:GET /api/browse",
   "http:GET /api/executor-processes/running",
   "http:GET /api/path/agent-sessions",
+  "http:GET /api/path/agent-sessions/alive",
   "http:GET /api/path/branches",
   "http:GET /api/path/branches/activity",
   "http:GET /api/path/browse",
