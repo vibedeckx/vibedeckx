@@ -62,6 +62,11 @@ const COVERED_BY = {
   // Registered by "anchor main workspace to its current branch" without a
   // coverage entry here, which left this list unsatisfiable. Local route test.
   "http:POST /api/path/worktrees/anchor": { file: "packages/vibedeckx/src/routes/worktree-registry-routes.test.ts", marker: "/worktrees/anchor" },
+  // Same shape as /anchor: the hub turns an old worker's 404 into a 501, so a
+  // smoke here could not tell "expected gap" from "broken" the way this
+  // harness judges it. The route test covers both halves — the local anchor
+  // change and the 501 the hub reports for a stale worker.
+  "http:POST /api/path/worktrees/anchor-branch": { file: "packages/vibedeckx/src/routes/worktree-registry-routes.test.ts", marker: "/worktrees/anchor-branch" },
   // Only ever called by the hub's reconciliation timer, which has no
   // operator-facing trigger to drive from here. Both halves are tested: the
   // worker endpoint's contract (full listing + `complete`) in the route test
