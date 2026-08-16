@@ -107,8 +107,8 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       <div className="h-screen flex flex-col items-center justify-center bg-background">
         <div className={CLERK_CARD_WIDTH}>
           {sessionExpired && (
-            <div className="mb-4 flex w-full items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-600 dark:text-amber-400">
-              <Clock className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="mb-4 flex w-full items-center justify-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-center text-sm text-amber-600 dark:text-amber-400">
+              <Clock className="h-4 w-4 shrink-0" />
               <span>Session expired. Sign in again to continue.</span>
             </div>
           )}
