@@ -15,7 +15,13 @@ export const WORKTREE_DRIFT_BACKSTOP_MS = 5 * 60_000;
 // second return trigger this soon after a successful fetch is therefore
 // dropped. Only the return triggers are gated — a long absence always
 // refreshes, since the cooldown can only bite when the list was just fetched.
-export const RETURN_REFRESH_COOLDOWN_MS = 15_000;
+//
+// Kept short deliberately: the pair to collapse arrives tens of milliseconds
+// to a couple of seconds apart (uncovered, then clicked), so a few seconds
+// buys the whole dedup, while every extra second widens the window in which a
+// Git change made outside the app — the case these triggers exist for — is
+// missed until the five-minute backstop.
+export const RETURN_REFRESH_COOLDOWN_MS = 5_000;
 
 /**
  * True while the worktree list can't be trusted for `scope` — a fetch is in
