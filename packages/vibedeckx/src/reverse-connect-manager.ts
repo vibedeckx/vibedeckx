@@ -137,7 +137,10 @@ export class ReverseConnectManager {
     method: string,
     path: string,
     body?: unknown,
-    timeoutMs = DEFAULT_HTTP_TIMEOUT_MS
+    timeoutMs = DEFAULT_HTTP_TIMEOUT_MS,
+    /** Forwarded verbatim into the frame; the worker hands these to its own
+     *  server.inject, so a `traceparent` here continues the hub's trace. */
+    extraHeaders?: Record<string, string>
   ): Promise<ProxyResult> {
     const conn = this.connections.get(this.resolveId(remoteServerId));
     if (!conn || conn.ws.readyState !== 1) {
@@ -155,7 +158,10 @@ export class ReverseConnectManager {
       requestId,
       method,
       path,
-      headers: body !== undefined ? { "content-type": "application/json" } : {},
+      headers: {
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        ...extraHeaders,
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     };
 

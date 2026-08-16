@@ -4,6 +4,7 @@ import { format } from "node:util";
 import { pino, multistream, type Logger, type Level, type StreamEntry } from "pino";
 import pretty from "pino-pretty";
 import { createStream, type RotatingFileStream } from "rotating-file-stream";
+import { getTraceContext, type TraceContext } from "./trace-context.js";
 
 // Central logging setup. Design doc: docs/superpowers/specs/2026-07-04-logging-design.md
 //
@@ -28,16 +29,40 @@ function resolveLevel(flagLevel: string | undefined): string {
   return "info";
 }
 
+// Child loggers are memoized per request context so a request that logs 200
+// times builds one child, not 200. Weak so the entry dies with the context.
+const traceLoggers = new WeakMap<TraceContext, { base: Logger; child: Logger }>();
+
 /**
- * Root logger accessor. Before setupLogging runs (unit tests, direct
- * createServer use) this falls back to a plain stdout pino so importing
- * modules never crash.
+ * Bind the active request's trace IDs onto a logger.
+ *
+ * Resolved per call rather than captured once, because the ALS context only
+ * exists inside a request while both getLogger() and the console bridge are
+ * module-level and long-lived. Capturing at install time is exactly the bug
+ * that leaves error lines — the ones you go looking for — unlabeled.
+ */
+function withTraceContext(base: Logger): Logger {
+  const ctx = getTraceContext();
+  if (!ctx) return base;
+  const cached = traceLoggers.get(ctx);
+  // Compare the base too: setupLogging replaces the root logger, and tests
+  // call it repeatedly, so a cached child can outlive the logger it came from.
+  if (cached && cached.base === base) return cached.child;
+  const child = base.child({ traceId: ctx.traceId, spanId: ctx.spanId });
+  traceLoggers.set(ctx, { base, child });
+  return child;
+}
+
+/**
+ * Logger accessor. Before setupLogging runs (unit tests, direct createServer
+ * use) this falls back to a plain stdout pino so importing modules never
+ * crash. Inside a request it returns a child bound to that request's trace.
  */
 export function getLogger(): Logger {
   if (!rootLogger) {
     rootLogger = pino({ level: resolveLevel(undefined) });
   }
-  return rootLogger;
+  return withTraceContext(rootLogger);
 }
 
 export interface SetupLoggingOptions {
@@ -116,6 +141,10 @@ export function setupLogging(opts: SetupLoggingOptions): Logger {
 /**
  * Route console.* through the logger so all ~355 existing call sites gain
  * levels, timestamps, and file persistence without being touched.
+ *
+ * Each closure resolves the trace-bound child at call time. Since nearly all
+ * logging in this codebase is console.*, this — not getLogger() — is what
+ * actually puts a trace ID on request errors.
  */
 function installConsoleBridge(logger: Logger): void {
   if (!originalConsole) {
@@ -127,11 +156,11 @@ function installConsoleBridge(logger: Logger): void {
       debug: console.debug,
     };
   }
-  console.log = (...args: unknown[]) => logger.info(format(...args));
-  console.info = (...args: unknown[]) => logger.info(format(...args));
-  console.warn = (...args: unknown[]) => logger.warn(format(...args));
-  console.error = (...args: unknown[]) => logger.error(format(...args));
-  console.debug = (...args: unknown[]) => logger.debug(format(...args));
+  console.log = (...args: unknown[]) => withTraceContext(logger).info(format(...args));
+  console.info = (...args: unknown[]) => withTraceContext(logger).info(format(...args));
+  console.warn = (...args: unknown[]) => withTraceContext(logger).warn(format(...args));
+  console.error = (...args: unknown[]) => withTraceContext(logger).error(format(...args));
+  console.debug = (...args: unknown[]) => withTraceContext(logger).debug(format(...args));
 }
 
 /** Undo installConsoleBridge (tests only). */

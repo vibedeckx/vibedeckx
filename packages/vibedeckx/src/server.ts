@@ -45,6 +45,7 @@ import notificationRoutes from "./routes/notification-routes.js";
 import notificationOutboxRoutes from "./routes/notification-outbox-routes.js";
 import { getAuth, clerkClient } from "@clerk/fastify";
 import { getLogger } from "./logger.js";
+import { registerTraceContext } from "./trace-context-hooks.js";
 import "./server-types.js";
 
 // Operator secret for /api/admin/*. An empty value is normalized to "unset":
@@ -204,11 +205,21 @@ export const createServer = async (opts: {
   // Decorate noLocalProjects so project routes can reject local-path creation
   server.decorate("noLocalProjects", noLocalProjects);
 
+  // Trace context — must be the first onRequest hook. The gates below return
+  // 404 before any later hook runs, and a rejected request is exactly the kind
+  // worth tracing.
+  registerTraceContext(server);
+
   // CORS - must be set before all routes
   server.addHook("onRequest", (req, reply, done) => {
     reply.header("access-control-allow-origin", "*");
     reply.header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
-    reply.header("access-control-allow-headers", "Content-Type, Upgrade, Connection, X-Vibedeckx-Api-Key, X-Request-Id, Authorization");
+    // traceparent is not a CORS-safelisted request header, so the frontend dev
+    // origin (:3000 → :5173) needs it allowed or every request preflight-fails.
+    reply.header("access-control-allow-headers", "Content-Type, Upgrade, Connection, X-Vibedeckx-Api-Key, X-Request-Id, Authorization, traceparent");
+    // Response headers are unreadable from JS unless exposed — without this
+    // the UI cannot show the user the trace ID it just received.
+    reply.header("access-control-expose-headers", "traceparent");
     done();
   });
 
@@ -262,25 +273,10 @@ export const createServer = async (opts: {
     });
   }
 
-  // Request/response logging for proxied requests (those with X-Request-Id)
-  server.addHook("onRequest", (req, _reply, done) => {
-    const requestId = req.headers["x-request-id"];
-    if (requestId) {
-      (req as unknown as Record<string, unknown>).startTime = Date.now();
-      console.log(`[remote] ${requestId} ${req.method} ${redactUrlForLog(req.url)}`);
-    }
-    done();
-  });
-
-  server.addHook("onResponse", (req, reply, done) => {
-    const requestId = req.headers["x-request-id"];
-    if (requestId) {
-      const startTime = (req as unknown as Record<string, unknown>).startTime as number | undefined;
-      const ms = startTime ? Date.now() - startTime : 0;
-      console.log(`[remote] ${requestId} ${req.method} ${redactUrlForLog(req.url)} -> ${reply.statusCode} (${ms}ms)`);
-    }
-    done();
-  });
+  // (The X-Request-Id request/response logging that used to sit here was dead
+  // code: its only sender was the direct-URL outbound mode removed in c6b04d8.
+  // registerTraceContext above supersedes it and works for every request, not
+  // just proxied ones.)
 
   // Handle CORS preflight requests
   server.options("/*", async (req, reply) => {

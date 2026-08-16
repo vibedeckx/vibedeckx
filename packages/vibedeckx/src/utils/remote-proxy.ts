@@ -1,4 +1,5 @@
 import type { ReverseConnectManager } from "../reverse-connect-manager.js";
+import { outboundTraceparent } from "../trace-context.js";
 
 export interface ProxyResult {
   ok: boolean;
@@ -26,6 +27,8 @@ export function proxyStatus(result: { status: number }, fallback: number = 502):
 export interface ProxyOptions {
   requestId?: string;
   timeoutMs?: number;
+  /** Extra tunnel headers. Merged over the automatic trace header. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -43,7 +46,15 @@ export async function proxyToRemoteAuto(
 ): Promise<ProxyResult> {
   const rcm = options?.reverseConnectManager;
   if (rcm && rcm.isConnected(remoteServerId)) {
-    return rcm.sendHttpRequest(remoteServerId, method, apiPath, body, options?.timeoutMs);
+    // Pulled from the ambient request context rather than threaded through the
+    // dozens of proxy call sites: the trace header rides along automatically,
+    // and a worker running old code simply ignores an unknown header.
+    const traceparent = outboundTraceparent();
+    const headers = {
+      ...(traceparent ? { traceparent } : {}),
+      ...options?.headers,
+    };
+    return rcm.sendHttpRequest(remoteServerId, method, apiPath, body, options?.timeoutMs, headers);
   }
   return {
     ok: false,
