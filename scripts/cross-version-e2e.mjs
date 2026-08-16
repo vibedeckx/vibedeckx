@@ -96,6 +96,14 @@ if (args[0] === "--worker-bin") {
   workerBin = path.resolve(args[1] ?? BIN);
 } else if (args[0] && !args[0].startsWith("-")) {
   workerVersion = args[0];
+  // A dist-tag ("latest") would install fine but silently disable the version-
+  // gap policy below — every unparseable comparison says "not older", so a
+  // capability the published worker legitimately predates reports as a failure.
+  // Resolve tags to a concrete x.y.z before calling (CI does: `npm view`).
+  if (!/^\d+\.\d+\.\d+/.test(workerVersion)) {
+    console.error(`worker version must be a concrete x.y.z, got "${workerVersion}" — resolve dist-tags with \`npm view vibedeckx version\` first`);
+    process.exit(2);
+  }
 } else {
   console.error("usage: cross-version-e2e.mjs <worker-version> | --worker-bin <path>");
   process.exit(2);
@@ -479,6 +487,24 @@ await smoke("session-list", ["http:GET /api/path/agent-sessions"], async () => {
 const sessionSmoke = (label, keys, fn) => smoke(label, keys, async () => {
   assert(sessionId, "no remote session (session-create failed?)");
   await fn();
+});
+await sessionSmoke("session-alive", ["http:GET /api/path/agent-sessions/alive"], async () => {
+  // Whole-project liveness in one request — what the sidebar asks instead of
+  // listing every branch. The hub converts an old worker's 404 into
+  // 200 + `complete: false` (its fan-out fallback signal) rather than an error
+  // status, so re-raise that as the 404 it came from and let the version-gap
+  // policy above judge it like any other additive capability.
+  const r = await api("GET", `${P}/agent-sessions/alive`);
+  if (r.complete === false) {
+    throw new HttpError("GET", "/api/path/agent-sessions/alive", 404, "worker predates alive listing");
+  }
+  assert(Array.isArray(r.sessions), `no sessions array: ${JSON.stringify(r).slice(0, 150)}`);
+  // The session just created holds a live stub process, so it must be listed —
+  // a shape-only check would pass against a worker that always answers empty.
+  assert(
+    r.sessions.some((s) => s.id === sessionId),
+    `created session ${sessionId} missing from alive listing: ${JSON.stringify(r.sessions).slice(0, 200)}`,
+  );
 });
 await sessionSmoke("session-get", ["http:GET /api/agent-sessions/:param"], async () => {
   const r = await api("GET", `/api/agent-sessions/${sessionId}`);
