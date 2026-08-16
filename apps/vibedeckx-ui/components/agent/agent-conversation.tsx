@@ -464,7 +464,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // useReviewerRun 里的详细说明。远程会话两侧 id 均已按 remote- 前缀映射,
   // 直接比对。streamEpoch 让每次 socket 连上都重新对账一次,补掉断线期间
   // 丢掉的帧(该帧不入 store、重连不回放)。
-  const reviewerRun = useReviewerRun(projectId, branch, activeSessionId, workflowRunUpdate, streamEpoch);
+  // 传整个 session:hook 只认 projectId/branch 与当前工作区一致的 session,
+  // 挡掉切换那一帧里用旧 session 读新工作区的脏请求。
+  const reviewerRun = useReviewerRun(projectId, branch, session, workflowRunUpdate, streamEpoch);
   const [isFinalizing, setIsFinalizing] = useState(false);
 
   const handleFinalize = useCallback(async () => {

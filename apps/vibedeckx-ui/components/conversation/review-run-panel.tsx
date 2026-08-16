@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type WorkflowRun } from "@/lib/api";
+import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
@@ -26,10 +27,14 @@ export function ReviewRunPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  // `force`: the workspace-change read may share an in-flight request with
+  // useReviewerRun's seed (same commit, same data); every other trigger wants a
+  // snapshot taken *after* the event that caused it — a runUpdate frame, a
+  // gate action, or the poll tick — so it must not ride an older request.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
     if (!projectId) return;
     try {
-      const active = await api.getActiveWorkflowRuns(projectId, branch);
+      const active = await fetchActiveWorkflowRuns(projectId, branch, opts);
       setRuns(active);
       onRunsChange?.(active);
     } catch {
@@ -38,11 +43,11 @@ export function ReviewRunPanel({
   }, [projectId, branch, onRunsChange]);
 
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => { if (runUpdate) void refresh(); }, [runUpdate, refresh]);
+  useEffect(() => { if (runUpdate) void refresh({ force: true }); }, [runUpdate, refresh]);
   // Polling fallback while a run is active (WS push is best-effort).
   useEffect(() => {
     if (runs.length === 0) return;
-    const t = setInterval(() => void refresh(), 5000);
+    const t = setInterval(() => void refresh({ force: true }), 5000);
     return () => clearInterval(t);
   }, [runs.length, refresh]);
 
@@ -50,7 +55,7 @@ export function ReviewRunPanel({
     setBusy(runId);
     setActionError(null);
     try { await fn(); } catch (e) { setActionError(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(null); await refresh(); }
+    finally { setBusy(null); await refresh({ force: true }); }
   };
 
   const activeRuns = runs.filter((r) => ACTIVE.has(r.status));

@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, type WorkflowRun } from "@/lib/api";
+import type { WorkflowRun } from "@/lib/api";
+import type { AgentSession } from "@/hooks/use-agent-session";
+import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 
 const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 
@@ -25,16 +27,29 @@ const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing"
  * 等于把"每次 socket 连上"变成一次对账,断线/僵尸 socket/dormant 唤醒/服务
  * 端重启都一并覆盖。首连会多种一次(挂载一次 + Ready 一次),幂等,故意保留:
  * 无条件对账比"判断这次是不是重连"更不容易出错。
+ *
+ * `session` 传整个对象而不是 id:AgentConversation 跨项目/跨分支切换时不卸载,
+ * useAgentSession 的 reset effect 与本 hook 的种子 effect 在同一 commit 跑,
+ * setSession 下一帧才生效——本帧看到的仍是旧工作区的 session。只认
+ * `session.projectId/branch` 与当前工作区一致的 session,否则当作没有 session,
+ * 避免拿旧 session id 去读新工作区(纯浪费的一趟 tunnel 请求)。
+ *
+ * REST 种子走 fetchActiveWorkflowRuns 的并发合并:首次种子与 ReviewRunPanel
+ * 同 commit 的首拉合成一次;epoch 变化(Ready 对账)必须 force——复用握手前
+ * 发出的请求会拿到断线前的快照,兜底就失效了。
  */
 export function useReviewerRun(
   projectId: string | null,
   branch: string | null,
-  sessionId: string | null,
+  session: Pick<AgentSession, "id" | "projectId" | "branch"> | null,
   runUpdate: WorkflowRun | null,
   streamEpoch: number,
 ): WorkflowRun | null {
+  const sessionId =
+    session && session.projectId === projectId && session.branch === branch ? session.id : null;
   const [run, setRun] = useState<WorkflowRun | null>(null);
   const frameSeqRef = useRef(0);
+  const seededEpochRef = useRef<number | null>(null);
 
   const [seenFrame, setSeenFrame] = useState<{ runUpdate: WorkflowRun | null; sessionId: string | null }>({
     runUpdate: null,
@@ -72,7 +87,11 @@ export function useReviewerRun(
     if (!projectId || !sessionId) return;
     let stale = false;
     const seqAtStart = frameSeqRef.current;
-    void api.getActiveWorkflowRuns(projectId, branch)
+    // 同一 epoch 内的重跑(工作区/会话切换)可以搭并发的便车;epoch 变了就是
+    // socket 刚连上的对账,必须发新请求。
+    const force = seededEpochRef.current !== null && seededEpochRef.current !== streamEpoch;
+    seededEpochRef.current = streamEpoch;
+    void fetchActiveWorkflowRuns(projectId, branch, { force })
       .then((runs) => {
         if (stale || frameSeqRef.current !== seqAtStart) return; // frame-wins
         setRun(runs.find((r) => r.reviewer_session_id === sessionId) ?? null);

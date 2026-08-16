@@ -12,6 +12,7 @@ vi.mock("@/lib/api", () => ({
 
 import { useReviewerRun } from "./use-reviewer-run";
 import { api } from "@/lib/api";
+import { resetWorkflowRunsInflightForTests } from "@/lib/workflow-runs-fetch";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,8 +37,22 @@ function makeRun(overrides: Partial<WorkflowRun>): WorkflowRun {
   };
 }
 
-function Probe({ runUpdate, streamEpoch = 0 }: { runUpdate: WorkflowRun | null; streamEpoch?: number }) {
-  const run = useReviewerRun("p1", "dev", "s-rev", runUpdate, streamEpoch);
+const REVIEWER = { id: "s-rev", projectId: "p1", branch: "dev" };
+
+function Probe({
+  runUpdate,
+  streamEpoch = 0,
+  session = REVIEWER,
+  projectId = "p1",
+  branch = "dev",
+}: {
+  runUpdate: WorkflowRun | null;
+  streamEpoch?: number;
+  session?: { id: string; projectId: string; branch: string | null } | null;
+  projectId?: string;
+  branch?: string | null;
+}) {
+  const run = useReviewerRun(projectId, branch, session, runUpdate, streamEpoch);
   return <div data-status>{run?.status ?? "none"}</div>;
 }
 
@@ -55,6 +70,7 @@ describe("useReviewerRun", () => {
     act(() => root.unmount());
     container.remove();
     vi.clearAllMocks();
+    resetWorkflowRunsInflightForTests();
   });
 
   it("frame-wins: a later WS frame is not overwritten by a slow, stale REST response", async () => {
@@ -154,5 +170,65 @@ describe("useReviewerRun", () => {
       root.render(<Probe runUpdate={makeRun({ status: "completed" })} />);
     });
     expect(container.textContent).toBe("none");
+  });
+
+  it("does not seed with a session that belongs to another workspace", async () => {
+    // Cross-project / cross-branch switch: AgentConversation stays mounted and
+    // for one commit the hook still sees the OLD workspace's session while
+    // projectId/branch already point at the new one. That read is pure waste
+    // (its sessionId can never match a run in the new workspace).
+    getActiveWorkflowRuns.mockResolvedValue([]);
+
+    await act(async () => {
+      root.render(<Probe runUpdate={null} projectId="p2" branch="dev7"
+        session={{ id: "s-old", projectId: "p1", branch: "dev" }} />);
+    });
+    expect(getActiveWorkflowRuns).not.toHaveBeenCalled();
+
+    // Same project, different branch — still stale, still no read.
+    await act(async () => {
+      root.render(<Probe runUpdate={null} projectId="p2" branch="dev7"
+        session={{ id: "s-old", projectId: "p2", branch: "dev" }} />);
+    });
+    expect(getActiveWorkflowRuns).not.toHaveBeenCalled();
+
+    // The matching session lands next frame → exactly one seed.
+    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ project_id: "p2", branch: "dev7", reviewer_session_id: "s-new" })));
+    await act(async () => {
+      root.render(<Probe runUpdate={null} projectId="p2" branch="dev7"
+        session={{ id: "s-new", projectId: "p2", branch: "dev7" }} />);
+    });
+    expect(getActiveWorkflowRuns).toHaveBeenCalledTimes(1);
+    expect(getActiveWorkflowRuns).toHaveBeenCalledWith("p2", "dev7");
+    expect(container.textContent).toBe("discussing");
+  });
+
+  it("an epoch bump forces a fresh read even while an older one is in flight", async () => {
+    // The pre-Ready read may predate the transition; sharing it would defeat
+    // the reconciliation the epoch exists for.
+    let resolveFirst: (v: WorkflowRun[]) => void;
+    getActiveWorkflowRuns.mockReturnValueOnce(
+      new Promise<WorkflowRun[]>((r) => { resolveFirst = r; }),
+    );
+    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ status: "discussing" })));
+
+    await act(async () => {
+      root.render(<Probe runUpdate={null} streamEpoch={0} />);
+    });
+    expect(getActiveWorkflowRuns).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root.render(<Probe runUpdate={null} streamEpoch={1} />);
+    });
+    expect(getActiveWorkflowRuns).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toBe("discussing");
+
+    // The superseded first read resolving late is ignored (its effect was cleaned up).
+    await act(async () => {
+      resolveFirst!(Array.of(makeRun({ status: "waiting_feedback" })));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toBe("discussing");
   });
 });
