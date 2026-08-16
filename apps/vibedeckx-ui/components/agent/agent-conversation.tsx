@@ -294,12 +294,26 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     getAgentProviders().then(setProviders).catch(() => {});
   }, []);
 
-  // Sync local permissionMode from session (e.g. after workspace switch restores cached session)
+  // Single source of truth for the local permissionMode:
+  // - With a session, follow that session's mode. Keyed on session id too, so
+  //   swapping directly from plan-session A to plan-session B (warm preview,
+  //   no null in between) still re-syncs instead of keeping a stale value.
+  // - Without a session (New Conversation / empty-workspace placeholder), fall
+  //   back to "edit". AgentConversation has no `key` and never remounts, so
+  //   without this the mode of whatever was on screen last — e.g. a reviewer
+  //   session, which is always plan — leaked into the next session created
+  //   via ensureSession(permissionMode).
+  const syncedSessionId = session?.id ?? null;
+  const syncedSessionMode = session?.permissionMode ?? null;
   useEffect(() => {
-    if (session?.permissionMode) {
-      setPermissionMode(session.permissionMode);
+    if (syncedSessionId === null) {
+      setPermissionMode("edit");
+      return;
     }
-  }, [session?.permissionMode]);
+    if (syncedSessionMode) {
+      setPermissionMode(syncedSessionMode);
+    }
+  }, [syncedSessionId, syncedSessionMode]);
 
   // Sync local agentType from session (e.g. after workspace switch restores cached session)
   useEffect(() => {
