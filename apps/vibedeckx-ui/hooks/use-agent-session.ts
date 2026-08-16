@@ -913,6 +913,15 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
         // Handle task completed - show toast
         if ("taskCompleted" in msg) {
+          // Remote sessions: the front's remotePatchCache keeps every
+          // taskCompleted frame the worker ever sent and replays ALL cached
+          // frames to each new subscriber (websocket-routes.ts only cursors
+          // /entries patches). Those are turns that finished long ago — not
+          // news. Without this guard each replayed frame re-toasts and
+          // re-fires onTaskCompleted (→ one /tasks refetch per historical
+          // turn every time the session is opened). Live frames arrive after
+          // Ready, when isReplayingRef is already false.
+          if (isReplayingRef.current) return;
           const { duration_ms, cost_usd, input_tokens, output_tokens } = msg.taskCompleted;
           const parts: string[] = [];
           if (duration_ms != null) {
