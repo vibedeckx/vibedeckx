@@ -978,6 +978,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
                 const patch = ConversationPatch.addEntry(entryIndex, message as AgentMessage);
                 fastify.remotePatchCache.appendMessage(localSessionId, JSON.stringify({ JsonPatch: patch }), true);
               }
+              // Seeded from a REST read, so the cache is complete from the first
+              // index that read returned — for a bounded window that is the
+              // window's start, NOT 0.
+              fastify.remotePatchCache.declareCoverage(localSessionId, {
+                epoch: remoteData.historyWindow?.historyEpoch ?? null,
+                start: seededEntries[0]?.entryIndex ?? 0,
+              });
               if (remoteData.historyWindow) {
                 fastify.remotePatchCache.setHistoryEpoch(localSessionId, remoteData.historyWindow.historyEpoch);
                 if (remoteData.historyWindow.lastTurnEndEntryIndex !== null) {

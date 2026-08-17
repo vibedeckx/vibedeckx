@@ -891,7 +891,15 @@ export function connectPersistentRemoteWs(
     upstreamEpoch !== undefined ? cachedHead?.lastTurnEndEntryIndex ?? undefined : undefined
   );
   const upstreamParams = new URLSearchParams();
-  if (upstreamEpoch !== undefined && upstreamAfter !== undefined) {
+  // A bounded request is only meaningful when there is a cached prefix for the
+  // replayed tail to be spliced onto. On a cold cache it would instead pin this
+  // session's cache coverage to whichever subscriber happened to arrive first
+  // after a hub restart, leaving every lower cursor permanently unservable from
+  // cache — so ask for the whole history and let the cache be authoritative
+  // from index 0. Costs one full replay per session per cold start; the cache
+  // would have grown to that size anyway as the session continued, since every
+  // live frame is retained.
+  if (hasCachedData && upstreamEpoch !== undefined && upstreamAfter !== undefined) {
     upstreamParams.set("after", String(upstreamAfter));
     upstreamParams.set("epoch", String(upstreamEpoch));
   }
@@ -899,6 +907,17 @@ export function connectPersistentRemoteWs(
   const wsPath = `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}/stream${
     usesBoundedReplay ? `?${upstreamParams}` : ""
   }`;
+
+  // A cold cache is built entirely out of what this channel replays, so the
+  // channel's own lower bound IS the cache's coverage — and per the unbounded
+  // request above that bound is now 0. A warm cache keeps the coverage it
+  // already had: the sync path below only rewrites the tail above
+  // `upstreamAfter`, so raising the bound here would claim what we never asked
+  // for. Declared from the REQUEST, not the response — a bounded replay that
+  // returns nothing still leaves everything below the cursor unknown.
+  if (!hasCachedData) {
+    cache.declareCoverage(sessionId, { epoch: upstreamEpoch ?? null, start: 0 });
+  }
 
   const adapter = new VirtualWsAdapter(
     (data) => reverseConnectManager.sendChannelData(remoteInfo.remoteServerId, channelId, data),

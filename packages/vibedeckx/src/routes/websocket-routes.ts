@@ -10,6 +10,7 @@ import {
 import type { AgentWsInput } from "../agent-types.js";
 import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs, processOwnerScope } from "./ws-authz.js";
 import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
+import { coverageAdmitsReplay } from "../remote-patch-cache.js";
 import { attachWsHeartbeat } from "../utils/ws-heartbeat.js";
 import { ProjectChatNotFoundError } from "../project-chat-manager.js";
 import "../server-types.js";
@@ -328,6 +329,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
               historyEpoch, cacheEntry.historyEpoch, afterEntryIndex,
             );
             console.log(`[AgentWS] Replaying cached msgs for ${sessionId} after=${replayAfter}`);
+            // OBSERVE-ONLY (Phase A). The `Ready` sent at the end of this replay
+            // tells the browser its history is complete; when coverage does not
+            // reach the client's cursor that claim is unprovable and any gap is
+            // silent — nothing refetches, because the client believes it synced.
+            // Behaviour is deliberately unchanged: withholding `Ready` without a
+            // backfill path would strand the browser in its replay state.
+            if (!coverageAdmitsReplay(cacheEntry.coverage, historyEpoch, afterEntryIndex)) {
+              console.warn(
+                `[AgentWS] COVERAGE GAP ${sessionId}: client needs from ` +
+                `${(afterEntryIndex ?? -1) + 1} (epoch=${historyEpoch ?? "-"}), cache covers from ` +
+                `${cacheEntry.coverage?.start ?? "unknown"} (epoch=${cacheEntry.coverage?.epoch ?? "-"}), ` +
+                `frames=${cacheEntry.messages.length}, entriesLatest=${cacheEntry.latestEntryIndex ?? "-"} ` +
+                `— Ready will be sent anyway`,
+              );
+            }
             try {
               socket.send(JSON.stringify({
                 HistorySync: {

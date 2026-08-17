@@ -244,8 +244,42 @@ describe("reconnect reconciliation", () => {
     cache.shutdown();
   });
 
-  it("passes a browser cursor upstream on a cold cache", () => {
+  // Reverses the cold-cache half of b2a1cbf ("load session history in turn
+  // windows"), which sent the browser's cursor upstream in every case to keep
+  // the full transcript off the tunnel. On a WARM cache that is still right —
+  // the replayed tail splices onto a cached prefix. On a cold cache it instead
+  // pinned the cache's coverage to whichever subscriber arrived first after a
+  // hub restart, so any lower cursor could never be served from cache again and
+  // would be handed a `Ready` the hub could not justify. Paying one full replay
+  // per session per cold start (p50 ~67KB, p95 ~1.5MB in production) buys a
+  // coverage floor of 0, which is what makes that `Ready` provable.
+  it("asks for the whole history on a cold cache, ignoring the browser cursor", () => {
     const cache = new RemotePatchCache();
+    const reverse = {
+      isConnected: () => true,
+      setChannelAdapter: vi.fn(),
+      openVirtualChannel: vi.fn(),
+      sendChannelData: vi.fn(),
+      closeChannel: vi.fn(),
+    };
+    connectPersistentRemoteWs(
+      sessionId, remoteInfo, cache, reverse as never,
+      undefined, undefined, undefined,
+      { afterEntryIndex: 40, historyEpoch: 2 },
+    );
+    expect(reverse.openVirtualChannel).toHaveBeenCalledWith(
+      "server-1", expect.any(String), "/api/agent-sessions/worker-session/stream",
+    );
+    expect(cache.get(sessionId)!.coverage).toEqual({ epoch: 2, start: 0 });
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  it("still bounds the request on a warm cache, and keeps that cache's coverage", () => {
+    const cache = new RemotePatchCache();
+    cache.declareCoverage(sessionId, { epoch: 2, start: 0 });
+    cache.appendMessage(sessionId, entryPatch(40, "cached"), true);
+    cache.setHistoryEpoch(sessionId, 2);
     const reverse = {
       isConnected: () => true,
       setChannelAdapter: vi.fn(),
@@ -261,6 +295,8 @@ describe("reconnect reconciliation", () => {
     expect(reverse.openVirtualChannel).toHaveBeenCalledWith(
       "server-1", expect.any(String), "/api/agent-sessions/worker-session/stream?after=40&epoch=2",
     );
+    // The tail replay must not be mistaken for a new, higher coverage floor.
+    expect(cache.get(sessionId)!.coverage).toEqual({ epoch: 2, start: 0 });
     cache.setFinished(sessionId);
     cache.shutdown();
   });

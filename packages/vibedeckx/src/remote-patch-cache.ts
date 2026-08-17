@@ -39,6 +39,45 @@ function percentile(sorted: number[], fraction: number): number {
   return sorted[Math.min(sorted.length, Math.max(1, rank)) - 1];
 }
 
+/**
+ * The interval this cache is authorized to be complete over.
+ *
+ * Deliberately derived from what was REQUESTED upstream, never inferred from
+ * the lowest entry that happened to arrive: a bounded replay (`after=N`) that
+ * returns zero entries still means "this cache knows nothing below N+1", and an
+ * arrival-derived low-water mark has no data to say so. Caches in exactly that
+ * state — a lone `/status` frame, zero entries — are common in production logs.
+ *
+ * The violation this guards (a subscriber whose cursor predates `start` being
+ * told its history is complete) is reachable by construction but has NOT been
+ * observed: replaying this rule over 9 days of hub logs found 0 violations in
+ * 1075 cached replays. That measurement is why the gate ships observe-only
+ * first — see the COVERAGE GAP warning in websocket-routes.
+ */
+export interface CacheCoverage {
+  /** Entry-index namespace this statement belongs to; null when not yet known. */
+  epoch: number | null;
+  /** Lowest entry index the cache is authorized to be complete from. */
+  start: number;
+}
+
+/**
+ * Whether the cache may answer a subscriber's replay request by itself — i.e.
+ * whether a `Ready` after that replay would be a provable claim rather than an
+ * assumption. Pure so both the route and its tests can name the rule directly.
+ */
+export function coverageAdmitsReplay(
+  coverage: CacheCoverage | null,
+  clientEpoch: number | undefined,
+  afterEntryIndex: number | undefined,
+): boolean {
+  // No statement at all — the cache cannot prove anything about its own head.
+  if (!coverage) return false;
+  // A cursor from a different namespace names unrelated entries.
+  if (clientEpoch !== undefined && coverage.epoch !== null && clientEpoch !== coverage.epoch) return false;
+  return (afterEntryIndex ?? -1) + 1 >= coverage.start;
+}
+
 export interface RemotePatchCacheStats {
   sessions: number;
   messages: number;
@@ -88,6 +127,8 @@ export interface CacheEntry {
   historyEpoch: number | null;
   latestEntryIndex: number | null;
   lastTurnEndEntryIndex: number | null;
+  /** Authorized completeness interval; null means "unknown, prove nothing". */
+  coverage: CacheCoverage | null;
   sessionStatus: "running" | "stopped" | "error" | null;
 }
 
@@ -110,6 +151,7 @@ export class RemotePatchCache {
         historyEpoch: null,
         latestEntryIndex: null,
         lastTurnEndEntryIndex: null,
+        coverage: null,
         sessionStatus: null,
       };
       this.cache.set(sessionId, entry);
@@ -163,6 +205,11 @@ export class RemotePatchCache {
       if (metadata.lastTurnEnd !== null) lastTurnEndEntryIndex = Math.max(lastTurnEndEntryIndex ?? -1, metadata.lastTurnEnd);
     }
     const sessionStatus = existing?.sessionStatus ?? null;
+    // Coverage is carried, never recomputed from `messages`. `replaceEntryTail`
+    // funnels through here and only ever rewrites entries ABOVE a cursor, so
+    // recomputing would silently raise the low-water mark and hand back exactly
+    // the unprovable `Ready` this field exists to prevent.
+    const coverage = existing?.coverage ?? null;
     this.cache.set(sessionId, {
       messages,
       approxBytes: messages.reduce((sum, raw) => sum + raw.length, 0),
@@ -176,6 +223,7 @@ export class RemotePatchCache {
       historyEpoch,
       latestEntryIndex,
       lastTurnEndEntryIndex,
+      coverage,
       sessionStatus,
     });
   }
@@ -220,7 +268,24 @@ export class RemotePatchCache {
   }
 
   setHistoryEpoch(sessionId: string, epoch: number): void {
-    this.getOrCreate(sessionId).historyEpoch = epoch;
+    const entry = this.getOrCreate(sessionId);
+    entry.historyEpoch = epoch;
+    if (!entry.coverage) return;
+    // A REST seed can be declared before any frame names the namespace. Adopting
+    // the epoch we now learn is safe precisely because a namespace REPLACEMENT
+    // arrives as `HistorySync{reset}` → `resetHistory`, which overwrites
+    // coverage outright rather than coming through here.
+    if (entry.coverage.epoch === null) entry.coverage.epoch = epoch;
+    else if (entry.coverage.epoch !== epoch) entry.coverage = null;
+  }
+
+  /**
+   * Record the interval this cache was authorized to fetch. Callers pass the
+   * lower bound they REQUESTED upstream — 0 for an unbounded replay, N+1 for
+   * `after=N`, the window's first index for a REST seed — not what came back.
+   */
+  declareCoverage(sessionId: string, coverage: CacheCoverage): void {
+    this.getOrCreate(sessionId).coverage = { ...coverage };
   }
 
   /** Start a fresh entry-index namespace without dropping live connections. */
@@ -233,6 +298,9 @@ export class RemotePatchCache {
     entry.historyEpoch = epoch;
     entry.latestEntryIndex = null;
     entry.lastTurnEndEntryIndex = null;
+    // A fresh namespace holds nothing, so it is complete from its own start —
+    // there is no index below 0 that could be missing.
+    entry.coverage = { epoch, start: 0 };
   }
 
   setLastTurnEndEntryIndex(sessionId: string, index: number): void {
