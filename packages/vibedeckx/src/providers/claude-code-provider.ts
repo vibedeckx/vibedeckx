@@ -5,6 +5,7 @@ import { type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import {
   CANONICAL_PROPOSE_SCHEDULE_TOOL,
   SESSION_TOOLS_MCP_SERVER_NAME,
+  SESSION_TOOLS_SYSTEM_PROMPT_HINT,
   type SessionToolsMcpConfig,
 } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
@@ -64,6 +65,7 @@ export class ClaudeCodeProvider implements AgentProvider {
       Object.keys(mcpServers).length > 0 ? buildClaudeMcpConfigArg(mcpServers) : undefined,
       model,
       sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL] : undefined,
+      sessionToolsMcp ? SESSION_TOOLS_SYSTEM_PROMPT_HINT : undefined,
     );
   }
 

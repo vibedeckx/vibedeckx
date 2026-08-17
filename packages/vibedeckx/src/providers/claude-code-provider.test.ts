@@ -242,4 +242,20 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     const blob = JSON.parse(config.args[config.args.indexOf("--mcp-config") + 1]);
     expect(Object.keys(blob.mcpServers)).toEqual(["vibedeckx"]);
   });
+
+  it("states the scheduling rule in the system prompt when the session tool is mounted", () => {
+    const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "edit", undefined, null, {
+      url: "http://127.0.0.1:5173/api/session-mcp",
+      token: "session-tok",
+    });
+
+    const hint = config.args[config.args.indexOf("--append-system-prompt") + 1];
+    expect(hint).toContain("mcp__vibedeckx__propose_schedule");
+  });
+
+  it("says nothing about scheduling when the session tool is absent", () => {
+    // Advertising a tool the session doesn't have would be worse than silence.
+    const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "edit");
+    expect(config.args).not.toContain("--append-system-prompt");
+  });
 });

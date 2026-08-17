@@ -33,9 +33,18 @@ export interface SessionToolsMcpConfig {
 }
 
 export const PROPOSE_SCHEDULE_DESCRIPTION = [
-  "Propose a recurring scheduled check to the user. Call this when you tell the user that",
-  "something needs periodic follow-up observation — e.g. after a fix whose effect can only be",
-  "confirmed over time, or a flaky failure worth watching.",
+  "Propose a recurring scheduled check to the user. This is the only way to schedule work in this",
+  "environment. Call it in either situation:",
+  "- The user asks for something recurring — \"every morning\", \"nightly\", \"hourly\", \"on a cron\",",
+  "  \"keep an eye on\". Such a request IS this tool; it is not a programming task.",
+  "- You are telling the user that something needs periodic follow-up observation — e.g. after a",
+  "  fix whose effect can only be confirmed over time, or a flaky failure worth watching.",
+  "",
+  "Never satisfy a scheduling request by writing a crontab entry, systemd timer, launchd plist, CI",
+  "cron trigger, setInterval, or sleep loop: the platform owns execution, and anything you wire up",
+  "by hand is invisible to the user and does not survive this session. (Adding scheduling to the",
+  "user's OWN product — a cron block in their deployment config, a timer in their app — is still",
+  "ordinary coding work. This tool is for scheduling YOUR follow-up runs, not their features.)",
   "",
   "The proposal is shown to the user as a confirmation card; it does NOT create anything by",
   "itself and this call does not wait for the user. Say you have SUGGESTED a scheduled check",
@@ -55,6 +64,32 @@ export const PROPOSE_SCHEDULE_DESCRIPTION = [
   "",
   "Project, execution target and branch are taken from this session — do not describe them here.",
 ].join("\n");
+
+/**
+ * Server-level `instructions` returned from MCP `initialize`. Claude Code folds
+ * these into the system prompt, so they are read even when the model never
+ * considers the tool list — which is the actual failure mode: "set up a nightly
+ * check" reads as an engineering task, so the agent writes a cron job instead of
+ * looking for a tool. Kept short; the tool description carries the detail.
+ */
+export const SESSION_TOOLS_MCP_INSTRUCTIONS = [
+  `\`${PROPOSE_SCHEDULE_TOOL}\` is the only way to schedule work in this environment.`,
+  "When the user asks for anything recurring — nightly, hourly, every morning, on a cron, \"keep",
+  "watching\" — call it instead of writing a crontab entry, systemd timer, or setInterval loop.",
+  "Scheduling inside the user's own product remains ordinary coding work.",
+].join("\n");
+
+/**
+ * Same rule as a system-prompt append, for CLIs that take one. Belt to the
+ * instructions' braces: this lands in context by construction rather than by
+ * the CLI's choice to surface server instructions.
+ */
+export const SESSION_TOOLS_SYSTEM_PROMPT_HINT = [
+  "Scheduling: when the user asks you to run something on a schedule (nightly, hourly, every",
+  `morning, on a cron, "keep watching"), call the \`${CANONICAL_PROPOSE_SCHEDULE_TOOL}\` tool. That`,
+  "is the only way to schedule work here — do not hand-roll a crontab entry, systemd timer, or",
+  "setInterval loop for it. Writing scheduling into the user's own project is still normal coding.",
+].join(" ");
 
 export const PROPOSE_SCHEDULE_INPUT_SCHEMA = {
   type: "object",

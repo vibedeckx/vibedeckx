@@ -91,6 +91,9 @@ describe("session tools MCP endpoint", () => {
   it("answers initialize and ping", async () => {
     const init = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     expect(init.json().result.serverInfo.name).toBe("vibedeckx-session-tools");
+    // Server instructions reach the system prompt, so the scheduling rule lands
+    // even when the model never reads the tool list.
+    expect(init.json().result.instructions).toContain("propose_schedule");
     expect((await rpc(tokenFor(), { jsonrpc: "2.0", id: 2, method: "ping" })).json().result).toEqual({});
   });
 

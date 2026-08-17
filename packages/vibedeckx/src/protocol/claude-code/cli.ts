@@ -42,6 +42,7 @@ export function buildClaudeSessionSpawnConfig(
   mcpConfigArg?: string,
   model?: string | null,
   allowedTools?: string[],
+  appendSystemPrompt?: string,
 ): SpawnConfig {
   const permissionFlag = permissionMode === "plan"
     ? "--permission-mode=plan"
@@ -80,6 +81,13 @@ export function buildClaudeSessionSpawnConfig(
   // with --dangerously-skip-permissions).
   if (allowedTools?.length) {
     args.push("--allowedTools", allowedTools.join(","));
+  }
+
+  // Appended, not replacing: the default system prompt still applies. Used to
+  // state routing rules the model would otherwise have to infer from a tool
+  // description it never reads (see SESSION_TOOLS_SYSTEM_PROMPT_HINT).
+  if (appendSystemPrompt?.trim()) {
+    args.push("--append-system-prompt", appendSystemPrompt.trim());
   }
 
   return withNpxFallback(nativeBinary, args);

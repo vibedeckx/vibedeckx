@@ -10,6 +10,7 @@ import {
   PROPOSE_SCHEDULE_DESCRIPTION,
   PROPOSE_SCHEDULE_INPUT_SCHEMA,
   PROPOSE_SCHEDULE_TOOL,
+  SESSION_TOOLS_MCP_INSTRUCTIONS,
   SESSION_TOOLS_MCP_PATH,
   parseProposeScheduleArgs,
 } from "../session-tools-mcp.js";
@@ -104,6 +105,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: {} },
           serverInfo: { name: "vibedeckx-session-tools", version: "1.0.0" },
+          instructions: SESSION_TOOLS_MCP_INSTRUCTIONS,
         });
       case "ping":
         return respond({});
