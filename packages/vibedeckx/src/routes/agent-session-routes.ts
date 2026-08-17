@@ -1299,6 +1299,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
       );
       if (result.ok) {
         const data = result.data as Record<string, unknown> & { session?: Record<string, unknown> };
+        // The bounds, not just the fact of a fetch: a window whose tail is older
+        // than what the browser's stream already holds is the signature of the
+        // stale-snapshot race, and it is unreadable without these two numbers.
+        console.log(
+          `[API] history-window ${req.params.sessionId}: latest=${String(data.latestEntryIndex)}, ` +
+          `lastTurnEnd=${String(data.lastTurnEndEntryIndex)}, hasMore=${String(data.hasMore)}, ` +
+          `before=${before ?? "-"}, turns=${turns}`,
+        );
         return reply.code(200).send({
           ...data,
           session: data.session ? {
@@ -1359,6 +1367,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
         const cached = fastify.remotePatchCache.get(req.params.sessionId);
         if (cached?.historyEpoch !== null && cached?.lastTurnEndEntryIndex !== null && cached?.sessionStatus) {
+          // Cache-served, i.e. the worker was never asked. Whether this head is
+          // the reason a browser skipped revalidation is only answerable if the
+          // source is on the record next to the numbers.
+          console.log(
+            `[API] history-head ${req.params.sessionId} (from cache): latest=${cached.latestEntryIndex}, ` +
+            `lastTurnEnd=${cached.lastTurnEndEntryIndex}, status=${cached.sessionStatus}`,
+          );
           return reply.code(200).send({
             historyEpoch: cached.historyEpoch,
             latestEntryIndex: cached.latestEntryIndex,
@@ -1371,7 +1386,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "GET",
           `/api/agent-sessions/${encodeURIComponent(remoteInfo.remoteSessionId)}/history-head`,
         );
-        if (result.ok) return reply.code(200).send(result.data);
+        if (result.ok) {
+          const head = result.data as Record<string, unknown>;
+          console.log(
+            `[API] history-head ${req.params.sessionId} (from worker): latest=${String(head.latestEntryIndex)}, ` +
+            `lastTurnEnd=${String(head.lastTurnEndEntryIndex)}, status=${String(head.status)}`,
+          );
+          return reply.code(200).send(result.data);
+        }
         if (result.status !== 404) return reply.code(proxyStatus(result)).send(result.data);
         const legacy = await proxyAuto(
           remoteInfo.remoteServerId,

@@ -461,6 +461,53 @@ function emptyHistory(session: AgentSession): SessionHistoryWindow {
   };
 }
 
+/**
+ * A history window is a snapshot of the server's store taken when the request
+ * left. The WebSocket may have applied newer entries while it was in flight —
+ * committing the window verbatim then deletes a tail the window never saw, and
+ * nothing replays it: the stream is already connected, so `connectWebSocket`
+ * early-returns instead of re-syncing. That is how a finished turn loses its
+ * closing assistant message and its `turn_end` divider permanently.
+ *
+ * Keeping the live tail is only sound when both sides name the same
+ * conversation. A warm preview may hold a DIFFERENT session than the one the
+ * REST call resolves to (see `readLatestWorkspaceSnapshot`), and a new
+ * `historyEpoch` renames the entire index space. In either case the window wins
+ * whole — merging by index would splice two unrelated transcripts together.
+ *
+ * `latestEntryIndex`/`lastTurnEndEntryIndex` are recomputed from the merged set
+ * rather than inherited: they are the reconnect cursor (`?after=`), and a cursor
+ * above what the browser actually holds loses those entries for good. Recomputing
+ * can only err low, which costs a harmless re-replay. `hasMore`/`previousCursor`
+ * describe the head, which only the window knows, so they pass through.
+ */
+function commitWindowOverLiveTail(
+  restWindow: SessionHistoryWindow,
+  live: PatchContainer,
+  isSameConversation: boolean,
+): SessionHistoryWindow {
+  if (!isSameConversation) return restWindow;
+  const liveEntries = denseEntries(live);
+  const liveTail = liveEntries.at(-1)?.entryIndex ?? null;
+  if (liveTail === null) return restWindow;
+  if (restWindow.latestEntryIndex !== null && restWindow.latestEntryIndex >= liveTail) return restWindow;
+
+  const merged = new Map<number, AgentMessage>();
+  for (const entry of restWindow.entries) merged.set(entry.entryIndex, entry.message);
+  // The stream is authoritative for every index it has already applied.
+  for (const entry of liveEntries) merged.set(entry.entryIndex, entry.message);
+  const entries = [...merged].sort((a, b) => a[0] - b[0])
+    .map(([entryIndex, message]) => ({ entryIndex, message }));
+
+  return {
+    ...restWindow,
+    entries,
+    latestEntryIndex: entries.at(-1)?.entryIndex ?? null,
+    lastTurnEndEntryIndex: [...entries].reverse()
+      .find((entry) => entry.message.type === "turn_end")?.entryIndex ?? null,
+  };
+}
+
 // ============ Patch Application ============
 
 /**
@@ -577,6 +624,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
+  // Sockets already warned about for dropping frames — one line each, not one
+  // per frame. Weak so a closed socket is not retained for the warning's sake.
+  const reportedRetiredDropRef = useRef<WeakSet<WebSocket>>(new WeakSet());
   const openSocketRef = useRef<(sessionId: string) => void>(() => {});
   const replaceSilentSocketRef = useRef<(socket: WebSocket) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -838,7 +888,16 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     ws.onmessage = (event) => {
-      if (!isCurrentSocket()) return;
+      if (!isCurrentSocket()) {
+        // Silently dropping conversation frames is indistinguishable from the
+        // server never sending them. Say it once per retired socket so the next
+        // "content vanished" report is attributable without guesswork.
+        if (!reportedRetiredDropRef.current.has(ws)) {
+          reportedRetiredDropRef.current.add(ws);
+          console.warn(`[AgentSession] Dropping frames from retired socket for ${sessionId}`);
+        }
+        return;
+      }
       // Any frame proves the socket is alive, whatever it turns out to be.
       armSilenceTimer(ws);
       try {
@@ -888,7 +947,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
         // Handle Ready signal - history replay complete, flush state
         if ("Ready" in msg) {
-          console.log("[AgentSession] Received Ready signal - history complete, status=", containerRef.current.status);
+          console.log(
+            `[AgentSession] Received Ready signal for ${sessionId} - history complete, ` +
+            `status=${containerRef.current.status}, tail=${denseEntries(containerRef.current).at(-1)?.entryIndex ?? "-"}`,
+          );
           isReplayingRef.current = false;
           // Flush accumulated state to React in a single update
           setMessages(denseEntries(containerRef.current).map((entry) => entry.message));
@@ -1186,7 +1248,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         return null;
       }
 
-      console.log(`[AgentSession] REST response: sessionId=${newSession.id}, msgCount=${initialMessages?.length ?? 0}, status=${newSession.status}, explicitSessionIdRequested=${explicitSessionId ?? "<null>"}`);
+      console.log(
+        `[AgentSession] REST response: sessionId=${newSession.id}, msgCount=${initialMessages?.length ?? 0}, ` +
+        `status=${newSession.status}, explicitSessionIdRequested=${explicitSessionId ?? "<null>"}, ` +
+        `window=[${historyWindow?.entries[0]?.entryIndex ?? "-"}..${historyWindow?.latestEntryIndex ?? "-"}], ` +
+        `streamTail=${denseEntries(containerRef.current).at(-1)?.entryIndex ?? "-"}`,
+      );
 
       // Cache the session for future workspace switches (cache under both the explicit id key and the latest key)
       const normalizedHistory: SessionHistoryWindow = historyWindow ? {
@@ -1206,19 +1273,33 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         status: newSession.status,
         session: newSession,
       };
-      cacheSessionSnapshot(projectId, branch, explicitSessionId, newSession, normalizedHistory);
+      // Reconcile against whatever the stream already applied BEFORE anything is
+      // committed, so `messages`, `containerRef`, `historyRef` and the snapshot
+      // cache cannot disagree about the tail (a regressed `historyRef` would hand
+      // the next reconnect a cursor below what is on screen, and the next warm
+      // preview a snapshot missing the same entries).
+      const sameConversation = sessionRef.current?.id === newSession.id
+        && historyRef.current?.historyEpoch === normalizedHistory.historyEpoch;
+      const committed = commitWindowOverLiveTail(normalizedHistory, containerRef.current, sameConversation);
+      if (committed !== normalizedHistory) {
+        console.warn(
+          `[AgentSession] Stale history window for ${newSession.id}: window ends at ` +
+          `${normalizedHistory.latestEntryIndex}, stream already at ${committed.latestEntryIndex} — keeping live tail`,
+        );
+      }
+      cacheSessionSnapshot(projectId, branch, explicitSessionId, newSession, committed);
 
       setSession(newSession);
       sessionRef.current = newSession;
-      historyRef.current = normalizedHistory;
-      setHasEarlierHistory(normalizedHistory.hasMore);
+      historyRef.current = committed;
+      setHasEarlierHistory(committed.hasMore);
       setStatus(newSession.status);
 
       // Pre-populate the bounded REST window; WebSocket replay only reconciles
       // the active tail after its sealed boundary.
-      if (initialMessages && initialMessages.length > 0) {
-        setMessages(initialMessages);
-        containerRef.current = { entries: entriesRecord(normalizedHistory.entries), status: newSession.status };
+      if (committed.entries.length > 0) {
+        setMessages(committed.entries.map((entry) => entry.message));
+        containerRef.current = { entries: entriesRecord(committed.entries), status: newSession.status };
       }
       setIsInitialized(true);
 
