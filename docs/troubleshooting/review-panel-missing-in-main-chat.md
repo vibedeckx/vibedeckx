@@ -30,12 +30,14 @@ Reviewer session 正常跑完（会话里能看到完整的 review 正文，通�
 2026-08-18 的实测时间线（hub 日志 + 浏览器 HAR）：
 
 ```
-14:05:15  Main Chat WS 断开（chat session 0fe6014b）
-          ↓  ← 断线 641 秒。客户端没有 silence watchdog，标签页在后台被节流，
-          ↓    只有 visibilitychange 才会发现
+~14:04    浏览器整体停止回 pong
+14:05:04  服务端心跳回收 AgentWS
+14:05:15  服务端心跳回收 ChatWS 0fe6014b 和 ExecutorMux
+          [WsHeartbeat] ChatWS session=0fe6014b…: no pong within 60000ms — terminating dead socket
+          ↓  ← 断线 641 秒
 14:13:55  run 创建 → WorkflowRunUpdated 推送 → 丢弃（0 个活订阅者）
 14:15:56  run → waiting_feedback → WorkflowRunUpdated 推送 → 丢弃
-14:15:57  Main Chat WS 重连（比第二帧晚 1.05 秒）
+14:15:57  页面恢复，Main Chat WS 重连（比第二帧晚 1.05 秒）
 ```
 
 重连会重放 686 条聊天历史 patch，**但 `WorkflowRunUpdated` 不在重放范围内**，
@@ -44,17 +46,26 @@ Reviewer session 正常跑完（会话里能看到完整的 review 正文，通�
 
 ### 为什么 WS 会断这么久
 
-Main Chat 的 WS 缺少 agent session WS 已有的僵尸连接防护：
+**不是服务端漏了防护。** Main Chat 的 WS 一样挂了 `attachWsHeartbeat`，并且在
+14:05:15 正是它按设计终止了这条 socket（ping 连续两个 30s 周期无 pong）。同一时刻
+该浏览器的 AgentWS 和 ExecutorMux 也被一起回收 —— **是这个页面整体不再回 pong**，
+典型原因是标签页被冻结/机器休眠/网络中断。
+
+断线本身因此属于正常情形；641 秒的长度取决于页面什么时候恢复运行（这次是
+14:15:57，与 `visibilitychange` 触发重连吻合）。页面冻结时客户端跑不了任何定时器，
+所以**加客户端看门狗也救不了这一次** —— 结论是推送本来就必须允许丢，面板必须在
+重连后自己对账。
+
+顺带一提的次要差异（与本次事故无关，属于另一类僵尸：socket 已死但页面仍在运行）：
 
 | | Agent session WS | Main Chat (chat session) WS |
 |---|---|---|
-| 服务端 `{keepalive}` 应用帧 | 有（`keepalive: true`，30s） | **无**（只有 WS ping 控制帧，浏览器不暴露 pong） |
-| 客户端静默看门狗 | 有（`SILENCE_TIMEOUT_MS = 95s`） | **无** |
-| 发现断线的时机 | 最多 95 秒 | 只有 `visibilitychange` 或真的收到 close 事件 |
+| 服务端心跳 ping/pong | 有 | 有（`websocket-routes.ts` 调 `attachWsHeartbeat`） |
+| 服务端 `{keepalive}` 应用帧 | 有（`keepalive: true`，30s） | 无（浏览器不暴露 pong，客户端因此观察不到活性） |
+| 客户端静默看门狗 | 有（`SILENCE_TIMEOUT_MS = 95s`） | 无 |
 
-所以标签页切到后台时，连接可以死掉十几分钟而两端都不知道。日常还能观察到这条
-socket 每 1–5 分钟就重连一次（HAR 里 15 分钟内 4 次），每次都有 1–3 秒空窗 ——
-review 恰好在空窗里完成的概率并不低。
+另外，这条 socket 日常每 1–5 分钟就重连一次（HAR 里 15 分钟内 4 次），每次 1–3 秒
+空窗 —— 即便没有这次的长断线，review 恰好在空窗里完成的概率也并不低。
 
 ## 复现与确认
 
@@ -99,8 +110,8 @@ curl -s "http://127.0.0.1:<worker-port>/api/path/workflow-runs?path=<remote_path
 | 日志 | 含义 |
 |---|---|
 | `[ChatSession] WorkflowRunUpdated dropped: no chat session for run=… key="<project>:<branch>", indexed=[…]` | 推送到达了，但这个 project+branch 没有 Main Chat 会话。对比 `indexed` 的 key 可看出是否 branch 对不上 |
-| `[ChatSession] WorkflowRunUpdated dropped: … live=0/N` | 找到了会话但没有活着的 socket —— **本文故障的特征行** |
-| `[ChatSession] WorkflowRunUpdated sent: … live=N/M` | 推送送到浏览器了，此时问题在前端 |
+| `[ChatSession] WorkflowRunUpdated dropped: … live=0/N` | 找到了会话但没有一个 socket 处于 `OPEN` —— **本文故障的特征行** |
+| `[ChatSession] WorkflowRunUpdated sent: … live=N/M` | 服务端向 N 个自认为 `OPEN` 的 socket 调了 `send()`。**这不是送达确认**：没有浏览器 ACK，尚未被心跳回收的僵尸 socket 也会计入 `live`。要确认真的收到，得配合浏览器侧（HAR / DevTools 的 WS Messages） |
 | `[ChatSession] subscribe/unsubscribe chat=… project=… branch=… subscribers=N` | 某时刻 Main Chat 的 socket 在不在、绑在哪个工作区 |
 | `[workflow-runs] read project=… branch=… source=local\|remote:<id> active=N` | 客户端到底问没问、带的哪个 branch、拿回几条 |
 
@@ -110,8 +121,10 @@ curl -s "http://127.0.0.1:<worker-port>/api/path/workflow-runs?path=<remote_path
 
 ## 临时绕过
 
-切一次工作区（`dev` → `main`）或刷新页面，面板会因 remount 重新拉一次 REST 而出现。
-run 仍在 `waiting_feedback`，review 正文和发送按钮都还在，没有数据丢失。
+切到别的工作区再切回 **run 所属的那个工作区**（run 的 branch 见上面的 SQL；源
+session 在根工作区时就是标着 `main` 的那一行），或者直接在正确的工作区刷新页面 ——
+面板会因 remount 重新拉一次 REST 而出现。run 仍在 `waiting_feedback`，review 正文和
+发送按钮都还在，没有数据丢失。
 
 ## 待修
 
@@ -119,7 +132,11 @@ run 仍在 `waiting_feedback`，review 正文和发送按钮都还在，没有�
    visibility recovery）时做一次 `refresh({ force: true })`。参考
    `use-reviewer-run.ts` 里 `streamEpoch` 已有的 Ready 对账 —— reviewer 的终稿按钮
    早就有这层兜底，面板没有。
-2. **Main Chat WS 僵尸连接防护（诱因）**：`websocket-routes.ts` 的
-   `attachWsHeartbeat` 传 `keepalive: true`，并给 `use-chat-session.ts` 补上与
-   `use-agent-session.ts` 同款的 silence watchdog。这条同时修好其他所有走 Main Chat
-   推送的通道，不只是 review 面板。
+   这一条是本次事故的**唯一必要修复**：断线本身无法避免，能改的只有「重连后要
+   自己补一次」。
+
+2. **（可选，与本次事故无关）Main Chat WS 的客户端活性感知**：`websocket-routes.ts`
+   的 `attachWsHeartbeat` 传 `keepalive: true`，并给 `use-chat-session.ts` 补上与
+   `use-agent-session.ts` 同款的 silence watchdog。只对「页面还在运行、但 socket
+   已经悄悄死掉」那类僵尸有效 —— 本次是页面自己冻结了，加了也不会更早重连。属于
+   纵深防御，不是治本。
