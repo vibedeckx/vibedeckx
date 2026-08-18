@@ -6,6 +6,10 @@
 
 - [Codex Review 在 Ubuntu 上报 `bwrap: loopback: Failed RTM_NEWADDR`](./codex-bwrap-apparmor-userns.md)
 
+## Review 与 Main Chat
+
+- [Review 跑完了，Main Chat 顶部却没有 review 面板](./review-panel-missing-in-main-chat.md)（根因未定论，含定位步骤）
+
 ## 新增文档约定
 
 每篇故障文档尽量包含：

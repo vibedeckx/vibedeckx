@@ -345,16 +345,44 @@ export class ChatSessionManager {
     });
   }
 
+  /**
+   * Push a run transition to the Main Chat stream (ReviewRunPanel's only live
+   * input).
+   *
+   * Logged at info on every outcome, including both drop paths. The panel does
+   * one REST read at mount and then polls only while it already holds a run, so
+   * a frame dropped here — no chat session for the key, or zero live sockets
+   * mid-reconnect — leaves the panel blank with nothing scheduled to correct it.
+   * That failure is indistinguishable from "the review never ran" in the UI, and
+   * these lines are the only place it becomes visible after the fact. Run
+   * transitions are rare, so the volume is negligible.
+   */
   private handleWorkflowRunUpdated(event: Extract<GlobalEvent, { type: "workflow:run-updated" }>): void {
     const key = `${event.projectId}:${event.branch ?? ""}`;
+    const runInfo = `run=${event.run.id} status=${event.run.status} key="${key}"`;
     const sessionId = this.sessionIndex.get(key);
-    if (!sessionId) return;
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    const frame = JSON.stringify({ WorkflowRunUpdated: event.run });
-    for (const ws of session.subscribers) {
-      if (ws.readyState === 1) ws.send(frame);
+    if (!sessionId) {
+      console.log(
+        `[ChatSession] WorkflowRunUpdated dropped: no chat session for ${runInfo}, indexed=[${[...this.sessionIndex.keys()].join(", ")}]`,
+      );
+      return;
     }
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      console.log(`[ChatSession] WorkflowRunUpdated dropped: ${runInfo} indexed as ${sessionId} but session is gone`);
+      return;
+    }
+    const frame = JSON.stringify({ WorkflowRunUpdated: event.run });
+    let sent = 0;
+    for (const ws of session.subscribers) {
+      if (ws.readyState === 1) {
+        ws.send(frame);
+        sent++;
+      }
+    }
+    console.log(
+      `[ChatSession] WorkflowRunUpdated ${sent > 0 ? "sent" : "dropped"}: ${runInfo} chat=${sessionId} live=${sent}/${session.subscribers.size}`,
+    );
   }
 
   private handleSessionTaskCompleted(event: Extract<GlobalEvent, { type: "session:taskCompleted" }>): void {
@@ -1267,9 +1295,19 @@ export class ChatSessionManager {
     }
 
     session.subscribers.add(ws);
+    // Connect/disconnect at info, carrying project+branch: "was Main Chat
+    // listening for this workspace at time T" is the first question asked when
+    // a pushed frame (WorkflowRunUpdated, activity) fails to reach the UI, and
+    // the raw [WS] upgrade line carries only the opaque chat session id.
+    console.log(
+      `[ChatSession] subscribe chat=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} subscribers=${session.subscribers.size}`,
+    );
 
     return () => {
       session.subscribers.delete(ws);
+      console.log(
+        `[ChatSession] unsubscribe chat=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} subscribers=${session.subscribers.size}`,
+      );
     };
   }
 

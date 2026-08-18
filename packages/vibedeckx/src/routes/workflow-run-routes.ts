@@ -554,12 +554,25 @@ async function routes(fastify: FastifyInstance) {
     return reply.send({ candidate });
   });
 
+  /**
+   * The panel's only pull path. Logged at info with the branch it asked for and
+   * the count it got back: the generic access log records the route *pattern*
+   * only (query strings carry WS/SSE auth material and are deliberately never
+   * logged), and a 2xx never reaches it at info anyway — so without this line an
+   * empty panel gives no way to tell "the client never asked" from "it asked on
+   * the wrong branch" from "the run genuinely wasn't there". `branch` is scoped
+   * exactly (`branch is ?`), so a workspace mismatch reads as a normal empty 200.
+   */
   fastify.get<{ Querystring: { projectId: string; branch?: string } }>(
     "/api/workflow-runs", async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
       const { projectId, branch } = req.query;
       if (!projectId) return reply.code(400).send({ error: "projectId is required" });
+      const logRead = (count: number, source: string) =>
+        console.log(
+          `[workflow-runs] read project=${projectId} branch=${branch ?? "(unset)"} source=${source} active=${count}`,
+        );
       const project = await fastify.storage.projects.getById(projectId, userId);
       if (!project) return reply.code(404).send({ error: "Project not found" });
       if (project.agent_mode && project.agent_mode !== "local") {
@@ -578,10 +591,12 @@ async function routes(fastify: FastifyInstance) {
             trackRemoteRun(mapped, { ...info, bareRunId: r.id, projectId });
             return mapped;
           });
+          logRead(runs.length, `remote:${info.remoteServerId}`);
           return reply.send({ runs });
         }
       }
       const runs = await fastify.storage.workflowRuns.getActive(projectId, branch ?? null);
+      logRead(runs.length, "local");
       return reply.send({ runs });
     });
 
