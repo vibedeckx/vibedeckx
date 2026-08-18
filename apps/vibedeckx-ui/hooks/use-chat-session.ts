@@ -275,8 +275,16 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     const wsGeneration = sessionGenerationRef.current;
+    // Socket identity, not just workspace generation: the silence watchdog
+    // retires a socket and opens its replacement without waiting for the old
+    // one's close handshake, so two sockets of the SAME generation can overlap.
+    // Without this guard the retired socket's late `close` would null out the
+    // replacement's wsRef and clear its silence timer, and its late frames
+    // would land in the live conversation.
+    const isCurrentSocket = () => wsRef.current === ws;
 
     ws.onopen = () => {
+      if (!isCurrentSocket()) return;
       setIsConnected(true);
       setError(null);
       connectionStartTimeRef.current = Date.now();
@@ -290,7 +298,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     };
 
     ws.onmessage = (event) => {
-      if (wsGeneration !== sessionGenerationRef.current) return;
+      if (wsGeneration !== sessionGenerationRef.current || !isCurrentSocket()) return;
       // Any frame proves the socket is alive, whatever it turns out to be.
       armSilenceTimer(ws, sessionId);
       try {
@@ -380,7 +388,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     };
 
     ws.onclose = (event) => {
-      if (wsGeneration !== sessionGenerationRef.current) return;
+      if (wsGeneration !== sessionGenerationRef.current || !isCurrentSocket()) return;
       setIsConnected(false);
       wsRef.current = null;
       clearSilenceTimer();

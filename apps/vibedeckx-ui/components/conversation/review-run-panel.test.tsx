@@ -116,3 +116,44 @@ describe("ReviewRunPanel WS reconnect reconciliation", () => {
     expect(api.getActiveWorkflowRuns).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ReviewRunPanel out-of-order reads", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    resetWorkflowRunsInflightForTests();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  // mount 的那次读发出得早、返回得晚(远程代理往返会互相超车)。它带的是 run 出现
+  // 之前的空快照,若允许落地就会把重连对账刚拉到的 run 再抹掉。
+  it("keeps the newest read when an earlier one resolves last", async () => {
+    const waiting = { ...runFixture, status: "waiting_feedback" as const };
+    let resolveMount: (runs: typeof waiting[]) => void = () => {};
+    vi.mocked(api.getActiveWorkflowRuns)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveMount = resolve; }))
+      .mockResolvedValueOnce([waiting]);
+
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+    // 重连对账:第二次读先返回,面板显示 run。
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={1} />);
+    });
+    expect(container.textContent).toContain("等你确认反馈");
+
+    // mount 那次姗姗来迟的空快照必须被丢弃。
+    await act(async () => { resolveMount([]); });
+    expect(container.textContent).toContain("等你确认反馈");
+  });
+});

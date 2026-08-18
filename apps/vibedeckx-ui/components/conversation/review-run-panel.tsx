@@ -34,10 +34,22 @@ export function ReviewRunPanel({
   // useReviewerRun's seed (same commit, same data); every other trigger wants a
   // snapshot taken *after* the event that caused it — a runUpdate frame, a
   // gate action, or the poll tick — so it must not ride an older request.
+  //
+  // `reqSeq` makes the last *issued* read the one that lands. `force` starts a
+  // second request but cannot cancel the first, and these reads are remote
+  // proxy round-trips that routinely overtake each other: the mount read
+  // (issued before the run existed, resolving empty) finishing after the
+  // reconnect read would blank the panel again — the exact bug the reconnect
+  // reconciliation below is here to fix. The ref outlives projectId/branch
+  // changes on purpose, so a read from the workspace you just left cannot land
+  // either.
+  const reqSeqRef = useRef(0);
   const refresh = useCallback(async (opts?: { force?: boolean }) => {
     if (!projectId) return;
+    const seq = ++reqSeqRef.current;
     try {
       const active = await fetchActiveWorkflowRuns(projectId, branch, opts);
+      if (seq !== reqSeqRef.current) return;
       setRuns(active);
       onRunsChange?.(active);
     } catch {

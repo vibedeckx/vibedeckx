@@ -15,13 +15,15 @@ import websocketRoutes from "./websocket-routes.js";
 
 /**
  * The `{ keepalive }` frame is application-level traffic on a stream whose
- * clients do not tolerate unknown shapes: Project Chat throws on one and fails
- * the socket, the executor mux dereferences `.data.length`, the single-process
- * stream appends it to the terminal. Only `use-agent-session` recognises it (it
- * needs an observable frame to reset its silence watchdog), so exactly one
- * endpoint may opt in. Asserting the wiring keeps a future endpoint from
- * enabling it by accident — the protocol-level ping/pong liveness that actually
- * reaps dead sockets is unconditional and unaffected.
+ * clients do not tolerate unknown shapes: Project Chat (`/api/project-chat/…`)
+ * throws on one and fails the socket, the executor mux dereferences
+ * `.data.length`, the single-process stream appends it to the terminal. Only a
+ * client that both recognises the frame and needs it — one running a silence
+ * watchdog, which cannot observe protocol-level pongs because browsers never
+ * expose them — may opt in: today `use-agent-session` and `use-chat-session`.
+ * Asserting the wiring keeps a future endpoint from enabling it by accident —
+ * the protocol-level ping/pong liveness that actually reaps dead sockets is
+ * unconditional and unaffected.
  */
 describe("WebSocket heartbeat wiring", () => {
   let app: FastifyInstance | undefined;
@@ -46,6 +48,12 @@ describe("WebSocket heartbeat wiring", () => {
       handleInput: vi.fn(),
     } as never);
     instance.decorate("agentSessionManager", { subscribe: () => () => {} } as never);
+    instance.decorate("chatSessionManager", {
+      // Owned by the connecting principal ("local" when auth is off), so the
+      // handler gets past its ownership gate and reaches the heartbeat.
+      getSession: () => ({ id: "chat-1", userId: "local" }),
+      subscribe: () => () => {},
+    } as never);
     instance.decorate("reverseConnectManager", { setStatusChangeHandler: vi.fn() } as never);
     instance.decorate("remoteSessionMap", new Map());
     instance.decorate("remotePatchCache", {} as never);
@@ -78,6 +86,17 @@ describe("WebSocket heartbeat wiring", () => {
   it("opts the agent-session stream into keepalive frames", async () => {
     app = await build();
     await connect(app, "/api/agent-sessions/local-session/stream");
+    expect(attached).toHaveLength(1);
+    expect(attached[0]).toMatchObject({ keepalive: true });
+  });
+
+  // Main Chat runs the same silence watchdog, and its socket is otherwise
+  // silent while idle — without an application-level frame the watchdog has
+  // nothing to distinguish "dead" from "quiet" (see
+  // docs/troubleshooting/review-panel-missing-in-main-chat.md).
+  it("opts the chat-session stream into keepalive frames", async () => {
+    app = await build();
+    await connect(app, "/api/chat-sessions/chat-1/stream");
     expect(attached).toHaveLength(1);
     expect(attached[0]).toMatchObject({ keepalive: true });
   });
