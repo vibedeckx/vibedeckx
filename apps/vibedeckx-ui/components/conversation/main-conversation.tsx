@@ -96,6 +96,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     stopGeneration,
     restartSession,
     workflowRunUpdate,
+    streamEpoch,
   } = useChatSession(projectId, branch);
 
   const { settings: convSettings } = useConversationSettings();
@@ -195,6 +196,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
         projectId={projectId}
         branch={branch}
         runUpdate={workflowRunUpdate}
+        streamEpoch={streamEpoch}
         onRunsChange={setActiveRuns}
       />
 

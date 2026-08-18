@@ -1,7 +1,7 @@
 # Review 跑完了，Main Chat 顶部却没有 review 面板
 
-> 状态：**根因已确认**（2026-08-18）。推送帧落在 Main Chat WebSocket 的一段
-> 断线空窗里被丢弃，而 `ReviewRunPanel` 没有任何补偿路径。修复尚未实施。
+> 状态：**根因已确认、已修复**（2026-08-18）。推送帧落在 Main Chat WebSocket 的
+> 一段断线空窗里被丢弃，而 `ReviewRunPanel` 没有任何补偿路径。两处修复见文末。
 
 ## 症状
 
@@ -46,26 +46,36 @@ Reviewer session 正常跑完（会话里能看到完整的 review 正文，通�
 
 ### 为什么 WS 会断这么久
 
-**不是服务端漏了防护。** Main Chat 的 WS 一样挂了 `attachWsHeartbeat`，并且在
-14:05:15 正是它按设计终止了这条 socket（ping 连续两个 30s 周期无 pong）。同一时刻
-该浏览器的 AgentWS 和 ExecutorMux 也被一起回收 —— **是这个页面整体不再回 pong**，
-典型原因是标签页被冻结/机器休眠/网络中断。
+**不是服务端漏了防护。** Main Chat 的 WS 一样挂了 `attachWsHeartbeat`，14:05:15 正是
+它按设计终止了这条 socket（ping 连续两个 30s 周期无 pong）。同一时刻该浏览器的
+AgentWS 和 ExecutorMux 也被一起回收 —— 是这个页面在网络层整体不再回 pong。
 
-断线本身因此属于正常情形；641 秒的长度取决于页面什么时候恢复运行（这次是
-14:15:57，与 `visibilitychange` 触发重连吻合）。页面冻结时客户端跑不了任何定时器，
-所以**加客户端看门狗也救不了这一次** —— 结论是推送本来就必须允许丢，面板必须在
-重连后自己对账。
+**掉线不奇怪，躺 641 秒才是缺陷。** 同一个页面的 agent session WS 提供了现成的对照：
 
-顺带一提的次要差异（与本次事故无关，属于另一类僵尸：socket 已死但页面仍在运行）：
+```
+14:05:04  [WsHeartbeat] AgentWS …89f9efa6…: no pong within 60000ms   ← 一起被回收
+14:05:42  [AgentWS] Client connected …89f9efa6…                       ← 38 秒后自愈
+14:13:56  [AgentWS] Client connected …9ac6e3b6…                       ← 还跟着 review 切了会话
+```
 
-| | Agent session WS | Main Chat (chat session) WS |
+页面一直在跑 JS。差别只在于 hook：
+
+| | Agent session WS | Main Chat (chat session) WS（修复前） |
 |---|---|---|
-| 服务端心跳 ping/pong | 有 | 有（`websocket-routes.ts` 调 `attachWsHeartbeat`） |
-| 服务端 `{keepalive}` 应用帧 | 有（`keepalive: true`，30s） | 无（浏览器不暴露 pong，客户端因此观察不到活性） |
-| 客户端静默看门狗 | 有（`SILENCE_TIMEOUT_MS = 95s`） | 无 |
+| 服务端心跳 ping/pong | 有 | 有 |
+| 服务端 `{keepalive}` 应用帧 | 有（30s） | **无** |
+| 客户端静默看门狗 | 有（`SILENCE_TIMEOUT_MS = 95s`） | **无** |
+| 恢复时机 | ≤95 秒 | 只有 `visibilitychange`（这次是 641 秒） |
+
+浏览器不向 JS 暴露 pong，所以客户端只能靠应用层帧判断活性；而这条 socket 空闲时
+本来就一条帧都不收，**「死了」和「闲着」在浏览器看来完全一样**。时序也对得上：
+pong 约在 14:04:04 停止 → 服务端 60s 后回收 → agent 客户端 95s 静默超时（约
+14:05:39）触发重连 → 14:05:42 连上；chat hook 没有这个计时器，一直等到 14:15:57
+`visibilitychange` 才恢复。
 
 另外，这条 socket 日常每 1–5 分钟就重连一次（HAR 里 15 分钟内 4 次），每次 1–3 秒
-空窗 —— 即便没有这次的长断线，review 恰好在空窗里完成的概率也并不低。
+空窗 —— 即便没有这次的长断线，review 恰好在空窗里完成的概率也并不低。这就是为什么
+面板的重连对账（修复 1）无论如何都要做。
 
 ## 复现与确认
 
@@ -126,17 +136,25 @@ session 在根工作区时就是标着 `main` 的那一行），或者直接在�
 面板会因 remount 重新拉一次 REST 而出现。run 仍在 `waiting_feedback`，review 正文和
 发送按钮都还在，没有数据丢失。
 
-## 待修
+## 修复
 
 1. **面板对账（主因）**：`ReviewRunPanel` 在 chat WS 每次 `Ready`（含重连、
-   visibility recovery）时做一次 `refresh({ force: true })`。参考
-   `use-reviewer-run.ts` 里 `streamEpoch` 已有的 Ready 对账 —— reviewer 的终稿按钮
-   早就有这层兜底，面板没有。
-   这一条是本次事故的**唯一必要修复**：断线本身无法避免，能改的只有「重连后要
-   自己补一次」。
+   visibility recovery）时做一次 `refresh({ force: true })` —— `useChatSession`
+   新导出的 `streamEpoch` 就是这个信号，形状照搬 `use-reviewer-run.ts` 里早已存在
+   的同名对账（reviewer 的终稿按钮一直有这层兜底，面板漏了）。
+   断线本身无法避免，能改的只有「重连后要自己补一次」，所以这一条无论如何都要做。
+   回归测试见 `review-run-panel.test.tsx` 的 “WS reconnect reconciliation”。
 
-2. **（可选，与本次事故无关）Main Chat WS 的客户端活性感知**：`websocket-routes.ts`
-   的 `attachWsHeartbeat` 传 `keepalive: true`，并给 `use-chat-session.ts` 补上与
-   `use-agent-session.ts` 同款的 silence watchdog。只对「页面还在运行、但 socket
-   已经悄悄死掉」那类僵尸有效 —— 本次是页面自己冻结了，加了也不会更早重连。属于
-   纵深防御，不是治本。
+2. **Main Chat WS 的僵尸连接感知（本次 641 秒的成因）**：`websocket-routes.ts` 的
+   `attachWsHeartbeat` 补上 `keepalive: true`，`use-chat-session.ts` 补上与
+   `use-agent-session.ts` 同款的 95s silence watchdog。
+   这一条不是可有可无的纵深防御：页面当时**一直在跑**（同一浏览器的 agent WS 在
+   14:05:42 就自愈重连了，14:13:56 还跟着 review 切了会话），只是 chat hook 没有
+   任何能发现死 socket 的代码，才躺了 641 秒。装上后同样的掉线约 14:06:40 就该恢复，
+   早于 14:13:55 的第一帧。
+
+## 修好之后怎么验证还没坏
+
+`[ChatSession] WorkflowRunUpdated dropped: … live=0/N` 这一行的语义从「查根因」变成
+了回归信号：正常情况下它应该几乎不出现。如果它又频繁出现，说明 socket 又在长时间
+掉线而没被 watchdog 发现，或者对账没跑起来。

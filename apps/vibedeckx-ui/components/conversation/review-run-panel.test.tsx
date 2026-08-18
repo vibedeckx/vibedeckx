@@ -24,6 +24,7 @@ vi.mock("@/components/ai-elements/message", () => ({
 
 import { ReviewRunPanel } from "./review-run-panel";
 import { api } from "@/lib/api";
+import { resetWorkflowRunsInflightForTests } from "@/lib/workflow-runs-fetch";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,7 +37,7 @@ describe("ReviewRunPanel discussing state", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     await act(async () => {
-      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} />);
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
     });
   });
 
@@ -63,5 +64,55 @@ describe("ReviewRunPanel discussing state", () => {
     )!;
     await act(async () => { btn.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "finalize");
+  });
+});
+
+describe("ReviewRunPanel WS reconnect reconciliation", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    resetWorkflowRunsInflightForTests();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  // 掉线期间发出的 WorkflowRunUpdated 是丢帧且不重放的,面板手里 0 条 run 时
+  // 又不会轮询 —— 没有这次对账,重连后面板会一直空着(2026-08-18 事故)。
+  it("re-reads on a streamEpoch bump and surfaces a run pushed while the socket was down", async () => {
+    const waiting = { ...runFixture, status: "waiting_feedback" as const, feedback_snapshot: "verdict" };
+    vi.mocked(api.getActiveWorkflowRuns)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([waiting]);
+
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+    expect(container.textContent).toBe("");
+
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={1} />);
+    });
+    expect(api.getActiveWorkflowRuns).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("等你确认反馈");
+  });
+
+  it("does not re-read when nothing but an unrelated re-render happens", async () => {
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue([]);
+
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+    expect(api.getActiveWorkflowRuns).toHaveBeenCalledTimes(1);
   });
 });

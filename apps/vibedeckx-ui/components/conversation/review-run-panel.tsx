@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type WorkflowRun } from "@/lib/api";
 import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 import { Button } from "@/components/ui/button";
@@ -14,11 +14,14 @@ export function ReviewRunPanel({
   projectId,
   branch,
   runUpdate,
+  streamEpoch,
   onRunsChange,
 }: {
   projectId: string | null;
   branch: string | null;
   runUpdate: WorkflowRun | null;
+  /** Bumped on every Main Chat WS `Ready` — see the reconciliation effect. */
+  streamEpoch: number;
   onRunsChange?: (runs: WorkflowRun[]) => void;
 }) {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
@@ -42,7 +45,19 @@ export function ReviewRunPanel({
     }
   }, [projectId, branch, onRunsChange]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  // Mount read, plus a forced re-read on every WS (re)connect. `runUpdate` is a
+  // fire-and-forget push with no replay: a frame emitted while the socket was
+  // down is gone for good, and with zero runs held the poll below never starts —
+  // so without this reconciliation the panel stays blank forever (that is the
+  // 2026-08-18 failure, docs/troubleshooting/review-panel-missing-in-main-chat.md).
+  // The first pass after mount is unforced so it can share useReviewerRun's
+  // in-flight read; later epochs must see state from after the reconnect.
+  const seededEpochRef = useRef<number | null>(null);
+  useEffect(() => {
+    const force = seededEpochRef.current !== null && seededEpochRef.current !== streamEpoch;
+    seededEpochRef.current = streamEpoch;
+    void refresh({ force });
+  }, [refresh, streamEpoch]);
   useEffect(() => { if (runUpdate) void refresh({ force: true }); }, [runUpdate, refresh]);
   // Polling fallback while a run is active (WS push is best-effort).
   useEffect(() => {

@@ -500,7 +500,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
         console.log(`[ChatWS] Client connected for session ${sessionId}`);
 
-        const stopHeartbeat = attachWsHeartbeat(socket, { label: `ChatWS session=${sessionId}` });
+        // `keepalive: true` for the same reason the agent stream sets it: the
+        // protocol-level pong never reaches JS, and an idle Main Chat socket
+        // otherwise receives nothing at all — so a dead one is indistinguishable
+        // from a quiet one and the client's watchdog would have nothing to
+        // observe. 2026-08-18: without it this socket sat dead for 641s while
+        // the agent stream, which has both halves, recovered in 38s.
+        const stopHeartbeat = attachWsHeartbeat(socket, { label: `ChatWS session=${sessionId}`, keepalive: true });
 
         const unsubscribe = fastify.chatSessionManager.subscribe(sessionId, socket);
 

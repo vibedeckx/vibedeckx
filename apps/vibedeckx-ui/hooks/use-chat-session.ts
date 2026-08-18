@@ -61,7 +61,10 @@ type AgentWsMessage =
   | { error: string }
   | { browserCommand: BrowserCommand }
   | { openPreviewFrame: { projectId: string; url: string } }
-  | { WorkflowRunUpdated: WorkflowRun };
+  | { WorkflowRunUpdated: WorkflowRun }
+  // Liveness-only frame from the server heartbeat — carries no state, exists to
+  // give the silence watchdog something to observe on an idle session.
+  | { keepalive: number };
 
 interface PatchContainer {
   entries: AgentMessage[];
@@ -182,6 +185,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workflowRunUpdate, setWorkflowRunUpdate] = useState<WorkflowRun | null>(null);
+  const [streamEpoch, setStreamEpoch] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const openSocketRef = useRef<(sessionId: string) => void>(() => {});
@@ -196,11 +200,43 @@ export function useChatSession(projectId: string | null, branch: string | null) 
   const stabilityTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const shortLivedConnectionsRef = useRef(0);
   const lastStartFailedRef = useRef(false);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const replaceSilentSocketRef = useRef<(socket: WebSocket, sessionId: string) => void>(() => {});
 
   const MIN_STABLE_CONNECTION_MS = 5000;
   const MAX_RECONNECT_DELAY_MS = 30000;
   const MAX_RECONNECT_ATTEMPTS = 10;
   const MAX_SHORT_LIVED_CONNECTIONS = 3;
+
+  // Zombie-socket watchdog, mirroring use-agent-session. When the device sleeps
+  // or the network switches, the TCP connection dies with no close handshake:
+  // readyState stays OPEN, `onclose` never fires, and nothing schedules a
+  // reconnect — every frame the server broadcasts from then on is lost. That is
+  // exactly what happened on 2026-08-18 (docs/troubleshooting/
+  // review-panel-missing-in-main-chat.md): this socket stayed dead for 641s,
+  // swallowing both of a review run's WorkflowRunUpdated pushes, while the agent
+  // stream recovered in 38s because it had this timer. `visibilitychange` alone
+  // is not a substitute — it only fires when the tab comes back to the front.
+  // The server sends `keepalive` every 30s, so three missed intervals means gone.
+  const SILENCE_TIMEOUT_MS = 95000;
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  /** Restart the silence countdown for `ws`; called on every inbound frame. */
+  const armSilenceTimer = useCallback((ws: WebSocket, sessionId: string) => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(() => {
+      silenceTimerRef.current = null;
+      if (ws.readyState !== WebSocket.OPEN) return;
+      console.warn(`[ChatSession] No frames for ${SILENCE_TIMEOUT_MS}ms — assuming dead socket, forcing reconnect`);
+      replaceSilentSocketRef.current(ws, sessionId);
+    }, SILENCE_TIMEOUT_MS);
+  }, []);
 
   const getReconnectDelay = (attempt: number): number => {
     const baseDelay = Math.min(MAX_RECONNECT_DELAY_MS, 1000 * Math.pow(2, attempt));
@@ -244,6 +280,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
       setIsConnected(true);
       setError(null);
       connectionStartTimeRef.current = Date.now();
+      armSilenceTimer(ws, sessionId);
 
       if (stabilityTimeoutRef.current) clearTimeout(stabilityTimeoutRef.current);
       stabilityTimeoutRef.current = setTimeout(() => {
@@ -254,8 +291,13 @@ export function useChatSession(projectId: string | null, branch: string | null) 
 
     ws.onmessage = (event) => {
       if (wsGeneration !== sessionGenerationRef.current) return;
+      // Any frame proves the socket is alive, whatever it turns out to be.
+      armSilenceTimer(ws, sessionId);
       try {
         const msg = JSON.parse(event.data) as AgentWsMessage;
+
+        // Liveness-only frame — already accounted for above.
+        if ("keepalive" in msg) return;
 
         if ("JsonPatch" in msg) {
           containerRef.current = applyPatch(containerRef.current, msg.JsonPatch);
@@ -273,6 +315,11 @@ export function useChatSession(projectId: string | null, branch: string | null) 
           setMessages([...containerRef.current.entries.filter(Boolean)]);
           setStatus(containerRef.current.status);
           setIsInitialized(true);
+          // The stream is caught up on everything that replays. Signal the
+          // reconciliation point for the state that does NOT replay — pushes
+          // like WorkflowRunUpdated are fire-and-forget, so whatever consumes
+          // them has to re-read on every (re)connect or stay stale forever.
+          setStreamEpoch((epoch) => epoch + 1);
           return;
         }
 
@@ -336,6 +383,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
       if (wsGeneration !== sessionGenerationRef.current) return;
       setIsConnected(false);
       wsRef.current = null;
+      clearSilenceTimer();
 
       if (stabilityTimeoutRef.current) {
         clearTimeout(stabilityTimeoutRef.current);
@@ -391,7 +439,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     ws.onerror = () => {
       // onclose will fire next
     };
-  }, [session?.id, connectWebSocket]);
+  }, [session?.id, connectWebSocket, armSilenceTimer, clearSilenceTimer]);
 
   // Keep the ref pointed at the latest openSocket so connectWebSocket (stable
   // deps) always reaches the current closure after refreshing the token.
@@ -547,6 +595,34 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     }
   }, [session?.id, isConnected, connectWebSocket]);
 
+  // A silence timeout proves the old socket can no longer be trusted. Detach it
+  // from wsRef before close() — connectWebSocket bails out while wsRef still
+  // holds an OPEN socket — then reconnect immediately rather than waiting for a
+  // close handshake a half-open connection may never complete.
+  useEffect(() => {
+    replaceSilentSocketRef.current = (silentSocket: WebSocket, sessionId: string) => {
+      if (wsRef.current !== silentSocket) return;
+      wsRef.current = null;
+      setIsConnected(false);
+
+      if (stabilityTimeoutRef.current) {
+        clearTimeout(stabilityTimeoutRef.current);
+        stabilityTimeoutRef.current = null;
+      }
+      connectionStartTimeRef.current = null;
+
+      // Code 4000 keeps this out of the short-lived-connection detector if the
+      // close event does eventually arrive; the generation guard makes that
+      // handler harmless for the replacement socket either way.
+      try { silentSocket.close(4000, "silence watchdog"); } catch { /* already gone */ }
+
+      if (!finishedRef.current) connectWebSocket(sessionId, true);
+    };
+    return () => {
+      replaceSilentSocketRef.current = () => {};
+    };
+  }, [connectWebSocket]);
+
   // Recover WebSocket state when the browser tab regains focus.
   // Browsers may silently drop WebSocket connections for backgrounded tabs,
   // causing messages to be missed. On tab return, force a reconnect so
@@ -577,6 +653,7 @@ export function useChatSession(projectId: string | null, branch: string | null) 
     isLoading,
     error,
     workflowRunUpdate,
+    streamEpoch,
     sendMessage,
     stopGeneration,
     restartSession,

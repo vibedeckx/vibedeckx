@@ -8,7 +8,7 @@
 
 ## Review 与 Main Chat
 
-- [Review 跑完了，Main Chat 顶部却没有 review 面板](./review-panel-missing-in-main-chat.md)（根因已确认：推送落在 WS 断线空窗，面板无对账）
+- [Review 跑完了，Main Chat 顶部却没有 review 面板](./review-panel-missing-in-main-chat.md)（已修复：推送落在 WS 断线空窗 + 面板无对账）
 
 ## 新增文档约定
 
