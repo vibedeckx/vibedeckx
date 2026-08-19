@@ -21,10 +21,22 @@ const listAliveSessions = vi.hoisted(() =>
 );
 
 vi.mock("@/lib/api", () => ({ listBranchSessions, listAliveSessions }));
+// Capture the SSE listener so a test can drive the event-triggered refresh
+// (the only way to re-run the primary read for the same project short of a
+// reconnect). Mirrors use-merge-status-auto-refresh.test.tsx.
+let capturedListener: ((evt: { type?: string; [k: string]: unknown }) => void) | null = null;
 vi.mock("@/hooks/global-event-stream", () => ({
-  useGlobalEventStream: () => {},
+  useGlobalEventStream: (listener: (evt: unknown) => void) => {
+    capturedListener = listener;
+  },
   useConnectionStatus: () => ({ state: "live" }),
 }));
+const fireProcessAlive = async (projectId: string, sessionId: string) => {
+  await act(async () => {
+    capturedListener?.({ type: "session:process", projectId, sessionId, alive: true, branch: "dev" });
+    await Promise.resolve();
+  });
+};
 
 import { useResidentSessions } from "./use-resident-sessions";
 
@@ -58,6 +70,7 @@ describe("useResidentSessions cache", () => {
   };
 
   beforeEach(() => {
+    capturedListener = null;
     listBranchSessions.mockReset();
     listBranchSessions.mockResolvedValue({ sessions: [] });
     listAliveSessions.mockReset();
@@ -142,6 +155,7 @@ describe("useResidentSessions fetch shape", () => {
   };
 
   beforeEach(() => {
+    capturedListener = null;
     listBranchSessions.mockReset();
     listBranchSessions.mockResolvedValue({ sessions: [] });
     listAliveSessions.mockReset();
@@ -179,19 +193,50 @@ describe("useResidentSessions fetch shape", () => {
     expect(latest!.get("spike")).toBeUndefined();
   });
 
-  it("does not refetch when the workspace list is a new array with the same branches", async () => {
-    // Cold load: the cached worktree seed renders first, then the network copy
-    // replaces it with an identical list under a new identity. The fetch is
-    // keyed on the branch content, so that identity flip costs no request.
+  it("primary /alive is read once per project, not again when the workspace list changes", async () => {
+    // Cold load: the workspace list arrives after the first /alive (empty seed
+    // → real list). Liveness is a project property, so that change — or any
+    // later branch add/remove — must not cost another whole-project read.
     listAliveSessions.mockResolvedValue({ complete: true, sessions: [] });
-    await render("d-ident", [{ branch: null }, { branch: "dev" }]);
+    await render("d-ident", []);
     expect(listAliveSessions).toHaveBeenCalledTimes(1);
 
-    await render("d-ident", [{ branch: null }, { branch: "dev" }]); // same content, new array
+    await render("d-ident", [{ branch: null }, { branch: "dev" }]); // worktrees land
     expect(listAliveSessions).toHaveBeenCalledTimes(1);
 
-    await render("d-ident", [{ branch: null }, { branch: "dev" }, { branch: "spike" }]); // real change
+    await render("d-ident", [{ branch: null }, { branch: "dev" }, { branch: "spike" }]); // branch added
+    expect(listAliveSessions).toHaveBeenCalledTimes(1);
+    expect(listBranchSessions).not.toHaveBeenCalled(); // no fallback either
+
+    await render("d-ident-2", [{ branch: null }]); // project switch → one new read
     expect(listAliveSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("fallback (worker can't enumerate) re-fans out when the workspace list changes", async () => {
+    listAliveSessions.mockResolvedValue({ complete: false, sessions: [] });
+    listBranchSessions.mockResolvedValue({ sessions: [] });
+    await render("d-fb", [{ branch: null }, { branch: "dev" }]);
+    expect(listAliveSessions).toHaveBeenCalledTimes(1);
+    expect(listBranchSessions).toHaveBeenCalledTimes(2);
+
+    await render("d-fb", [{ branch: null }, { branch: "dev" }, { branch: "spike" }]);
+    expect(listAliveSessions).toHaveBeenCalledTimes(1); // primary not re-read
+    expect(listBranchSessions).toHaveBeenCalledTimes(5); // fan-out re-run for the new list
+  });
+
+  it("fallback re-runs on every incomplete refresh, not only the first (old worker + event/reconnect refresh)", async () => {
+    // An old worker answers incomplete every time. A session:process event
+    // (same path as an SSE reconnect) re-reads primary → incomplete again →
+    // the per-branch fan-out must run again, or the sidebar goes stale.
+    listAliveSessions.mockResolvedValue({ complete: false, sessions: [] });
+    listBranchSessions.mockResolvedValue({ sessions: [] });
+    await render("d-fb2", [{ branch: "dev" }]);
+    expect(listAliveSessions).toHaveBeenCalledTimes(1);
+    expect(listBranchSessions).toHaveBeenCalledTimes(1);
+
+    await fireProcessAlive("d-fb2", "s-new");
+    expect(listAliveSessions).toHaveBeenCalledTimes(2);
+    expect(listBranchSessions).toHaveBeenCalledTimes(2);
   });
 
   it("does not wait for the workspace list, and keeps its rows if only that is missing", async () => {
@@ -208,10 +253,12 @@ describe("useResidentSessions fetch shape", () => {
     expect(latest!.get("dev")?.map((s) => s.id)).toEqual(["s-dev"]);
 
     // Old worker + no workspace list = no answer at all; the rows must stay.
-    // A fresh worktrees array re-runs refresh without remounting, so this
+    // The primary read only re-runs on project switch / reconnect / a
+    // session:process event, so drive it with the event (no remount): this
     // asserts the hold itself rather than the cache re-seeding the same rows.
     listAliveSessions.mockResolvedValue({ sessions: [], complete: false });
-    await render("d3", []);
+    await fireProcessAlive("d3", "s-dev");
+    expect(listAliveSessions).toHaveBeenCalledTimes(2);
     expect(listBranchSessions).not.toHaveBeenCalled();
     expect(latest!.get("dev")?.map((s) => s.id)).toEqual(["s-dev"]);
   });

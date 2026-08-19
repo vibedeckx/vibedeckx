@@ -97,38 +97,41 @@ function sessionTitle(session: { title?: string | null }): string {
 
 /**
  * The sidebar's rows for one project: the sessions holding a live process.
- * Returns null when no answer could be produced — the caller must then keep
- * the rows it has, since "we don't know" is not "nothing is running".
  *
- * One whole-project request, deliberately independent of the workspace list:
- * liveness is a property of the project, so it must not wait on (or be scoped
- * by) a worktree fetch. The fallback — one listing per branch, of which
- * everything but the live rows is discarded — is what this hook used to do
- * unconditionally, and is still the only thing a remote worker older than the
- * `/alive` endpoint can answer (`complete: false`); only that path needs
- * `branches`. A worker that is offline or erroring makes the request REJECT,
- * and the caller keeps its current rows.
+ * Primary path — one whole-project request, deliberately independent of the
+ * workspace list: liveness is a property of the project, so it must not wait
+ * on (or be scoped by, or be re-read because of) a worktree fetch. Returns
+ * "incomplete" when the remote worker predates the `/alive` endpoint
+ * (`complete: false`); only then does the per-branch fallback below run, and
+ * it is the only path that needs `branches`. A worker that is offline or
+ * erroring makes the request REJECT, and the caller keeps its current rows.
  */
-async function fetchResidentSessions(
+async function fetchAliveSessions(
+  projectId: string,
+): Promise<ResidentSidebarSession[] | "incomplete"> {
+  const alive = await listAliveSessions(projectId);
+  if (!alive.complete) return "incomplete";
+  // No `updated_at`: these arrive most-recently-active first and the grouping
+  // below keeps that order (its sort is stable, and a row without a timestamp
+  // never reorders against its peers).
+  return alive.sessions.map((session) => ({
+    id: session.id,
+    projectId,
+    branch: session.branch,
+    title: sessionTitle(session),
+    status: session.status,
+    processAlive: true,
+  }));
+}
+
+// Fallback — one listing per branch, of which everything but the live rows is
+// discarded (what this hook used to do unconditionally). With no workspace list
+// yet there is nothing to enumerate, and an empty fan-out result would read as
+// "no live sessions": null = no answer, the caller keeps the rows it has.
+async function fetchAliveSessionsByBranch(
   projectId: string,
   branches: Array<string | null>,
 ): Promise<ResidentSidebarSession[] | null> {
-  const alive = await listAliveSessions(projectId);
-  if (alive.complete) {
-    // No `updated_at`: these arrive most-recently-active first and the grouping
-    // below keeps that order (its sort is stable, and a row without a timestamp
-    // never reorders against its peers).
-    return alive.sessions.map((session) => ({
-      id: session.id,
-      projectId,
-      branch: session.branch,
-      title: sessionTitle(session),
-      status: session.status,
-      processAlive: true,
-    }));
-  }
-  // Fallback only: with no workspace list yet there is nothing to enumerate,
-  // and an empty fan-out result would read as "no live sessions".
   if (branches.length === 0) return null;
   const perBranch = await Promise.all(
     branches.map(async (branch) => {
@@ -207,21 +210,43 @@ export function useResidentSessions(
     if (projectId) residentSessionListCache.set(projectId, sessions);
   }, [projectId, sessions]);
 
+  // Project whose worker answered `complete: false` on the primary endpoint —
+  // only then does the branch list matter (one listing per branch). Keyed by
+  // projectId so a stale flag from a previous project cannot trigger a fan-out.
+  // `gen` makes every incomplete answer a fresh trigger: an old worker keeps
+  // answering incomplete, and the reconnect / session:process refreshes must
+  // still re-run the fan-out (a same-valued projectId alone would be a no-op).
+  const [fallbackTrigger, setFallbackTrigger] = useState<{ projectId: string; gen: number } | null>(null);
+
+  const commitRows = useCallback((pid: string, rows: ResidentSidebarSession[] | null) => {
+    // null = the answer could not be produced (see fetchAliveSessionsByBranch);
+    // hold the rows we have rather than reporting the project as idle.
+    if (rows === null) return;
+    if (projectIdRef.current !== pid) return;
+    // Functional update so we reconcile against the freshest state: a
+    // `session:title` event that landed while this fetch was in flight must not
+    // be clobbered by the pre-title snapshot this request returned.
+    setSessions((prev) => mergeRefreshedSessions(prev, rows));
+  }, []);
+
+  // Primary read: one whole-project request, independent of the workspace
+  // list. Re-run only for a project switch or an SSE reconnect — NOT when the
+  // branch list changes, which on a cold load happens once the worktrees land
+  // (empty seed → real list) and used to cost a second identical /alive.
   const refresh = useCallback(async () => {
     if (!projectId) {
       setSessions([]);
       return;
     }
-    const rows = await fetchResidentSessions(projectId, branches);
-    // null = the answer could not be produced (see fetchResidentSessions);
-    // hold the rows we have rather than reporting the project as idle.
-    if (rows === null) return;
+    const primary = await fetchAliveSessions(projectId);
     if (projectIdRef.current !== projectId) return;
-    // Functional update so we reconcile against the freshest state: a
-    // `session:title` event that landed while this fetch was in flight must not
-    // be clobbered by the pre-title snapshot this request returned.
-    setSessions((prev) => mergeRefreshedSessions(prev, rows));
-  }, [branches, projectId]);
+    if (primary === "incomplete") {
+      setFallbackTrigger((cur) => ({ projectId, gen: (cur?.gen ?? 0) + 1 }));
+      return; // the fallback effect below takes it from here
+    }
+    setFallbackTrigger((cur) => (cur?.projectId === projectId ? null : cur));
+    commitRows(projectId, primary);
+  }, [projectId, commitRows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,6 +257,21 @@ export function useResidentSessions(
       cancelled = true;
     };
   }, [refresh]);
+
+  // Fallback read: per-branch fan-out, and the only path that depends on
+  // `branches` — so it (and only it) re-runs when the workspace list changes.
+  useEffect(() => {
+    if (!projectId || fallbackTrigger?.projectId !== projectId) return;
+    let cancelled = false;
+    fetchAliveSessionsByBranch(projectId, branches)
+      .then((rows) => { if (!cancelled) commitRows(projectId, rows); })
+      .catch((error) => {
+        if (!cancelled) console.warn("[ResidentSessions] fallback refresh failed:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, fallbackTrigger, branches, commitRows]);
 
   // Recover from a dropped SSE stream: events (e.g. session:title) emitted
   // while disconnected are gone for good (no replay), so re-fetch once the
