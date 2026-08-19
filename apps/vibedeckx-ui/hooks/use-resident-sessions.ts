@@ -179,9 +179,13 @@ export function useResidentSessions(
   worktrees: Worktree[] | undefined,
   seedSession?: ResidentSidebarSession | null,
 ): Map<string, ResidentSidebarSession[]> {
+  // Keyed on content, not array identity: the cached seed and the network
+  // result usually carry the same branches, and a fetch keyed on the array
+  // would re-run for that identity change alone (one extra /alive per load).
+  const branchesKey = JSON.stringify((worktrees ?? []).map((wt) => wt.branch));
   const branches = useMemo(
-    () => worktrees?.map((wt) => wt.branch) ?? [],
-    [worktrees],
+    () => JSON.parse(branchesKey) as Array<string | null>,
+    [branchesKey],
   );
   const [sessions, setSessions] = useState<ResidentSidebarSession[]>([]);
 

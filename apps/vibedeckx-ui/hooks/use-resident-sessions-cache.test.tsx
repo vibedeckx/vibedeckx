@@ -179,6 +179,21 @@ describe("useResidentSessions fetch shape", () => {
     expect(latest!.get("spike")).toBeUndefined();
   });
 
+  it("does not refetch when the workspace list is a new array with the same branches", async () => {
+    // Cold load: the cached worktree seed renders first, then the network copy
+    // replaces it with an identical list under a new identity. The fetch is
+    // keyed on the branch content, so that identity flip costs no request.
+    listAliveSessions.mockResolvedValue({ complete: true, sessions: [] });
+    await render("d-ident", [{ branch: null }, { branch: "dev" }]);
+    expect(listAliveSessions).toHaveBeenCalledTimes(1);
+
+    await render("d-ident", [{ branch: null }, { branch: "dev" }]); // same content, new array
+    expect(listAliveSessions).toHaveBeenCalledTimes(1);
+
+    await render("d-ident", [{ branch: null }, { branch: "dev" }, { branch: "spike" }]); // real change
+    expect(listAliveSessions).toHaveBeenCalledTimes(2);
+  });
+
   it("does not wait for the workspace list, and keeps its rows if only that is missing", async () => {
     // Liveness is a property of the project: gating it on the worktree fetch
     // would blank the sidebar for a round-trip on every project switch.

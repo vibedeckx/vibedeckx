@@ -137,21 +137,14 @@ export function useExecutors(
     fetchExecutors();
   }, [fetchExecutors]);
 
-  // Running processes are global (not workspace-scoped), so fetch once on
-  // mount. Kept out of the executor effect above, whose identity changes as
-  // projectId then branch resolve — bundling them re-fired this argument-less
-  // call 3x per load for an identical result.
-  useEffect(() => {
-    fetchRunningProcesses();
-  }, [fetchRunningProcesses]);
-
-  // Reconcile on project switch. The hook isn't remounted when projectId
-  // changes (the prop just updates), so the mount fetch above never re-runs.
-  // An executor:stopped emitted while we were viewing another project is
-  // dropped by the projectId filter in the SSE handler below (SSE has no
-  // replay), so without this the stale "running" entry survives the round
-  // trip and the Stop button stays red. Re-fetching rebuilds runningProcesses
-  // from the authoritative REST snapshot.
+  // Running processes are global (not workspace-scoped). One effect keyed on
+  // projectId covers both reasons to read them: first display (projectId
+  // resolving from undefined is the first run) and project switch — an
+  // executor:stopped emitted while we were viewing another project is dropped
+  // by the projectId filter in the SSE handler below (SSE has no replay), so
+  // the stale "running" entry would otherwise survive the round trip and the
+  // Stop button would stay red. A separate mount effect used to fire once more
+  // before projectId existed, for an identical result.
   useEffect(() => {
     if (!projectId) return;
     fetchRunningProcesses();

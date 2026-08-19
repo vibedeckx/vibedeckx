@@ -7,6 +7,8 @@ import type { ProjectRemote } from "@/lib/api";
 interface ProjectRemotesContextValue {
   remotes: ProjectRemote[];
   loading: boolean;
+  // True once the current project's links have been fetched (even if empty).
+  loaded: boolean;
   refresh: () => Promise<void>;
 }
 

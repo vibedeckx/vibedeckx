@@ -95,6 +95,83 @@ describe("useProjectRemotes status refresh", () => {
     expect(getRemoteServers).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a slow previous-project response that lands after the new project's", async () => {
+    // A→B switch; B's /remotes resolves first, then A's. A must not overwrite
+    // B's links nor flip loadedProjectId back to A (which would leave B
+    // loaded=false for good and gate the diff panel shut).
+    let resolveA!: (v: unknown) => void;
+    let resolveB!: (v: unknown) => void;
+    getProjectRemotes.mockReset();
+    getProjectRemotes
+      .mockImplementationOnce(() => new Promise((r) => { resolveA = r; }))
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = r; }));
+    getRemoteServers.mockResolvedValue([]);
+
+    await render("pA");
+    await flush();
+    expect(latest?.loaded).toBe(false);
+    await render("pB");
+    await flush();
+    expect(latest?.remotes).toEqual([]); // A's pre-fetch list is not shown for B
+    expect(latest?.loaded).toBe(false);
+
+    await act(async () => { resolveB([{ id: "prB", project_id: "pB", remote_server_id: "srvB", remote_path: "/b", server_name: "B" }]); });
+    await flush();
+    expect(latest?.remotes.map((r) => r.id)).toEqual(["prB"]);
+    expect(latest?.loaded).toBe(true);
+
+    await act(async () => { resolveA([{ id: "prA", project_id: "pA", remote_server_id: "srvA", remote_path: "/a", server_name: "A" }]); });
+    await flush();
+    expect(latest?.remotes.map((r) => r.id)).toEqual(["prB"]);
+    expect(latest?.loaded).toBe(true);
+  });
+
+  it("A→B→A while B is pending: A is not loaded again until its own refetch lands", async () => {
+    let resolveB!: (v: unknown) => void;
+    let resolveA2!: (v: unknown) => void;
+    const linksA = [{ id: "prA", project_id: "pA", remote_server_id: "srvA", remote_path: "/a", server_name: "A" }];
+    getProjectRemotes.mockReset();
+    getProjectRemotes
+      .mockResolvedValueOnce(linksA)                                        // A, first visit
+      .mockImplementationOnce(() => new Promise((r) => { resolveB = r; }))  // B, left pending
+      .mockImplementationOnce(() => new Promise((r) => { resolveA2 = r; })); // A, revisit
+    getRemoteServers.mockResolvedValue([]);
+
+    await render("pA");
+    await flush();
+    expect(latest?.loaded).toBe(true);
+
+    await render("pB");
+    await flush();
+    expect(latest?.loaded).toBe(false);
+
+    await render("pA"); // back before B resolved
+    await flush();
+    expect(latest?.remotes).toEqual([]);
+    expect(latest?.loaded).toBe(false); // not "loaded" on the strength of the earlier visit
+
+    await act(async () => { resolveB([]); });
+    await flush();
+    expect(latest?.loaded).toBe(false); // B's late response is ignored
+
+    await act(async () => { resolveA2(linksA); });
+    await flush();
+    expect(latest?.remotes.map((r) => r.id)).toEqual(["prA"]);
+    expect(latest?.loaded).toBe(true);
+  });
+
+  it("on a failed fetch for the new project, shows no links (not the previous project's) and still reports loaded", async () => {
+    await render("pA");
+    await flush();
+    expect(latest?.remotes).toHaveLength(1);
+
+    getProjectRemotes.mockRejectedValueOnce(new Error("network"));
+    await render("pB");
+    await flush();
+    expect(latest?.remotes).toEqual([]);
+    expect(latest?.loaded).toBe(true); // attempt finished — consumers may proceed with the empty list
+  });
+
   it("does not poll /remotes on the backstop interval, only /remote-servers", async () => {
     await render("p1");
     await flush();

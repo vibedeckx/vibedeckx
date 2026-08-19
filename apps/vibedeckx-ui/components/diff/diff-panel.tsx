@@ -46,7 +46,7 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, 
     if (!nonceBumped) setCompareMode(false); // plain branch switch resets; deep-link wins
   }
 
-  const { remotes } = useProjectRemotesContext();
+  const { remotes, loaded: remotesLoaded } = useProjectRemotesContext();
 
   // Build execution mode targets from local path + project remotes
   const diffTargets: ExecutionModeTarget[] = [];
@@ -55,10 +55,22 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, 
     diffTargets.push({ id: r.remote_server_id, label: r.server_name, icon: Cloud });
   }
 
+  // State holds only the user's explicit pick; the effective target is derived
+  // during render. A pick that no longer exists (project switch, remote removed)
+  // falls back to the default by itself — no reset effect, no stale-value render.
   const defaultTarget = project?.path ? 'local' : (remotes.length > 0 ? remotes[0].remote_server_id : 'local');
-  const [diffTarget, setDiffTarget] = useState<string>(defaultTarget);
+  const [pickedTarget, setPickedTarget] = useState<string | null>(null);
+  const diffTarget =
+    pickedTarget !== null && diffTargets.some((t) => t.id === pickedTarget) ? pickedTarget : defaultTarget;
   const [allExpanded, setAllExpanded] = useState(true);
   const [expandKey, setExpandKey] = useState(0);
+
+  // The target is only known once the project's remotes are loaded (a project
+  // without a local path defaults to its first remote). Fetching before that
+  // sent a target-less request the backend auto-resolved over the tunnel, then
+  // the real one once remotes arrived — two slow round-trips, first discarded.
+  // A local-path project defaults to 'local' regardless, so it needn't wait.
+  const targetReady = !!project?.path || remotesLoaded;
 
   // Map diffTarget to 'local' | 'remote' for hooks that still use old API.
   // When the project has no local path, omit target so the backend auto-detects remote.
@@ -69,17 +81,14 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, 
   const { commits, loading: commitsLoading, refetch: refetchCommits } = useCommits(projectId, selectedBranch, undefined, hookTarget);
 
   useEffect(() => {
+    if (!targetReady) return;
     refresh();
-  }, [refresh]);
+  }, [refresh, targetReady]);
 
   useEffect(() => {
+    if (!targetReady) return;
     refetchCommits();
-  }, [refetchCommits]);
-
-  // Reset diffTarget when project changes
-  useEffect(() => {
-    setDiffTarget(defaultTarget);
-  }, [projectId, defaultTarget]);
+  }, [refetchCommits, targetReady]);
 
   if (!projectId) {
     return (
@@ -125,7 +134,7 @@ export function DiffPanel({ projectId, selectedBranch, onMergeRequest, project, 
             <ExecutionModeToggle
               targets={diffTargets}
               activeTarget={diffTarget}
-              onTargetChange={setDiffTarget}
+              onTargetChange={setPickedTarget}
               disabled={loading}
             />
           )}

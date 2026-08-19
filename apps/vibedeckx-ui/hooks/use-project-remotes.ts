@@ -26,9 +26,32 @@ export function useProjectRemotes(
   const withStatus = options?.withStatus ?? false;
   const [remotes, setRemotes] = useState<ProjectRemote[]>([]);
   const [loading, setLoading] = useState(false);
-  // Latest list, so a status-only refresh can merge into it without being
-  // recreated (and re-subscribing the effects below) on every update.
-  const remotesRef = useRef<ProjectRemote[]>([]);
+  // Project whose links have completed at least one fetch (success or failure).
+  // `loading` alone can't tell "not started yet" from "finished": consumers that
+  // derive a target from the links (diff panel) must not fire requests on the
+  // empty pre-fetch list.
+  const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
+  const loaded = projectId === undefined ? true : loadedProjectId === projectId;
+
+  // Project switch: drop the previous project's links during render so they
+  // are never shown (or used to derive a target) as the new project's — even
+  // if the new project's fetch fails and leaves nothing to replace them with.
+  const [seenProjectId, setSeenProjectId] = useState(projectId);
+  if (projectId !== seenProjectId) {
+    setSeenProjectId(projectId);
+    setRemotes([]);
+    // Also forget that any project finished loading: switching A→B→A while B
+    // is still in flight would otherwise pair the cleared list with A's old
+    // `loaded=true`, and consumers would fetch against an empty link list.
+    setLoadedProjectId(null);
+  }
+
+  // Request generation: every refresh() bumps it and only the latest issued
+  // request may land. Without this a slow project-A response arriving after
+  // project-B's would overwrite B's links with A's and set loadedProjectId back
+  // to A — leaving B `loaded=false` for good, which would gate the diff panel
+  // shut (nothing else sets loadedProjectId).
+  const generationRef = useRef(0);
 
   const applyStatus = useCallback(
     (data: ProjectRemote[], servers: { id: string; status?: ProjectRemote["status"] }[]) => {
@@ -41,45 +64,47 @@ export function useProjectRemotes(
     [],
   );
 
-  const commit = useCallback((next: ProjectRemote[]) => {
-    remotesRef.current = next;
-    setRemotes(next);
-  }, []);
-
   // Full refresh: project→remote links (rarely change) plus, when requested,
   // their connection status.
   const refresh = useCallback(async () => {
+    const generation = ++generationRef.current;
     if (!projectId) {
-      commit([]);
+      setRemotes([]);
       return;
     }
     setLoading(true);
     try {
       const data = await api.getProjectRemotes(projectId);
+      let next = data;
       if (withStatus) {
         const servers = await api.getRemoteServers();
-        commit(applyStatus(data, servers));
-      } else {
-        commit(data);
+        next = applyStatus(data, servers);
       }
+      if (generation !== generationRef.current) return;
+      setRemotes(next);
     } catch (err) {
+      if (generation !== generationRef.current) return;
       console.error("Failed to fetch project remotes:", err);
     } finally {
-      setLoading(false);
+      if (generation === generationRef.current) {
+        setLoading(false);
+        setLoadedProjectId(projectId);
+      }
     }
-  }, [projectId, withStatus, commit, applyStatus]);
+  }, [projectId, withStatus, applyStatus]);
 
   // Status-only refresh: one `/api/remote-servers` call merged into the
-  // already-loaded links. `/remotes` is project config and is not re-read here.
+  // already-loaded links (functional update — merges into whatever list is
+  // current when it lands). `/remotes` is project config and is not re-read.
   const refreshStatus = useCallback(async () => {
     if (!projectId || !withStatus) return;
     try {
       const servers = await api.getRemoteServers();
-      commit(applyStatus(remotesRef.current, servers));
+      setRemotes((prev) => applyStatus(prev, servers));
     } catch (err) {
       console.error("Failed to refresh remote server status:", err);
     }
-  }, [projectId, withStatus, commit, applyStatus]);
+  }, [projectId, withStatus, applyStatus]);
 
   useEffect(() => {
     refresh();
@@ -110,7 +135,7 @@ export function useProjectRemotes(
     };
   }, [withStatus, projectId, refreshStatus]);
 
-  return { remotes, loading, refresh };
+  return { remotes, loading, loaded, refresh };
 }
 
 // Cloud icon for a remote target: a slashed cloud when the remote is known to be
