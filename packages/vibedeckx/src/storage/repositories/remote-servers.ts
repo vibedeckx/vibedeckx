@@ -257,6 +257,15 @@ export const createRemoteServerRepos = (
       return rows.map(mapProjectRemoteWithServer);
     },
 
+    listProjectIdsByServer: async (remoteServerId) => {
+      const rows = await kdb.selectFrom("project_remotes")
+        .select("project_id")
+        .distinct()
+        .where("remote_server_id", "=", remoteServerId)
+        .execute();
+      return rows.map((r) => r.project_id);
+    },
+
     getByProjectAndServer: async (projectId, remoteServerId) => {
       const row = await kdb.selectFrom("project_remotes")
         .innerJoin("remote_servers", "remote_servers.id", "project_remotes.remote_server_id")

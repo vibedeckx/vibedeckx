@@ -828,6 +828,8 @@ export interface Storage {
   projectRemotes: {
     getByProject(projectId: string): Promise<ProjectRemoteWithServer[]>;
     getByProjectAndServer(projectId: string, remoteServerId: string): Promise<ProjectRemoteWithServer | undefined>;
+    /** Distinct ids of projects linked to this remote server (status-event fan-out). */
+    listProjectIdsByServer(remoteServerId: string): Promise<string[]>;
     add(opts: {
       project_id: string;
       remote_server_id: string;

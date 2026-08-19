@@ -284,6 +284,15 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
     void (async () => {
       await opts.storage.remoteServers.updateStatus(remoteServerId, status);
+      // Emit only after the row is updated so a browser that refetches
+      // /api/remote-servers on this event never reads the stale status.
+      try {
+        for (const projectId of await opts.storage.projectRemotes.listProjectIdsByServer(remoteServerId)) {
+          eventBus.emit({ type: "remote-server:status", projectId, remoteServerId, status });
+        }
+      } catch (err) {
+        console.error(`[SharedServices] remote-server:status fan-out failed for ${remoteServerId}:`, err);
+      }
       // When a reverse connection comes online, restore any persisted remote executors
       if (status === "online") {
         const machineId = reverseConnectManager.getMachineId(remoteServerId);

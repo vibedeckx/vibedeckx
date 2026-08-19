@@ -326,6 +326,20 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     expect(await storage.projectRemotes.getByProjectAndServer("p1", "nonexistent")).toBeUndefined();
   });
 
+  it("projectRemotes listProjectIdsByServer returns distinct linked projects", async () => {
+    await storage.projects.create({ id: "p1", name: "a", path: "/tmp/a" });
+    await storage.projects.create({ id: "p2", name: "b", path: "/tmp/b" });
+    await storage.projects.create({ id: "p3", name: "c", path: "/tmp/c" });
+    const srv = await storage.remoteServers.create({ name: "srv" });
+    const other = await storage.remoteServers.create({ name: "other" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: srv.id, remote_path: "/r1" });
+    await storage.projectRemotes.add({ project_id: "p2", remote_server_id: srv.id, remote_path: "/r2" });
+    await storage.projectRemotes.add({ project_id: "p3", remote_server_id: other.id, remote_path: "/r3" });
+
+    expect((await storage.projectRemotes.listProjectIdsByServer(srv.id)).sort()).toEqual(["p1", "p2"]);
+    expect(await storage.projectRemotes.listProjectIdsByServer("nonexistent")).toEqual([]);
+  });
+
   it("projectRemotes getByProject orders by sort_order ascending", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
     const s1 = await storage.remoteServers.create({ name: "s1" });

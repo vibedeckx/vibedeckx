@@ -27,7 +27,11 @@ export type GlobalEvent =
   // SSE frame costs freshness, not the notification. `projectId` stays at the
   // top level so the existing per-tenant SSE project filter applies unchanged
   // (a second authorization layer over the row's own user_id).
-  | { type: "notification:created"; projectId: string; notification: import("./storage/types.js").Notification };
+  | { type: "notification:created"; projectId: string; notification: import("./storage/types.js").Notification }
+  // A reverse-connect worker came online / went offline. Fanned out once per
+  // project linked to that server so the per-tenant SSE project filter applies
+  // unchanged; consumers refetch /api/remote-servers on it instead of polling.
+  | { type: "remote-server:status"; projectId: string; remoteServerId: string; status: "online" | "offline" };
 
 export class EventBus {
   private emitter = new EventEmitter();

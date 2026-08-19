@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { api, type RemoteServer, type CrossRemoteAccess } from '@/lib/api';
+import { useGlobalEventStream } from '@/hooks/global-event-stream';
 import {
   Globe,
   Plus,
@@ -98,9 +99,17 @@ export function RemoteServersSettings() {
     loadServers();
   }, [loadServers]);
 
-  // Refresh servers periodically to update status
+  // Live status: the hub emits `remote-server:status` when a worker connects or
+  // disconnects. The list here is global (not per project), so accept the event
+  // from any project. Servers linked to no project emit nothing — the focus
+  // handler and backstop below cover those.
+  useGlobalEventStream((evt) => {
+    if (evt.type === 'remote-server:status') void loadServers();
+  });
+
+  // Backstop refresh for missed events / unlinked servers.
   useEffect(() => {
-    const interval = setInterval(loadServers, 15000);
+    const interval = setInterval(loadServers, 60000);
     const onFocus = () => loadServers();
     window.addEventListener('focus', onFocus);
     return () => {
