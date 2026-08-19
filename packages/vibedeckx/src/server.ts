@@ -56,6 +56,19 @@ import "./server-types.js";
 // it disagree about whether a key exists.
 const API_KEY = process.env.VIBEDECKX_API_KEY || undefined;
 
+// Cache policy for the bundled UI. Next's static export puts every JS/CSS/font
+// under `/_next/static/` with a content hash in the name, so a new build is a
+// new URL: those can be cached "forever" and marked immutable (browsers then
+// skip even the revalidation on reload). HTML is the entry point that decides
+// which hashes to reference, so it must always be revalidated. Everything else
+// (sounds, favicon, svg) is unhashed and gets a short TTL.
+export function staticCacheControl(filePath: string): string {
+  const p = filePath.replace(/\\/g, "/");
+  if (p.includes("/_next/static/")) return "public, max-age=31536000, immutable";
+  if (p.endsWith(".html") || p.endsWith(".txt")) return "no-cache";
+  return "public, max-age=86400";
+}
+
 /**
  * Check auth and send 401 if unauthorized. Returns userId (or undefined in no-auth mode).
  * Returns null if reply was sent (caller should return early).
@@ -384,6 +397,13 @@ export const createServer = async (opts: {
     server.register(fastifyStatic, {
       root: UI_ROOT,
       wildcard: false,
+      // Cache policy is ours, not send's default (`public, max-age=0`): with no
+      // origin Cache-Control, Cloudflare was stamping a 4h TTL on every asset
+      // and every reload re-downloaded ~1.2MB of content-hashed chunks.
+      cacheControl: false,
+      setHeaders: (res, filePath) => {
+        res.setHeader("Cache-Control", staticCacheControl(filePath));
+      },
     });
   }
 
