@@ -1,4 +1,4 @@
-import { type BundledLanguage, codeToTokensBase } from "shiki";
+import { getHighlighterFor, THEMES, type SupportedLanguage } from "@/lib/shiki";
 
 // What kind of token sits under a click. Only "code" tokens are real symbols
 // worth a definition/reference lookup; the rest are noise the popover should
@@ -43,11 +43,12 @@ function classifyScopes(scopes: string[]): TokenKind {
 // not the theme — so any theme works.
 export async function tokenizeFile(
   code: string,
-  language: BundledLanguage
+  language: SupportedLanguage
 ): Promise<SymbolTokenIndex> {
-  const lines = await codeToTokensBase(code, {
+  const highlighter = await getHighlighterFor(language);
+  const lines = highlighter.codeToTokensBase(code, {
     lang: language,
-    theme: "one-light",
+    theme: THEMES.light,
     includeExplanation: "scopeName",
   });
 

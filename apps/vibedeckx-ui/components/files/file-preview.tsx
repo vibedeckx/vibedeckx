@@ -29,7 +29,7 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { api, type FileContentResponse } from "@/lib/api";
-import type { BundledLanguage } from "shiki";
+import type { SupportedLanguage } from "@/lib/shiki";
 import { SymbolNavPopover } from "./symbol-nav-popover";
 import { ImagePreview } from "./image-preview";
 import {
@@ -214,7 +214,7 @@ function clearSymbolHighlight() {
   if (highlightApiAvailable()) CSS.highlights.delete(SYMBOL_HL);
 }
 
-const EXTENSION_LANGUAGE_MAP: Record<string, BundledLanguage> = {
+const EXTENSION_LANGUAGE_MAP: Record<string, SupportedLanguage> = {
   ts: "typescript",
   tsx: "tsx",
   js: "javascript",
@@ -256,7 +256,7 @@ const EXTENSION_LANGUAGE_MAP: Record<string, BundledLanguage> = {
   zig: "zig",
 };
 
-function getLanguage(filePath: string): BundledLanguage {
+function getLanguage(filePath: string): SupportedLanguage {
   const fileName = filePath.split("/").pop()?.toLowerCase() ?? "";
 
   // Handle special filenames

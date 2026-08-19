@@ -15,12 +15,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { type BundledLanguage, codeToHtml, type ShikiTransformer } from "shiki";
+import type { ShikiTransformer } from "shiki/core";
+import { getHighlighterFor, THEMES, type SupportedLanguage } from "@/lib/shiki";
 import { computeFoldRanges, type FoldRange } from "@/lib/files/fold-ranges";
 
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
-  language: BundledLanguage;
+  language: SupportedLanguage;
   showLineNumbers?: boolean;
   // 1-based line to scroll into view and briefly highlight once highlighting
   // renders. `scrollKey` lets the same line (or a repeat jump) re-trigger.
@@ -91,7 +92,7 @@ function makeFoldGutterTransformer(foldStartLines: Set<number>): ShikiTransforme
 
 export async function highlightCode(
   code: string,
-  language: BundledLanguage,
+  language: SupportedLanguage,
   showLineNumbers = false,
   foldStartLines?: Set<number>
 ) {
@@ -105,18 +106,11 @@ export async function highlightCode(
   }
   if (showLineNumbers) transformers.push(lineNumberTransformer);
 
-  return await Promise.all([
-    codeToHtml(code, {
-      lang: language,
-      theme: "one-light",
-      transformers,
-    }),
-    codeToHtml(code, {
-      lang: language,
-      theme: "one-dark-pro",
-      transformers,
-    }),
-  ]);
+  const highlighter = await getHighlighterFor(language);
+  return [
+    highlighter.codeToHtml(code, { lang: language, theme: THEMES.light, transformers }),
+    highlighter.codeToHtml(code, { lang: language, theme: THEMES.dark, transformers }),
+  ];
 }
 
 // Imperative controls for the fold gutter, so a sibling (the Files header's
