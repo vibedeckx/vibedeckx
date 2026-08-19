@@ -53,6 +53,11 @@ describe("cross-remote access", () => {
       remote_stat_path: "read",
       remote_process_list: "read",
       remote_bash: "exec",
+      remote_mcp_open: "exec",
+      remote_mcp_list_tools: "exec",
+      remote_mcp_call: "exec",
+      remote_mcp_ping: "exec",
+      remote_mcp_close: "exec",
     });
   });
 
@@ -178,7 +183,9 @@ describe("cross-remote access", () => {
       connected.add(b.id);
 
       const list = await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: a.id }));
-      expect(list).toEqual([{ id: b.id, name: "b", access: "read", online: true }]);
+      expect(list).toEqual([{
+        id: b.id, name: "b", access: "read", online: true, mcp_broker_supported: false,
+      }]);
       expect(list.find((r) => r.id === c.id)).toBeUndefined();
     });
 

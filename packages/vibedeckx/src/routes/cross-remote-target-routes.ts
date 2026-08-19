@@ -1,9 +1,15 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { promises as fs } from "fs";
 import type { FileHandle } from "fs/promises";
 import { runOneShot, MAX_OUTPUT_BYTES } from "../utils/one-shot-exec.js";
+import {
+  McpTimeoutError,
+  RemoteMcpSessionManager,
+  RemoteMcpSessionNotFoundError,
+  clampTimeout,
+} from "../remote-mcp-session-manager.js";
 
 const DEFAULT_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 300;
@@ -27,6 +33,10 @@ const clampTimeoutMs = (timeoutSec: unknown): number => {
  * x-vibedeckx-api-key hook, exactly like the other server-invoked remote routes.
  */
 const routes: FastifyPluginAsync = async (fastify) => {
+  const mcpSessions = new RemoteMcpSessionManager();
+  fastify.decorate("remoteMcpSessionManager", mcpSessions);
+  fastify.addHook("onClose", async () => mcpSessions.shutdown());
+
   fastify.post<{ Body: { command?: string; cwd?: string; timeoutSec?: number } }>(
     "/api/path/cross-remote/exec",
     async (request, reply) => {
@@ -138,6 +148,52 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/api/path/cross-remote/process-list", async (_request, reply) => {
     const result = await runOneShot(PROCESS_LIST_COMMAND, { timeoutMs: 15_000 });
     return reply.send(result);
+  });
+
+  const mcpError = (reply: FastifyReply, error: unknown) => {
+    if (error instanceof RemoteMcpSessionNotFoundError) return reply.code(404).send({ error: error.message });
+    if (error instanceof McpTimeoutError) return reply.code(504).send({ error: error.message, timedOut: true });
+    return reply.code(400).send({ error: error instanceof Error ? error.message : "MCP operation failed" });
+  };
+
+  fastify.post<{ Body: { command?: string; args?: string[]; cwd?: string; timeoutSec?: number } }>(
+    "/api/path/cross-remote/mcp/open",
+    async (request, reply) => {
+      try {
+        const { command, args, cwd, timeoutSec = 20 } = request.body ?? {};
+        if (typeof command !== "string" || !command) return reply.code(400).send({ error: "command is required" });
+        return reply.send(await mcpSessions.open({ command, args, cwd }, clampTimeout(timeoutSec * 1000)));
+      } catch (error) { return mcpError(reply, error); }
+    },
+  );
+
+  fastify.post<{ Body: { workerHandle?: string } }>("/api/path/cross-remote/mcp/list-tools", async (request, reply) => {
+    try {
+      return reply.send({ tools: await mcpSessions.listTools(request.body?.workerHandle ?? "") });
+    } catch (error) { return mcpError(reply, error); }
+  });
+
+  fastify.post<{ Body: { workerHandle?: string; tool?: string; arguments?: Record<string, unknown>; timeoutSec?: number } }>(
+    "/api/path/cross-remote/mcp/call",
+    async (request, reply) => {
+      try {
+        const { workerHandle = "", tool, arguments: args = {}, timeoutSec = 120 } = request.body ?? {};
+        if (typeof tool !== "string" || !tool) return reply.code(400).send({ error: "tool is required" });
+        const result = await mcpSessions.call(workerHandle, tool, args, clampTimeout(timeoutSec * 1000));
+        return reply.send({ result });
+      } catch (error) { return mcpError(reply, error); }
+    },
+  );
+
+  fastify.post<{ Body: { workerHandle?: string } }>("/api/path/cross-remote/mcp/ping", async (request, reply) => {
+    try {
+      await mcpSessions.ping(request.body?.workerHandle ?? "");
+      return reply.send({ ok: true });
+    } catch (error) { return mcpError(reply, error); }
+  });
+
+  fastify.post<{ Body: { workerHandle?: string } }>("/api/path/cross-remote/mcp/close", async (request, reply) => {
+    return reply.send({ closed: await mcpSessions.close(request.body?.workerHandle ?? "") });
   });
 };
 

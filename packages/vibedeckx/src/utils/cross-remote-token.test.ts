@@ -4,6 +4,8 @@ import {
   verifyCrossRemoteToken,
   CROSS_REMOTE_TOKEN_TTL_MS,
   type CrossRemoteTokenPayload,
+  signRemoteMcpHandle,
+  verifyRemoteMcpHandle,
 } from "./cross-remote-token.js";
 
 const SECRET = "test-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -71,5 +73,25 @@ describe("cross-remote token", () => {
 
     const noSession = signCrossRemoteToken(SECRET, { ...payload, sessionId: "" }, NOW);
     expect(verifyCrossRemoteToken(SECRET, noSession, NOW)).toBeNull();
+  });
+});
+
+describe("remote MCP handle", () => {
+  const handlePayload = {
+    userId: "user-1", sessionId: "session-1", remoteId: "remote-1",
+    workerHandle: "worker-handle", serverLabel: "chrome-devtools",
+  };
+
+  it("round-trips ownership claims", () => {
+    const handle = signRemoteMcpHandle(SECRET, handlePayload, NOW);
+    expect(verifyRemoteMcpHandle(SECRET, handle, NOW)).toEqual(handlePayload);
+  });
+
+  it("rejects tampering, a wrong secret, and expiry", () => {
+    const handle = signRemoteMcpHandle(SECRET, handlePayload, NOW, 10);
+    expect(verifyRemoteMcpHandle("wrong", handle, NOW)).toBeNull();
+    expect(verifyRemoteMcpHandle(SECRET, `${handle}x`, NOW)).toBeNull();
+    expect(verifyRemoteMcpHandle(SECRET, `${handle}.junk`, NOW)).toBeNull();
+    expect(verifyRemoteMcpHandle(SECRET, handle, NOW + 10)).toBeNull();
   });
 });

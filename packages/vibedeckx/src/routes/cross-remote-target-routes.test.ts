@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, promises as fsPromises } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, promises as fsPromises } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import crossRemoteTargetRoutes from "./cross-remote-target-routes.js";
@@ -161,5 +161,50 @@ describe("cross-remote target routes", () => {
     const res = await post("/api/path/cross-remote/process-list", {});
     expect(res.statusCode).toBe(200);
     expect(res.json().stdout.length).toBeGreaterThan(0);
+  });
+
+  it("keeps one stdio MCP process alive across calls and closes it explicitly", async () => {
+    const fake = path.join(dir, "fake-mcp.mjs");
+    const wrapper = path.join(dir, "mcp-wrapper.mjs");
+    const childPidFile = path.join(dir, "mcp-child.pid");
+    writeFileSync(fake, `
+      import readline from "node:readline";
+      let calls = 0;
+      const rl = readline.createInterface({ input: process.stdin });
+      const send = (x) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...x }) + "\\n");
+      rl.on("line", (line) => {
+        const m = JSON.parse(line);
+        if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: "2025-03-26", serverInfo: { name: "fake" }, capabilities: { tools: {} } } });
+        else if (m.method === "tools/list") send({ id: m.id, result: { tools: [{ name: "count", inputSchema: { type: "object" } }] } });
+        else if (m.method === "tools/call") send({ id: m.id, result: { content: [{ type: "text", text: String(++calls) }] } });
+        else if (m.method === "ping") send({ id: m.id, result: {} });
+      });
+    `);
+    writeFileSync(wrapper, `
+      import { spawn } from "node:child_process";
+      import { writeFileSync } from "node:fs";
+      const child = spawn(process.execPath, [process.argv[2]], { stdio: "inherit" });
+      writeFileSync(process.argv[3], String(child.pid));
+      setInterval(() => {}, 60_000);
+    `);
+
+    const opened = await post("/api/path/cross-remote/mcp/open", {
+      command: process.execPath, args: [wrapper, fake, childPidFile], cwd: dir,
+    });
+    expect(opened.statusCode).toBe(200);
+    const handle = opened.json().workerHandle;
+    expect(opened.json().tools[0].name).toBe("count");
+
+    const first = await post("/api/path/cross-remote/mcp/call", { workerHandle: handle, tool: "count" });
+    const second = await post("/api/path/cross-remote/mcp/call", { workerHandle: handle, tool: "count" });
+    expect(first.json().result.content[0].text).toBe("1");
+    expect(second.json().result.content[0].text).toBe("2");
+
+    expect((await post("/api/path/cross-remote/mcp/close", { workerHandle: handle })).json().closed).toBe(true);
+    expect((await post("/api/path/cross-remote/mcp/ping", { workerHandle: handle })).statusCode).toBe(404);
+    const childPid = Number(readFileSync(childPidFile, "utf8"));
+    await vi.waitFor(() => {
+      expect(() => process.kill(childPid, 0)).toThrow();
+    }, { timeout: 3_000 });
   });
 });

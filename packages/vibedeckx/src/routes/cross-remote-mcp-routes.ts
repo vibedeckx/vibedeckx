@@ -1,7 +1,13 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import { proxyToRemoteAuto, type ProxyResult } from "../utils/remote-proxy.js";
-import { getCrossRemoteSecret, verifyCrossRemoteToken, type CrossRemoteTokenPayload } from "../utils/cross-remote-token.js";
+import {
+  getCrossRemoteSecret,
+  signRemoteMcpHandle,
+  verifyCrossRemoteToken,
+  verifyRemoteMcpHandle,
+  type CrossRemoteTokenPayload,
+} from "../utils/cross-remote-token.js";
 import {
   CROSS_REMOTE_MCP_PATH,
   TOOL_TIERS,
@@ -9,6 +15,7 @@ import {
   resolveTarget,
   listAccessibleRemotes,
   SessionConcurrencyGuard,
+  supportsRemoteMcpBroker,
   type AccessDeps,
 } from "../cross-remote-access.js";
 import type { CrossRemoteAuditStatus } from "../storage/types.js";
@@ -86,6 +93,45 @@ const TOOLS = [
       required: ["remoteId", "command"],
     },
   },
+  {
+    name: "remote_mcp_open",
+    description: "Open a persistent stdio MCP server on an exec-tier remote. Returns a session-bound handle and tool schemas.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...REMOTE_ID_PROP,
+        command: { type: "string" },
+        args: { type: "array", items: { type: "string" } },
+        cwd: { type: "string", description: "Optional absolute working directory" },
+        serverLabel: { type: "string", description: "Short audit label; defaults to command" },
+        timeoutSec: { type: "number", description: "Initialization timeout (max 300s)" },
+      },
+      required: ["remoteId", "command"],
+    },
+  },
+  ...["list_tools", "ping", "close"].map((operation) => ({
+    name: `remote_mcp_${operation}`,
+    description: `${operation.replace("_", " ")} on a persistent remote MCP session.`,
+    inputSchema: {
+      type: "object",
+      properties: { handle: { type: "string", description: "Signed handle returned by remote_mcp_open" } },
+      required: ["handle"],
+    },
+  })),
+  {
+    name: "remote_mcp_call",
+    description: "Call a tool on a persistent remote MCP session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handle: { type: "string" },
+        tool: { type: "string" },
+        arguments: { type: "object" },
+        timeoutSec: { type: "number", description: "Tool timeout (max 300s, default 120s)" },
+      },
+      required: ["handle", "tool"],
+    },
+  },
 ];
 
 /** Maps a tool call onto the target-side route and body. Returns null when args are invalid. */
@@ -123,6 +169,43 @@ function buildTargetCall(
     }
     case "remote_process_list":
       return { path: "/api/path/cross-remote/process-list", body: {}, summary: "ps" };
+    case "remote_mcp_open": {
+      if (typeof args.command !== "string" || !args.command) return null;
+      const serverLabel = typeof args.serverLabel === "string" && args.serverLabel.trim() ? args.serverLabel : args.command;
+      return {
+        path: "/api/path/cross-remote/mcp/open",
+        body: { command: args.command, args: args.args, cwd: args.cwd, timeoutSec: args.timeoutSec },
+        summary: `server=${serverLabel} command=${args.command} argCount=${Array.isArray(args.args) ? args.args.length : 0}`,
+      };
+    }
+    case "remote_mcp_list_tools":
+      return {
+        path: "/api/path/cross-remote/mcp/list-tools",
+        body: { workerHandle: args.workerHandle },
+        summary: `server=${String(args.serverLabel ?? "mcp")}`,
+      };
+    case "remote_mcp_ping":
+      return {
+        path: "/api/path/cross-remote/mcp/ping",
+        body: { workerHandle: args.workerHandle },
+        summary: `server=${String(args.serverLabel ?? "mcp")}`,
+      };
+    case "remote_mcp_close":
+      return {
+        path: "/api/path/cross-remote/mcp/close",
+        body: { workerHandle: args.workerHandle },
+        summary: `server=${String(args.serverLabel ?? "mcp")}`,
+      };
+    case "remote_mcp_call": {
+      if (typeof args.tool !== "string" || !args.tool) return null;
+      return {
+        path: "/api/path/cross-remote/mcp/call",
+        body: { workerHandle: args.workerHandle, tool: args.tool, arguments: args.arguments, timeoutSec: args.timeoutSec },
+        summary: `server=${String(args.serverLabel ?? "mcp")} tool=${args.tool} argKeys=${
+          args.arguments && typeof args.arguments === "object" ? Object.keys(args.arguments).sort().join(",") : ""
+        }`,
+      };
+    }
     default:
       return null;
   }
@@ -199,17 +282,37 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!Object.hasOwn(TOOL_TIERS, toolName)) return textResult(`Unknown tool: ${toolName}`, true);
     const tier = TOOL_TIERS[toolName];
 
-    const target = buildTargetCall(toolName, args);
+    const isMcpTool = toolName.startsWith("remote_mcp_");
+    let routedArgs = args;
+    if (isMcpTool && toolName !== "remote_mcp_open") {
+      if (typeof args.handle !== "string") return textResult(`Invalid arguments for ${toolName}`, true);
+      const handle = verifyRemoteMcpHandle(await getSecret(), args.handle, Date.now());
+      if (!handle || handle.userId !== payload.userId || handle.sessionId !== payload.sessionId) {
+        return textResult("Invalid or expired remote MCP handle", true);
+      }
+      routedArgs = {
+        ...args,
+        remoteId: handle.remoteId,
+        workerHandle: handle.workerHandle,
+        serverLabel: handle.serverLabel,
+      };
+    }
+
+    const target = buildTargetCall(toolName, routedArgs);
     if (!target) return textResult(`Invalid arguments for ${toolName}`, true);
 
     const startedAt = Date.now();
-    const remoteId = args.remoteId as string;
+    const remoteId = routedArgs.remoteId as string;
 
     const resolved = await resolveTarget(fastify as unknown as AccessDeps, payload, remoteId, tier);
     if (!resolved.ok) {
       const status: CrossRemoteAuditStatus = resolved.reason === "offline" ? "offline" : "denied";
       await audit(payload, remoteId, toolName, target.summary, status, null, startedAt);
       return textResult(resolved.reason === "offline" ? `Remote ${remoteId} is offline` : NOT_ACCESSIBLE, true);
+    }
+    if (isMcpTool && !supportsRemoteMcpBroker(resolved.server)) {
+      await audit(payload, remoteId, toolName, target.summary, "denied", null, startedAt);
+      return textResult(`Remote ${remoteId} does not support the MCP broker; upgrade its worker.`, true);
     }
 
     if (!guard.acquire(payload.sessionId)) {
@@ -224,12 +327,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // of escaping as a bare 500.
       let result: ProxyResult;
       try {
+        const requestedSec = typeof routedArgs.timeoutSec === "number" ? routedArgs.timeoutSec : toolName === "remote_mcp_call" ? 120 : 20;
+        const boundedTimeoutSec = Math.min(Math.max(requestedSec, 1), 300);
+        // Opening performs initialize and tools/list sequentially on the worker;
+        // budget for both so the hub never abandons a successfully opened session.
+        const tunnelTimeoutMs = isMcpTool
+          ? boundedTimeoutSec * 1000 * (toolName === "remote_mcp_open" ? 2 : 1) + 5_000
+          : undefined;
         result = await proxyToRemoteAuto(
           resolved.server.id,
           "POST",
           target.path,
           target.body,
-          { reverseConnectManager: fastify.reverseConnectManager },
+          { reverseConnectManager: fastify.reverseConnectManager, timeoutMs: tunnelTimeoutMs },
         );
       } catch (err) {
         result = {
@@ -241,17 +351,40 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       if (!result.ok) {
-        await audit(payload, remoteId, toolName, target.summary, "error", null, startedAt);
+        const failedStatus: CrossRemoteAuditStatus =
+          result.errorCode === "timeout" || result.status === 504 || (result.data as { timedOut?: boolean } | undefined)?.timedOut === true
+            ? "timeout"
+            : "error";
+        await audit(payload, remoteId, toolName, target.summary, failedStatus, null, startedAt);
         const detail = (result.data as { error?: string } | undefined)?.error ?? result.errorCode ?? "unknown error";
         return textResult(`Call to remote ${remoteId} failed: ${detail}`, true);
       }
 
-      const data = result.data as Record<string, unknown>;
+      let data = result.data as Record<string, unknown>;
+      if (toolName === "remote_mcp_open") {
+        const workerHandle = data.workerHandle;
+        if (typeof workerHandle !== "string") return textResult("Remote returned an invalid MCP handle", true);
+        const serverLabel = typeof routedArgs.serverLabel === "string" && routedArgs.serverLabel.trim()
+          ? routedArgs.serverLabel
+          : String(routedArgs.command);
+        data = {
+          ...data,
+          workerHandle: undefined,
+          handle: signRemoteMcpHandle(await getSecret(), {
+            userId: payload.userId,
+            sessionId: payload.sessionId,
+            remoteId,
+            workerHandle,
+            serverLabel,
+          }, Date.now()),
+        };
+      }
       const exitCode = typeof data.exitCode === "number" ? data.exitCode : null;
-      const status: CrossRemoteAuditStatus = data.timedOut === true ? "timeout" : "ok";
+      const downstream = data.result as { isError?: boolean } | undefined;
+      const status: CrossRemoteAuditStatus = data.timedOut === true ? "timeout" : downstream?.isError === true ? "error" : "ok";
       await audit(payload, remoteId, toolName, target.summary, status, exitCode, startedAt);
 
-      return textResult(JSON.stringify(data, null, 2));
+      return textResult(JSON.stringify(data, null, 2), downstream?.isError === true);
     } finally {
       guard.release(payload.sessionId);
     }

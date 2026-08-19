@@ -6,6 +6,7 @@ import path from "path";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 import { signCrossRemoteToken, getCrossRemoteSecret } from "../utils/cross-remote-token.js";
+import { REMOTE_MCP_CAPABILITIES } from "../cross-remote-access.js";
 
 const proxyToRemoteAuto = vi.hoisted(() => vi.fn());
 vi.mock("../utils/remote-proxy.js", () => ({
@@ -51,6 +52,7 @@ describe("cross-remote MCP gateway", () => {
     const target = await storage.remoteServers.create({ name: "b" }, "user-1");
     targetId = target.id;
     await storage.remoteServers.update(targetId, { cross_remote_access: "exec" }, "user-1");
+    await storage.remoteServers.updateWorkerVersion(targetId, "0.3.23", [...REMOTE_MCP_CAPABILITIES]);
     connected = new Set([targetId]);
 
     app = Fastify();
@@ -98,17 +100,117 @@ describe("cross-remote MCP gateway", () => {
     expect(res.statusCode).toBe(202);
   });
 
-  it("lists all six tools", async () => {
+  it("lists the remote and broker tools", async () => {
     const res = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const names = res.json().result.tools.map((t: { name: string }) => t.name).sort();
     expect(names).toEqual([
       "list_accessible_remotes",
       "remote_bash",
       "remote_list_dir",
+      "remote_mcp_call",
+      "remote_mcp_close",
+      "remote_mcp_list_tools",
+      "remote_mcp_open",
+      "remote_mcp_ping",
       "remote_process_list",
       "remote_read_file",
       "remote_stat_path",
     ]);
+  });
+
+  it("opens a broker session, signs its handle, and reuses it for a tool call", async () => {
+    proxyToRemoteAuto
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", serverInfo: { name: "fake" }, tools: [{ name: "echo" }] } })
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { result: { content: [{ type: "text", text: "ok" }] } } });
+
+    const opened = await call(tokenFor(), "remote_mcp_open", {
+      remoteId: targetId, command: "fake-mcp", args: ["--stdio"], serverLabel: "fake", timeoutSec: 10,
+    });
+    const openData = JSON.parse(opened.json().result.content[0].text);
+    expect(openData.handle).toMatch(/^mcp\./);
+    expect(openData.workerHandle).toBeUndefined();
+    expect(proxyToRemoteAuto).toHaveBeenNthCalledWith(
+      1,
+      targetId,
+      "POST",
+      "/api/path/cross-remote/mcp/open",
+      expect.anything(),
+      expect.objectContaining({ timeoutMs: 25_000 }),
+    );
+
+    const called = await call(tokenFor(), "remote_mcp_call", {
+      handle: openData.handle, tool: "echo", arguments: { text: "ok" }, timeoutSec: 40,
+    });
+    expect(called.json().result.isError).toBeUndefined();
+    expect(proxyToRemoteAuto).toHaveBeenLastCalledWith(
+      targetId,
+      "POST",
+      "/api/path/cross-remote/mcp/call",
+      { workerHandle: "worker-1", tool: "echo", arguments: { text: "ok" }, timeoutSec: 40 },
+      expect.objectContaining({ timeoutMs: 45_000 }),
+    );
+  });
+
+  it("rejects a broker handle from another source session", async () => {
+    proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } });
+    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, command: "fake-mcp" });
+    const handle = JSON.parse(opened.json().result.content[0].text).handle;
+    proxyToRemoteAuto.mockClear();
+    const res = await call(tokenFor({ sessionId: "sess-2" }), "remote_mcp_ping", { handle });
+    expect(res.json().result.isError).toBe(true);
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the command when serverLabel is empty", async () => {
+    proxyToRemoteAuto
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } })
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { ok: true } });
+    const opened = await call(tokenFor(), "remote_mcp_open", {
+      remoteId: targetId, command: "fake-mcp", serverLabel: "",
+    });
+    const handle = JSON.parse(opened.json().result.content[0].text).handle;
+    const pinged = await call(tokenFor(), "remote_mcp_ping", { handle });
+    expect(pinged.json().result.isError).toBeUndefined();
+    expect(proxyToRemoteAuto).toHaveBeenLastCalledWith(
+      targetId,
+      "POST",
+      "/api/path/cross-remote/mcp/ping",
+      expect.objectContaining({ workerHandle: "worker-1" }),
+      expect.anything(),
+    );
+  });
+
+  it("degrades before proxying when a worker lacks MCP broker capabilities", async () => {
+    const old = await storage.remoteServers.create({ name: "old" }, "user-1");
+    await storage.remoteServers.update(old.id, { cross_remote_access: "exec" }, "user-1");
+    connected.add(old.id);
+    const res = await call(tokenFor(), "remote_mcp_open", { remoteId: old.id, command: "fake-mcp" });
+    expect(res.json().result.content[0].text).toContain("upgrade");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("requires exec access for broker operations", async () => {
+    await storage.remoteServers.update(targetId, { cross_remote_access: "read" }, "user-1");
+    const res = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, command: "fake-mcp" });
+    expect(res.json().result.isError).toBe(true);
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("audits downstream MCP errors with tool and argument keys but not values", async () => {
+    proxyToRemoteAuto
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } })
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { result: { isError: true, content: [] } } });
+    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, command: "fake-mcp", serverLabel: "safe" });
+    const handle = JSON.parse(opened.json().result.content[0].text).handle;
+    const called = await call(tokenFor(), "remote_mcp_call", { handle, tool: "login", arguments: { password: "never-log-me", user: "j" } });
+    expect(called.json().result.isError).toBe(true);
+    const rows = await storage.crossRemoteAudit.listByTarget(targetId);
+    expect(rows[0]).toMatchObject({ tool_name: "remote_mcp_call", status: "error" });
+    expect(rows[0].args_summary).toContain("tool=login");
+    expect(rows[0].args_summary).toContain("argKeys=password,user");
+    expect(rows[0].args_summary).not.toContain("never-log-me");
+    expect(rows[1]).toMatchObject({ tool_name: "remote_mcp_open", status: "ok" });
+    expect(rows[1].args_summary).toContain("server=safe command=fake-mcp argCount=0");
   });
 
   it("returns a JSON-RPC error for an unknown method", async () => {

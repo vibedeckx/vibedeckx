@@ -16,9 +16,24 @@ export const TOOL_TIERS: Record<string, CrossRemoteTier> = {
   remote_stat_path: "read",
   remote_process_list: "read",
   remote_bash: "exec",
+  remote_mcp_open: "exec",
+  remote_mcp_list_tools: "exec",
+  remote_mcp_call: "exec",
+  remote_mcp_ping: "exec",
+  remote_mcp_close: "exec",
 };
 
 export const MAX_IN_FLIGHT_PER_SESSION = 4;
+export const REMOTE_MCP_CAPABILITIES = [
+  "http:POST /api/path/cross-remote/mcp/open",
+  "http:POST /api/path/cross-remote/mcp/list-tools",
+  "http:POST /api/path/cross-remote/mcp/call",
+  "http:POST /api/path/cross-remote/mcp/ping",
+  "http:POST /api/path/cross-remote/mcp/close",
+] as const;
+
+export const supportsRemoteMcpBroker = (server: RemoteServer): boolean =>
+  REMOTE_MCP_CAPABILITIES.every((capability) => server.worker_capabilities?.includes(capability));
 
 /** Structural subset of FastifyInstance, so the gateway route can pass `fastify` directly. */
 export interface AccessDeps {
@@ -74,12 +89,18 @@ export async function resolveTarget(
 export async function listAccessibleRemotes(
   deps: AccessDeps,
   payload: CrossRemoteTokenPayload,
-): Promise<Array<{ id: string; name: string; access: CrossRemoteAccess; online: boolean }>> {
+): Promise<Array<{ id: string; name: string; access: CrossRemoteAccess; online: boolean; mcp_broker_supported: boolean }>> {
   const servers = await deps.storage.remoteServers.getAll(payload.userId);
   return servers
     .filter((s) => s.cross_remote_access !== "off")
     .filter((s) => s.id !== payload.sourceRemoteServerId)
-    .map((s) => ({ id: s.id, name: s.name, access: s.cross_remote_access, online: isOnline(deps, s) }));
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      access: s.cross_remote_access,
+      online: isOnline(deps, s),
+      mcp_broker_supported: supportsRemoteMcpBroker(s),
+    }));
 }
 
 export class SessionConcurrencyGuard {

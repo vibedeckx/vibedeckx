@@ -152,6 +152,7 @@ export class ReverseConnectClient {
 
       this.clearNoPingTimer();
       this.closeAllLocalChannels();
+      void this.localServer.remoteMcpSessionManager?.closeAll("reverse-connect disconnected");
       this.ws = null;
 
       if (!this.shuttingDown) {

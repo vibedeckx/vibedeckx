@@ -21,6 +21,48 @@ interface WirePayload {
 const sign = (secret: string, body: string): string =>
   createHmac("sha256", secret).update(body).digest("base64url");
 
+export interface RemoteMcpHandlePayload {
+  userId: string;
+  sessionId: string;
+  remoteId: string;
+  workerHandle: string;
+  serverLabel: string;
+}
+
+interface McpHandleWire {
+  u: string; s: string; r: string; h: string; n: string; exp: number;
+}
+
+export function signRemoteMcpHandle(
+  secret: string,
+  payload: RemoteMcpHandlePayload,
+  nowMs: number,
+  ttlMs = CROSS_REMOTE_TOKEN_TTL_MS,
+): string {
+  const wire: McpHandleWire = {
+    u: payload.userId, s: payload.sessionId, r: payload.remoteId,
+    h: payload.workerHandle, n: payload.serverLabel, exp: nowMs + ttlMs,
+  };
+  const body = Buffer.from(JSON.stringify(wire)).toString("base64url");
+  return `mcp.${body}.${sign(secret, `mcp:${body}`)}`;
+}
+
+export function verifyRemoteMcpHandle(secret: string, handle: string, nowMs: number): RemoteMcpHandlePayload | null {
+  const parts = handle.split(".");
+  if (parts.length !== 3) return null;
+  const [prefix, body, providedSig] = parts;
+  if (prefix !== "mcp" || !body || !providedSig) return null;
+  const expectedSig = sign(secret, `mcp:${body}`);
+  const provided = Buffer.from(providedSig);
+  const expected = Buffer.from(expectedSig);
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return null;
+  let wire: McpHandleWire;
+  try { wire = JSON.parse(Buffer.from(body, "base64url").toString()); } catch { return null; }
+  if (![wire.u, wire.s, wire.r, wire.h, wire.n].every((v) => typeof v === "string" && v.length > 0)) return null;
+  if (typeof wire.exp !== "number" || nowMs >= wire.exp) return null;
+  return { userId: wire.u, sessionId: wire.s, remoteId: wire.r, workerHandle: wire.h, serverLabel: wire.n };
+}
+
 export function signCrossRemoteToken(
   secret: string,
   payload: CrossRemoteTokenPayload,

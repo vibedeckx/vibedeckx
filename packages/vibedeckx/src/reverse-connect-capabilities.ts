@@ -130,6 +130,11 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/path/cross-remote/list-dir": { since: "0.2.0", summary: "跨远程网关:列目录" },
   "http:POST /api/path/cross-remote/stat": { since: "0.2.0", summary: "跨远程网关:stat" },
   "http:POST /api/path/cross-remote/process-list": { since: "0.2.0", summary: "跨远程网关:进程列表" },
+  "http:POST /api/path/cross-remote/mcp/open": { since: "0.3.23", summary: "跨远程网关:打开 MCP 会话" },
+  "http:POST /api/path/cross-remote/mcp/list-tools": { since: "0.3.23", summary: "跨远程网关:MCP 工具列表" },
+  "http:POST /api/path/cross-remote/mcp/call": { since: "0.3.23", summary: "跨远程网关:调用 MCP 工具" },
+  "http:POST /api/path/cross-remote/mcp/ping": { since: "0.3.23", summary: "跨远程网关:MCP 心跳" },
+  "http:POST /api/path/cross-remote/mcp/close": { since: "0.3.23", summary: "跨远程网关:关闭 MCP 会话" },
 
   // --- Raw passthrough ---
   // Browser preview proxies caller-supplied paths (and localhost ports) through
