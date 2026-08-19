@@ -5,11 +5,14 @@ import { promises as fs } from "fs";
 import type { FileHandle } from "fs/promises";
 import { runOneShot, MAX_OUTPUT_BYTES } from "../utils/one-shot-exec.js";
 import {
+  McpSessionExpiredError,
   McpTimeoutError,
+  RemoteMcpSessionLimitError,
   RemoteMcpSessionManager,
   RemoteMcpSessionNotFoundError,
   clampTimeout,
 } from "../remote-mcp-session-manager.js";
+import { parseRemoteMcpTransport } from "../protocol/mcp/transport.js";
 
 const DEFAULT_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 300;
@@ -152,17 +155,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   const mcpError = (reply: FastifyReply, error: unknown) => {
     if (error instanceof RemoteMcpSessionNotFoundError) return reply.code(404).send({ error: error.message });
+    if (error instanceof McpSessionExpiredError) {
+      return reply.code(410).send({ code: "MCP_SESSION_EXPIRED", error: error.message });
+    }
+    if (error instanceof RemoteMcpSessionLimitError) return reply.code(429).send({ error: error.message });
     if (error instanceof McpTimeoutError) return reply.code(504).send({ error: error.message, timedOut: true });
     return reply.code(400).send({ error: error instanceof Error ? error.message : "MCP operation failed" });
   };
 
-  fastify.post<{ Body: { command?: string; args?: string[]; cwd?: string; timeoutSec?: number } }>(
+  fastify.post<{ Body: { transport?: unknown; timeoutSec?: number } }>(
     "/api/path/cross-remote/mcp/open",
     async (request, reply) => {
       try {
-        const { command, args, cwd, timeoutSec = 20 } = request.body ?? {};
-        if (typeof command !== "string" || !command) return reply.code(400).send({ error: "command is required" });
-        return reply.send(await mcpSessions.open({ command, args, cwd }, clampTimeout(timeoutSec * 1000)));
+        const { transport, timeoutSec = 20 } = request.body ?? {};
+        const parsed = parseRemoteMcpTransport(transport);
+        if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+        return reply.send(await mcpSessions.open(parsed.transport, clampTimeout(timeoutSec * 1000)));
       } catch (error) { return mcpError(reply, error); }
     },
   );

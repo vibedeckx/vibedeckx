@@ -1,14 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import { mcpLine, parseMcpLine } from "./codec.js";
+import { McpClientError, McpTimeoutError, type McpTool, type RemoteMcpClient } from "./client.js";
 
 export interface McpServerSpec { command: string; args?: string[]; cwd?: string }
-export interface McpTool { name: string; description?: string; inputSchema?: unknown }
+export { McpClientError, McpTimeoutError, type McpTool };
 
-export class McpClientError extends Error {}
-export class McpTimeoutError extends McpClientError {}
-
-export class McpStdioClient {
+export class McpStdioClient implements RemoteMcpClient {
   private nextId = 1;
   private pending = new Map<string | number, {
     resolve: (value: unknown) => void;

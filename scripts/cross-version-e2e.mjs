@@ -53,6 +53,14 @@ const COVERED_BY = {
   "http:POST /api/path/cross-remote/list-dir": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/list-dir" },
   "http:POST /api/path/cross-remote/stat": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/stat" },
   "http:POST /api/path/cross-remote/process-list": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/process-list" },
+  // The broker's smoke would have to spawn a real MCP server on the worker under test
+  // and keep it alive across calls; the route test does exactly that (stdio child plus a
+  // fake Streamable HTTP endpoint) against the same handlers the tunnel reaches.
+  "http:POST /api/path/cross-remote/mcp/open": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/mcp/open" },
+  "http:POST /api/path/cross-remote/mcp/list-tools": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/mcp/list-tools" },
+  "http:POST /api/path/cross-remote/mcp/call": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/mcp/call" },
+  "http:POST /api/path/cross-remote/mcp/ping": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/mcp/ping" },
+  "http:POST /api/path/cross-remote/mcp/close": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/mcp/close" },
   "http:POST /api/notification-outbox/query": { file: "packages/vibedeckx/src/routes/notification-outbox-routes.test.ts", marker: "/api/notification-outbox/query" },
   "http:POST /api/path/workflow-runs": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "/api/path/workflow-runs" },
   "http:GET /api/path/workflow-runs/reviewer-candidate": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "reviewer-candidate" },

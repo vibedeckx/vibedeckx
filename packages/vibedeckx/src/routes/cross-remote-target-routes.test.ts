@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import crossRemoteTargetRoutes from "./cross-remote-target-routes.js";
 import { MAX_OUTPUT_BYTES } from "../utils/one-shot-exec.js";
+import { startFakeHttpMcpServer } from "../protocol/mcp/__fixtures__/fake-http-mcp-server.js";
 
 describe("cross-remote target routes", () => {
   let app: FastifyInstance;
@@ -189,7 +190,7 @@ describe("cross-remote target routes", () => {
     `);
 
     const opened = await post("/api/path/cross-remote/mcp/open", {
-      command: process.execPath, args: [wrapper, fake, childPidFile], cwd: dir,
+      transport: { type: "stdio", command: process.execPath, args: [wrapper, fake, childPidFile], cwd: dir },
     });
     expect(opened.statusCode).toBe(200);
     const handle = opened.json().workerHandle;
@@ -206,5 +207,58 @@ describe("cross-remote target routes", () => {
     await vi.waitFor(() => {
       expect(() => process.kill(childPid, 0)).toThrow();
     }, { timeout: 3_000 });
+  });
+
+  it("brokers a streamable-http MCP endpoint the remote can reach", async () => {
+    const server = await startFakeHttpMcpServer({ stateful: true, sse: true });
+    try {
+      const opened = await post("/api/path/cross-remote/mcp/open", {
+        transport: { type: "streamable-http", url: server.url, headers: { Authorization: "Bearer token-1" } },
+      });
+      expect(opened.statusCode).toBe(200);
+      expect(opened.json().transport).toBe("streamable-http");
+      expect(opened.json().serverInfo).toMatchObject({ name: "fake-http-mcp" });
+      const workerHandle = opened.json().workerHandle;
+
+      const listed = await post("/api/path/cross-remote/mcp/list-tools", { workerHandle });
+      expect(listed.json().tools[0].name).toBe("echo");
+      expect((await post("/api/path/cross-remote/mcp/call", { workerHandle, tool: "echo" })).json().result)
+        .toMatchObject({ content: [{ text: "call-1" }] });
+      expect((await post("/api/path/cross-remote/mcp/ping", { workerHandle })).statusCode).toBe(200);
+      // The downstream protocol session is reused across calls and never surfaces to the caller.
+      expect(server.requests.filter((r) => r.sessionId === "fake-session-1").length).toBeGreaterThan(3);
+      expect(JSON.stringify(opened.json())).not.toContain("fake-session-1");
+
+      expect((await post("/api/path/cross-remote/mcp/close", { workerHandle })).json().closed).toBe(true);
+      expect(server.deletes).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("reports an expired downstream session with a re-open code", async () => {
+    const server = await startFakeHttpMcpServer({ stateful: true });
+    try {
+      const opened = await post("/api/path/cross-remote/mcp/open", {
+        transport: { type: "streamable-http", url: server.url },
+      });
+      const workerHandle = opened.json().workerHandle;
+      server.expire();
+
+      const called = await post("/api/path/cross-remote/mcp/call", { workerHandle, tool: "echo" });
+      expect(called.statusCode).toBe(410);
+      expect(called.json().code).toBe("MCP_SESSION_EXPIRED");
+      // The session is gone locally too, so a retry is an honest 404 rather than a second
+      // trip to a server that already forgot us.
+      expect((await post("/api/path/cross-remote/mcp/ping", { workerHandle })).statusCode).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects an unsupported transport without dialing anything", async () => {
+    const res = await post("/api/path/cross-remote/mcp/open", { transport: { type: "sse", url: "http://127.0.0.1:1/mcp" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("Unsupported MCP transport type: sse");
   });
 });

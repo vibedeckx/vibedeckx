@@ -18,6 +18,11 @@ import {
   supportsRemoteMcpBroker,
   type AccessDeps,
 } from "../cross-remote-access.js";
+import {
+  parseRemoteMcpTransport,
+  resolveMcpServerLabel,
+  type RemoteMcpTransport,
+} from "../protocol/mcp/transport.js";
 import type { CrossRemoteAuditStatus } from "../storage/types.js";
 import "../server-types.js";
 
@@ -95,18 +100,50 @@ const TOOLS = [
   },
   {
     name: "remote_mcp_open",
-    description: "Open a persistent stdio MCP server on an exec-tier remote. Returns a session-bound handle and tool schemas.",
+    description:
+      "Open a persistent MCP session on an exec-tier remote — either a stdio server the remote spawns, or a "
+      + "Streamable HTTP endpoint the remote can reach (its localhost, its LAN, its private DNS). "
+      + "Returns a session-bound handle and tool schemas.",
     inputSchema: {
       type: "object",
       properties: {
         ...REMOTE_ID_PROP,
-        command: { type: "string" },
-        args: { type: "array", items: { type: "string" } },
-        cwd: { type: "string", description: "Optional absolute working directory" },
-        serverLabel: { type: "string", description: "Short audit label; defaults to command" },
+        transport: {
+          description: "How the remote should reach the MCP server.",
+          oneOf: [
+            {
+              type: "object",
+              description: "Spawn an MCP server process on the remote.",
+              properties: {
+                type: { const: "stdio" },
+                command: { type: "string" },
+                args: { type: "array", items: { type: "string" } },
+                cwd: { type: "string", description: "Optional absolute working directory" },
+              },
+              required: ["type", "command"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              description: "Connect to an MCP server already listening at a URL the remote can reach.",
+              properties: {
+                type: { const: "streamable-http" },
+                url: { type: "string", description: "http(s) MCP endpoint, resolved from the remote" },
+                headers: {
+                  type: "object",
+                  description: "Extra request headers, e.g. Authorization. Never logged.",
+                  additionalProperties: { type: "string" },
+                },
+              },
+              required: ["type", "url"],
+              additionalProperties: false,
+            },
+          ],
+        },
+        serverLabel: { type: "string", description: "Short audit label; defaults to the command or the endpoint host/path" },
         timeoutSec: { type: "number", description: "Initialization timeout (max 300s)" },
       },
-      required: ["remoteId", "command"],
+      required: ["remoteId", "transport"],
     },
   },
   ...["list_tools", "ping", "close"].map((operation) => ({
@@ -170,12 +207,18 @@ function buildTargetCall(
     case "remote_process_list":
       return { path: "/api/path/cross-remote/process-list", body: {}, summary: "ps" };
     case "remote_mcp_open": {
-      if (typeof args.command !== "string" || !args.command) return null;
-      const serverLabel = typeof args.serverLabel === "string" && args.serverLabel.trim() ? args.serverLabel : args.command;
+      // callTool has already parsed the union and resolved the label; both are on args.
+      const transport = args.transport as RemoteMcpTransport | undefined;
+      if (!transport) return null;
+      const head = `server=${String(args.serverLabel)} transport=${transport.type}`;
       return {
         path: "/api/path/cross-remote/mcp/open",
-        body: { command: args.command, args: args.args, cwd: args.cwd, timeoutSec: args.timeoutSec },
-        summary: `server=${serverLabel} command=${args.command} argCount=${Array.isArray(args.args) ? args.args.length : 0}`,
+        body: { transport, timeoutSec: args.timeoutSec },
+        // The URL itself never lands in the audit row: its userinfo, query and fragment
+        // are exactly where MCP endpoints carry credentials. The label keeps host+path.
+        summary: transport.type === "stdio"
+          ? `${head} command=${transport.command} argCount=${transport.args?.length ?? 0}`
+          : head,
       };
     }
     case "remote_mcp_list_tools":
@@ -284,6 +327,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const isMcpTool = toolName.startsWith("remote_mcp_");
     let routedArgs = args;
+    if (toolName === "remote_mcp_open") {
+      const parsed = parseRemoteMcpTransport(args.transport);
+      if (!parsed.ok) return textResult(parsed.error, true);
+      routedArgs = { ...args, transport: parsed.transport, serverLabel: resolveMcpServerLabel(args.serverLabel, parsed.transport) };
+    }
     if (isMcpTool && toolName !== "remote_mcp_open") {
       if (typeof args.handle !== "string") return textResult(`Invalid arguments for ${toolName}`, true);
       const handle = verifyRemoteMcpHandle(await getSecret(), args.handle, Date.now());
@@ -356,17 +404,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
             ? "timeout"
             : "error";
         await audit(payload, remoteId, toolName, target.summary, failedStatus, null, startedAt);
-        const detail = (result.data as { error?: string } | undefined)?.error ?? result.errorCode ?? "unknown error";
-        return textResult(`Call to remote ${remoteId} failed: ${detail}`, true);
+        const failure = result.data as { error?: string; code?: string } | undefined;
+        const detail = failure?.error ?? result.errorCode ?? "unknown error";
+        // e.g. MCP_SESSION_EXPIRED — a machine-readable hint the agent can act on
+        // (re-open) rather than retrying a call the remote will keep refusing.
+        const code = failure?.code ? ` [${failure.code}]` : "";
+        return textResult(`Call to remote ${remoteId} failed${code}: ${detail}`, true);
       }
 
       let data = result.data as Record<string, unknown>;
       if (toolName === "remote_mcp_open") {
         const workerHandle = data.workerHandle;
         if (typeof workerHandle !== "string") return textResult("Remote returned an invalid MCP handle", true);
-        const serverLabel = typeof routedArgs.serverLabel === "string" && routedArgs.serverLabel.trim()
-          ? routedArgs.serverLabel
-          : String(routedArgs.command);
+        const serverLabel = routedArgs.serverLabel as string;
         data = {
           ...data,
           workerHandle: undefined,

@@ -8,6 +8,8 @@ import type { Storage } from "../storage/types.js";
 import { signCrossRemoteToken, getCrossRemoteSecret } from "../utils/cross-remote-token.js";
 import { REMOTE_MCP_CAPABILITIES } from "../cross-remote-access.js";
 
+const STDIO = { type: "stdio", command: "fake-mcp" } as const;
+
 const proxyToRemoteAuto = vi.hoisted(() => vi.fn());
 vi.mock("../utils/remote-proxy.js", () => ({
   proxyToRemoteAuto,
@@ -124,7 +126,10 @@ describe("cross-remote MCP gateway", () => {
       .mockResolvedValueOnce({ ok: true, status: 200, data: { result: { content: [{ type: "text", text: "ok" }] } } });
 
     const opened = await call(tokenFor(), "remote_mcp_open", {
-      remoteId: targetId, command: "fake-mcp", args: ["--stdio"], serverLabel: "fake", timeoutSec: 10,
+      remoteId: targetId,
+      transport: { type: "stdio", command: "fake-mcp", args: ["--stdio"] },
+      serverLabel: "fake",
+      timeoutSec: 10,
     });
     const openData = JSON.parse(opened.json().result.content[0].text);
     expect(openData.handle).toMatch(/^mcp\./);
@@ -153,7 +158,7 @@ describe("cross-remote MCP gateway", () => {
 
   it("rejects a broker handle from another source session", async () => {
     proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } });
-    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, command: "fake-mcp" });
+    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport: STDIO });
     const handle = JSON.parse(opened.json().result.content[0].text).handle;
     proxyToRemoteAuto.mockClear();
     const res = await call(tokenFor({ sessionId: "sess-2" }), "remote_mcp_ping", { handle });
@@ -161,16 +166,18 @@ describe("cross-remote MCP gateway", () => {
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
 
-  it("falls back to the command when serverLabel is empty", async () => {
+  it("derives the audit label from the transport when serverLabel is empty", async () => {
     proxyToRemoteAuto
       .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } })
       .mockResolvedValueOnce({ ok: true, status: 200, data: { ok: true } });
     const opened = await call(tokenFor(), "remote_mcp_open", {
-      remoteId: targetId, command: "fake-mcp", serverLabel: "",
+      remoteId: targetId, transport: STDIO, serverLabel: "",
     });
     const handle = JSON.parse(opened.json().result.content[0].text).handle;
     const pinged = await call(tokenFor(), "remote_mcp_ping", { handle });
     expect(pinged.json().result.isError).toBeUndefined();
+    const rows = await storage.crossRemoteAudit.listByTarget(targetId);
+    expect(rows.at(-1)?.args_summary).toContain("server=fake-mcp transport=stdio");
     expect(proxyToRemoteAuto).toHaveBeenLastCalledWith(
       targetId,
       "POST",
@@ -184,14 +191,14 @@ describe("cross-remote MCP gateway", () => {
     const old = await storage.remoteServers.create({ name: "old" }, "user-1");
     await storage.remoteServers.update(old.id, { cross_remote_access: "exec" }, "user-1");
     connected.add(old.id);
-    const res = await call(tokenFor(), "remote_mcp_open", { remoteId: old.id, command: "fake-mcp" });
+    const res = await call(tokenFor(), "remote_mcp_open", { remoteId: old.id, transport: STDIO });
     expect(res.json().result.content[0].text).toContain("upgrade");
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
 
   it("requires exec access for broker operations", async () => {
     await storage.remoteServers.update(targetId, { cross_remote_access: "read" }, "user-1");
-    const res = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, command: "fake-mcp" });
+    const res = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport: STDIO });
     expect(res.json().result.isError).toBe(true);
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
   });
@@ -200,7 +207,7 @@ describe("cross-remote MCP gateway", () => {
     proxyToRemoteAuto
       .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } })
       .mockResolvedValueOnce({ ok: true, status: 200, data: { result: { isError: true, content: [] } } });
-    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, command: "fake-mcp", serverLabel: "safe" });
+    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport: STDIO, serverLabel: "safe" });
     const handle = JSON.parse(opened.json().result.content[0].text).handle;
     const called = await call(tokenFor(), "remote_mcp_call", { handle, tool: "login", arguments: { password: "never-log-me", user: "j" } });
     expect(called.json().result.isError).toBe(true);
@@ -210,7 +217,75 @@ describe("cross-remote MCP gateway", () => {
     expect(rows[0].args_summary).toContain("argKeys=password,user");
     expect(rows[0].args_summary).not.toContain("never-log-me");
     expect(rows[1]).toMatchObject({ tool_name: "remote_mcp_open", status: "ok" });
-    expect(rows[1].args_summary).toContain("server=safe command=fake-mcp argCount=0");
+    expect(rows[1].args_summary).toContain("server=safe transport=stdio command=fake-mcp argCount=0");
+  });
+
+  it("opens a streamable-http session and audits only the safe part of the URL", async () => {
+    proxyToRemoteAuto.mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", transport: "streamable-http", tools: [] } });
+
+    const opened = await call(tokenFor(), "remote_mcp_open", {
+      remoteId: targetId,
+      transport: {
+        type: "streamable-http",
+        url: "http://user:pass@127.0.0.1:8080/mcp?token=secret#x",
+        headers: { Authorization: "Bearer super-secret" },
+      },
+    });
+    expect(JSON.parse(opened.json().result.content[0].text).handle).toMatch(/^mcp\./);
+    expect(proxyToRemoteAuto).toHaveBeenCalledWith(
+      targetId,
+      "POST",
+      "/api/path/cross-remote/mcp/open",
+      {
+        transport: {
+          type: "streamable-http",
+          url: "http://user:pass@127.0.0.1:8080/mcp?token=secret#x",
+          headers: { Authorization: "Bearer super-secret" },
+        },
+        timeoutSec: undefined,
+      },
+      expect.anything(),
+    );
+
+    const [row] = await storage.crossRemoteAudit.listByTarget(targetId);
+    expect(row.args_summary).toBe("server=127.0.0.1:8080/mcp transport=streamable-http");
+    for (const secret of ["super-secret", "Authorization", "token=secret", "user:pass"]) {
+      expect(row.args_summary).not.toContain(secret);
+    }
+  });
+
+  it("rejects an unknown or malformed transport before proxying", async () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ type: "websocket", url: "ws://127.0.0.1/mcp" }, "Unsupported MCP transport type: websocket"],
+      [{ type: "streamable-http", url: "file:///etc/passwd" }, "http: or https:"],
+      [{ type: "streamable-http", url: "http://127.0.0.1/mcp", command: "npx" }, "does not accept command"],
+      [{ type: "stdio", command: "npx", url: "http://127.0.0.1/mcp" }, "does not accept url"],
+      [{ type: "stdio", command: "npx", cwd: "relative/dir" }, "absolute path"],
+    ];
+    for (const [transport, expected] of cases) {
+      const res = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport });
+      expect(res.json().result.isError).toBe(true);
+      expect(res.json().result.content[0].text).toContain(expected);
+    }
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the worker's session-expired code so the agent re-opens instead of retrying", async () => {
+    proxyToRemoteAuto
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 410,
+        data: { code: "MCP_SESSION_EXPIRED", error: "Remote MCP session expired; call remote_mcp_open again" },
+      });
+    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport: STDIO });
+    const handle = JSON.parse(opened.json().result.content[0].text).handle;
+
+    const called = await call(tokenFor(), "remote_mcp_call", { handle, tool: "echo" });
+    const text = called.json().result.content[0].text;
+    expect(called.json().result.isError).toBe(true);
+    expect(text).toContain("MCP_SESSION_EXPIRED");
+    expect(text).toContain("remote_mcp_open again");
   });
 
   it("returns a JSON-RPC error for an unknown method", async () => {
