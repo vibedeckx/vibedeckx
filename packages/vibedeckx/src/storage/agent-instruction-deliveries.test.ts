@@ -26,16 +26,22 @@ describe("agent instruction delivery claims", () => {
   it("leases a claim, rejects live takeover, permits same-owner retry and expired takeover", async () => {
     const input = { sessionId: "s1", idempotencyKey: "delivery-1", contentHash: "hash-a" };
 
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 10 }))
+    // The live-lease assertions below need a lease that can't quietly expire
+    // while a loaded test run schedules the next statement — the expiry path
+    // gets its own short lease further down.
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 60_000 }))
       .resolves.toBe("claimed");
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 10 }))
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 60_000 }))
       .resolves.toBe("claimed");
     await expect(storage.agentInstructionDeliveries.claim({ ...input, contentHash: "hash-b", claimToken: "instance-a" }))
       .resolves.toBe("conflict");
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 60_000 }))
       .resolves.toBe("busy");
+    // Shorten the owner's lease, then outwait it: takeover is now permitted.
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-a", leaseMs: 10 }))
+      .resolves.toBe("claimed");
     await new Promise((resolve) => setTimeout(resolve, 15));
-    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
+    await expect(storage.agentInstructionDeliveries.claim({ ...input, claimToken: "instance-b", leaseMs: 60_000 }))
       .resolves.toBe("claimed");
     await expect(storage.agentInstructionDeliveries.renewClaim({ ...input, claimToken: "instance-b", leaseMs: 10 }))
       .resolves.toBe(true);

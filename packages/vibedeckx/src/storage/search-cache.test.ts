@@ -57,6 +57,18 @@ describe("searchCache", () => {
   let dir: string;
   let storage: Storage;
 
+  // A snapshot is a photo taken at `collectedAt`, and reconciliation only
+  // sweeps or overrides rows written strictly before that instant. Two
+  // snapshots landing in the same wall-clock millisecond therefore reconcile
+  // to a no-op — Date.now() repeats on a fast machine, which silently turned
+  // chained-snapshot assertions into flakes. Snapshots with no deliberate
+  // timestamp go through this strictly increasing clock instead; tests that
+  // exercise the in-flight exemption still pass collectedAt explicitly.
+  let lastCollectedAt = 0;
+  const nextCollectedAt = () => (lastCollectedAt = Math.max(Date.now(), lastCollectedAt + 1));
+  const applySnapshot = (projectId: string, targetId: string, snapshot: SearchCatalogSnapshot) =>
+    storage.searchCache.applyCatalogSnapshot(projectId, targetId, snapshot, nextCollectedAt());
+
   // Raw read of the cache tables via a second better-sqlite3 connection —
   // Task 2's search() doesn't exist yet, so direct SQL is the only way to
   // assert what actually landed in the tables.
@@ -72,6 +84,7 @@ describe("searchCache", () => {
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-search-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    lastCollectedAt = 0;
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/p1" });
   });
   afterEach(async () => {
@@ -80,7 +93,7 @@ describe("searchCache", () => {
   });
 
   it("applyCatalogSnapshot upserts rows and records sync success", async () => {
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
+    await applySnapshot("p1", "w1", snap());
     const states = await storage.searchCache.getSyncStates(["p1"]);
     expect(states).toHaveLength(1);
     expect(states[0].target_id).toBe("w1");
@@ -115,20 +128,20 @@ describe("searchCache", () => {
     // so the snapshot target must be a real linked server id.
     const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
-    await storage.searchCache.applyCatalogSnapshot("p1", server.id, snap());
-    await storage.searchCache.applyCatalogSnapshot("p1", server.id, {
+    await applySnapshot("p1", server.id, snap());
+    await applySnapshot("p1", server.id, {
       workspaces: [{ branch: null }],
       sessions: [snap().sessions[1]],
     });
     let res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
     expect(res.sessions).toHaveLength(0); // s1 deleted
-    await storage.searchCache.applyCatalogSnapshot("p1", server.id, snap());
+    await applySnapshot("p1", server.id, snap());
     res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
     expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]); // reappeared
   });
 
   it("recordSyncFailure records the error and never deletes cache rows", async () => {
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
+    await applySnapshot("p1", "w1", snap());
     await storage.searchCache.recordSyncFailure("p1", "w1", "timeout");
     const states = await storage.searchCache.getSyncStates(["p1"]);
     expect(states[0].last_error).toBe("timeout");
@@ -152,8 +165,8 @@ describe("searchCache", () => {
   });
 
   it("an empty snapshot is a successful sync (updates last_success_at, deletes all rows)", async () => {
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", snap());
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", { workspaces: [], sessions: [] });
+    await applySnapshot("p1", "w1", snap());
+    await applySnapshot("p1", "w1", { workspaces: [], sessions: [] });
     const states = await storage.searchCache.getSyncStates(["p1"]);
     expect(states[0].last_success_at).toBeGreaterThan(0);
 
@@ -173,7 +186,7 @@ describe("searchCache", () => {
 
   it("reconciliation never touches remote_session_mappings", async () => {
     await storage.remoteSessionMappings.upsert("remote-w1-p1-s1", "p1", "w1", "s1", "dev");
-    await storage.searchCache.applyCatalogSnapshot("p1", "w1", { workspaces: [], sessions: [] });
+    await applySnapshot("p1", "w1", { workspaces: [], sessions: [] });
     const mappings = await storage.remoteSessionMappings.getAll();
     expect(mappings).toHaveLength(1);
   });
@@ -182,7 +195,7 @@ describe("searchCache", () => {
     // Seed a linked server so the updated row is visible to search().
     const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
     await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
-    await storage.searchCache.applyCatalogSnapshot("p1", server.id, snap());
+    await applySnapshot("p1", server.id, snap());
     await storage.searchCache.updateCachedSessionTitle("remote-w1-p1-s1", "Renamed thing");
     const res = await storage.searchCache.search({ query: "Renamed", limitPerGroup: 10 });
     expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]);
@@ -194,7 +207,7 @@ describe("searchCache", () => {
       const server = await storage.remoteServers.create({ name: "Worker 1", url: "http://w1" });
       serverId = server.id;
       await storage.projectRemotes.add({ project_id: "p1", remote_server_id: serverId, remote_path: "/repo" });
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
     });
 
     it("matches projects by name and path", async () => {
@@ -203,7 +216,7 @@ describe("searchCache", () => {
     });
 
     it("ranks exact > prefix > substring and boosts favorites within a tier", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [
+      await applySnapshot("p1", serverId, { workspaces: [], sessions: [
         { id: "a", branch: "dev", title: "auth",         lastActiveAt: 1, favoritedAt: null, entryCount: 1 }, // exact
         { id: "b", branch: "dev", title: "auth refactor", lastActiveAt: 9, favoritedAt: null, entryCount: 1 }, // prefix
         { id: "c", branch: "dev", title: "fix auth bug",  lastActiveAt: 5, favoritedAt: null, entryCount: 1 }, // substring
@@ -294,7 +307,7 @@ describe("searchCache", () => {
       // recency let old favorites never make the cut. The split contract:
       // `sessions` = pure recency, `favorites` = favorited rows that didn't
       // make the recency cut.
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [] }); // drop seeded s1/s2 (s2 is favorited)
+      await applySnapshot("p1", serverId, { workspaces: [], sessions: [] }); // drop seeded s1/s2 (s2 is favorited)
       await storage.agentSessions.create({ id: "old-fav", project_id: "p1", branch: "dev" });
       await storage.agentSessions.updateTitle("old-fav", "ancient favorite");
       await storage.agentSessions.setFavorited("old-fav", true);
@@ -314,7 +327,7 @@ describe("searchCache", () => {
       // 12 old favorites + 3 newer unfavorited sessions, limit 10: under the
       // old favorited-first sort the favorites filled all 10 slots and the
       // actually-recent sessions vanished.
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [] }); // drop seeded s1/s2 (s2 is favorited)
+      await applySnapshot("p1", serverId, { workspaces: [], sessions: [] }); // drop seeded s1/s2 (s2 is favorited)
       for (let i = 0; i < 12; i++) {
         const id = `fav-${i}`;
         await storage.agentSessions.create({ id, project_id: "p1", branch: "dev" });
@@ -350,7 +363,7 @@ describe("searchCache", () => {
     });
 
     it("limitPerGroup truncates each group to the top-ranked rows", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, { workspaces: [], sessions: [
+      await applySnapshot("p1", serverId, { workspaces: [], sessions: [
         { id: "e1", branch: "dev", title: "deploy",         lastActiveAt: 1, favoritedAt: null, entryCount: 1 }, // exact
         { id: "p2", branch: "dev", title: "deploy watcher", lastActiveAt: 5, favoritedAt: null, entryCount: 1 }, // prefix
         { id: "p3", branch: "dev", title: "deploy scripts", lastActiveAt: 3, favoritedAt: null, entryCount: 1 }, // prefix, older
@@ -595,13 +608,13 @@ describe("searchCache", () => {
     });
 
     it("noteSessionDeleted hides the session immediately", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
       await storage.searchCache.noteSessionDeleted("remote-w1-p1-s1");
       expect(await recents()).not.toContain("remote-w1-p1-s1");
     });
 
     it("a snapshot collected BEFORE the deletion does not resurrect the row", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
       await storage.searchCache.noteSessionDeleted("remote-w1-p1-s1");
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap(), past());
       expect(await recents()).not.toContain("remote-w1-p1-s1");
@@ -610,14 +623,14 @@ describe("searchCache", () => {
     it("a snapshot collected AFTER the deletion resurrects a row the worker still has", async () => {
       // e.g. the proxied DELETE failed on the worker — the worker's catalog is
       // the source of truth, so a genuinely-newer snapshot wins.
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
       await storage.searchCache.noteSessionDeleted("remote-w1-p1-s1");
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap(), future());
       expect(await recents()).toContain("remote-w1-p1-s1");
     });
 
     it("noteSessionCreated after a deletion resurrects the row (recreate flow)", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
       await storage.searchCache.noteSessionDeleted("remote-w1-p1-s1");
       await storage.searchCache.noteSessionCreated({
         localSessionId: "remote-w1-p1-s1", projectId: "p1", targetId: serverId, branch: "dev",
@@ -626,7 +639,7 @@ describe("searchCache", () => {
     });
 
     it("updateCachedSessionTitle(null) clears the title and the clear survives an in-flight snapshot", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
       await storage.searchCache.updateCachedSessionTitle("remote-w1-p1-s1", null);
       let res = await storage.searchCache.search({ query: "Fix login", limitPerGroup: 10 });
       expect(res.sessions).toHaveLength(0);
@@ -637,7 +650,7 @@ describe("searchCache", () => {
     });
 
     it("updateCachedSessionTitle protects the fresh title from an in-flight snapshot", async () => {
-      await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap());
+      await applySnapshot("p1", serverId, snap());
       await storage.searchCache.updateCachedSessionTitle("remote-w1-p1-s1", "Fresh rename");
       // Stale snapshot (collected before the rename) still carries the old title.
       await storage.searchCache.applyCatalogSnapshot("p1", serverId, snap(), past());
