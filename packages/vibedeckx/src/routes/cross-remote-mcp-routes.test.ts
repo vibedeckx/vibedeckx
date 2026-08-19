@@ -17,7 +17,7 @@ vi.mock("../utils/remote-proxy.js", () => ({
 }));
 
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
-import crossRemoteMcpRoutes from "./cross-remote-mcp-routes.js";
+import crossRemoteMcpRoutes, { CROSS_REMOTE_MCP_INSTRUCTIONS } from "./cross-remote-mcp-routes.js";
 
 describe("cross-remote MCP gateway", () => {
   let app: FastifyInstance;
@@ -95,6 +95,11 @@ describe("cross-remote MCP gateway", () => {
     const body = res.json();
     expect(body.result.serverInfo.name).toBe("vibedeckx-cross-remote");
     expect(body.result.capabilities.tools).toBeDefined();
+    expect(body.result.instructions).toBe(CROSS_REMOTE_MCP_INSTRUCTIONS);
+    expect(body.result.instructions).toContain("inspect files, directories, paths, and processes");
+    expect(body.result.instructions).toContain("run commands on exec-tier remotes");
+    expect(body.result.instructions).toContain("remote_mcp_open");
+    expect(body.result.instructions).toContain("Do not reopen");
   });
 
   it("returns 202 with no body for the initialized notification", async () => {
