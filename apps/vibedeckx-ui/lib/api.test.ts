@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   api,
   createNewAgentSession,
+  getAuthToken,
   getFreshToken,
   parseProjectChatOperationMessage,
   setAuthToken,
@@ -68,6 +69,94 @@ describe("getFreshToken", () => {
     await getFreshToken({ skipCache: true });
 
     expect(getter).toHaveBeenCalledWith({ skipCache: true });
+  });
+
+  it("single-flights concurrent cold-start mints (one network call, not one per caller)", async () => {
+    // Regression: on page load the warm cache is empty, so every concurrent
+    // caller chose skipCache and minted its own token — 22 POSTs to Clerk per
+    // refresh. Callers arriving during an in-flight mint must share it.
+    setAuthToken(null);
+    const minted = makeJwt(60);
+    let resolveMint!: (t: string) => void;
+    const getter = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveMint = resolve; }))
+      .mockResolvedValue(minted);
+    setTokenGetter(getter);
+
+    const calls = Promise.all([getFreshToken(), getFreshToken(), getFreshToken()]);
+    expect(getter).toHaveBeenCalledTimes(1);
+    expect(getter).toHaveBeenCalledWith({ skipCache: true });
+    resolveMint(minted);
+
+    expect(await calls).toEqual([minted, minted, minted]);
+
+    // Once the mint has landed the cache is warm: the next call is a cache hit,
+    // not another join on a finished promise.
+    await getFreshToken();
+    expect(getter).toHaveBeenCalledTimes(2);
+    expect(getter).toHaveBeenLastCalledWith({ skipCache: false });
+  });
+
+  it("warms the cache before releasing the guard (no second mint in the microtask gap)", async () => {
+    // Interleaving: getter resolves → guard cleared → (gap) → waiters resume and
+    // write the cache. A caller in that gap must find either a warm cache or
+    // an in-flight mint, never neither.
+    setAuthToken(null);
+    const minted = makeJwt(60);
+    let resolveMint!: (t: string) => void;
+    const getter = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveMint = resolve; }))
+      .mockResolvedValue(minted);
+    setTokenGetter(getter);
+
+    const first = getFreshToken();
+    resolveMint(minted);
+    // Drain microtasks one at a time and fire a new cold-ish caller after each
+    // tick; none of them may trigger a skipCache mint.
+    const stragglers: Promise<string | null>[] = [];
+    for (let i = 0; i < 6; i++) {
+      await Promise.resolve();
+      stragglers.push(getFreshToken());
+    }
+    await Promise.all([first, ...stragglers]);
+
+    const forced = getter.mock.calls.filter((c) => c[0]?.skipCache === true);
+    expect(forced).toHaveLength(1);
+  });
+
+  it("does not write a mint from a previous getter generation back into the cache", async () => {
+    // Sign-out / account switch: setTokenGetter(null) then setAuthToken(null).
+    // A mint that started under the old getter and lands afterwards must not
+    // resurrect the old user's token.
+    setAuthToken(null);
+    let resolveOld!: (t: string) => void;
+    const oldGetter = vi.fn().mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveOld = resolve; }),
+    );
+    setTokenGetter(oldGetter);
+    const pending = getFreshToken();
+
+    setTokenGetter(null);
+    setAuthToken(null);
+    resolveOld(makeJwt(60));
+    await pending;
+
+    expect(getAuthToken()).toBeNull();
+  });
+
+  it("lets a new mint start after a failed one (no stuck in-flight promise)", async () => {
+    setAuthToken(null);
+    const getter = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce(makeJwt(60));
+    setTokenGetter(getter);
+
+    expect(await getFreshToken()).toBeNull();
+    expect(await getFreshToken()).not.toBeNull();
+    expect(getter).toHaveBeenCalledTimes(2);
   });
 
   it("drops an expired cached token when getToken() throws (no doomed reuse)", async () => {

@@ -24,7 +24,25 @@ export function setTokenGetter(
   fn: ((opts?: { skipCache?: boolean }) => Promise<string | null>) | null
 ) {
   _tokenGetter = fn;
+  _tokenGeneration++;
+  _mintInFlight = null;
 }
+
+// Bumped on every setTokenGetter(). A mint that started under an earlier getter
+// (previous account, or pre-sign-out) must not write its result into the cache
+// after the swap: sign-out runs `setTokenGetter(null); setAuthToken(null)`, and a
+// late-resolving mint would otherwise put the old user's JWT straight back.
+let _tokenGeneration = 0;
+
+// Single-flight guard for forced network mints. On a cold page load `_authToken`
+// is null, so every concurrent `getFreshToken()` caller (the warm-up plus the
+// first wave of API fetches and WS/SSE connects — 20+ in parallel) decides
+// `skipCache: true` before the first mint has landed. `skipCache` bypasses
+// Clerk's own in-flight dedup, so without this each caller sent its own
+// `POST /v1/client/sessions/:id/tokens` — one token storm per refresh. Callers
+// that arrive while a mint is in flight await that same promise instead: the
+// token it yields is just as fresh as one they would mint themselves.
+let _mintInFlight: Promise<string | null> | null = null;
 
 // Decode a JWT's `exp` and decide whether it is at/near expiry. The WS/SSE URL
 // builders read the warm `_authToken` cache synchronously, so a stale value here
@@ -59,8 +77,30 @@ export async function getFreshToken(opts?: {
   if (_tokenGetter) {
     try {
       const skipCache = opts?.skipCache ?? tokenExpiringSoon(_authToken);
-      const token = await _tokenGetter({ skipCache });
-      _authToken = token;
+      const generation = _tokenGeneration;
+      let token: string | null;
+      if (!skipCache) {
+        token = await _tokenGetter({ skipCache: false });
+      } else if (_mintInFlight) {
+        token = await _mintInFlight;
+      } else {
+        const getter = _tokenGetter;
+        // The chain writes the cache itself, *before* the guard is cleared:
+        // if the guard were dropped first, a caller landing in the microtask gap
+        // before the waiters resume would see "cold cache, nothing in flight"
+        // and start a second mint.
+        const mint = getter({ skipCache: true })
+          .then((t) => {
+            if (generation === _tokenGeneration) _authToken = t;
+            return t;
+          })
+          .finally(() => {
+            if (_mintInFlight === mint) _mintInFlight = null;
+          });
+        _mintInFlight = mint;
+        token = await mint;
+      }
+      if (generation === _tokenGeneration) _authToken = token;
       return token;
     } catch {
       // Transient getToken() failure. The last-known token only helps while it
