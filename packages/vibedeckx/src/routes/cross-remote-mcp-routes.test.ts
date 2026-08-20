@@ -100,6 +100,10 @@ describe("cross-remote MCP gateway", () => {
     expect(body.result.instructions).toContain("run commands on exec-tier remotes");
     expect(body.result.instructions).toContain("remote_mcp_open");
     expect(body.result.instructions).toContain("Do not reopen");
+    expect(body.result.instructions).toContain("look at the ubuntu machine");
+    expect(body.result.instructions).toContain("If exactly one accessible remote matches");
+    expect(body.result.instructions).toContain("ask the user which target they mean");
+    expect(body.result.instructions).toContain("instead of silently falling back to local");
   });
 
   it("returns 202 with no body for the initialized notification", async () => {
@@ -109,7 +113,8 @@ describe("cross-remote MCP gateway", () => {
 
   it("lists the remote and broker tools", async () => {
     const res = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    const names = res.json().result.tools.map((t: { name: string }) => t.name).sort();
+    const tools = res.json().result.tools as Array<{ name: string; description: string }>;
+    const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "list_accessible_remotes",
       "remote_bash",
@@ -123,6 +128,8 @@ describe("cross-remote MCP gateway", () => {
       "remote_read_file",
       "remote_stat_path",
     ]);
+    expect(tools.find((t) => t.name === "list_accessible_remotes")?.description)
+      .toContain("whenever the user names or otherwise identifies a machine/host");
   });
 
   it("opens a broker session, signs its handle, and reuses it for a tool call", async () => {

@@ -48,6 +48,8 @@ const REMOTE_ID_PROP = {
  */
 export const CROSS_REMOTE_MCP_INSTRUCTIONS = [
   "Use these tools when the task requires inspecting or operating another remote machine, or using an MCP server reachable from that remote.",
+  "Treat a machine or host name in the user's request (for example, 'look at the ubuntu machine') as an explicit target signal, not as a request to inspect the current local workspace. Call `list_accessible_remotes` and match the user's wording against the returned remote names and ids before reading files or running local commands.",
+  "If exactly one accessible remote matches the named machine, perform the requested work on that remote. If multiple remotes match, or the wording could reasonably refer to either the local machine or a remote, ask the user which target they mean before operating. If no remote matches, say so instead of silently falling back to local.",
   "Cross-remote can discover accessible machines, inspect files, directories, paths, and processes, run commands on exec-tier remotes, and persistently use MCP servers reachable from those remotes. Available operations depend on the remote's access tier, online state, and worker capabilities.",
   "Call `list_accessible_remotes` first to discover the remote id, access tier, online state, and whether its MCP broker is supported.",
   "For a remote MCP server, call `remote_mcp_open` once, use the returned tool schemas and handle for repeated `remote_mcp_call` calls, then call `remote_mcp_close` when the work is complete. Do not reopen the MCP server for every tool call.",
@@ -59,7 +61,7 @@ export const CROSS_REMOTE_MCP_INSTRUCTIONS = [
 const TOOLS = [
   {
     name: "list_accessible_remotes",
-    description: "List the remote machines this agent may access, with their access tier and online status.",
+    description: "List remote machines this agent may access, including their names, ids, access tiers, and online status. Call this before acting whenever the user names or otherwise identifies a machine/host, so the request is routed to the intended target instead of the current local machine.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
