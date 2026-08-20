@@ -1022,7 +1022,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           initial="instant"
           resize={turnInFlight ? "smooth" : "instant"}
         >
-          <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar">
+          {/* will-change-transform: without it Chrome may not give this scroller
+              its own composited layer and instead repaints the entire
+              conversation on every scrolled frame (measured 15fps → 60fps on a
+              slow-raster machine). Trade-off: a stacking context + a persistent
+              layer for the scroll contents. */}
+          <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar will-change-transform">
             {!session && messages.length === 0 ? (
               <div className="text-center py-16">
                 {isLoading || (projectId && !isInitialized) ? (
