@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronDown, Terminal, Bot } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/format-duration";
 import type { BackgroundTask } from "@/lib/api";
@@ -28,18 +28,41 @@ function useNow(active: boolean): number {
 const elapsed = (now: number, startedAt: number) => Math.max(0, now - startedAt);
 
 /**
- * `local_bash` is a real OS process; `local_agent` is a subagent inside the
- * same CLI process. Calling both "processes" would be wrong for half of them,
- * so the summary line counts them separately and only names what it can.
+ * `local_bash` is a real OS process; `local_agent` (Claude Code) and
+ * `codex_subagent` (Codex) are extra LLM threads inside the CLI process.
+ * Calling both "processes" would be wrong for half of them, and the two need
+ * different handling — only a process can hang forever on a bad exit
+ * condition — so the difference has to survive all the way to the screen.
  */
+type TaskKind = "process" | "agent" | "other";
+
+const KIND_ORDER: TaskKind[] = ["process", "agent", "other"];
+
+/** Row badge. The summary wording alone reads as a generic "something is running". */
+const KIND_BADGE: Record<TaskKind, string> = { process: "进程", agent: "子 agent", other: "任务" };
+
+const KIND_NOUN: Record<TaskKind, string> = {
+  process: "后台进程",
+  agent: "后台子 agent",
+  other: "后台任务",
+};
+
+/**
+ * Both the summary line and the row badge derive from this, so they cannot
+ * disagree — `codex_subagent` used to be counted as a generic task while the
+ * row drew it with a terminal icon.
+ */
+function kindOf(task: BackgroundTask): TaskKind {
+  if (task.taskType === "local_bash") return "process";
+  if (task.taskType === "local_agent" || task.taskType === "codex_subagent") return "agent";
+  return "other";
+}
+
 function summarize(tasks: BackgroundTask[]): string {
-  const processes = tasks.filter((t) => t.taskType === "local_bash").length;
-  const agents = tasks.filter((t) => t.taskType === "local_agent").length;
-  const other = tasks.length - processes - agents;
-  const parts: string[] = [];
-  if (processes) parts.push(`${processes} 个后台进程`);
-  if (agents) parts.push(`${agents} 个后台子 agent`);
-  if (other) parts.push(`${other} 个后台任务`);
+  const parts = KIND_ORDER.flatMap((kind) => {
+    const n = tasks.filter((t) => kindOf(t) === kind).length;
+    return n ? [`${n} 个${KIND_NOUN[kind]}`] : [];
+  });
   return `${parts.join(" · ")}运行中`;
 }
 
@@ -88,21 +111,19 @@ export function BackgroundTasksBar({ tasks, turnParked }: BackgroundTasksBarProp
 
       {expanded && (
         <ul className="border-t border-border/60 px-3 py-2">
-          {tasks.map((task) => {
-            const isProcess = task.taskType !== "local_agent";
-            const Icon = isProcess ? Terminal : Bot;
-            return (
-              <li key={task.taskId} className="flex items-baseline gap-2 py-1">
-                <Icon className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground/70" />
-                <span className="min-w-0 flex-1 truncate text-foreground/90">
-                  {task.description || task.taskId}
-                </span>
-                <span className="shrink-0 tabular-nums text-muted-foreground">
-                  {formatDuration(elapsed(now, task.startedAt))}
-                </span>
-              </li>
-            );
-          })}
+          {tasks.map((task) => (
+            <li key={task.taskId} className="flex items-baseline gap-2 py-1">
+              <span className="inline-flex min-w-14 shrink-0 justify-center rounded border border-border/60 bg-background/60 px-1 py-px text-[10px] leading-tight text-muted-foreground">
+                {KIND_BADGE[kindOf(task)]}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-foreground/90">
+                {task.description || task.taskId}
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatDuration(elapsed(now, task.startedAt))}
+              </span>
+            </li>
+          ))}
           <li className="pt-1.5 text-muted-foreground/70">
             {turnParked
               ? "agent 已经答完这一轮,是这些任务让会话保持「运行中」—— 任务结束后本轮才会收尾。停止会话可一并结束它们。"

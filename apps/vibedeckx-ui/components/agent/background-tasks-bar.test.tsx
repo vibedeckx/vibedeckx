@@ -80,6 +80,34 @@ describe("BackgroundTasksBar", () => {
     expect(container.textContent).toContain("1 个后台子 agent");
   });
 
+  // The summary wording was the only type signal on screen and it reads as a
+  // generic "something is running" — a user looking straight at it still could
+  // not tell a shell command from a subagent. The badge says it outright.
+  it("labels every row with its type", () => {
+    render(
+      <BackgroundTasksBar
+        tasks={[
+          task({ taskId: "b1" }),
+          task({ taskId: "a1", taskType: "local_agent", description: "a subagent" }),
+          task({ taskId: "c1", taskType: "codex_subagent", description: "a codex subagent" }),
+          task({ taskId: "x1", taskType: undefined, description: "something new" }),
+        ]}
+        turnParked
+      />,
+    );
+    expand();
+    const badges = [...container.querySelectorAll("li > span:first-child")].map((el) => el.textContent);
+    expect(badges).toEqual(["进程", "子 agent", "子 agent", "任务"]);
+  });
+
+  // Codex's subagents are threads inside the CLI process, same as Claude
+  // Code's — counting them as untyped "tasks" while badging them as agents
+  // would be the drift this shares one function to avoid.
+  it("counts codex subagents as subagents, not as untyped tasks", () => {
+    render(<BackgroundTasksBar tasks={[task({ taskType: "codex_subagent" })]} turnParked />);
+    expect(container.textContent).toContain("1 个后台子 agent");
+  });
+
   it("reports the longest-running task and keeps the clock moving", () => {
     render(<BackgroundTasksBar tasks={[task({ startedAt: NOW - 90_000 }), task({ taskId: "b2" })]} turnParked />);
     expect(container.textContent).toContain("1m 30s");
