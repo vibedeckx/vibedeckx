@@ -44,8 +44,11 @@ export type ParsedAgentEvent =
   | { type: "task_finished"; taskId: string; status?: string }
   // Authoritative snapshot of the running background-task set (Claude Code
   // `system/background_tasks_changed`). Resyncs the ledger so add/delete
-  // drift in the started/finished pairs can't accumulate.
-  | { type: "task_list_changed"; taskIds: string[] }
+  // drift in the started/finished pairs can't accumulate. Carries the same
+  // descriptors as `task_started`: the snapshot is the only event that fires
+  // for a task promoted to the background by a Bash-tool timeout, so dropping
+  // to bare IDs here would leave those tasks unlabelled in the UI.
+  | { type: "task_list_changed"; tasks: Array<{ taskId: string; taskType?: string; description?: string }> }
   // A new turn began (Claude Code `system/init`, emitted for auto-resume
   // turns too). Cancels a grace-held completion — it beats the resume's
   // first assistant event by an LLM roundtrip.

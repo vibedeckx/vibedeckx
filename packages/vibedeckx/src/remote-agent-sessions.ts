@@ -1066,6 +1066,13 @@ export function connectPersistentRemoteWs(
           );
         }
       }
+    } else if ("backgroundTasks" in parsed) {
+      // Last-value, not appended: every task change pushes a full snapshot, so
+      // replaying the series would bloat the cache and tell a reloading client
+      // nothing the newest frame doesn't. websocket-routes replays it after
+      // Ready, which is where a local subscribe sends its own copy.
+      cache.setBackgroundTasks(sessionId, raw);
+      cache.broadcast(sessionId, raw);
     } else if ("error" in parsed) {
       cache.setSessionStatus(sessionId, "error");
       cache.appendMessage(sessionId, raw, false);

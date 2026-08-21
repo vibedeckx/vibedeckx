@@ -148,7 +148,10 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
       session_id: "cdc13acc-4319-48b4-8003-f0fc1ac347b7",
     });
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([
-      { type: "task_list_changed", taskIds: ["a2c8b3b8fef0c5b25", "a0b37e04e9bcdb02a"] },
+      { type: "task_list_changed", tasks: [
+        { taskId: "a2c8b3b8fef0c5b25", taskType: "local_agent", description: "Return OK immediately" },
+        { taskId: "a0b37e04e9bcdb02a", taskType: "local_agent", description: "Return OK immediately" },
+      ] },
     ]);
   });
 
@@ -161,7 +164,7 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
       session_id: "cdc13acc-4319-48b4-8003-f0fc1ac347b7",
     });
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([
-      { type: "task_list_changed", taskIds: [] },
+      { type: "task_list_changed", tasks: [] },
     ]);
   });
 

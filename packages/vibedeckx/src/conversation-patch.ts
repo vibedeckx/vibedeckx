@@ -4,6 +4,7 @@
 
 import type { AgentMessage } from "./agent-types.js";
 import type { WorkflowRun } from "./storage/types.js";
+import type { BackgroundTask } from "./turn-completion.js";
 
 // ============ Patch Operation Types ============
 
@@ -47,6 +48,17 @@ export type AgentWsMessage =
   | { browserCommand: BrowserCommand }
   | { openPreviewFrame: { projectId: string; url: string } }
   | { titleUpdated: { title: string } }
+  // Live background-task set (Claude Code `background_tasks_changed`). Sent on
+  // every change AND once at subscribe time — the harness only pushes on
+  // change, so a client that reloads mid-task would otherwise never learn the
+  // task exists. An empty array is meaningful ("nothing running"), so this is
+  // always sent, never omitted.
+  //
+  // `turnParked` means the agent already finished answering and the turn is
+  // being held open ONLY by these tasks. The client cannot derive this: its
+  // own `turnInFlight` is "no turn_end yet", which is exactly what a parked
+  // completion withholds.
+  | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean } }
   | { workflowRunUpdated: WorkflowRun };
 
 /**

@@ -56,6 +56,7 @@ vi.mock("@/hooks/use-agent-session", () => ({
     isLoading: false,
     error: null,
     remoteStatus: null,
+    backgroundTasks: { tasks: [], turnParked: false },
     sendMessage: vi.fn(),
     uploadPaste: vi.fn(),
     stopSession: vi.fn(),

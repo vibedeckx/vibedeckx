@@ -130,6 +130,15 @@ export interface CacheEntry {
   /** Authorized completeness interval; null means "unknown, prove nothing". */
   coverage: CacheCoverage | null;
   sessionStatus: "running" | "stopped" | "error" | null;
+  /**
+   * Latest raw `{ backgroundTasks }` frame, held as last-value rather than
+   * appended to `messages`. The worker pushes a full snapshot on every change,
+   * so replaying the whole series would grow the cache without bound and hand
+   * a reloading client a burst of superseded frames to no effect. Only the
+   * newest one carries information; it is replayed after `Ready` alongside the
+   * status patch, mirroring what a local subscribe sends.
+   */
+  backgroundTasks: string | null;
 }
 
 export class RemotePatchCache {
@@ -153,6 +162,7 @@ export class RemotePatchCache {
         lastTurnEndEntryIndex: null,
         coverage: null,
         sessionStatus: null,
+        backgroundTasks: null,
       };
       this.cache.set(sessionId, entry);
     }
@@ -205,6 +215,10 @@ export class RemotePatchCache {
       if (metadata.lastTurnEnd !== null) lastTurnEndEntryIndex = Math.max(lastTurnEndEntryIndex ?? -1, metadata.lastTurnEnd);
     }
     const sessionStatus = existing?.sessionStatus ?? null;
+    // Survives a cache replacement for the same reason sessionStatus does: the
+    // worker only re-sends it on change, so dropping it here would blank the
+    // bar until the next task event — possibly never.
+    const backgroundTasks = existing?.backgroundTasks ?? null;
     // Coverage is carried, never recomputed from `messages`. `replaceEntryTail`
     // funnels through here and only ever rewrites entries ABOVE a cursor, so
     // recomputing would silently raise the low-water mark and hand back exactly
@@ -225,6 +239,7 @@ export class RemotePatchCache {
       lastTurnEndEntryIndex,
       coverage,
       sessionStatus,
+      backgroundTasks,
     });
   }
 
@@ -298,6 +313,11 @@ export class RemotePatchCache {
     entry.historyEpoch = epoch;
     entry.latestEntryIndex = null;
     entry.lastTurnEndEntryIndex = null;
+    // Unlike replaceAll (same conversation, a still-running task must survive),
+    // a fresh namespace is a different conversation whose worker-side ledger
+    // was reset with it. Keeping the old snapshot would replay dead tasks to
+    // anyone who reloads.
+    entry.backgroundTasks = null;
     // A fresh namespace holds nothing, so it is complete from its own start —
     // there is no index below 0 that could be missing.
     entry.coverage = { epoch, start: 0 };
@@ -309,6 +329,11 @@ export class RemotePatchCache {
 
   setSessionStatus(sessionId: string, status: "running" | "stopped" | "error"): void {
     this.getOrCreate(sessionId).sessionStatus = status;
+  }
+
+  /** Last-value store for the live background-task snapshot (see CacheEntry). */
+  setBackgroundTasks(sessionId: string, raw: string): void {
+    this.getOrCreate(sessionId).backgroundTasks = raw;
   }
 
   /** Store a persistent remote WebSocket connection. */

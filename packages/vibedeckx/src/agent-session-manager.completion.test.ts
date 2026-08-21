@@ -69,10 +69,15 @@ function makeHarness(agentType: string = "claude-code") {
       }),
       setNativeSessionId: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async () => undefined),
+      deleteEntries: vi.fn(async () => undefined),
+      incrementHistoryEpoch: vi.fn(async () => 1),
+      updateAgentType: vi.fn(async () => undefined),
       touchUpdatedAt: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
     },
     tasks: { completeIfAssigned },
+    // Restart consults the resident-process cap on its way to respawn.
+    settings: { get: async () => null },
   } as unknown as Storage;
 
   return { storage, row, markCompleted, updateStatus, completeIfAssigned };
@@ -95,6 +100,20 @@ async function liveSession(manager: AgentSessionManager) {
 
 async function settle(ms: number) {
   await new Promise((r) => setTimeout(r, ms));
+}
+
+/** Raw WS frames a subscriber would receive, in order. */
+function attachSubscriber(manager: AgentSessionManager): string[] {
+  const internals = manager as unknown as { sessions: Map<string, { subscribers: Set<unknown> }> };
+  const frames: string[] = [];
+  internals.sessions.get(SESSION_ID)!.subscribers.add({ send: (raw: string) => frames.push(raw) });
+  return frames;
+}
+
+function backgroundFrames(frames: string[]): Array<{ tasks: unknown[]; turnParked: boolean }> {
+  return frames
+    .map((raw) => JSON.parse(raw) as { backgroundTasks?: { tasks: unknown[]; turnParked: boolean } })
+    .flatMap((msg) => (msg.backgroundTasks ? [msg.backgroundTasks] : []));
 }
 
 describe("agent-session-manager turn completion wiring", () => {
@@ -219,6 +238,76 @@ describe("agent-session-manager turn completion wiring", () => {
     } finally {
       getProvider("codex").onSessionDestroyed?.(SESSION_ID);
     }
+  });
+
+  // Killing the process kills its background tasks with it, but subscribers
+  // keep their socket across a Stop — so the empty snapshot is the only thing
+  // that stops the bar from counting up dead tasks forever.
+  it("a Stop with a live background task tells subscribers the tasks are gone", async () => {
+    const { storage } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: 60_000 });
+    manager.setEventBus(new EventBus());
+
+    const { feed } = await liveSession(manager);
+    const frames = attachSubscriber(manager);
+    await feed([
+      JSON.stringify({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [{ task_id: "b1", task_type: "local_bash", description: "long build" }],
+      }),
+      JSON.stringify({ type: "result", subtype: "success", duration_ms: 5 }),
+    ].join("\n") + "\n");
+
+    // The turn is parked: the agent answered, the task is what holds it open.
+    const parked = backgroundFrames(frames).at(-1);
+    expect(parked).toEqual({
+      tasks: [{ taskId: "b1", taskType: "local_bash", description: "long build", startedAt: expect.any(Number) }],
+      turnParked: true,
+    });
+
+    await manager.stopSession(SESSION_ID);
+    expect(backgroundFrames(frames).at(-1)).toEqual({ tasks: [], turnParked: false });
+  });
+
+  // Restart kills the process, then does five awaits before spawnAgent's own
+  // reset. A grace timer armed for the killed turn firing inside that window
+  // would commit a turn whose history is about to be wiped — and the bar would
+  // keep listing tasks that died with the process.
+  it("a restart clears the ledger before its first await, not at respawn", async () => {
+    const { storage } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: 60_000 });
+    manager.setEventBus(new EventBus());
+
+    const { feed } = await liveSession(manager);
+    const frames = attachSubscriber(manager);
+    await feed([
+      JSON.stringify({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [{ task_id: "b1", task_type: "local_bash", description: "long build" }],
+      }),
+      JSON.stringify({ type: "result", subtype: "success", duration_ms: 5 }),
+    ].join("\n") + "\n");
+    expect(backgroundFrames(frames).at(-1)!.turnParked).toBe(true);
+
+    // Sample the ledger from inside the FIRST await of the restart. If the
+    // reset moved back to spawnAgent, this observes the still-parked turn.
+    const internals = manager as unknown as {
+      sessions: Map<string, { completion: { hasPendingCompletion: boolean; pendingTaskCount: number } }>;
+      spawnAgent: (session: unknown, cwd: string) => Promise<void>;
+    };
+    let atFirstAwait: { parked: boolean; tasks: number } | null = null;
+    vi.mocked(storage.agentSessions.deleteEntries).mockImplementation(async () => {
+      const ledger = internals.sessions.get(SESSION_ID)!.completion;
+      atFirstAwait = { parked: ledger.hasPendingCompletion, tasks: ledger.pendingTaskCount };
+    });
+    internals.spawnAgent = async () => undefined;
+
+    await manager.restartSession(SESSION_ID, "/tmp/p1");
+
+    expect(atFirstAwait).toEqual({ parked: false, tasks: 0 });
+    expect(backgroundFrames(frames).at(-1)).toEqual({ tasks: [], turnParked: false });
   });
 
   it("a plain turn with no background tasks completes with zero grace delay", async () => {

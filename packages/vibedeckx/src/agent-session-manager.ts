@@ -1055,6 +1055,10 @@ export class AgentSessionManager {
       if (action.kind === "commit") {
         await this.commitCompletion(session, action.payload);
       }
+      // processExited also clears the ledger on any non-committing exit
+      // (crash, or a clean exit with tasks still listed). The tasks died with
+      // the process either way, so the bar has to be told.
+      this.broadcastBackgroundTasks(session);
 
       // A non-zero exit with no agent output means the process never really
       // started — most often the agent isn't installed (and the npx fallback
@@ -1196,6 +1200,12 @@ export class AgentSessionManager {
   private resetCompletion(session: RunningSession): void {
     this.clearGraceTimer(session);
     session.completion.reset();
+    // Every caller kills or respawns the process, which takes its background
+    // tasks with it. Subscribers keep their socket across a Stop/hibernate, so
+    // without this the bar would keep counting down tasks that are already
+    // dead — and on a placeholder or dormant session no later frame arrives to
+    // correct it.
+    this.broadcastBackgroundTasks(session);
   }
 
   /**
@@ -1203,6 +1213,21 @@ export class AgentSessionManager {
    * for turns with no background activity (zero delay), by the grace timer
    * for held candidates, and by the close handler on a clean process exit.
    */
+  /**
+   * Push the live background-task set to every subscriber. Called on each
+   * lifecycle event rather than diffed: the set is tiny and the harness
+   * already only speaks on change, so a plain snapshot keeps the client
+   * stateless (no patch application, no ordering assumptions).
+   */
+  private broadcastBackgroundTasks(session: RunningSession): void {
+    this.broadcastRaw(session.id, {
+      backgroundTasks: {
+        tasks: session.completion.backgroundTasks,
+        turnParked: session.completion.hasPendingCompletion,
+      },
+    });
+  }
+
   private async commitCompletion(session: RunningSession, payload: CompletionPayload): Promise<void> {
     const sessionId = session.id;
     console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
@@ -1213,6 +1238,9 @@ export class AgentSessionManager {
     // Stop point: persist the turn_end marker BEFORE the completion event goes
     // out, so event consumers can use its index as a turn boundary / branch cutoff.
     const turnEndEntryIndex = await this.endActiveTurn(session, "completed");
+    // The turn is no longer parked; any task still running is now plainly
+    // outliving its turn rather than holding it open.
+    this.broadcastBackgroundTasks(session);
     const summaryText = extractLastAssistantText(session.store.entries);
     this.broadcastRaw(sessionId, {
       taskCompleted: {
@@ -1514,21 +1542,28 @@ export class AgentSessionManager {
       // no auto-resume behind it, and cancelling on it would drop the
       // completion entirely.
       case "task_started":
-        this.applyCompletionTimerAction(session, session.completion.taskStarted(event.taskId));
+        this.applyCompletionTimerAction(session, session.completion.taskStarted({
+          taskId: event.taskId,
+          taskType: event.taskType,
+          description: event.description,
+        }, timestamp));
         session.taskStartedThisTurn++;
+        this.broadcastBackgroundTasks(session);
         console.log(`[AgentSession] Background task started: ${event.taskId} (${event.taskType ?? "?"}) — ${session.completion.pendingTaskCount} pending in ${sessionId}`);
         break;
 
       case "task_finished":
         this.applyCompletionTimerAction(session, session.completion.taskFinished(event.taskId));
+        this.broadcastBackgroundTasks(session);
         console.log(`[AgentSession] Background task finished: ${event.taskId} (${event.status ?? "?"}) — ${session.completion.pendingTaskCount} pending in ${sessionId}`);
         break;
 
       // Authoritative running-task snapshot from the CLI — resyncs the ledger
       // so add/delete drift in the started/finished pairs can't accumulate.
       case "task_list_changed":
-        this.applyCompletionTimerAction(session, session.completion.taskListChanged(event.taskIds));
-        console.log(`[AgentSession] Background task snapshot: [${event.taskIds.join(", ")}] in ${sessionId}`);
+        this.applyCompletionTimerAction(session, session.completion.taskListChanged(event.tasks, timestamp));
+        this.broadcastBackgroundTasks(session);
+        console.log(`[AgentSession] Background task snapshot: [${event.tasks.map((t) => t.taskId).join(", ")}] in ${sessionId}`);
         break;
 
       // Handled above (cancels a grace-held completion); no store entry.
@@ -1632,6 +1667,11 @@ export class AgentSessionManager {
               console.log(`[AgentSession] result after background-task activity — holding completion for ${this.completionGraceMs}ms grace (session=${sessionId})`);
             }
             this.applyCompletionTimerAction(session, action);
+            // The park/hold itself is the state change worth showing: the
+            // agent has stopped answering and only these tasks are keeping
+            // the turn open. No task event follows it, so nothing else would
+            // tell the client.
+            this.broadcastBackgroundTasks(session);
           }
         }
         break;
@@ -2091,6 +2131,18 @@ export class AgentSessionManager {
     const statusPatch = ConversationPatch.updateStatus(session.status);
     ws.send(JSON.stringify({ JsonPatch: statusPatch }));
 
+    // Send the live background-task set. The harness pushes these only on
+    // change, so without this a reload during a long-running background task
+    // shows an empty bar while the task is still running — exactly the case
+    // the bar exists for.
+    const tasksMsg: AgentWsMessage = {
+      backgroundTasks: {
+        tasks: session.completion.backgroundTasks,
+        turnParked: session.completion.hasPendingCompletion,
+      },
+    };
+    ws.send(JSON.stringify(tasksMsg));
+
     // Return unsubscribe function
     return () => {
       session.subscribers.delete(ws);
@@ -2494,6 +2546,13 @@ export class AgentSessionManager {
     session.process = null;
     this.killProcess(proc);
     this.emitProcessAlive(session, false);
+    // Before the first await: steps 2-7 below are all async, and a grace timer
+    // armed for the killed turn would otherwise fire inside that window and
+    // commit it — writing a turn_end into the history this restart is about to
+    // wipe, and dinging a completion for a turn the user just discarded. The
+    // background tasks died with the process, so their snapshot goes too.
+    // spawnAgent resets again; that one stays as the fresh-process guard.
+    this.resetCompletion(session);
 
     // 2. Clear persisted entries
     if (!session.skipDb) {

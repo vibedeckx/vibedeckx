@@ -1424,6 +1424,24 @@ export async function setSessionFavorited(sessionId: string, favorited: boolean)
 
 // ============ Workflow Runs (agent-review loop) ============
 
+/**
+ * A background task the agent launched that is still running. Mirrors the
+ * backend ledger: `local_bash` is a real OS process, `local_agent` is a
+ * subagent running inside the same CLI process — so "N background processes"
+ * is only an honest label for the former.
+ *
+ * These outlive the turn that started them, and Claude Code does not bound
+ * their runtime, so a task with a faulty exit condition can run indefinitely
+ * while the session sits at "running" with no visible explanation.
+ */
+export interface BackgroundTask {
+  taskId: string;
+  taskType?: string;
+  description?: string;
+  /** Epoch ms, stamped when the server first saw the task. */
+  startedAt: number;
+}
+
 export interface WorkflowRun {
   id: string;
   project_id: string;

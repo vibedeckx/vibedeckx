@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
 import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError, type RunningResidentSession } from "@/lib/api";
-import type { AgentType, WorkflowRun } from "@/lib/api";
+import type { AgentType, BackgroundTask, WorkflowRun } from "@/lib/api";
 import {
   workspaceKey,
   hasPlaceholder,
@@ -78,6 +78,7 @@ type AgentWsMessage =
   | { processAlive: { alive: boolean } }
   | { remoteStatus: RemoteConnectionStatus; attempt?: number }
   | { titleUpdated: { title: string } }
+  | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean } }
   | { workflowRunUpdated: WorkflowRun }
   // Server liveness frame, every 30s. Carries no state — its only job is to
   // give the silence watchdog something to observe on an idle session.
@@ -613,6 +614,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const [error, setError] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteConnectionStatus | null>(null);
   const [workflowRunUpdate, setWorkflowRunUpdate] = useState<WorkflowRun | null>(null);
+  // Full snapshot, replaced wholesale — the server sends the complete live set
+  // on every change and once at subscribe time, so there is nothing to merge.
+  // `turnParked` rides along because it cannot be derived here: the local
+  // `turnInFlight` means "no turn_end yet", which is exactly what a parked
+  // completion withholds.
+  const [backgroundTasks, setBackgroundTasks] = useState<{ tasks: BackgroundTask[]; turnParked: boolean }>(
+    { tasks: [], turnParked: false },
+  );
   // Bumped once per completed subscribe (every `Ready`). Out-of-band frames
   // like `workflowRunUpdated` are fire-and-forget: `broadcastRaw` writes to the
   // subscribers alive at that instant, and `subscribe()` replays entry patches
@@ -1013,6 +1022,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // Handle session title (set asynchronously after the first user message)
         if ("titleUpdated" in msg) {
           onTitleUpdatedRef.current?.(msg.titleUpdated.title, sessionId);
+          return;
+        }
+
+        if ("backgroundTasks" in msg) {
+          setBackgroundTasks(msg.backgroundTasks);
           return;
         }
 
@@ -1597,6 +1611,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setIsInitialized(true);
     setError(null);
     setRemoteStatus(null);
+    // The placeholder opens no socket, so nothing would ever correct a stale
+    // bar left over from the session we just detached from.
+    setBackgroundTasks({ tasks: [], turnParked: false });
     setMessages([]);
     containerRef.current = { entries: {}, status: "stopped" };
     historyRef.current = null;
@@ -1930,6 +1947,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setError(null);
     setIsLoading(false);
     setRemoteStatus(null);
+    // Belongs to the workspace we are leaving. The next subscribe sends its
+    // own snapshot, but a workspace with no live session never subscribes.
+    setBackgroundTasks({ tasks: [], turnParked: false });
     finishedRef.current = false;
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;
@@ -2020,6 +2040,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     error,
     remoteStatus,
     workflowRunUpdate,
+    backgroundTasks,
     streamEpoch,
     messageEntryIndices: denseEntries(containerRef.current).map((entry) => entry.entryIndex),
     hasEarlierHistory,

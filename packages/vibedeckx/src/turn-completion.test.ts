@@ -29,7 +29,7 @@ describe("TurnCompletionLedger", () => {
 
   it("defers (no commit) while background tasks are still running, keeping the result parked", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     expect(ledger.successResult(P1)).toEqual({ kind: "cancel" });
     expect(ledger.pendingTaskCount).toBe(1);
     // The result stays parked: Codex never auto-resumes the main thread
@@ -40,7 +40,7 @@ describe("TurnCompletionLedger", () => {
 
   it("codex fire-and-forget: last task finishing schedules the parked result (no resume ever comes)", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("sub-thread-1");
+    ledger.taskStarted({ taskId: "sub-thread-1" }, 0);
     const parked = ledger.successResult(P1); // main turn ends while subagent runs
     expect(parked).toEqual({ kind: "cancel" });
     const action = ledger.taskFinished("sub-thread-1");
@@ -50,7 +50,7 @@ describe("TurnCompletionLedger", () => {
 
   it("a parked result is superseded by resume activity (claude path unaffected)", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.successResult(P1); // parked, task a still running
     const g1 = generationOf(ledger.taskFinished("a")); // schedules parked P1
     expect(ledger.noteTurnActivity()).toEqual({ kind: "cancel" }); // resume init beats the grace
@@ -61,10 +61,10 @@ describe("TurnCompletionLedger", () => {
 
   it("a new task starting while a result is scheduled parks it again until the set empties", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.successResult(P1);
     const g1 = generationOf(ledger.taskFinished("a")); // scheduled
-    expect(ledger.taskStarted("b")).toEqual({ kind: "cancel" }); // parked again, kept
+    expect(ledger.taskStarted({ taskId: "b" }, 0)).toEqual({ kind: "cancel" }); // parked again, kept
     expect(ledger.graceElapsed(g1)).toEqual({ kind: "none" });
     const g2 = generationOf(ledger.taskFinished("b"));
     expect(ledger.graceElapsed(g2)).toEqual({ kind: "commit", payload: P1 });
@@ -72,16 +72,16 @@ describe("TurnCompletionLedger", () => {
 
   it("an emptying task snapshot schedules the parked result", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskListChanged(["sub-1"]);
+    ledger.taskListChanged([{ taskId: "sub-1" }], 0);
     ledger.successResult(P1);
-    const gen = generationOf(ledger.taskListChanged([]));
+    const gen = generationOf(ledger.taskListChanged([], 0));
     expect(ledger.graceElapsed(gen)).toEqual({ kind: "commit", payload: P1 });
   });
 
   it("holds the result for grace when background tasks ran this turn (race sequence)", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
-    ledger.taskStarted("b");
+    ledger.taskStarted({ taskId: "a" }, 0);
+    ledger.taskStarted({ taskId: "b" }, 0);
     ledger.taskFinished("a");
     ledger.taskFinished("b");
     const action = ledger.successResult(P1);
@@ -94,8 +94,8 @@ describe("TurnCompletionLedger", () => {
 
   it("supersedes intermediate results: only the last result of a resume chain commits", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
-    ledger.taskStarted("b");
+    ledger.taskStarted({ taskId: "a" }, 0);
+    ledger.taskStarted({ taskId: "b" }, 0);
     ledger.taskFinished("a");
     ledger.taskFinished("b");
     const g1 = generationOf(ledger.successResult(P1));
@@ -112,8 +112,8 @@ describe("TurnCompletionLedger", () => {
 
   it("in-turn consumption: single result after tasks finished mid-turn commits after grace", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("agent");
-    ledger.taskStarted("bash");
+    ledger.taskStarted({ taskId: "agent" }, 0);
+    ledger.taskStarted({ taskId: "bash" }, 0);
     ledger.taskFinished("agent");
     ledger.taskFinished("bash");
     const gen = generationOf(ledger.successResult(P1));
@@ -122,9 +122,9 @@ describe("TurnCompletionLedger", () => {
 
   it("tracks task_id restart cycles via the live set", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
-    ledger.taskStarted("a"); // same id restarts (subagent resumed by its own nested task)
+    ledger.taskStarted({ taskId: "a" }, 0); // same id restarts (subagent resumed by its own nested task)
     expect(ledger.pendingTaskCount).toBe(1);
     expect(ledger.successResult(P1)).toEqual({ kind: "cancel" }); // still deferred
     ledger.taskFinished("a");
@@ -133,7 +133,7 @@ describe("TurnCompletionLedger", () => {
 
   it("task events during grace re-arm the timer instead of cancelling (no wedge)", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const g1 = generationOf(ledger.successResult(P1));
     // An orphaned nested-task notification arrives with no resume behind it.
@@ -146,17 +146,59 @@ describe("TurnCompletionLedger", () => {
 
   it("taskListChanged replaces the live set (authoritative snapshot)", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("stale");
-    ledger.taskListChanged(["a", "b"]);
+    ledger.taskStarted({ taskId: "stale" }, 0);
+    ledger.taskListChanged([{ taskId: "a" }, { taskId: "b" }], 0);
     expect(ledger.pendingTaskCount).toBe(2);
-    ledger.taskListChanged([]);
+    ledger.taskListChanged([], 0);
     expect(ledger.pendingTaskCount).toBe(0);
     expect(ledger.successResult(P1).kind).toBe("schedule"); // saw background activity
   });
 
+  // The descriptors the UI renders. The harness pushes a full snapshot on
+  // every change, so the ledger — not the client — has to be the thing that
+  // remembers when each task first appeared.
+  it("exposes task descriptors, and startedAt survives snapshot resyncs", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskStarted({ taskId: "a", taskType: "local_bash", description: "run the build" }, 1_000);
+    ledger.taskListChanged([{ taskId: "a", taskType: "local_bash", description: "run the build" }], 9_000);
+    ledger.taskListChanged(
+      [
+        { taskId: "a", taskType: "local_bash", description: "run the build" },
+        { taskId: "b", taskType: "local_agent", description: "a subagent" },
+      ],
+      9_000,
+    );
+    expect(ledger.backgroundTasks).toEqual([
+      { taskId: "a", taskType: "local_bash", description: "run the build", startedAt: 1_000 },
+      { taskId: "b", taskType: "local_agent", description: "a subagent", startedAt: 9_000 },
+    ]);
+  });
+
+  // A Bash-tool command promoted to the background by a timeout is announced
+  // by task_started (which carries the description) and only later appears in
+  // a snapshot — which may omit it. Neither event alone is complete.
+  it("merges labels across events rather than letting a later one blank them", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskStarted({ taskId: "a", taskType: "local_bash", description: "wait for build" }, 1_000);
+    ledger.taskListChanged([{ taskId: "a" }], 5_000);
+    expect(ledger.backgroundTasks).toEqual([
+      { taskId: "a", taskType: "local_bash", description: "wait for build", startedAt: 1_000 },
+    ]);
+  });
+
+  it("drops descriptors as tasks finish, and reports an empty set when idle", () => {
+    const ledger = new TurnCompletionLedger();
+    ledger.taskStarted({ taskId: "a", description: "one" }, 0);
+    ledger.taskStarted({ taskId: "b", description: "two" }, 0);
+    ledger.taskFinished("a");
+    expect(ledger.backgroundTasks.map((t) => t.taskId)).toEqual(["b"]);
+    ledger.reset();
+    expect(ledger.backgroundTasks).toEqual([]);
+  });
+
   it("error result discards the held completion", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const gen = generationOf(ledger.successResult(P1));
     expect(ledger.errorResult()).toEqual({ kind: "cancel" });
@@ -165,7 +207,7 @@ describe("TurnCompletionLedger", () => {
 
   it("clean process exit commits the held completion immediately", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const gen = generationOf(ledger.successResult(P1));
     expect(ledger.processExited(0)).toEqual({ kind: "commit", payload: P1 });
@@ -174,7 +216,7 @@ describe("TurnCompletionLedger", () => {
 
   it("non-zero process exit discards the held completion", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const gen = generationOf(ledger.successResult(P1));
     expect(ledger.processExited(1)).toEqual({ kind: "cancel" });
@@ -183,7 +225,7 @@ describe("TurnCompletionLedger", () => {
 
   it("clean exit without a held completion just clears state", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     expect(ledger.processExited(0)).toEqual({ kind: "cancel" });
     expect(ledger.pendingTaskCount).toBe(0);
   });
@@ -194,7 +236,7 @@ describe("TurnCompletionLedger", () => {
     // early. If that commit cleared the background flag, every later result
     // of the chain would commit instantly — three chimes instead of one.
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const g1 = generationOf(ledger.successResult(P1));
     expect(ledger.graceElapsed(g1)).toEqual({ kind: "commit", payload: P1 }); // premature
@@ -204,7 +246,7 @@ describe("TurnCompletionLedger", () => {
 
   it("a new user turn resets the background flag: its plain result commits immediately", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const gen = generationOf(ledger.successResult(P1));
     expect(ledger.graceElapsed(gen).kind).toBe("commit");
@@ -214,7 +256,7 @@ describe("TurnCompletionLedger", () => {
 
   it("userTurnStarted discards a held completion (user moved on)", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const gen = generationOf(ledger.successResult(P1));
     expect(ledger.userTurnStarted()).toEqual({ kind: "cancel" });
@@ -228,7 +270,7 @@ describe("TurnCompletionLedger", () => {
 
   it("reset clears tasks, held completion, and the background flag", () => {
     const ledger = new TurnCompletionLedger();
-    ledger.taskStarted("a");
+    ledger.taskStarted({ taskId: "a" }, 0);
     ledger.taskFinished("a");
     const gen = generationOf(ledger.successResult(P1));
     ledger.reset();

@@ -368,6 +368,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
               try { socket.send(raw); } catch { /* client gone */ }
             }
             try { socket.send(JSON.stringify({ Ready: true, historyEpoch: cacheEntry.historyEpoch ?? undefined })); } catch { /* client gone */ }
+            // Live background-task snapshot, held last-value rather than in
+            // `messages` (see CacheEntry.backgroundTasks). Without this a
+            // reload during a long-running background task shows an empty bar
+            // while the task is still running — the case the bar exists for.
+            if (cacheEntry.backgroundTasks !== null) {
+              try { socket.send(cacheEntry.backgroundTasks); } catch { /* client gone */ }
+            }
 
             if (cacheEntry.finished) {
               try { socket.send(JSON.stringify({ finished: true })); } catch { /* noop */ }

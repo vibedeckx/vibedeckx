@@ -41,9 +41,26 @@ export type CompletionAction =
   /** (Re)start the grace timer; pass `generation` back to graceElapsed. */
   | { kind: "schedule"; generation: number };
 
+/**
+ * A background task the agent launched and has not finished yet. `startedAt`
+ * is stamped by the caller (the ledger stays clock-free) the first time a task
+ * id is seen, and deliberately survives snapshot resyncs — the harness pushes
+ * a fresh snapshot on every change, so re-stamping would reset the elapsed
+ * time the UI shows.
+ */
+export interface BackgroundTask {
+  taskId: string;
+  taskType?: string;
+  description?: string;
+  startedAt: number;
+}
+
+/** The subset of {@link BackgroundTask} the harness reports; no timestamp. */
+export type BackgroundTaskDescriptor = Omit<BackgroundTask, "startedAt">;
+
 export class TurnCompletionLedger {
   /** Live background tasks by harness task_id (same id may restart). */
-  private tasks = new Set<string>();
+  private tasks = new Map<string, BackgroundTask>();
   /** Held completion candidate — the latest success result, if any. */
   private pending: CompletionPayload | null = null;
   /** Bumped whenever the candidate changes; stale grace timers no-op. */
@@ -63,8 +80,13 @@ export class TurnCompletionLedger {
     return this.pending !== null;
   }
 
-  taskStarted(taskId: string): CompletionAction {
-    this.tasks.add(taskId);
+  /** Live tasks in first-seen order — the payload the UI renders. */
+  get backgroundTasks(): BackgroundTask[] {
+    return [...this.tasks.values()];
+  }
+
+  taskStarted(task: BackgroundTaskDescriptor, now: number): CompletionAction {
+    this.upsert(task, this.tasks.get(task.taskId), now);
     this.sawBackgroundActivity = true;
     return this.rearmIfHeld();
   }
@@ -76,9 +98,13 @@ export class TurnCompletionLedger {
   }
 
   /** Authoritative snapshot from `system/background_tasks_changed`. */
-  taskListChanged(taskIds: string[]): CompletionAction {
-    this.tasks = new Set(taskIds);
-    if (taskIds.length > 0) this.sawBackgroundActivity = true;
+  taskListChanged(tasks: BackgroundTaskDescriptor[], now: number): CompletionAction {
+    const previous = this.tasks;
+    this.tasks = new Map();
+    for (const task of tasks) {
+      this.upsert(task, previous.get(task.taskId), now);
+    }
+    if (tasks.length > 0) this.sawBackgroundActivity = true;
     return this.rearmIfHeld();
   }
 
@@ -176,6 +202,22 @@ export class TurnCompletionLedger {
     this.generation++;
     if (this.tasks.size > 0) return { kind: "cancel" };
     return { kind: "schedule", generation: this.generation };
+  }
+
+  /**
+   * Merge a descriptor into the live set, keeping the earliest `startedAt` and
+   * any label already known: `task_started` carries a description that the
+   * snapshot for the same task may omit, and the two arrive in either order.
+   * `known` comes from the caller: a snapshot resync rebuilds the map, so the
+   * prior entry is no longer reachable through `this.tasks`.
+   */
+  private upsert(task: BackgroundTaskDescriptor, known: BackgroundTask | undefined, now: number): void {
+    this.tasks.set(task.taskId, {
+      taskId: task.taskId,
+      taskType: task.taskType ?? known?.taskType,
+      description: task.description ?? known?.description,
+      startedAt: known?.startedAt ?? now,
+    });
   }
 
   private commitHeld(): CompletionAction {

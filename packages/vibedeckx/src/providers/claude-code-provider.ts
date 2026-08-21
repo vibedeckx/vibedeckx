@@ -150,10 +150,16 @@ export class ClaudeCodeProvider implements AgentProvider {
       // the ledger; a missing tasks array (upstream drift) is ignored rather
       // than treated as "no tasks".
       if (systemMsg.subtype === BACKGROUND_TASKS_CHANGED_SUBTYPE) {
-        const tasks = (msg as { tasks?: Array<{ task_id?: string }> }).tasks;
+        const tasks = (msg as {
+          tasks?: Array<{ task_id?: string; task_type?: string; description?: string }>;
+        }).tasks;
         if (!Array.isArray(tasks)) return [];
-        const taskIds = tasks.map((t) => t.task_id).filter((id): id is string => typeof id === "string");
-        return [{ type: "task_list_changed", taskIds }];
+        const parsed = tasks.flatMap((t) =>
+          typeof t.task_id === "string"
+            ? [{ taskId: t.task_id, taskType: t.task_type, description: t.description }]
+            : [],
+        );
+        return [{ type: "task_list_changed", tasks: parsed }];
       }
       // Turn start (fires for auto-resume turns too) — the timely cancel
       // signal for a grace-held completion; the resume's first assistant

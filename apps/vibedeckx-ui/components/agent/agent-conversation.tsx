@@ -43,6 +43,7 @@ import {
   DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import { TurnEndDivider } from "./turn-end-divider";
+import { BackgroundTasksBar } from "./background-tasks-bar";
 import { ModelPicker } from "./model-picker";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
@@ -233,6 +234,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     error,
     remoteStatus,
     workflowRunUpdate,
+    backgroundTasks,
     streamEpoch,
     messageEntryIndices: loadedMessageEntryIndices,
     hasEarlierHistory,
@@ -1135,6 +1137,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
 
       {/* Input area */}
       <div className="flex-shrink-0 p-3">
+        {/* Above the composer, not on the turn_end divider: when a parked
+            completion holds the turn open there IS no divider, which is
+            exactly the case this needs to explain. */}
+        <BackgroundTasksBar tasks={backgroundTasks.tasks} turnParked={backgroundTasks.turnParked} />
         <PromptInput
           onSubmit={handleSubmit}
           accept="image/*"
