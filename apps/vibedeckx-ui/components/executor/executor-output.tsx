@@ -97,6 +97,13 @@ export function ExecutorOutput({
   const fittedRef = useRef(false);
   const pendingHistRef = useRef("");
   const pendingLiveRef = useRef("");
+  // Buffering alone doesn't make the first open clean: xterm parses a large
+  // write() in 12ms slices and paints between slices, so a multi-MB replay
+  // still streams past as a visible scroll-through of stale history. Keep the
+  // terminal transparent (opacity, not display — fit() needs layout) until the
+  // flushed history has fully parsed, then show the settled screen in one
+  // frame.
+  const [revealed, setRevealed] = useState(false);
   const muteInputRef = useRef(muteInput);
   if (muteInputRef.current !== muteInput) {
     console.log(`[ExecutorOutput] muteInput changed: ${muteInputRef.current} → ${muteInput}`);
@@ -145,29 +152,44 @@ export function ExecutorOutput({
     }
   };
 
-  const writeToTerminal = useCallback((historical: string, live: string) => {
-    const terminal = terminalRef.current;
-    if (!terminal) return;
-    if (historical) {
-      historyParseMuteRef.current++;
-      try {
-        terminal.write(historical, () => {
+  const writeToTerminal = useCallback(
+    (historical: string, live: string, onAllParsed?: () => void) => {
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        onAllParsed?.();
+        return;
+      }
+      // onAllParsed must ride the LAST enqueued write: xterm parses queued
+      // writes in order with renders in between, so firing it after historical
+      // alone would reveal a stale frame that the (possibly large, up to the
+      // 1MB pre-fit cap) live tail then visibly rewrites.
+      if (historical) {
+        historyParseMuteRef.current++;
+        try {
+          terminal.write(historical, () => {
+            historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
+            if (!live) onAllParsed?.();
+          });
+        } catch (err) {
           historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
-        });
-      } catch (err) {
-        historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
-        // Last-resort guard: never let a terminal write crash the React tree.
-        console.error("[ExecutorOutput] terminal write failed", err);
+          // Last-resort guard: never let a terminal write crash the React tree.
+          console.error("[ExecutorOutput] terminal write failed", err);
+          if (!live) onAllParsed?.();
+        }
+      } else if (!live) {
+        onAllParsed?.();
       }
-    }
-    if (live) {
-      try {
-        terminal.write(live);
-      } catch (err) {
-        console.error("[ExecutorOutput] terminal write failed", err);
+      if (live) {
+        try {
+          terminal.write(live, () => onAllParsed?.());
+        } catch (err) {
+          console.error("[ExecutorOutput] terminal write failed", err);
+          onAllParsed?.();
+        }
       }
-    }
-  }, []);
+    },
+    []
+  );
 
   // Called after the first successful fit(): the terminal now has its real
   // geometry, so everything held back can be parsed without mis-wrapping.
@@ -177,7 +199,17 @@ export function ExecutorOutput({
     const live = pendingLiveRef.current;
     pendingHistRef.current = "";
     pendingLiveRef.current = "";
-    if (historical || live) writeToTerminal(historical, live);
+    if (historical || live) {
+      // Reveal only once every buffered byte has parsed: the callback fires
+      // after the final queued write's last slice, when the buffer shows the
+      // settled end state instead of the scroll-through.
+      writeToTerminal(historical, live, () => {
+        terminalRef.current?.scrollToBottom();
+        setRevealed(true);
+      });
+    } else {
+      setRevealed(true);
+    }
   }, [writeToTerminal]);
 
   // fit() returning is not proof of a fit: FitAddon silently no-ops when cell
@@ -472,7 +504,9 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         className
       )}
     >
-      <div ref={containerRef} className="h-full w-full" />
+      {/* opacity (not visibility/display) keeps the container measurable for
+          fit() and xterm's renderer active while concealed pre-reveal. */}
+      <div ref={containerRef} className={cn("h-full w-full", !revealed && "opacity-0")} />
       <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
