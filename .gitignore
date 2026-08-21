@@ -24,6 +24,9 @@ node_modules/
 **/dist-out/
 *.tgz
 
+# generated at UI build time (next.config.ts)
+apps/vibedeckx-ui/public/build-id.json
+
 # production
 /build
 

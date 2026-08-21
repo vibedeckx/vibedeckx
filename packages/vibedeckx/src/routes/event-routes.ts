@@ -57,6 +57,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Send initial keepalive
     reply.raw.write(":ok\n\n");
 
+    // Handshake frame. Carries the build fingerprint of the UI bundle this
+    // server is serving so a long-lived tab can detect version skew the moment
+    // it (re)connects — a deploy is a restart, so the SSE reconnect is exactly
+    // when a new build becomes visible. Additive: consumers filter by `type`,
+    // old UIs ignore it. `uiBuildId` is omitted in API-only mode or for a
+    // pre-build-id UI bundle; clients treat its absence as "check unavailable".
+    reply.raw.write(
+      `data: ${JSON.stringify({ type: "hello", ...(fastify.uiBuildId ? { uiBuildId: fastify.uiBuildId } : {}) })}\n\n`,
+    );
+
     // Subscribe to all events, filtered to the subscriber's tenant
     const unsubscribe = fastify.eventBus.subscribe((event) => {
       void (async () => {

@@ -48,6 +48,8 @@ declare module "fastify" {
     reverseConnectManager: ReverseConnectManager;
     authEnabled: boolean;
     noLocalProjects: boolean;
+    /** Build fingerprint of the UI assets this server serves; undefined = API-only or pre-build-id bundle. */
+    uiBuildId: string | undefined;
     browserManager: BrowserManager;
     scheduler: SchedulerService;
     notificationService: NotificationService;

@@ -22,7 +22,7 @@ function formatAgo(ts: number | null): string {
  * user assumes nothing finished) into a *visible* one with a one-click remedy.
  */
 export function ConnectionStatusIndicator() {
-  const { state, lastEventAt, reconnect } = useConnectionStatus();
+  const { state, lastEventAt, updateAvailable, reconnect } = useConnectionStatus();
 
   // Keep the relative "last update" label current without depending on new
   // events (a stale stream sends nothing, so it wouldn't re-render otherwise).
@@ -42,6 +42,25 @@ export function ConnectionStatusIndicator() {
       >
         <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
         实时更新已断开
+      </button>
+    );
+  }
+
+  // Version skew: this tab runs an older UI build than the server serves. The
+  // stale pill above wins — a dead stream is the more urgent signal, and skew
+  // was detected over that same stream anyway. A hidden tab reloads silently
+  // (see global-event-stream.tsx); this pill is the visible-tab path, where
+  // the user chooses the moment.
+  if (updateAvailable) {
+    return (
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        title="服务器已更新到新版本 · 点击刷新页面加载"
+        className="flex items-center gap-1.5 rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-600 transition-colors hover:bg-sky-500/20"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+        有新版本 · 点击刷新
       </button>
     );
   }

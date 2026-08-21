@@ -178,6 +178,25 @@ export const createServer = async (opts: {
         ? bakedUiRoot
         : null;
 
+  // Build fingerprint of the UI assets actually being served (written into the
+  // export by apps/vibedeckx-ui/next.config.ts), broadcast on the /api/events
+  // handshake so long-lived tabs can detect version skew. Read from UI_ROOT —
+  // not from this server's own build — because a --ui-dir override may serve a
+  // different build than the binary shipped with; announcing the wrong side
+  // would make every tab report skew forever. Absent file (API-only mode, a
+  // pre-build-id ui-dist package) leaves it undefined and disables the check.
+  let uiBuildId: string | undefined;
+  if (UI_ROOT) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(UI_ROOT, "build-id.json"), "utf8")) as {
+        buildId?: unknown;
+      };
+      if (typeof parsed.buildId === "string" && parsed.buildId) uiBuildId = parsed.buildId;
+    } catch {
+      // Missing or malformed — skew detection stays off for this UI bundle.
+    }
+  }
+
   // maxParamLength: remote session IDs are ~117 chars (remote-{serverId}-{projectId}-{sessionId}),
   // which exceeds find-my-way's default limit of 100, causing silent 404s on route matching.
   // bodyLimit: 16MB to accommodate large paste uploads and image attachments. Per-route
@@ -214,6 +233,9 @@ export const createServer = async (opts: {
 
   // Decorate authEnabled so routes can access it
   server.decorate("authEnabled", authEnabled);
+
+  // Build id of the served UI, for the /api/events skew-detection handshake
+  server.decorate("uiBuildId", uiBuildId);
 
   // Decorate noLocalProjects so project routes can reject local-path creation
   server.decorate("noLocalProjects", noLocalProjects);

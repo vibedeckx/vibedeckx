@@ -45,6 +45,10 @@ interface ConnectionStatusValue {
   state: ConnectionState;
   /** Epoch ms of the last received frame (event or ping), or null pre-connect. */
   lastEventAt: number | null;
+  /** Build id of the UI the server currently serves (SSE hello frame), or null if unknown. */
+  serverBuildId: string | null;
+  /** True when this tab runs an older UI build than the server serves — a reload picks up the new one. */
+  updateAvailable: boolean;
 }
 
 const GlobalEventStreamContext = createContext<GlobalEventStreamValue | null>(
@@ -53,6 +57,15 @@ const GlobalEventStreamContext = createContext<GlobalEventStreamValue | null>(
 const ConnectionStatusContext = createContext<ConnectionStatusValue | null>(
   null,
 );
+
+// This tab's own build fingerprint, inlined at `next build` time by
+// next.config.ts. Compared against the server's `hello` frame to detect
+// version skew. The check only runs in production with both sides present: in
+// monorepo dev the `next dev` frontend and the backend's possibly-stale
+// dist/ui are different builds by construction, and a missing id on either
+// side means "check unavailable", never "update available".
+export const UI_BUILD_ID = process.env.NEXT_PUBLIC_UI_BUILD_ID ?? null;
+const SKEW_CHECK_ENABLED = process.env.NODE_ENV === "production" && UI_BUILD_ID !== null;
 
 const MAX_RETRY_MS = 5000;
 // Backend sends a `{type:"ping"}` heartbeat every 15s. If we hear nothing —
@@ -102,6 +115,9 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
   const [state, setState] = useState<ConnectionState>("connecting");
   const [lastEventAt, setLastEventAt] = useState<number | null>(null);
   const lastEventAtRef = useRef<number | null>(null);
+  const [serverBuildId, setServerBuildId] = useState<string | null>(null);
+  const updateAvailable =
+    SKEW_CHECK_ENABLED && serverBuildId !== null && serverBuildId !== UI_BUILD_ID;
 
   const subscribe = useCallback((listener: Listener) => {
     listenersRef.current.add(listener);
@@ -219,6 +235,16 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
         }
         // Heartbeat: keeps the connection observably alive; not a real event.
         if (data.type === "ping") return;
+        // Handshake: the build id of the UI the server is serving right now.
+        // Not dispatched — it is connection metadata, not a project event.
+        // A missing/invalid id must *clear* the state, not leave the previous
+        // server's id behind: after skew was detected once, reconnecting to a
+        // server that no longer announces a build id (API-only, a pre-build-id
+        // UI bundle) would otherwise keep a false "update available" alive.
+        if (data.type === "hello") {
+          setServerBuildId(typeof data.uiBuildId === "string" ? data.uiBuildId : null);
+          return;
+        }
         for (const listener of listenersRef.current) {
           try {
             listener(data);
@@ -290,6 +316,22 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     };
   }, [loading, authEnabled, markAlive]);
 
+  // Silent convergence: when a newer build is available and the tab is hidden
+  // (user on another tab, machine waking from sleep), reload it in the
+  // background — the user comes back to the new version without ever seeing a
+  // banner. Safe to be aggressive: all real state is server-side and the URL
+  // carries the route, so a hidden reload loses nothing the user is looking
+  // at. A visible tab is never yanked; it gets the update pill instead.
+  useEffect(() => {
+    if (!updateAvailable) return;
+    const reloadIfHidden = () => {
+      if (document.visibilityState === "hidden") window.location.reload();
+    };
+    reloadIfHidden();
+    document.addEventListener("visibilitychange", reloadIfHidden);
+    return () => document.removeEventListener("visibilitychange", reloadIfHidden);
+  }, [updateAvailable]);
+
   // Stable so `useGlobalEventStream` consumers don't re-subscribe on every
   // heartbeat (subscribe + reconnect are both memoized).
   const streamValue = useMemo<GlobalEventStreamValue>(
@@ -297,8 +339,8 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     [subscribe, reconnect],
   );
   const statusValue = useMemo<ConnectionStatusValue>(
-    () => ({ state, lastEventAt }),
-    [state, lastEventAt],
+    () => ({ state, lastEventAt, serverBuildId, updateAvailable }),
+    [state, lastEventAt, serverBuildId, updateAvailable],
   );
 
   return (
@@ -341,6 +383,8 @@ export function useConnectionStatus(): ConnectionStatusValue & {
   return {
     state: status?.state ?? "connecting",
     lastEventAt: status?.lastEventAt ?? null,
+    serverBuildId: status?.serverBuildId ?? null,
+    updateAvailable: status?.updateAvailable ?? false,
     reconnect: stream?.reconnect ?? (() => {}),
   };
 }
