@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Archive, Bot, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
+import { Archive, Bot, Info, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
 import { PageHeader } from "@/components/layout";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { getPersistedConfig } from "@/lib/api";
+import { AboutSettings } from "./about-settings";
 import { AppearanceSettings } from "./appearance-settings";
 import { ChatProviderSettings } from "./chat-provider-settings";
 import { ProxySettings } from "./proxy-settings";
@@ -24,6 +25,7 @@ const NAV: SettingsNavItem[] = [
   { id: "retention", label: "History", Icon: Archive },
   { id: "terminal", label: "Terminal", Icon: TerminalSquare },
   { id: "proxy", label: "Proxy", Icon: Network },
+  { id: "about", label: "About", Icon: Info },
 ];
 
 export function SettingsView() {
@@ -102,6 +104,14 @@ export function SettingsView() {
             <ProxySettings />
           </SettingsSection>
         )}
+
+        <SettingsSection
+          id="about"
+          label="About"
+          description="Build fingerprints of this tab and the server, for update checks and bug reports."
+        >
+          <AboutSettings />
+        </SettingsSection>
       </SettingsLayout>
     </div>
   );

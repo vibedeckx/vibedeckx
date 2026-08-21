@@ -16,7 +16,6 @@ import { api, type ProxyConfig } from '@/lib/api';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { RemoteServersSettings } from './remote-servers-settings';
 import { ChatProviderSettings } from './chat-provider-settings';
-import { AboutSettings } from './about-settings';
 
 type ProxyType = ProxyConfig['type'];
 
@@ -99,12 +98,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             <TabsTrigger value="remote-servers" className="flex-1">Remote Servers</TabsTrigger>
             <TabsTrigger value="ai-chat" className="flex-1">AI Chat</TabsTrigger>
             <TabsTrigger value="proxy" className="flex-1">Proxy</TabsTrigger>
-            <TabsTrigger value="about" className="flex-1">About</TabsTrigger>
           </TabsList>
-
-          <TabsContent value="about">
-            <AboutSettings />
-          </TabsContent>
 
           <TabsContent value="remote-servers">
             <RemoteServersSettings />
