@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -85,6 +85,18 @@ export function ExecutorOutput({
   // parse-completion callback — which xterm fires strictly after all onData
   // events for the chunk — so the mute covers exactly the replayed bytes.
   const historyParseMuteRef = useRef(0);
+  // PTY bytes held back until the first successful fit(). The panel mounts
+  // hidden (display:none) behind other tabs, where the 0×0 guards below skip
+  // fit and xterm sits at its default 80×24 — but the WS connects and replays
+  // history immediately. Replayed prompt-redraw sequences encode the width
+  // they were emitted at, so parsing them at 80 cols renders mangled wraps
+  // that flash when the tab is first opened. Buffering until the terminal has
+  // its real geometry makes the first paint correct. Only the pre-first-fit
+  // window is deferred: after that, a hidden terminal keeps its last real
+  // size, so direct writes are safe.
+  const fittedRef = useRef(false);
+  const pendingHistRef = useRef("");
+  const pendingLiveRef = useRef("");
   const muteInputRef = useRef(muteInput);
   if (muteInputRef.current !== muteInput) {
     console.log(`[ExecutorOutput] muteInput changed: ${muteInputRef.current} → ${muteInput}`);
@@ -132,6 +144,90 @@ export function ExecutorOutput({
       toast.error("Failed to copy to clipboard");
     }
   };
+
+  const writeToTerminal = useCallback((historical: string, live: string) => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    if (historical) {
+      historyParseMuteRef.current++;
+      try {
+        terminal.write(historical, () => {
+          historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
+        });
+      } catch (err) {
+        historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
+        // Last-resort guard: never let a terminal write crash the React tree.
+        console.error("[ExecutorOutput] terminal write failed", err);
+      }
+    }
+    if (live) {
+      try {
+        terminal.write(live);
+      } catch (err) {
+        console.error("[ExecutorOutput] terminal write failed", err);
+      }
+    }
+  }, []);
+
+  // Called after the first successful fit(): the terminal now has its real
+  // geometry, so everything held back can be parsed without mis-wrapping.
+  const markFittedAndFlush = useCallback(() => {
+    fittedRef.current = true;
+    const historical = pendingHistRef.current;
+    const live = pendingLiveRef.current;
+    pendingHistRef.current = "";
+    pendingLiveRef.current = "";
+    if (historical || live) writeToTerminal(historical, live);
+  }, [writeToTerminal]);
+
+  // fit() returning is not proof of a fit: FitAddon silently no-ops when cell
+  // measurements are unavailable, which can happen right after a display:none
+  // mount before xterm has re-measured glyphs. Gate the flush on
+  // proposeDimensions() yielding real numbers — the same check fit() uses
+  // internally — so history is never parsed at the default 80 cols.
+  const fitRetryRafRef = useRef<number | null>(null);
+
+  const tryFitAndFlush = useCallback((): boolean => {
+    const el = containerRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!el || !fitAddon || el.clientWidth === 0 || el.clientHeight === 0) return false;
+    const dims = fitAddon.proposeDimensions();
+    if (
+      !dims ||
+      !Number.isFinite(dims.cols) ||
+      !Number.isFinite(dims.rows) ||
+      dims.cols <= 0 ||
+      dims.rows <= 0
+    ) {
+      return false;
+    }
+    try {
+      fitAddon.fit();
+    } catch {
+      return false;
+    }
+    markFittedAndFlush();
+    return true;
+  }, [markFittedAndFlush]);
+
+  // Container visible but glyphs not yet measurable: retry once per frame
+  // until measurement lands, else the buffered replay would strand forever
+  // (no further ResizeObserver event fires without a size change). Stops on
+  // success, on hide (the observer re-arms it on the next 0→real transition),
+  // and on dispose.
+  const scheduleFitRetry = useCallback(() => {
+    if (fitRetryRafRef.current !== null) return;
+    const tick = () => {
+      fitRetryRafRef.current = null;
+      if (fittedRef.current || !terminalRef.current) return;
+      const el = containerRef.current;
+      if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
+      if (!tryFitAndFlush()) {
+        fitRetryRafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    fitRetryRafRef.current = requestAnimationFrame(tick);
+  }, [tryFitAndFlush]);
 
   // Initialize terminal
   useEffect(() => {
@@ -186,17 +282,22 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
 
     terminal.open(containerRef.current);
 
-    // Delay fit to ensure container is ready
-    setTimeout(() => {
+    // Delay fit to ensure container is ready. Cleared on cleanup so an effect
+    // restart can't fit a disposed terminal and flush through the replacement
+    // before it has fitted.
+    const initialFitTimer = setTimeout(() => {
       try {
         // Skip fit while the container is hidden (0×0): fitting against no size
         // resizes xterm to a tiny column count and tells the PTY it is narrow,
         // corrupting the prompt wrap. The ResizeObserver re-fits once visible.
         const el = containerRef.current;
         if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
-        fitAddon.fit();
-        if (isPty) {
-          onResize?.(terminal.cols, terminal.rows);
+        if (tryFitAndFlush()) {
+          if (isPty) {
+            onResize?.(terminal.cols, terminal.rows);
+          }
+        } else {
+          scheduleFitRetry();
         }
       } catch {
         // Ignore fit errors
@@ -223,6 +324,11 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     }
 
     return () => {
+      clearTimeout(initialFitTimer);
+      if (fitRetryRafRef.current !== null) {
+        cancelAnimationFrame(fitRetryRafRef.current);
+        fitRetryRafRef.current = null;
+      }
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -230,8 +336,11 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       // Disposing drops queued write callbacks — a stuck counter would mute
       // the next terminal instance forever.
       historyParseMuteRef.current = 0;
+      fittedRef.current = false;
+      pendingHistRef.current = "";
+      pendingLiveRef.current = "";
     };
-  }, [isPty, onInput, onResize]);
+  }, [isPty, onInput, onResize, tryFitAndFlush, scheduleFitRetry]);
 
   // Write new logs to terminal
   useEffect(() => {
@@ -241,6 +350,8 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     if (logs.length < lastLogIndexRef.current) {
       terminalRef.current.reset();
       lastLogIndexRef.current = 0;
+      pendingHistRef.current = "";
+      pendingLiveRef.current = "";
     }
 
     // Coalesce all new logs into a single write. Writing each entry with its
@@ -268,26 +379,22 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       }
     }
     lastLogIndexRef.current = logs.length;
-    if (pendingHistorical) {
-      historyParseMuteRef.current++;
-      try {
-        terminalRef.current.write(pendingHistorical, () => {
-          historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
-        });
-      } catch (err) {
-        historyParseMuteRef.current = Math.max(0, historyParseMuteRef.current - 1);
-        // Last-resort guard: never let a terminal write crash the React tree.
-        console.error("[ExecutorOutput] terminal write failed", err);
-      }
+    // Before the first fit, PTY bytes are buffered instead of written (see
+    // fittedRef above). Non-PTY output is plain-ish stdout/stderr whose soft
+    // wraps reflow fine on resize, and can be arbitrarily large — write it
+    // straight through. Buffers are capped so a chatty shell (runInTerminal
+    // builds) can't grow them without bound while the tab stays closed;
+    // trimming keeps the tail, same trade-off as any ring-buffer history.
+    if (isPty && !fittedRef.current) {
+      const CAP = 1_000_000;
+      pendingHistRef.current = (pendingHistRef.current + pendingHistorical).slice(-CAP);
+      pendingLiveRef.current = (pendingLiveRef.current + pendingLive).slice(-CAP);
+      return;
     }
-    if (pendingLive) {
-      try {
-        terminalRef.current.write(pendingLive);
-      } catch (err) {
-        console.error("[ExecutorOutput] terminal write failed", err);
-      }
+    if (pendingHistorical || pendingLive) {
+      writeToTerminal(pendingHistorical, pendingLive);
     }
-  }, [logs]);
+  }, [logs, isPty, writeToTerminal]);
 
   // Apply live terminal settings changes (font, scrollback) without remounting
   useEffect(() => {
@@ -323,7 +430,11 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         // again the observer fires for the 0→real transition and fit() re-syncs.
         const el = containerRef.current;
         if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
-        fitAddonRef.current?.fit();
+        if (fittedRef.current) {
+          fitAddonRef.current?.fit();
+        } else if (!tryFitAndFlush()) {
+          scheduleFitRetry();
+        }
       } catch {
         // Ignore resize errors
       }
@@ -334,7 +445,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     return () => {
       resizeObserver.disconnect();
     };
-  }, []);
+  }, [tryFitAndFlush, scheduleFitRetry]);
 
   const statusLabel =
     status === "closed" && exitCode !== null
