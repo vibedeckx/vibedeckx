@@ -229,6 +229,21 @@ describe("buildReviewerPrompt verdict & settled semantics", () => {
     expect(prompt).not.toContain("looks good");
   });
 
+  // Without a stated cost model "blocking" drifts into "anything I'd have done
+  // differently", and the author side of the loop pays for it in complexity.
+  it("states the blocking bar — real and worth fixing, not over-engineering", () => {
+    for (const prompt of [
+      buildReviewerPrompt(base),
+      buildRereviewerPrompt({ taskContext: null, authorSelfReport: null, reviewFocus: null, target }),
+      FINAL_VERDICT_PROMPT,
+    ]) {
+      expect(prompt).toMatch(/bar for blocking/i);
+      expect(prompt).toMatch(/worth fixing/i);
+      expect(prompt).toMatch(/over-engineering/i);
+      expect(prompt).toMatch(/more complexity than the problem it prevents/i);
+    }
+  });
+
   it("rereviewer prompt carries the same verdict structure", () => {
     const prompt = buildRereviewerPrompt({
       taskContext: null,
