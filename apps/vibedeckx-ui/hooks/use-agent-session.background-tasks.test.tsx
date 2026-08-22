@@ -106,7 +106,22 @@ afterEach(async () => {
 describe("useAgentSession background tasks", () => {
   it("starts empty and is not parked", async () => {
     await render();
-    expect(latest!.backgroundTasks).toEqual({ tasks: [], turnParked: false });
+    expect(latest!.backgroundTasks).toEqual({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false });
+  });
+
+  // A worker at v0.3.27 sends only `tasks` and `turnParked` — that release is
+  // on main and in the field. Stored raw, the missing deadline reaches the bar
+  // as undefined and renders "NaN:NaN 后自动收尾本轮" next to a "keep running"
+  // button whose route that worker does not serve.
+  it("normalizes the older two-field frame instead of storing it raw", async () => {
+    await render();
+    await deliverTasks([{ taskId: "b1", startedAt: 1 }], true);
+    expect(latest!.backgroundTasks).toEqual({
+      tasks: [{ taskId: "b1", startedAt: 1 }],
+      turnParked: true,
+      parkDeadlineAt: null,
+      canStopTasks: false,
+    });
   });
 
   it("startNewConversation clears the previous session's tasks", async () => {
@@ -116,7 +131,7 @@ describe("useAgentSession background tasks", () => {
 
     await act(async () => { await latest!.startNewConversation(); });
 
-    expect(latest!.backgroundTasks).toEqual({ tasks: [], turnParked: false });
+    expect(latest!.backgroundTasks).toEqual({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false });
   });
 
   // Distinct branches from the test above: startNewConversation records a
@@ -129,6 +144,6 @@ describe("useAgentSession background tasks", () => {
 
     await render("dev2");
 
-    expect(latest!.backgroundTasks).toEqual({ tasks: [], turnParked: false });
+    expect(latest!.backgroundTasks).toEqual({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false });
   });
 });

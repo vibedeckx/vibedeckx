@@ -15,7 +15,20 @@ export type ContentPart = TextPart | ImagePart;
 // ============ Agent Message Types ============
 
 /** Why a turn's turn_end marker was written. See endActiveTurn in agent-session-manager.ts. */
-export type TurnOutcome = "completed" | "failed" | "stopped" | "process_exit" | "server_restart";
+/**
+ * `completed_with_pending_tasks` is a success: the agent answered, but
+ * background tasks outlived the turn and the turn was closed on a deadline
+ * rather than by them finishing. Kept distinct from `completed` so the divider
+ * can say so — a turn that claims a clean finish while a task is still running
+ * is the same lie this bound exists to end.
+ */
+export type TurnOutcome =
+  | "completed"
+  | "completed_with_pending_tasks"
+  | "failed"
+  | "stopped"
+  | "process_exit"
+  | "server_restart";
 
 /**
  * Whether a turn's outcome is a user-facing attention milestone.

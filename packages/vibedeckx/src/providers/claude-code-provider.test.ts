@@ -261,4 +261,17 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "edit");
     expect(config.args).not.toContain("--append-system-prompt");
   });
+
+  // The frame shape is the contract with the CLI, verified live against
+  // claude 2.1.238: it answers control_response success, empties its task
+  // list, and the process really dies. A typo here fails silently — the CLI
+  // just ignores an unknown control_request.
+  it("formats stop_task as the Agent SDK control_request", () => {
+    const provider = new ClaudeCodeProvider();
+    expect(JSON.parse(provider.formatStopBackgroundTask("bia7w8yz2", "s1"))).toEqual({
+      type: "control_request",
+      request_id: "stop_task-bia7w8yz2",
+      request: { subtype: "stop_task", task_id: "bia7w8yz2" },
+    });
+  });
 });

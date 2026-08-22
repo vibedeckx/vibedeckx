@@ -1422,6 +1422,39 @@ export async function setSessionFavorited(sessionId: string, favorited: boolean)
   if (!res.ok) throw new Error(`setSessionFavorited failed: ${res.status}`);
 }
 
+/**
+ * Vouch for a background task: stop counting it toward the park deadline, so
+ * the turn is not force-closed on its account and the session keeps its
+ * resident-process shield.
+ *
+ * A worker older than the route 404s; the caller treats that as "this session
+ * has no deadline to defuse" rather than an error.
+ */
+export async function keepBackgroundTaskRunning(sessionId: string, taskId: string): Promise<void> {
+  const res = await authFetch(
+    `${getApiBase()}/api/agent-sessions/${sessionId}/background-tasks/${encodeURIComponent(taskId)}/keep`,
+    { method: "POST" },
+  );
+  if (!res.ok && res.status !== 404) throw new Error(`keepBackgroundTaskRunning failed: ${res.status}`);
+}
+
+/**
+ * Ask the agent to stop one background task.
+ *
+ * Returns false when the agent has no such primitive (501, Codex) or the
+ * worker predates the route (404) — the caller then points at stopping the
+ * session, which always works.
+ */
+export async function stopBackgroundTask(sessionId: string, taskId: string): Promise<boolean> {
+  const res = await authFetch(
+    `${getApiBase()}/api/agent-sessions/${sessionId}/background-tasks/${encodeURIComponent(taskId)}/stop`,
+    { method: "POST" },
+  );
+  if (res.status === 501 || res.status === 404) return false;
+  if (!res.ok) throw new Error(`stopBackgroundTask failed: ${res.status}`);
+  return true;
+}
+
 // ============ Workflow Runs (agent-review loop) ============
 
 /**
@@ -1440,6 +1473,12 @@ export interface BackgroundTask {
   description?: string;
   /** Epoch ms, stamped when the server first saw the task. */
   startedAt: number;
+  /**
+   * The user vouched for this one ("keep running"), so it no longer pressures
+   * the session: no park deadline, and it keeps shielding the session from
+   * being reclaimed.
+   */
+  sanctioned?: boolean;
 }
 
 export interface WorkflowRun {

@@ -44,6 +44,7 @@ import {
 } from "./resident-agent-processes.js";
 import {
   COMPLETION_GRACE_MS,
+  PARK_TIMEOUT_MS,
   TurnCompletionLedger,
   type CompletionAction,
   type CompletionPayload,
@@ -182,6 +183,8 @@ interface RunningSession {
   completion: TurnCompletionLedger;
   /** Live grace timer for a held completion candidate, if any. */
   graceTimer: NodeJS.Timeout | null;
+  /** Bound on a parked completion — see PARK_TIMEOUT_MS. */
+  parkTimer: NodeJS.Timeout | null;
   /**
    * Per-session serial work queue. Stdout chunks, the grace-timer commit,
    * and process-exit handling all run through it, so a completion commit
@@ -292,11 +295,14 @@ export class AgentSessionManager {
   private retentionDeleting: Set<string> = new Set();
   /** Grace window before committing a held completion (injectable for tests). */
   private readonly completionGraceMs: number;
+  /** Bound on a parked completion (injectable for tests). */
+  private readonly parkTimeoutMs: number;
   private workflowSuppressionCheck: ((sessionId: string) => boolean) | null = null;
 
-  constructor(storage: Storage, opts?: { completionGraceMs?: number }) {
+  constructor(storage: Storage, opts?: { completionGraceMs?: number; parkTimeoutMs?: number }) {
     this.storage = storage;
     this.completionGraceMs = opts?.completionGraceMs ?? COMPLETION_GRACE_MS;
+    this.parkTimeoutMs = opts?.parkTimeoutMs ?? PARK_TIMEOUT_MS;
   }
 
   private async resolveSessionWorktreePath(
@@ -627,7 +633,7 @@ export class AgentSessionManager {
           processAlive: this.isProcessAlive(session),
           status: session.status,
           dormant: session.dormant,
-          backgroundTaskCount: session.completion.pendingTaskCount,
+          backgroundTasksProtect: session.completion.backgroundTasksProtectSession,
           lastActiveAt: session.lastActiveAt,
           projectId: session.projectId,
           branch: session.branch,
@@ -823,8 +829,9 @@ export class AgentSessionManager {
       crossRemoteMcp: opts.crossRemoteMcp,
       agentType,
       model,
-      completion: new TurnCompletionLedger(),
+      completion: new TurnCompletionLedger(this.parkTimeoutMs),
       graceTimer: null,
+      parkTimer: null,
       eventChain: Promise.resolve(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
@@ -1194,12 +1201,89 @@ export class AgentSessionManager {
     } else if (action.kind === "schedule") {
       this.armGraceTimer(session, action.generation);
     }
+    this.syncParkTimer(session);
+  }
+
+  /**
+   * Keep the park timer in step with the ledger's deadline.
+   *
+   * Driven by ledger STATE rather than by an action kind, because the deadline
+   * survives across many actions (every task event returns `cancel` while a
+   * completion stays parked) and can also be lifted without any action at all
+   * when the user vouches for the last unvouched task. Re-reading the state
+   * after each mutation is the only way the two can't drift.
+   */
+  private syncParkTimer(session: RunningSession): void {
+    const deadlineAt = session.completion.parkDeadlineAt;
+    if (deadlineAt === null) {
+      if (session.parkTimer) {
+        clearTimeout(session.parkTimer);
+        session.parkTimer = null;
+      }
+      return;
+    }
+    if (session.parkTimer) return; // already armed for this park
+    const timer = setTimeout(() => {
+      session.parkTimer = null;
+      this.enqueueSessionWork(session, async () => {
+        const action = session.completion.parkDeadlineElapsed();
+        if (action.kind !== "commit") return;
+        console.log(
+          `[AgentSession] parked completion exceeded ${this.parkTimeoutMs}ms with ` +
+          `${session.completion.pendingTaskCount} background task(s) still running — ` +
+          `committing the turn anyway (session=${session.id})`,
+        );
+        // `completed_with_pending_tasks`, not `completed`: the tasks outlived
+        // the turn, and a divider claiming a clean finish would be the second
+        // lie after the one this whole mechanism exists to stop.
+        await this.commitCompletion(session, action.payload, "completed_with_pending_tasks");
+        // The turn is closed but the tasks are not — repaint the bar so it
+        // switches from "counting down" to "still running after the turn".
+        this.broadcastBackgroundTasks(session);
+      }, "completion-park-deadline");
+    }, Math.max(0, deadlineAt - Date.now()));
+    timer.unref?.();
+    session.parkTimer = timer;
+  }
+
+  /**
+   * The user vouched for a background task: it stops counting toward the park
+   * deadline, restoring the original wait-for-auto-resume behavior for that
+   * task alone — now as an explicit choice rather than a silent assumption.
+   */
+  /**
+   * Ask the agent to stop one background task.
+   *
+   * Returns "unsupported" for agents with no such primitive (Codex), so the
+   * caller can say "stop the session instead" rather than showing a dead
+   * button. On success nothing is updated here: the CLI's own
+   * `background_tasks_changed` snapshot drains the ledger, which then commits
+   * the parked turn through the normal path.
+   */
+  stopBackgroundTask(sessionId: string, taskId: string): "ok" | "unsupported" | "not_found" {
+    const session = this.sessions.get(sessionId);
+    if (!session?.process?.stdin) return "not_found";
+    const frame = getProvider(session.agentType).formatStopBackgroundTask?.(taskId, sessionId);
+    if (!frame) return "unsupported";
+    session.process.stdin.write(frame);
+    console.log(`[AgentSession] stop_task sent for ${taskId} (session=${sessionId})`);
+    return "ok";
+  }
+
+  sanctionBackgroundTask(sessionId: string, taskId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.completion.sanction(taskId);
+    this.syncParkTimer(session);
+    this.broadcastBackgroundTasks(session);
+    return true;
   }
 
   /** Discard all turn-completion state (fresh spawn / stop / hibernate / agent switch). */
   private resetCompletion(session: RunningSession): void {
     this.clearGraceTimer(session);
     session.completion.reset();
+    this.syncParkTimer(session);
     // Every caller kills or respawns the process, which takes its background
     // tasks with it. Subscribers keep their socket across a Stop/hibernate, so
     // without this the bar would keep counting down tasks that are already
@@ -1220,15 +1304,31 @@ export class AgentSessionManager {
    * stateless (no patch application, no ordering assumptions).
    */
   private broadcastBackgroundTasks(session: RunningSession): void {
-    this.broadcastRaw(session.id, {
+    this.broadcastRaw(session.id, this.backgroundTasksMessage(session));
+  }
+
+  /**
+   * Reported rather than inferred client-side: whether a single task can be
+   * stopped is a property of the agent (Claude Code has `stop_task`, Codex has
+   * nothing equivalent), and the server is the only side that knows. A client
+   * guessing from the agent type would drift the day Codex gains one.
+   */
+  private backgroundTasksMessage(session: RunningSession): AgentWsMessage {
+    return {
       backgroundTasks: {
         tasks: session.completion.backgroundTasks,
         turnParked: session.completion.hasPendingCompletion,
+        parkDeadlineAt: session.completion.parkDeadlineAt,
+        canStopTasks: !!getProvider(session.agentType).formatStopBackgroundTask,
       },
-    });
+    };
   }
 
-  private async commitCompletion(session: RunningSession, payload: CompletionPayload): Promise<void> {
+  private async commitCompletion(
+    session: RunningSession,
+    payload: CompletionPayload,
+    outcome: "completed" | "completed_with_pending_tasks" = "completed",
+  ): Promise<void> {
     const sessionId = session.id;
     console.log(`[AgentSession] taskCompleted: sessionId=${sessionId}, eventBus=${!!this.eventBus}, projectId=${session.projectId}, branch=${session.branch}`);
     const completedAt = Date.now();
@@ -1237,7 +1337,7 @@ export class AgentSessionManager {
     }
     // Stop point: persist the turn_end marker BEFORE the completion event goes
     // out, so event consumers can use its index as a turn boundary / branch cutoff.
-    const turnEndEntryIndex = await this.endActiveTurn(session, "completed");
+    const turnEndEntryIndex = await this.endActiveTurn(session, outcome);
     // The turn is no longer parked; any task still running is now plainly
     // outliving its turn rather than holding it open.
     this.broadcastBackgroundTasks(session);
@@ -1553,7 +1653,7 @@ export class AgentSessionManager {
         break;
 
       case "task_finished":
-        this.applyCompletionTimerAction(session, session.completion.taskFinished(event.taskId));
+        this.applyCompletionTimerAction(session, session.completion.taskFinished(event.taskId, timestamp));
         this.broadcastBackgroundTasks(session);
         console.log(`[AgentSession] Background task finished: ${event.taskId} (${event.status ?? "?"}) — ${session.completion.pendingTaskCount} pending in ${sessionId}`);
         break;
@@ -1657,7 +1757,7 @@ export class AgentSessionManager {
             cost_usd: event.cost_usd,
             input_tokens: event.input_tokens,
             output_tokens: event.output_tokens,
-          });
+          }, timestamp);
           if (action.kind === "commit") {
             await this.commitCompletion(session, action.payload);
           } else {
@@ -2135,12 +2235,7 @@ export class AgentSessionManager {
     // change, so without this a reload during a long-running background task
     // shows an empty bar while the task is still running — exactly the case
     // the bar exists for.
-    const tasksMsg: AgentWsMessage = {
-      backgroundTasks: {
-        tasks: session.completion.backgroundTasks,
-        turnParked: session.completion.hasPendingCompletion,
-      },
-    };
+    const tasksMsg = this.backgroundTasksMessage(session);
     ws.send(JSON.stringify(tasksMsg));
 
     // Return unsubscribe function
@@ -3268,8 +3363,9 @@ export class AgentSessionManager {
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
         model: dbSession.model ?? null,
-        completion: new TurnCompletionLedger(),
+        completion: new TurnCompletionLedger(this.parkTimeoutMs),
       graceTimer: null,
+      parkTimer: null,
       eventChain: Promise.resolve(),
         bgSpawnHintsThisTurn: 0,
         taskStartedThisTurn: 0,
@@ -3520,8 +3616,9 @@ export class AgentSessionManager {
       permissionMode,
       agentType,
       model,
-      completion: new TurnCompletionLedger(),
+      completion: new TurnCompletionLedger(this.parkTimeoutMs),
       graceTimer: null,
+      parkTimer: null,
       eventChain: Promise.resolve(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,

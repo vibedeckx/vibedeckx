@@ -58,7 +58,17 @@ export type AgentWsMessage =
   // being held open ONLY by these tasks. The client cannot derive this: its
   // own `turnInFlight` is "no turn_end yet", which is exactly what a parked
   // completion withholds.
-  | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean } }
+  //
+  // `parkDeadlineAt` is when that parked turn will be committed anyway (epoch
+  // ms), or null when nothing is parked or the user vouched for every live
+  // task. Sent as an absolute instant rather than a remaining duration so the
+  // countdown survives a reload without the server re-sending anything.
+  //
+  // `canStopTasks` is whether this agent can stop one task (Claude Code can,
+  // Codex cannot). Reported so the client never renders a button that is dead
+  // on arrival — and a worker too old to send this field is read as false,
+  // which is also the truth: it has no stop route either.
+  | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean; parkDeadlineAt: number | null; canStopTasks: boolean } }
   | { workflowRunUpdated: WorkflowRun };
 
 /**

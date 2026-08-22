@@ -25,6 +25,23 @@
 /** Grace window between a candidate result and committing its completion. */
 export const COMPLETION_GRACE_MS = 1500;
 
+/**
+ * How long a parked completion waits for its background tasks before it is
+ * committed anyway.
+ *
+ * Parking bets that Claude Code will auto-resume when the task finishes. A
+ * task with a faulty exit condition never finishes, so the bet never settles
+ * and the session sits at "running" forever with the agent long done. This
+ * bound is what makes that failure temporary.
+ *
+ * 20 minutes: across 1714 background tasks observed in production the longest
+ * one that ever finished ran 12 minutes, and none exceeded 20 — so the bound
+ * clears real work by a wide margin. Expiring early is cheap (the turn closes,
+ * the task keeps running, a later auto-resume just adds another turn); leaving
+ * it unbounded is not.
+ */
+export const PARK_TIMEOUT_MS = 20 * 60 * 1000;
+
 export interface CompletionPayload {
   duration_ms?: number;
   cost_usd?: number;
@@ -53,10 +70,16 @@ export interface BackgroundTask {
   taskType?: string;
   description?: string;
   startedAt: number;
+  /**
+   * The user vouched for this task ("keep waiting"), so it no longer counts
+   * toward the park deadline. Set through {@link TurnCompletionLedger.sanction}
+   * and reported so the UI can say why the countdown stopped.
+   */
+  sanctioned?: boolean;
 }
 
 /** The subset of {@link BackgroundTask} the harness reports; no timestamp. */
-export type BackgroundTaskDescriptor = Omit<BackgroundTask, "startedAt">;
+export type BackgroundTaskDescriptor = Omit<BackgroundTask, "startedAt" | "sanctioned">;
 
 export class TurnCompletionLedger {
   /** Live background tasks by harness task_id (same id may restart). */
@@ -71,6 +94,25 @@ export class TurnCompletionLedger {
    * grace delay (the common case).
    */
   private sawBackgroundActivity = false;
+  /**
+   * When the held candidate was parked behind live background tasks — the
+   * moment the agent stopped working and only tasks kept the turn open. The
+   * park deadline counts from here, not from when a task started: the number
+   * that matters to the user is "how long since the agent answered".
+   */
+  private parkedSince: number | null = null;
+  /** Task ids the user vouched for; they stop counting toward the deadline. */
+  private sanctioned = new Set<string>();
+  /**
+   * Whether a park deadline already expired and closed the turn. Live tasks
+   * normally shield the session from being reclaimed — hibernating would kill
+   * a real build and the auto-resume that reads it — but that shield must not
+   * outlast the deadline, or one stuck task pins a resident process slot
+   * forever and new sessions on the branch get turned away.
+   */
+  private parkDeadlineExpired = false;
+
+  constructor(private readonly parkTimeoutMs: number = PARK_TIMEOUT_MS) {}
 
   get pendingTaskCount(): number {
     return this.tasks.size;
@@ -82,19 +124,67 @@ export class TurnCompletionLedger {
 
   /** Live tasks in first-seen order — the payload the UI renders. */
   get backgroundTasks(): BackgroundTask[] {
-    return [...this.tasks.values()];
+    return [...this.tasks.values()].map((task) =>
+      this.sanctioned.has(task.taskId) ? { ...task, sanctioned: true } : task,
+    );
+  }
+
+  /**
+   * When the parked turn will be committed anyway, or null if nothing is
+   * parked or every live task has been vouched for. Timer-free by design: the
+   * caller re-reads this after each mutation and syncs its own timer, so the
+   * ledger stays a pure state machine.
+   */
+  get parkDeadlineAt(): number | null {
+    if (this.pending === null || this.parkedSince === null) return null;
+    const allVouchedFor = [...this.tasks.keys()].every((id) => this.sanctioned.has(id));
+    return allVouchedFor ? null : this.parkedSince + this.parkTimeoutMs;
+  }
+
+  /**
+   * The user vouched for a task: stop counting it toward the deadline. This
+   * restores the original behavior for that task — wait for it, let the
+   * auto-resume close the turn — but now as an explicit choice.
+   */
+  sanction(taskId: string): void {
+    if (this.tasks.has(taskId)) this.sanctioned.add(taskId);
+  }
+
+  /**
+   * The deadline expired: commit the parked candidate. Deliberately uses the
+   * ORIGINAL payload — its duration/cost/tokens describe the turn the agent
+   * actually ran, not the time spent waiting on a stuck task.
+   */
+  parkDeadlineElapsed(): CompletionAction {
+    if (this.pending === null) return { kind: "none" };
+    this.parkDeadlineExpired = true;
+    return this.commitHeld();
+  }
+
+  /**
+   * Whether live background tasks should still shield this session from
+   * resident-process reclamation. True while they are plausibly doing real
+   * work; false once the deadline judged them anomalous — unless the user
+   * vouched for every one of them, which restores the shield along with the
+   * waiting behavior it protects.
+   */
+  get backgroundTasksProtectSession(): boolean {
+    if (this.tasks.size === 0) return false;
+    if (!this.parkDeadlineExpired) return true;
+    return [...this.tasks.keys()].every((id) => this.sanctioned.has(id));
   }
 
   taskStarted(task: BackgroundTaskDescriptor, now: number): CompletionAction {
     this.upsert(task, this.tasks.get(task.taskId), now);
     this.sawBackgroundActivity = true;
-    return this.rearmIfHeld();
+    return this.rearmIfHeld(now);
   }
 
-  taskFinished(taskId: string): CompletionAction {
+  taskFinished(taskId: string, now: number): CompletionAction {
     this.tasks.delete(taskId);
+    this.sanctioned.delete(taskId);
     this.sawBackgroundActivity = true;
-    return this.rearmIfHeld();
+    return this.rearmIfHeld(now);
   }
 
   /** Authoritative snapshot from `system/background_tasks_changed`. */
@@ -104,8 +194,13 @@ export class TurnCompletionLedger {
     for (const task of tasks) {
       this.upsert(task, previous.get(task.taskId), now);
     }
+    // A vouched-for id that left the snapshot is gone; keeping it would let a
+    // recycled task id inherit someone else's exemption.
+    for (const id of this.sanctioned) {
+      if (!this.tasks.has(id)) this.sanctioned.delete(id);
+    }
     if (tasks.length > 0) this.sawBackgroundActivity = true;
-    return this.rearmIfHeld();
+    return this.rearmIfHeld(now);
   }
 
   /**
@@ -118,8 +213,10 @@ export class TurnCompletionLedger {
    * the race against the grace window.
    */
   noteTurnActivity(): CompletionAction {
+    this.parkDeadlineExpired = false; // a new turn gets its own deadline
     if (this.pending === null) return { kind: "none" };
     this.pending = null;
+    this.parkedSince = null;
     this.generation++;
     return { kind: "cancel" };
   }
@@ -137,9 +234,12 @@ export class TurnCompletionLedger {
     return this.noteTurnActivity();
   }
 
-  successResult(payload: CompletionPayload): CompletionAction {
+  successResult(payload: CompletionPayload, now: number): CompletionAction {
     this.generation++;
     if (this.tasks.size > 0) {
+      // A fresh answer restarts the clock: "how long since the agent spoke".
+      this.parkedSince = now;
+      this.parkDeadlineExpired = false;
       // Turn ended while background work is still running. PARK the result
       // (no timer) instead of discarding it: Claude Code auto-resumes when
       // the task completes and the resume supersedes this candidate, but
@@ -159,6 +259,7 @@ export class TurnCompletionLedger {
   errorResult(): CompletionAction {
     if (this.pending === null) return { kind: "none" };
     this.pending = null;
+    this.parkedSince = null;
     this.generation++;
     return { kind: "cancel" };
   }
@@ -187,7 +288,10 @@ export class TurnCompletionLedger {
   /** Full reset (fresh spawn / stop / hibernate / agent switch). */
   reset(): void {
     this.tasks.clear();
+    this.sanctioned.clear();
     this.pending = null;
+    this.parkedSince = null;
+    this.parkDeadlineExpired = false;
     this.generation++;
     this.sawBackgroundActivity = false;
   }
@@ -197,10 +301,18 @@ export class TurnCompletionLedger {
    * have no resume behind it), so they delay the commit rather than cancel
    * it — and while tasks are still live the candidate stays parked with no
    * timer at all (only an empty set can complete a turn). */
-  private rearmIfHeld(): CompletionAction {
+  private rearmIfHeld(now: number): CompletionAction {
     if (this.pending === null) return { kind: "none" };
     this.generation++;
-    if (this.tasks.size > 0) return { kind: "cancel" };
+    if (this.tasks.size > 0) {
+      // A task appearing after the result parks the candidate too, and it needs
+      // a deadline just as much — otherwise `pending` could sit parked with no
+      // bound at all. Only stamp the first park: later task churn must not keep
+      // pushing the deadline out, or a session that keeps spawning tasks would
+      // never reach it.
+      this.parkedSince ??= now;
+      return { kind: "cancel" };
+    }
     return { kind: "schedule", generation: this.generation };
   }
 
@@ -223,6 +335,7 @@ export class TurnCompletionLedger {
   private commitHeld(): CompletionAction {
     const payload = this.pending!;
     this.pending = null;
+    this.parkedSince = null;
     this.generation++;
     // sawBackgroundActivity deliberately survives the commit — see
     // userTurnStarted for why.

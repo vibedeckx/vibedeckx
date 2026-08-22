@@ -58,6 +58,12 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/agent-sessions/:param/restart": { since: "0.2.0", summary: "重启会话进程" },
   "http:POST /api/agent-sessions/:param/agent-type": { since: "0.2.0", summary: "切换 agent 类型" },
   "http:POST /api/agent-sessions/:param/model": { since: "0.2.0", summary: "切换会话模型" },
+  // Additive: an older worker 404s it, and the UI degrades by hiding the
+  // "keep running" button — that worker has no park deadline to defuse.
+  "http:POST /api/agent-sessions/:param/background-tasks/:param/keep": { since: "0.3.28", summary: "为后台任务背书,免于超时收尾" },
+  // Additive alongside /keep, and degrades the same way: an older worker 404s
+  // and the UI hides the button.
+  "http:POST /api/agent-sessions/:param/background-tasks/:param/stop": { since: "0.3.28", summary: "停止单个后台任务" },
   "http:POST /api/path/agent-sessions/:param/branch": { since: "0.2.0", summary: "从历史分叉会话" },
   "http:POST /api/agent-sessions/:param/switch-mode": { since: "0.2.0", summary: "权限模式切换" },
   "http:POST /api/agent-sessions/:param/accept-plan": { since: "0.2.0", summary: "接受计划(退出 plan 模式)" },

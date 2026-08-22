@@ -34,7 +34,13 @@ export interface ResidentProcessCandidate {
   processAlive: boolean;
   status: AgentSessionStatus;
   dormant: boolean;
-  backgroundTaskCount: number;
+  /**
+   * Whether live background tasks still shield this session from eviction.
+   * Not a raw count: a task that outlived its turn past the park deadline has
+   * been judged anomalous and stops protecting, so one stuck shell can no
+   * longer pin a resident slot forever. See TurnCompletionLedger.
+   */
+  backgroundTasksProtect: boolean;
   lastActiveAt: number;
 }
 
@@ -55,7 +61,7 @@ export function isIdleResidentProcess(candidate: ResidentProcessCandidate): bool
     candidate.processAlive &&
     !candidate.dormant &&
     candidate.status !== "running" &&
-    candidate.backgroundTaskCount === 0
+    !candidate.backgroundTasksProtect
   );
 }
 

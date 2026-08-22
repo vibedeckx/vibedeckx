@@ -200,6 +200,26 @@ export class ClaudeCodeProvider implements AgentProvider {
     return serializeUserInput(content);
   }
 
+  /**
+   * `stop_task` control_request — the documented Agent SDK primitive for
+   * killing one background task, verified live against claude 2.1.238: the CLI
+   * answers `control_response { subtype: "success" }`, empties its task list
+   * and the process really dies.
+   *
+   * `request_id` is namespaced by task id so a response could be correlated;
+   * nothing reads control_response today, and it does not need to — the
+   * authoritative `background_tasks_changed` snapshot that follows is what
+   * updates the ledger. An older CLI that does not know the subtype answers an
+   * error and simply changes nothing.
+   */
+  formatStopBackgroundTask(taskId: string, _sessionId: string): string {
+    return JSON.stringify({
+      type: "control_request",
+      request_id: `stop_task-${taskId}`,
+      request: { subtype: "stop_task", task_id: taskId },
+    }) + "\n";
+  }
+
   // Lifecycle hooks are no-ops for Claude (stateless per-session)
   onSessionCreated(_sessionId: string, _permissionMode?: "plan" | "edit"): void {}
   onSessionDestroyed(_sessionId: string): void {}

@@ -143,7 +143,9 @@ export function sessionMilestoneForTurnEnd(opts: {
     created_at: opts.createdAt,
   };
 
-  if (opts.outcome === "completed") {
+  // Both count as "the answer is ready" — the whole point of committing a
+  // parked turn on a deadline is that the user finally gets told.
+  if (opts.outcome === "completed" || opts.outcome === "completed_with_pending_tasks") {
     return {
       ...base,
       id: sessionResultReadyId(opts.sessionId, opts.entryIndex),

@@ -1140,7 +1140,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         {/* Above the composer, not on the turn_end divider: when a parked
             completion holds the turn open there IS no divider, which is
             exactly the case this needs to explain. */}
-        <BackgroundTasksBar tasks={backgroundTasks.tasks} turnParked={backgroundTasks.turnParked} />
+        <BackgroundTasksBar
+          sessionId={activeSessionId}
+          tasks={backgroundTasks.tasks}
+          turnParked={backgroundTasks.turnParked}
+          parkDeadlineAt={backgroundTasks.parkDeadlineAt}
+          canStopTasks={backgroundTasks.canStopTasks}
+          agentWorking={status === "running"}
+        />
         <PromptInput
           onSubmit={handleSubmit}
           accept="image/*"

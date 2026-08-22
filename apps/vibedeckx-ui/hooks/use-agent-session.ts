@@ -78,7 +78,10 @@ type AgentWsMessage =
   | { processAlive: { alive: boolean } }
   | { remoteStatus: RemoteConnectionStatus; attempt?: number }
   | { titleUpdated: { title: string } }
-  | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean } }
+  // The last two fields are optional ON THE WIRE: a worker at v0.3.27 sends
+  // only `tasks` and `turnParked`. Kept optional here so the normalization
+  // below is not something a future edit can quietly skip.
+  | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean; parkDeadlineAt?: number | null; canStopTasks?: boolean } }
   | { workflowRunUpdated: WorkflowRun }
   // Server liveness frame, every 30s. Carries no state — its only job is to
   // give the silence watchdog something to observe on an idle session.
@@ -619,8 +622,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // `turnParked` rides along because it cannot be derived here: the local
   // `turnInFlight` means "no turn_end yet", which is exactly what a parked
   // completion withholds.
-  const [backgroundTasks, setBackgroundTasks] = useState<{ tasks: BackgroundTask[]; turnParked: boolean }>(
-    { tasks: [], turnParked: false },
+  const [backgroundTasks, setBackgroundTasks] = useState<{ tasks: BackgroundTask[]; turnParked: boolean; parkDeadlineAt: number | null; canStopTasks: boolean }>(
+    { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
   );
   // Bumped once per completed subscribe (every `Ready`). Out-of-band frames
   // like `workflowRunUpdated` are fire-and-forget: `broadcastRaw` writes to the
@@ -1026,7 +1029,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         }
 
         if ("backgroundTasks" in msg) {
-          setBackgroundTasks(msg.backgroundTasks);
+          // Normalize the older two-field frame (worker v0.3.27): a missing
+          // deadline is "no deadline", and a worker that cannot report the
+          // stop capability also has no stop route to call. Left raw, the
+          // undefined deadline renders as "NaN:NaN 后自动收尾本轮".
+          const { tasks, turnParked, parkDeadlineAt, canStopTasks } = msg.backgroundTasks;
+          setBackgroundTasks({
+            tasks,
+            turnParked,
+            parkDeadlineAt: parkDeadlineAt ?? null,
+            canStopTasks: canStopTasks ?? false,
+          });
           return;
         }
 
@@ -1613,7 +1626,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setRemoteStatus(null);
     // The placeholder opens no socket, so nothing would ever correct a stale
     // bar left over from the session we just detached from.
-    setBackgroundTasks({ tasks: [], turnParked: false });
+    setBackgroundTasks({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false });
     setMessages([]);
     containerRef.current = { entries: {}, status: "stopped" };
     historyRef.current = null;
@@ -1949,7 +1962,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setRemoteStatus(null);
     // Belongs to the workspace we are leaving. The next subscribe sends its
     // own snapshot, but a workspace with no live session never subscribes.
-    setBackgroundTasks({ tasks: [], turnParked: false });
+    setBackgroundTasks({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false });
     finishedRef.current = false;
     reconnectAttemptRef.current = 0;
     connectionStartTimeRef.current = null;

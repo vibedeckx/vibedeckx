@@ -3,6 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  keepBackgroundTaskRunning: vi.fn(async () => undefined),
+  stopBackgroundTask: vi.fn(async () => true),
+}));
+
 import { BackgroundTasksBar } from "./background-tasks-bar";
 import type { BackgroundTask } from "@/lib/api";
 
@@ -43,7 +49,7 @@ afterEach(() => {
 
 describe("BackgroundTasksBar", () => {
   it("renders nothing when no task is running", () => {
-    render(<BackgroundTasksBar tasks={[]} turnParked={false} />);
+    render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[]} turnParked={false} />);
     expect(container.textContent).toBe("");
   });
 
@@ -51,23 +57,75 @@ describe("BackgroundTasksBar", () => {
   // and no other on-screen explanation, so this line is the only thing that
   // tells the user the agent is done and what is holding the turn open.
   it("says the turn is already answered when a completion is parked", () => {
-    render(<BackgroundTasksBar tasks={[task()]} turnParked />);
+    render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[task()]} turnParked />);
     expect(container.textContent).toContain("本轮已答完");
     expand();
     expect(container.textContent).toContain("保持「运行中」");
   });
 
+  // Both "agent still working" and "turn already closed" have
+  // `turnParked === false`; only `agentWorking` tells them apart. Collapsing
+  // them put "本轮已收尾" in the header while the body said the opposite.
   it("does not claim the turn is over while the agent is still working", () => {
-    render(<BackgroundTasksBar tasks={[task()]} turnParked={false} />);
+    render(
+      <BackgroundTasksBar
+        sessionId="s1"
+        canStopTasks
+        agentWorking
+        parkDeadlineAt={null}
+        tasks={[task()]}
+        turnParked={false}
+      />,
+    );
     expect(container.textContent).not.toContain("本轮已答完");
+    expect(container.textContent).not.toContain("本轮已收尾");
+    expect(container.textContent).toContain("与 agent 并行运行");
     expand();
     expect(container.textContent).toContain("agent 仍在工作");
+    expect(container.textContent).not.toContain("本轮已经收尾");
+  });
+
+  it("says the turn is over once it closed and the tasks outlived it", () => {
+    render(
+      <BackgroundTasksBar
+        sessionId="s1"
+        canStopTasks
+        agentWorking={false}
+        parkDeadlineAt={null}
+        tasks={[task()]}
+        turnParked={false}
+      />,
+    );
+    expect(container.textContent).toContain("本轮已收尾");
+    expand();
+    expect(container.textContent).toContain("比它活得更久");
+    expect(container.textContent).not.toContain("agent 仍在工作");
+  });
+
+  // Codex has no stop primitive. Showing the button and only hiding it after
+  // the first click returned 501 is a button that is dead on arrival.
+  it("never offers a stop the agent cannot perform", () => {
+    render(
+      <BackgroundTasksBar
+        sessionId="s1"
+        canStopTasks={false}
+        agentWorking={false}
+        parkDeadlineAt={NOW + 60_000}
+        tasks={[task()]}
+        turnParked
+      />,
+    );
+    expand();
+    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["保持运行"]);
+    expect(container.textContent).toContain("不支持单独停止后台任务");
   });
 
   // local_agent is a subagent inside the same CLI process, not an OS process.
   it("counts processes and subagents separately", () => {
     render(
       <BackgroundTasksBar
+        sessionId="s1" canStopTasks agentWorking={false}
+        parkDeadlineAt={null}
         tasks={[
           task({ taskId: "b1" }),
           task({ taskId: "b2" }),
@@ -86,6 +144,8 @@ describe("BackgroundTasksBar", () => {
   it("labels every row with its type", () => {
     render(
       <BackgroundTasksBar
+        sessionId="s1" canStopTasks agentWorking={false}
+        parkDeadlineAt={null}
         tasks={[
           task({ taskId: "b1" }),
           task({ taskId: "a1", taskType: "local_agent", description: "a subagent" }),
@@ -104,12 +164,106 @@ describe("BackgroundTasksBar", () => {
   // Code's — counting them as untyped "tasks" while badging them as agents
   // would be the drift this shares one function to avoid.
   it("counts codex subagents as subagents, not as untyped tasks", () => {
-    render(<BackgroundTasksBar tasks={[task({ taskType: "codex_subagent" })]} turnParked />);
+    render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[task({ taskType: "codex_subagent" })]} turnParked />);
     expect(container.textContent).toContain("1 个后台子 agent");
   });
 
+  // The countdown is the whole product promise: it turns "is this broken?"
+  // into a number and a deadline the user can act on.
+  it("counts down to the park deadline and warns while it runs", () => {
+    render(
+      <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} tasks={[task()]} turnParked parkDeadlineAt={NOW + 167_000} />,
+    );
+    expect(container.textContent).toContain("2:47 后自动收尾本轮");
+    act(() => { vi.advanceTimersByTime(2_000); });
+    expect(container.textContent).toContain("2:45 后自动收尾本轮");
+    expect(container.querySelector(".border-amber-500\\/40")).not.toBeNull();
+  });
+
+  // Past the deadline the turn is already closed: the bar must stop promising
+  // a cleanup that has happened, and stop implying the agent is still working.
+  it("switches to 'turn closed' once the deadline has passed", () => {
+    render(
+      <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} tasks={[task()]} turnParked={false} parkDeadlineAt={null} />,
+    );
+    expect(container.textContent).toContain("本轮已收尾");
+    expect(container.textContent).not.toContain("自动收尾");
+  });
+
+  // Vouching restores the original waiting behavior — and the bar has to say
+  // so, otherwise the countdown just vanishes with no explanation.
+  it("says a vouched-for task is being waited on deliberately", () => {
+    render(
+      <BackgroundTasksBar
+        sessionId="s1" canStopTasks agentWorking={false}
+        tasks={[task({ sanctioned: true })]}
+        turnParked
+        parkDeadlineAt={null}
+      />,
+    );
+    expect(container.textContent).toContain("已设为保持运行");
+    expand();
+    expect(container.textContent).toContain("不会自动收尾");
+    // Vouching removes only "keep running" — there is no deadline left to
+    // defuse. "Stop" has to survive it: someone who vouched for a build and
+    // later finds it was stuck would otherwise have no way out but stopping
+    // the whole session.
+    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["结束"]);
+  });
+
+  // The decision is per task: one of three may be a stuck poller while the
+  // others are a real build, so a bulk button would force the wrong call.
+  it("offers both actions on an undecided row, and only stop on a vouched-for one", () => {
+    render(
+      <BackgroundTasksBar
+        sessionId="s1" canStopTasks agentWorking={false}
+        tasks={[
+          task({ taskId: "b1", description: "stuck poller" }),
+          task({ taskId: "b2", description: "a real build", sanctioned: true }),
+        ]}
+        turnParked
+        parkDeadlineAt={NOW + 60_000}
+      />,
+    );
+    expand();
+    const rows = [...container.querySelectorAll("li")];
+    const labels = (i: number) => [...rows[i].querySelectorAll("button")].map((b) => b.textContent);
+    expect(labels(0)).toEqual(["保持运行", "结束"]);
+    expect(labels(1)).toEqual(["结束"]);
+  });
+
+  // The bar outlives the turn: after a deadline commits, the task keeps
+  // running and stopping it is still the only thing that clears it.
+  it("keeps the stop action after the turn is already closed", () => {
+    render(
+      <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} tasks={[task()]} turnParked={false} parkDeadlineAt={null} />,
+    );
+    expand();
+    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["结束"]);
+  });
+
+  it("calls the per-task endpoints with that row's task id", async () => {
+    const { keepBackgroundTaskRunning, stopBackgroundTask } = await import("@/lib/api");
+    render(
+      <BackgroundTasksBar
+        sessionId="s1" canStopTasks agentWorking={false}
+        tasks={[task({ taskId: "b1" }), task({ taskId: "b2" })]}
+        turnParked
+        parkDeadlineAt={NOW + 60_000}
+      />,
+    );
+    expand();
+    const buttons = [...container.querySelectorAll("li")[1].querySelectorAll("button")];
+    // Awaited: a click disables its row's buttons until the request settles,
+    // so a synchronous second click would land on a disabled button.
+    await act(async () => { buttons[0].click(); });
+    await act(async () => { buttons[1].click(); });
+    expect(vi.mocked(keepBackgroundTaskRunning)).toHaveBeenCalledWith("s1", "b2");
+    expect(vi.mocked(stopBackgroundTask)).toHaveBeenCalledWith("s1", "b2");
+  });
+
   it("reports the longest-running task and keeps the clock moving", () => {
-    render(<BackgroundTasksBar tasks={[task({ startedAt: NOW - 90_000 }), task({ taskId: "b2" })]} turnParked />);
+    render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[task({ startedAt: NOW - 90_000 }), task({ taskId: "b2" })]} turnParked />);
     expect(container.textContent).toContain("1m 30s");
     act(() => { vi.advanceTimersByTime(5_000); });
     expect(container.textContent).toContain("1m 35s");
@@ -118,13 +272,13 @@ describe("BackgroundTasksBar", () => {
   // `now` is seeded at mount but tasks usually appear later, so the frame
   // before the first tick can be older than the task itself.
   it("never renders a negative age from a stale clock", () => {
-    render(<BackgroundTasksBar tasks={[task({ startedAt: NOW + 30_000 })]} turnParked />);
+    render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[task({ startedAt: NOW + 30_000 })]} turnParked />);
     expect(container.textContent).not.toContain("-");
     expect(container.textContent).toContain("0s");
   });
 
   it("falls back to the task id when the harness sent no description", () => {
-    render(<BackgroundTasksBar tasks={[task({ description: undefined, taskId: "bia7w8yz2" })]} turnParked />);
+    render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[task({ description: undefined, taskId: "bia7w8yz2" })]} turnParked />);
     expand();
     expect(container.textContent).toContain("bia7w8yz2");
   });

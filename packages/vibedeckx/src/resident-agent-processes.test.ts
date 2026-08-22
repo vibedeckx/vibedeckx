@@ -13,7 +13,7 @@ describe("resident agent process helpers", () => {
     processAlive: true,
     status: "stopped" as const,
     dormant: false,
-    backgroundTaskCount: 0,
+    backgroundTasksProtect: false,
     lastActiveAt: 1,
   };
 
@@ -34,7 +34,7 @@ describe("resident agent process helpers", () => {
     const candidate = pickIdleResidentEvictionCandidate([
       { ...baseCandidate, id: "running", status: "running", lastActiveAt: 10 },
       { ...baseCandidate, id: "dead", processAlive: false, dormant: true, lastActiveAt: 1 },
-      { ...baseCandidate, id: "background", backgroundTaskCount: 1, lastActiveAt: 0 },
+      { ...baseCandidate, id: "background", backgroundTasksProtect: true, lastActiveAt: 0 },
       { ...baseCandidate, id: "newer-idle", lastActiveAt: 20 },
       { ...baseCandidate, id: "oldest-idle", lastActiveAt: 5 },
     ]);

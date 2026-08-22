@@ -52,6 +52,7 @@ function makeHarness(agentType: string = "claude-code") {
     row.status = status;
   });
   const completeIfAssigned = vi.fn(async () => undefined);
+  const upsertEntry = vi.fn(async () => undefined);
 
   const storage = {
     agentSessions: {
@@ -68,7 +69,7 @@ function makeHarness(agentType: string = "claude-code") {
         row.last_user_message_at = ts;
       }),
       setNativeSessionId: vi.fn(async () => undefined),
-      upsertEntry: vi.fn(async () => undefined),
+      upsertEntry,
       deleteEntries: vi.fn(async () => undefined),
       incrementHistoryEpoch: vi.fn(async () => 1),
       updateAgentType: vi.fn(async () => undefined),
@@ -80,7 +81,7 @@ function makeHarness(agentType: string = "claude-code") {
     settings: { get: async () => null },
   } as unknown as Storage;
 
-  return { storage, row, markCompleted, updateStatus, completeIfAssigned };
+  return { storage, row, markCompleted, updateStatus, completeIfAssigned, upsertEntry };
 }
 
 /** Restore the fixture session into memory and put it in live-turn state. */
@@ -110,10 +111,26 @@ function attachSubscriber(manager: AgentSessionManager): string[] {
   return frames;
 }
 
-function backgroundFrames(frames: string[]): Array<{ tasks: unknown[]; turnParked: boolean }> {
+interface BackgroundFrame { tasks: Array<{ taskId: string; sanctioned?: boolean }>; turnParked: boolean; parkDeadlineAt: number | null; canStopTasks: boolean }
+
+function backgroundFrames(frames: string[]): BackgroundFrame[] {
   return frames
-    .map((raw) => JSON.parse(raw) as { backgroundTasks?: { tasks: unknown[]; turnParked: boolean } })
+    .map((raw) => JSON.parse(raw) as { backgroundTasks?: BackgroundFrame })
     .flatMap((msg) => (msg.backgroundTasks ? [msg.backgroundTasks] : []));
+}
+
+/** turn_end entries as a subscriber sees them, in order. */
+function turnEndEntries(frames: string[]): Array<{ outcome?: string; durationMs?: number }> {
+  return frames
+    .flatMap((raw) => {
+      const msg = JSON.parse(raw) as { JsonPatch?: Array<{ value?: { content?: { type?: string } } }> };
+      return msg.JsonPatch ?? [];
+    })
+    .flatMap((op) =>
+      op.value?.content?.type === "turn_end"
+        ? [op.value.content as { outcome?: string; durationMs?: number }]
+        : [],
+    );
 }
 
 describe("agent-session-manager turn completion wiring", () => {
@@ -264,10 +281,80 @@ describe("agent-session-manager turn completion wiring", () => {
     expect(parked).toEqual({
       tasks: [{ taskId: "b1", taskType: "local_bash", description: "long build", startedAt: expect.any(Number) }],
       turnParked: true,
+      parkDeadlineAt: expect.any(Number),
+      canStopTasks: true,
     });
 
     await manager.stopSession(SESSION_ID);
-    expect(backgroundFrames(frames).at(-1)).toEqual({ tasks: [], turnParked: false });
+    expect(backgroundFrames(frames).at(-1)).toEqual({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: true });
+  });
+
+  // The bound that makes a wedge temporary. Without it this session sits at
+  // "running" forever: the agent answered, and the only thing holding the turn
+  // open is a task whose exit condition can never be true.
+  it("commits a parked turn once the deadline passes, and says so on the divider", async () => {
+    const { storage, markCompleted } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS, parkTimeoutMs: 60 });
+    const bus = new EventBus();
+    const events: GlobalEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    manager.setEventBus(bus);
+
+    const { feed } = await liveSession(manager);
+    const frames = attachSubscriber(manager);
+    await feed([
+      // Opens the turn: turn_end is only written for a turn that started, and
+      // turns are opened by process activity, not by the send.
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }),
+      JSON.stringify({
+        type: "system", subtype: "background_tasks_changed",
+        tasks: [{ task_id: "b1", task_type: "local_bash", description: "wait for build" }],
+      }),
+      JSON.stringify({ type: "result", subtype: "success", duration_ms: 1234 }),
+    ].join("\n") + "\n");
+
+    expect(markCompleted).not.toHaveBeenCalled(); // parked, still counting down
+    await settle(200);
+
+    expect(markCompleted).toHaveBeenCalledTimes(1);
+    const completed = events.find((e) => e.type === "session:taskCompleted");
+    // The ORIGINAL payload: the turn ran 1234ms, it did not run for however
+    // long the stuck task kept it parked.
+    expect((completed as { duration_ms?: number }).duration_ms).toBe(1234);
+    expect(turnEndEntries(frames).map((e) => e.outcome)).toEqual(["completed_with_pending_tasks"]);
+
+    // Turn closed, task still live — the bar has to keep showing it.
+    const last = backgroundFrames(frames).at(-1)!;
+    expect(last.turnParked).toBe(false);
+    expect(last.parkDeadlineAt).toBeNull();
+    expect(last.tasks.map((t) => t.taskId)).toEqual(["b1"]);
+  });
+
+  // Vouching restores the original behavior for that task: keep waiting, let
+  // the auto-resume close the turn. It must survive the deadline passing.
+  it("never force-commits a turn whose tasks the user vouched for", async () => {
+    const { storage, markCompleted } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS, parkTimeoutMs: 60 });
+    manager.setEventBus(new EventBus());
+
+    const { feed } = await liveSession(manager);
+    const frames = attachSubscriber(manager);
+    await feed([
+      JSON.stringify({
+        type: "system", subtype: "background_tasks_changed",
+        tasks: [{ task_id: "b1", task_type: "local_bash", description: "a real long build" }],
+      }),
+      JSON.stringify({ type: "result", subtype: "success", duration_ms: 1234 }),
+    ].join("\n") + "\n");
+
+    expect(manager.sanctionBackgroundTask(SESSION_ID, "b1")).toBe(true);
+    expect(backgroundFrames(frames).at(-1)).toMatchObject({
+      parkDeadlineAt: null,
+      tasks: [{ taskId: "b1", sanctioned: true }],
+    });
+
+    await settle(200);
+    expect(markCompleted).not.toHaveBeenCalled();
   });
 
   // Restart kills the process, then does five awaits before spawnAgent's own
@@ -307,7 +394,7 @@ describe("agent-session-manager turn completion wiring", () => {
     await manager.restartSession(SESSION_ID, "/tmp/p1");
 
     expect(atFirstAwait).toEqual({ parked: false, tasks: 0 });
-    expect(backgroundFrames(frames).at(-1)).toEqual({ tasks: [], turnParked: false });
+    expect(backgroundFrames(frames).at(-1)).toEqual({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: true });
   });
 
   it("a plain turn with no background tasks completes with zero grace delay", async () => {

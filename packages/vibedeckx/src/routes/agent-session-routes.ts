@@ -1902,6 +1902,89 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  // Vouch for a background task: it stops counting toward the park deadline,
+  // so the turn is no longer force-committed on its account and the session
+  // keeps its resident-process shield. This restores the original
+  // wait-for-auto-resume behavior for that one task — as an explicit choice
+  // rather than a silent assumption.
+  fastify.post<{ Params: { sessionId: string; taskId: string } }>(
+    "/api/agent-sessions/:sessionId/background-tasks/:taskId/keep",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const { sessionId, taskId } = req.params;
+      if (sessionId.startsWith("remote-")) {
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(sessionId, userId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/background-tasks/${encodeURIComponent(taskId)}/keep`,
+          {},
+        );
+        return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      const row = await fastify.storage.agentSessions.getById(sessionId);
+      if (!row || !(await fastify.storage.projects.getById(row.project_id, userId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      // A task that already ended is a no-op, not an error: the user clicked
+      // just as it finished, and the outcome they wanted (stop pressuring this
+      // session) is already true.
+      if (!fastify.agentSessionManager.sanctionBackgroundTask(sessionId, taskId)) {
+        return reply.code(404).send({ error: "Session not running" });
+      }
+      return reply.code(200).send({ success: true });
+    }
+  );
+
+  // Stop one background task. Nothing is updated here on success: the CLI's
+  // own task snapshot drains the ledger, which commits the parked turn through
+  // the normal path — so the divider and notification arrive as usual.
+  fastify.post<{ Params: { sessionId: string; taskId: string } }>(
+    "/api/agent-sessions/:sessionId/background-tasks/:taskId/stop",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const { sessionId, taskId } = req.params;
+      if (sessionId.startsWith("remote-")) {
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(sessionId, userId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/background-tasks/${encodeURIComponent(taskId)}/stop`,
+          {},
+        );
+        return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      const row = await fastify.storage.agentSessions.getById(sessionId);
+      if (!row || !(await fastify.storage.projects.getById(row.project_id, userId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      const outcome = fastify.agentSessionManager.stopBackgroundTask(sessionId, taskId);
+      if (outcome === "not_found") {
+        return reply.code(404).send({ error: "Session not running" });
+      }
+      if (outcome === "unsupported") {
+        // Codex has no primitive for this. Say so plainly so the UI can point
+        // at the only thing that does work rather than failing silently.
+        return reply.code(501).send({ error: "This agent cannot stop a single background task — stop the session instead" });
+      }
+      return reply.code(200).send({ success: true });
+    }
+  );
+
   // Branch an Agent Session: create a new dormant session that copies the
   // source session's conversation history. The user continues in the copy
   // (optionally with a different agent type) while the original stays intact.

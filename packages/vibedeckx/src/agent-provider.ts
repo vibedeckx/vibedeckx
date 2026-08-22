@@ -121,6 +121,20 @@ export interface AgentProvider {
    */
   formatInterrupt?(sessionId: string): string | null;
 
+  /**
+   * Format a "stop this one background task" message for stdin, or null when
+   * the agent has no such primitive.
+   *
+   * Claude Code exposes `stop_task` as a control_request; Codex has nothing
+   * equivalent (its only terminate method targets client-launched processes,
+   * not the ones the model started), so it omits this and the UI degrades to
+   * offering only "stop the session".
+   *
+   * Note the CLI does NOT auto-resume after a stop_task — the model is never
+   * told its task was killed — so the caller owns whatever the user sees.
+   */
+  formatStopBackgroundTask?(taskId: string, sessionId: string): string | null;
+
   /** Human-readable display name for this agent. */
   getDisplayName(): string;
 

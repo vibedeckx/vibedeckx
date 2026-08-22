@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/format-duration";
-import type { BackgroundTask } from "@/lib/api";
+import { keepBackgroundTaskRunning, stopBackgroundTask, type BackgroundTask } from "@/lib/api";
 
 /**
  * Elapsed times are the whole point here, so they have to keep moving. One
@@ -66,7 +66,19 @@ function summarize(tasks: BackgroundTask[]): string {
   return `${parts.join(" · ")}运行中`;
 }
 
+/**
+ * Counts down to `at`, or null once it passes. Rendered as m:ss because this
+ * is a deadline the user may want to beat, not an elapsed reading.
+ */
+function formatCountdown(now: number, at: number): string | null {
+  const left = Math.round((at - now) / 1000);
+  if (left <= 0) return null;
+  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+}
+
 interface BackgroundTasksBarProps {
+  /** The live session, or null before one exists — no session, no button. */
+  sessionId: string | null;
   tasks: BackgroundTask[];
   /**
    * Server-reported: the agent already finished answering and the turn is held
@@ -75,18 +87,82 @@ interface BackgroundTasksBarProps {
    * nothing else on screen says why. Not derivable client-side.
    */
   turnParked: boolean;
+  /**
+   * Epoch ms when the parked turn will be closed anyway, or null when nothing
+   * is parked or the user vouched for every task. Absolute rather than a
+   * remaining duration so the countdown survives a reload untouched.
+   */
+  parkDeadlineAt: number | null;
+  /**
+   * Server-reported: whether this agent can stop a single task (Claude Code
+   * can, Codex cannot). Not inferred from the agent type here — a client
+   * guessing would drift the day Codex gains the primitive, and would render a
+   * button that is dead on arrival until the first click failed.
+   */
+  canStopTasks: boolean;
+  /**
+   * The agent is mid-turn. Distinguishes "tasks running alongside a working
+   * agent" from "tasks that outlived a turn already closed on the deadline" —
+   * both have `turnParked === false` and nothing else tells them apart.
+   */
+  agentWorking: boolean;
 }
 
-export function BackgroundTasksBar({ tasks, turnParked }: BackgroundTasksBarProps) {
+export function BackgroundTasksBar({
+  sessionId, tasks, turnParked, parkDeadlineAt, canStopTasks, agentWorking,
+}: BackgroundTasksBarProps) {
   const [expanded, setExpanded] = useState(false);
+  // Per task id: a click is in flight. Per-task rather than one flag because
+  // each row acts on its own task, and one pending request must not grey out
+  // the others.
+  const [busy, setBusy] = useState<Set<string>>(new Set());
   const now = useNow(tasks.length > 0);
 
   if (tasks.length === 0) return null;
 
   const longest = tasks.reduce((max, t) => Math.max(max, elapsed(now, t.startedAt)), 0);
+  const countdown = parkDeadlineAt === null ? null : formatCountdown(now, parkDeadlineAt);
+  const vouchedFor = tasks.some((t) => t.sanctioned);
+  // Four states, and the honest label for each. The one worth naming loudest
+  // is "counting down": the agent is done, and until the deadline lands
+  // nothing else on screen distinguishes this from an agent still at work.
+  const note = countdown
+    ? `${countdown} 后自动收尾本轮`
+    : turnParked && vouchedFor
+      ? "已设为保持运行"
+      : turnParked
+        ? "本轮已答完"
+        : agentWorking
+          ? "与 agent 并行运行"
+          : "本轮已收尾";
+
+  const run = async (taskId: string, action: (id: string) => Promise<unknown>) => {
+    if (!sessionId) return;
+    setBusy((prev) => new Set(prev).add(taskId));
+    try {
+      return await action(taskId);
+    } finally {
+      setBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
+  };
+
+  const keep = (taskId: string) => run(taskId, (id) => keepBackgroundTaskRunning(sessionId!, id));
+
+  // Nothing is updated here on success: the agent's own task snapshot drains
+  // the ledger, which closes the parked turn through the normal path.
+  const stop = (taskId: string) => run(taskId, (id) => stopBackgroundTask(sessionId!, id));
 
   return (
-    <div className="mb-2 rounded-lg border border-border/60 bg-muted/30 text-xs">
+    <div
+      className={cn(
+        "mb-2 rounded-lg border text-xs",
+        countdown ? "border-amber-500/40 bg-amber-500/5" : "border-border/60 bg-muted/30",
+      )}
+    >
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -101,9 +177,9 @@ export function BackgroundTasksBar({ tasks, turnParked }: BackgroundTasksBarProp
           {summarize(tasks)}
           <span className="tabular-nums"> · {formatDuration(longest)}</span>
         </span>
-        {turnParked && (
-          <span className="shrink-0 text-muted-foreground/70">本轮已答完</span>
-        )}
+        <span className={cn("shrink-0", countdown ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground/70")}>
+          {note}
+        </span>
         <ChevronDown
           className={cn("ml-auto h-3.5 w-3.5 shrink-0 transition-transform", expanded && "rotate-180")}
         />
@@ -122,13 +198,57 @@ export function BackgroundTasksBar({ tasks, turnParked }: BackgroundTasksBarProp
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {formatDuration(elapsed(now, task.startedAt))}
               </span>
+              {/* Per row, because the decision is per task: one of three may be
+                  a stuck poller while the others are a real build.
+
+                  The two conditions differ on purpose. Vouching only means
+                  something while a deadline is running — there is nothing to
+                  defuse otherwise. Stopping is meaningful in every state, and
+                  must stay reachable after vouching: someone who vouched for a
+                  build 40 minutes ago and now sees it was stuck would
+                  otherwise have no way out but stopping the whole session. */}
+              {sessionId && (
+                <span className="flex shrink-0 gap-1">
+                  {countdown && !task.sanctioned && (
+                    <button
+                      type="button"
+                      onClick={() => keep(task.taskId)}
+                      disabled={busy.has(task.taskId)}
+                      className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                    >
+                      保持运行
+                    </button>
+                  )}
+                  {canStopTasks && (
+                    <button
+                      type="button"
+                      onClick={() => stop(task.taskId)}
+                      disabled={busy.has(task.taskId)}
+                      className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                    >
+                      结束
+                    </button>
+                  )}
+                </span>
+              )}
             </li>
           ))}
           <li className="pt-1.5 text-muted-foreground/70">
-            {turnParked
-              ? "agent 已经答完这一轮,是这些任务让会话保持「运行中」—— 任务结束后本轮才会收尾。停止会话可一并结束它们。"
-              : "agent 仍在工作,这些任务与它并行运行。"}
+            {countdown
+              ? "agent 已经答完这一轮,是这些任务让会话保持「运行中」。到点会先把本轮收尾,任务本身继续运行。"
+              : turnParked && vouchedFor
+                ? "已按你的选择等待这些任务结束,不会自动收尾。"
+                : turnParked
+                  ? "agent 已经答完这一轮,是这些任务让会话保持「运行中」。"
+                  : agentWorking
+                    ? "agent 仍在工作,这些任务与它并行运行。"
+                    : "本轮已经收尾,这些任务比它活得更久 —— 结束它们不会影响已完成的这一轮。"}
           </li>
+          {!canStopTasks && (
+            <li className="pt-1 text-muted-foreground/70">
+              这个 agent 不支持单独停止后台任务 —— 停止会话可一并结束它们。
+            </li>
+          )}
         </ul>
       )}
     </div>
