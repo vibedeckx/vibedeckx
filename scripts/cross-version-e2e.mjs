@@ -595,6 +595,24 @@ await sessionSmoke("session-history-head", ["http:GET /api/agent-sessions/:param
 await sessionSmoke("session-paste", ["http:POST /api/agent-sessions/:param/paste"], async () => {
   await api("POST", `/api/agent-sessions/${sessionId}/paste`, { content: "pasted-by-xver" });
 });
+// The park-deadline controls. Both take a task id the worker never has to
+// know: /keep only records a sanction (an unknown id is a harmless no-op) and
+// /stop only writes a stop_task control frame down the CLI's stdin, which the
+// PATH stub ignores. Driving them against a real background task would mean
+// teaching the stub to fake one — the tunnel contract this harness checks is
+// "does a worker of this version serve the path", and these calls answer it.
+// Runs while the session still holds a live process: both routes 404 without
+// one, which the version-gap policy would misread as an additive gap.
+await sessionSmoke("session-background-task-controls", [
+  "http:POST /api/agent-sessions/:param/background-tasks/:param/keep",
+  "http:POST /api/agent-sessions/:param/background-tasks/:param/stop",
+], async () => {
+  const taskId = "xver-task-1";
+  const kept = await api("POST", `/api/agent-sessions/${sessionId}/background-tasks/${taskId}/keep`, {});
+  assert(kept?.success === true, `keep did not report success: ${JSON.stringify(kept).slice(0, 150)}`);
+  const stopped = await api("POST", `/api/agent-sessions/${sessionId}/background-tasks/${taskId}/stop`, {});
+  assert(stopped?.success === true, `stop did not report success: ${JSON.stringify(stopped).slice(0, 150)}`);
+});
 await sessionSmoke("session-title", ["http:PATCH /api/agent-sessions/:param/title"], async () => {
   await api("PATCH", `/api/agent-sessions/${sessionId}/title`, { title: "xver session" });
 });
