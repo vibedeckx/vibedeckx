@@ -1037,8 +1037,10 @@ describe("ProjectChatManager", () => {
       }, error: null,
     });
     const first = deferred<boolean>();
+    const second = deferred<boolean>();
     const sendAgentInstruction = vi.fn()
       .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise)
       .mockResolvedValue(true);
     const manager = new ProjectChatManager(storage, reply("unused"), {
       eventBus: new EventBus(), reconciliationIntervalMs: 5,
@@ -1060,10 +1062,13 @@ describe("ProjectChatManager", () => {
     )).toMatchObject({ status: "running", retry_count: 0 });
 
     first.reject(new Error("settled failure"));
-    await waitFor(async () => (await storage.projectChatOperations.getById(
-      "slow-send", "thread-slow-retry", "project-1", "user-1",
-    ))?.retry_count === 1);
+    // The retry stays in flight until `second` settles, so retry_count = 1 is a stable
+    // state to observe rather than a window between the failure and the next success.
     await waitFor(() => sendAgentInstruction.mock.calls.length === 2);
+    expect((await storage.projectChatOperations.getById(
+      "slow-send", "thread-slow-retry", "project-1", "user-1",
+    ))?.retry_count).toBe(1);
+    second.resolve(true);
     await waitFor(async () => (await storage.projectChatOperations.getById(
       "slow-send", "thread-slow-retry", "project-1", "user-1",
     ))?.status === "completed");
