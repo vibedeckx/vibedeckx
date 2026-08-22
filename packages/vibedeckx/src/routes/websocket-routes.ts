@@ -142,6 +142,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           try {
             const message = JSON.parse(data.toString()) as InputMessage;
             if (message.type === "input" || message.type === "resize") {
+              if (message.type === "resize") {
+                // PTY resizes are replayed forever via the shell's prompt
+                // redraw, so record who asked for what: this is the only
+                // vantage point that sees every client attached to a process.
+                console.log(
+                  `[WebSocket] resize ${processId} → ${message.cols}x${message.rows} ip=${req.ip} ua=${req.headers["user-agent"] ?? "?"}`
+                );
+              }
               handle.handleInput(message);
             }
           } catch (error) {
@@ -233,6 +241,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
             } else if (msg.type === "input") {
               handleInputMap.get(msg.processId)?.({ type: "input", data: msg.data });
             } else if (msg.type === "resize") {
+              console.log(
+                `[ExecutorMux] resize ${msg.processId} → ${msg.cols}x${msg.rows} ip=${req.ip} ua=${req.headers["user-agent"] ?? "?"}`
+              );
               handleInputMap.get(msg.processId)?.({ type: "resize", cols: msg.cols, rows: msg.rows });
             }
           } catch (error) {

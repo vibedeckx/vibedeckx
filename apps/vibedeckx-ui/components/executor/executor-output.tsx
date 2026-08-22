@@ -104,6 +104,10 @@ export function ExecutorOutput({
   // flushed history has fully parsed, then show the settled screen in one
   // frame.
   const [revealed, setRevealed] = useState(false);
+  const processIdRef = useRef(processId);
+  useEffect(() => {
+    processIdRef.current = processId;
+  }, [processId]);
   const muteInputRef = useRef(muteInput);
   if (muteInputRef.current !== muteInput) {
     console.log(`[ExecutorOutput] muteInput changed: ${muteInputRef.current} → ${muteInput}`);
@@ -151,6 +155,25 @@ export function ExecutorOutput({
       toast.error("Failed to copy to clipboard");
     }
   };
+
+  // Every PTY resize is replayed forever through the shell's prompt redraw,
+  // so record each one this client pushes together with the layout that
+  // produced it. A "narrow replay" report can then be checked against:
+  //   cols small AND container narrow  → a genuinely narrow layout (phone,
+  //     narrow window, persisted splitter position);
+  //   cols small BUT container wide    → FitAddon measured bad cell metrics
+  //     (e.g. right after display:none → visible), not a layout issue.
+  // This only sees THIS client; the server-side "[WebSocket] resize" log is
+  // the cross-client view (which device pushed what to a given process).
+  const logResize = useCallback((cols: number, rows: number) => {
+    const el = containerRef.current;
+    console.log(
+      `[ExecutorOutput] resize → PTY ${cols}x${rows}` +
+        ` process=${processIdRef.current ?? "?"}` +
+        ` container=${el?.clientWidth ?? 0}x${el?.clientHeight ?? 0}px` +
+        ` viewport=${typeof window !== "undefined" ? `${window.innerWidth}x${window.innerHeight}px` : "?"}`
+    );
+  }, []);
 
   const writeToTerminal = useCallback(
     (historical: string, live: string, onAllParsed?: () => void) => {
@@ -326,6 +349,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
         if (tryFitAndFlush()) {
           if (isPty) {
+            logResize(terminal.cols, terminal.rows);
             onResize?.(terminal.cols, terminal.rows);
           }
         } else {
@@ -351,6 +375,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // Handle resize (only in PTY mode)
     if (isPty && onResize) {
       terminal.onResize(({ cols, rows }) => {
+        logResize(cols, rows);
         onResize(cols, rows);
       });
     }
@@ -372,7 +397,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       pendingHistRef.current = "";
       pendingLiveRef.current = "";
     };
-  }, [isPty, onInput, onResize, tryFitAndFlush, scheduleFitRetry]);
+  }, [isPty, onInput, onResize, tryFitAndFlush, scheduleFitRetry, logResize]);
 
   // Write new logs to terminal
   useEffect(() => {
