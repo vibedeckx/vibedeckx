@@ -39,12 +39,12 @@ type TaskKind = "process" | "agent" | "other";
 const KIND_ORDER: TaskKind[] = ["process", "agent", "other"];
 
 /** Row badge. The summary wording alone reads as a generic "something is running". */
-const KIND_BADGE: Record<TaskKind, string> = { process: "进程", agent: "子 agent", other: "任务" };
+const KIND_BADGE: Record<TaskKind, string> = { process: "Process", agent: "Subagent", other: "Task" };
 
-const KIND_NOUN: Record<TaskKind, string> = {
-  process: "后台进程",
-  agent: "后台子 agent",
-  other: "后台任务",
+const KIND_NOUN: Record<TaskKind, [singular: string, plural: string]> = {
+  process: ["background process", "background processes"],
+  agent: ["background subagent", "background subagents"],
+  other: ["background task", "background tasks"],
 };
 
 /**
@@ -61,9 +61,9 @@ function kindOf(task: BackgroundTask): TaskKind {
 function summarize(tasks: BackgroundTask[]): string {
   const parts = KIND_ORDER.flatMap((kind) => {
     const n = tasks.filter((t) => kindOf(t) === kind).length;
-    return n ? [`${n} 个${KIND_NOUN[kind]}`] : [];
+    return n ? [`${n} ${KIND_NOUN[kind][n === 1 ? 0 : 1]}`] : [];
   });
-  return `${parts.join(" · ")}运行中`;
+  return `${parts.join(" · ")} running`;
 }
 
 /**
@@ -127,14 +127,14 @@ export function BackgroundTasksBar({
   // is "counting down": the agent is done, and until the deadline lands
   // nothing else on screen distinguishes this from an agent still at work.
   const note = countdown
-    ? `${countdown} 后自动收尾本轮`
+    ? `${countdown} until this turn closes automatically`
     : turnParked && vouchedFor
-      ? "已设为保持运行"
+      ? "Set to keep running"
       : turnParked
-        ? "本轮已答完"
+        ? "Response complete"
         : agentWorking
-          ? "与 agent 并行运行"
-          : "本轮已收尾";
+          ? "Running alongside the agent"
+          : "This turn has closed";
 
   const run = async (taskId: string, action: (id: string) => Promise<unknown>) => {
     if (!sessionId) return;
@@ -216,7 +216,7 @@ export function BackgroundTasksBar({
                       disabled={busy.has(task.taskId)}
                       className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
                     >
-                      保持运行
+                      Keep running
                     </button>
                   )}
                   {canStopTasks && (
@@ -226,7 +226,7 @@ export function BackgroundTasksBar({
                       disabled={busy.has(task.taskId)}
                       className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
                     >
-                      结束
+                      Stop
                     </button>
                   )}
                 </span>
@@ -235,18 +235,18 @@ export function BackgroundTasksBar({
           ))}
           <li className="pt-1.5 text-muted-foreground/70">
             {countdown
-              ? "agent 已经答完这一轮,是这些任务让会话保持「运行中」。到点会先把本轮收尾,任务本身继续运行。"
+              ? "The agent has finished this turn, but these tasks are keeping the session running. When the timer expires, the turn will close while the tasks continue running."
               : turnParked && vouchedFor
-                ? "已按你的选择等待这些任务结束,不会自动收尾。"
+                ? "You chose to wait for these tasks to finish. This turn will not close automatically."
                 : turnParked
-                  ? "agent 已经答完这一轮,是这些任务让会话保持「运行中」。"
+                  ? "The agent has finished this turn, but these tasks are keeping the session running."
                   : agentWorking
-                    ? "agent 仍在工作,这些任务与它并行运行。"
-                    : "本轮已经收尾,这些任务比它活得更久 —— 结束它们不会影响已完成的这一轮。"}
+                    ? "The agent is still working. These tasks are running alongside it."
+                    : "This turn has closed, but these tasks are still running. Stopping them will not affect the completed turn."}
           </li>
           {!canStopTasks && (
             <li className="pt-1 text-muted-foreground/70">
-              这个 agent 不支持单独停止后台任务 —— 停止会话可一并结束它们。
+              This agent cannot stop individual background tasks. Stop the session to end them all.
             </li>
           )}
         </ul>
