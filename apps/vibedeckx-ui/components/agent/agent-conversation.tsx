@@ -1136,7 +1136,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       </div>
 
       {/* Input area */}
-      <div className="flex-shrink-0 p-3">
+      {/* Horizontal padding mirrors the message list so the composer and the
+          background-task bar line up with the turn-end dividers: the scroller
+          carries an inline `scrollbar-gutter: stable both-edges` (set by
+          use-stick-to-bottom, not overridable from a class), reserving 14px on
+          each side, plus the content's own p-4 — 30px per side. */}
+      <div className="flex-shrink-0 py-3 px-[30px]">
         {/* Above the composer, not on the turn_end divider: when a parked
             completion holds the turn open there IS no divider, which is
             exactly the case this needs to explain. */}
