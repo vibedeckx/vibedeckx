@@ -2211,6 +2211,16 @@ export class AgentSessionManager {
       },
     }));
 
+    // Send the live background-task set BEFORE the history replay. The harness
+    // pushes these only on change, so without a snapshot here a reload during a
+    // long-running background task shows an empty bar while the task is still
+    // running — exactly the case the bar exists for. It goes first because it
+    // is a standalone snapshot, not a patch: it depends on nothing that
+    // replays, and putting it last made the bar wait out the whole transcript
+    // on every reload. The client renders it against the status it already got
+    // from the REST session load; the status patch below only reconciles.
+    ws.send(JSON.stringify(this.backgroundTasksMessage(session)));
+
     // Send historical entry patches after the client's sealed boundary. Keep
     // every replace for the active tail: multiple patches may target the same
     // entry index while assistant text streams.
@@ -2230,13 +2240,6 @@ export class AgentSessionManager {
     // Send current status
     const statusPatch = ConversationPatch.updateStatus(session.status);
     ws.send(JSON.stringify({ JsonPatch: statusPatch }));
-
-    // Send the live background-task set. The harness pushes these only on
-    // change, so without this a reload during a long-running background task
-    // shows an empty bar while the task is still running — exactly the case
-    // the bar exists for.
-    const tasksMsg = this.backgroundTasksMessage(session);
-    ws.send(JSON.stringify(tasksMsg));
 
     // Return unsubscribe function
     return () => {

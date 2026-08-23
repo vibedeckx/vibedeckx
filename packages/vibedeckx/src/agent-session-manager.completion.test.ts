@@ -410,4 +410,42 @@ describe("agent-session-manager turn completion wiring", () => {
     // time the test out if the no-background fast path regressed.
     expect(markCompleted).toHaveBeenCalledTimes(1);
   });
+
+  // A reload is exactly when the bar matters most — a task has been running
+  // for minutes and nothing else on screen says so. The snapshot is
+  // standalone (a full set, not a patch), so it goes out before the history
+  // replay: sending it last made the bar wait out the whole transcript, which
+  // on a long session is the entire perceived delay.
+  it("sends the background-task snapshot before replaying history on subscribe", async () => {
+    const { storage } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: 60_000 });
+    manager.setEventBus(new EventBus());
+
+    const { feed } = await liveSession(manager);
+    await feed([
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "working" }] } }),
+      JSON.stringify({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [{ task_id: "b1", task_type: "local_bash", description: "long build" }],
+      }),
+    ].join("\n") + "\n");
+
+    // A fresh subscriber, as a reloaded browser would be: no cursor, so the
+    // whole transcript replays.
+    const replay: string[] = [];
+    const socket = { send: (raw: string) => replay.push(raw) } as unknown as Parameters<typeof manager.subscribe>[1];
+    expect(manager.subscribe(SESSION_ID, socket)).not.toBeNull();
+
+    const kinds = replay.map((raw) => {
+      const msg = JSON.parse(raw) as { backgroundTasks?: unknown; JsonPatch?: Array<{ path?: string }> };
+      if (msg.backgroundTasks) return "tasks";
+      if (msg.JsonPatch?.some((op) => op.path?.startsWith("/entries/"))) return "entry";
+      return "other";
+    });
+    expect(kinds).toContain("tasks");
+    expect(kinds).toContain("entry");
+    expect(kinds.indexOf("tasks")).toBeLessThan(kinds.indexOf("entry"));
+    expect(backgroundFrames(replay).at(-1)!.tasks.map((t) => t.taskId)).toEqual(["b1"]);
+  });
 });
