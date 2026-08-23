@@ -380,7 +380,12 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
       </Conversation>
 
       {/* Input area */}
-      <div className="flex-shrink-0 p-3">
+      {/* Horizontal padding mirrors the message list so the composer lines up
+          with the conversation content: the scroller carries an inline
+          `scrollbar-gutter: stable both-edges` (set by use-stick-to-bottom,
+          not overridable from a class) reserving 6px per side, plus the
+          content's own p-4 — 22px per side. */}
+      <div className="flex-shrink-0 py-3 px-[22px]">
         {isGenerating && (
           <div className="flex justify-center mb-2">
             <Button
