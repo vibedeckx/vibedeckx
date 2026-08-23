@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { Bot, ChevronDown, ListTodo, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/format-duration";
 import { keepBackgroundTaskRunning, stopBackgroundTask, type BackgroundTask } from "@/lib/api";
@@ -38,8 +38,7 @@ type TaskKind = "process" | "agent" | "other";
 
 const KIND_ORDER: TaskKind[] = ["process", "agent", "other"];
 
-/** Row badge. The summary wording alone reads as a generic "something is running". */
-const KIND_BADGE: Record<TaskKind, string> = { process: "Process", agent: "Subagent", other: "Task" };
+const KIND_LABEL: Record<TaskKind, string> = { process: "Process", agent: "Subagent", other: "Task" };
 
 const KIND_NOUN: Record<TaskKind, [singular: string, plural: string]> = {
   process: ["background process", "background processes"],
@@ -48,7 +47,7 @@ const KIND_NOUN: Record<TaskKind, [singular: string, plural: string]> = {
 };
 
 /**
- * Both the summary line and the row badge derive from this, so they cannot
+ * Both the summary line and the row icon derive from this, so they cannot
  * disagree — `codex_subagent` used to be counted as a generic task while the
  * row drew it with a terminal icon.
  */
@@ -56,6 +55,13 @@ function kindOf(task: BackgroundTask): TaskKind {
   if (task.taskType === "local_bash") return "process";
   if (task.taskType === "local_agent" || task.taskType === "codex_subagent") return "agent";
   return "other";
+}
+
+function TaskKindIcon({ kind }: { kind: TaskKind }) {
+  const className = "h-3.5 w-3.5";
+  if (kind === "process") return <Terminal className={className} aria-hidden="true" />;
+  if (kind === "agent") return <Bot className={className} aria-hidden="true" />;
+  return <ListTodo className={className} aria-hidden="true" />;
 }
 
 function summarize(tasks: BackgroundTask[]): string {
@@ -187,18 +193,25 @@ export function BackgroundTasksBar({
 
       {expanded && (
         <ul className="border-t border-border/60 px-3 py-2">
-          {tasks.map((task) => (
-            <li key={task.taskId} className="flex items-baseline gap-2 py-1">
-              <span className="inline-flex min-w-14 shrink-0 justify-center rounded border border-border/60 bg-background/60 px-1 py-px text-[10px] leading-tight text-muted-foreground">
-                {KIND_BADGE[kindOf(task)]}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-foreground/90">
-                {task.description || task.taskId}
-              </span>
-              <span className="shrink-0 tabular-nums text-muted-foreground">
-                {formatDuration(elapsed(now, task.startedAt))}
-              </span>
-              {/* Per row, because the decision is per task: one of three may be
+          {tasks.map((task) => {
+            const kind = kindOf(task);
+            const kindLabel = KIND_LABEL[kind];
+            return (
+              <li key={task.taskId} className="flex items-baseline gap-2 py-1">
+                <span
+                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center self-center text-muted-foreground"
+                  aria-label={kindLabel}
+                  title={kindLabel}
+                >
+                  <TaskKindIcon kind={kind} />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-foreground/90">
+                  {task.description || task.taskId}
+                </span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">
+                  {formatDuration(elapsed(now, task.startedAt))}
+                </span>
+                {/* Per row, because the decision is per task: one of three may be
                   a stuck poller while the others are a real build.
 
                   The two conditions differ on purpose. Vouching only means
@@ -207,32 +220,33 @@ export function BackgroundTasksBar({
                   must stay reachable after vouching: someone who vouched for a
                   build 40 minutes ago and now sees it was stuck would
                   otherwise have no way out but stopping the whole session. */}
-              {sessionId && (
-                <span className="flex shrink-0 gap-1">
-                  {countdown && !task.sanctioned && (
-                    <button
-                      type="button"
-                      onClick={() => keep(task.taskId)}
-                      disabled={busy.has(task.taskId)}
-                      className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-                    >
-                      Keep running
-                    </button>
-                  )}
-                  {canStopTasks && (
-                    <button
-                      type="button"
-                      onClick={() => stop(task.taskId)}
-                      disabled={busy.has(task.taskId)}
-                      className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-                    >
-                      Stop
-                    </button>
-                  )}
-                </span>
-              )}
-            </li>
-          ))}
+                {sessionId && (
+                  <span className="flex shrink-0 gap-1">
+                    {countdown && !task.sanctioned && (
+                      <button
+                        type="button"
+                        onClick={() => keep(task.taskId)}
+                        disabled={busy.has(task.taskId)}
+                        className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                      >
+                        Keep running
+                      </button>
+                    )}
+                    {canStopTasks && (
+                      <button
+                        type="button"
+                        onClick={() => stop(task.taskId)}
+                        disabled={busy.has(task.taskId)}
+                        className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                      >
+                        Stop
+                      </button>
+                    )}
+                  </span>
+                )}
+              </li>
+            );
+          })}
           <li className="pt-1.5 text-muted-foreground/70">
             {countdown
               ? "The agent has finished this turn, but these tasks are keeping the session running. When the timer expires, the turn will close while the tasks continue running."

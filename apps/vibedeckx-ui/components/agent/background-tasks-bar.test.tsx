@@ -138,10 +138,9 @@ describe("BackgroundTasksBar", () => {
     expect(container.textContent).toContain("1 background subagent");
   });
 
-  // The summary wording was the only type signal on screen and it reads as a
-  // generic "something is running" — a user looking straight at it still could
-  // not tell a shell command from a subagent. The badge says it outright.
-  it("labels every row with its type", () => {
+  // Each task kind has a distinct icon, with an accessible label so the type
+  // information is not conveyed visually alone.
+  it("shows an accessible type icon on every row", () => {
     render(
       <BackgroundTasksBar
         sessionId="s1" canStopTasks agentWorking={false}
@@ -156,8 +155,14 @@ describe("BackgroundTasksBar", () => {
       />,
     );
     expand();
-    const badges = [...container.querySelectorAll("li > span:first-child")].map((el) => el.textContent);
-    expect(badges).toEqual(["Process", "Subagent", "Subagent", "Task"]);
+    const indicators = [...container.querySelectorAll("li > span:first-child")];
+    expect(indicators.map((el) => el.getAttribute("aria-label"))).toEqual(["Process", "Subagent", "Subagent", "Task"]);
+    expect(indicators.map((el) => el.querySelector("svg")?.getAttribute("class"))).toEqual([
+      expect.stringContaining("lucide-terminal"),
+      expect.stringContaining("lucide-bot"),
+      expect.stringContaining("lucide-bot"),
+      expect.stringContaining("lucide-list-todo"),
+    ]);
   });
 
   // Codex's subagents are threads inside the CLI process, same as Claude
