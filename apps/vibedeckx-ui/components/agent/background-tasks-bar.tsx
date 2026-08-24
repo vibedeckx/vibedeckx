@@ -135,7 +135,7 @@ export function BackgroundTasksBar({
   const note = countdown
     ? `${countdown} until this turn closes automatically`
     : turnParked && vouchedFor
-      ? "Set to keep running"
+      ? "Waiting for these tasks"
       : turnParked
         ? "Response complete"
         : agentWorking
@@ -222,14 +222,19 @@ export function BackgroundTasksBar({
                   otherwise have no way out but stopping the whole session. */}
                 {sessionId && (
                   <span className="flex shrink-0 gap-1">
+                    {/* The two buttons act on different things — the turn and
+                      the task — and "Keep running" next to "Stop" read as a
+                      pair about the task, as if one resumed what the other
+                      killed. The labels name their object instead. */}
                     {countdown && !task.sanctioned && (
                       <button
                         type="button"
                         onClick={() => keep(task.taskId)}
                         disabled={busy.has(task.taskId)}
+                        title="Keep this turn open until this task finishes, instead of closing it when the timer runs out"
                         className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
                       >
-                        Keep running
+                        Keep waiting
                       </button>
                     )}
                     {canStopTasks && (
@@ -237,9 +242,10 @@ export function BackgroundTasksBar({
                         type="button"
                         onClick={() => stop(task.taskId)}
                         disabled={busy.has(task.taskId)}
+                        title="End this background task now"
                         className="rounded border border-border/60 px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
                       >
-                        Stop
+                        Stop task
                       </button>
                     )}
                   </span>
@@ -249,11 +255,11 @@ export function BackgroundTasksBar({
           })}
           <li className="pt-1.5 text-muted-foreground/70">
             {countdown
-              ? "The agent has finished this turn, but these tasks are keeping the session running. When the timer expires, the turn will close while the tasks continue running."
+              ? "The agent has already answered — these tasks are the only thing keeping this turn open. When the timer runs out the turn closes on its own, and the tasks keep running in the background."
               : turnParked && vouchedFor
-                ? "You chose to wait for these tasks to finish. This turn will not close automatically."
+                ? "You chose to keep waiting for these tasks, so this turn stays open until they finish."
                 : turnParked
-                  ? "The agent has finished this turn, but these tasks are keeping the session running."
+                  ? "The agent has already answered — these tasks are the only thing keeping this turn open."
                   : agentWorking
                     ? "The agent is still working. These tasks are running alongside it."
                     : "This turn has closed, but these tasks are still running. Stopping them will not affect the completed turn."}

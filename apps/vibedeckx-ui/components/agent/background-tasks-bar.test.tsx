@@ -60,7 +60,7 @@ describe("BackgroundTasksBar", () => {
     render(<BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} parkDeadlineAt={null} tasks={[task()]} turnParked />);
     expect(container.textContent).toContain("Response complete");
     expand();
-    expect(container.textContent).toContain("keeping the session running");
+    expect(container.textContent).toContain("keeping this turn open");
   });
 
   // Both "agent still working" and "turn already closed" have
@@ -116,7 +116,7 @@ describe("BackgroundTasksBar", () => {
       />,
     );
     expand();
-    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["Keep running"]);
+    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["Keep waiting"]);
     expect(container.textContent).toContain("cannot stop individual background tasks");
   });
 
@@ -206,14 +206,14 @@ describe("BackgroundTasksBar", () => {
         parkDeadlineAt={null}
       />,
     );
-    expect(container.textContent).toContain("Set to keep running");
+    expect(container.textContent).toContain("Waiting for these tasks");
     expand();
-    expect(container.textContent).toContain("will not close automatically");
-    // Vouching removes only "keep running" — there is no deadline left to
-    // defuse. "Stop" has to survive it: someone who vouched for a build and
+    expect(container.textContent).toContain("stays open until they finish");
+    // Vouching removes only "Keep waiting" — there is no deadline left to
+    // defuse. "Stop task" has to survive it: someone who vouched for a build and
     // later finds it was stuck would otherwise have no way out but stopping
     // the whole session.
-    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["Stop"]);
+    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["Stop task"]);
   });
 
   // The decision is per task: one of three may be a stuck poller while the
@@ -233,8 +233,28 @@ describe("BackgroundTasksBar", () => {
     expand();
     const rows = [...container.querySelectorAll("li")];
     const labels = (i: number) => [...rows[i].querySelectorAll("button")].map((b) => b.textContent);
-    expect(labels(0)).toEqual(["Keep running", "Stop"]);
-    expect(labels(1)).toEqual(["Stop"]);
+    expect(labels(0)).toEqual(["Keep waiting", "Stop task"]);
+    expect(labels(1)).toEqual(["Stop task"]);
+  });
+
+  // "Keep waiting" acts on the turn and "Stop task" on the task; side by side
+  // on a cramped row they read as one pair about the task, and only the
+  // tooltip has room to say which is which.
+  it("carries a tooltip naming what each action acts on", () => {
+    render(
+      <BackgroundTasksBar
+        sessionId="s1" canStopTasks agentWorking={false}
+        tasks={[task()]}
+        turnParked
+        parkDeadlineAt={NOW + 60_000}
+      />,
+    );
+    expand();
+    const titles = [...container.querySelectorAll("li button")].map((b) => b.getAttribute("title"));
+    expect(titles).toEqual([
+      expect.stringContaining("Keep this turn open until this task finishes"),
+      expect.stringContaining("End this background task now"),
+    ]);
   });
 
   // The bar outlives the turn: after a deadline commits, the task keeps
@@ -244,7 +264,7 @@ describe("BackgroundTasksBar", () => {
       <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} tasks={[task()]} turnParked={false} parkDeadlineAt={null} />,
     );
     expand();
-    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["Stop"]);
+    expect([...container.querySelectorAll("li button")].map((b) => b.textContent)).toEqual(["Stop task"]);
   });
 
   it("calls the per-task endpoints with that row's task id", async () => {
