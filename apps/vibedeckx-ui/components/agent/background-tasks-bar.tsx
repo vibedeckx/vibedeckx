@@ -132,6 +132,12 @@ export function BackgroundTasksBar({
   // Four states, and the honest label for each. The one worth naming loudest
   // is "counting down": the agent is done, and until the deadline lands
   // nothing else on screen distinguishes this from an agent still at work.
+  // Amber marks a turn that is still open — the session is being held, whether
+  // by a countdown, by a vouched-for wait, or by the agent itself. Once the
+  // turn has closed the tasks are orphans nobody is waiting on, and the bar
+  // goes grey. `turnParked` covers the countdown too: a deadline only exists
+  // while a completion is parked.
+  const turnOpen = turnParked || agentWorking;
   const note = countdown
     ? `${countdown} until this turn closes automatically`
     : turnParked && vouchedFor
@@ -166,7 +172,7 @@ export function BackgroundTasksBar({
     <div
       className={cn(
         "mb-2 rounded-lg border text-xs",
-        countdown ? "border-amber-500/40 bg-amber-500/5" : "border-border/60 bg-muted/30",
+        turnOpen ? "border-amber-500/40 bg-amber-500/5" : "border-border/60 bg-muted/30",
       )}
     >
       <button
@@ -175,9 +181,22 @@ export function BackgroundTasksBar({
         aria-expanded={expanded}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-muted-foreground transition-colors hover:text-foreground"
       >
+        {/* Follows the container: amber while the turn is open, muted once it
+          has closed. The pulse itself survives either way — the tasks really
+          are still running, which is the one thing that never changes here. */}
         <span className="relative flex h-1.5 w-1.5 shrink-0">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-500/60" />
-          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
+          <span
+            className={cn(
+              "absolute inline-flex h-full w-full animate-ping rounded-full",
+              turnOpen ? "bg-amber-500/60" : "bg-muted-foreground/40",
+            )}
+          />
+          <span
+            className={cn(
+              "relative inline-flex h-1.5 w-1.5 rounded-full",
+              turnOpen ? "bg-amber-500" : "bg-muted-foreground/70",
+            )}
+          />
         </span>
         <span className="truncate">
           {summarize(tasks)}

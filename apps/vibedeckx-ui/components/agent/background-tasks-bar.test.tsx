@@ -185,6 +185,31 @@ describe("BackgroundTasksBar", () => {
     expect(container.querySelector(".border-amber-500\\/40")).not.toBeNull();
   });
 
+  // Amber means the turn is still open and being held. Once it has closed the
+  // tasks are orphans nobody is waiting on, and an amber bar overstated them.
+  it("goes grey once the turn has closed and stays amber while it is open", () => {
+    const amber = () => container.querySelectorAll("[class*='amber']").length;
+
+    render(
+      <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} tasks={[task()]} turnParked={false} parkDeadlineAt={null} />,
+    );
+    expect(container.textContent).toContain("This turn has closed");
+    expect(amber()).toBe(0);
+    // The pulse survives the grey: the tasks really are still running.
+    expect(container.querySelector(".animate-ping")).not.toBeNull();
+
+    // Every open-turn state is amber, deadline or not.
+    render(
+      <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking={false} tasks={[task({ sanctioned: true })]} turnParked parkDeadlineAt={null} />,
+    );
+    expect(amber()).toBeGreaterThan(0);
+
+    render(
+      <BackgroundTasksBar sessionId="s1" canStopTasks agentWorking tasks={[task()]} turnParked={false} parkDeadlineAt={null} />,
+    );
+    expect(amber()).toBeGreaterThan(0);
+  });
+
   // Past the deadline the turn is already closed: the bar must stop promising
   // a cleanup that has happened, and stop implying the agent is still working.
   it("switches to 'turn closed' once the deadline has passed", () => {
