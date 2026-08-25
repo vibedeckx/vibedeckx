@@ -526,6 +526,7 @@ export interface RemoteReviewerCreationIntent {
   review_focus: string | null;
   source_turn_end_index: number | null;
   review_span: ReviewSpan;
+  review_context_mode: "briefed" | "blind" | null;
   agent_type: string;
   intent_brief: string | null;
   user_id: string | null;
@@ -1242,6 +1243,7 @@ export interface Storage {
       reviewFocus?: string | null;
       sourceTurnEndIndex?: number | null;
       reviewSpan: ReviewSpan;
+      reviewContextMode?: "briefed" | "blind" | null;
       agentType: string;
       intentBrief?: string | null;
       userId?: string | null;

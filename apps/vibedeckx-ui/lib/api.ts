@@ -1070,6 +1070,7 @@ export type AgentType = "claude-code" | "codex";
 
 /** Review-scope span; mirrors the backend `ReviewSpan` (frontend can't import backend types). */
 export type ReviewSpan = "this_turn" | "session_start";
+export type ReviewContextMode = "briefed" | "blind";
 
 export interface AgentProviderInfo {
   type: AgentType;
@@ -3057,6 +3058,8 @@ export const api = {
     reviewerSessionId?: string;
     /** Review-scope span: `this_turn` (default) or `session_start`. */
     reviewSpan?: ReviewSpan;
+    /** `briefed` (default) or `blind` — blind withholds all session context from the reviewer. */
+    reviewContextMode?: ReviewContextMode;
     /** Pre-generated tier-1 brief (see generateReviewIntentBrief); when present the server skips its own distillation. */
     intentBrief?: string;
   }): Promise<WorkflowRun> {

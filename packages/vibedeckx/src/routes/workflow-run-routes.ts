@@ -24,6 +24,12 @@ export function parseReviewSpan(raw: unknown): ReviewSpan | null {
   return raw === "this_turn" || raw === "session_start" ? raw : null;
 }
 
+/** undefined → briefed (back-compat); a valid mode passes; anything else → null (reject with 400). */
+export function parseReviewContextMode(raw: unknown): "briefed" | "blind" | null {
+  if (raw === undefined) return "briefed";
+  return raw === "briefed" || raw === "blind" ? raw : null;
+}
+
 /**
  * Opaque tier-1 text handed over the wire (browser → front, front → worker).
  * Bound it so a client/front bug can't balloon the reviewer prompt.
@@ -182,7 +188,7 @@ async function routes(fastify: FastifyInstance) {
   };
 
   fastify.post<{
-    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string };
+    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; reviewContextMode?: string };
   }>("/api/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -201,15 +207,22 @@ async function routes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: "reviewerSessionId and reviewerAgentType are mutually exclusive" });
     }
     const reviewerSessionId = reviewerSessionIdRaw?.trim();
+    const reviewContextMode = parseReviewContextMode(req.body?.reviewContextMode);
+    if (reviewContextMode === null) return reply.code(400).send({ error: "reviewContextMode must be one of: briefed, blind" });
+    const blind = reviewContextMode === "blind";
+    if (blind && reviewerSessionId) {
+      return reply.code(400).send({ error: "blind review requires a new reviewer session" });
+    }
     const intentBriefRaw = req.body?.intentBrief;
     if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
       return reply.code(400).send({ error: "intentBrief must be a string" });
     }
     // A present field means the client already ran tier-1 pre-generation (the
     // review dialog does this on open, via POST /api/workflow-runs/intent-brief,
-    // to hide the distillation latency) — don't distill again here.
+    // to hide the distillation latency) — don't distill again here. Blind
+    // review discards any brief outright: withheld context is the feature.
     const clientProvidedBrief = intentBriefRaw !== undefined;
-    const clientBrief = normalizeIntentBrief(intentBriefRaw);
+    const clientBrief = blind ? undefined : normalizeIntentBrief(intentBriefRaw);
     if (sourceSessionId.startsWith("remote-")) {
       // Remote workspace: the run lives on the worker (spec §Phase 1.5 —
       // engine runs where the session/worktree live). Authz follows the
@@ -244,7 +257,7 @@ async function routes(fastify: FastifyInstance) {
       // degrades to the worker's deterministic excerpt (tier 2) by simply
       // omitting the field.
       let intentBrief = clientBrief;
-      if (!clientProvidedBrief && !bareReviewerSessionId) {
+      if (!clientProvidedBrief && !bareReviewerSessionId && !blind) {
         intentBrief = await distillIntentBrief(userId, sourceSessionId);
       }
 
@@ -294,6 +307,10 @@ async function routes(fastify: FastifyInstance) {
           reviewFocus,
           sourceTurnEndIndex,
           reviewSpan,
+          // Additive tunnel field: a worker that predates it ignores the flag
+          // and runs a briefed (tier-2) review — the reviewer prompt's
+          // trailing "(review context: …)" line records what actually ran.
+          reviewContextMode,
           reviewerAgentType: reviewerAgentType ?? "claude-code",
           intentBrief,
           userId,
@@ -438,7 +455,7 @@ async function routes(fastify: FastifyInstance) {
     // Tier-1 context (fresh reviews only): same rule as the remote branch —
     // prefer the client's pre-generated brief, distill only when absent.
     let intentBrief = clientBrief;
-    if (!clientProvidedBrief && !reviewerSessionId) {
+    if (!clientProvidedBrief && !reviewerSessionId && !blind) {
       intentBrief = await distillIntentBrief(userId, sourceSessionId);
     }
     try {
@@ -452,6 +469,7 @@ async function routes(fastify: FastifyInstance) {
         reviewerAgentType,
         reviewerSessionId,
         intentBrief,
+        blind,
       });
       return reply.code(201).send({ run });
     } catch (err) {
@@ -694,7 +712,7 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; runId?: string; newReviewerSessionId?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; reviewContextMode?: string; runId?: string; newReviewerSessionId?: string };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireRawAuth(req, reply);
     if (userId === null) return;
@@ -702,11 +720,14 @@ async function routes(fastify: FastifyInstance) {
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
     const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
     if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
+    const reviewContextMode = parseReviewContextMode(req.body?.reviewContextMode);
+    if (reviewContextMode === null) return reply.code(400).send({ error: "reviewContextMode must be one of: briefed, blind" });
+    const blind = reviewContextMode === "blind";
     const intentBriefRaw = req.body?.intentBrief;
     if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
       return reply.code(400).send({ error: "intentBrief must be a string" });
     }
-    const intentBrief = normalizeIntentBrief(intentBriefRaw);
+    const intentBrief = blind ? undefined : normalizeIntentBrief(intentBriefRaw);
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     const reviewerSessionIdRaw = req.body?.reviewerSessionId;
@@ -747,6 +768,7 @@ async function routes(fastify: FastifyInstance) {
           reviewerAgentType,
           reviewerSessionId,
           intentBrief,
+          blind,
           runId: runId || undefined,
           newReviewerSessionId: newReviewerSessionId || undefined,
         });

@@ -51,6 +51,7 @@ export interface CreateRemoteWorkflowReviewerParams {
   reviewFocus?: string;
   sourceTurnEndIndex?: number;
   reviewSpan: ReviewSpan;
+  reviewContextMode?: "briefed" | "blind";
   reviewerAgentType: string;
   intentBrief?: string;
   userId: string | undefined;
@@ -420,6 +421,7 @@ export async function createRemoteWorkflowReviewer(
     reviewFocus: params.reviewFocus ?? null,
     sourceTurnEndIndex: params.sourceTurnEndIndex ?? null,
     reviewSpan: params.reviewSpan,
+    reviewContextMode: params.reviewContextMode ?? null,
     agentType: params.reviewerAgentType,
     intentBrief: params.intentBrief ?? null,
     userId: params.userId ?? null,
@@ -436,6 +438,7 @@ export async function createRemoteWorkflowReviewer(
         reviewFocus: params.reviewFocus,
         sourceTurnEndIndex: params.sourceTurnEndIndex,
         reviewSpan: params.reviewSpan,
+        reviewContextMode: params.reviewContextMode,
         reviewerAgentType: params.reviewerAgentType,
         intentBrief: params.intentBrief,
         runId: remoteRunId,
@@ -667,6 +670,7 @@ function recoverPendingRemoteReviewerOnce(
         reviewFocus: intent.review_focus ?? undefined,
         sourceTurnEndIndex: intent.source_turn_end_index ?? undefined,
         reviewSpan: intent.review_span,
+        reviewContextMode: intent.review_context_mode ?? undefined,
         reviewerAgentType: intent.agent_type,
         intentBrief: intent.intent_brief ?? undefined,
         userId: intent.user_id ?? undefined,

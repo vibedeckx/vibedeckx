@@ -208,6 +208,60 @@ describe("pure helpers", () => {
   });
 });
 
+describe("buildReviewerPrompt blind mode", () => {
+  const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
+  const loaded = {
+    taskContext: "now add rate limiting",
+    originalIntent: "build a public API for widgets",
+    authorSelfReport: "I added a token-bucket limiter in middleware and covered it with tests.",
+    intentBrief: "1. Goal: public widgets API\n2. Constraints: no external deps",
+    reviewFocus: "focus on the middleware ordering",
+    target,
+    blind: true,
+  };
+
+  it("withholds every session-derived section even when all are supplied", () => {
+    const prompt = buildReviewerPrompt(loaded);
+    expect(prompt).not.toContain("## Intent brief");
+    expect(prompt).not.toContain("## Original request");
+    expect(prompt).not.toContain("## Latest user message");
+    expect(prompt).not.toContain("<author-self-report>");
+    expect(prompt).not.toContain("no external deps");
+    expect(prompt).not.toContain("token-bucket");
+    expect(prompt).toContain("## Independent review");
+    expect(prompt).toContain("state");
+    expect(prompt).toContain("possibly intended — needs author confirmation");
+  });
+
+  it("keeps repo-derived context (scope) and the user's review focus", () => {
+    const prompt = buildReviewerPrompt({
+      ...loaded,
+      scope: { changedFiles: ["src/a.ts"], startHead: "abc123" },
+    });
+    expect(prompt).toContain("## Review focus (from the user)");
+    expect(prompt).toContain("focus on the middleware ordering");
+    expect(prompt).toContain("src/a.ts");
+    expect(prompt).toContain("git diff abc123");
+  });
+
+  it("marks the trailer as deliberately withheld, distinct from the unavailable tier", () => {
+    const prompt = buildReviewerPrompt(loaded);
+    expect(prompt).toContain("deliberately withheld");
+    expect(prompt).not.toContain("was unavailable");
+    // and the settled-suppression rules never fire without a brief
+    expect(prompt).not.toContain("[settled]");
+  });
+
+  it("never routes a no-diff turn to the analysis-review branch — the self-report is withheld", () => {
+    const prompt = buildReviewerPrompt({
+      ...loaded,
+      scope: { changedFiles: [], startHead: "abc123" },
+    });
+    expect(prompt).toContain("there is nothing in scope for this turn");
+    expect(prompt).not.toContain("review THAT");
+  });
+});
+
 describe("buildReviewerPrompt verdict & settled semantics", () => {
   const target = { baseHead: null, diffDigest: null, diffStat: null, capturedAt: 1 };
   const base = {

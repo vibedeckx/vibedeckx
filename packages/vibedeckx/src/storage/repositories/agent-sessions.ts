@@ -364,6 +364,7 @@ const mapRemoteReviewerCreationIntent = (
 ): RemoteReviewerCreationIntent => ({
   ...row,
   review_span: row.review_span as "this_turn" | "session_start",
+  review_context_mode: (row.review_context_mode ?? null) as "briefed" | "blind" | null,
   status: row.status as "pending" | "confirmed",
 });
 
@@ -1249,6 +1250,7 @@ export const createAgentSessionRepos = (
         review_focus: intent.reviewFocus ?? null,
         source_turn_end_index: intent.sourceTurnEndIndex ?? null,
         review_span: intent.reviewSpan,
+        review_context_mode: intent.reviewContextMode ?? null,
         agent_type: intent.agentType,
         intent_brief: intent.intentBrief ?? null,
         user_id: intent.userId ?? null,
@@ -1270,6 +1272,7 @@ export const createAgentSessionRepos = (
         && row.review_focus === (intent.reviewFocus ?? null)
         && row.source_turn_end_index === (intent.sourceTurnEndIndex ?? null)
         && row.review_span === intent.reviewSpan
+        && (row.review_context_mode ?? null) === (intent.reviewContextMode ?? null)
         && row.agent_type === intent.agentType
         && row.intent_brief === (intent.intentBrief ?? null)
         && row.user_id === (intent.userId ?? null);

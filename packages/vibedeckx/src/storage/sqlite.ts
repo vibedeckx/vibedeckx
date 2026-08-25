@@ -552,6 +552,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       review_focus TEXT,
       source_turn_end_index INTEGER,
       review_span TEXT NOT NULL CHECK (review_span IN ('this_turn', 'session_start')),
+      review_context_mode TEXT CHECK (review_context_mode IN ('briefed', 'blind')),
       agent_type TEXT NOT NULL,
       intent_brief TEXT,
       user_id TEXT,
@@ -1936,6 +1937,14 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   const workflowRunsInfo = db.prepare("PRAGMA table_info(workflow_runs)").all() as { name: string }[];
   if (!workflowRunsInfo.some((col) => col.name === "review_span")) {
     db.exec("ALTER TABLE workflow_runs ADD COLUMN review_span TEXT NOT NULL DEFAULT 'this_turn'");
+  }
+
+  // Migration: add review_context_mode to the reviewer-creation durable
+  // intents — blind review must survive a replay as blind, not silently
+  // regain the context the user asked to withhold. Null = briefed (legacy).
+  const reviewerIntentsInfo = db.prepare("PRAGMA table_info(remote_reviewer_creation_intents)").all() as { name: string }[];
+  if (!reviewerIntentsInfo.some((col) => col.name === "review_context_mode")) {
+    db.exec("ALTER TABLE remote_reviewer_creation_intents ADD COLUMN review_context_mode TEXT CHECK (review_context_mode IN ('briefed', 'blind'))");
   }
 
   db.exec(`

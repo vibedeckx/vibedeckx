@@ -5,6 +5,7 @@ import {
   api,
   type AgentProviderInfo,
   type AgentType,
+  type ReviewContextMode,
   type ReviewSpan,
   type ReviewerCandidate,
 } from "@/lib/api";
@@ -42,6 +43,11 @@ export function defaultReviewerAgent(
 const SPAN_HINT: Record<ReviewSpan, string> = {
   this_turn: "Latest turn only — faster, more focused",
   session_start: "Whole session from its start — complete but slower",
+};
+
+const MODE_HINT: Record<ReviewContextMode, string> = {
+  briefed: "A distilled summary of this conversation guides the reviewer",
+  blind: "No conversation context — fresh eyes on the change itself",
 };
 
 function formatRelativeTime(at: number): string {
@@ -139,6 +145,7 @@ export function ReviewDialog({
   const [focus, setFocus] = useState("");
   const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
   const [reviewSpan, setReviewSpan] = useState<ReviewSpan>("this_turn");
+  const [contextMode, setContextMode] = useState<ReviewContextMode>("briefed");
   const [reviewerMode, setReviewerMode] = useState<"reuse" | "new">("new");
   const [candidate, setCandidate] = useState<ReviewerCandidate | null>(null);
   const [candidateLoading, setCandidateLoading] = useState(false);
@@ -176,6 +183,7 @@ export function ReviewDialog({
     if (open) {
       setReviewerAgent(defaultReviewerAgent(options, currentAgentType ?? null));
       setReviewSpan("this_turn");
+      setContextMode("briefed");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -249,11 +257,15 @@ export function ReviewDialog({
       const reviewer = reviewerMode === "reuse" && candidate?.sessionId
         ? { reviewerSessionId: candidate.sessionId }
         : { reviewerAgentType: reviewerAgent };
+      // Blind mode applies to fresh reviewers only (a reused reviewer already
+      // carries earlier rounds' context; the server rejects the combination).
+      const blind = contextMode === "blind" && "reviewerAgentType" in reviewer;
       // Usually resolved by now (pre-generated on open); if not, the busy
       // spinner covers the remaining wait. Only the prefetch that belongs to
-      // the session being submitted counts.
+      // the session being submitted counts. A blind review never waits on it:
+      // the brief would be discarded server-side anyway.
       const prefetch = briefPrefetchRef.current;
-      const usable = "reviewerAgentType" in reviewer
+      const usable = !blind && "reviewerAgentType" in reviewer
         && prefetch?.projectId === projectId && prefetch?.sessionId === sessionId
         ? prefetch : null;
       const pre = usable ? await usable.result : null;
@@ -270,6 +282,7 @@ export function ReviewDialog({
         sourceSessionId: sessionId,
         reviewFocus: focus.trim() || undefined,
         reviewSpan,
+        ...(blind ? { reviewContextMode: "blind" as const } : {}),
         ...reviewer,
         ...briefFields,
       });
@@ -298,9 +311,11 @@ export function ReviewDialog({
     ? { Icon: Info, text: "Setup continues in the background" }
     : reuseSelected
       ? { Icon: Info, text: "Reuses context — no re-distillation" }
-      : briefReady
-        ? { Icon: Clock, text: "Intent summary ready" }
-        : { Icon: Clock, text: "Preparing intent summary…" };
+      : contextMode === "blind"
+        ? { Icon: Info, text: "Blind review — no conversation context is sent" }
+        : briefReady
+          ? { Icon: Clock, text: "Intent summary ready" }
+          : { Icon: Clock, text: "Preparing intent summary…" };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -451,6 +466,36 @@ export function ReviewDialog({
                 </div>
               </div>
               <p className="ml-[102px] font-mono text-[10px] text-muted-foreground/70">{SPAN_HINT[reviewSpan]}</p>
+
+              {!reuseSelected && (
+                <>
+                  <div className="flex items-center gap-2.5">
+                    <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Review context</span>
+                    <div className="flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
+                      {([
+                        ["briefed", "Briefed"],
+                        ["blind", "Blind"],
+                      ] as const).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          aria-pressed={contextMode === value}
+                          onClick={() => setContextMode(value)}
+                          className={cn(
+                            "h-full flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
+                            contextMode === value
+                              ? "border bg-card font-medium text-foreground shadow-sm"
+                              : "border border-transparent text-muted-foreground hover:text-foreground",
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="ml-[102px] font-mono text-[10px] text-muted-foreground/70">{MODE_HINT[contextMode]}</p>
+                </>
+              )}
             </div>
           </div>
 

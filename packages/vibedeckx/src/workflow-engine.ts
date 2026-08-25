@@ -220,6 +220,15 @@ export function buildReviewerPrompt(opts: {
    * deliberately strips completion claims).
    */
   intentBrief?: string | null;
+  /**
+   * Blind review ("Blind" in the review dialog): withhold every
+   * session-derived section — brief, verbatim excerpts, author self-report —
+   * and tell the reviewer to infer intent from the repository alone. The
+   * point is an unanchored second look: any author narrative would re-import
+   * the assumptions the user asked to escape. Repo-derived context (scope,
+   * git history) stays — it is evidence, not narrative.
+   */
+  blind?: boolean;
   reviewFocus: string | null;
   target: ReviewTarget;
   /**
@@ -231,26 +240,32 @@ export function buildReviewerPrompt(opts: {
    */
   scope?: { changedFiles: string[]; startHead: string } | null;
 }): string {
+  const blind = opts.blind === true;
   // In single-turn sessions the first user message IS the turn's task — don't
   // print it twice.
-  const intent = opts.originalIntent !== opts.taskContext ? opts.originalIntent : null;
-  const brief = opts.intentBrief || null;
-  const hasExcerpt = Boolean(intent || opts.taskContext || opts.authorSelfReport);
+  const intent = !blind && opts.originalIntent !== opts.taskContext ? opts.originalIntent : null;
+  const brief = blind ? null : opts.intentBrief || null;
+  const taskContext = blind ? null : opts.taskContext;
+  const selfReport = blind ? null : opts.authorSelfReport;
+  const hasExcerpt = Boolean(intent || taskContext || selfReport);
   const scope = opts.scope && opts.scope.changedFiles.length > 0 ? opts.scope : null;
   // A no-diff turn whose author left a substantial self-report was almost
   // certainly an analysis/plan turn: the deliverable IS that reasoning, not a
   // diff. Point the reviewer at it instead of declaring "nothing in scope".
   const noDiffWithAnalysis =
-    Boolean(opts.authorSelfReport) && (opts.authorSelfReport as string).trim().length >= SELF_REPORT_MIN_CHARS;
+    Boolean(selfReport) && (selfReport as string).trim().length >= SELF_REPORT_MIN_CHARS;
   return [
     "You are a code reviewer agent. Another agent just completed work in this workspace; review it critically and independently.",
+    blind
+      ? "\n## Independent review\nBy design you have been given no context from the conversation that produced this work — no task statement, no author summary. Infer the intent from the change itself, the repository, and its history, and open your verdict message by stating that inferred intent in one or two sentences. Do not assume any agreement, exemption, or constraint that is not evidenced in the repository; if a behavior looks wrong but could plausibly be intentional, report it marked \"possibly intended — needs author confirmation\" rather than staying silent."
+      : null,
     brief ? `\n## Intent brief (distilled from the source conversation)\n${brief}` : null,
     !brief && intent ? `\n## Original request (the user's first message in this session, verbatim)\n${intent}` : null,
     // Deliberately not titled "Original task": in confirmation-style
     // conversations the latest message is often just "ok" — informative as
     // the user's last word, misleading as a statement of the task.
-    !brief && opts.taskContext ? `\n## Latest user message (verbatim)\n${opts.taskContext}` : null,
-    selfReportSection(opts.authorSelfReport),
+    !brief && taskContext ? `\n## Latest user message (verbatim)\n${taskContext}` : null,
+    selfReportSection(selfReport),
     opts.reviewFocus ? `\n## Review focus (from the user)\n${opts.reviewFocus}` : null,
     scope
       ? `\n## Scope — the change under review\n\nThe reviewed turn changed exactly these files:\n${scope.changedFiles.map((f) => `- ${f}`).join("\n")}\n\nIt starts from commit \`${scope.startHead}\` — use \`git diff ${scope.startHead} -- <file>\` and \`git log ${scope.startHead}..HEAD\` to see the content.\n\nConfine your review to these files and changes. Other uncommitted or pre-existing changes in the worktree, or changes from other turns, are out of scope unless this change depends on them.`
@@ -265,9 +280,11 @@ export function buildReviewerPrompt(opts: {
     "- Do NOT modify any files — you are in read-only review mode.",
     "- Inspect the actual workspace state yourself: read the relevant files, run `git diff`, `git status` and `git log`.",
     reviewTargetPromptLine(opts.target),
-    noDiffWithAnalysis
-      ? "- Judge correctness and completeness against the task. For this analysis/plan turn the work under review is the reasoning and the proposal, not code quality of a diff. Be specific: reference files and lines."
-      : "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
+    blind
+      ? "- Judge correctness and code quality on the change's own evidence — there is no task statement to judge completeness against. Be specific: reference files and lines."
+      : noDiffWithAnalysis
+        ? "- Judge correctness and completeness against the task. For this analysis/plan turn the work under review is the reasoning and the proposal, not code quality of a diff. Be specific: reference files and lines."
+        : "- Judge correctness, completeness against the task, and code quality. Be specific: reference files and lines.",
     // These two only make sense against a distilled brief: tier 2 has no
     // [settled]/[tentative] marks and no stated scope, and implying it does
     // would suppress findings on the strength of data that doesn't exist.
@@ -278,13 +295,18 @@ export function buildReviewerPrompt(opts: {
       ? "- Do not propose enhancements beyond the brief's stated scope — scope expansion is a product decision, not a review finding."
       : null,
     ...VERDICT_INSTRUCTIONS,
-    brief
-      ? opts.authorSelfReport
-        ? "\n(review context: distilled intent brief + author self-report + live workspace)"
-        : "\n(review context: distilled intent brief + live workspace)"
-      : hasExcerpt
-        ? "\n(review context: deterministic excerpt of the source conversation + live workspace)"
-        : "\n(review context: live workspace only — the source conversation was unavailable)",
+    // "deliberately withheld" vs the tier-3 "was unavailable": both are
+    // workspace-only prompts, but post-hoc attribution must be able to tell a
+    // user choice from a degradation.
+    blind
+      ? "\n(review context: independent review — session context deliberately withheld; live workspace only)"
+      : brief
+        ? opts.authorSelfReport
+          ? "\n(review context: distilled intent brief + author self-report + live workspace)"
+          : "\n(review context: distilled intent brief + live workspace)"
+        : hasExcerpt
+          ? "\n(review context: deterministic excerpt of the source conversation + live workspace)"
+          : "\n(review context: live workspace only — the source conversation was unavailable)",
   ]
     .filter((l): l is string => l !== null)
     .join("\n");
@@ -586,6 +608,13 @@ export class WorkflowEngine {
      * Fresh reviews only — re-reviews keep their own turn-scoped context.
      */
     intentBrief?: string;
+    /**
+     * Blind review: withhold all session-derived context from the reviewer
+     * prompt (see buildReviewerPrompt). Fresh reviewers only — a reused
+     * reviewer already carries earlier rounds' context, so blind would be a
+     * fiction there; routes reject the combination.
+     */
+    blind?: boolean;
     /** Existing reviewer session to continue. Mutually exclusive with reviewerAgentType. */
     reviewerSessionId?: string;
     /** Agent that runs the review; defaults to claude-code. */
@@ -599,6 +628,9 @@ export class WorkflowEngine {
     }
     if (opts.reviewerSessionId && opts.newReviewerSessionId) {
       throw new WorkflowError("reviewer-unavailable", "不能同时复用和新建 reviewer session");
+    }
+    if (opts.blind && opts.reviewerSessionId) {
+      throw new WorkflowError("reviewer-unavailable", "blind review 不能复用已有 reviewer session");
     }
     const runId = opts.runId ?? randomUUID();
     const existingRun = opts.runId
@@ -793,6 +825,7 @@ export class WorkflowEngine {
           originalIntent: extractFirstUserMessage(entries),
           authorSelfReport: extractAuthorSelfReport(entries, turnEndIndex),
           intentBrief: opts.intentBrief ?? null,
+          blind: opts.blind,
           reviewFocus: opts.reviewFocus ?? null,
           target,
           scope,

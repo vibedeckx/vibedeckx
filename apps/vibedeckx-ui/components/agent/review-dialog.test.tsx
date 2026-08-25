@@ -79,7 +79,7 @@ describe("ReviewDialog reviewer reuse", () => {
 
     expect(document.body.textContent).toContain("Review - Fix login");
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -99,11 +99,11 @@ describe("ReviewDialog reviewer reuse", () => {
     });
 
     await act(async () => {
-      button("创建新 Reviewer Session").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("New reviewer session").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(document.body.textContent).toContain("Reviewer agent");
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -122,7 +122,7 @@ describe("ReviewDialog reviewer reuse", () => {
       reason: "deleted",
     });
 
-    expect(document.body.textContent).toContain("上次 reviewer 已不可用");
+    expect(document.body.textContent).toContain("The last reviewer is no longer available");
     expect(document.body.textContent).toContain("Reviewer agent");
   });
 });
@@ -158,7 +158,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockResolvedValueOnce(null);
     await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ intentBrief: "" }));
@@ -172,7 +172,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockRejectedValueOnce(new Error("Failed to generate intent brief: 503"));
     await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
@@ -182,7 +182,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockResolvedValueOnce("the brief");
     await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ intentBrief: "the brief" }));
@@ -213,7 +213,7 @@ describe("ReviewDialog intent brief", () => {
 
     expect(generateReviewIntentBrief).toHaveBeenCalledTimes(2);
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -227,7 +227,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockResolvedValueOnce("the brief");
     await renderAndOpen({ available: true, sessionId: "s-rev", title: "Prev", agentType: "codex", reason: null });
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
@@ -244,7 +244,7 @@ describe("ReviewDialog review span", () => {
       reason: "deleted",
     });
     await act(async () => {
-      button("开始 Review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(
@@ -252,7 +252,7 @@ describe("ReviewDialog review span", () => {
     );
   });
 
-  it("hides the span selector in reuse mode", async () => {
+  it("keeps the span selector but hides the context toggle in reuse mode", async () => {
     await renderAndOpen({
       available: true,
       sessionId: "s-rev",
@@ -261,8 +261,42 @@ describe("ReviewDialog review span", () => {
       reason: null,
     });
     // reuse mode is auto-selected when a reusable candidate exists
-    expect(
-      Array.from(document.body.querySelectorAll("*")).some((el) => el.textContent === "审查范围"),
-    ).toBe(false);
+    const texts = Array.from(document.body.querySelectorAll("span"))
+      .map((el) => el.textContent);
+    expect(texts).toContain("Review scope");
+    // a reused reviewer already carries earlier rounds' context, so
+    // briefed-vs-blind is not a real choice there
+    expect(texts).not.toContain("Review context");
+  });
+});
+
+describe("ReviewDialog review context", () => {
+  it("defaults to briefed and omits the mode field", async () => {
+    await renderAndOpen({
+      available: false, sessionId: null, title: null, agentType: null, reason: "deleted",
+    });
+    await act(async () => {
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("reviewContextMode");
+  });
+
+  it("sends blind and drops the brief when Blind is selected", async () => {
+    generateReviewIntentBrief.mockResolvedValueOnce("the brief");
+    await renderAndOpen({
+      available: false, sessionId: null, title: null, agentType: null, reason: "deleted",
+    });
+    await act(async () => {
+      button("Blind").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
+      reviewContextMode: "blind",
+    }));
+    expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
   });
 });
