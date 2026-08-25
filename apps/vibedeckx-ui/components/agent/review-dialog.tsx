@@ -459,8 +459,10 @@ export function ReviewDialog({
               {!reuseSelected && (
                 <div className="flex items-center gap-2.5">
                   <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Context</span>
-                  {/* w-fit, not flex-1: two short labels stretched across the
-                      row read as two giant buttons. */}
+                  {/* Fixed equal tab widths: neither flex-1 (short labels
+                      stretched into giant buttons) nor content-sized (the
+                      selected tab's font-medium reflows the control on every
+                      click). */}
                   <div className="flex h-8 w-fit items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
                     {([
                       ["briefed", "With context"],
@@ -472,7 +474,7 @@ export function ReviewDialog({
                         aria-pressed={contextMode === value}
                         onClick={() => setContextMode(value)}
                         className={cn(
-                          "h-full rounded-md px-2.5 text-[11.5px] whitespace-nowrap transition-colors",
+                          "h-full w-[96px] rounded-md text-[11.5px] whitespace-nowrap transition-colors",
                           contextMode === value
                             ? "border bg-card font-medium text-foreground shadow-sm"
                             : "border border-transparent text-muted-foreground hover:text-foreground",
