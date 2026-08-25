@@ -40,16 +40,6 @@ export function defaultReviewerAgent(
   );
 }
 
-const SPAN_HINT: Record<ReviewSpan, string> = {
-  this_turn: "Latest turn only — faster, more focused",
-  session_start: "Whole session from its start — complete but slower",
-};
-
-const MODE_HINT: Record<ReviewContextMode, string> = {
-  briefed: "A distilled summary of this conversation guides the reviewer",
-  blind: "No conversation context — fresh eyes on the change itself",
-};
-
 function formatRelativeTime(at: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
   if (seconds < 60) return "just now";
@@ -413,7 +403,7 @@ export function ReviewDialog({
 
             <div className="mt-0.5 flex flex-col gap-2">
               <div className="flex items-center gap-2.5">
-                <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Reviewer agent</span>
+                <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Agent</span>
                 {reuseSelected ? (
                   <span className="flex h-8 flex-1 items-center gap-2 rounded-md border bg-secondary px-2.5 text-xs text-muted-foreground">
                     <span className="truncate">{agentLabel(candidate?.agentType)}</span>
@@ -442,7 +432,7 @@ export function ReviewDialog({
               </div>
 
               <div className="flex items-center gap-2.5">
-                <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Review scope</span>
+                <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Scope</span>
                 <div className="flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
                   {([
                     ["this_turn", "This turn only"],
@@ -465,36 +455,34 @@ export function ReviewDialog({
                   ))}
                 </div>
               </div>
-              <p className="ml-[102px] font-mono text-[10px] text-muted-foreground/70">{SPAN_HINT[reviewSpan]}</p>
 
               {!reuseSelected && (
-                <>
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Review context</span>
-                    <div className="flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
-                      {([
-                        ["briefed", "Briefed"],
-                        ["blind", "Blind"],
-                      ] as const).map(([value, label]) => (
-                        <button
-                          key={value}
-                          type="button"
-                          aria-pressed={contextMode === value}
-                          onClick={() => setContextMode(value)}
-                          className={cn(
-                            "h-full flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
-                            contextMode === value
-                              ? "border bg-card font-medium text-foreground shadow-sm"
-                              : "border border-transparent text-muted-foreground hover:text-foreground",
-                          )}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
+                <div className="flex items-center gap-2.5">
+                  <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Context</span>
+                  {/* w-fit, not flex-1: two short labels stretched across the
+                      row read as two giant buttons. */}
+                  <div className="flex h-8 w-fit items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
+                    {([
+                      ["briefed", "With context"],
+                      ["blind", "Blind"],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={contextMode === value}
+                        onClick={() => setContextMode(value)}
+                        className={cn(
+                          "h-full rounded-md px-2.5 text-[11.5px] whitespace-nowrap transition-colors",
+                          contextMode === value
+                            ? "border bg-card font-medium text-foreground shadow-sm"
+                            : "border border-transparent text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
-                  <p className="ml-[102px] font-mono text-[10px] text-muted-foreground/70">{MODE_HINT[contextMode]}</p>
-                </>
+                </div>
               )}
             </div>
           </div>

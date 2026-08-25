@@ -101,7 +101,7 @@ describe("ReviewDialog reviewer reuse", () => {
     await act(async () => {
       button("New reviewer session").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(document.body.textContent).toContain("Reviewer agent");
+    expect(document.body.textContent).toContain("Agent");
     await act(async () => {
       button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -123,7 +123,7 @@ describe("ReviewDialog reviewer reuse", () => {
     });
 
     expect(document.body.textContent).toContain("The last reviewer is no longer available");
-    expect(document.body.textContent).toContain("Reviewer agent");
+    expect(document.body.textContent).toContain("Agent");
   });
 });
 
@@ -263,10 +263,10 @@ describe("ReviewDialog review span", () => {
     // reuse mode is auto-selected when a reusable candidate exists
     const texts = Array.from(document.body.querySelectorAll("span"))
       .map((el) => el.textContent);
-    expect(texts).toContain("Review scope");
+    expect(texts).toContain("Scope");
     // a reused reviewer already carries earlier rounds' context, so
     // briefed-vs-blind is not a real choice there
-    expect(texts).not.toContain("Review context");
+    expect(texts).not.toContain("Context");
   });
 });
 
