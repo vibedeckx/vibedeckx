@@ -684,6 +684,7 @@ describe("WorkflowEngine", () => {
       sessionId: "s-rev",
       title: "Review - Fix login bug",
       agentType: "codex",
+      lastActiveAt: expect.any(Number),
       reason: null,
     });
   });
@@ -695,6 +696,7 @@ describe("WorkflowEngine", () => {
       sessionId: null,
       title: null,
       agentType: null,
+      lastActiveAt: null,
       reason: "deleted",
     });
   });

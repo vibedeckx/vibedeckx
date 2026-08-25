@@ -1502,6 +1502,8 @@ export interface ReviewerCandidate {
   sessionId: string | null;
   title: string | null;
   agentType: AgentType | null;
+  /** Epoch ms of the reviewer session's last activity; absent from older workers. */
+  lastActiveAt?: number | null;
   reason:
     | "deleted"
     | "project-mismatch"

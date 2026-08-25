@@ -385,6 +385,12 @@ export interface ReviewerCandidate {
   sessionId: string | null;
   title: string | null;
   agentType: AgentType | null;
+  /**
+   * Epoch ms of the reviewer session's last activity, so the UI can say how
+   * stale the reused context is. Optional on the wire: workers older than the
+   * field simply omit it and the caller shows no timestamp.
+   */
+  lastActiveAt?: number | null;
   reason: ReviewerCandidateUnavailableReason | null;
 }
 
@@ -525,6 +531,7 @@ export class WorkflowEngine {
       sessionId: null,
       title: null,
       agentType: null,
+      lastActiveAt: null,
       reason,
     });
     const source = await this.storage.agentSessions.getById(sourceSessionId);
@@ -560,6 +567,7 @@ export class WorkflowEngine {
       sessionId: reviewer.id,
       title: reviewer.title ?? null,
       agentType: reviewer.agent_type as AgentType,
+      lastActiveAt: reviewerProjection.lastActiveAt,
       reason: null,
     };
   }
