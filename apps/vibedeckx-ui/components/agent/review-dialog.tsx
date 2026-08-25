@@ -326,7 +326,7 @@ export function ReviewDialog({
       </DialogTrigger>
       <DialogContent
         showCloseButton={false}
-        className="bg-card gap-0 overflow-hidden p-0 sm:max-w-[520px]"
+        className="bg-card gap-0 overflow-hidden p-0 sm:max-w-md"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitDisabled) {
             e.preventDefault();
