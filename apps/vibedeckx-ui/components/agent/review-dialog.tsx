@@ -316,7 +316,7 @@ export function ReviewDialog({
       </DialogTrigger>
       <DialogContent
         showCloseButton={false}
-        className="bg-card gap-0 overflow-hidden p-0 sm:max-w-md"
+        className="bg-card w-[calc(100%-2rem)] min-w-0 gap-0 overflow-hidden p-0 sm:w-full sm:max-w-md"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitDisabled) {
             e.preventDefault();
@@ -340,7 +340,7 @@ export function ReviewDialog({
           </DialogClose>
         </div>
 
-        <div className="flex flex-col gap-3.5 px-4 pt-3.5 pb-1">
+        <div className="min-w-0 flex flex-col gap-3.5 px-4 pt-3.5 pb-1">
           {candidateNotice && (
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11.5px] text-amber-700 dark:text-amber-300">
               <TriangleAlert className="mt-px size-3.5 shrink-0" />
@@ -348,7 +348,7 @@ export function ReviewDialog({
             </div>
           )}
 
-          <div className="flex flex-col gap-1.5">
+          <div className="min-w-0 flex flex-col gap-1.5">
             <FieldLabel
               note={
                 candidateLoading
@@ -401,8 +401,8 @@ export function ReviewDialog({
               />
             </div>
 
-            <div className="mt-0.5 flex flex-col gap-2">
-              <div className="flex items-center gap-2.5">
+            <div className="mt-0.5 min-w-0 flex flex-col gap-2">
+              <div className="min-w-0 flex items-center gap-2.5">
                 <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Agent</span>
                 {reuseSelected ? (
                   <span className="flex h-8 flex-1 items-center gap-2 rounded-md border bg-secondary px-2.5 text-xs text-muted-foreground">
@@ -413,7 +413,7 @@ export function ReviewDialog({
                   </span>
                 ) : (
                   <Select value={reviewerAgent} onValueChange={(v) => setReviewerAgent(v as AgentType)}>
-                    <SelectTrigger size="sm" className="flex-1 text-xs">
+                    <SelectTrigger size="sm" className="min-w-0 flex-1 text-xs">
                       <SelectValue />
                       <span className="ml-auto font-mono text-[10px] text-muted-foreground/70">
                         {reviewerAgent === currentAgentType ? "same as current agent" : "differs from current agent"}
@@ -431,9 +431,9 @@ export function ReviewDialog({
                 )}
               </div>
 
-              <div className="flex items-center gap-2.5">
+              <div className="min-w-0 flex items-center gap-2.5">
                 <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Scope</span>
-                <div className="flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
+                <div className="min-w-0 flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
                   {([
                     ["this_turn", "This turn only"],
                     ["session_start", "Whole session"],
@@ -457,13 +457,9 @@ export function ReviewDialog({
               </div>
 
               {!reuseSelected && (
-                <div className="flex items-center gap-2.5">
+                <div className="min-w-0 flex items-center gap-2.5">
                   <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Context</span>
-                  {/* Fixed equal tab widths: neither flex-1 (short labels
-                      stretched into giant buttons) nor content-sized (the
-                      selected tab's font-medium reflows the control on every
-                      click). */}
-                  <div className="flex h-8 w-fit items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
+                  <div className="min-w-0 flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
                     {([
                       ["briefed", "With context"],
                       ["blind", "Blind"],
@@ -474,7 +470,7 @@ export function ReviewDialog({
                         aria-pressed={contextMode === value}
                         onClick={() => setContextMode(value)}
                         className={cn(
-                          "h-full w-[96px] rounded-md text-[11.5px] whitespace-nowrap transition-colors",
+                          "h-full min-w-0 flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
                           contextMode === value
                             ? "border bg-card font-medium text-foreground shadow-sm"
                             : "border border-transparent text-muted-foreground hover:text-foreground",
@@ -509,12 +505,11 @@ export function ReviewDialog({
           )}
         </div>
 
-        <div className="mt-2.5 flex items-center gap-2.5 border-t bg-secondary px-4 py-2.5">
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+        <div className="mt-2.5 min-w-0 flex w-full items-center gap-2.5 overflow-hidden border-t bg-secondary px-4 py-2.5">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden text-[11px] text-muted-foreground">
             <footNote.Icon className="size-3 shrink-0 text-muted-foreground/70" />
             <span className="truncate">{footNote.text}</span>
           </span>
-          <span className="flex-1" />
           <DialogClose asChild>
             <Button variant="outline" size="sm" className="h-7 text-xs">Cancel</Button>
           </DialogClose>
