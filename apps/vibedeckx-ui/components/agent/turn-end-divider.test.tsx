@@ -112,7 +112,7 @@ describe("TurnEndDivider send-back affordance", () => {
   });
 
   const sendBackBtn = () =>
-    container!.querySelector<HTMLButtonElement>('button[aria-label="发回源会话"]');
+    container!.querySelector<HTMLButtonElement>('button[aria-label="Send back to source session"]');
 
   it("is absent without a sendBack control (non-branch sessions)", () => {
     act(() => {

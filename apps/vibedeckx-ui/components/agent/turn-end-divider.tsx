@@ -62,17 +62,17 @@ const dividerButtonClass = (emphasis: "normal" | "subtle") =>
  */
 function SendBackButton({ sendBack, emphasis }: { sendBack: SendBackControl; emphasis: "normal" | "subtle" }) {
   const label = !sendBack.available
-    ? "源会话已被清理，无法发回"
+    ? "Source session no longer exists"
     : sendBack.sent
-      ? "已发回源会话（可再次发送）"
-      : "把本轮回答发回源会话";
+      ? "Sent — click to send again"
+      : "Send this answer back to the source session";
 
   const button = (
     <Button
       variant="ghost"
       size="icon"
       className={dividerButtonClass(emphasis)}
-      aria-label="发回源会话"
+      aria-label="Send back to source session"
       disabled={!sendBack.available || sendBack.busy}
       onClick={sendBack.onSend}
     >

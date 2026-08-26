@@ -499,21 +499,21 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     if (!sendBackTargetId || sendingBackEntry !== null) return;
     const content = composeSendBackContent(dividerIndex);
     if (content === null) {
-      toast.error("本轮没有可发回的文本回复");
+      toast.error("This turn has no text answer to send back");
       return;
     }
     setSendingBackEntry(entryIndex);
     try {
       await sendAgentSessionMessage(sendBackTargetId, content);
       setSentBackEntries((prev) => new Set(prev).add(entryIndex));
-      toast.success("已发回源会话");
+      toast.success("Sent back to source session");
       setSessionUrlParam?.(sendBackTargetId);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const gone = msg.includes("404");
       if (gone) setSendBackParentGone(true);
-      toast.error("发回源会话失败", {
-        description: gone ? "源会话已不存在" : msg,
+      toast.error("Send back failed", {
+        description: gone ? "The source session no longer exists" : msg,
       });
     } finally {
       setSendingBackEntry(null);
