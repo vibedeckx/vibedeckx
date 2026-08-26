@@ -182,8 +182,36 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Same liveness contract as the single-process endpoint above.
         const stopHeartbeat = attachWsHeartbeat(socket, { label: "ExecutorMux" });
 
-        const subs = new Map<string, () => void>(); // processId → cleanup
+        /**
+         * `detach` silences this subscription's `send`; `cleanup` tears the
+         * upstream down. They are separate because tearing down is not
+         * instantaneous and not silent: for a remote process,
+         * `attachRemoteProcessStream` fabricates `finished` when the proxy
+         * channel closes (it cannot tell "the channel went away" from "the
+         * process exited"). On a client-initiated unsubscribe that frame would
+         * land on a socket that is still open, and the browser would mark a
+         * still-running remote executor as stopped — the Start button appearing
+         * under live output once the executor item unmounts and remounts (a
+         * right-panel tab switch, a workspace switch).
+         * So detach first, then clean up: nothing the teardown emits reaches a
+         * client that already stopped listening.
+         */
+        type Subscription = { cleanup: () => void; detach: () => void };
+        const subs = new Map<string, Subscription>();
         const handleInputMap = new Map<string, (msg: InputMessage) => void>();
+        // Processes the client currently wants. Read after the ownership await
+        // below so an unsubscribe that overtakes a slow subscribe still wins.
+        const wanted = new Set<string>();
+
+        const dropSubscription = (processId: string) => {
+          const sub = subs.get(processId);
+          if (sub) {
+            sub.detach();
+            sub.cleanup();
+            subs.delete(processId);
+          }
+          handleInputMap.delete(processId);
+        };
 
         const subscribeProcess = async (processId: string): Promise<void> => {
           if (subs.has(processId)) return; // 幂等：已订阅则跳过
@@ -200,16 +228,33 @@ const routes: FastifyPluginAsync = async (fastify) => {
           // arriving before the first await above resolves would otherwise both
           // pass the subs.has() guard and register duplicate streams.
           if (subs.has(processId)) return;
+          // Unsubscribed while the ownership check was in flight: attaching now
+          // would leave a stream nobody is listening to, whose eventual close
+          // fabricates the very `finished` this route is careful not to send.
+          if (!wanted.has(processId)) return;
 
+          let detached = false;
           const send = (msg: StreamMessage) => {
+            if (detached) return;
             try { socket.send(JSON.stringify({ processId, ...msg })); } catch { /* closed */ }
           };
           let terminated = false;
+          // The slot this subscription owns, once registered. A terminal
+          // callback can arrive long after the client dropped this
+          // subscription — the remote teardown reads the process row before it
+          // fires — by which time an unsubscribe → resubscribe cycle may have
+          // put a *different*, live subscription in the slot. Evicting that one
+          // would close its stream while leaving it attached to the socket, so
+          // its own close would fabricate the `finished` this route exists to
+          // suppress. Only ever tear down our own entry.
+          let self: Subscription | null = null;
           const onTerminal = () => {
             terminated = true;
-            const c = subs.get(processId);
-            if (c) { c(); subs.delete(processId); }
-            handleInputMap.delete(processId);
+            if (self && subs.get(processId) === self) {
+              subs.delete(processId);
+              handleInputMap.delete(processId);
+            }
+            self?.cleanup();
           };
 
           const handle = processId.startsWith("remote-")
@@ -218,7 +263,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           // 仅当流尚未同步终止时登记 cleanup（避免给已终止进程留下陈旧条目）
           if (!terminated) {
-            subs.set(processId, handle.cleanup);
+            self = { cleanup: handle.cleanup, detach: () => { detached = true; } };
+            subs.set(processId, self);
             handleInputMap.set(processId, handle.handleInput);
           }
         };
@@ -231,13 +277,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
               | { type: "resize"; processId: string; cols: number; rows: number };
 
             if (msg.type === "subscribe") {
+              wanted.add(msg.processId);
               subscribeProcess(msg.processId).catch((err) => {
                 console.error(`[ExecutorMux] Failed to subscribe to ${msg.processId}:`, err);
               });
             } else if (msg.type === "unsubscribe") {
-              subs.get(msg.processId)?.();
-              subs.delete(msg.processId);
-              handleInputMap.delete(msg.processId);
+              wanted.delete(msg.processId);
+              dropSubscription(msg.processId);
             } else if (msg.type === "input") {
               handleInputMap.get(msg.processId)?.({ type: "input", data: msg.data });
             } else if (msg.type === "resize") {
@@ -254,7 +300,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         socket.on("close", () => {
           console.log(`[ExecutorMux] Client disconnected; cleaning ${subs.size} subscriptions`);
           stopHeartbeat();
-          for (const cleanup of subs.values()) cleanup();
+          wanted.clear();
+          for (const sub of subs.values()) { sub.detach(); sub.cleanup(); }
           subs.clear();
           handleInputMap.clear();
         });

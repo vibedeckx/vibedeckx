@@ -134,6 +134,15 @@ export function ExecutorLogsProvider({
 
   const applyServerMessage = useCallback((m: MuxServerMessage) => {
     const { processId } = m;
+    // Frames for a process we already unsubscribed from are stale by
+    // construction — the hub tears the upstream down asynchronously, and for a
+    // remote process that teardown fabricates a `finished`. Applying it would
+    // park `status:"closed", exitCode:0` in the retained state, and the next
+    // mount of ExecutorItem would read that and drop a still-running executor
+    // out of `runningProcesses` (black Start button under live output). The hub
+    // now detaches the subscription before tearing down; this covers frames
+    // already in flight, and older hubs.
+    if (!desiredRef.current.has(processId)) return;
     // [diag:mux] 临时诊断：打印每条收到的 mux 帧（init/输出/history_end/finished/error）
     const detail =
       m.type === "error" ? m.message
