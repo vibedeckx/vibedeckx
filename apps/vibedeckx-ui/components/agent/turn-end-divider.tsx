@@ -1,15 +1,9 @@
 "use client";
 
-import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/format-duration";
 import { BranchMenu } from "./branch-menu";
 import { Button } from "@/components/ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import {
   Tooltip,
   TooltipContent,
@@ -27,13 +21,12 @@ export interface SendBackControl {
   sent: boolean;
   busy: boolean;
   /**
-   * The composed message that would be sent (provenance preamble + the turn's
-   * final assistant text), or null when the turn produced no text answer.
-   * Called lazily when the confirm popover opens.
+   * Send this turn's answer to the parent session and go there. Composing the
+   * message (provenance preamble + the turn's final assistant text) and the
+   * "this turn has no text answer" case both belong to the caller — the button
+   * fires the action, it does not preview it.
    */
-  getContent: () => string | null;
-  /** Send exactly `content` — the string the user just previewed. */
-  onSend: (content: string) => void;
+  onSend: () => void;
 }
 
 interface TurnEndDividerProps {
@@ -63,14 +56,11 @@ const dividerButtonClass = (emphasis: "normal" | "subtle") =>
   );
 
 /**
- * Confirm-before-send popover: shows the exact composed message so a mis-aimed
- * turn or an unexpected extraction is caught before it lands in the parent
- * session's history and wakes its agent.
+ * Send-back button: one click posts this turn's answer into the parent session
+ * and follows it there — the mirror of the branch button, which creates the
+ * child session and navigates into it.
  */
 function SendBackButton({ sendBack, emphasis }: { sendBack: SendBackControl; emphasis: "normal" | "subtle" }) {
-  const [open, setOpen] = useState(false);
-  const [content, setContent] = useState<string | null>(null);
-
   const label = !sendBack.available
     ? "源会话已被清理，无法发回"
     : sendBack.sent
@@ -84,6 +74,7 @@ function SendBackButton({ sendBack, emphasis }: { sendBack: SendBackControl; emp
       className={dividerButtonClass(emphasis)}
       aria-label="发回源会话"
       disabled={!sendBack.available || sendBack.busy}
+      onClick={sendBack.onSend}
     >
       {sendBack.busy
         ? <Loader2 className="h-4 w-4 animate-spin" />
@@ -93,62 +84,16 @@ function SendBackButton({ sendBack, emphasis }: { sendBack: SendBackControl; emp
     </Button>
   );
 
-  // A disabled trigger can't open the popover — render tooltip-only.
-  if (!sendBack.available) {
-    return (
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            {/* span wrapper: disabled buttons swallow the hover events the tooltip needs */}
-            <span tabIndex={-1}>{button}</span>
-          </TooltipTrigger>
-          <TooltipContent>{label}</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    );
-  }
-
   return (
-    <Popover
-      open={open}
-      onOpenChange={(next) => {
-        if (next) setContent(sendBack.getContent());
-        setOpen(next);
-      }}
-    >
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <PopoverTrigger asChild>{button}</PopoverTrigger>
-          </TooltipTrigger>
-          <TooltipContent>{label}</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-      <PopoverContent align="end" className="w-80 p-3">
-        <div className="mb-1.5 text-xs font-medium">发回源会话</div>
-        {content === null ? (
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            本轮没有可发回的文本回复。
-          </p>
-        ) : (
-          <>
-            <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-2 text-xs leading-relaxed text-muted-foreground">
-              {content}
-            </div>
-            <Button
-              size="sm"
-              className="mt-2 h-7 w-full text-xs"
-              onClick={() => {
-                setOpen(false);
-                sendBack.onSend(content);
-              }}
-            >
-              {sendBack.sent ? "再次发送" : "确认发回"}
-            </Button>
-          </>
-        )}
-      </PopoverContent>
-    </Popover>
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {/* span wrapper: a disabled button swallows the hover events the tooltip needs */}
+          {sendBack.available ? button : <span tabIndex={-1}>{button}</span>}
+        </TooltipTrigger>
+        <TooltipContent>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 

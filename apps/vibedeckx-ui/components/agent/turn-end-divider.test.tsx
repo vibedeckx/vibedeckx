@@ -121,43 +121,36 @@ describe("TurnEndDivider send-back affordance", () => {
     expect(sendBackBtn()).toBeNull();
   });
 
-  it("opens a confirm popover with the composed content and only sends on confirm", () => {
+  it("sends on a single click — no confirm step", () => {
     const onSend = vi.fn();
-    const getContent = vi.fn(() => "preamble\n\nanswer");
     act(() => {
       root!.render(<TurnEndDivider {...dividerProps} sendBack={{
-        available: true, sent: false, busy: false, getContent, onSend,
+        available: true, sent: false, busy: false, onSend,
       }} />);
     });
     const btn = sendBackBtn()!;
     expect(btn.disabled).toBe(false);
     act(() => { btn.click(); });
-    // Opening previews but does not send.
-    expect(getContent).toHaveBeenCalledTimes(1);
-    expect(onSend).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("preamble");
-    const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((b) => b.textContent === "确认发回")!;
-    act(() => { confirm.click(); });
-    expect(onSend).toHaveBeenCalledWith("preamble\n\nanswer");
+    expect(onSend).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the no-text notice when the turn produced no answer", () => {
+  it("does not fire while a send is in flight", () => {
     const onSend = vi.fn();
     act(() => {
       root!.render(<TurnEndDivider {...dividerProps} sendBack={{
-        available: true, sent: false, busy: false, getContent: () => null, onSend,
+        available: true, sent: false, busy: true, onSend,
       }} />);
     });
-    act(() => { sendBackBtn()!.click(); });
-    expect(document.body.textContent).toContain("本轮没有可发回的文本回复");
+    const btn = sendBackBtn()!;
+    expect(btn.disabled).toBe(true);
+    act(() => { btn.click(); });
     expect(onSend).not.toHaveBeenCalled();
   });
 
   it("disables the button when the parent session is gone", () => {
     act(() => {
       root!.render(<TurnEndDivider {...dividerProps} sendBack={{
-        available: false, sent: false, busy: false, getContent: () => "x", onSend: vi.fn(),
+        available: false, sent: false, busy: false, onSend: vi.fn(),
       }} />);
     });
     expect(sendBackBtn()!.disabled).toBe(true);

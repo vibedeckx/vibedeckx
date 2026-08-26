@@ -492,15 +492,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     return `以下是另一个 agent（${currentAgentName}）在分支会话中给出的意见，非用户本人观点，请自行判断是否采纳：\n\n${answer}`;
   }, [messages, currentAgentName]);
 
-  const handleSendBack = useCallback(async (entryIndex: number, content: string) => {
+  // One click sends and follows — the mirror of branching, which creates the
+  // child session and navigates into it. No confirm step: the send is visible
+  // and answerable in the parent we just landed in.
+  const handleSendBack = useCallback(async (entryIndex: number, dividerIndex: number) => {
     if (!sendBackTargetId || sendingBackEntry !== null) return;
+    const content = composeSendBackContent(dividerIndex);
+    if (content === null) {
+      toast.error("本轮没有可发回的文本回复");
+      return;
+    }
     setSendingBackEntry(entryIndex);
     try {
       await sendAgentSessionMessage(sendBackTargetId, content);
       setSentBackEntries((prev) => new Set(prev).add(entryIndex));
-      toast.success("已发回源会话", {
-        action: { label: "打开", onClick: () => setSessionUrlParam?.(sendBackTargetId) },
-      });
+      toast.success("已发回源会话");
+      setSessionUrlParam?.(sendBackTargetId);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const gone = msg.includes("404");
@@ -511,7 +518,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     } finally {
       setSendingBackEntry(null);
     }
-  }, [sendBackTargetId, sendingBackEntry, setSessionUrlParam]);
+  }, [sendBackTargetId, sendingBackEntry, composeSendBackContent, setSessionUrlParam]);
 
   // Last persisted turn_end — rendered with "normal" emphasis as the
   // discoverable tail affordance; earlier stop points render "subtle".
@@ -1146,8 +1153,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                           available: !sendBackParentGone && session?.branchedFromAvailable !== false,
                           sent: sentBackEntries.has(messageEntryIndices[index] ?? index),
                           busy: sendingBackEntry === (messageEntryIndices[index] ?? index),
-                          getContent: () => composeSendBackContent(index),
-                          onSend: (content) => void handleSendBack(messageEntryIndices[index] ?? index, content),
+                          onSend: () => void handleSendBack(messageEntryIndices[index] ?? index, index),
                         } : undefined}
                       />
                     ) : (
