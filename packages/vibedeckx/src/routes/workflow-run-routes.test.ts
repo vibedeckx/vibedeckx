@@ -294,6 +294,52 @@ describe("workflow-run-routes", () => {
     expect(prepareAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: null }));
   });
 
+  it("POST /api/path/workflow-runs/prepare creates a stable remote review placeholder", async () => {
+    const prepareAdhocReview = vi.fn(async () => preparingRun);
+    const app = makeApp({ engine: { prepareAdhocReview } });
+    await app.register(workflowRunRoutes);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/path/workflow-runs/prepare",
+      payload: {
+        sourceSessionId: "s-src",
+        reviewFocus: "compat coverage",
+        runId: "r1",
+        newReviewerSessionId: "s-rev",
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.json().run.status).toBe("preparing");
+    expect(prepareAdhocReview).toHaveBeenCalledWith(expect.objectContaining({
+      project: { id: "p1", path: "/tmp/p" },
+      branch: "dev",
+      sourceSessionId: "s-src",
+      runId: "r1",
+      newReviewerSessionId: "s-rev",
+    }));
+  });
+
+  it("POST /api/path/workflow-runs/:id/activate hands the brief to the prepared review", async () => {
+    const activateAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { activateAdhocReview } });
+    await app.register(workflowRunRoutes);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/path/workflow-runs/r1/activate",
+      payload: { intentBrief: "client brief", reviewContextMode: "briefed" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().run.id).toBe("r1");
+    expect(activateAdhocReview).toHaveBeenCalledWith("r1", {
+      intentBrief: "client brief",
+      blind: false,
+    });
+  });
+
   it("GET lists active runs for a workspace", async () => {
     const app = makeApp();
     await app.register(workflowRunRoutes);

@@ -63,6 +63,8 @@ const COVERED_BY = {
   "http:POST /api/path/cross-remote/mcp/close": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/mcp/close" },
   "http:POST /api/notification-outbox/query": { file: "packages/vibedeckx/src/routes/notification-outbox-routes.test.ts", marker: "/api/notification-outbox/query" },
   "http:POST /api/path/workflow-runs": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "/api/path/workflow-runs" },
+  "http:POST /api/path/workflow-runs/prepare": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: '"/api/path/workflow-runs/prepare"' },
+  "http:POST /api/path/workflow-runs/:param/activate": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: '"/api/path/workflow-runs/r1/activate"' },
   "http:GET /api/path/workflow-runs/reviewer-candidate": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "reviewer-candidate" },
   "http:POST /api/workflow-runs/:param/gate": { file: "packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts", marker: "/gate" },
   "http:POST /api/workflow-runs/:param/cancel": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "cancel" },
