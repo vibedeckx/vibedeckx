@@ -44,6 +44,16 @@ function makeHarness() {
     error: null, deleted_at: null, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
   };
 
+  // Writes through to the created row so the idempotent-replay repair sees an
+  // already-set pointer, exactly like the real repository.
+  const setBranchedFrom = vi.fn(async (id: string, sourceSessionId: string, entryIndex: number | null) => {
+    const row = created.find((r) => r.id === id);
+    if (row) {
+      row.branched_from_session_id = sourceSessionId;
+      row.branched_from_entry_index = entryIndex;
+    }
+  });
+
   const storage = {
     agentSessions: {
       getAll: async () => [sourceRow],
@@ -58,6 +68,7 @@ function makeHarness() {
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
       upsertEntry: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
+      setBranchedFrom,
       listByBranch: async () => created,
     },
     workspaceRegistry: {
@@ -69,7 +80,7 @@ function makeHarness() {
     },
   } as unknown as Storage;
 
-  return { storage, created };
+  return { storage, created, setBranchedFrom };
 }
 
 describe("branchSession cross-remote MCP", () => {
@@ -106,6 +117,48 @@ describe("branchSession cross-remote MCP", () => {
     expect(replay).toEqual(first);
     expect(created).toHaveLength(1);
     expect(manager.getSession("durable-branch")?.crossRemoteMcp).toEqual(freshCrossRemoteMcp);
+  });
+});
+
+describe("branchSession send-back pointer", () => {
+  it("records the source session and the cutoff turn_end on the branch", async () => {
+    const { storage, setBranchedFrom } = makeHarness();
+    const manager = new AgentSessionManager(storage);
+    await manager.branchSession(SOURCE_ID, undefined, { sessionId: "sb1", upToEntryIndex: 2 });
+    expect(setBranchedFrom).toHaveBeenCalledWith("sb1", SOURCE_ID, 2);
+    expect(manager.getSession("sb1")?.branchedFromSessionId).toBe(SOURCE_ID);
+    expect(manager.getSession("sb1")?.branchedFromEntryIndex).toBe(2);
+  });
+
+  it("records the source tail turn_end for a legacy full copy", async () => {
+    const { storage, setBranchedFrom } = makeHarness();
+    const manager = new AgentSessionManager(storage);
+    await manager.branchSession(SOURCE_ID, undefined, { sessionId: "sb2" });
+    expect(setBranchedFrom).toHaveBeenCalledWith("sb2", SOURCE_ID, 5);
+  });
+
+  it("replay backfills a missing pointer in BOTH db and runtime (crash-before-pointer window)", async () => {
+    const { storage, created, setBranchedFrom } = makeHarness();
+    const manager = new AgentSessionManager(storage);
+    await manager.branchSession(SOURCE_ID, undefined, { sessionId: "sb3" });
+    // Simulate the crash window the pointer write is ordered to leave behind:
+    // entries fully copied, pointer never persisted — and the post-restart
+    // runtime restored from that row carries null pointers too. (Also the
+    // shape of a branch created before the pointer feature existed.)
+    const row = created.find((r) => r.id === "sb3")!;
+    row.branched_from_session_id = null;
+    const runtime = manager.getSession("sb3")!;
+    runtime.branchedFromSessionId = null;
+    runtime.branchedFromEntryIndex = null;
+    setBranchedFrom.mockClear();
+
+    const replay = await manager.branchSession(SOURCE_ID, undefined, { sessionId: "sb3" });
+    expect(replay).toEqual({ ok: true, sessionId: "sb3" });
+    expect(setBranchedFrom).toHaveBeenCalledWith("sb3", SOURCE_ID, 5);
+    // Session payloads read the runtime — a DB-only repair would keep the
+    // send-back button hidden for the rest of the process lifetime.
+    expect(manager.getSession("sb3")?.branchedFromSessionId).toBe(SOURCE_ID);
+    expect(manager.getSession("sb3")?.branchedFromEntryIndex).toBe(5);
   });
 });
 

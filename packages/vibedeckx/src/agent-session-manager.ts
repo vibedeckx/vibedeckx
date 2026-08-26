@@ -170,6 +170,20 @@ interface RunningSession {
    * lives on agent_sessions.native_session_id.
    */
   nativeSessionId?: string;
+  /**
+   * Send-back pointer: the session this one was branched from, or absent for
+   * non-branch sessions and pre-feature branches. Mirror of
+   * agent_sessions.branched_from_session_id; may dangle once the parent is
+   * retention-deleted, so consumers must re-resolve the target before use.
+   */
+  branchedFromSessionId?: string | null;
+  /**
+   * The turn_end entry index the branched copy ended at. Entry indices are
+   * preserved by the copy, so dividers ABOVE this index are inherited history
+   * (send-back would echo the parent's own content) and only dividers beyond
+   * it are turns this branch produced itself.
+   */
+  branchedFromEntryIndex?: number | null;
   producedOutput?: boolean; // Whether the current process has emitted any parsed agent output (reset per spawn)
   /** Tail of stdout lines that produced no parsed events (reset per spawn). */
   unparsedStdoutTail?: string;
@@ -3366,6 +3380,8 @@ export class AgentSessionManager {
         permissionMode,
         agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
         model: dbSession.model ?? null,
+        branchedFromSessionId: dbSession.branched_from_session_id ?? null,
+        branchedFromEntryIndex: dbSession.branched_from_entry_index ?? null,
         completion: new TurnCompletionLedger(this.parkTimeoutMs),
       graceTimer: null,
       parkTimer: null,
@@ -3545,6 +3561,21 @@ export class AgentSessionManager {
         // Hub recovery replays the exact preallocated ID after an uncertain
         // response. Returning the already-copied transcript makes the worker
         // operation idempotent without creating a second branch.
+        if (!existingBranch.branched_from_session_id) {
+          // The entries matched, so the earlier attempt finished the copy but
+          // crashed before the pointer write (which runs last for exactly this
+          // reason), or the branch predates the pointer feature. Either way
+          // the replay carries the same source identity — backfill it, and
+          // mirror it onto the restored runtime: session payloads read the
+          // runtime, so a DB-only repair would keep the send-back button
+          // hidden until the next process restart.
+          const repairedEntryIndex = entryRows[entryRows.length - 1]!.entry_index;
+          await this.storage.agentSessions.setBranchedFrom(newId, sourceSessionId, repairedEntryIndex);
+          if (existingRuntime) {
+            existingRuntime.branchedFromSessionId = sourceSessionId;
+            existingRuntime.branchedFromEntryIndex = repairedEntryIndex;
+          }
+        }
         return { ok: true, sessionId: newId };
       }
     }
@@ -3579,6 +3610,17 @@ export class AgentSessionManager {
     for (const row of entryRows) {
       await this.storage.agentSessions.upsertEntry(newId, row.entry_index, row.data);
     }
+
+    // Send-back pointer: lets the branch offer "send this turn's answer back
+    // to the session it came from". The entry index is the turn_end the copy
+    // ends at (cutoff, or the source's tail for legacy full copies). Written
+    // AFTER the entry copy on purpose: a crash before the copy completes makes
+    // the exact-ID replay refuse on the entry mismatch above, so the only
+    // partially-created state a replay can actually reach is "entries complete,
+    // pointer missing" — which the replay's repair branch closes.
+    const branchedFromEntryIndex = opts.upToEntryIndex
+      ?? entryRows[entryRows.length - 1]!.entry_index;
+    await this.storage.agentSessions.setBranchedFrom(newId, sourceSessionId, branchedFromEntryIndex);
 
     // "Branch - <source title>", falling back to a first-user-message snippet
     // when the source's AI title never resolved.
@@ -3629,6 +3671,8 @@ export class AgentSessionManager {
       turnOpenSince: null,
       turnDisposition: null,
       crossRemoteMcp: opts.crossRemoteMcp,
+      branchedFromSessionId: sourceSessionId,
+      branchedFromEntryIndex,
     };
     this.sessions.set(newId, branched);
 

@@ -1395,6 +1395,23 @@ export async function branchAgentSession(
   return res.json();
 }
 
+// Send a text message into an arbitrary agent session (send-back: a branch
+// posting a turn's answer into its parent). Works for local and remote-
+// prefixed ids alike — the backend /message route owns the proxying. A 404
+// means the target session no longer exists (e.g. reclaimed by retention).
+export async function sendAgentSessionMessage(sessionId: string, content: string): Promise<void> {
+  const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const detail = typeof body?.error === "string" ? ` — ${body.error}` : "";
+    throw new Error(`sendAgentSessionMessage failed: ${res.status}${detail}`);
+  }
+}
+
 // Rename (or clear) the title of an agent session
 export async function renameSession(sessionId: string, title: string | null): Promise<void> {
   const res = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/title`, {

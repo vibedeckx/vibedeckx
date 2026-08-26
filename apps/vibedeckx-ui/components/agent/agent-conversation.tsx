@@ -43,6 +43,7 @@ import {
   DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import { TurnEndDivider } from "./turn-end-divider";
+import { extractTurnAnswer } from "./turn-answer";
 import { BackgroundTasksBar } from "./background-tasks-bar";
 import { ModelPicker } from "./model-picker";
 import { cn } from "@/lib/utils";
@@ -57,7 +58,7 @@ import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useAgentTabActive } from "@/hooks/agent-tab-active-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
-import { getAgentProviders, translateText, branchAgentSession, api } from "@/lib/api";
+import { getAgentProviders, translateText, branchAgentSession, sendAgentSessionMessage, api } from "@/lib/api";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
@@ -459,6 +460,58 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     ?? (agentType === "codex" ? "Codex" : "Claude Code");
   const availableBranchProviders = providers.filter((p) => p.available);
   const alternateBranchProviders = availableBranchProviders.filter((p) => p.type !== agentType);
+
+  // ---- Send-back: post a turn's answer into the session this one was branched from ----
+  const sendBackTargetId = session?.branchedFromSessionId ?? null;
+  // Dividers at or below the branch point are copied history — sending them
+  // back would echo content the parent already has. Only turns this branch
+  // produced (entryIndex beyond the branch point) get the button. Missing
+  // index (defensive; writes always pair it with the pointer) hides none.
+  const sendBackBranchPoint = session?.branchedFromEntryIndex ?? -1;
+  // Soft resend guard, per turn_end entryIndex. Deliberately UI-state only:
+  // resending after a reload is legal, silently double-sending in one sitting
+  // is the mistake this prevents.
+  const [sentBackEntries, setSentBackEntries] = useState<Set<number>>(() => new Set());
+  const [sendingBackEntry, setSendingBackEntry] = useState<number | null>(null);
+  // Availability is fetched with the session payload; a 404 on send is the
+  // live signal that retention took the parent since — latch it so the button
+  // disables immediately instead of on the next payload refetch.
+  const [sendBackParentGone, setSendBackParentGone] = useState(false);
+  useEffect(() => {
+    setSentBackEntries(new Set());
+    setSendingBackEntry(null);
+    setSendBackParentGone(false);
+  }, [session?.id]);
+
+  // Provenance preamble so the parent's agent (and a future card renderer)
+  // knows this is a consulted opinion, not the user speaking — anchor weight
+  // should be discounted accordingly.
+  const composeSendBackContent = useCallback((dividerIndex: number): string | null => {
+    const answer = extractTurnAnswer(messages, dividerIndex);
+    if (answer === null) return null;
+    return `以下是另一个 agent（${currentAgentName}）在分支会话中给出的意见，非用户本人观点，请自行判断是否采纳：\n\n${answer}`;
+  }, [messages, currentAgentName]);
+
+  const handleSendBack = useCallback(async (entryIndex: number, content: string) => {
+    if (!sendBackTargetId || sendingBackEntry !== null) return;
+    setSendingBackEntry(entryIndex);
+    try {
+      await sendAgentSessionMessage(sendBackTargetId, content);
+      setSentBackEntries((prev) => new Set(prev).add(entryIndex));
+      toast.success("已发回源会话", {
+        action: { label: "打开", onClick: () => setSessionUrlParam?.(sendBackTargetId) },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const gone = msg.includes("404");
+      if (gone) setSendBackParentGone(true);
+      toast.error("发回源会话失败", {
+        description: gone ? "源会话已不存在" : msg,
+      });
+    } finally {
+      setSendingBackEntry(null);
+    }
+  }, [sendBackTargetId, sendingBackEntry, setSessionUrlParam]);
 
   // Last persisted turn_end — rendered with "normal" emphasis as the
   // discoverable tail affordance; earlier stop points render "subtle".
@@ -1089,6 +1142,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                         showFinalize={index === lastTurnEndIndex && reviewerRun?.status === "discussing"}
                         finalizeBusy={isFinalizing}
                         onFinalize={handleFinalize}
+                        sendBack={sendBackTargetId && (messageEntryIndices[index] ?? index) > sendBackBranchPoint ? {
+                          available: !sendBackParentGone && session?.branchedFromAvailable !== false,
+                          sent: sentBackEntries.has(messageEntryIndices[index] ?? index),
+                          busy: sendingBackEntry === (messageEntryIndices[index] ?? index),
+                          getContent: () => composeSendBackContent(index),
+                          onSend: (content) => void handleSendBack(messageEntryIndices[index] ?? index, content),
+                        } : undefined}
                       />
                     ) : (
                       <div

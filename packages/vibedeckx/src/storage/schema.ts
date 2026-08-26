@@ -152,6 +152,14 @@ export interface AgentSessionsTable {
   native_session_id: string | null;
   /** Increments whenever this session's entry-index namespace is reset. */
   history_epoch: Generated<number>;
+  /**
+   * The session this one was branched from (send-back pointer), or null for
+   * non-branch sessions and pre-feature branches. No FK: the parent may be
+   * retention-deleted, and a dangling pointer must read as "unavailable".
+   */
+  branched_from_session_id: string | null;
+  /** The turn_end entry index the branched copy ended at (cutoff or tail). */
+  branched_from_entry_index: number | null;
 }
 
 /**

@@ -94,3 +94,72 @@ describe("TurnEndDivider finalize affordance", () => {
     expect(btn.disabled).toBe(true);
   });
 });
+
+describe("TurnEndDivider send-back affordance", () => {
+  const dividerProps = {
+    durationMs: 1000,
+    emphasis: "normal" as const,
+    agentType: "claude-code" as const,
+    currentAgentName: "Claude Code",
+    alternateProviders: [],
+    onBranch: vi.fn(),
+  };
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  const sendBackBtn = () =>
+    container!.querySelector<HTMLButtonElement>('button[aria-label="发回源会话"]');
+
+  it("is absent without a sendBack control (non-branch sessions)", () => {
+    act(() => {
+      root!.render(<TurnEndDivider {...dividerProps} />);
+    });
+    expect(sendBackBtn()).toBeNull();
+  });
+
+  it("opens a confirm popover with the composed content and only sends on confirm", () => {
+    const onSend = vi.fn();
+    const getContent = vi.fn(() => "preamble\n\nanswer");
+    act(() => {
+      root!.render(<TurnEndDivider {...dividerProps} sendBack={{
+        available: true, sent: false, busy: false, getContent, onSend,
+      }} />);
+    });
+    const btn = sendBackBtn()!;
+    expect(btn.disabled).toBe(false);
+    act(() => { btn.click(); });
+    // Opening previews but does not send.
+    expect(getContent).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("preamble");
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((b) => b.textContent === "确认发回")!;
+    act(() => { confirm.click(); });
+    expect(onSend).toHaveBeenCalledWith("preamble\n\nanswer");
+  });
+
+  it("shows the no-text notice when the turn produced no answer", () => {
+    const onSend = vi.fn();
+    act(() => {
+      root!.render(<TurnEndDivider {...dividerProps} sendBack={{
+        available: true, sent: false, busy: false, getContent: () => null, onSend,
+      }} />);
+    });
+    act(() => { sendBackBtn()!.click(); });
+    expect(document.body.textContent).toContain("本轮没有可发回的文本回复");
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("disables the button when the parent session is gone", () => {
+    act(() => {
+      root!.render(<TurnEndDivider {...dividerProps} sendBack={{
+        available: false, sent: false, busy: false, getContent: () => "x", onSend: vi.fn(),
+      }} />);
+    });
+    expect(sendBackBtn()!.disabled).toBe(true);
+  });
+});

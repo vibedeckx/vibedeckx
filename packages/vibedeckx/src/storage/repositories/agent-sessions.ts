@@ -115,6 +115,8 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   favorited_at: row.favorited_at,
   native_session_id: row.native_session_id,
   history_epoch: row.history_epoch,
+  branched_from_session_id: row.branched_from_session_id,
+  branched_from_entry_index: row.branched_from_entry_index,
 });
 
 const parseActivityTimestamp = (value: string): number | null => {
@@ -752,6 +754,13 @@ export const createAgentSessionRepos = (
     // Toggle favorite without touching updated_at — favoriting is a passive
     // bookmark, not a "this session was active" signal, so it must not
     // disturb the dropdown's recency ordering.
+    setBranchedFrom: async (id, sourceSessionId, entryIndex) => {
+      await kdb.updateTable("agent_sessions")
+        .set({ branched_from_session_id: sourceSessionId, branched_from_entry_index: entryIndex })
+        .where("id", "=", id)
+        .execute();
+    },
+
     setFavorited: async (id, favorited) => {
       await kdb.updateTable("agent_sessions")
         .set({ favorited_at: favorited ? Date.now() : null })

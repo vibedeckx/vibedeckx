@@ -567,6 +567,14 @@ export interface AgentSession {
   native_session_id?: string | null;
   /** Entry-index namespace generation; changes only when history is reset. */
   history_epoch?: number;
+  /**
+   * The session this one was branched from (send-back pointer), or null.
+   * May dangle after the parent is retention-deleted — readers must treat a
+   * pointer whose target no longer resolves as "parent unavailable".
+   */
+  branched_from_session_id?: string | null;
+  /** The turn_end entry index the branched copy ended at (cutoff or tail). */
+  branched_from_entry_index?: number | null;
 }
 
 export interface SearchCatalogSessionEntry {
@@ -1051,6 +1059,11 @@ export interface Storage {
      */
     updateModel: (id: string, model: string | null) => Promise<void>;
     updateTitle: (id: string, title: string | null) => Promise<void>;
+    /**
+     * Record which session (and turn_end entry) this one was branched from.
+     * Written once at branch creation; does not touch updated_at.
+     */
+    setBranchedFrom: (id: string, sourceSessionId: string, entryIndex: number | null) => Promise<void>;
     /** Mark or unmark the session as favorited. Does not touch updated_at. */
     setFavorited: (id: string, favorited: boolean) => Promise<void>;
     /**

@@ -125,6 +125,8 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
           favorited_at INTEGER DEFAULT NULL,
           native_session_id TEXT DEFAULT NULL,
           history_epoch INTEGER NOT NULL DEFAULT 0,
+          branched_from_session_id TEXT DEFAULT NULL,
+          branched_from_entry_index INTEGER DEFAULT NULL,
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
           FOREIGN KEY (workspace_checkout_id) REFERENCES workspace_checkouts(id)
             DEFERRABLE INITIALLY DEFERRED
@@ -132,10 +134,12 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
         INSERT INTO agent_sessions_fk_new
           (id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
            title, model, created_at, updated_at, activity_at, last_user_message_at,
-           last_completed_at, favorited_at, native_session_id, history_epoch)
+           last_completed_at, favorited_at, native_session_id, history_epoch,
+           branched_from_session_id, branched_from_entry_index)
           SELECT id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
                  title, model, created_at, updated_at, activity_at, last_user_message_at,
-                 last_completed_at, favorited_at, native_session_id, history_epoch
+                 last_completed_at, favorited_at, native_session_id, history_epoch,
+                 branched_from_session_id, branched_from_entry_index
             FROM agent_sessions;
         DROP TABLE agent_sessions;
         ALTER TABLE agent_sessions_fk_new RENAME TO agent_sessions;
@@ -1059,6 +1063,16 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       coalesce(cast((julianday(updated_at) - 2440587.5) * 86400000 as integer), 0),
       coalesce(cast((julianday(created_at) - 2440587.5) * 86400000 as integer), 0)
     )`);
+  }
+
+  // Send-back pointer: which session this one was branched from and the
+  // turn_end entry the copy ended at. Deliberately no FOREIGN KEY — the parent
+  // may be reclaimed by session retention, and a dangling pointer must read as
+  // "parent unavailable", not block the delete or null itself out.
+  const sessionBranchedFromInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionBranchedFromInfo.some(col => col.name === "branched_from_session_id")) {
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN branched_from_session_id TEXT DEFAULT NULL");
+    db.exec("ALTER TABLE agent_sessions ADD COLUMN branched_from_entry_index INTEGER DEFAULT NULL");
   }
 
   // Ensure agent_sessions indexes exist. Safe to run here because either:

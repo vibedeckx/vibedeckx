@@ -45,6 +45,19 @@ export interface AgentSession {
   agentType?: AgentType;
   model?: string | null;
   processAlive?: boolean;
+  /**
+   * Session this one was branched from (already remote-prefixed for remote
+   * targets), or absent for non-branches, pre-feature branches, and remote
+   * parents the hub cannot map. Presence gates the send-back divider button.
+   */
+  branchedFromSessionId?: string | null;
+  /** False once the parent session has been reclaimed by retention. */
+  branchedFromAvailable?: boolean;
+  /**
+   * The turn_end entry index the branch copy ended at. Dividers at or below
+   * it are inherited history; only dividers beyond it get send-back.
+   */
+  branchedFromEntryIndex?: number | null;
 }
 
 // ============ JSON Patch Types (RFC 6902) ============

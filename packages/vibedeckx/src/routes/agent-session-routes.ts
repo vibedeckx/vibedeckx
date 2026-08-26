@@ -233,6 +233,46 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reader(session.id, "runtime");
   }
 
+  // Send-back fields for a locally-managed session payload. The pointer alone
+  // is not enough for the UI: the parent may have been reclaimed by session
+  // retention, so "available" is re-resolved against the running-session map
+  // (retention removes reclaimed sessions from it) on every fetch. Sessions
+  // without a pointer (non-branches, pre-feature branches) get neither field.
+  function sendBackFields(session: { branchedFromSessionId?: string | null; branchedFromEntryIndex?: number | null }): {
+    branchedFromSessionId?: string;
+    branchedFromAvailable?: boolean;
+    branchedFromEntryIndex?: number;
+  } {
+    const parentId = session.branchedFromSessionId;
+    if (!parentId) return {};
+    return {
+      branchedFromSessionId: parentId,
+      branchedFromAvailable: fastify.agentSessionManager.getSession(parentId) != null,
+      // Entry indices survive the branch copy unchanged, so this tells the UI
+      // which dividers are inherited history (≤) vs the branch's own turns (>)
+      // — send-back only makes sense on the latter.
+      ...(session.branchedFromEntryIndex != null ? { branchedFromEntryIndex: session.branchedFromEntryIndex } : {}),
+    };
+  }
+
+  // A worker reports branched_from in ITS OWN session-id namespace. Rewrite the
+  // pointer to the hub's remote- prefixed id so the UI's send-back goes through
+  // the normal /message proxy; when the hub has no mapping for the parent (or
+  // the worker predates the feature), strip both fields so the UI never sees a
+  // pointer it cannot address.
+  async function mapRemoteSendBackFields(
+    remoteServerId: string,
+    session: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const { branchedFromSessionId: workerParentId, branchedFromAvailable, branchedFromEntryIndex, ...rest } = session;
+    if (typeof workerParentId !== "string") return rest;
+    const mapping = await fastify.storage.remoteSessionMappings.getByRemote?.(remoteServerId, workerParentId);
+    if (!mapping) return rest;
+    // branchedFromEntryIndex is in the worker's entry-index namespace, which
+    // the hub streams through unchanged — no rewrite needed.
+    return { ...rest, branchedFromSessionId: mapping.local_session_id, branchedFromAvailable, branchedFromEntryIndex };
+  }
+
   // Branch a local session: verify the caller owns the source's project, copy
   // its history into a new dormant session, and return the response payload.
   // Shared by the UI route (`/api/agent-sessions/:id/branch`, which mints its
@@ -286,6 +326,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           agentType: session?.agentType || "claude-code",
           model: session?.model ?? null,
           title: dbRow?.title ?? null,
+          ...(session ? sendBackFields(session) : {}),
         },
         messages,
       },
@@ -410,6 +451,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           worktreePath: projection?.worktreePath ?? session?.checkoutPath ?? null,
           checkoutDeletedAt: projection?.checkoutDeletedAt ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
+          ...(session ? sendBackFields(session) : {}),
         },
         messages: historyWindow ? historyWindow.entries.map((entry) => entry.message) : messages,
         ...(historyWindow ? { historyWindow } : {}),
@@ -590,6 +632,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               workspaceCheckoutId: active!.workspaceCheckoutId,
               worktreePath: active!.checkoutPath,
               processAlive: fastify.agentSessionManager.getSessionProcessAlive(sessionId),
+              ...sendBackFields(active!),
             },
             messages: fastify.agentSessionManager.getMessages(sessionId),
           });
@@ -1005,7 +1048,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
           return reply.code(200).send({
             session: {
-              ...remoteData.session,
+              ...(await mapRemoteSendBackFields(agentMode, remoteData.session as Record<string, unknown>)),
               id: localSessionId,
               projectId: req.params.projectId,
             },
@@ -1059,6 +1102,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               agentType: session?.agentType || "claude-code",
               model: session?.model ?? null,
               processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
+              ...(session ? sendBackFields(session) : {}),
             },
         messages: historyWindow ? historyWindow.entries.map((entry) => entry.message) : messages,
         ...(historyWindow ? { historyWindow } : {}),
@@ -1215,7 +1259,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return reply.code(200).send({
             ...remoteData,
             session: {
-              ...remoteData.session,
+              ...(await mapRemoteSendBackFields(remoteInfo.remoteServerId, remoteData.session)),
               id: req.params.sessionId,
               projectId: registered?.workspace.project_id ?? mapping?.project_id,
               branch: registered
@@ -1272,6 +1316,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           agentType: session.agentType || "claude-code",
           model: session.model ?? null,
           processAlive: fastify.agentSessionManager.getSessionProcessAlive(session.id),
+          ...sendBackFields(session),
         },
         messages,
       });
@@ -1317,7 +1362,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(200).send({
           ...data,
           session: data.session ? {
-            ...data.session,
+            ...(await mapRemoteSendBackFields(remoteInfo.remoteServerId, data.session)),
             id: req.params.sessionId,
             projectId: projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo),
             branch: remoteInfo.branch ?? null,
@@ -1360,6 +1405,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         agentType: session.agentType,
         model: session.model,
         processAlive: fastify.agentSessionManager.getSessionProcessAlive(session.id),
+        ...sendBackFields(session),
       },
     });
   });

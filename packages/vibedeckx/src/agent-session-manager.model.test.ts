@@ -200,6 +200,7 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
       updateModel,
       upsertEntry: vi.fn(async () => undefined),
       updateTitle: vi.fn(async () => undefined),
+      setBranchedFrom: vi.fn(async () => undefined),
       listByBranch: async () => created,
       // switchAgentType's confirmation system entry goes through pushEntry →
       // persistEntry, which touches updated_at — not in the brief's harness,
