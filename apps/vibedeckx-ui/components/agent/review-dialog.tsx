@@ -294,6 +294,10 @@ export function ReviewDialog({
 
   const canReuse = Boolean(candidate?.available && candidate.sessionId);
   const reuseSelected = reviewerMode === "reuse" && canReuse;
+  // A reused reviewer necessarily carries its existing session context. Keep
+  // the row visible so switching reviewer modes does not resize the dialog,
+  // but present the only truthful value and disable both choices.
+  const displayedContextMode: ReviewContextMode = reuseSelected ? "briefed" : contextMode;
   const agentLabel = (type: AgentType | null | undefined) =>
     options.find((p) => p.type === type)?.displayName ?? type ?? "—";
   const submitDisabled = busy || candidateLoading;
@@ -365,12 +369,7 @@ export function ReviewDialog({
                 <ChoiceCard
                   selected={reuseSelected}
                   onSelect={() => setReviewerMode("reuse")}
-                  title={
-                    <>
-                      Continue last reviewer
-                      <ChoiceTag tone="rec">Recommended</ChoiceTag>
-                    </>
-                  }
+                  title="Continue last reviewer"
                   meta={
                     <>
                       <span className="truncate">{candidate?.title ?? "Review session"}</span>
@@ -456,32 +455,31 @@ export function ReviewDialog({
                 </div>
               </div>
 
-              {!reuseSelected && (
-                <div className="min-w-0 flex items-center gap-2.5">
-                  <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Context</span>
-                  <div className="min-w-0 flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
-                    {([
-                      ["briefed", "With context"],
-                      ["blind", "Blind"],
-                    ] as const).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        aria-pressed={contextMode === value}
-                        onClick={() => setContextMode(value)}
-                        className={cn(
-                          "h-full min-w-0 flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
-                          contextMode === value
-                            ? "border bg-card font-medium text-foreground shadow-sm"
-                            : "border border-transparent text-muted-foreground hover:text-foreground",
-                        )}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
+              <div className="min-w-0 flex items-center gap-2.5">
+                <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Context</span>
+                <div className="min-w-0 flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
+                  {([
+                    ["briefed", "With context"],
+                    ["blind", "Blind"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={reuseSelected}
+                      aria-pressed={displayedContextMode === value}
+                      onClick={() => setContextMode(value)}
+                      className={cn(
+                        "h-full min-w-0 flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors disabled:cursor-not-allowed",
+                        displayedContextMode === value
+                          ? "border bg-card font-medium text-foreground shadow-sm disabled:text-muted-foreground"
+                          : "border border-transparent text-muted-foreground hover:text-foreground disabled:opacity-45",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-              )}
+              </div>
             </div>
           </div>
 

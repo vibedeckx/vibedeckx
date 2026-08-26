@@ -252,7 +252,7 @@ describe("ReviewDialog review span", () => {
     );
   });
 
-  it("keeps the span selector but hides the context toggle in reuse mode", async () => {
+  it("keeps the scope and context rows stable in reuse mode", async () => {
     await renderAndOpen({
       available: true,
       sessionId: "s-rev",
@@ -264,9 +264,13 @@ describe("ReviewDialog review span", () => {
     const texts = Array.from(document.body.querySelectorAll("span"))
       .map((el) => el.textContent);
     expect(texts).toContain("Scope");
-    // a reused reviewer already carries earlier rounds' context, so
-    // briefed-vs-blind is not a real choice there
-    expect(texts).not.toContain("Context");
+    // A reused reviewer already carries earlier rounds' context. Keep the row
+    // for stable dialog height, but lock it to With context.
+    expect(texts).toContain("Context");
+    expect(button("With context").disabled).toBe(true);
+    expect(button("With context").getAttribute("aria-pressed")).toBe("true");
+    expect(button("Blind").disabled).toBe(true);
+    expect(document.body.textContent).not.toContain("Recommended");
   });
 });
 
