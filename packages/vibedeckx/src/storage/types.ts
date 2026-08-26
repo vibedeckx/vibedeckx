@@ -390,6 +390,13 @@ export interface Command {
 }
 
 export type WorkflowRunStatus =
+  /**
+   * Run and reviewer session exist, but the reviewer's first message has not
+   * been sent yet — the intent brief is still distilling in the background.
+   * The run leaves this state via activation (→ waiting_reviewer), cancel,
+   * or the engine's preparation timeout (→ failed).
+   */
+  | "preparing"
   | "waiting_reviewer"
   | "waiting_feedback"
   | "discussing"
@@ -1735,6 +1742,8 @@ export interface Storage {
       review_target: string | null;
       reviewer_session_id?: string | null;
       review_span?: ReviewSpan;
+      /** Initial status; defaults to "waiting_reviewer" (single-shot start). */
+      status?: Extract<WorkflowRunStatus, "preparing" | "waiting_reviewer">;
     }): Promise<WorkflowRun>;
     getById(id: string): Promise<WorkflowRun | undefined>;
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;

@@ -1509,7 +1509,7 @@ export interface WorkflowRun {
   review_focus: string | null;
   review_target: string | null;
   feedback_snapshot: string | null;
-  status: "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "completed" | "cancelled" | "failed";
+  status: "preparing" | "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "completed" | "cancelled" | "failed";
   error: string | null;
   created_at: string;
   updated_at: string;

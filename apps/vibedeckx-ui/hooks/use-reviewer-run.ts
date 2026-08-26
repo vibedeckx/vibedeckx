@@ -5,7 +5,7 @@ import type { WorkflowRun } from "@/lib/api";
 import type { AgentSession } from "@/hooks/use-agent-session";
 import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 
-const RUN_ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
+const RUN_ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 
 /**
  * 本 session 作为活跃 review run 的 reviewer 时的 run 状态,供终稿按钮使用。

@@ -58,7 +58,10 @@ const bareRun = {
 let app: FastifyInstance;
 afterEach(async () => { if (app) await app.close(); vi.clearAllMocks(); });
 
-function makeApp() {
+function makeApp(opts: { workerCapabilities?: string[] } = {}) {
+  // Default: a worker that predates the two-phase review routes, so existing
+  // tests exercise the single-shot fallback unchanged.
+  const workerCapabilities = opts.workerCapabilities ?? null;
   const remoteSessionMap = new Map<string, unknown>();
   remoteSessionMap.set(SRC, {
     remoteServerId: "srv1",
@@ -102,6 +105,10 @@ function makeApp() {
       }),
     },
     searchCache: { updateRemoteSessionActivity },
+    remoteServers: {
+      getById: async (id: string) =>
+        id === "srv1" ? { id: "srv1", worker_capabilities: workerCapabilities } : undefined,
+    },
     workflowRuns: { getActive: async () => [], getById: async () => undefined },
     agentSessions: { getById: async () => undefined },
   } as never);
@@ -298,6 +305,44 @@ describe("workflow-run remote proxying (front server)", () => {
     const [, method, apiPath, body] = proxyMock.mock.calls[0];
     expect([method, apiPath]).toEqual(["POST", "/api/path/workflow-runs"]);
     expect((body as { intentBrief?: string }).intentBrief).toBeUndefined();
+  });
+
+  it("POST goes two-phase when the worker reports both capabilities: prepare before the 201, distill + activate after it", async () => {
+    makeApp({ workerCapabilities: [
+      "http:POST /api/path/workflow-runs/prepare",
+      "http:POST /api/path/workflow-runs/:param/activate",
+    ] });
+    await app.register(workflowRunRoutes);
+    proxyMock.mockImplementation(async (_srv: string, _method: string, apiPath: string) => {
+      if (apiPath.endsWith("/brief-source")) return { ok: true, status: 200, data: { messages: [] } };
+      if (apiPath.endsWith("/activate")) return { ok: true, status: 200, data: { run: bareRun } };
+      return { ok: true, status: 201, data: { run: { ...bareRun, status: "preparing" } } };
+    });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC },
+    });
+    // The 201 carries the preparing run; the creation call went out flagged as
+    // phase 1 (no brief travels with it) and nothing distilled before the
+    // response — no brief-source pull yet at this point is what makes the
+    // submit fast.
+    expect(res.statusCode).toBe(201);
+    expect(res.json().run.status).toBe("preparing");
+    expect(reviewerCreateMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ phase: "prepare" }),
+    );
+    expect(reviewerCreateMock.mock.calls[0][1]).not.toHaveProperty("intentBrief", "distilled brief");
+
+    // Phase 2, after the response: distill from the projected history, then
+    // hand the brief to the worker's activate route.
+    await vi.waitFor(() => {
+      const activate = proxyMock.mock.calls.find((c) => String(c[2]).endsWith("/activate"));
+      expect(activate).toBeTruthy();
+      expect(activate![2]).toBe("/api/path/workflow-runs/run1/activate");
+      expect(activate![3]).toMatchObject({ intentBrief: "distilled brief", reviewContextMode: "briefed" });
+    });
   });
 
   it("POST /intent-brief pulls remote history over the session proxy and returns the brief", async () => {

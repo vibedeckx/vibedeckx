@@ -16,7 +16,7 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         ...opts,
         reviewer_session_id: opts.reviewer_session_id ?? null,
         review_span: opts.review_span ?? "this_turn",
-        status: "waiting_reviewer",
+        status: opts.status ?? "waiting_reviewer",
       }).execute();
       const row = await kdb
         .selectFrom("workflow_runs").selectAll().where("id", "=", opts.id)

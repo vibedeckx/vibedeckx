@@ -58,6 +58,18 @@ export interface CreateRemoteWorkflowReviewerParams {
   remoteRunId?: string;
   remoteReviewerSessionId?: string;
   localReviewerSessionId?: string;
+  /**
+   * "prepare" = phase 1 of the two-phase remote review: the worker creates
+   * the run (status `preparing`) and the placeholder reviewer session but
+   * does NOT prompt it — the hub distills the intent brief afterwards and
+   * delivers it via POST /api/path/workflow-runs/:id/activate. intentBrief
+   * and reviewContextMode are not sent in this phase (they belong to
+   * activation). Omitted = the original single-shot create, kept for old
+   * workers and for the durable-intent replay (whose single-shot call also
+   * completes a run a crashed hub left in `preparing` — the worker's
+   * startAdhocReview activates it inline).
+   */
+  phase?: "prepare";
 }
 
 export type CreateRemoteWorkflowReviewerResult =
@@ -429,23 +441,35 @@ export async function createRemoteWorkflowReviewer(
 
   let registeredLocalSessionId: string | null = null;
   try {
-    const result = await proxyToRemoteAuto(
-      params.agentMode,
-      "POST",
-      "/api/path/workflow-runs",
-      {
-        sourceSessionId: params.sourceRemoteSessionId,
-        reviewFocus: params.reviewFocus,
-        sourceTurnEndIndex: params.sourceTurnEndIndex,
-        reviewSpan: params.reviewSpan,
-        reviewContextMode: params.reviewContextMode,
-        reviewerAgentType: params.reviewerAgentType,
-        intentBrief: params.intentBrief,
-        runId: remoteRunId,
-        newReviewerSessionId: remoteReviewerSessionId,
-      },
-      { reverseConnectManager: deps.reverseConnectManager ?? undefined },
-    );
+    const sharedBody = {
+      sourceSessionId: params.sourceRemoteSessionId,
+      reviewFocus: params.reviewFocus,
+      sourceTurnEndIndex: params.sourceTurnEndIndex,
+      reviewSpan: params.reviewSpan,
+      reviewerAgentType: params.reviewerAgentType,
+      runId: remoteRunId,
+      newReviewerSessionId: remoteReviewerSessionId,
+    };
+    const proxyOpts = { reverseConnectManager: deps.reverseConnectManager ?? undefined };
+    const result = params.phase === "prepare"
+      ? await proxyToRemoteAuto(
+        params.agentMode,
+        "POST",
+        "/api/path/workflow-runs/prepare",
+        sharedBody,
+        proxyOpts,
+      )
+      : await proxyToRemoteAuto(
+        params.agentMode,
+        "POST",
+        "/api/path/workflow-runs",
+        {
+          ...sharedBody,
+          reviewContextMode: params.reviewContextMode,
+          intentBrief: params.intentBrief,
+        },
+        proxyOpts,
+      );
     if (!result.ok) {
       const uncertain = result.errorCode === "network_error" || result.errorCode === "timeout";
       await (uncertain

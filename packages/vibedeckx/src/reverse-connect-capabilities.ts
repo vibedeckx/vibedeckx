@@ -85,6 +85,12 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // --- Workflow runs ---
   // Empirically bisected via cross-version e2e: 0.2.4 → 404, 0.2.5 → serves.
   "http:POST /api/path/workflow-runs": { since: "0.2.5", summary: "创建 workflow run" },
+  // Both additive, checked as a pair (TWO_PHASE_REVIEW_CAPABILITIES in
+  // workflow-run-routes.ts): a worker missing either gets the original
+  // single-shot create — the hub distills inline and the submit blocks on it,
+  // exactly the pre-two-phase behavior.
+  "http:POST /api/path/workflow-runs/prepare": { since: "0.3.30", summary: "两段式 review:准备(占位 run + reviewer session)" },
+  "http:POST /api/path/workflow-runs/:param/activate": { since: "0.3.30", summary: "两段式 review:激活(投递 reviewer 首条消息)" },
   "http:GET /api/path/workflow-runs": { since: "0.2.5", summary: "workflow run 列表" },
   "http:GET /api/path/workflow-runs/reviewer-candidate": { since: "0.2.5", summary: "reviewer 候选查询" },
   "http:GET /api/workflow-runs/:param": { since: "0.2.5", summary: "读 workflow run" },

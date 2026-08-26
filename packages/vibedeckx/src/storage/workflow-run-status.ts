@@ -11,6 +11,7 @@ import type { WorkflowRunStatus } from "./types.js";
  * added, and the drift would show up as a silently deleted participant.
  */
 export const WORKFLOW_ACTIVE_STATUSES: readonly WorkflowRunStatus[] = [
+  "preparing",
   "waiting_reviewer",
   "waiting_feedback",
   "discussing",

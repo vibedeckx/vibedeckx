@@ -254,21 +254,23 @@ export function ReviewDialog({
       // Blind mode applies to fresh reviewers only (a reused reviewer already
       // carries earlier rounds' context; the server rejects the combination).
       const blind = contextMode === "blind" && "reviewerAgentType" in reviewer;
-      // Usually resolved by now (pre-generated on open); if not, the busy
-      // spinner covers the remaining wait. Only the prefetch that belongs to
-      // the session being submitted counts. A blind review never waits on it:
-      // the brief would be discarded server-side anyway.
+      // Only the prefetch that belongs to the session being submitted counts,
+      // and only when it already resolved (briefReady): the server distills in
+      // the background after responding, so blocking the submit on an
+      // unfinished prefetch would reintroduce the very wait the two-phase
+      // start removes. A blind review never uses it: the brief would be
+      // discarded server-side anyway.
       const prefetch = briefPrefetchRef.current;
       const usable = !blind && "reviewerAgentType" in reviewer
         && prefetch?.projectId === projectId && prefetch?.sessionId === sessionId
         ? prefetch : null;
-      const pre = usable ? await usable.result : null;
+      const pre = usable && briefReady ? await usable.result : null;
       // A present field tells the server the client already ran tier-1, so it
       // skips its own pass — "" is how a distillation that produced nothing
       // says so, instead of making the server redo two model calls that just
-      // came back empty, on the request the user is waiting on. A prefetch
-      // that never reached the server is different: nothing was distilled, so
-      // omit the field and let the server try.
+      // came back empty. An unresolved or failed prefetch is different:
+      // nothing was distilled yet, so omit the field and the server distills
+      // in the background after it responds.
       const briefFields = pre?.reached ? { intentBrief: pre.brief ?? "" } : {};
       await api.createWorkflowRun({
         projectId,
@@ -313,7 +315,7 @@ export function ReviewDialog({
         ? { Icon: Info, text: "Blind review — no conversation context is sent" }
         : briefReady
           ? { Icon: Clock, text: "Intent summary ready" }
-          : { Icon: Clock, text: "Preparing intent summary…" };
+          : { Icon: Clock, text: "Intent summary finishes in the background" };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

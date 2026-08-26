@@ -33,6 +33,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
+import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown } from "lucide-react";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
@@ -274,7 +275,21 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     projectId,
     branch,
     session?.id ?? null,
-    (id) => setSessionUrlParam?.(id),
+    (id) => {
+      // A workflow reviewer also fires session:status "running" on this
+      // workspace (when its first turn starts), but it must NOT hijack the
+      // open window — the user stays on the source session and opens the
+      // reviewer from its sidebar entry. Its run is registered in the active
+      // list at creation, well before any turn starts, so this lookup wins
+      // the race against the status event; on a fetch error surface anyway
+      // (old behavior beats a silently dropped commander session).
+      if (!projectId) return;
+      void fetchActiveWorkflowRuns(projectId, branch)
+        .then((runs) => {
+          if (!runs.some((r) => r.reviewer_session_id === id)) setSessionUrlParam?.(id);
+        })
+        .catch(() => setSessionUrlParam?.(id));
+    },
   );
 
   // Report what this window is actually showing. `session` is the RESOLVED
@@ -543,6 +558,20 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // 传整个 session:hook 只认 projectId/branch 与当前工作区一致的 session,
   // 挡掉切换那一帧里用旧 session 读新工作区的脏请求。
   const reviewerRun = useReviewerRun(projectId, branch, session, workflowRunUpdate, streamEpoch);
+  // Terminal fate of a preparing reviewer, for the placeholder view below:
+  // useReviewerRun deliberately nulls out on any terminal status (the run
+  // leaves the active set), so a preparation failure would leave a blank
+  // window with no explanation. The failed run's workflowRunUpdated frame is
+  // pushed onto this very session's stream — hold on to it while the
+  // conversation is still empty. Live-only by design: after a reload the
+  // failure is carried by the workflow_failed bell notification instead.
+  const failedReviewerRun =
+    workflowRunUpdate
+      && session
+      && workflowRunUpdate.reviewer_session_id === session.id
+      && workflowRunUpdate.status === "failed"
+      ? workflowRunUpdate
+      : null;
   const [isFinalizing, setIsFinalizing] = useState(false);
 
   const handleFinalize = useCallback(async () => {
@@ -1090,7 +1119,30 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               slow-raster machine). Trade-off: a stacking context + a persistent
               layer for the scroll contents. */}
           <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar will-change-transform">
-            {!session && messages.length === 0 ? (
+            {session && messages.length === 0 && reviewerRun?.status === "preparing" ? (
+              // This session is the placeholder reviewer of a run still
+              // distilling its intent brief (two-phase review start). The
+              // review prompt lands here as a normal message once activation
+              // delivers it; a failure flips to the failed branch below.
+              <div className="text-center py-16">
+                <Loader className="h-6 w-6 mx-auto mb-4" />
+                <h3 className="text-sm font-semibold mb-1 text-foreground">Preparing review…</h3>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Summarizing the source conversation and briefing the reviewer.
+                  The review will start here automatically — you can leave this window in the meantime.
+                </p>
+              </div>
+            ) : session && messages.length === 0 && failedReviewerRun ? (
+              <div className="text-center py-16">
+                <div className="mx-auto w-12 h-12 rounded-xl bg-destructive/10 flex items-center justify-center mb-4">
+                  <AlertCircle className="h-6 w-6 text-destructive/70" />
+                </div>
+                <h3 className="text-sm font-semibold mb-1 text-foreground">Review setup failed</h3>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {failedReviewerRun.error ?? "The reviewer could not be started."}
+                </p>
+              </div>
+            ) : !session && messages.length === 0 ? (
               <div className="text-center py-16">
                 {isLoading || (projectId && !isInitialized) ? (
                   <>

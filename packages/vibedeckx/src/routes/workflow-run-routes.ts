@@ -129,6 +129,59 @@ async function routes(fastify: FastifyInstance) {
       reverseConnectManager: fastify.reverseConnectManager,
     });
 
+  /**
+   * Worker routes the two-phase remote review needs. Checked against the
+   * handshake-reported capability list; a worker missing either falls back to
+   * the original single-shot create (distill inline, slow submit) — exactly
+   * the behavior it had before these routes existed.
+   */
+  const TWO_PHASE_REVIEW_CAPABILITIES = [
+    "http:POST /api/path/workflow-runs/prepare",
+    "http:POST /api/path/workflow-runs/:param/activate",
+  ] as const;
+
+  /**
+   * Phase 2 for a remote review, after the 201 already went out: distill the
+   * intent brief (unless the client supplied one or the review is blind) and
+   * hand it to the worker's activate route, which sends the reviewer's first
+   * message. Failure accounting lives worker-side — an activation error fails
+   * the run, and an activation that never arrives trips the worker's
+   * preparation timeout — both surfacing as a failed run + workflow_failed
+   * milestone, so the hub only retries transient tunnel errors and logs.
+   */
+  const activateRemoteReview = async (opts: {
+    remoteServerId: string;
+    bareRunId: string;
+    /** Local (`remote-`-prefixed) source session id, for distillation. */
+    sourceSessionId: string;
+    userId: string | undefined;
+    reviewContextMode: "briefed" | "blind";
+    clientBrief: string | undefined;
+    clientProvidedBrief: boolean;
+  }): Promise<void> => {
+    const blind = opts.reviewContextMode === "blind";
+    let intentBrief = opts.clientBrief;
+    if (!opts.clientProvidedBrief && !blind) {
+      intentBrief = await distillIntentBrief(opts.userId, opts.sourceSessionId);
+    }
+    const body = { intentBrief, reviewContextMode: opts.reviewContextMode };
+    for (let attempt = 1; ; attempt++) {
+      const result = await proxyAuto(
+        opts, "POST", `/api/path/workflow-runs/${opts.bareRunId}/activate`, body,
+      );
+      if (result.ok) return;
+      // status 0 = never reached the worker (tunnel blip / brief disconnect);
+      // any semantic response means the worker owns the outcome now.
+      if (result.status !== 0 || attempt >= 3) {
+        console.warn(
+          `[WorkflowRuns] remote activation failed for run ${opts.bareRunId}: status=${result.status} code=${result.errorCode ?? "n/a"}`,
+        );
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 5000));
+    }
+  };
+
   /** status 0 = never reached the worker; otherwise forward its semantic body. */
   const sendProxyFailure = (reply: FastifyReply, result: { status: number; data: unknown; errorCode?: string }) =>
     reply.code(proxyStatus(result)).send(
@@ -252,15 +305,6 @@ async function routes(fastify: FastifyInstance) {
         bareReviewerSessionId = reviewerInfo.remoteSessionId;
       }
 
-      // Tier-1 context (fresh reviews only): prefer the client's pre-generated
-      // brief; distill here only when the client didn't attempt it. Any failure
-      // degrades to the worker's deterministic excerpt (tier 2) by simply
-      // omitting the field.
-      let intentBrief = clientBrief;
-      if (!clientProvidedBrief && !bareReviewerSessionId && !blind) {
-        intentBrief = await distillIntentBrief(userId, sourceSessionId);
-      }
-
       // A reused reviewer is about to start a new turn on an already-mapped
       // session: baseline its cursor first (see prepareForNewTurn) so the
       // review we are starting can't be mistaken for that session's history.
@@ -275,14 +319,17 @@ async function routes(fastify: FastifyInstance) {
       // is not forwarded (server-derived branch, same rule as the local path).
       const reviewerActivityAt = Date.now();
       let bareRun: WorkflowRun;
+      let twoPhase = false;
       if (bareReviewerSessionId) {
+        // Re-reviews never distill (the reviewer keeps its own context), so a
+        // client-provided brief is all that can apply here.
         const result = await proxyAuto(remoteInfo, "POST", "/api/path/workflow-runs", {
           sourceSessionId: remoteInfo.remoteSessionId,
           reviewFocus,
           sourceTurnEndIndex,
           reviewSpan,
           reviewerSessionId: bareReviewerSessionId,
-          intentBrief,
+          intentBrief: clientBrief,
         });
         if (!result.ok) return sendProxyFailure(reply, result);
         bareRun = (result.data as { run: WorkflowRun }).run;
@@ -291,6 +338,19 @@ async function routes(fastify: FastifyInstance) {
           projectId, remoteInfo.remoteServerId,
         );
         if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
+        const server = await fastify.storage.remoteServers.getById(remoteInfo.remoteServerId);
+        twoPhase = TWO_PHASE_REVIEW_CAPABILITIES.every(
+          (capability) => server?.worker_capabilities?.includes(capability),
+        );
+        // Tier-1 context: with a two-phase worker the distillation moves past
+        // the response (activateRemoteReview); on the single-shot fallback it
+        // stays inline — prefer the client's pre-generated brief, distill only
+        // when the client didn't attempt it. Any failure degrades to the
+        // worker's deterministic excerpt (tier 2) by simply omitting the field.
+        let intentBrief = clientBrief;
+        if (!twoPhase && !clientProvidedBrief && !blind) {
+          intentBrief = await distillIntentBrief(userId, sourceSessionId);
+        }
         const result = await createRemoteWorkflowReviewer({
           remoteSessionMap: fastify.remoteSessionMap,
           remoteSessionMappings: fastify.storage.remoteSessionMappings,
@@ -314,6 +374,7 @@ async function routes(fastify: FastifyInstance) {
           reviewerAgentType: reviewerAgentType ?? "claude-code",
           intentBrief,
           userId,
+          ...(twoPhase ? { phase: "prepare" as const } : {}),
         });
         if (!result.ok) return reply.code(proxyStatus(result)).send(result.data);
         bareRun = result.remoteRun;
@@ -413,13 +474,20 @@ async function routes(fastify: FastifyInstance) {
             sessionId: localRun.reviewer_session_id,
             alive: true,
           });
-          fastify.eventBus.emit({
-            type: "session:status",
-            projectId,
-            branch: bareRun.branch,
-            sessionId: localRun.reviewer_session_id,
-            status: "running",
-          });
+          // session:status "running" auto-surfaces the reviewer into an open
+          // agent window (useSurfaceCommanderSession). The two-phase flow
+          // deliberately skips it: the user stays on the source session and
+          // opens the preparing reviewer from the sidebar entry the
+          // session:process emit above just produced.
+          if (!twoPhase) {
+            fastify.eventBus.emit({
+              type: "session:status",
+              projectId,
+              branch: bareRun.branch,
+              sessionId: localRun.reviewer_session_id,
+              status: "running",
+            });
+          }
         }
         // The worker's engine already wrote the final "Review - …" title
         // before responding (the session:process refetch above picks it up).
@@ -429,6 +497,20 @@ async function routes(fastify: FastifyInstance) {
         await fastify.storage.remoteSessionMappings.markTitleResolved(localRun.reviewer_session_id);
       }
       fastify.eventBus.emit({ type: "workflow:run-updated", projectId, branch: bareRun.branch, run: localRun });
+      if (twoPhase) {
+        const bareRunId = bareRun.id;
+        void activateRemoteReview({
+          remoteServerId: remoteInfo.remoteServerId,
+          bareRunId,
+          sourceSessionId,
+          userId,
+          reviewContextMode,
+          clientBrief,
+          clientProvidedBrief,
+        }).catch((err) => {
+          console.warn(`[WorkflowRuns] remote activation task failed for run ${bareRunId}:`, err);
+        });
+      }
       return reply.code(201).send({ run: localRun });
     }
     const project = await fastify.storage.projects.getById(projectId, userId);
@@ -452,11 +534,42 @@ async function routes(fastify: FastifyInstance) {
     if (branch !== undefined && (branch || null) !== runBranch) {
       return reply.code(400).send({ error: "branch does not match source session" });
     }
-    // Tier-1 context (fresh reviews only): same rule as the remote branch —
-    // prefer the client's pre-generated brief, distill only when absent.
-    let intentBrief = clientBrief;
-    if (!clientProvidedBrief && !reviewerSessionId && !blind) {
-      intentBrief = await distillIntentBrief(userId, sourceSessionId);
+    if (!reviewerSessionId) {
+      // Fresh local reviewer: two-phase. Prepare synchronously (fast — run row
+      // + placeholder session, no model calls) so the client gets the run and
+      // the sidebar entry immediately; the intent-brief distillation and the
+      // reviewer's first message happen after this response. A failure past
+      // this point becomes a failed run + workflow_failed milestone
+      // (activateAdhocReview / the engine's preparation timeout own that), so
+      // the fire-and-forget below only logs.
+      let run: WorkflowRun;
+      try {
+        run = await fastify.workflowEngine.prepareAdhocReview({
+          project: { id: project.id, path: project.path },
+          branch: runBranch,
+          sourceSessionId,
+          reviewFocus,
+          sourceTurnEndIndex,
+          reviewSpan,
+          reviewerAgentType,
+        });
+      } catch (err) {
+        const status = errStatus(err);
+        if (status) return reply.code(status).send({ error: (err as Error).message });
+        throw err;
+      }
+      void (async () => {
+        // Same rule as the remote branch: prefer the client's pre-generated
+        // brief, distill only when the client didn't attempt it.
+        let intentBrief = clientBrief;
+        if (!clientProvidedBrief && !blind) {
+          intentBrief = await distillIntentBrief(userId, sourceSessionId);
+        }
+        await fastify.workflowEngine.activateAdhocReview(run.id, { intentBrief, blind });
+      })().catch((err) => {
+        console.warn(`[WorkflowRuns] background activation failed for run ${run.id}:`, err);
+      });
+      return reply.code(201).send({ run });
     }
     try {
       const run = await fastify.workflowEngine.startAdhocReview({
@@ -466,9 +579,8 @@ async function routes(fastify: FastifyInstance) {
         reviewFocus,
         sourceTurnEndIndex,
         reviewSpan,
-        reviewerAgentType,
         reviewerSessionId,
-        intentBrief,
+        intentBrief: clientBrief,
         blind,
       });
       return reply.code(201).send({ run });
@@ -785,6 +897,101 @@ async function routes(fastify: FastifyInstance) {
       }
       const run = await flight;
       return reply.code(201).send({ run });
+    } catch (err) {
+      const status = errStatus(err);
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      throw err;
+    }
+  });
+
+  /**
+   * Phase 1 mirror for the two-phase remote review (hub distills, this worker
+   * executes): create the run — status `preparing` — and the placeholder
+   * reviewer session without prompting it. Stable identities are REQUIRED so
+   * an uncertain result can be replayed through either this route or the
+   * single-shot mirror above (whose startAdhocReview activates a prepared run
+   * inline). Fresh reviewers only: a re-review has nothing to distill, so it
+   * never has a preparing phase. Shares durableReviewFlights with the
+   * single-shot mirror — same runId means the same creation, whichever mirror
+   * a replay lands on.
+   */
+  fastify.post<{
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewSpan?: string; runId?: string; newReviewerSessionId?: string };
+  }>("/api/path/workflow-runs/prepare", async (req, reply) => {
+    const userId = requireRawAuth(req, reply);
+    if (userId === null) return;
+    const { sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
+    if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
+    const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
+    if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
+    const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
+    if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    const runId = typeof req.body?.runId === "string" ? req.body.runId.trim() : "";
+    const newReviewerSessionId = typeof req.body?.newReviewerSessionId === "string"
+      ? req.body.newReviewerSessionId.trim() : "";
+    if (!runId || !newReviewerSessionId) {
+      return reply.code(400).send({ error: "runId and newReviewerSessionId are required" });
+    }
+    const sourceSession = await fastify.storage.agentSessions.getById(sourceSessionId);
+    if (!sourceSession) return reply.code(404).send({ error: "Session not found" });
+    const sourceProjection = await projectLocalSession(sourceSession);
+    if (!sourceProjection) return reply.code(409).send({ error: "Session workspace binding is unavailable" });
+    const project = await fastify.storage.projects.getById(sourceProjection.projectId);
+    if (!project) return reply.code(404).send({ error: "Session not found" });
+    if (!project.path) return reply.code(400).send({ error: "Project has no local path" });
+    const projectPath = project.path;
+    try {
+      let flight = durableReviewFlights.get(runId);
+      if (!flight) {
+        flight = fastify.workflowEngine.prepareAdhocReview({
+          project: { id: project.id, path: projectPath },
+          branch: sourceProjection.branch,
+          sourceSessionId,
+          reviewFocus,
+          sourceTurnEndIndex,
+          reviewSpan,
+          reviewerAgentType,
+          runId,
+          newReviewerSessionId,
+        });
+        durableReviewFlights.set(runId, flight);
+        const clear = () => {
+          if (durableReviewFlights.get(runId) === flight) durableReviewFlights.delete(runId);
+        };
+        void flight.then(clear, clear);
+      }
+      const run = await flight;
+      return reply.code(201).send({ run });
+    } catch (err) {
+      const status = errStatus(err);
+      if (status) return reply.code(status).send({ error: (err as Error).message });
+      throw err;
+    }
+  });
+
+  /**
+   * Phase 2 mirror: the hub finished (or skipped) distilling and hands over
+   * the brief; the engine builds the reviewer prompt and sends the first
+   * message. Idempotent on replay — an already-activated run comes back
+   * unchanged.
+   */
+  fastify.post<{
+    Params: { id: string };
+    Body: { intentBrief?: string; reviewContextMode?: string };
+  }>("/api/path/workflow-runs/:id/activate", async (req, reply) => {
+    const userId = requireRawAuth(req, reply);
+    if (userId === null) return;
+    const reviewContextMode = parseReviewContextMode(req.body?.reviewContextMode);
+    if (reviewContextMode === null) return reply.code(400).send({ error: "reviewContextMode must be one of: briefed, blind" });
+    const blind = reviewContextMode === "blind";
+    const intentBriefRaw = req.body?.intentBrief;
+    if (intentBriefRaw !== undefined && typeof intentBriefRaw !== "string") {
+      return reply.code(400).send({ error: "intentBrief must be a string" });
+    }
+    const intentBrief = blind ? undefined : normalizeIntentBrief(intentBriefRaw);
+    try {
+      const run = await fastify.workflowEngine.activateAdhocReview(req.params.id, { intentBrief, blind });
+      return reply.send({ run });
     } catch (err) {
       const status = errStatus(err);
       if (status) return reply.code(status).send({ error: (err as Error).message });

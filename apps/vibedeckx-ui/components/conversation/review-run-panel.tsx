@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Eye, FileCheck, Loader2, Pencil, X } from "lucide-react";
 
-const ACTIVE = new Set(["waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
+const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 
 export function ReviewRunPanel({
   projectId,
@@ -100,6 +100,7 @@ export function ReviewRunPanel({
             <span className="font-medium">
               Review{run.review_focus ? ` — ${run.review_focus}` : ""}
               <span className="ml-2 text-muted-foreground">
+                {run.status === "preparing" && "准备中…"}
                 {run.status === "waiting_reviewer" && "reviewer 审查中…"}
                 {run.status === "waiting_feedback" && "等你确认反馈"}
                 {run.status === "discussing" && "讨论中"}
@@ -112,6 +113,11 @@ export function ReviewRunPanel({
             </Button>
           </div>
           {run.error && <div className="text-xs text-amber-600">{run.error}</div>}
+          {run.status === "preparing" && (
+            <div className="flex items-center text-muted-foreground text-xs">
+              <Loader2 className="h-3 w-3 mr-1 animate-spin" /> 正在蒸馏上下文并启动 reviewer
+            </div>
+          )}
           {run.status === "waiting_reviewer" && (
             <div className="flex items-center text-muted-foreground text-xs">
               <Loader2 className="h-3 w-3 mr-1 animate-spin" /> reviewer session 正在工作

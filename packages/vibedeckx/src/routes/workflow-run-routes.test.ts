@@ -12,6 +12,7 @@ const mockGenerateIntentBrief = vi.mocked(generateIntentBrief);
 
 const project = { id: "p1", name: "p", path: "/tmp/p" };
 const run = { id: "r1", project_id: "p1", branch: "dev", status: "waiting_feedback" };
+const preparingRun = { ...run, status: "preparing" };
 
 let app: FastifyInstance;
 
@@ -38,6 +39,8 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
   } as never);
   app.decorate("workflowEngine", {
     startAdhocReview: vi.fn(async () => run),
+    prepareAdhocReview: vi.fn(async () => preparingRun),
+    activateAdhocReview: vi.fn(async () => run),
     getReviewerCandidate: vi.fn(async () => ({
       available: true,
       sessionId: "s-rev",
@@ -108,20 +111,23 @@ describe("workflow-run-routes", () => {
     expect(blank.statusCode).toBe(400);
   });
 
-  it("POST distills a tier-1 brief front-side for a fresh review, but not for reviewer reuse", async () => {
-    const startAdhocReview = vi.fn(async () => run);
-    const app = makeApp({ engine: { startAdhocReview } });
+  it("POST distills a tier-1 brief in the background for a fresh review, but not for reviewer reuse", async () => {
+    const activateAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { activateAdhocReview } });
     await app.register(workflowRunRoutes);
 
     const fresh = await app.inject({
       method: "POST", url: "/api/workflow-runs",
       payload: { projectId: "p1", sourceSessionId: "s-src" },
     });
+    // The 201 carries the preparing run and must not wait on distillation —
+    // that happens after the response, feeding the activation call.
     expect(fresh.statusCode).toBe(201);
+    expect(fresh.json().run.status).toBe("preparing");
+    await vi.waitFor(() => expect(activateAdhocReview).toHaveBeenCalledWith(
+      "r1", expect.objectContaining({ intentBrief: "distilled brief" }),
+    ));
     expect(mockGenerateIntentBrief).toHaveBeenCalledTimes(1);
-    expect(startAdhocReview).toHaveBeenCalledWith(
-      expect.objectContaining({ intentBrief: "distilled brief" }),
-    );
 
     mockGenerateIntentBrief.mockClear();
     const reuse = await app.inject({
@@ -133,18 +139,18 @@ describe("workflow-run-routes", () => {
   });
 
   it("POST accepts a client pre-generated intentBrief and skips its own distillation", async () => {
-    const startAdhocReview = vi.fn(async () => run);
-    const app = makeApp({ engine: { startAdhocReview } });
+    const activateAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { activateAdhocReview } });
     await app.register(workflowRunRoutes);
     const res = await app.inject({
       method: "POST", url: "/api/workflow-runs",
       payload: { projectId: "p1", sourceSessionId: "s-src", intentBrief: "client brief" },
     });
     expect(res.statusCode).toBe(201);
+    await vi.waitFor(() => expect(activateAdhocReview).toHaveBeenCalledWith(
+      "r1", expect.objectContaining({ intentBrief: "client brief" }),
+    ));
     expect(mockGenerateIntentBrief).not.toHaveBeenCalled();
-    expect(startAdhocReview).toHaveBeenCalledWith(
-      expect.objectContaining({ intentBrief: "client brief" }),
-    );
 
     const bad = await app.inject({
       method: "POST", url: "/api/workflow-runs",
@@ -158,18 +164,18 @@ describe("workflow-run-routes", () => {
   // request the user is actively waiting on — the field's presence, not its
   // content, is what says the client already tried.
   it("POST treats an empty client intentBrief as an attempt, not as a missing one", async () => {
-    const startAdhocReview = vi.fn(async () => run);
-    const app = makeApp({ engine: { startAdhocReview } });
+    const activateAdhocReview = vi.fn(async () => run);
+    const app = makeApp({ engine: { activateAdhocReview } });
     await app.register(workflowRunRoutes);
     const res = await app.inject({
       method: "POST", url: "/api/workflow-runs",
       payload: { projectId: "p1", sourceSessionId: "s-src", intentBrief: "" },
     });
     expect(res.statusCode).toBe(201);
+    await vi.waitFor(() => expect(activateAdhocReview).toHaveBeenCalledWith(
+      "r1", expect.objectContaining({ intentBrief: undefined }),
+    ));
     expect(mockGenerateIntentBrief).not.toHaveBeenCalled();
-    expect(startAdhocReview).toHaveBeenCalledWith(
-      expect.objectContaining({ intentBrief: undefined }),
-    );
   });
 
   it("POST /intent-brief pre-generates for an authorized source and 404s foreign sessions", async () => {
@@ -234,7 +240,7 @@ describe("workflow-run-routes", () => {
 
   it("POST maps WorkflowError codes to HTTP", async () => {
     const app = makeApp({
-      engine: { startAdhocReview: vi.fn(async () => { throw new WorkflowError("session-busy", "busy"); }) },
+      engine: { prepareAdhocReview: vi.fn(async () => { throw new WorkflowError("session-busy", "busy"); }) },
     });
     await app.register(workflowRunRoutes);
     const res = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "p1", sourceSessionId: "s" } });
@@ -243,7 +249,7 @@ describe("workflow-run-routes", () => {
 
   it("POST maps source-running to 409", async () => {
     const app = makeApp({
-      engine: { startAdhocReview: vi.fn(async () => { throw new WorkflowError("source-running", "still running"); }) },
+      engine: { prepareAdhocReview: vi.fn(async () => { throw new WorkflowError("source-running", "still running"); }) },
     });
     await app.register(workflowRunRoutes);
     const res = await app.inject({ method: "POST", url: "/api/workflow-runs", payload: { projectId: "p1", sourceSessionId: "s" } });
@@ -262,21 +268,21 @@ describe("workflow-run-routes", () => {
   });
 
   it("POST derives the run branch from the source session, ignoring an absent body branch", async () => {
-    const startAdhocReview = vi.fn(async () => run);
-    const app = makeApp({ engine: { startAdhocReview } });
+    const prepareAdhocReview = vi.fn(async () => preparingRun);
+    const app = makeApp({ engine: { prepareAdhocReview } });
     await app.register(workflowRunRoutes);
     const res = await app.inject({
       method: "POST", url: "/api/workflow-runs",
       payload: { projectId: "p1", sourceSessionId: "s-src" }, // branch omitted entirely
     });
     expect(res.statusCode).toBe(201);
-    expect(startAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: "dev" }));
+    expect(prepareAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: "dev" }));
   });
 
   it("POST normalizes the session's empty-string (main workspace) branch to null and accepts a matching null body branch", async () => {
-    const startAdhocReview = vi.fn(async () => run);
+    const prepareAdhocReview = vi.fn(async () => preparingRun);
     const app = makeApp({
-      engine: { startAdhocReview },
+      engine: { prepareAdhocReview },
       sessions: { getById: async (id: string) => (id === "s-main" ? { id, project_id: "p1", branch: "" } : undefined) },
     });
     await app.register(workflowRunRoutes);
@@ -285,7 +291,7 @@ describe("workflow-run-routes", () => {
       payload: { projectId: "p1", branch: null, sourceSessionId: "s-main" },
     });
     expect(res.statusCode).toBe(201);
-    expect(startAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: null }));
+    expect(prepareAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ branch: null }));
   });
 
   it("GET lists active runs for a workspace", async () => {

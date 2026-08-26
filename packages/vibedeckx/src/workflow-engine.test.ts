@@ -552,10 +552,12 @@ describe("WorkflowEngine", () => {
     expect(run.status).toBe("waiting_reviewer");
     expect(run.reviewer_session_id).toBe("s-rev");
     expect(run.source_turn_end_index).toBe(4); // derived from entries
-    // Trailing args: no forced eviction, and the worktree snapshot taken for
-    // the scope handed over so the new session doesn't re-walk it.
+    // Trailing args: announceRunning=false (the preparing reviewer must not
+    // auto-surface into the open agent window), no forced eviction, and the
+    // worktree snapshot taken for the scope handed over so the new session
+    // doesn't re-walk it.
     expect(agentOps.createNewSession).toHaveBeenCalledWith(
-      "p1", "dev", project.path, false, "plan", "claude-code", true,
+      "p1", "dev", project.path, false, "plan", "claude-code", false,
       false, { startSnapshot: null },
     );
     const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
@@ -632,6 +634,78 @@ describe("WorkflowEngine", () => {
     });
     expect(agentOps.createNewSession).toHaveBeenCalledTimes(1);
     expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed run is pushed to the event bus and both participant streams", async () => {
+    const run = await start();
+    const busEvents: unknown[] = [];
+    bus.subscribe((e) => { if (e.type === "workflow:run-updated") busEvents.push(e); });
+    agentOps.broadcastRawToSession.mockClear();
+
+    await engine.failRunForTest(run.id, "boom");
+
+    // A failed run leaves the active set, so pull paths go blank — the
+    // reviewer window's failure view lives entirely off this pushed frame.
+    expect(busEvents).toHaveLength(1);
+    expect((busEvents[0] as { run: { status: string; error: string } }).run)
+      .toMatchObject({ status: "failed", error: "boom" });
+    const failedFrames = agentOps.broadcastRawToSession.mock.calls
+      .filter(([, frame]) => (frame as { workflowRunUpdated?: { status?: string } })
+        .workflowRunUpdated?.status === "failed");
+    expect(failedFrames.map(([sid]) => sid).sort()).toEqual(["s-rev", "s-src"]);
+    expect((failedFrames[0][1] as { workflowRunUpdated: { error: string } })
+      .workflowRunUpdated.error).toBe("boom");
+  });
+
+  it("activation keeps the run in preparing until the first message is delivered", async () => {
+    const run = await engine.prepareAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src",
+    });
+    expect(run.status).toBe("preparing");
+
+    let release!: (sent: boolean) => void;
+    agentOps.sendUserMessage.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => { release = resolve; }),
+    );
+    const activation = engine.activateAdhocReview(run.id);
+    await vi.waitFor(() => expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1));
+    // The send is in flight: a crash here must leave `preparing` — the
+    // recoverable state boot re-arms a preparation timeout for — not a
+    // prompt-less waiting_reviewer that replayed activation would skip.
+    expect((await storage.workflowRuns.getById(run.id))!.status).toBe("preparing");
+    // A concurrent activation joins the in-flight one instead of double-sending.
+    const duplicate = engine.activateAdhocReview(run.id);
+
+    release(true);
+    const [done, dupDone] = await Promise.all([activation, duplicate]);
+    expect(done.status).toBe("waiting_reviewer");
+    expect(dupDone.status).toBe("waiting_reviewer");
+    expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("boot fails a preparing run whose activation window has expired", async () => {
+    const run = await engine.prepareAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src",
+    });
+    // Age the row past PREPARE_TIMEOUT_MS, as if the process died mid-distill
+    // (or mid-send) and came back much later.
+    const raw = new Database(path.join(dir, "t.sqlite"));
+    try {
+      raw.prepare("UPDATE workflow_runs SET created_at = datetime('now', '-1 hour') WHERE id = ?")
+        .run(run.id);
+    } finally {
+      raw.close();
+    }
+
+    const engine2 = new WorkflowEngine(storage, agentOps);
+    engine2.setEventBus(bus);
+    await engine2.init();
+
+    await vi.waitFor(async () => {
+      const swept = await storage.workflowRuns.getById(run.id);
+      expect(swept?.status).toBe("failed");
+    });
+    expect((await storage.workflowRuns.getById(run.id))?.error).toMatch(/准备超时/);
   });
 
   it("does not revive a terminal preallocated workflow run", async () => {
@@ -718,7 +792,7 @@ describe("WorkflowEngine", () => {
       project, branch: "dev", sourceSessionId: "s-src", reviewerAgentType: "codex",
     });
     expect(agentOps.createNewSession).toHaveBeenCalledWith(
-      "p1", "dev", project.path, false, "plan", "codex", true,
+      "p1", "dev", project.path, false, "plan", "codex", false,
       false, { startSnapshot: null },
     );
   });
@@ -1232,7 +1306,9 @@ describe("WorkflowEngine", () => {
       const rows = await outboxRows();
       const failure = rows.filter((r) => r.kind === "workflow_failed");
       expect(failure).toHaveLength(1);
-      expect(failure[0].id).toMatch(/:failed:waiting_reviewer$/);
+      // Reviewer creation happens in the preparing phase now, so that's the
+      // state the failure is stamped with.
+      expect(failure[0].id).toMatch(/:failed:preparing$/);
       expect(failure[0].session_id).toBe("s-src");
     });
 
