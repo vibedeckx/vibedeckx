@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   api,
   type AgentProviderInfo,
@@ -17,7 +17,10 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { isMacPlatform } from "@/lib/tab-shortcuts";
 import { Clock, Info, Loader2, Lock, SearchCheck, Send, TriangleAlert, X } from "lucide-react";
+
+const noopSubscribe = () => () => {};
 
 const FALLBACK_PROVIDERS: AgentProviderInfo[] = [
   { type: "claude-code", displayName: "Claude Code", available: true },
@@ -131,6 +134,7 @@ export function ReviewDialog({
   currentAgentType?: AgentType | null;
   providers?: AgentProviderInfo[];
 }) {
+  const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
   const [open, setOpen] = useState(false);
   const [focus, setFocus] = useState("");
   const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
@@ -511,7 +515,13 @@ export function ReviewDialog({
           <DialogClose asChild>
             <Button variant="outline" size="sm" className="h-7 text-xs">Cancel</Button>
           </DialogClose>
-          <Button size="sm" className="h-7 gap-1.5 text-xs" onClick={start} disabled={submitDisabled}>
+          <Button
+            size="sm"
+            className="h-7 w-28 gap-1.5 text-xs"
+            aria-label="Start"
+            onClick={start}
+            disabled={submitDisabled}
+          >
             {busy ? (
               <>
                 <Loader2 className="size-3 animate-spin" />
@@ -520,9 +530,12 @@ export function ReviewDialog({
             ) : (
               <>
                 <Send className="size-3" />
-                Start review
-                <kbd className="rounded border border-primary-foreground/30 bg-primary-foreground/15 px-1 font-mono text-[10px] leading-[1.4] text-primary-foreground/90">
-                  ⌘⏎
+                Start
+                <kbd
+                  className="rounded border border-primary-foreground/30 bg-primary-foreground/15 px-1 font-mono text-[10px] leading-[1.4] text-primary-foreground/90"
+                  title={isMac ? "Command+Enter" : "Ctrl+Enter"}
+                >
+                  {isMac ? "⌘⏎" : "Ctrl⏎"}
                 </kbd>
               </>
             )}

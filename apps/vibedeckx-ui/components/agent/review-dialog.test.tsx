@@ -23,6 +23,7 @@ import { ReviewDialog } from "./review-dialog";
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+const realPlatform = Object.getOwnPropertyDescriptor(Navigator.prototype, "platform");
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -31,7 +32,15 @@ afterEach(() => {
   container = null;
   root = null;
   vi.clearAllMocks();
+  if (realPlatform) Object.defineProperty(Navigator.prototype, "platform", realPlatform);
 });
+
+function setPlatform(platform: string) {
+  Object.defineProperty(Navigator.prototype, "platform", {
+    get: () => platform,
+    configurable: true,
+  });
+}
 
 async function renderAndOpen(candidate: unknown) {
   getReviewerCandidate.mockResolvedValueOnce(candidate);
@@ -67,6 +76,12 @@ function button(text: string): HTMLButtonElement {
   return found as HTMLButtonElement;
 }
 
+function startButton(): HTMLButtonElement {
+  const found = document.body.querySelector('button[aria-label="Start"]');
+  if (!found) throw new Error("start button not found");
+  return found as HTMLButtonElement;
+}
+
 describe("ReviewDialog reviewer reuse", () => {
   it("defaults to the previous reviewer and submits its session id", async () => {
     await renderAndOpen({
@@ -79,7 +94,7 @@ describe("ReviewDialog reviewer reuse", () => {
 
     expect(document.body.textContent).toContain("Review - Fix login");
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -103,7 +118,7 @@ describe("ReviewDialog reviewer reuse", () => {
     });
     expect(document.body.textContent).toContain("Agent");
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -158,7 +173,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockResolvedValueOnce(null);
     await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ intentBrief: "" }));
@@ -172,7 +187,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockRejectedValueOnce(new Error("Failed to generate intent brief: 503"));
     await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
@@ -182,7 +197,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockResolvedValueOnce("the brief");
     await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ intentBrief: "the brief" }));
@@ -213,7 +228,7 @@ describe("ReviewDialog intent brief", () => {
 
     expect(generateReviewIntentBrief).toHaveBeenCalledTimes(2);
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -227,7 +242,7 @@ describe("ReviewDialog intent brief", () => {
     generateReviewIntentBrief.mockResolvedValueOnce("the brief");
     await renderAndOpen({ available: true, sessionId: "s-rev", title: "Prev", agentType: "codex", reason: null });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
@@ -244,7 +259,7 @@ describe("ReviewDialog review span", () => {
       reason: "deleted",
     });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(
@@ -280,7 +295,7 @@ describe("ReviewDialog review context", () => {
       available: false, sessionId: null, title: null, agentType: null, reason: "deleted",
     });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("reviewContextMode");
@@ -295,12 +310,28 @@ describe("ReviewDialog review context", () => {
       button("Blind").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await act(async () => {
-      button("Start review").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
       reviewContextMode: "blind",
     }));
     expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("intentBrief");
+  });
+});
+
+describe("ReviewDialog shortcut hint", () => {
+  it("shows Ctrl+Enter on Linux and Windows", async () => {
+    setPlatform("Linux x86_64");
+    await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
+    const hint = document.body.querySelector('kbd[title="Ctrl+Enter"]');
+    expect(hint?.textContent).toBe("Ctrl⏎");
+  });
+
+  it("shows Command+Enter on macOS", async () => {
+    setPlatform("MacIntel");
+    await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: "deleted" });
+    const hint = document.body.querySelector('kbd[title="Command+Enter"]');
+    expect(hint?.textContent).toBe("⌘⏎");
   });
 });
