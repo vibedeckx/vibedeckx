@@ -136,14 +136,17 @@ export function ScheduleFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] min-w-0 max-w-lg grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
+        <DialogHeader className="min-w-0">
           <DialogTitle>{initial ? "Edit Scheduled Task" : "New Scheduled Task"}</DialogTitle>
           <DialogDescription>
             Run a command or a Claude prompt on a cron schedule
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
+        <div
+          data-slot="schedule-form-body"
+          className="min-h-0 min-w-0 space-y-4 overflow-x-hidden overflow-y-auto px-0.5"
+        >
           <div className="space-y-2">
             <label className="text-sm font-medium">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily log analysis" disabled={loading} />
@@ -196,7 +199,7 @@ export function ScheduleFormDialog({
               value={content}
               onChange={(e) => setContent(e.target.value)}
               placeholder={runType === "command" ? "./scripts/scan.sh --daily" : "Analyze today's server logs under ./logs and summarize anomalies"}
-              className="font-mono text-sm min-h-[80px]"
+              className="field-sizing-fixed min-h-[80px] min-w-0 max-w-full resize-y overflow-auto font-mono text-sm"
               disabled={loading}
             />
           </div>
