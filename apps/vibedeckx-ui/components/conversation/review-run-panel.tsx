@@ -95,7 +95,7 @@ export function ReviewRunPanel({
     // scroll to it.
     <div className="shrink-0 border-b bg-muted/30 px-4 py-2 space-y-2 max-h-[50vh] overflow-y-auto">
       {activeRuns.map((run) => (
-        <div key={run.id} className="text-sm space-y-2">
+        <div key={run.id} className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
           <div className="flex items-center justify-between">
             <span className="font-medium">
               Review{run.review_focus ? ` — ${run.review_focus}` : ""}
@@ -112,20 +112,22 @@ export function ReviewRunPanel({
               <X className="h-3 w-3 mr-1" />结束
             </Button>
           </div>
-          {run.error && <div className="text-xs text-amber-600">{run.error}</div>}
+          {run.error && (
+            <div className="text-amber-600" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{run.error}</div>
+          )}
           {run.status === "preparing" && (
-            <div className="flex items-center text-muted-foreground text-xs">
+            <div className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
               <Loader2 className="h-3 w-3 mr-1 animate-spin" /> 正在蒸馏上下文并启动 reviewer
             </div>
           )}
           {run.status === "waiting_reviewer" && (
-            <div className="flex items-center text-muted-foreground text-xs">
+            <div className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
               <Loader2 className="h-3 w-3 mr-1 animate-spin" /> reviewer session 正在工作
             </div>
           )}
           {run.status === "discussing" && (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">
+              <span className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
                 与 reviewer 讨论后，生成终稿再发送
               </span>
               <Button
@@ -146,12 +148,16 @@ export function ReviewRunPanel({
                   instead of inflating the panel. */}
               {editing[run.id] ? (
                 <Textarea
-                  className="text-xs font-mono min-h-28 max-h-72"
+                  className="font-mono min-h-28 max-h-72"
+                  style={{ fontSize: "var(--conv-font-size, 12px)" }}
                   value={draft[run.id] ?? run.feedback_snapshot ?? ""}
                   onChange={(e) => setDraft((d) => ({ ...d, [run.id]: e.target.value }))}
                 />
               ) : (
-                <div className="text-xs border rounded-md bg-background px-3 py-2 max-h-72 overflow-y-auto">
+                <div
+                  className="border rounded-md bg-background px-3 py-2 max-h-72 overflow-y-auto"
+                  style={{ fontSize: "var(--conv-font-size, 12px)" }}
+                >
                   <MessageResponse>{draft[run.id] ?? run.feedback_snapshot ?? ""}</MessageResponse>
                 </div>
               )}
@@ -169,7 +175,9 @@ export function ReviewRunPanel({
               </div>
             </>
           )}
-          {actionError && <div className="text-xs text-destructive">{actionError}</div>}
+          {actionError && (
+            <div className="text-destructive" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{actionError}</div>
+          )}
         </div>
       ))}
     </div>
