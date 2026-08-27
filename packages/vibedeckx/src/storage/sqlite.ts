@@ -1797,6 +1797,12 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
+    -- getActive (panel poll, every 5s per open workspace) and
+    -- listReviewedSourceSessions (same request) both scope by project+branch
+    -- and differ only in the status filter.
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_project_branch_status
+      ON workflow_runs(project_id, branch, status);
+
     CREATE TABLE IF NOT EXISTS turn_snapshots (
       session_id TEXT NOT NULL,
       turn_end_index INTEGER NOT NULL,

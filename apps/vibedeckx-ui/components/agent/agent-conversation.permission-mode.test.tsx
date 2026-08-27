@@ -95,7 +95,7 @@ vi.mock("@/lib/api", () => ({
   ]),
   translateText: vi.fn(),
   branchAgentSession: vi.fn(),
-  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue([]) },
+  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue({ runs: [] }) },
 }));
 
 vi.mock("@/components/ui/dropdown-menu", async (importOriginal) => {

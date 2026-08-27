@@ -1750,6 +1750,18 @@ export interface Storage {
     getAllActive(): Promise<WorkflowRun[]>;
     getActiveBySession(sessionId: string): Promise<WorkflowRun | undefined>;
     getLatestCompletedBySource(sourceSessionId: string): Promise<WorkflowRun | undefined>;
+    /**
+     * Source sessions on this branch that have at least one completed review —
+     * i.e. the exact set for which `getLatestCompletedBySource` can return a
+     * row. Lets the Start Review dialog know, before it opens, whether a
+     * "continue last reviewer" choice can exist at all; the live "is that
+     * reviewer reusable right now" judgement stays in getReviewerCandidate.
+     *
+     * Branch-scoped to match getActive (and `branch is ?`, so the null branch
+     * is its own scope): the candidate check rejects a branch mismatch anyway,
+     * so a session reviewed on another branch correctly reads as absent here.
+     */
+    listReviewedSourceSessions(projectId: string, branch: string | null): Promise<string[]>;
     update(
       id: string,
       patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error">>,

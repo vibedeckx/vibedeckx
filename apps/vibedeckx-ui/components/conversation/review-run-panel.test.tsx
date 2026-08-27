@@ -13,7 +13,7 @@ const runFixture = {
 
 vi.mock("@/lib/api", () => ({
   api: {
-    getActiveWorkflowRuns: vi.fn(async () => [runFixture]),
+    getActiveWorkflowRuns: vi.fn(async () => ({ runs: [runFixture] })),
     workflowRunGate: vi.fn(async () => runFixture),
     cancelWorkflowRun: vi.fn(async () => runFixture),
   },
@@ -89,8 +89,8 @@ describe("ReviewRunPanel WS reconnect reconciliation", () => {
   it("re-reads on a streamEpoch bump and surfaces a run pushed while the socket was down", async () => {
     const waiting = { ...runFixture, status: "waiting_feedback" as const, feedback_snapshot: "verdict" };
     vi.mocked(api.getActiveWorkflowRuns)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([waiting]);
+      .mockResolvedValueOnce({ runs: [] })
+      .mockResolvedValueOnce({ runs: [waiting] });
 
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
@@ -105,7 +105,7 @@ describe("ReviewRunPanel WS reconnect reconciliation", () => {
   });
 
   it("does not re-read when nothing but an unrelated re-render happens", async () => {
-    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue([]);
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [] });
 
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
@@ -138,10 +138,10 @@ describe("ReviewRunPanel out-of-order reads", () => {
   // 之前的空快照,若允许落地就会把重连对账刚拉到的 run 再抹掉。
   it("keeps the newest read when an earlier one resolves last", async () => {
     const waiting = { ...runFixture, status: "waiting_feedback" as const };
-    let resolveMount: (runs: typeof waiting[]) => void = () => {};
+    let resolveMount: (payload: { runs: typeof waiting[] }) => void = () => {};
     vi.mocked(api.getActiveWorkflowRuns)
       .mockReturnValueOnce(new Promise((resolve) => { resolveMount = resolve; }))
-      .mockResolvedValueOnce([waiting]);
+      .mockResolvedValueOnce({ runs: [waiting] });
 
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
@@ -153,7 +153,7 @@ describe("ReviewRunPanel out-of-order reads", () => {
     expect(container.textContent).toContain("等你确认反馈");
 
     // mount 那次姗姗来迟的空快照必须被丢弃。
-    await act(async () => { resolveMount([]); });
+    await act(async () => { resolveMount({ runs: [] }); });
     expect(container.textContent).toContain("等你确认反馈");
   });
 });

@@ -17,6 +17,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { hasPriorReview, subscribeReviewedSessions } from "@/lib/workflow-runs-fetch";
 import { isMacPlatform } from "@/lib/tab-shortcuts";
 import { Clock, Info, Loader2, Lock, SearchCheck, Send, TriangleAlert, X } from "lucide-react";
 
@@ -140,10 +141,30 @@ export function ReviewDialog({
   const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
   const [reviewSpan, setReviewSpan] = useState<ReviewSpan>("this_turn");
   const [contextMode, setContextMode] = useState<ReviewContextMode>("briefed");
-  const [reviewerMode, setReviewerMode] = useState<"reuse" | "new">("new");
-  const [candidate, setCandidate] = useState<ReviewerCandidate | null>(null);
-  const [candidateLoading, setCandidateLoading] = useState(false);
-  const [candidateNotice, setCandidateNotice] = useState<string | null>(null);
+  // Selection is DERIVED (default + explicit override), never stored outright:
+  // the default depends on an answer that arrives after the first frame, and a
+  // stored default would have to be corrected by the late callback — which is
+  // both the frame-one jump and, once the user has clicked, a silent override
+  // of their choice. `null` = following the default; anything else = the user
+  // picked, and nothing may move it. Cleared on close so the next open starts
+  // from a clean first frame (resetting it on *open* would be one frame late).
+  // Tagged with the session it was made for, exactly like candidateAnswer
+  // below: the dialog supports the source session changing underneath it, and
+  // a choice made about one session must not silently govern the next.
+  const [reviewerModeOverride, setReviewerModeOverride] =
+    useState<{ key: string; mode: "reuse" | "new" } | null>(null);
+  // The live check's answer, tagged with the project+session it answers for.
+  // Tagged rather than cleared, because the effect that would clear it runs a
+  // frame *after* the props change: an untagged answer is read during that
+  // frame and renders the previous session's reviewer, or hides a card that
+  // then jumps in. Reading it through `answer` below makes staleness a
+  // render-phase fact instead of an effect's race.
+  type CandidateAnswer = {
+    key: string;
+    candidate: ReviewerCandidate | null;
+    notice: string | null;
+  };
+  const [candidateAnswer, setCandidateAnswer] = useState<CandidateAnswer | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Whether the speculative brief below has come back, so the footer can say
@@ -168,6 +189,51 @@ export function ReviewDialog({
     result: Promise<{ reached: boolean; brief: string | null }>;
   };
   const briefPrefetchRef = useRef<BriefPrefetch | null>(null);
+  // Same identity-tagged shape, for the live candidate check: a submit made
+  // before it resolves has to consume this one rather than start a second.
+  type CandidateFetch = {
+    projectId: string;
+    sessionId: string;
+    result: Promise<ReviewerCandidate | null>;
+  };
+  const candidateFetchRef = useRef<CandidateFetch | null>(null);
+
+  // Does a "continue last reviewer" choice exist at all? Rides the branch's
+  // workflow-runs poll, so it is already known before the dialog opens —
+  // including when a keyboard shortcut opens it, which is why this cannot be a
+  // hover prefetch. `undefined` = not known yet, or the remote worker predates
+  // the field; that case must behave exactly as it did before this existed.
+  //
+  // useSyncExternalStore, not a prop: the poll landing does not reliably
+  // rerender any ancestor (useReviewerRun's setRun(null) over an already-null
+  // state is bailed out by React), so a prop would sit at undefined forever.
+  const priorReview = useSyncExternalStore(
+    subscribeReviewedSessions,
+    () => hasPriorReview(projectId, branch, sessionId),
+    () => undefined,
+  );
+
+  const skipCandidateCheck = priorReview === false;
+
+  // Identity of the question the dialog is currently asking. An answer tagged
+  // with a different key is not this session's answer, so it does not count as
+  // settled and none of its details may be rendered.
+  const candidateKey = sessionId ? `${projectId}\u0000${sessionId}` : null;
+  const answer = candidateAnswer?.key === candidateKey ? candidateAnswer : null;
+  const overrideMode = reviewerModeOverride?.key === candidateKey ? reviewerModeOverride.mode : null;
+  const candidate = answer?.candidate ?? null;
+  const candidateNotice = answer?.notice ?? null;
+  // Skipping the check settles the question just as much as asking it does —
+  // but only for as long as the skip holds. Derived rather than written as an
+  // empty answer, so that the snapshot flipping false → true un-settles it on
+  // the same render: a stored `{candidate: null}` would keep reading as a
+  // checked "no" and leave New selected and submittable until the newly fired
+  // request landed, which is the option jump this change exists to remove.
+  const candidateSettled = answer !== null || skipCandidateCheck;
+  // "Loading" is exactly the absence of an answer for the key we are asking
+  // about. Derived, a session switch reads as loading on the very first frame
+  // — before the effect that starts the new request runs.
+  const candidateLoading = open && candidateKey !== null && !candidateSettled;
 
   const options = providers?.length ? providers : FALLBACK_PROVIDERS;
 
@@ -185,35 +251,70 @@ export function ReviewDialog({
   useEffect(() => {
     if (!open || !sessionId) return;
 
-    let cancelled = false;
-    setReviewerMode("new");
-    setCandidate(null);
-    setCandidateNotice(null);
-    setCandidateLoading(true);
+    // Known to have never been reviewed: there is nothing for the live check
+    // to judge, so skip the request outright. This is the common case, and
+    // skipping it is what removes both the delayed card and the window where
+    // Start sits disabled waiting for an answer of "no".
+    const key = `${projectId}\u0000${sessionId}`;
+    if (skipCandidateCheck) {
+      // Settledness is derived from the skip itself (see candidateSettled), so
+      // there is nothing to record — and nothing left behind to go stale when
+      // the snapshot later says this session has been reviewed after all.
+      candidateFetchRef.current = null;
+      return;
+    }
 
-    void api.getReviewerCandidate(projectId, sessionId)
+    let cancelled = false;
+    // Nothing to clear: an answer from a previous open cycle was dropped on
+    // close, and one from a different session never counted (see `answer`).
+    // So this open starts unsettled, the card is drawn from priorReview alone,
+    // and a submit made before the check lands takes the await path in start().
+
+    const result = api.getReviewerCandidate(projectId, sessionId);
+    candidateFetchRef.current = { projectId, sessionId, result };
+    void result
       .then((nextCandidate) => {
         if (cancelled) return;
-        setCandidate(nextCandidate);
-        if (nextCandidate?.available && nextCandidate.sessionId) {
-          setReviewerMode("reuse");
-        } else if (nextCandidate) {
-          setCandidateNotice("The last reviewer is no longer available — a new session will be created.");
-        }
+        // Deliberately does NOT touch the selection: it is derived from
+        // this state, and an explicit user choice outranks it either way.
+        const reusable = Boolean(nextCandidate?.available && nextCandidate.sessionId);
+        // A null candidate is only *news* if something had promised otherwise.
+        // A non-null one always has: it names a last reviewer, just an unusable
+        // one. A null one has only if the snapshot predicted a card — which the
+        // union can do for a run retention has since reclaimed, and demoting
+        // that card without a word is the silent disappearance this change
+        // exists to avoid. Read the snapshot live rather than from the closure:
+        // it can flip undefined → true while this request is in flight, and an
+        // unknown snapshot must not narrate a reviewer that never existed.
+        const wasPromised =
+          nextCandidate !== null || hasPriorReview(projectId, branch, sessionId) === true;
+        setCandidateAnswer({
+          key,
+          candidate: nextCandidate,
+          notice: !reusable && wasPromised
+            ? "The last reviewer is no longer available — a new session will be created."
+            : null,
+        });
       })
       .catch(() => {
-        if (!cancelled) {
-          setCandidateNotice("Could not load the last reviewer — a new session will be created.");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setCandidateLoading(false);
+        if (cancelled) return;
+        setCandidateAnswer({
+          key,
+          candidate: null,
+          notice: "Could not load the last reviewer — a new session will be created.",
+        });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [open, projectId, sessionId]);
+    // Depends on the skip decision, not on `priorReview` itself: a poll that
+    // upgrades undefined → true must not re-run this and duplicate a request
+    // that is already in flight. Only false ⇄ not-false changes what we do.
+    // `branch` is here because the response callback reads the snapshot for it;
+    // re-running on a branch change costs one idempotent GET, and in practice
+    // sessionId changes with it and would have re-run this anyway.
+  }, [open, projectId, branch, sessionId, skipCandidateCheck]);
 
   // Pre-generate the brief the moment the dialog opens, in parallel with the
   // candidate check. Distillation costs model calls measured in tens of
@@ -244,12 +345,58 @@ export function ReviewDialog({
 
   if (!sessionId) return null;
 
+  // The one way the dialog closes — the programmatic close after a successful
+  // start included, which is why start() must not call setOpen directly.
+  // Clearing on close rather than on open matters: an override surviving into
+  // the next open would be applied to its first rendered frame, before any
+  // effect could reset it.
+  const setDialogOpen = (next: boolean) => {
+    setOpen(next);
+    if (!next) {
+      setReviewerModeOverride(null);
+      // The live answer does not survive the close either. Its two negative
+      // verdicts, `running` and `busy`, are ordinary transient states, so an
+      // answer from the previous open cycle is not evidence about this one —
+      // and counting it as settled both hides a Continue card that has since
+      // become available and, worse, lets start() skip the in-flight check and
+      // submit a reviewer id we were already told is unusable.
+      setCandidateAnswer(null);
+    }
+  };
+
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
-      const reviewer = reviewerMode === "reuse" && candidate?.sessionId
-        ? { reviewerSessionId: candidate.sessionId }
+      // Reuse can be selected before the live check lands — that is what
+      // replaces the disabled button. Settle it here instead, behind the
+      // "Starting…" spinner: same wall clock, but the click is accepted
+      // immediately and only the path that actually needs the answer waits.
+      let reuseCandidate = candidate;
+      if (reviewerMode === "reuse" && !candidateSettled && candidateKey) {
+        const pending = candidateFetchRef.current;
+        reuseCandidate = pending?.projectId === projectId && pending?.sessionId === sessionId
+          ? await pending.result.catch(() => null)
+          : null;
+        setCandidateAnswer({ key: candidateKey, candidate: reuseCandidate, notice: null });
+      }
+      if (reviewerMode === "reuse" && !(reuseCandidate?.available && reuseCandidate.sessionId)) {
+        // The optimistic guess lost: the reviewer went away, started running,
+        // or was taken by another run between the last poll and now. Never
+        // silently substitute a fresh reviewer for the one they asked to
+        // continue — say so and let them press again.
+        if (candidateKey) {
+          setCandidateAnswer({
+            key: candidateKey,
+            candidate: reuseCandidate,
+            notice: "The last reviewer is no longer available — a new session will be created.",
+          });
+        }
+        setReviewerModeOverride(candidateKey ? { key: candidateKey, mode: "new" } : null);
+        return;
+      }
+      const reviewer = reviewerMode === "reuse" && reuseCandidate?.sessionId
+        ? { reviewerSessionId: reuseCandidate.sessionId }
         : { reviewerAgentType: reviewerAgent };
       // Blind mode applies to fresh reviewers only (a reused reviewer already
       // carries earlier rounds' context; the server rejects the combination).
@@ -282,16 +429,20 @@ export function ReviewDialog({
         ...reviewer,
         ...briefFields,
       });
-      setOpen(false);
+      setDialogOpen(false);
       setFocus("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       void api.getReviewerCandidate(projectId, sessionId).then((nextCandidate) => {
-        setCandidate(nextCandidate);
-        if (!nextCandidate?.available || !nextCandidate.sessionId) {
-          setReviewerMode("new");
-          setCandidateNotice("The last reviewer is no longer available — a new session will be created.");
-        }
+        const gone = !nextCandidate?.available || !nextCandidate.sessionId;
+        setCandidateAnswer({
+          key: `${projectId}\u0000${sessionId}`,
+          candidate: nextCandidate,
+          notice: gone
+            ? "The last reviewer is no longer available — a new session will be created."
+            : null,
+        });
+        if (gone) setReviewerModeOverride(candidateKey ? { key: candidateKey, mode: "new" } : null);
       }).catch(() => undefined);
     } finally {
       setBusy(false);
@@ -299,14 +450,32 @@ export function ReviewDialog({
   };
 
   const canReuse = Boolean(candidate?.available && candidate.sessionId);
-  const reuseSelected = reviewerMode === "reuse" && canReuse;
+  // Before the live check lands, `priorReview` stands in for it: a reuse card
+  // is only ever drawn when we already know one is coming, so it never
+  // promises a choice that then evaporates. Once the check settles, reality
+  // governs — including demoting an optimistic card, which is the rare case
+  // the amber notice explains.
+  const reuseAvailable = candidateSettled ? canReuse : priorReview === true;
+  // Normalized against availability, not merely defaulted by it: an override of
+  // "reuse" that outlives the card — the user picks Continue while the check is
+  // pending and it comes back unavailable — must collapse to "new" rather than
+  // leave the mode pointing at a choice that is no longer on screen. Otherwise
+  // the New card renders selected while start() still takes the reuse branch
+  // and aborts.
+  const reviewerMode = reuseAvailable ? (overrideMode ?? "reuse") : "new";
+  const reuseSelected = reviewerMode === "reuse";
   // A reused reviewer necessarily carries its existing session context. Keep
   // the row visible so switching reviewer modes does not resize the dialog,
   // but present the only truthful value and disable both choices.
   const displayedContextMode: ReviewContextMode = reuseSelected ? "briefed" : contextMode;
   const agentLabel = (type: AgentType | null | undefined) =>
     options.find((p) => p.type === type)?.displayName ?? type ?? "—";
-  const submitDisabled = busy || candidateLoading;
+  // Blocking on the candidate check is only needed when we cannot predict its
+  // answer — i.e. `undefined`, where the selection could still flip under the
+  // user between reading the dialog and pressing Start. When we do know, the
+  // card is already in its final position and a submit inside the check's
+  // window is resolved inside start(), behind the spinner.
+  const submitDisabled = busy || (candidateLoading && priorReview === undefined);
   const footNote = busy
     ? { Icon: Info, text: "Setup continues in the background" }
     : reuseSelected
@@ -318,7 +487,7 @@ export function ReviewDialog({
           : { Icon: Clock, text: "Intent summary finishes in the background" };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={setDialogOpen}>
       <DialogTrigger asChild>
         <Button variant="ghost" size="sm" title="让另一个 agent review 这个 session 的最新成果">
           <SearchCheck className="h-4 w-4" />
@@ -363,7 +532,7 @@ export function ReviewDialog({
               note={
                 candidateLoading
                   ? "Checking last reviewer…"
-                  : canReuse
+                  : reuseAvailable
                     ? "Last reviewer still available"
                     : undefined
               }
@@ -371,29 +540,37 @@ export function ReviewDialog({
               Reviewer
             </FieldLabel>
             <div className="grid gap-2" role="radiogroup" aria-label="Reviewer">
-              {canReuse && (
+              {reuseAvailable && (
                 <ChoiceCard
                   selected={reuseSelected}
-                  onSelect={() => setReviewerMode("reuse")}
+                  onSelect={() => candidateKey && setReviewerModeOverride({ key: candidateKey, mode: "reuse" })}
                   title="Continue last reviewer"
                   meta={
-                    <>
-                      <span className="truncate">{candidate?.title ?? "Review session"}</span>
-                      <span className="text-muted-foreground/60">·</span>
-                      <span>{agentLabel(candidate?.agentType)}</span>
-                      {typeof candidate?.lastActiveAt === "number" && (
-                        <>
-                          <span className="text-muted-foreground/60">·</span>
-                          <span>{formatRelativeTime(candidate.lastActiveAt)}</span>
-                        </>
-                      )}
-                    </>
+                    // Which reviewer it is only arrives with the live check.
+                    // The card's identity ("there is one to continue") is
+                    // already known, so hold the row and fill the details in
+                    // rather than materializing the whole card late.
+                    candidateSettled ? (
+                      <>
+                        <span className="truncate">{candidate?.title ?? "Review session"}</span>
+                        <span className="text-muted-foreground/60">·</span>
+                        <span>{agentLabel(candidate?.agentType)}</span>
+                        {typeof candidate?.lastActiveAt === "number" && (
+                          <>
+                            <span className="text-muted-foreground/60">·</span>
+                            <span>{formatRelativeTime(candidate.lastActiveAt)}</span>
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground/60">Loading details…</span>
+                    )
                   }
                 />
               )}
               <ChoiceCard
                 selected={!reuseSelected}
-                onSelect={() => setReviewerMode("new")}
+                onSelect={() => candidateKey && setReviewerModeOverride({ key: candidateKey, mode: "new" })}
                 title={
                   <>
                     New reviewer session
@@ -401,7 +578,9 @@ export function ReviewDialog({
                   </>
                 }
                 meta={
-                  canReuse ? "Starts fresh, without the last context" : "Independent second opinion, from zero context"
+                  reuseAvailable
+                    ? "Starts fresh, without the last context"
+                    : "Independent second opinion, from zero context"
                 }
               />
             </div>
@@ -411,7 +590,7 @@ export function ReviewDialog({
                 <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Agent</span>
                 {reuseSelected ? (
                   <span className="flex h-8 flex-1 items-center gap-2 rounded-md border bg-secondary px-2.5 text-xs text-muted-foreground">
-                    <span className="truncate">{agentLabel(candidate?.agentType)}</span>
+                    <span className="truncate">{candidateSettled ? agentLabel(candidate?.agentType) : "Loading…"}</span>
                     <span className="flex-1" />
                     <span className="font-mono text-[10px] text-muted-foreground/70">same as last reviewer</span>
                     <Lock className="size-3 shrink-0" />

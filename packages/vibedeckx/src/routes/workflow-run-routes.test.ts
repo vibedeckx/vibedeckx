@@ -34,6 +34,7 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
     workflowRuns: {
       getActive: async () => [run],
       getById: async (id: string) => (id === "r1" ? run : undefined),
+      listReviewedSourceSessions: async () => ["s-src"],
       ...(overrides.runs ?? {}),
     },
   } as never);
@@ -340,12 +341,26 @@ describe("workflow-run-routes", () => {
     });
   });
 
-  it("GET lists active runs for a workspace", async () => {
+  it("GET lists active runs for a workspace, plus the branch's reviewed sessions", async () => {
     const app = makeApp();
     await app.register(workflowRunRoutes);
     const res = await app.inject({ method: "GET", url: "/api/workflow-runs?projectId=p1&branch=dev" });
     expect(res.statusCode).toBe(200);
     expect(res.json().runs).toHaveLength(1);
+    // Rides this poll so the Start Review dialog knows whether a "continue
+    // last reviewer" choice exists before it opens.
+    expect(res.json().reviewedSessionIds).toEqual(["s-src"]);
+  });
+
+  it("GET /api/path/workflow-runs carries reviewed sessions for the worker side too", async () => {
+    const app = makeApp();
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/path/workflow-runs?path=${encodeURIComponent("/tmp/p")}&branch=dev`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().reviewedSessionIds).toEqual(["s-src"]);
   });
 
   it("gate approve calls engine and returns the run", async () => {

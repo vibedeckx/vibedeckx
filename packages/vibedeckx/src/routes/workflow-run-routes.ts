@@ -715,19 +715,35 @@ async function routes(fastify: FastifyInstance) {
           };
           const result = await proxyAuto(info, "GET", `/api/path/workflow-runs?${q}`);
           if (!result.ok) return sendProxyFailure(reply, result);
-          const bareRuns = (result.data as { runs: WorkflowRun[] }).runs ?? [];
+          const data = result.data as { runs: WorkflowRun[]; reviewedSessionIds?: string[] };
+          const bareRuns = data.runs ?? [];
           const runs = bareRuns.map((r) => {
             const mapped = mapRemoteRun(r, info.remoteServerId, projectId);
             trackRemoteRun(mapped, { ...info, bareRunId: r.id, projectId });
             return mapped;
           });
           logRead(runs.length, `remote:${info.remoteServerId}`);
-          return reply.send({ runs });
+          // Worker-namespace ids, rewritten with mapRemoteRun's prefix scheme
+          // (a pure string prefix — no mapping table needed). A worker that
+          // predates the field sends nothing: pass the absence through rather
+          // than defaulting to [], so the client can tell "no prior reviews"
+          // from "this worker cannot answer" and degrade to asking the
+          // candidate endpoint on open, as it always did.
+          const prefix = `remote-${info.remoteServerId}-${projectId}-`;
+          return reply.send({
+            runs,
+            ...(data.reviewedSessionIds
+              ? { reviewedSessionIds: data.reviewedSessionIds.map((id) => prefix + id) }
+              : {}),
+          });
         }
       }
-      const runs = await fastify.storage.workflowRuns.getActive(projectId, branch ?? null);
+      const [runs, reviewedSessionIds] = await Promise.all([
+        fastify.storage.workflowRuns.getActive(projectId, branch ?? null),
+        fastify.storage.workflowRuns.listReviewedSourceSessions(projectId, branch ?? null),
+      ]);
       logRead(runs.length, "local");
-      return reply.send({ runs });
+      return reply.send({ runs, reviewedSessionIds });
     });
 
   fastify.get<{ Params: { id: string } }>("/api/workflow-runs/:id", async (req, reply) => {
@@ -1027,9 +1043,12 @@ async function routes(fastify: FastifyInstance) {
     const project =
       (await fastify.storage.projects.getByPath(projectPath)) ??
       (await fastify.storage.projects.getById(`path:${projectPath}`));
-    if (!project) return reply.send({ runs: [] });
-    const runs = await fastify.storage.workflowRuns.getActive(project.id, branch || null);
-    return reply.send({ runs });
+    if (!project) return reply.send({ runs: [], reviewedSessionIds: [] });
+    const [runs, reviewedSessionIds] = await Promise.all([
+      fastify.storage.workflowRuns.getActive(project.id, branch || null),
+      fastify.storage.workflowRuns.listReviewedSourceSessions(project.id, branch || null),
+    ]);
+    return reply.send({ runs, reviewedSessionIds });
   });
 }
 

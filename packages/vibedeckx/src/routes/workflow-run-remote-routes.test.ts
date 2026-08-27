@@ -541,6 +541,10 @@ describe("workflow-run remote proxying (front server)", () => {
     const list = await app.inject({ method: "GET", url: "/api/workflow-runs?projectId=p1&branch=dev" });
     expect(list.statusCode).toBe(200);
     expect(list.json().runs[0].id).toBe("remote-srv1-p1-run1");
+    // This worker predates reviewedSessionIds. The absence must survive as an
+    // absence — an empty array would read as "nothing was ever reviewed" and
+    // permanently hide the Continue last reviewer choice.
+    expect("reviewedSessionIds" in list.json()).toBe(false);
     const listPath = proxyMock.mock.calls[0][2] as string;
     expect(listPath).toContain("/api/path/workflow-runs?");
     expect(listPath).toContain("branch=dev");
@@ -554,6 +558,25 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(gate.json().run.status).toBe("completed");
     expect(proxyMock.mock.calls[1][2]).toBe("/api/workflow-runs/run1/gate");
     expect(proxyMock.mock.calls[1][3]).toMatchObject({ action: "approve", editedPayload: "edited" });
+  });
+
+  it("GET list rewrites the worker's reviewed session ids into this server's namespace", async () => {
+    makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      data: { runs: [], reviewedSessionIds: ["src1", "src2"] },
+    });
+    const list = await app.inject({ method: "GET", url: "/api/workflow-runs?projectId=p1&branch=dev" });
+
+    expect(list.statusCode).toBe(200);
+    // Same pure-string prefix mapRemoteRun uses for run ids — the dialog
+    // compares these against the prefixed session id it already holds.
+    expect(list.json().reviewedSessionIds).toEqual([
+      "remote-srv1-p1-src1",
+      "remote-srv1-p1-src2",
+    ]);
   });
 
   it("gate forwards a finalize action to the worker verbatim", async () => {

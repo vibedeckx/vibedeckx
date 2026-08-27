@@ -54,6 +54,51 @@ describe("workflowRuns repository", () => {
     expect(await storage.workflowRuns.getActive("p1", "dev")).toEqual([]);
   });
 
+  describe("listReviewedSourceSessions", () => {
+    const completed = async (id: string, patch: Record<string, unknown>) => {
+      await storage.workflowRuns.create({ ...baseRun, id, ...patch });
+      await storage.workflowRuns.update(id, { reviewer_session_id: `rev-${id}`, status: "completed" });
+    };
+
+    it("returns each source session once, however many reviews it had", async () => {
+      await completed("r1", {});
+      await completed("r2", {});
+      expect(await storage.workflowRuns.listReviewedSourceSessions("p1", "dev")).toEqual(["s-src"]);
+    });
+
+    it("excludes runs that are unfinished, or finished without a reviewer", async () => {
+      await storage.workflowRuns.create({ ...baseRun, id: "r1", source_session_id: "s-active" });
+      // completed but never got a reviewer — nothing to continue
+      await storage.workflowRuns.create({ ...baseRun, id: "r2", source_session_id: "s-orphan" });
+      await storage.workflowRuns.update("r2", { status: "completed" });
+      await completed("r3", { source_session_id: "s-done" });
+
+      expect(await storage.workflowRuns.listReviewedSourceSessions("p1", "dev")).toEqual(["s-done"]);
+    });
+
+    // `branch is ?`, matching getActive: the null branch is its own scope, not
+    // a wildcard. The candidate check rejects a branch mismatch anyway, so a
+    // session reviewed elsewhere must read as absent here.
+    it("scopes by branch, with null as a scope of its own", async () => {
+      await completed("r1", { branch: null, source_session_id: "s-null" });
+      await completed("r2", { branch: "dev", source_session_id: "s-dev" });
+
+      expect(await storage.workflowRuns.listReviewedSourceSessions("p1", null)).toEqual(["s-null"]);
+      expect(await storage.workflowRuns.listReviewedSourceSessions("p1", "dev")).toEqual(["s-dev"]);
+    });
+
+    it("agrees with getLatestCompletedBySource on exactly which sessions qualify", async () => {
+      await completed("r1", { source_session_id: "s-done" });
+      await storage.workflowRuns.create({ ...baseRun, id: "r2", source_session_id: "s-active" });
+
+      const listed = await storage.workflowRuns.listReviewedSourceSessions("p1", "dev");
+      for (const id of ["s-done", "s-active", "s-never"]) {
+        const latest = await storage.workflowRuns.getLatestCompletedBySource(id);
+        expect(listed.includes(id)).toBe(latest !== undefined);
+      }
+    });
+  });
+
   it("getActiveBySession matches source and reviewer ids", async () => {
     await storage.workflowRuns.create(baseRun);
     await storage.workflowRuns.update("r1", { reviewer_session_id: "s-rev" });

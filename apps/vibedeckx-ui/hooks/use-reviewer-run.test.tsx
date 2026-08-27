@@ -74,9 +74,9 @@ describe("useReviewerRun", () => {
   });
 
   it("frame-wins: a later WS frame is not overwritten by a slow, stale REST response", async () => {
-    let resolveRest: (v: WorkflowRun[]) => void;
+    let resolveRest: (v: { runs: WorkflowRun[] }) => void;
     getActiveWorkflowRuns.mockReturnValue(
-      new Promise<WorkflowRun[]>((r) => { resolveRest = r; }),
+      new Promise<{ runs: WorkflowRun[] }>((r) => { resolveRest = r; }),
     );
 
     await act(async () => {
@@ -93,7 +93,7 @@ describe("useReviewerRun", () => {
 
     // The slow REST GET now resolves with pre-transition (stale) data.
     await act(async () => {
-      resolveRest(Array.of(makeRun({ status: "waiting_feedback" })));
+      resolveRest({ runs: Array.of(makeRun({ status: "waiting_feedback" })) });
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -103,9 +103,9 @@ describe("useReviewerRun", () => {
   });
 
   it("seed lands when no frame has arrived yet", async () => {
-    let resolveRest: (v: WorkflowRun[]) => void;
+    let resolveRest: (v: { runs: WorkflowRun[] }) => void;
     getActiveWorkflowRuns.mockReturnValue(
-      new Promise<WorkflowRun[]>((r) => { resolveRest = r; }),
+      new Promise<{ runs: WorkflowRun[] }>((r) => { resolveRest = r; }),
     );
 
     await act(async () => {
@@ -114,7 +114,7 @@ describe("useReviewerRun", () => {
     expect(container.textContent).toBe("none");
 
     await act(async () => {
-      resolveRest(Array.of(makeRun({ status: "waiting_feedback" })));
+      resolveRest({ runs: Array.of(makeRun({ status: "waiting_feedback" })) });
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -130,7 +130,7 @@ describe("useReviewerRun", () => {
     // bumps streamEpoch, which must re-read the authoritative REST state.
     // Not mockResolvedValueOnce: an unconsumed once-value would survive
     // clearAllMocks and leak into the next test if the re-seed regressed away.
-    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ status: "waiting_feedback" })));
+    getActiveWorkflowRuns.mockResolvedValue({ runs: Array.of(makeRun({ status: "waiting_feedback" })) });
 
     await act(async () => {
       root.render(<Probe runUpdate={null} streamEpoch={0} />);
@@ -138,7 +138,7 @@ describe("useReviewerRun", () => {
     expect(container.textContent).toBe("waiting_feedback");
 
     // Server moved the run to `discussing` while nobody was subscribed.
-    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ status: "discussing" })));
+    getActiveWorkflowRuns.mockResolvedValue({ runs: Array.of(makeRun({ status: "discussing" })) });
 
     await act(async () => {
       root.render(<Probe runUpdate={null} streamEpoch={1} />);
@@ -154,7 +154,7 @@ describe("useReviewerRun", () => {
     // seed effect only re-runs on projectId/branch/sessionId/streamEpoch
     // changes, none of which happen across these rerenders, so it can't race
     // the frames.
-    getActiveWorkflowRuns.mockReturnValue(new Promise<WorkflowRun[]>(() => {}));
+    getActiveWorkflowRuns.mockReturnValue(new Promise<never>(() => {}));
 
     await act(async () => {
       root.render(<Probe runUpdate={null} />);
@@ -177,7 +177,7 @@ describe("useReviewerRun", () => {
     // for one commit the hook still sees the OLD workspace's session while
     // projectId/branch already point at the new one. That read is pure waste
     // (its sessionId can never match a run in the new workspace).
-    getActiveWorkflowRuns.mockResolvedValue([]);
+    getActiveWorkflowRuns.mockResolvedValue({ runs: [] });
 
     await act(async () => {
       root.render(<Probe runUpdate={null} projectId="p2" branch="dev7"
@@ -193,7 +193,7 @@ describe("useReviewerRun", () => {
     expect(getActiveWorkflowRuns).not.toHaveBeenCalled();
 
     // The matching session lands next frame → exactly one seed.
-    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ project_id: "p2", branch: "dev7", reviewer_session_id: "s-new" })));
+    getActiveWorkflowRuns.mockResolvedValue({ runs: Array.of(makeRun({ project_id: "p2", branch: "dev7", reviewer_session_id: "s-new" })) });
     await act(async () => {
       root.render(<Probe runUpdate={null} projectId="p2" branch="dev7"
         session={{ id: "s-new", projectId: "p2", branch: "dev7" }} />);
@@ -206,11 +206,11 @@ describe("useReviewerRun", () => {
   it("an epoch bump forces a fresh read even while an older one is in flight", async () => {
     // The pre-Ready read may predate the transition; sharing it would defeat
     // the reconciliation the epoch exists for.
-    let resolveFirst: (v: WorkflowRun[]) => void;
+    let resolveFirst: (v: { runs: WorkflowRun[] }) => void;
     getActiveWorkflowRuns.mockReturnValueOnce(
-      new Promise<WorkflowRun[]>((r) => { resolveFirst = r; }),
+      new Promise<{ runs: WorkflowRun[] }>((r) => { resolveFirst = r; }),
     );
-    getActiveWorkflowRuns.mockResolvedValue(Array.of(makeRun({ status: "discussing" })));
+    getActiveWorkflowRuns.mockResolvedValue({ runs: Array.of(makeRun({ status: "discussing" })) });
 
     await act(async () => {
       root.render(<Probe runUpdate={null} streamEpoch={0} />);
@@ -225,7 +225,7 @@ describe("useReviewerRun", () => {
 
     // The superseded first read resolving late is ignored (its effect was cleaned up).
     await act(async () => {
-      resolveFirst!(Array.of(makeRun({ status: "waiting_feedback" })));
+      resolveFirst!({ runs: Array.of(makeRun({ status: "waiting_feedback" })) });
       await Promise.resolve();
       await Promise.resolve();
     });

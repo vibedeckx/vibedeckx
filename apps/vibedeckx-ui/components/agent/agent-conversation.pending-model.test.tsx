@@ -120,7 +120,7 @@ vi.mock("@/lib/api", () => ({
   branchAgentSession: vi.fn(),
   // Only reached once a session exists: the reviewer-run hook polls for the
   // session's workflow runs on mount. Nothing here reads the result.
-  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue([]) },
+  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue({ runs: [] }) },
 }));
 
 // Radix's DropdownMenu opens on pointerdown and portals its content; jsdom has

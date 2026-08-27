@@ -3125,12 +3125,24 @@ export const api = {
     return (await res.json()).candidate;
   },
 
-  async getActiveWorkflowRuns(projectId: string, branch: string | null): Promise<WorkflowRun[]> {
+  /**
+   * `reviewedSessionIds` — source sessions on this branch that already have a
+   * completed review. Absent (not empty) when a remote worker predates the
+   * field; callers must keep the two apart. See lib/workflow-runs-fetch.ts.
+   */
+  async getActiveWorkflowRuns(
+    projectId: string,
+    branch: string | null,
+  ): Promise<{ runs: WorkflowRun[]; reviewedSessionIds?: string[] }> {
     const params = new URLSearchParams({ projectId });
     if (branch) params.set("branch", branch);
     const res = await authFetch(`${getApiBase()}/api/workflow-runs?${params}`);
     if (!res.ok) throw new Error(`Failed to fetch workflow runs: ${res.status}`);
-    return (await res.json()).runs;
+    const data = await res.json();
+    return {
+      runs: data.runs ?? [],
+      ...(Array.isArray(data.reviewedSessionIds) ? { reviewedSessionIds: data.reviewedSessionIds } : {}),
+    };
   },
 
   async workflowRunGate(runId: string, action: "approve" | "cancel" | "finalize", editedPayload?: string): Promise<WorkflowRun> {
