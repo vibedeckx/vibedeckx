@@ -12,7 +12,7 @@ import type { Project, ExecutionMode } from '@/lib/api';
 import { FileNavigationProvider } from '@/components/agent/file-navigation-context';
 import { matchTabShortcut, isMacPlatform, tabShortcutHint, TAB_SHORTCUTS, type TabShortcutTarget } from '@/lib/tab-shortcuts';
 import { useFileRefIndex } from '@/hooks/use-file-ref-index';
-import { AgentTabActiveProvider } from '@/hooks/agent-tab-active-context';
+import { AgentTabFocusProvider } from '@/hooks/agent-tab-focus-context';
 import { useFocusRegion } from '@/components/locate/focus-region';
 
 interface RightPanelProps {
@@ -116,6 +116,18 @@ export function RightPanel({
     setActiveTab('diff');
   }, [diffCompareNonce, setActiveTab]);
 
+  // Asking for the Agent tab is an event, not a state: `displayTab === 'agent'`
+  // is already true when you press the shortcut from the sidebar or after
+  // clicking into the transcript, so the composer's activation effect would
+  // never re-run. Bumping this on every explicit request (shortcut or tab
+  // click) gives it something to fire on. Deliberately NOT bumped by
+  // activateAgentTabNonce: when that arrives from another tab it already flips
+  // `active` and focuses (a tab switch to Agent, same as any other), but when
+  // Agent is already open it's a sidebar/cross-project jump landing on a new
+  // session — grabbing focus there would feel like a steal.
+  const [agentFocusNonce, setAgentFocusNonce] = useState(0);
+  const requestAgentFocus = useCallback(() => setAgentFocusNonce((n) => n + 1), []);
+
   // Keyboard focus region: pointerdown/focusin inside the panel claims it
   // (via the data-focus-region attribute below), an idle Esc releases it.
   // While claimed, type-to-locate targets this panel's tab instead of the
@@ -137,10 +149,11 @@ export function RightPanel({
       event.preventDefault();
       setActiveTab(tab);
       setRegion('right-panel');
+      if (tab === 'agent') requestAgentFocus();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [active, setActiveTab, setRegion]);
+  }, [active, setActiveTab, setRegion, requestAgentFocus]);
 
   // The server snapshot (static-export prerender, no `navigator`) is false;
   // useSyncExternalStore re-reads on the client so hydration stays clean.
@@ -164,6 +177,20 @@ export function RightPanel({
 
   const navValue = useMemo(() => ({ openFile, index }), [openFile, index]);
 
+  const agentTabFocus = useMemo(
+    () => ({
+      // Gated on projectId too: page.tsx keeps this panel mounted but
+      // display:none until a project resolves (its `needsProject`), and passes
+      // projectId=null over exactly that window. Without the gate the flag
+      // would turn true during the cold-load render, focus would no-op against
+      // a display:none textarea, and nothing would fire again once the project
+      // landed.
+      active: active && projectId !== null && displayTab === 'agent',
+      requestNonce: agentFocusNonce,
+    }),
+    [active, projectId, displayTab, agentFocusNonce],
+  );
+
   return (
     <FileNavigationProvider value={navValue}>
     <div data-focus-region="right-panel" className="h-full flex flex-col">
@@ -172,7 +199,10 @@ export function RightPanel({
         {TABS.map(({ id, icon: Icon, label, code }) => (
           <Fragment key={id}>
             <button
-              onClick={() => setActiveTab(id)}
+              onClick={() => {
+                setActiveTab(id);
+                if (id === 'agent') requestAgentFocus();
+              }}
               title={`${label} (${tabShortcutHint(isMac, code)})`}
               className={cn(
                 'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
@@ -208,16 +238,10 @@ export function RightPanel({
           {/* visibility:hidden also blurs the composer on the way out, so the
               agent panel needs to be told when it comes back — same contract as
               the terminal's `active` prop below, delivered by context because
-              agentSlot is created in page.tsx but rendered here.
-              Gated on projectId too: page.tsx keeps this panel mounted but
-              display:none until a project resolves (its `needsProject`), and
-              passes projectId=null over exactly that window. Without the gate
-              the flag would turn true during the cold-load render, focus would
-              no-op against a display:none textarea, and nothing would fire
-              again once the project landed. */}
-          <AgentTabActiveProvider value={active && projectId !== null && displayTab === 'agent'}>
+              agentSlot is created in page.tsx but rendered here. */}
+          <AgentTabFocusProvider value={agentTabFocus}>
             {agentSlot}
-          </AgentTabActiveProvider>
+          </AgentTabFocusProvider>
         </div>
         <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'executors' && 'hidden')}>
           <ExecutorPanel

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, useEffect, useRef, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RightPanel } from "./right-panel";
-import { useAgentTabActive } from "@/hooks/agent-tab-active-context";
+import { useAgentTabFocus } from "@/hooks/agent-tab-focus-context";
 import { FocusRegionProvider } from "@/components/locate/focus-region";
 
 vi.mock("@/hooks/use-file-ref-index", () => ({
@@ -95,12 +95,12 @@ function mountPanel(active = true, agentSlot?: ReactNode, projectId: string | nu
 // Stands in for AgentConversation's composer: same focus-on-activation effect
 // shape, so this covers the context wiring the real component depends on.
 function ComposerProbe() {
-  const agentTabActive = useAgentTabActive();
+  const { active: agentTabActive, requestNonce } = useAgentTabFocus();
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (!agentTabActive) return;
     ref.current?.focus({ preventScroll: true });
-  }, [agentTabActive]);
+  }, [agentTabActive, requestNonce]);
   return <textarea ref={ref} data-slot="composer" />;
 }
 
@@ -250,6 +250,40 @@ describe("RightPanel", () => {
       setPlatform("Win32");
       mountPanel(false, <ComposerProbe />);
 
+      expect(document.activeElement).not.toBe(composer());
+    });
+
+    it("takes focus back when the tab is already open (shortcut and tab click)", () => {
+      setPlatform("Win32");
+      mountPanel(true, <ComposerProbe />);
+
+      // Focus wandered off — clicking the transcript, or the sidebar workspace
+      // list — while the Agent tab stayed open. `active` never flips here, so
+      // only the request nonce can bring the caret back.
+      act(() => (composer() as HTMLTextAreaElement).blur());
+      pressKey({ code: "KeyA", ctrlKey: true, altKey: true });
+      expect(document.activeElement).toBe(composer());
+
+      act(() => (composer() as HTMLTextAreaElement).blur());
+      const agentTab = Array.from(container!.querySelectorAll("button")).find(
+        (button) => button.textContent === "Agent",
+      );
+      act(() => {
+        agentTab!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(document.activeElement).toBe(composer());
+    });
+
+    it("does not refocus on an external session selection while already on the tab", () => {
+      setPlatform("Win32");
+      mountPanel(true, <ComposerProbe />);
+
+      // activateAgentTabNonce bumps arrive during sidebar/cross-project jumps.
+      // From another tab they're an ordinary switch to Agent and do focus (the
+      // "does not steal focus back while another tab is showing" case above);
+      // with the tab already open, focus must stay where the user put it.
+      act(() => (composer() as HTMLTextAreaElement).blur());
+      renderPanel(1, true, <ComposerProbe />);
       expect(document.activeElement).not.toBe(composer());
     });
 

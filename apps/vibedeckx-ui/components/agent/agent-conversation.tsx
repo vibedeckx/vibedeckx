@@ -56,7 +56,7 @@ import { useReviewerRun } from "@/hooks/use-reviewer-run";
 import { useWorkspaceDraft } from "@/hooks/use-workspace-draft";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
-import { useAgentTabActive } from "@/hooks/agent-tab-active-context";
+import { useAgentTabFocus } from "@/hooks/agent-tab-focus-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
 import { getAgentProviders, translateText, branchAgentSession, sendAgentSessionMessage, api } from "@/lib/api";
@@ -601,16 +601,18 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
 
   // Land the cursor in the composer whenever the Agent tab comes on screen, so
   // ⌃⇧A lets you type immediately — the same deal the Terminal tab gives its
-  // shell. Only fires on an explicit switch to the tab (shortcut, tab click,
-  // activateAgentTabNonce, or first paint with Agent as the persisted tab);
-  // session changes while already on the tab deliberately don't refocus, since
-  // those also happen during sidebar/cross-project jumps where grabbing focus
-  // would feel like a steal.
-  const agentTabActive = useAgentTabActive();
+  // shell. Fires on an explicit switch to the tab (activateAgentTabNonce or
+  // first paint with Agent as the persisted tab) and on every explicit request
+  // for it (shortcut, tab click) — the latter via requestNonce, because those
+  // can happen while the tab is already open and `active` alone wouldn't
+  // change. Session changes while already on the tab deliberately don't
+  // refocus, since those also happen during sidebar/cross-project jumps where
+  // grabbing focus would feel like a steal.
+  const { active: agentTabActive, requestNonce: agentTabFocusNonce } = useAgentTabFocus();
   useEffect(() => {
     if (!agentTabActive) return;
     focusComposer();
-  }, [agentTabActive, focusComposer]);
+  }, [agentTabActive, agentTabFocusNonce, focusComposer]);
 
   const handleQuote = useCallback((text: string) => {
     setInput(appendQuote(input, text));
