@@ -8,6 +8,9 @@ import { ProjectGlyph } from "@/components/project/project-glyph";
 import { WorkspaceDirtyDot, WorkspaceMergeBadge } from "./workspace-merge-badge";
 import { WorkspaceRowMenu } from "./workspace-row-menu";
 import { RootWorkspaceMenu } from "./root-workspace-menu";
+import { useLocateScope, useLocateEngagement } from "@/components/locate/locate-context";
+import { LocateMatchText } from "@/components/locate/locate-highlight";
+import { useFocusRegion } from "@/components/locate/focus-region";
 
 import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
@@ -229,6 +232,42 @@ export function AppSidebar({
   const selectedProjectRef = useRef<HTMLButtonElement | null>(null);
   const selectedScheduleRef = useRef<HTMLButtonElement | null>(null);
 
+  // Type-to-locate over the workspace list, enabled only while the default
+  // region holds the keyboard. When the right panel is focused, typing
+  // belongs to that tab's own scope — or to nothing if the tab has none
+  // (Diff, Files…); falling back to workspaces there would be surprising.
+  // Esc releases the region and typing locates workspaces again.
+  const { region } = useFocusRegion();
+  const workspaceLocate = useLocateEngagement("workspaces");
+  useLocateScope(
+    {
+      id: "workspaces",
+      label: "Workspaces",
+      priority: 0,
+      getItems: () =>
+        (worktrees ?? []).map((wt) => ({
+          id: wt.branch ?? "__main__",
+          text: wt.branch ?? wt.expectedBranch ?? "main",
+        })),
+      onCommit: (item) => {
+        const wt = (worktrees ?? []).find((w) => (w.branch ?? "__main__") === item.id);
+        if (!wt) return;
+        onBranchChange?.(wt.branch);
+        onViewChange("workspace");
+      },
+    },
+    Boolean(currentProject && worktrees && worktrees.length > 0 && region === "default"),
+  );
+
+  // Keep the locate candidate visible while ↑↓ cycles through matches.
+  const locateSelectedId = workspaceLocate?.selectedId ?? null;
+  useEffect(() => {
+    if (locateSelectedId === null) return;
+    document
+      .querySelector(`[data-locate-id="${CSS.escape(locateSelectedId)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [locateSelectedId]);
+
   // Keep the current project visible in the scrollable projects list
   useEffect(() => {
     selectedProjectRef.current?.scrollIntoView({ block: "nearest" });
@@ -242,7 +281,10 @@ export function AppSidebar({
   }, [selectedScheduleId, activeView, schedules]);
 
   return (
-    <nav className="w-[220px] border-r border-border bg-sidebar flex flex-col overflow-hidden">
+    <nav
+      data-focus-region="default"
+      className="w-[220px] border-r border-border bg-sidebar flex flex-col overflow-hidden"
+    >
       {/* Projects Section */}
       <SidebarSection>
         <SectionLabel
@@ -401,10 +443,24 @@ export function AppSidebar({
                   const branchLabel = wt.branch ?? wt.expectedBranch ?? "main";
                   const liveSessions = residentSessions?.get(branchKey) ?? [];
                   const dotStatus = workspaceDotStatus(workspaceStatuses?.get(branchKey), liveSessions.length > 0);
+                  const locateId = wt.branch ?? "__main__";
+                  const isLocateMatch = workspaceLocate?.matchSet.has(locateId) ?? false;
+                  const isLocateSelected = workspaceLocate?.selectedId === locateId;
                   return (
                     <div
                       key={wt.branch ?? "__main__"}
-                      className={cn("min-w-0 rounded-[3px]", isActive && "bg-accent")}
+                      data-locate-id={locateId}
+                      className={cn(
+                        "min-w-0 rounded-[3px]",
+                        isActive && "bg-accent",
+                        // Locate feedback: non-matches recede, matches get the
+                        // hover tint + a bold label (bold alone is invisible at
+                        // this size), the ↑↓ candidate gets the same accent bg
+                        // a selected workspace would.
+                        workspaceLocate && !isLocateMatch && "opacity-40",
+                        workspaceLocate && isLocateMatch && !isLocateSelected && "bg-muted",
+                        isLocateSelected && "bg-accent",
+                      )}
                     >
                       <div className="group relative flex items-center min-w-0 gap-0.5 pr-1">
                         <Tooltip>
@@ -421,8 +477,12 @@ export function AppSidebar({
                               )}
                             >
                               <StatusDot status={dotStatus} />
-                              <span className="truncate text-left">
-                                {branchLabel}
+                              <span className={cn("truncate text-left", isLocateMatch && "text-foreground")}>
+                                {workspaceLocate && isLocateMatch ? (
+                                  <LocateMatchText text={branchLabel} query={workspaceLocate.query} />
+                                ) : (
+                                  branchLabel
+                                )}
                                 {hasBranchDrift && (
                                   <span className="text-amber-600 dark:text-amber-400">
                                     {" → "}{currentBranchLabel}

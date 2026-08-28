@@ -32,12 +32,17 @@ import { useExecutorProcessLogs } from "@/hooks/executor-logs-context";
 import type { ExecutorWithProcess } from "@/hooks/use-executors";
 import type { ExecutorType, PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { LocateMatchText } from "@/components/locate/locate-highlight";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 interface ExecutorItemProps {
   executor: ExecutorWithProcess;
   executorMode?: string;
+  /** Active type-to-locate query, null when no query is engaged on this list. */
+  locateQuery?: string | null;
+  locateMatch?: boolean;
+  locateSelected?: boolean;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onStart: () => Promise<string | null>;
@@ -50,6 +55,9 @@ interface ExecutorItemProps {
 export function ExecutorItem({
   executor,
   executorMode,
+  locateQuery = null,
+  locateMatch = false,
+  locateSelected = false,
   isOpen,
   onOpenChange,
   onStart,
@@ -163,7 +171,17 @@ export function ExecutorItem({
         <div
           ref={setNodeRef}
           style={style}
-          className={cn("border rounded-lg", isDragging && "shadow-lg bg-background")}
+          data-locate-id={executor.id}
+          className={cn(
+            "border rounded-lg",
+            isDragging && "shadow-lg bg-background",
+            // Locate feedback (same language as the sidebar workspace list):
+            // non-matches recede, matches get a tint + bold name, the ↑↓
+            // candidate tints the card's existing border too.
+            locateQuery !== null && !locateMatch && "opacity-40",
+            locateQuery !== null && locateMatch && "bg-muted/50",
+            locateSelected && "border-primary/60",
+          )}
         >
           <CollapsibleTrigger asChild>
             <div className="group flex items-center justify-between p-3 cursor-pointer hover:bg-muted/50">
@@ -183,7 +201,11 @@ export function ExecutorItem({
                   <ChevronRight className="h-4 w-4" />
                 )}
                 <span className={cn("font-medium", isDisabled && "text-muted-foreground line-through")}>
-                  {executor.name}
+                  {locateQuery !== null && locateMatch ? (
+                    <LocateMatchText text={executor.name} query={locateQuery} />
+                  ) : (
+                    executor.name
+                  )}
                 </span>
                 {isDisabled ? (
                   <Badge variant="outline" className="text-muted-foreground border-muted-foreground/40 gap-1">
@@ -216,11 +238,14 @@ export function ExecutorItem({
                     Last run: {lastRunLabel}
                   </span>
                 )}
+                {/* data-locate-action: type-to-locate's Enter clicks whichever
+                    of these is showing (executor-panel.tsx onCommit). */}
                 {isRunning ? (
                   <Button
                     size="sm"
                     variant="destructive"
                     onClick={handleStop}
+                    data-locate-action
                     className="w-20 border border-destructive"
                   >
                     <Square className="h-3 w-3 mr-1" />
@@ -232,6 +257,7 @@ export function ExecutorItem({
                     onClick={handleStart}
                     disabled={isDisabled}
                     title={isDisabled ? "Executor is disabled" : undefined}
+                    data-locate-action
                     className="w-20"
                   >
                     <Play className="h-3 w-3 mr-1" />

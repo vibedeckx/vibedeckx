@@ -50,6 +50,34 @@ export function fuzzyScore(query: string, target: string): number | null {
   return score;
 }
 
+// The target indices `fuzzyScore` would match, for marking matched characters
+// in a result. Mirrors the same greedy left-to-right traversal so the marked
+// characters are exactly the ones that scored.
+export function fuzzyMatchIndices(query: string, target: string): number[] | null {
+  const q = query.toLowerCase().replace(/\s+/g, "");
+  if (!q) return null;
+
+  const t = target.toLowerCase();
+  const indices: number[] = [];
+  let ti = 0;
+
+  for (let qi = 0; qi < q.length; qi++) {
+    const qc = q[qi];
+    let found = -1;
+    for (; ti < t.length; ti++) {
+      if (t[ti] === qc) {
+        found = ti;
+        break;
+      }
+    }
+    if (found === -1) return null;
+    indices.push(found);
+    ti = found + 1;
+  }
+
+  return indices;
+}
+
 export interface FuzzyResult {
   path: string;
   score: number;

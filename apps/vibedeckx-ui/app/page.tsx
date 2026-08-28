@@ -47,6 +47,8 @@ import { useCompletionNotifications } from '@/hooks/use-completion-notifications
 import { useResidentSessions, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
 import { CompletionNotificationsMenu } from '@/components/layout/completion-notifications-menu';
 import { KeyboardShortcutsOverlay } from '@/components/layout/keyboard-shortcuts-overlay';
+import { FocusRegionProvider } from '@/components/locate/focus-region';
+import { LocateProvider } from '@/components/locate/locate-context';
 import { ConnectionStatusIndicator } from '@/components/layout/connection-status-indicator';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
@@ -851,9 +853,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
   const needsProject = !currentProject;
 
   return (
+    <FocusRegionProvider>
+    <LocateProvider>
     <div className="h-screen flex flex-col w-full">
         {/* Header with Project Selector */}
-        <div className="border-b border-border bg-card px-3 h-[44px] flex items-center justify-between sticky top-0 z-10">
+        <div data-focus-region="default" className="border-b border-border bg-card px-3 h-[44px] flex items-center justify-between sticky top-0 z-10">
           <div className="flex items-center gap-[9px]">
             <Logo size={22} />
             <h1 className="text-[13px] font-semibold tracking-tight text-foreground">
@@ -1009,7 +1013,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             <ResizablePanelGroup direction="horizontal" autoSaveId="workspace-panels">
               {/* Left Panel: Project Card + Main Chat */}
               <ResizablePanel defaultSize={33} minSize={25}>
-                <div className="h-full flex flex-col overflow-hidden">
+                <div data-focus-region="default" className="h-full flex flex-col overflow-hidden">
                   {currentProject && (
                     <div className="px-4 py-3 border-b border-border/60 flex-shrink-0">
                       <WorkspaceTabs
@@ -1228,5 +1232,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
           onNavigateSession={handleSwitcherSession}
         />
       </div>
+    </LocateProvider>
+    </FocusRegionProvider>
   );
 }

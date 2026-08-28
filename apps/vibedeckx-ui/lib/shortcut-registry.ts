@@ -29,15 +29,20 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
         { hints: [meta(isMac, 'J')], description: 'Notifications' },
         { hints: [meta(isMac, 'B')], description: 'Toggle sidebar' },
         { hints: [metaShift(isMac, 'O')], description: 'New agent conversation' },
+        { hints: ['a…z'], description: 'Locate workspace (type, ↑↓ cycle, ↵ jump)' },
+        { hints: ['Esc'], description: 'Clear locate query / unfocus right panel' },
         { hints: ['?', meta(isMac, '/')], description: 'This dialog' },
       ],
     },
     {
       title: 'Workspace tabs',
-      entries: TAB_SHORTCUTS.map((t) => ({
-        hints: [tabShortcutHint(isMac, t.code)],
-        description: `Open ${t.label}`,
-      })),
+      entries: [
+        ...TAB_SHORTCUTS.map((t) => ({
+          hints: [tabShortcutHint(isMac, t.code)],
+          description: `Open ${t.label}`,
+        })),
+        { hints: ['←', '→'], description: 'Switch executor target (Executors focused)' },
+      ],
     },
   ];
 }

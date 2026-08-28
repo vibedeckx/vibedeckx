@@ -13,6 +13,7 @@ import { FileNavigationProvider } from '@/components/agent/file-navigation-conte
 import { matchTabShortcut, isMacPlatform, tabShortcutHint, TAB_SHORTCUTS, type TabShortcutTarget } from '@/lib/tab-shortcuts';
 import { useFileRefIndex } from '@/hooks/use-file-ref-index';
 import { AgentTabActiveProvider } from '@/hooks/agent-tab-active-context';
+import { useFocusRegion } from '@/components/locate/focus-region';
 
 interface RightPanelProps {
   projectId: string | null;
@@ -115,10 +116,19 @@ export function RightPanel({
     setActiveTab('diff');
   }, [diffCompareNonce, setActiveTab]);
 
+  // Keyboard focus region: pointerdown/focusin inside the panel claims it
+  // (via the data-focus-region attribute below), an idle Esc releases it.
+  // While claimed, type-to-locate targets this panel's tab instead of the
+  // sidebar workspace list, and the active tab's underline keeps its accent
+  // color — the "typing lands here" signal.
+  const { region, setRegion } = useFocusRegion();
+  const regionFocused = region === 'right-panel';
+
   // Tab shortcuts (see lib/tab-shortcuts.ts). Deliberately active even while
   // an input/textarea is focused — the modifier pairs don't produce text, and
   // jumping to a tab mid-typing is the point. The panel stays mounted on
-  // other views, so `active` gates the listener.
+  // other views, so `active` gates the listener. Jumping to a tab by shortcut
+  // also claims the focus region — it's the keyboard way in, mirroring Esc out.
   useEffect(() => {
     if (!active) return;
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -126,10 +136,11 @@ export function RightPanel({
       if (!tab) return;
       event.preventDefault();
       setActiveTab(tab);
+      setRegion('right-panel');
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [active, setActiveTab]);
+  }, [active, setActiveTab, setRegion]);
 
   // The server snapshot (static-export prerender, no `navigator`) is false;
   // useSyncExternalStore re-reads on the client so hydration stays clean.
@@ -155,7 +166,7 @@ export function RightPanel({
 
   return (
     <FileNavigationProvider value={navValue}>
-    <div className="h-full flex flex-col">
+    <div data-focus-region="right-panel" className="h-full flex flex-col">
       {/* Tab Bar */}
       <div className="flex items-center px-3 gap-4 border-b border-border">
         {TABS.map(({ id, icon: Icon, label, code }) => (
@@ -165,8 +176,11 @@ export function RightPanel({
               title={`${label} (${tabShortcutHint(isMac, code)})`}
               className={cn(
                 'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
+                // Two-level selection: which tab is open (always visible) vs
+                // whether the panel holds the keyboard focus region — the
+                // accent underline is reserved for the latter.
                 displayTab === id
-                  ? 'text-foreground border-primary'
+                  ? cn('text-foreground', regionFocused ? 'border-primary' : 'border-foreground/25')
                   : 'text-muted-foreground border-transparent hover:text-foreground/70'
               )}
             >
@@ -211,6 +225,7 @@ export function RightPanel({
             selectedBranch={selectedBranch}
             project={project}
             onExecutorModeChange={onExecutorModeChange}
+            locateActive={active && displayTab === 'executors'}
           />
         </div>
         <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'diff' && 'hidden')}>

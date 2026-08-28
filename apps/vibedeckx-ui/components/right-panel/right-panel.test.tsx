@@ -4,6 +4,7 @@ import { act, useEffect, useRef, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { RightPanel } from "./right-panel";
 import { useAgentTabActive } from "@/hooks/agent-tab-active-context";
+import { FocusRegionProvider } from "@/components/locate/focus-region";
 
 vi.mock("@/hooks/use-file-ref-index", () => ({
   useFileRefIndex: () => null,
@@ -65,16 +66,24 @@ function renderPanel(
 ) {
   act(() => {
     root!.render(
-      <RightPanel
-        projectId={projectId}
-        selectedBranch="dev"
-        activateAgentTabNonce={activateAgentTabNonce}
-        agentSlot={agentSlot}
-        active={active}
-      />,
+      <FocusRegionProvider>
+        <RightPanel
+          projectId={projectId}
+          selectedBranch="dev"
+          activateAgentTabNonce={activateAgentTabNonce}
+          agentSlot={agentSlot}
+          active={active}
+        />
+      </FocusRegionProvider>,
     );
   });
 }
+
+// The open tab's underline is two-level: accent (border-primary) while the
+// right panel holds the keyboard focus region, dim (border-foreground/25)
+// otherwise. "Which tab is open" matches either.
+const isOpenTabClass = (cls: string) =>
+  cls.includes("border-primary") || cls.includes("border-foreground/25");
 
 function mountPanel(active = true, agentSlot?: ReactNode, projectId: string | null = "project-1") {
   container = document.createElement("div");
@@ -123,14 +132,14 @@ describe("RightPanel", () => {
     const agentTab = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent === "Agent",
     );
-    expect(agentTab?.className).toContain("border-primary");
+    expect(isOpenTabClass(agentTab?.className ?? "")).toBe(true);
     expect(localStorage.getItem("vibedeckx:activeTab:project-1:dev")).toBe("agent");
   });
 
   describe("tab keyboard shortcuts", () => {
     function activeTabLabel() {
       return Array.from(container!.querySelectorAll("button")).find((button) =>
-        button.className.includes("border-primary"),
+        isOpenTabClass(button.className),
       )?.textContent;
     }
 
@@ -172,6 +181,45 @@ describe("RightPanel", () => {
       pressKey({ code: "KeyE", ctrlKey: true, altKey: true });
       renderPanel(0, true);
       expect(activeTabLabel()).toBe("Agent");
+    });
+  });
+
+  describe("focus region underline", () => {
+    function agentTab() {
+      return Array.from(container!.querySelectorAll("button")).find(
+        (button) => button.textContent === "Agent",
+      )!;
+    }
+
+    it("reserves the accent underline for the focused region and dims on Esc release", () => {
+      setPlatform("Win32");
+      mountPanel();
+
+      // Open but unfocused: dim underline.
+      expect(agentTab().className).toContain("border-foreground/25");
+      expect(agentTab().className).not.toContain("border-primary");
+
+      // pointerdown inside the panel claims the region → accent.
+      act(() => {
+        agentTab().dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      });
+      expect(agentTab().className).toContain("border-primary");
+
+      // An idle Esc releases the region → dim again.
+      pressKey({ key: "Escape" });
+      expect(agentTab().className).toContain("border-foreground/25");
+      expect(agentTab().className).not.toContain("border-primary");
+    });
+
+    it("claims the region via tab shortcuts", () => {
+      setPlatform("Win32");
+      mountPanel();
+
+      pressKey({ code: "KeyD", ctrlKey: true, altKey: true });
+      const diffTab = Array.from(container!.querySelectorAll("button")).find(
+        (button) => button.textContent === "Diff",
+      );
+      expect(diffTab?.className).toContain("border-primary");
     });
   });
 

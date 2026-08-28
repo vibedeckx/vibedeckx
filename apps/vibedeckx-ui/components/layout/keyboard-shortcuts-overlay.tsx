@@ -11,18 +11,9 @@ import {
 } from "@/components/ui/dialog";
 import { isMacPlatform } from "@/lib/tab-shortcuts";
 import { shortcutGroups } from "@/lib/shortcut-registry";
+import { isEditableTarget } from "@/lib/editable-target";
 
 const noopSubscribe = () => () => {};
-
-// `?` must still type a question mark wherever text entry is possible.
-// (A focused xterm never lets the key bubble this far, so terminals need no
-// check here.)
-const isEditableTarget = (target: EventTarget | null) =>
-  target instanceof HTMLElement &&
-  (target.tagName === "INPUT" ||
-    target.tagName === "TEXTAREA" ||
-    target.tagName === "SELECT" ||
-    target.isContentEditable);
 
 // GitHub-style keyboard shortcut reference: `?` toggles it (outside inputs),
 // ⌘/ (Ctrl+/) toggles it from anywhere, Esc closes via the Dialog. Content
