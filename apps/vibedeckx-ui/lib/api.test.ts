@@ -490,3 +490,37 @@ describe("setMergeTarget", () => {
     global.fetch = originalFetch;
   });
 });
+
+describe("cancelWorkflowRun", () => {
+  it("resolves null on 404 — ending an already-finished run is a no-op", async () => {
+    // The panel is workspace-scoped and 5s-polled, so a second view (or a
+    // second click) routinely fires cancel at a run that just ended. Throwing
+    // painted "Failed to cancel run: 404" over a review that was already over.
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as Response);
+
+    await expect(api.cancelWorkflowRun("r1")).resolves.toBeNull();
+
+    global.fetch = originalFetch;
+  });
+
+  it("still throws on other failures", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 } as Response);
+
+    await expect(api.cancelWorkflowRun("r1")).rejects.toThrow("Failed to cancel run: 500");
+
+    global.fetch = originalFetch;
+  });
+
+  it("returns the cancelled run on success", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ run: { id: "r1", status: "cancelled" } }),
+    } as unknown as Response);
+
+    await expect(api.cancelWorkflowRun("r1")).resolves.toMatchObject({ status: "cancelled" });
+
+    global.fetch = originalFetch;
+  });
+});

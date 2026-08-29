@@ -116,6 +116,42 @@ export function mapRemoteRun<
   };
 }
 
+const UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+const REMOTE_RUN_ID_RE = new RegExp(`^remote-(${UUID_PATTERN})-(${UUID_PATTERN})-(${UUID_PATTERN})$`);
+
+/**
+ * Inverse of mapRemoteRun's id scheme — recover `{serverId, projectId, runId}`
+ * from a prefixed run id so a front can address a remote run it has no
+ * in-memory handle for (evicted after the run went terminal, or lost across a
+ * restart).
+ *
+ * All three segments are anchored to the UUID shape, for two reasons:
+ *
+ * 1. It is the only unambiguous split — the id is dash-joined and dashes are
+ *    legal inside each part.
+ * 2. `bareRunId` is interpolated straight into a worker URL by the proxy call
+ *    sites, and this id arrives as a route parameter, which Fastify decodes:
+ *    a tail of `…-x%2F..%2Fpath%2Ffile-content%3Fpath=%2Fetc` would decode to
+ *    `x/../path/file-content?path=/etc`, and the worker's `inject()` collapses
+ *    the dot segments — turning read-a-run into an arbitrary authenticated GET
+ *    against the worker's `/api/path/*` surface. A shape check here is what
+ *    keeps that string from being a URL.
+ *
+ * Every id in play really is a UUID: the front mints project and
+ * remote_server ids with `randomUUID()`, and the worker mints run ids the same
+ * way. Anything else returns null and the caller keeps its old behavior (the
+ * in-memory handle, else 404). The parse carries no authority on its own — the
+ * caller must still check that the user owns the project and that the project
+ * is bound to that worker.
+ */
+export function parseRemoteRunId(
+  runId: string,
+): { remoteServerId: string; projectId: string; bareRunId: string } | null {
+  const match = REMOTE_RUN_ID_RE.exec(runId);
+  if (!match) return null;
+  return { remoteServerId: match[1]!, projectId: match[2]!, bareRunId: match[3]! };
+}
+
 export function mapRemoteReviewerCandidate(
   candidate: ReviewerCandidate | null,
   remoteServerId: string,

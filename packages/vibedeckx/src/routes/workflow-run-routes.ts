@@ -7,7 +7,7 @@ import { generateIntentBrief } from "../utils/review-brief.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import type { AgentMessage } from "../agent-types.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun } from "./remote-status-bridge.js";
+import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun, parseRemoteRunId } from "./remote-status-bridge.js";
 import { bindRemoteSessionMapping, createRemoteWorkflowReviewer, ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
 import type { AgentType } from "../agent-types.js";
@@ -193,12 +193,29 @@ async function routes(fastify: FastifyInstance) {
    * remoteRunMap.get — always re-check project ownership with the raw
    * requireAuth result (undefined in solo mode is fine), same rule as
    * getAuthorizedRemoteSessionInfo for remote sessions.
+   *
+   * The map alone is not enough to *find* a run, only to shortcut finding it:
+   * it holds what this front has seen since boot and evicts terminal runs (see
+   * trackRemoteRun). Without the parse fallback, cancelling a run that just
+   * finished — the panel is workspace-scoped and 5s-polled, so a second view
+   * (or a second click) routinely races the transition — answered 404 "Run not
+   * found" for a run the worker knows perfectly well, and the user saw an
+   * error for what is a no-op. The id is self-describing, so derive the handle
+   * from it and let the worker stay the authority on existence.
    */
   const resolveRemoteRun = async (runId: string, userId: string | undefined) => {
-    const info = remoteRunMap.get(runId);
+    const tracked = remoteRunMap.get(runId);
+    const info = tracked ?? parseRemoteRunId(runId);
     if (!info) return null;
     const project = await fastify.storage.projects.getById(info.projectId, userId);
     if (!project) return null;
+    // A parsed handle is caller-supplied: prove the project really is bound to
+    // that worker before proxying anything there. A tracked handle was built
+    // from a response this front had already authorized.
+    if (!tracked
+      && !(await fastify.storage.projectRemotes.getByProjectAndServer(info.projectId, info.remoteServerId))) {
+      return null;
+    }
     return info;
   };
 

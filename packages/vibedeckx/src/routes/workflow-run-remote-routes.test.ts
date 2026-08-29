@@ -47,6 +47,13 @@ vi.mock("../utils/review-brief.js", () => ({
 import workflowRunRoutes from "./workflow-run-routes.js";
 
 const SRC = "remote-srv1-p1-src1";
+// Production-shaped ids, for the tests that exercise resolveRemoteRun's parse
+// fallback — it only splits `remote-{serverId}-{projectId}-{runId}` when both
+// leading segments are UUIDs, which is the only unambiguous read of the id.
+const UUID_SERVER = "5a967959-f5b4-4f9f-bab7-22f1997e69ef";
+const UUID_PROJECT = "82192b68-707f-4882-bafe-b24c1bb97f0f";
+const UUID_RUN = "cc7037f0-12a0-4d15-b99a-dfbd54ac596a";
+const UUID_RUN_ID = `remote-${UUID_SERVER}-${UUID_PROJECT}-${UUID_RUN}`;
 const bareRun = {
   id: "run1", project_id: "wp1", branch: "dev",
   source_session_id: "src1", source_turn_end_index: 4,
@@ -58,10 +65,14 @@ const bareRun = {
 let app: FastifyInstance;
 afterEach(async () => { if (app) await app.close(); vi.clearAllMocks(); });
 
-function makeApp(opts: { workerCapabilities?: string[] } = {}) {
+function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serverId?: string } = {}) {
   // Default: a worker that predates the two-phase review routes, so existing
   // tests exercise the single-shot fallback unchanged.
   const workerCapabilities = opts.workerCapabilities ?? null;
+  // Short ids keep the other tests readable; the run-id parse fallback only
+  // fires on the real UUID shape, so those tests override these.
+  const PROJECT = opts.projectId ?? "p1";
+  const SERVER = opts.serverId ?? "srv1";
   const remoteSessionMap = new Map<string, unknown>();
   remoteSessionMap.set(SRC, {
     remoteServerId: "srv1",
@@ -79,14 +90,16 @@ function makeApp(opts: { workerCapabilities?: string[] } = {}) {
   const extendWatch = vi.fn(async () => undefined);
   const syncServer = vi.fn(async () => undefined);
   const enqueue = vi.fn((work: () => Promise<void>) => { void work(); });
-  app = Fastify();
+  // maxParamLength mirrors createServer's: a real `remote-…` id is ~117 chars
+  // and find-my-way's default of 100 would 404 it before any handler runs.
+  app = Fastify({ maxParamLength: 500 });
   app.decorate("authEnabled", false);
   app.decorate("storage", {
-    projects: { getById: async (id: string) => (id === "p1" ? { id: "p1", name: "p", path: null, agent_mode: "srv1" } : undefined) },
+    projects: { getById: async (id: string) => (id === PROJECT ? { id: PROJECT, name: "p", path: null, agent_mode: SERVER } : undefined) },
     projectRemotes: {
       getByProjectAndServer: async (pid: string, sid: string) =>
-        pid === "p1" && sid === "srv1"
-          ? { remote_path: "/w/repo", remote_server_id: "srv1" }
+        pid === PROJECT && sid === SERVER
+          ? { remote_path: "/w/repo", remote_server_id: SERVER }
           : undefined,
     },
     remoteSessionMappings: {
@@ -107,7 +120,7 @@ function makeApp(opts: { workerCapabilities?: string[] } = {}) {
     searchCache: { updateRemoteSessionActivity },
     remoteServers: {
       getById: async (id: string) =>
-        id === "srv1" ? { id: "srv1", worker_capabilities: workerCapabilities } : undefined,
+        id === SERVER ? { id: SERVER, worker_capabilities: workerCapabilities } : undefined,
     },
     workflowRuns: { getActive: async () => [], getById: async () => undefined },
     agentSessions: { getById: async () => undefined },
@@ -605,5 +618,62 @@ describe("workflow-run remote proxying (front server)", () => {
       payload: { action: "approve" },
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  // Handles are evicted the moment a run goes terminal, and lost outright on a
+  // front restart. Ending an already-finished review — a second click, or a
+  // second workspace view whose 5s poll hasn't landed — must reach the worker
+  // and come back as the no-op it is, not as "Failed to cancel run: 404".
+  it("cancel reaches the worker for a run it has no handle for", async () => {
+    const { emit } = makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER });
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({
+      ok: true, status: 200,
+      data: { run: { ...bareRun, id: UUID_RUN, status: "cancelled" } },
+    });
+
+    const res = await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/cancel` });
+
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().run.id).toBe(UUID_RUN_ID);
+    expect(res.json().run.status).toBe("cancelled");
+    expect(proxyMock.mock.calls[0][2]).toBe(`/api/workflow-runs/${UUID_RUN}/cancel`);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated" }));
+  });
+
+  // The bare id is interpolated into the worker URL, and Fastify decodes route
+  // params — so an encoded slash would smuggle dot segments the worker's
+  // inject() then collapses, reaching any `/api/path/*` route with a
+  // caller-chosen query. The shape check is what keeps the tail from being a
+  // URL; these ids must never resolve, let alone proxy.
+  it.each([
+    ["encoded traversal", "x/../../path/file-content?path=/etc"],
+    ["query smuggling", `${UUID_RUN}?path=/etc`],
+    ["non-uuid tail", "run1"],
+  ])("cancel 404s a run id with a %s tail, without proxying", async (_label, tail) => {
+    makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER });
+    await app.register(workflowRunRoutes);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/workflow-runs/${encodeURIComponent(`remote-${UUID_SERVER}-${UUID_PROJECT}-${tail}`)}/cancel`,
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(proxyMock).not.toHaveBeenCalled();
+  });
+
+  it("cancel 404s a parsed run id whose project is not bound to that worker", async () => {
+    makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER });
+    await app.register(workflowRunRoutes);
+
+    const otherServer = "99999999-9999-4999-8999-999999999999";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/workflow-runs/remote-${otherServer}-${UUID_PROJECT}-${UUID_RUN}/cancel`,
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(proxyMock).not.toHaveBeenCalled();
   });
 });

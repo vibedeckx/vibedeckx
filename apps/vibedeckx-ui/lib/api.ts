@@ -3159,8 +3159,16 @@ export const api = {
     return (await res.json()).run;
   },
 
-  async cancelWorkflowRun(runId: string): Promise<WorkflowRun> {
+  /**
+   * `null` = the server has no such run (404). Ending a review is idempotent —
+   * a run that already finished, was cancelled elsewhere, or is simply gone
+   * needs no second kill — and the panel is workspace-scoped and 5s-polled, so
+   * a stale row is normal. Surfacing that as an error told the user the cancel
+   * failed when the run was already over; callers just refresh instead.
+   */
+  async cancelWorkflowRun(runId: string): Promise<WorkflowRun | null> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/cancel`, { method: "POST" });
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Failed to cancel run: ${res.status}`);
     return (await res.json()).run;
   },
