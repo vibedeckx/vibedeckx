@@ -40,6 +40,9 @@ export const SOUND_FOR_KIND: Record<NotificationKind, string> = {
   review_ready: '/sounds/sound2.mp3',
   session_failed: '/sounds/failure.mp3',
   workflow_failed: '/sounds/failure.mp3',
+  // Needs attention but nothing is broken mid-run — the failure cue would
+  // overstate it; the review cue's "look at this when you can" register fits.
+  cross_remote_token_expired: '/sounds/sound2.mp3',
 };
 
 /**

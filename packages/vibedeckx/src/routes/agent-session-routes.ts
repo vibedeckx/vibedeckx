@@ -298,7 +298,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const result = await fastify.agentSessionManager.branchSession(
       sourceSessionId,
       opts.agentType as AgentType | undefined,
-      { sessionId: opts.sessionId, crossRemoteMcp: opts.crossRemoteMcp, upToEntryIndex: opts.upToEntryIndex },
+      { sessionId: opts.sessionId, crossRemoteMcp: opts.crossRemoteMcp, upToEntryIndex: opts.upToEntryIndex, userId },
     );
     if (!result.ok) {
       if (result.reason === "invalid-cutoff") {
@@ -1189,7 +1189,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         (agentType as AgentType) || "claude-code",
         false,
         force === true,
-        { sessionId: preSessionId, crossRemoteMcp, model },
+        { sessionId: preSessionId, crossRemoteMcp, model, userId: userId ?? undefined },
       );
       const session = fastify.agentSessionManager.getSession(sessionId);
       return reply.code(200).send({
@@ -1505,7 +1505,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 发送消息到 Agent Session
   fastify.post<{
     Params: { sessionId: string };
-    Body: { content: string | ContentPart[]; idempotencyKey?: string };
+    // `crossRemoteMcp` is the hub→worker token refresh (additive tunnel field,
+    // ignored by pre-refresh workers): workers cannot re-mint at spawn (no hub
+    // secret, no user auth), so the hub attaches a fresh token to every
+    // forwarded message and the worker swaps it in for the next wake.
+    Body: { content: string | ContentPart[]; idempotencyKey?: string; crossRemoteMcp?: CrossRemoteMcpConfig };
   }>("/api/agent-sessions/:sessionId/message", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
@@ -1553,12 +1557,36 @@ const routes: FastifyPluginAsync = async (fastify) => {
           errorCode: "notification_baseline_failed",
         });
       }
+      // Refresh the worker's session-scoped cross-remote token on every
+      // forwarded message. Without this, a worker-side wake reuses the token
+      // minted at creation until it expires. Minted against the LOCAL session
+      // id — the identity the gateway's isSessionUsable and the original
+      // create-time mint both use. Best-effort: a mint failure must not block
+      // the message, and undefined (solo caller / no reachable remotes) simply
+      // omits the field.
+      const freshCrossRemoteMcp = typeof authResult === "string"
+        ? await mintCrossRemoteMcpConfig(
+          { storage: fastify.storage },
+          {
+            userId: authResult,
+            sessionId: req.params.sessionId,
+            sourceRemoteServerId: remoteInfo.remoteServerId,
+          },
+        ).catch((err) => {
+          console.error(`[API] cross-remote token refresh mint failed for ${req.params.sessionId}:`, err);
+          return undefined;
+        })
+        : undefined;
       const activityAt = Date.now();
       const result = await proxyAuto(
         remoteInfo.remoteServerId,
         "POST",
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/message`,
-        { content, ...(idempotencyKey ? { idempotencyKey } : {}) }
+        {
+          content,
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+          ...(freshCrossRemoteMcp ? { crossRemoteMcp: freshCrossRemoteMcp } : {}),
+        }
       );
       if (!result.ok) {
         const status = proxyStatus(result);
@@ -1637,6 +1665,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!storedSession || !storedProjection
       || !(await fastify.storage.projects.getById(storedProjection.projectId, authResult))) {
       return reply.code(404).send({ error: "Session not found or not running" });
+    }
+
+    // Worker half of the token refresh: adopt the hub-minted config so a
+    // dormant session wakes with a live token instead of the creation-time
+    // one. Runs after the ownership check above — the sender already holds
+    // message-send authority over this session (same trust as the create
+    // routes, which accept the field the same way).
+    const incomingCrossRemoteMcp = req.body.crossRemoteMcp;
+    if (incomingCrossRemoteMcp
+      && typeof incomingCrossRemoteMcp.url === "string"
+      && typeof incomingCrossRemoteMcp.token === "string") {
+      fastify.agentSessionManager.updateCrossRemoteMcp(req.params.sessionId, {
+        url: incomingCrossRemoteMcp.url,
+        token: incomingCrossRemoteMcp.token,
+      });
     }
 
     // For dormant sessions, we need projectPath to spawn the process

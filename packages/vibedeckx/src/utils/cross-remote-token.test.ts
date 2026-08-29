@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   signCrossRemoteToken,
   verifyCrossRemoteToken,
+  verifyCrossRemoteTokenDetailed,
   CROSS_REMOTE_TOKEN_TTL_MS,
   type CrossRemoteTokenPayload,
   signRemoteMcpHandle,
@@ -63,6 +64,26 @@ describe("cross-remote token", () => {
     expect(verifyCrossRemoteToken(SECRET, "no-dot", NOW)).toBeNull();
     expect(verifyCrossRemoteToken(SECRET, "a.b.c", NOW)).toBeNull();
     expect(verifyCrossRemoteToken(SECRET, "!!!.###", NOW)).toBeNull();
+  });
+
+  it("reports an expired-but-authentic token with its payload", () => {
+    // The gateway uses the surfaced payload to notify the token's owner, so
+    // "expired" must only ever be reported AFTER the signature checks out.
+    const token = signCrossRemoteToken(SECRET, payload, NOW);
+    const result = verifyCrossRemoteTokenDetailed(SECRET, token, NOW + CROSS_REMOTE_TOKEN_TTL_MS);
+    expect(result).toEqual({ status: "expired", payload, exp: NOW + CROSS_REMOTE_TOKEN_TTL_MS });
+  });
+
+  it("reports a tampered expired token as invalid, never expired", () => {
+    const token = signCrossRemoteToken(SECRET, payload, NOW);
+    const [body, sig] = token.split(".");
+    const decoded = JSON.parse(Buffer.from(body, "base64url").toString());
+    decoded.u = "user-2";
+    const forged = `${Buffer.from(JSON.stringify(decoded)).toString("base64url")}.${sig}`;
+    expect(verifyCrossRemoteTokenDetailed(SECRET, forged, NOW + CROSS_REMOTE_TOKEN_TTL_MS))
+      .toEqual({ status: "invalid" });
+    expect(verifyCrossRemoteTokenDetailed("other-secret", token, NOW + CROSS_REMOTE_TOKEN_TTL_MS))
+      .toEqual({ status: "invalid" });
   });
 
   it("rejects a token with an empty userId or sessionId", () => {

@@ -1097,7 +1097,8 @@ export type NotificationKind =
   | "review_ready"
   | "session_result_ready"
   | "session_failed"
-  | "workflow_failed";
+  | "workflow_failed"
+  | "cross_remote_token_expired";
 
 /** Server row shape — snake_case, exactly as `/api/notifications` returns it. */
 export interface ServerNotification {

@@ -27,6 +27,10 @@ const TITLE_BY_KIND: Record<NotificationKind, string> = {
   session_result_ready: "Session result is ready",
   session_failed: "Session failed",
   workflow_failed: "Workflow needs attention",
+  // "Stop, then send" — NOT "restart": restartSession wipes the conversation
+  // history, while stop → dormant → next message respawns with a fresh token
+  // and keeps everything.
+  cross_remote_token_expired: "Cross-remote access expired — stop the session, then send a message to renew",
 };
 
 /**

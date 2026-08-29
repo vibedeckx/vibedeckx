@@ -19,7 +19,7 @@ import {
 } from "./notification-milestones.js";
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
-import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import { crossRemoteMcpEnabled, mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { mintSessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
@@ -246,6 +246,15 @@ interface RunningSession {
   turnDisposition: NotificationDisposition | null;
   /** Injected at spawn, never persisted: a token is useless once the process holding it exits. */
   crossRemoteMcp?: CrossRemoteMcpConfig;
+  /**
+   * The authenticated owner, when known — used to re-mint the cross-remote
+   * token on every spawn so a wake never reuses one past its exp. Only real
+   * user ids are stored; the "local" solo sentinel is filtered at every write
+   * (solo mode deliberately mints no cross-remote token). Never set on
+   * workers: their sessions are created over the tunnel without user auth,
+   * which is what keeps worker-side self-minting off.
+   */
+  userId?: string;
 }
 
 /**
@@ -742,6 +751,8 @@ export class AgentSessionManager {
       model?: string | null;
       /** Worktree state the caller already captured — reused for the session-start snapshot. */
       startSnapshot?: SnapshotState | null;
+      /** Authenticated owner; enables per-spawn cross-remote token re-minting. */
+      userId?: string;
     } = {},
   ): Promise<string> {
     // The caller may supply the id so it can mint a session-scoped token before spawn.
@@ -841,6 +852,7 @@ export class AgentSessionManager {
       skipDb,
       permissionMode,
       crossRemoteMcp: opts.crossRemoteMcp,
+      userId: opts.userId && opts.userId !== "local" ? opts.userId : undefined,
       agentType,
       model,
       completion: new TurnCompletionLedger(this.parkTimeoutMs),
@@ -936,6 +948,19 @@ export class AgentSessionManager {
   }
 
   /**
+   * Replace the session's cross-remote MCP config for its NEXT spawn. Worker
+   * side of the hub's per-message token refresh: a live process keeps the
+   * token it was spawned with (baked into --mcp-config), but the next wake
+   * picks this one up instead of the possibly-expired original.
+   */
+  updateCrossRemoteMcp(sessionId: string, config: CrossRemoteMcpConfig): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.crossRemoteMcp = config;
+    return true;
+  }
+
+  /**
    * Kill an agent process and its entire process tree.
    * Uses negative PID to signal the process group (requires detached: true at spawn).
    */
@@ -986,6 +1011,24 @@ export class AgentSessionManager {
       console.error(`[AgentSession] Failed to mint session tools MCP config for ${session.id}:`, err);
       return undefined;
     });
+
+    // Re-minted per spawn like sessionToolsMcp: the token cached at creation
+    // would otherwise be reused across hibernate/wake cycles past its exp.
+    // Only runs where minting is possible at all — hub-side sessions with a
+    // known owner. Workers keep the hub-signed token they were handed (they
+    // hold neither the hub secret nor a userId), refreshed via the message
+    // route instead. A successful mint returning undefined means the user has
+    // no reachable cross-remote target right now, so clearing is correct.
+    if (session.userId && crossRemoteMcpEnabled()) {
+      try {
+        session.crossRemoteMcp = await mintCrossRemoteMcpConfig(
+          { storage: this.storage },
+          { userId: session.userId, sessionId: session.id, sourceRemoteServerId: null },
+        );
+      } catch (err) {
+        console.error(`[AgentSession] Cross-remote token re-mint failed for ${session.id}, keeping cached config:`, err);
+      }
+    }
 
     const config = provider.buildSpawnConfig(
       cwd, session.permissionMode, session.crossRemoteMcp, session.model, sessionToolsMcp,
@@ -2077,6 +2120,11 @@ export class AgentSessionManager {
   ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
+
+    // Learn the owner as soon as an authenticated message arrives: sessions
+    // restored after a server restart lose the in-memory userId, and this is
+    // what re-arms per-spawn cross-remote token minting for them.
+    if (userId && userId !== "local" && !session.userId) session.userId = userId;
 
     const disposition = this.resolveOutgoingDisposition(sessionId, opts);
 
@@ -3485,7 +3533,7 @@ export class AgentSessionManager {
   async branchSession(
     sourceSessionId: string,
     agentTypeOverride?: AgentType,
-    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; upToEntryIndex?: number } = {},
+    opts: { sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; upToEntryIndex?: number; userId?: string } = {},
   ): Promise<BranchResult> {
     const source = this.sessions.get(sourceSessionId);
     const sourceRow = await this.storage.agentSessions.getById(sourceSessionId);
@@ -3671,6 +3719,7 @@ export class AgentSessionManager {
       turnOpenSince: null,
       turnDisposition: null,
       crossRemoteMcp: opts.crossRemoteMcp,
+      userId: opts.userId && opts.userId !== "local" ? opts.userId : undefined,
       branchedFromSessionId: sourceSessionId,
       branchedFromEntryIndex,
     };

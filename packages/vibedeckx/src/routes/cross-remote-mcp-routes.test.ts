@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
-import { signCrossRemoteToken, getCrossRemoteSecret } from "../utils/cross-remote-token.js";
+import { signCrossRemoteToken, getCrossRemoteSecret, CROSS_REMOTE_TOKEN_TTL_MS } from "../utils/cross-remote-token.js";
 import { REMOTE_MCP_CAPABILITIES } from "../cross-remote-access.js";
 
 const STDIO = { type: "stdio", command: "fake-mcp" } as const;
@@ -61,7 +61,8 @@ describe("cross-remote MCP gateway", () => {
     app.decorate("storage", storage);
     app.decorate("reverseConnectManager", { isConnected: (id: string) => connected.has(id) } as never);
     app.decorate("remoteSessionMap", new Map());
-    app.decorate("agentSessionManager", { getSessionProcessAlive: () => true } as never);
+    app.decorate("agentSessionManager", { getSessionProcessAlive: () => true, getSession: () => undefined } as never);
+    app.decorate("eventBus", { emit: () => {} } as never);
     await app.register(crossRemoteMcpRoutes);
     await app.ready();
   });
@@ -81,6 +82,45 @@ describe("cross-remote MCP gateway", () => {
     const forged = signCrossRemoteToken("wrong-secret", { userId: "user-1", sessionId: "sess-1", sourceRemoteServerId: null }, Date.now());
     const res = await rpc(forged, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("401s an expired token and files one durable notification for its owner", async () => {
+    (app.agentSessionManager as unknown as { getSession: () => unknown }).getSession =
+      () => ({ projectId: "proj-1", branch: "dev" });
+    const expired = signCrossRemoteToken(
+      secret,
+      { userId: "user-1", sessionId: "sess-1", sourceRemoteServerId: "srv-a" },
+      Date.now() - CROSS_REMOTE_TOKEN_TTL_MS - 1000,
+    );
+
+    const res = await rpc(expired, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(res.statusCode).toBe(401);
+
+    // The notification write is fire-and-forget behind the 401.
+    await vi.waitFor(async () => {
+      const rows = await storage.notifications.listForUser("user-1", { limit: 10 });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].kind).toBe("cross_remote_token_expired");
+      expect(rows[0].session_id).toBe("sess-1");
+      expect(rows[0].project_id).toBe("proj-1");
+    });
+
+    // A retry of the same expired token must not file a second row.
+    const retry = await rpc(expired, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(retry.statusCode).toBe(401);
+    const rows = await storage.notifications.listForUser("user-1", { limit: 10 });
+    expect(rows).toHaveLength(1);
+  });
+
+  it("files nothing for a forged expired token", async () => {
+    const forged = signCrossRemoteToken(
+      "wrong-secret",
+      { userId: "user-1", sessionId: "sess-1", sourceRemoteServerId: null },
+      Date.now() - CROSS_REMOTE_TOKEN_TTL_MS - 1000,
+    );
+    const res = await rpc(forged, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(res.statusCode).toBe(401);
+    expect(await storage.notifications.listForUser("user-1", { limit: 10 })).toHaveLength(0);
   });
 
   it("rejects a token whose session no longer exists", async () => {

@@ -434,7 +434,8 @@ export type NotificationKind =
   | "review_ready"
   | "session_result_ready"
   | "session_failed"
-  | "workflow_failed";
+  | "workflow_failed"
+  | "cross_remote_token_expired";
 
 /**
  * An immutable milestone row in an *execution* server's outbox. Stores semantic

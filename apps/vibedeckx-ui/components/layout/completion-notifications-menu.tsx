@@ -39,6 +39,9 @@ export const KIND_META: Record<NotificationKind, { label: string; dot: string }>
   review_ready: { label: "Review feedback is ready", dot: "bg-emerald-500" },
   session_failed: { label: "Session failed", dot: "bg-destructive" },
   workflow_failed: { label: "Workflow needs attention", dot: "bg-destructive" },
+  // "Stop & send", never "restart": the Restart action wipes conversation
+  // history, whereas stopping and sending a message renews the token losslessly.
+  cross_remote_token_expired: { label: "Cross-remote expired — stop & send a message to renew", dot: "bg-amber-500" },
 };
 
 function formatRelativeTime(at: number): string {

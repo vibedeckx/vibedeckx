@@ -4,10 +4,11 @@ import { proxyToRemoteAuto, type ProxyResult } from "../utils/remote-proxy.js";
 import {
   getCrossRemoteSecret,
   signRemoteMcpHandle,
-  verifyCrossRemoteToken,
+  verifyCrossRemoteTokenDetailed,
   verifyRemoteMcpHandle,
   type CrossRemoteTokenPayload,
 } from "../utils/cross-remote-token.js";
+import { notificationBody, notificationTitle } from "../notification-service.js";
 import {
   CROSS_REMOTE_MCP_PATH,
   TOOL_TIERS,
@@ -289,15 +290,88 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return cachedSecret;
   };
 
+  // Per-session throttle for expired-token notifications. The deterministic
+  // notification id already dedupes durably per (session, exp); this just keeps
+  // CLI retry storms from hitting the DB on every 401.
+  const expiredNotifyAt = new Map<string, number>();
+  const EXPIRED_NOTIFY_MIN_INTERVAL_MS = 60_000;
+
+  /**
+   * A signature-valid token failed only its exp check: the agent process has
+   * outlived its token (it is baked into --mcp-config and cannot rotate in a
+   * live process). The 401 the CLI reports is not actionable on its own, so
+   * tell the owner what actually fixes it — stop the session, then send a
+   * message: the wake respawns and re-mints, keeping the history (unlike
+   * Restart, which wipes it).
+   */
+  const notifyTokenExpired = async (payload: CrossRemoteTokenPayload, exp: number): Promise<void> => {
+    const last = expiredNotifyAt.get(payload.sessionId);
+    const now = Date.now();
+    if (last !== undefined && now - last < EXPIRED_NOTIFY_MIN_INTERVAL_MS) return;
+    expiredNotifyAt.set(payload.sessionId, now);
+
+    // Resolve the routing identity (project/branch) the bell needs for its
+    // deep link. Local sessions: runtime first, DB row as fallback. Remote
+    // sessions: the hub-side mapping. No identity → nothing to link → skip.
+    let projectId: string | undefined;
+    let branch: string | null = null;
+    const runtime = fastify.agentSessionManager.getSession(payload.sessionId);
+    if (runtime) {
+      projectId = runtime.projectId;
+      branch = runtime.branch;
+    } else if (payload.sessionId.startsWith("remote-")) {
+      const mapping = await fastify.storage.remoteSessionMappings.getByLocal(payload.sessionId);
+      if (mapping) {
+        projectId = mapping.project_id;
+        branch = mapping.branch ?? null;
+      }
+    } else {
+      const row = await fastify.storage.agentSessions.getById(payload.sessionId);
+      if (row) {
+        projectId = row.project_id;
+        branch = row.branch || null;
+      }
+    }
+    if (!projectId) return;
+
+    const project = await fastify.storage.projects.getById(projectId);
+    const session = await fastify.storage.agentSessions.getById(payload.sessionId);
+    const notification = {
+      // Deterministic per token instance: retries and multiple expired calls
+      // from the same process collapse onto one inbox row.
+      id: `cross-remote-expired:${payload.sessionId}:${exp}`,
+      user_id: payload.userId,
+      kind: "cross_remote_token_expired" as const,
+      project_id: projectId,
+      branch,
+      session_id: payload.sessionId,
+      workflow_run_id: null,
+      title: notificationTitle("cross_remote_token_expired"),
+      body: notificationBody({ sessionTitle: session?.title, branch, projectName: project?.name }),
+      created_at: now,
+      read_at: null,
+    };
+    if (await fastify.storage.notifications.insert(notification)) {
+      fastify.eventBus.emit({ type: "notification:created", projectId, notification });
+    }
+  };
+
   const authenticate = async (request: FastifyRequest): Promise<CrossRemoteTokenPayload | null> => {
     const header = request.headers.authorization;
     if (!header?.startsWith("Bearer ")) return null;
 
     const secret = await getSecret();
-    const payload = verifyCrossRemoteToken(secret, header.slice("Bearer ".length), Date.now());
-    if (!payload) return null;
-    if (!isSessionUsable(fastify as unknown as AccessDeps, payload.sessionId)) return null;
-    return payload;
+    const verified = verifyCrossRemoteTokenDetailed(secret, header.slice("Bearer ".length), Date.now());
+    if (verified.status === "expired") {
+      // Fire-and-forget: surfacing guidance must never delay or alter the 401.
+      void notifyTokenExpired(verified.payload, verified.exp).catch((err) =>
+        console.error("[CrossRemoteMCP] expired-token notification failed:", err),
+      );
+      return null;
+    }
+    if (verified.status !== "ok") return null;
+    if (!isSessionUsable(fastify as unknown as AccessDeps, verified.payload.sessionId)) return null;
+    return verified.payload;
   };
 
   const audit = async (
