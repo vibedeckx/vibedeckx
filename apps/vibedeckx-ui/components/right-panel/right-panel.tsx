@@ -128,6 +128,27 @@ export function RightPanel({
   const [agentFocusNonce, setAgentFocusNonce] = useState(0);
   const requestAgentFocus = useCallback(() => setAgentFocusNonce((n) => n + 1), []);
 
+  // Executors has panel-level keyboard commands (notably ←/→ for target
+  // switching) but no natural text/control focus target like Agent or Terminal.
+  // An explicit tab click/shortcut therefore moves DOM focus off the tab button
+  // and onto the stable panel wrapper. The pending flag makes this an event, not
+  // a consequence of displayTab changing: persisted/programmatic tab changes
+  // must not steal focus during navigation or initial mount.
+  const executorPanelRef = useRef<HTMLDivElement>(null);
+  const pendingExecutorFocusRef = useRef(false);
+  const [executorFocusNonce, setExecutorFocusNonce] = useState(0);
+  const requestExecutorFocus = useCallback(() => {
+    pendingExecutorFocusRef.current = true;
+    setExecutorFocusNonce((n) => n + 1);
+  }, []);
+
+  useIsomorphicLayoutEffect(() => {
+    if (!pendingExecutorFocusRef.current) return;
+    pendingExecutorFocusRef.current = false;
+    if (!active || projectId === null || displayTab !== 'executors') return;
+    executorPanelRef.current?.focus({ preventScroll: true });
+  }, [active, displayTab, executorFocusNonce, projectId]);
+
   // Keyboard focus region: pointerdown/focusin inside the panel claims it
   // (via the data-focus-region attribute below), an idle Esc releases it.
   // While claimed, type-to-locate targets this panel's tab instead of the
@@ -150,10 +171,11 @@ export function RightPanel({
       setActiveTab(tab);
       setRegion('right-panel');
       if (tab === 'agent') requestAgentFocus();
+      if (tab === 'executors') requestExecutorFocus();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [active, setActiveTab, setRegion, requestAgentFocus]);
+  }, [active, setActiveTab, setRegion, requestAgentFocus, requestExecutorFocus]);
 
   // The server snapshot (static-export prerender, no `navigator`) is false;
   // useSyncExternalStore re-reads on the client so hydration stays clean.
@@ -202,6 +224,7 @@ export function RightPanel({
               onClick={() => {
                 setActiveTab(id);
                 if (id === 'agent') requestAgentFocus();
+                if (id === 'executors') requestExecutorFocus();
               }}
               title={`${label} (${tabShortcutHint(isMac, code)})`}
               className={cn(
@@ -243,7 +266,14 @@ export function RightPanel({
             {agentSlot}
           </AgentTabFocusProvider>
         </div>
-        <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'executors' && 'hidden')}>
+        <div
+          ref={executorPanelRef}
+          tabIndex={-1}
+          className={cn(
+            "absolute inset-0 overflow-hidden outline-hidden",
+            displayTab !== 'executors' && 'hidden',
+          )}
+        >
           <ExecutorPanel
             projectId={projectId}
             selectedBranch={selectedBranch}

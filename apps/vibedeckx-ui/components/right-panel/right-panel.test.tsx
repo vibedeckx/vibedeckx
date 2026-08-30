@@ -108,6 +108,18 @@ function composer() {
   return container!.querySelector('textarea[data-slot="composer"]');
 }
 
+function tab(label: string) {
+  return Array.from(container!.querySelectorAll("button")).find(
+    (button) => button.textContent === label,
+  );
+}
+
+function executorsPanel() {
+  return Array.from(container!.querySelectorAll<HTMLElement>("[tabindex='-1']")).find(
+    (element) => element.textContent?.includes("Executors panel"),
+  );
+}
+
 describe("RightPanel", () => {
   it("switches back to the Agent tab when an external session selection asks for it", () => {
     container = document.createElement("div");
@@ -220,6 +232,61 @@ describe("RightPanel", () => {
         (button) => button.textContent === "Diff",
       );
       expect(diffTab?.className).toContain("border-primary");
+    });
+  });
+
+  describe("Executors panel focus", () => {
+    it("moves focus into the stable panel wrapper after an explicit tab click", () => {
+      setPlatform("Win32");
+      mountPanel();
+
+      act(() => {
+        tab("Executors")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(document.activeElement).toBe(executorsPanel());
+    });
+
+    it("moves focus into the panel after a shortcut, including repeated activation", () => {
+      setPlatform("Win32");
+      mountPanel();
+
+      pressKey({ code: "KeyE", ctrlKey: true, altKey: true });
+      expect(document.activeElement).toBe(executorsPanel());
+
+      act(() => tab("Executors")!.focus());
+      expect(document.activeElement).toBe(tab("Executors"));
+
+      pressKey({ code: "KeyE", ctrlKey: true, altKey: true });
+      expect(document.activeElement).toBe(executorsPanel());
+    });
+
+    it("does not focus the panel on initial mount or programmatic persisted-tab reconciliation", () => {
+      setPlatform("Win32");
+      localStorage.setItem("vibedeckx:activeTab:project-1:dev", "executors");
+      mountPanel();
+
+      expect(isOpenTabClass(tab("Executors")?.className ?? "")).toBe(true);
+      expect(tab("Executors")?.className).toContain("border-foreground/25");
+      expect(tab("Executors")?.className).not.toContain("border-primary");
+      expect(document.activeElement).not.toBe(executorsPanel());
+
+      renderPanel(0, true, undefined, "project-2");
+      expect(document.activeElement).not.toBe(executorsPanel());
+    });
+
+    it("does not focus a hidden or unresolved workspace panel", () => {
+      setPlatform("Win32");
+      mountPanel(false);
+
+      pressKey({ code: "KeyE", ctrlKey: true, altKey: true });
+      expect(document.activeElement).not.toBe(executorsPanel());
+
+      renderPanel(0, true, undefined, null);
+      act(() => {
+        tab("Executors")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(document.activeElement).not.toBe(executorsPanel());
     });
   });
 
