@@ -166,6 +166,10 @@ interface PasteEntry {
   size: number; // bytes, UTF-8
 }
 
+function isStartupDiagnostic(message: AgentMessage): boolean {
+  return message.type === "system" || message.type === "error";
+}
+
 function formatPasteSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   const kb = bytes / 1024;
@@ -563,8 +567,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // leaves the active set), so a preparation failure would leave a blank
   // window with no explanation. The failed run's workflowRunUpdated frame is
   // pushed onto this very session's stream — hold on to it while the
-  // conversation is still empty. Live-only by design: after a reload the
-  // failure is carried by the workflow_failed bell notification instead.
+  // conversation still contains only startup diagnostics. Live-only by
+  // design: after a reload the failure is carried by the workflow_failed bell
+  // notification instead.
   const failedReviewerRun =
     workflowRunUpdate
       && session
@@ -572,6 +577,41 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       && workflowRunUpdate.status === "failed"
       ? workflowRunUpdate
       : null;
+  // Codex can emit startup diagnostics (notably config warnings and terminal
+  // MCP startup failures) before the workflow prompt is delivered. They are
+  // real messages worth showing, but they do not mean the review has started.
+  // Any other message does: in particular, this prevents the preparing or
+  // failed placeholder from hiding a user's manual input and the reply to it.
+  const startupDiagnostics = messages.flatMap((message, index) =>
+    isStartupDiagnostic(message) ? [{ message, index }] : [],
+  );
+  const onlyStartupDiagnostics = messages.every(isStartupDiagnostic);
+  const showPreparingReview = Boolean(
+    session && reviewerRun?.status === "preparing" && onlyStartupDiagnostics,
+  );
+  const showFailedReview = Boolean(
+    session && failedReviewerRun && onlyStartupDiagnostics,
+  );
+  // These entries are deliberately restricted to system/error: neither
+  // renderer consumes AgentConversationContext, so they are safe in the
+  // placeholder branches outside the provider used by the full conversation.
+  const startupDiagnosticsView = startupDiagnostics.length > 0 ? (
+    <div className="mt-6 space-y-1 text-left">
+      {startupDiagnostics.map(({ message, index }) => (
+        <div
+          key={messageEntryIndices[index] ?? index}
+          data-message-idx={index}
+          className="scroll-mt-2"
+        >
+          <AgentMessageItem
+            message={message}
+            messageIndex={index}
+            streaming={false}
+          />
+        </div>
+      ))}
+    </div>
+  ) : null;
   const [isFinalizing, setIsFinalizing] = useState(false);
 
   const handleFinalize = useCallback(async () => {
@@ -1121,11 +1161,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               slow-raster machine). Trade-off: a stacking context + a persistent
               layer for the scroll contents. */}
           <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar will-change-transform">
-            {session && messages.length === 0 && reviewerRun?.status === "preparing" ? (
+            {showPreparingReview ? (
               // This session is the placeholder reviewer of a run still
               // distilling its intent brief (two-phase review start). The
               // review prompt lands here as a normal message once activation
-              // delivers it; a failure flips to the failed branch below.
+              // delivers it; startup diagnostics remain visible underneath.
               <div className="text-center py-16">
                 <Loader className="h-6 w-6 mx-auto mb-4" />
                 <h3 className="text-sm font-semibold mb-1 text-foreground">Preparing review…</h3>
@@ -1133,16 +1173,18 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   Summarizing the source conversation and briefing the reviewer.
                   The review will start here automatically — you can leave this window in the meantime.
                 </p>
+                {startupDiagnosticsView}
               </div>
-            ) : session && messages.length === 0 && failedReviewerRun ? (
+            ) : showFailedReview ? (
               <div className="text-center py-16">
                 <div className="mx-auto w-12 h-12 rounded-xl bg-destructive/10 flex items-center justify-center mb-4">
                   <AlertCircle className="h-6 w-6 text-destructive/70" />
                 </div>
                 <h3 className="text-sm font-semibold mb-1 text-foreground">Review setup failed</h3>
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  {failedReviewerRun.error ?? "The reviewer could not be started."}
+                  {failedReviewerRun?.error ?? "The reviewer could not be started."}
                 </p>
+                {startupDiagnosticsView}
               </div>
             ) : !session && messages.length === 0 ? (
               <div className="text-center py-16">

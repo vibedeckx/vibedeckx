@@ -23,9 +23,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowRun } from "@/lib/api";
 
 const ensureSession = vi.fn(async () => null);
 const setModel = vi.fn(async (): Promise<string | null> => null);
+const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }));
 
 /**
  * What the hook reports, so a test can put the component in front of a session
@@ -36,7 +38,8 @@ const hookState: {
   session: { id: string; model?: string | null } | null;
   status: string;
   messages: unknown[];
-} = { session: null, status: "idle", messages: [] };
+  workflowRunUpdate: WorkflowRun | null;
+} = { session: null, status: "idle", messages: [], workflowRunUpdate: null };
 
 vi.mock("./model-picker", () => ({
   ModelPicker: ({
@@ -71,7 +74,9 @@ vi.mock("@/hooks/use-agent-session", () => ({
     isLoading: false,
     error: null,
     remoteStatus: null,
+    workflowRunUpdate: hookState.workflowRunUpdate,
     backgroundTasks: { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
+    streamEpoch: 0,
     sendMessage: vi.fn(),
     uploadPaste: vi.fn(),
     stopSession: vi.fn(),
@@ -87,6 +92,10 @@ vi.mock("@/hooks/use-agent-session", () => ({
 
 vi.mock("@/hooks/use-surface-commander-session", () => ({
   useSurfaceCommanderSession: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-reviewer-run", () => ({
+  useReviewerRun: () => reviewerRunState.value,
 }));
 
 vi.mock("@/hooks/project-remotes-context", () => ({
@@ -200,12 +209,42 @@ vi.mock("./session-history-dropdown", () => ({
   ),
 }));
 vi.mock("./review-dialog", () => ({ ReviewDialog: () => null }));
-vi.mock("./agent-message", () => ({ AgentMessageItem: () => null }));
+vi.mock("./agent-message", () => ({
+  AgentMessageItem: ({
+    message,
+    messageIndex,
+  }: {
+    message: { type: string; content?: string; message?: string };
+    messageIndex: number;
+  }) => (
+    <div data-testid={`message-${messageIndex}`}>
+      {message.content ?? message.message ?? message.type}
+    </div>
+  ),
+}));
 vi.mock("./user-input-markers", () => ({ UserInputMarkers: () => null }));
 vi.mock("./quote-popover", () => ({ QuotePopover: () => null, appendQuote: vi.fn() }));
 vi.mock("./turn-end-divider", () => ({ TurnEndDivider: () => null }));
 
 import { AgentConversation } from "./agent-conversation";
+
+function makeRun(status: WorkflowRun["status"]): WorkflowRun {
+  return {
+    id: "run-1",
+    project_id: "pA",
+    branch: "featA",
+    source_session_id: "source",
+    source_turn_end_index: 1,
+    reviewer_session_id: "reviewer",
+    review_focus: null,
+    review_target: null,
+    feedback_snapshot: null,
+    status,
+    error: status === "failed" ? "distillation failed" : null,
+    created_at: "2026-08-30T00:00:00.000Z",
+    updated_at: "2026-08-30T00:00:00.000Z",
+  };
+}
 
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`);
@@ -227,6 +266,8 @@ describe("AgentConversation pendingModel", () => {
     hookState.session = null;
     hookState.status = "idle";
     hookState.messages = [];
+    hookState.workflowRunUpdate = null;
+    reviewerRunState.value = null;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -418,5 +459,76 @@ describe("AgentConversation pendingModel", () => {
     });
 
     expect(q(container, "model-value")!.textContent).toBe("opus");
+  });
+
+  describe("reviewer startup placeholders", () => {
+    const showReviewer = async (messages: unknown[], runStatus: "preparing" | "failed") => {
+      hookState.session = { id: "reviewer" };
+      hookState.status = "running";
+      hookState.messages = messages;
+      if (runStatus === "preparing") {
+        reviewerRunState.value = makeRun("preparing");
+      } else {
+        hookState.workflowRunUpdate = makeRun("failed");
+      }
+      await render("pA", "featA");
+    };
+
+    it("shows Preparing review while the reviewer has no messages", async () => {
+      await showReviewer([], "preparing");
+
+      expect(container.textContent).toContain("Preparing review…");
+    });
+
+    it("keeps Preparing review visible alongside Codex startup diagnostics", async () => {
+      await showReviewer([
+        { type: "system", content: 'MCP server "github" failed to start.', timestamp: 1 },
+        { type: "error", message: "Sandbox initialization degraded.", timestamp: 2 },
+      ], "preparing");
+
+      expect(container.textContent).toContain("Preparing review…");
+      expect(q(container, "message-0")?.textContent).toContain("MCP server");
+      expect(q(container, "message-1")?.textContent).toContain("Sandbox initialization degraded");
+    });
+
+    it("shows the conversation once the workflow review prompt arrives", async () => {
+      await showReviewer([
+        { type: "user", content: "Review this change", origin: "workflow", timestamp: 1 },
+      ], "preparing");
+
+      expect(container.textContent).not.toContain("Preparing review…");
+      expect(q(container, "message-0")?.textContent).toBe("Review this change");
+    });
+
+    it("does not hide a user-typed message behind Preparing review", async () => {
+      await showReviewer([
+        { type: "system", content: "MCP connection failed", timestamp: 1 },
+        { type: "user", content: "What are you reviewing?", timestamp: 2 },
+      ], "preparing");
+
+      expect(container.textContent).not.toContain("Preparing review…");
+      expect(q(container, "message-1")?.textContent).toBe("What are you reviewing?");
+    });
+
+    it("shows review setup failure alongside startup diagnostics", async () => {
+      await showReviewer([
+        { type: "system", content: 'MCP server "github" failed to start.', timestamp: 1 },
+      ], "failed");
+
+      expect(container.textContent).toContain("Review setup failed");
+      expect(container.textContent).toContain("distillation failed");
+      expect(q(container, "message-0")?.textContent).toContain("MCP server");
+    });
+
+    it("does not permanently hide user content after review setup fails", async () => {
+      await showReviewer([
+        { type: "user", content: "Manual reviewer question", timestamp: 1 },
+        { type: "assistant", content: "Manual reviewer answer", timestamp: 2 },
+      ], "failed");
+
+      expect(container.textContent).not.toContain("Review setup failed");
+      expect(q(container, "message-0")?.textContent).toBe("Manual reviewer question");
+      expect(q(container, "message-1")?.textContent).toBe("Manual reviewer answer");
+    });
   });
 });
