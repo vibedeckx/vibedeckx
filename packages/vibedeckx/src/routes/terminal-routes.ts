@@ -128,14 +128,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const branch = req.body?.branch;
     const explicitLocation = req.body?.location;
 
-    const executorMode = project.executor_mode;
     const remoteConfig = await getRemoteConfig(fastify, project, req.body?.remote_server_id);
 
+    // Without an explicit location, only a project with no local path defaults
+    // to a remote terminal. The Executors tab's target (executor_mode) is
+    // deliberately not consulted: terminal placement is chosen in the
+    // Terminal panel and is independent of where executors run.
     const useRemote =
       explicitLocation === "remote" ||
-      (explicitLocation === undefined &&
-        remoteConfig &&
-        (!project.path || executorMode !== "local"));
+      (explicitLocation === undefined && remoteConfig && !project.path);
 
     if (useRemote) {
       if (!remoteConfig) {

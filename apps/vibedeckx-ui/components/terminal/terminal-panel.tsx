@@ -82,9 +82,9 @@ export function TerminalPanel({ projectId, selectedBranch, project, active = tru
   const hasLocal = !!project?.path;
   const hasRemotes = remotes.length > 0;
   const hasMultipleTargets = (hasLocal && hasRemotes) || remotes.length > 1;
-  const defaultLocation: "local" | "remote" =
-    !hasLocal && hasRemotes ? "remote" :
-    hasMultipleTargets && project?.executor_mode !== "local" ? "remote" : "local";
+  // Only reached with a single target (the multi-target + button opens the
+  // explicit location menu instead), so the choice is just local vs remote.
+  const defaultLocation: "local" | "remote" = hasLocal ? "local" : "remote";
 
   const handleCreateDefault = useCallback(() => {
     createTerminal(defaultLocation);
