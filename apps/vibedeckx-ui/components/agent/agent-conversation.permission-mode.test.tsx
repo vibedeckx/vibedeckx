@@ -18,8 +18,10 @@ import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConversationHandle } from "./agent-conversation";
+import type { EnsuredAgentSession } from "@/hooks/use-agent-session";
 
-const ensureSession = vi.fn(async (): Promise<{ id: string } | null> => null);
+const ensureSession = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
+const sendEnsuredMessage = vi.fn(async () => true);
 const switchMode = vi.fn(async () => {});
 
 const hookState: {
@@ -47,6 +49,18 @@ vi.mock("@/components/ui/permission-mode-toggle", () => ({
 vi.mock("./model-picker", () => ({ ModelPicker: () => null }));
 
 vi.mock("@/hooks/use-agent-session", () => ({
+  createAgentWorkspaceIdentity: (
+    projectId: string | null,
+    branch: string | null,
+    agentMode?: string | null,
+    explicitSessionId?: string | null,
+  ) => projectId ? {
+    projectId,
+    branch,
+    agentMode: agentMode || "local",
+    explicitSessionId: explicitSessionId ?? null,
+  } : null,
+  sameAgentWorkspace: (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b),
   useAgentSession: () => ({
     session: hookState.session,
     messages: hookState.messages,
@@ -58,6 +72,8 @@ vi.mock("@/hooks/use-agent-session", () => ({
     remoteStatus: null,
     backgroundTasks: { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
     sendMessage: vi.fn(),
+    sendEnsuredMessage,
+    discardEnsuredSessionIfEmpty: vi.fn(),
     uploadPaste: vi.fn(),
     stopSession: vi.fn(),
     switchAgentType: vi.fn(),
@@ -156,6 +172,8 @@ describe("AgentConversation permissionMode", () => {
       disconnect() {}
     };
     ensureSession.mockClear();
+    ensureSession.mockResolvedValue(null);
+    sendEnsuredMessage.mockClear();
     switchMode.mockClear();
     hookState.session = null;
     hookState.status = "idle";
@@ -239,5 +257,30 @@ describe("AgentConversation permissionMode", () => {
       await ref.current!.submitMessage("plan this");
     });
     expect(ensureSession).toHaveBeenCalledWith("plan", null);
+  });
+
+  it("delivers imperative first-sends through the ensured session id", async () => {
+    const ensured: EnsuredAgentSession = {
+      session: { id: "s-new", projectId: "pA", branch: "featA", status: "running" },
+      origin: {
+        projectId: "pA",
+        branch: "featA",
+        agentMode: "local",
+        explicitSessionId: null,
+      },
+      adopted: true,
+    };
+    ensureSession.mockResolvedValueOnce(ensured);
+    await render();
+
+    await act(async () => {
+      await ref.current!.submitMessage("start task");
+    });
+
+    expect(sendEnsuredMessage).toHaveBeenCalledTimes(1);
+    expect(sendEnsuredMessage).toHaveBeenCalledWith(
+      ensured,
+      "start task",
+    );
   });
 });

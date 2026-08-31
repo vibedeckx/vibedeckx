@@ -35,6 +35,7 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:POST /api/agent-sessions/:param/approve",
   "http:POST /api/agent-sessions/:param/background-tasks/:param/keep",
   "http:POST /api/agent-sessions/:param/background-tasks/:param/stop",
+  "http:POST /api/agent-sessions/:param/discard-if-empty",
   "http:POST /api/agent-sessions/:param/message",
   "http:POST /api/agent-sessions/:param/model",
   "http:POST /api/agent-sessions/:param/paste",

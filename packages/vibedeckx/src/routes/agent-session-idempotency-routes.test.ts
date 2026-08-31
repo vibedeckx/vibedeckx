@@ -16,9 +16,20 @@ describe("path agent session preallocated identity", () => {
   function makeApp(authEnabled = false) {
     let row: Record<string, unknown> | undefined;
     let running: Record<string, unknown> | undefined;
+    const messages: Record<string, unknown>[] = [];
     const projects = new Map<string, Record<string, unknown>>();
     const deliveries = new Map<string, { hash: string; status: "pending" | "sent"; token: string | null }>();
-    const sendUserMessage = vi.fn(async () => true);
+    const sendUserMessage = vi.fn(async () => {
+      messages.push({ type: "user", content: "delivered" });
+      return true;
+    });
+    const deleteSession = vi.fn(async (id: string) => {
+      if (running?.id !== id) return false;
+      running = undefined;
+      row = undefined;
+      messages.length = 0;
+      return true;
+    });
     const createNewSession = vi.fn(async (
       projectId: string, branch: string | null, projectPath: string, _skipDb: boolean,
       permissionMode: string, agentType: string, _announce: boolean, _force: boolean,
@@ -85,7 +96,9 @@ describe("path agent session preallocated identity", () => {
       getSession: (id: string) => running?.id === id ? running : null,
       getSessionProcessAlive: (id: string) => running?.id === id,
       getMessages: () => [],
+      getRawMessages: () => messages,
       sendUserMessage,
+      deleteSession,
       emitBranchActivityIfChanged: vi.fn(),
     });
     app.decorate("remoteSessionMap", new Map());
@@ -96,6 +109,10 @@ describe("path agent session preallocated identity", () => {
     return {
       createNewSession,
       sendUserMessage,
+      deleteSession,
+      appendMessage: (message: Record<string, unknown> = { type: "user", content: "delivered" }) => {
+        messages.push(message);
+      },
       projects,
       setStored: (nextRow: Record<string, unknown>, nextRunning?: Record<string, unknown>) => {
         row = nextRow;
@@ -279,5 +296,69 @@ describe("path agent session preallocated identity", () => {
     expect(first.statusCode).toBe(200);
     expect(conflict.statusCode).toBe(409);
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a newly-created session only while it is still empty", async () => {
+    const { deleteSession } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+
+    const discarded = await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/discard-if-empty",
+    });
+
+    expect(discarded.statusCode).toBe(200);
+    expect(discarded.json()).toEqual({ success: true, discarded: true });
+    expect(deleteSession).toHaveBeenCalledWith("worker-id");
+  });
+
+  it("retains a session that already has an entry", async () => {
+    const { appendMessage, deleteSession } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    appendMessage();
+
+    const discarded = await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/discard-if-empty",
+    });
+
+    expect(discarded.statusCode).toBe(409);
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
+  it("serializes empty-session discard behind an in-flight message", async () => {
+    const { appendMessage, deleteSession, sendUserMessage } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    sendUserMessage.mockImplementationOnce(async () => {
+      await blocked;
+      appendMessage();
+      return true;
+    });
+
+    const delivery = app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "Implement", idempotencyKey: "delivery-race" },
+    });
+    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(1));
+    const discard = app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/discard-if-empty",
+    });
+    release();
+
+    expect((await delivery).statusCode).toBe(200);
+    expect((await discard).statusCode).toBe(409);
+    expect(deleteSession).not.toHaveBeenCalled();
   });
 });

@@ -101,10 +101,10 @@ describe("useAgentSession model", () => {
       messages: [],
     });
 
-    let created: { model?: string | null } | null = null;
+    let created: Awaited<ReturnType<HookApi["ensureSession"]>> = null;
     await act(async () => { created = await latest!.ensureSession("edit", "sonnet"); });
 
-    expect(created!.model).toBe("sonnet");
+    expect(created!.session.model).toBe("sonnet");
   });
 
   it("does not collapse concurrent different-model calls into one create", async () => {

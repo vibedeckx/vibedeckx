@@ -41,11 +41,16 @@ function load(): Map<string, number> {
         typeof item[0] === "string" &&
         typeof item[1] === "number"
       ) {
-        out.set(item[0], item[1]);
+        // Older clients used an empty final segment when the project record
+        // had not resolved yet, and "local" once it had. Canonicalize both so
+        // a first-send can always clear the placeholder it replaces.
+        const key = item[0].endsWith(":") ? `${item[0]}local` : item[0];
+        out.set(key, item[1]);
       } else if (typeof item === "string") {
         // Legacy format: array of bare keys with no timestamp. Treat as a
         // fresh reset so existing placeholders keep their gray dot.
-        out.set(item, Date.now());
+        const key = item.endsWith(":") ? `${item}local` : item;
+        out.set(key, Date.now());
       }
     }
     return out;
@@ -94,7 +99,7 @@ export function workspaceKey(
   branch: string | null,
   agentMode: string | null | undefined,
 ): string {
-  return `${projectId}:${branch ?? ""}:${agentMode ?? ""}`;
+  return `${projectId}:${branch ?? ""}:${agentMode || "local"}`;
 }
 
 export function hasPlaceholder(key: string): boolean {

@@ -53,6 +53,9 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // distillation degrades to the deterministic excerpt (tier 2).
   "http:GET /api/agent-sessions/:param/brief-source": { since: "0.3.6", summary: "读会话对话(仅蒸馏用文本)" },
   "http:POST /api/agent-sessions/:param/message": { since: "0.2.0", summary: "发消息给会话" },
+  // Additive: older workers return 404 and the hub leaves the empty session
+  // intact; no unconditional-delete fallback is safe under a concurrent send.
+  "http:POST /api/agent-sessions/:param/discard-if-empty": { since: "0.3.33", summary: "仅在空会话时删除" },
   "http:POST /api/agent-sessions/:param/paste": { since: "0.2.0", summary: "粘贴图片/长文本" },
   "http:POST /api/agent-sessions/:param/stop": { since: "0.2.0", summary: "停止会话 turn" },
   "http:POST /api/agent-sessions/:param/restart": { since: "0.2.0", summary: "重启会话进程" },

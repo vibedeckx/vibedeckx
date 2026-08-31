@@ -60,6 +60,47 @@ export interface AgentSession {
   branchedFromEntryIndex?: number | null;
 }
 
+export interface AgentWorkspaceIdentity {
+  projectId: string;
+  branch: string | null;
+  agentMode: string | null;
+  explicitSessionId: string | null;
+}
+
+export function createAgentWorkspaceIdentity(
+  projectId: string | null,
+  branch: string | null,
+  agentMode: string | null | undefined,
+  explicitSessionId: string | null | undefined,
+): AgentWorkspaceIdentity | null {
+  if (!projectId) return null;
+  return {
+    projectId,
+    branch,
+    // The API and project model use both an omitted value and the literal
+    // "local" for the built-in target. They are the same workspace identity.
+    agentMode: agentMode || "local",
+    explicitSessionId: explicitSessionId ?? null,
+  };
+}
+
+export interface EnsuredAgentSession {
+  session: AgentSession;
+  origin: AgentWorkspaceIdentity;
+  /** Whether the workspace that requested the create is currently displayed. */
+  adopted: boolean;
+}
+
+export function sameAgentWorkspace(
+  left: AgentWorkspaceIdentity,
+  right: AgentWorkspaceIdentity,
+): boolean {
+  return left.projectId === right.projectId
+    && left.branch === right.branch
+    && left.agentMode === right.agentMode
+    && left.explicitSessionId === right.explicitSessionId;
+}
+
 // ============ JSON Patch Types (RFC 6902) ============
 
 type PatchOperation = "add" | "replace" | "remove";
@@ -164,7 +205,10 @@ async function loadExistingSession(
   return response.json();
 }
 
-async function sendMessageToSession(sessionId: string, content: string | ContentPart[]): Promise<void> {
+async function sendMessageToSession(
+  sessionId: string,
+  content: string | ContentPart[],
+): Promise<void> {
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -189,6 +233,17 @@ async function sendMessageToSession(sessionId: string, content: string | Content
     console.error(`[AgentSession] /message failed: status=${response.status}, sessionId=${sessionId}, detail=${detail}`);
     throw new Error(`Failed to send message [${response.status}]${detail}`);
   }
+}
+
+async function discardEmptySessionApi(sessionId: string): Promise<boolean> {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/discard-if-empty`, {
+    method: "POST",
+  });
+  if (response.ok) return true;
+  // 404 can also mean a remote worker predates discard-if-empty. Never
+  // pretend cleanup succeeded and hide a session that may still be alive.
+  if (response.status === 404 || response.status === 409) return false;
+  throw new Error(`Failed to discard empty session [${response.status}]`);
 }
 
 export interface UploadedPaste {
@@ -382,6 +437,17 @@ function cacheSessionSnapshot(
   const snapshot = { session, history: { ...history, entries: [...history.entries] } };
   writeSessionCache(getCacheKey(projectId, branch, requestedSessionId), snapshot);
   writeSessionCache(getCacheKey(projectId, branch, session.id), snapshot);
+}
+
+function deleteCachedSessionSnapshot(
+  projectId: string,
+  branch: string | null,
+  requestedSessionId: string | null,
+  sessionId: string,
+): void {
+  const requestedKey = getCacheKey(projectId, branch, requestedSessionId);
+  if (sessionCache.get(requestedKey)?.session.id === sessionId) sessionCache.delete(requestedKey);
+  sessionCache.delete(getCacheKey(projectId, branch, sessionId));
 }
 
 function updateCachedSessionMetadata(
@@ -694,6 +760,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const projectIdRef = useRef(projectId);
   const branchRef = useRef(branch);
   const explicitSessionIdRef = useRef(explicitSessionId);
+  const workspaceIdentityRef = useRef<AgentWorkspaceIdentity | null>(
+    createAgentWorkspaceIdentity(projectId, branch, agentMode, explicitSessionId),
+  );
+  // Promise continuations can run between a render and its passive effects.
+  // Keep the identity used for adoption synchronous with the rendered props.
+  workspaceIdentityRef.current = createAgentWorkspaceIdentity(
+    projectId,
+    branch,
+    agentMode,
+    explicitSessionId,
+  );
 
   // Keep callback + identity refs in sync with latest props (avoids stale
   // closures in WebSocket handler — see comment above).
@@ -1416,6 +1493,97 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     [session?.id, projectId, branch, explicitSessionId]
   );
 
+  // First-send delivery can finish after this hook has been reused for a
+  // different workspace. Target the created session explicitly and guard all
+  // UI/cache error handling by the captured origin identity.
+  const sendEnsuredMessage = useCallback(async (
+    ensured: EnsuredAgentSession,
+    content: string | ContentPart[],
+  ): Promise<boolean> => {
+    try {
+      const trimmed = typeof content === "string" ? content.trim() : content;
+      await sendMessageToSession(ensured.session.id, trimmed);
+      return true;
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : "Failed to send message";
+      console.error(`[AgentSession] Failed first-send for ${ensured.session.id}:`, errorMsg);
+
+      const currentIdentity = workspaceIdentityRef.current;
+      if (!currentIdentity || !sameAgentWorkspace(ensured.origin, currentIdentity)) return false;
+
+      if (errorMsg.includes("[404]")) {
+        deleteCachedSessionSnapshot(
+          ensured.origin.projectId,
+          ensured.origin.branch,
+          ensured.origin.explicitSessionId,
+          ensured.session.id,
+        );
+        if (sessionRef.current?.id === ensured.session.id) {
+          setSession(null);
+          sessionRef.current = null;
+          historyRef.current = null;
+          setStatus("stopped");
+          setIsInitialized(false);
+          shouldAutoStartRef.current = true;
+        }
+      }
+      setError(errorMsg);
+      toast.error("Failed to send message", { description: errorMsg });
+      return false;
+    }
+  }, []);
+
+  // Compensating action for preprocessing failures after /new succeeded. The
+  // server deletes only while the session is still entry-less and serializes
+  // this check with /message, so a concurrent first-send cannot be destroyed.
+  const discardEnsuredSessionIfEmpty = useCallback(async (
+    ensured: EnsuredAgentSession,
+  ): Promise<boolean> => {
+    let discarded: boolean;
+    try {
+      discarded = await discardEmptySessionApi(ensured.session.id);
+    } catch (e) {
+      console.error(`[AgentSession] Failed to discard empty session ${ensured.session.id}:`, e);
+      return false;
+    }
+    if (!discarded) return false;
+
+    deleteCachedSessionSnapshot(
+      ensured.origin.projectId,
+      ensured.origin.branch,
+      ensured.origin.explicitSessionId,
+      ensured.session.id,
+    );
+    const originKey = workspaceKey(
+      ensured.origin.projectId,
+      ensured.origin.branch,
+      ensured.origin.agentMode,
+    );
+    if (latestCreatedSessionByWorkspaceRef.current.get(originKey) === ensured.session.id) {
+      latestCreatedSessionByWorkspaceRef.current.delete(originKey);
+      addPlaceholder(originKey);
+    }
+
+    const currentIdentity = workspaceIdentityRef.current;
+    if (currentIdentity
+      && sameAgentWorkspace(ensured.origin, currentIdentity)
+      && sessionRef.current?.id === ensured.session.id) {
+      if (wsSessionIdRef.current === ensured.session.id) {
+        wsRef.current?.close(1000, "discard-empty-session");
+        wsRef.current = null;
+        wsSessionIdRef.current = null;
+      }
+      setSession(null);
+      sessionRef.current = null;
+      historyRef.current = null;
+      setStatus("stopped");
+      setIsInitialized(true);
+      setMessages([]);
+      containerRef.current = { entries: {}, status: "stopped" };
+    }
+    return true;
+  }, []);
+
   const uploadPaste = useCallback(
     async (content: string, sessionId?: string): Promise<UploadedPaste> => {
       const targetSessionId = sessionId || session?.id;
@@ -1686,7 +1854,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // generation each get their own in-flight entry instead of the second's
   // assignment clobbering the first's — which would otherwise let a third,
   // same-model-as-first call slip past the guard and fire a duplicate create.
-  const ensureSessionInFlightRef = useRef<Map<string, Promise<AgentSession | null>>>(new Map());
+  const ensureSessionInFlightRef = useRef<Map<string, Promise<EnsuredAgentSession | null>>>(new Map());
+  const latestCreatedSessionByWorkspaceRef = useRef<Map<string, string>>(new Map());
 
   // Create a real session on demand (called by submitMessage on first send).
   // POSTs to /api/projects/:projectId/agent-sessions/new and wires up WS.
@@ -1694,9 +1863,15 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const ensureSession = useCallback((
     permissionMode?: "plan" | "edit",
     model?: string | null,
-  ): Promise<AgentSession | null> => {
+  ): Promise<EnsuredAgentSession | null> => {
     if (!projectId) return Promise.resolve(null);
-    if (session) return Promise.resolve(session);
+    const origin = createAgentWorkspaceIdentity(
+      projectId,
+      branch,
+      agentMode,
+      explicitSessionId,
+    )!;
+    if (session) return Promise.resolve({ session, origin, adopted: true });
 
     // Capture generation at call time to detect a workspace switch happening
     // under any of the awaits below (same pattern as startSession).
@@ -1706,7 +1881,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const inFlight = ensureSessionInFlightRef.current.get(inFlightKey);
     if (inFlight) return inFlight;
 
-    const run = async (): Promise<AgentSession | null> => {
+    const run = async (): Promise<EnsuredAgentSession | null> => {
       setIsLoading(true);
       setError(null);
       try {
@@ -1741,13 +1916,6 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           if (!confirmed) throw error;
           data = await createNewAgentSession(projectId, branch, permissionMode, agentType, true, model);
         }
-        // If workspace changed while a create call was in flight, discard the
-        // result rather than writing the old workspace's session into the new
-        // one's UI state.
-        if (sessionGenerationRef.current !== generation) {
-          console.log("[AgentSession] Discarding stale ensureSession result (generation mismatch)");
-          return null;
-        }
         const newSession: AgentSession = {
           id: data.session.id,
           projectId: data.session.projectId,
@@ -1759,17 +1927,46 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           processAlive: data.session.processAlive ?? true,
         };
         const history = emptyHistory(newSession);
-        cacheSessionSnapshot(projectId, branch, explicitSessionId, newSession, history);
-        setSession(newSession);
-        sessionRef.current = newSession;
-        historyRef.current = history;
-        setStatus(newSession.status);
-        setIsInitialized(true);
-        // No longer in placeholder mode — a real session exists now.
-        removePlaceholder(workspaceKey(projectId, branch, agentMode));
-        connectWebSocket(newSession.id);
-        onSessionStartedRef.current?.(newSession);
-        return newSession;
+        // Creation is durable even if the user navigated while it was in
+        // flight. Always make the origin workspace aware of the real session;
+        // only the live view adoption is conditional.
+        cacheSessionSnapshot(origin.projectId, origin.branch, origin.explicitSessionId, newSession, history);
+        removePlaceholder(workspaceKey(origin.projectId, origin.branch, origin.agentMode));
+        latestCreatedSessionByWorkspaceRef.current.set(
+          workspaceKey(origin.projectId, origin.branch, origin.agentMode),
+          newSession.id,
+        );
+
+        const currentIdentity = workspaceIdentityRef.current;
+        const adopted = currentIdentity !== null && sameAgentWorkspace(origin, currentIdentity);
+        if (adopted) {
+          // Switching away and back can start a latest-session lookup for the
+          // origin while this create is still in flight. The create is newer
+          // authoritative state; invalidate that lookup so a stale `null`
+          // response cannot overwrite the adopted session.
+          sessionGenerationRef.current += 1;
+          setIsLoading(false);
+          setSession(newSession);
+          sessionRef.current = newSession;
+          historyRef.current = history;
+          setStatus(newSession.status);
+          setIsInitialized(true);
+          try {
+            connectWebSocket(newSession.id);
+          } catch (connectionError) {
+            // REST delivery below does not depend on the stream. A socket
+            // setup failure must not turn a successful create back into null.
+            console.error(`[AgentSession] Failed to connect created session ${newSession.id}:`, connectionError);
+          }
+          try {
+            onSessionStartedRef.current?.(newSession);
+          } catch (callbackError) {
+            console.error(`[AgentSession] onSessionStarted failed for ${newSession.id}:`, callbackError);
+          }
+        } else {
+          console.log(`[AgentSession] Created session ${newSession.id} for a background workspace; not adopting it into the current view`);
+        }
+        return { session: newSession, origin, adopted };
       } catch (e) {
         console.error("[AgentSession] ensureSession:", e);
         // Don't surface the error into a workspace that has moved on.
@@ -2074,6 +2271,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     loadEarlierHistory,
     startSession,
     sendMessage,
+    sendEnsuredMessage,
+    discardEnsuredSessionIfEmpty,
     uploadPaste,
     stopSession,
     restartSession,

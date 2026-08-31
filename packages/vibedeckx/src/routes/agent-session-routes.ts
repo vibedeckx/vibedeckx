@@ -54,6 +54,7 @@ function messageTextLength(content: string | ContentPart[]): number {
 const routes: FastifyPluginAsync = async (fastify) => {
   const instructionReceiverToken = randomUUID();
   const instructionDeliveryLocks = new Map<string, Promise<void>>();
+  const sessionMutationLocks = new Map<string, Promise<void>>();
 
   async function serializeInstructionDelivery<T>(key: string, effect: () => Promise<T>): Promise<T> {
     const previous = instructionDeliveryLocks.get(key) ?? Promise.resolve();
@@ -67,6 +68,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
     } finally {
       release();
       if (instructionDeliveryLocks.get(key) === tail) instructionDeliveryLocks.delete(key);
+    }
+  }
+
+  async function serializeSessionMutation<T>(sessionId: string, effect: () => Promise<T>): Promise<T> {
+    const previous = sessionMutationLocks.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => gate);
+    sessionMutationLocks.set(sessionId, tail);
+    await previous;
+    try {
+      return await effect();
+    } finally {
+      release();
+      if (sessionMutationLocks.get(sessionId) === tail) sessionMutationLocks.delete(sessionId);
     }
   }
 
@@ -1702,18 +1718,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
       );
     };
 
-    if (!idempotencyKey) {
-      const success = await deliver();
-      if (!success) {
-        console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!session}, dormant=${session?.dormant}`);
-        return reply.code(404).send({ error: "Session not found or not running" });
-      }
-      return reply.code(200).send({ success: true });
-    }
+    return serializeSessionMutation(req.params.sessionId, async () => {
+      // A queued discard may have removed the session after the authorization
+      // lookup above. Re-check under the same lock used by discard-if-empty.
+      const currentSession = fastify.agentSessionManager.getSession(req.params.sessionId);
+      if (!currentSession) return reply.code(404).send({ error: "Session not found or not running" });
 
-    if (!session) return reply.code(404).send({ error: "Session not found or not running" });
-    const deliveryKey = `${req.params.sessionId}\0${idempotencyKey}`;
-    return serializeInstructionDelivery(deliveryKey, async () => {
+      if (!idempotencyKey) {
+        const success = await deliver();
+        if (!success) {
+          console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!currentSession}, dormant=${currentSession.dormant}`);
+          return reply.code(404).send({ error: "Session not found or not running" });
+        }
+        return reply.code(200).send({ success: true });
+      }
+
+      const deliveryKey = `${req.params.sessionId}\0${idempotencyKey}`;
+      return serializeInstructionDelivery(deliveryKey, async () => {
       const claim = await fastify.storage.agentInstructionDeliveries.claim({
         sessionId: req.params.sessionId,
         idempotencyKey,
@@ -1763,6 +1784,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       } finally {
         clearInterval(heartbeat);
       }
+      });
     });
   });
 
@@ -2345,6 +2367,48 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       return reply.code(200).send({ success: true });
     }
+  );
+
+  // Compensating cleanup for a first-send that failed during paste upload or
+  // translation. Unlike the user-facing unconditional DELETE, this operation
+  // is safe to race with /message: both are serialized per worker session and
+  // a session with any delivered entry is retained.
+  fastify.post<{ Params: { sessionId: string } }>(
+    "/api/agent-sessions/:sessionId/discard-if-empty",
+    async (req, reply) => {
+      const authResult = requireAuth(req, reply);
+      if (authResult === null) return;
+
+      if (req.params.sessionId.startsWith("remote-")) {
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, authResult);
+        if (!remoteInfo) return reply.code(404).send({ error: "Remote session not found" });
+        const result = await proxyAuto(
+          remoteInfo.remoteServerId,
+          "POST",
+          `/api/agent-sessions/${remoteInfo.remoteSessionId}/discard-if-empty`,
+        );
+        if (result.ok) await forgetRemoteSession(fastify, req.params.sessionId);
+        return reply.code(proxyStatus(result)).send(result.data);
+      }
+
+      const storedSession = await fastify.storage.agentSessions.getById(req.params.sessionId);
+      const storedProjection = storedSession ? await projectLocalSessionIdentity(storedSession) : undefined;
+      if (!storedSession || !storedProjection
+        || !(await fastify.storage.projects.getById(storedProjection.projectId, authResult))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      return serializeSessionMutation(req.params.sessionId, async () => {
+        const liveSession = fastify.agentSessionManager.getSession(req.params.sessionId);
+        if (!liveSession) return reply.code(404).send({ error: "Session not found" });
+        if (fastify.agentSessionManager.getRawMessages(req.params.sessionId).length > 0) {
+          return reply.code(409).send({ error: "Session is no longer empty" });
+        }
+        const deleted = await fastify.agentSessionManager.deleteSession(req.params.sessionId);
+        if (!deleted) return reply.code(404).send({ error: "Session not found" });
+        return reply.code(200).send({ success: true, discarded: true });
+      });
+    },
   );
 
   // 删除 Agent Session

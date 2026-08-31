@@ -20,7 +20,12 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 import { createNewAgentSession, authFetch, ResidentLimitError } from "@/lib/api";
-import { useAgentSession } from "./use-agent-session";
+import {
+  createAgentWorkspaceIdentity,
+  sameAgentWorkspace,
+  useAgentSession,
+} from "./use-agent-session";
+import { addPlaceholder, hasPlaceholder, removePlaceholder, workspaceKey } from "@/lib/placeholder-workspaces";
 
 const createSession = vi.mocked(createNewAgentSession);
 const fetchMock = vi.mocked(authFetch);
@@ -72,6 +77,9 @@ const sessionPayload = {
 };
 
 beforeEach(() => {
+  for (const branch of ["main", "a", "b"]) {
+    removePlaceholder(workspaceKey("p1", branch, null));
+  }
   createSession.mockReset();
   // Auto-start on mount POSTs /agent-sessions looking for an existing
   // session; "none" keeps the hook in the empty-placeholder state so
@@ -119,7 +127,11 @@ describe("ensureSession resident-limit flow", () => {
     expect(createSession).toHaveBeenCalledTimes(2);
     expect(createSession).toHaveBeenLastCalledWith("p1", "main", undefined, undefined, true, undefined);
     expect(latest!.residentLimitPrompt).toBeNull();
-    await expect(p1).resolves.toMatchObject({ id: "s-new" });
+    await expect(p1).resolves.toMatchObject({
+      session: { id: "s-new" },
+      origin: { projectId: "p1", branch: "main" },
+      adopted: true,
+    });
   });
 
   it("declining the prompt aborts the send without creating a session", async () => {
@@ -180,5 +192,106 @@ describe("ensureSession resident-limit flow", () => {
 
     await expect(pending).resolves.toBeNull();
     expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a created session without adopting it after switching workspaces", async () => {
+    await render("a");
+    addPlaceholder(workspaceKey("p1", "a", null));
+    let settle!: (value: typeof sessionPayload) => void;
+    createSession.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+
+    let pending!: ReturnType<HookApi["ensureSession"]>;
+    await act(async () => { pending = latest!.ensureSession(); });
+    expect(hasPlaceholder(workspaceKey("p1", "a", null))).toBe(true);
+
+    await render("b");
+    await act(async () => {
+      settle({ ...sessionPayload, session: { ...sessionPayload.session, branch: "a" } });
+      await pending;
+    });
+
+    const ensured = await pending;
+    expect(ensured).toMatchObject({
+      session: { id: "s-new", branch: "a" },
+      origin: { projectId: "p1", branch: "a" },
+      adopted: false,
+    });
+    expect(latest!.session).toBeNull();
+    expect(hasPlaceholder(workspaceKey("p1", "a", null))).toBe(false);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: "gone" }),
+    } as unknown as Response);
+    await act(async () => {
+      expect(await latest!.sendEnsuredMessage(ensured!, "hello")).toBe(false);
+    });
+    const [url, init] = fetchMock.mock.calls.at(-1)!;
+    expect(String(url)).toContain("/api/agent-sessions/s-new/message");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      content: "hello",
+    });
+    // The failure belonged to branch a and must not blank or error branch b.
+    expect(latest!.session).toBeNull();
+    expect(latest!.error).toBeNull();
+  });
+
+  it("adopts a create that resolves after switching away and back", async () => {
+    await render("a");
+    addPlaceholder(workspaceKey("p1", "a", null));
+    let settle!: (value: typeof sessionPayload) => void;
+    createSession.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+
+    let pending!: ReturnType<HookApi["ensureSession"]>;
+    await act(async () => { pending = latest!.ensureSession(); });
+    await render("b");
+    await render("a");
+    await act(async () => {
+      settle({ ...sessionPayload, session: { ...sessionPayload.session, branch: "a" } });
+      await pending;
+    });
+
+    await expect(pending).resolves.toMatchObject({ adopted: true, session: { id: "s-new" } });
+    expect(latest!.session?.id).toBe("s-new");
+    expect(hasPlaceholder(workspaceKey("p1", "a", null))).toBe(false);
+  });
+
+  it("normalizes omitted and literal local targets to the same identity", async () => {
+    await render("main");
+    createSession.mockResolvedValue(sessionPayload);
+
+    let ensured!: Awaited<ReturnType<HookApi["ensureSession"]>>;
+    await act(async () => { ensured = await latest!.ensureSession(); });
+
+    expect(ensured!.origin.agentMode).toBe("local");
+    expect(sameAgentWorkspace(
+      ensured!.origin,
+      createAgentWorkspaceIdentity("p1", "main", "local", null)!,
+    )).toBe(true);
+  });
+
+  it("restores the origin placeholder after discarding an empty created session", async () => {
+    await render("main");
+    addPlaceholder(workspaceKey("p1", "main", null));
+    createSession.mockResolvedValue(sessionPayload);
+
+    let ensured!: Awaited<ReturnType<HookApi["ensureSession"]>>;
+    await act(async () => { ensured = await latest!.ensureSession(); });
+    expect(latest!.session?.id).toBe("s-new");
+    expect(hasPlaceholder(workspaceKey("p1", "main", null))).toBe(false);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, discarded: true }),
+    } as unknown as Response);
+    await act(async () => {
+      expect(await latest!.discardEnsuredSessionIfEmpty(ensured!)).toBe(true);
+    });
+
+    expect(latest!.session).toBeNull();
+    expect(latest!.isInitialized).toBe(true);
+    expect(hasPlaceholder(workspaceKey("p1", "main", null))).toBe(true);
   });
 });

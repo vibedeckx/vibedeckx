@@ -3,7 +3,16 @@
 import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
 import { useAgentSession } from "@/hooks/use-agent-session";
 import { useSurfaceCommanderSession } from "@/hooks/use-surface-commander-session";
-import type { AgentMessage, ContentPart, UploadedPaste, AgentSession } from "@/hooks/use-agent-session";
+import {
+  createAgentWorkspaceIdentity,
+  sameAgentWorkspace,
+  type AgentMessage,
+  type ContentPart,
+  type UploadedPaste,
+  type AgentSession,
+  type EnsuredAgentSession,
+  type AgentWorkspaceIdentity,
+} from "@/hooks/use-agent-session";
 import { AgentMessageItem } from "./agent-message";
 import { Conversation, ConversationContent, ConversationScrollButton } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
@@ -190,6 +199,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const activeSubmissionRef = useRef<symbol | null>(null);
   const [agentType, setAgentType] = useState<AgentType>("claude-code");
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
   // Pre-session model choice. Mirrors how agentType is pre-selected before a
@@ -228,6 +238,23 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const sessionTargetLabel =
     agentTargets.find((t) => t.id === sessionTarget)?.label
     ?? (sessionTarget === "local" ? "Local" : sessionTarget);
+  const displayedWorkspaceRef = useRef<AgentWorkspaceIdentity | null>(null);
+  displayedWorkspaceRef.current = createAgentWorkspaceIdentity(
+    projectId,
+    branch,
+    sessionTarget,
+    sessionId,
+  );
+  const isOriginDisplayed = useCallback((origin: AgentWorkspaceIdentity): boolean => {
+    const current = displayedWorkspaceRef.current;
+    return current !== null && sameAgentWorkspace(origin, current);
+  }, []);
+  const isOriginDraftDisplayed = useCallback((origin: AgentWorkspaceIdentity): boolean => {
+    const current = displayedWorkspaceRef.current;
+    return current !== null
+      && origin.projectId === current.projectId
+      && origin.branch === current.branch;
+  }, []);
 
   const {
     session,
@@ -247,6 +274,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     isLoadingEarlier,
     loadEarlierHistory,
     sendMessage,
+    sendEnsuredMessage,
+    discardEnsuredSessionIfEmpty,
     uploadPaste,
     stopSession,
     switchAgentType,
@@ -352,9 +381,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // workspace A without sending, then switching to B and sending, would
   // otherwise spawn B's session on A's model.
   useEffect(() => {
+    activeSubmissionRef.current = null;
     setPastes([]);
     setNextPasteId(1);
     setPendingModel(null);
+    setIsTranslating(false);
+    setIsSubmitting(false);
   }, [projectId, branch]);
 
   // Arm the "title pending" state the moment the user's first message becomes
@@ -698,18 +730,21 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       // "idle" overlay set by New Conversation so the dot turns blue immediately.
       if (!session) {
         // No persisted session yet (placeholder). Create one via /new on first send.
-        const newSession = await ensureSession(permissionMode, pendingModel);
-        if (newSession) {
+        const ensured = await ensureSession(permissionMode, pendingModel);
+        if (ensured) {
           // Arm the title-pending loader before sendMessage so the dropdown
           // never flashes the snippet/timestamp the server writes synchronously.
-          setPendingTitleSessionId(newSession.id);
-          sendMessage(content, newSession.id);
+          if (isOriginDisplayed(ensured.origin)) {
+            setPendingTitleSessionId(ensured.session.id);
+          }
+          const sent = await sendEnsuredMessage(ensured, content);
+          if (!sent) await discardEnsuredSessionIfEmpty(ensured);
         }
       } else {
-        sendMessage(content);
+        await sendMessage(content);
       }
     }
-  }), [handleNewConversation, session, ensureSession, sendMessage, permissionMode, pendingModel, onStatusChange]);
+  }), [handleNewConversation, session, ensureSession, sendEnsuredMessage, discardEnsuredSessionIfEmpty, sendMessage, permissionMode, pendingModel, onStatusChange, isOriginDisplayed]);
 
   const handlePasteText = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => {
@@ -768,12 +803,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   }
 
   const handleSubmit = async (message: PromptInputMessage) => {
+    const submissionOrigin = displayedWorkspaceRef.current;
+    if (!submissionOrigin) return;
     const rawText = message.text;
     const hasFiles = message.files.length > 0;
     const hasPastes = pastes.length > 0;
     const trimmedRaw = rawText.trim();
     if (!trimmedRaw && !hasFiles) return;
 
+    const submissionToken = Symbol("agent-submission");
+    activeSubmissionRef.current = submissionToken;
     setIsSubmitting(true);
     try {
     setInput("");
@@ -787,20 +826,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // Resolve which session id to use. If no session yet, create one via /new
     // and use the resulting id for paste materialization + sendMessage.
     let targetSessionId: string | undefined = session?.id;
-    let startedSession: AgentSession | null = null;
+    let ensuredSession: EnsuredAgentSession | null = null;
     if (!session) {
-      startedSession = await ensureSession(permissionMode, pendingModel);
-      if (!startedSession) {
+      ensuredSession = await ensureSession(permissionMode, pendingModel);
+      if (!ensuredSession) {
         // Restore input on failure so the user doesn't lose their pastes.
-        setInput(rawText);
+        if (isOriginDraftDisplayed(submissionOrigin)) setInput(rawText);
         return;
       }
-      targetSessionId = startedSession.id;
+      targetSessionId = ensuredSession.session.id;
       // Arm the title-pending loader the moment the session exists so the
       // dropdown trigger goes straight from "New Session" to skeleton without
       // flashing "History" or the snippet/created_at the server persists
       // synchronously. Cleared by `onTitleUpdated` (or the 30s safety net).
-      setPendingTitleSessionId(startedSession.id);
+      if (isOriginDisplayed(submissionOrigin)) {
+        setPendingTitleSessionId(ensuredSession.session.id);
+      }
     }
 
     // Upload pastes (if any) and replace tokens with <vpaste/> markers.
@@ -810,8 +851,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         processedText = (await materializePastes(rawText, pastes, uploadPaste, targetSessionId)).trim();
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to upload paste";
-        toast.error("Paste upload failed", { description: msg });
-        setInput(rawText);
+        if (ensuredSession) {
+          const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
+          if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
+        }
+        if (isOriginDraftDisplayed(submissionOrigin)) {
+          toast.error("Paste upload failed", { description: msg });
+          setInput(rawText);
+        }
         return;
       }
     }
@@ -825,8 +872,14 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         processedText = `<vpaste path="${uploaded.path}" size="${uploaded.size}" />`;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to upload paste";
-        toast.error("Paste upload failed", { description: msg });
-        setInput(rawText);
+        if (ensuredSession) {
+          const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
+          if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
+        }
+        if (isOriginDraftDisplayed(submissionOrigin)) {
+          toast.error("Paste upload failed", { description: msg });
+          setInput(rawText);
+        }
         return;
       }
     }
@@ -834,8 +887,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // Clear pastes state now that they've been materialized into the outgoing message.
     const capturedPastes = pastes;
     const capturedNextPasteId = nextPasteId;
-    setPastes([]);
-    setNextPasteId(1);
+    if (isOriginDraftDisplayed(submissionOrigin)) {
+      setPastes([]);
+      setNextPasteId(1);
+    }
 
     // Build content: plain string when no files, ContentPart[] when files are attached
     let content: string | ContentPart[];
@@ -864,14 +919,23 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         : content.filter(p => p.type === "text").map(p => (p as { type: "text"; text: string }).text).join("\n");
 
       if (textToTranslate.trim()) {
-        setIsTranslating(true);
+        if (activeSubmissionRef.current === submissionToken
+          && isOriginDraftDisplayed(submissionOrigin)) {
+          setIsTranslating(true);
+        }
         try {
           const result = await translateText(textToTranslate);
           if (result.error) {
-            setInput(rawText);
-            setPastes(capturedPastes);
-            setNextPasteId(capturedNextPasteId);
-            toast.error("Translation failed", { description: "Disable translation to send the original text." });
+            if (ensuredSession) {
+              const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
+              if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
+            }
+            if (isOriginDraftDisplayed(submissionOrigin)) {
+              setInput(rawText);
+              setPastes(capturedPastes);
+              setNextPasteId(capturedNextPasteId);
+              toast.error("Translation failed", { description: "Disable translation to send the original text." });
+            }
             return;
           }
           if (typeof content === "string") {
@@ -882,26 +946,47 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             );
           }
         } catch {
-          setInput(rawText);
-          setPastes(capturedPastes);
-          setNextPasteId(capturedNextPasteId);
-          toast.error("Translation failed", { description: "Disable translation to send the original text." });
+          if (ensuredSession) {
+            const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
+            if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
+          }
+          if (isOriginDraftDisplayed(submissionOrigin)) {
+            setInput(rawText);
+            setPastes(capturedPastes);
+            setNextPasteId(capturedNextPasteId);
+            toast.error("Translation failed", { description: "Disable translation to send the original text." });
+          }
           return;
         } finally {
-          setIsTranslating(false);
+          if (activeSubmissionRef.current === submissionToken) setIsTranslating(false);
         }
       }
     }
 
-    if (startedSession) {
-      console.log(`[AgentConversation] handleSubmit: using freshly started session ${startedSession.id}`);
-      await sendMessage(content, startedSession.id);
+    if (ensuredSession) {
+      console.log(`[AgentConversation] handleSubmit: using freshly started session ${ensuredSession.session.id}`);
+      const sent = await sendEnsuredMessage(ensuredSession, content);
+      if (!sent) {
+        const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
+        if (discarded) {
+          if (isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
+          if (isOriginDraftDisplayed(submissionOrigin)) {
+            setInput(rawText);
+            setPastes(capturedPastes);
+            setNextPasteId(capturedNextPasteId);
+          }
+        }
+      }
     } else {
       console.log(`[AgentConversation] handleSubmit: existing session ${session!.id}, status=${status}`);
       await sendMessage(content);
     }
     } finally {
-      setIsSubmitting(false);
+      if (activeSubmissionRef.current === submissionToken) {
+        activeSubmissionRef.current = null;
+        setIsTranslating(false);
+        setIsSubmitting(false);
+      }
     }
   };
 

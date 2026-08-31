@@ -23,11 +23,20 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkflowRun } from "@/lib/api";
+import { translateText, type WorkflowRun } from "@/lib/api";
+import type { EnsuredAgentSession } from "@/hooks/use-agent-session";
 
-const ensureSession = vi.fn(async () => null);
+const ensureSession = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
+const sendEnsuredMessage = vi.fn(async () => true);
+const discardEnsuredSessionIfEmpty = vi.fn(async () => true);
+const uploadPaste = vi.fn();
 const setModel = vi.fn(async (): Promise<string | null> => null);
 const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }));
+const promptState = vi.hoisted(() => ({
+  submit: null as null | ((message: { text: string; files: [] }) => Promise<void>),
+  onPasteText: null as null | ((event: unknown, text: string) => void),
+}));
+const draftState = vi.hoisted(() => ({ value: "", set: vi.fn() }));
 
 /**
  * What the hook reports, so a test can put the component in front of a session
@@ -65,6 +74,18 @@ vi.mock("./model-picker", () => ({
 }));
 
 vi.mock("@/hooks/use-agent-session", () => ({
+  createAgentWorkspaceIdentity: (
+    projectId: string | null,
+    branch: string | null,
+    agentMode?: string | null,
+    explicitSessionId?: string | null,
+  ) => projectId ? {
+    projectId,
+    branch,
+    agentMode: agentMode || "local",
+    explicitSessionId: explicitSessionId ?? null,
+  } : null,
+  sameAgentWorkspace: (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b),
   useAgentSession: () => ({
     session: hookState.session,
     messages: hookState.messages,
@@ -78,7 +99,9 @@ vi.mock("@/hooks/use-agent-session", () => ({
     backgroundTasks: { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
     streamEpoch: 0,
     sendMessage: vi.fn(),
-    uploadPaste: vi.fn(),
+    sendEnsuredMessage,
+    discardEnsuredSessionIfEmpty,
+    uploadPaste,
     stopSession: vi.fn(),
     switchAgentType: vi.fn(),
     setModel,
@@ -107,7 +130,7 @@ vi.mock("@/hooks/use-conversation-settings", () => ({
 }));
 
 vi.mock("@/hooks/use-workspace-draft", () => ({
-  useWorkspaceDraft: () => ["", vi.fn()],
+  useWorkspaceDraft: () => [draftState.value, draftState.set],
 }));
 
 vi.mock("@/hooks/use-input-history", () => ({
@@ -172,16 +195,26 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
   type Kids = { children?: React.ReactNode };
   const Pass = ({ children }: Kids) => <>{children}</>;
   return {
-    PromptInput: ({ children }: Kids) => <form>{children}</form>,
-    PromptInputTextarea: () => <textarea />,
-    PromptInputSubmit: () => <button type="submit">send</button>,
+    PromptInput: ({ children, onSubmit }: Kids & { onSubmit: typeof promptState.submit }) => {
+      promptState.submit = onSubmit;
+      return <form>{children}</form>;
+    },
+    PromptInputTextarea: ({ onPasteText }: { onPasteText: typeof promptState.onPasteText }) => {
+      promptState.onPasteText = onPasteText;
+      return <textarea />;
+    },
+    PromptInputSubmit: ({ status }: { status: string }) => (
+      <button type="submit" data-testid="prompt-submit" data-status={status}>send</button>
+    ),
     PromptInputAttachments: () => null,
     PromptInputAttachment: () => null,
     PromptInputActionMenu: Pass,
     PromptInputActionMenuTrigger: () => null,
     PromptInputActionMenuContent: Pass,
     PromptInputActionAddAttachments: () => null,
-    PromptInputActionMenuItem: Pass,
+    PromptInputActionMenuItem: ({ children, onSelect }: Kids & { onSelect?: () => void }) => (
+      <button type="button" data-testid="prompt-action" onClick={() => onSelect?.()}>{children}</button>
+    ),
     PromptInputHeader: Pass,
     usePromptInputAttachments: () => ({ files: [] }),
   };
@@ -262,7 +295,18 @@ describe("AgentConversation pendingModel", () => {
       disconnect() {}
     };
     ensureSession.mockClear();
+    ensureSession.mockResolvedValue(null);
+    sendEnsuredMessage.mockReset();
+    sendEnsuredMessage.mockResolvedValue(true);
+    discardEnsuredSessionIfEmpty.mockReset();
+    discardEnsuredSessionIfEmpty.mockResolvedValue(true);
+    uploadPaste.mockReset();
+    vi.mocked(translateText).mockReset();
     setModel.mockClear();
+    promptState.submit = null;
+    promptState.onPasteText = null;
+    draftState.value = "";
+    draftState.set.mockReset();
     hookState.session = null;
     hookState.status = "idle";
     hookState.messages = [];
@@ -279,12 +323,13 @@ describe("AgentConversation pendingModel", () => {
     vi.clearAllMocks();
   });
 
-  const render = async (projectId: string, branch: string | null) => {
+  const render = async (projectId: string, branch: string | null, sessionId?: string | null) => {
     await act(async () => {
       root.render(
         <AgentConversation
           projectId={projectId}
           branch={branch}
+          sessionId={sessionId}
           project={{ id: projectId, name: projectId, path: `/tmp/${projectId}` } as never}
         />,
       );
@@ -459,6 +504,162 @@ describe("AgentConversation pendingModel", () => {
     });
 
     expect(q(container, "model-value")!.textContent).toBe("opus");
+  });
+
+  describe("failed first-send preprocessing", () => {
+    const ensured: EnsuredAgentSession = {
+      session: {
+        id: "s-new",
+        projectId: "pA",
+        branch: "featA",
+        status: "running",
+      },
+      origin: {
+        projectId: "pA",
+        branch: "featA",
+        agentMode: "local",
+        explicitSessionId: null,
+      },
+      adopted: true,
+    };
+
+    const renderFirstSend = async () => {
+      ensureSession.mockResolvedValue(ensured);
+      await render("pA", "featA");
+      expect(promptState.submit).not.toBeNull();
+    };
+
+    it.each(["returned-error", "thrown-error"] as const)(
+      "discards the empty created session on translation %s",
+      async (failure) => {
+        await renderFirstSend();
+        await act(async () => { q(container, "prompt-action")!.click(); });
+        if (failure === "returned-error") {
+          vi.mocked(translateText).mockResolvedValue({ translatedText: "", error: "failed" });
+        } else {
+          vi.mocked(translateText).mockRejectedValue(new Error("failed"));
+        }
+
+        await act(async () => {
+          await promptState.submit!({ text: "hello", files: [] });
+        });
+
+        expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
+        expect(sendEnsuredMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it("discards the empty created session when oversize paste upload fails", async () => {
+      await renderFirstSend();
+      uploadPaste.mockRejectedValue(new Error("upload failed"));
+
+      await act(async () => {
+        await promptState.submit!({ text: "x".repeat(2001), files: [] });
+      });
+
+      expect(uploadPaste).toHaveBeenCalledWith("x".repeat(2001), "s-new");
+      expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
+      expect(sendEnsuredMessage).not.toHaveBeenCalled();
+    });
+
+    it("discards the empty created session when tokenized paste upload fails", async () => {
+      await renderFirstSend();
+      const pasted = "x".repeat(2001);
+      await act(async () => {
+        promptState.onPasteText!(
+          {
+            preventDefault: vi.fn(),
+            currentTarget: { value: "", selectionStart: 0, selectionEnd: 0 },
+          },
+          pasted,
+        );
+      });
+      uploadPaste.mockRejectedValue(new Error("upload failed"));
+
+      await act(async () => {
+        await promptState.submit!({ text: "[📎 paste #1 (2.0KB)]", files: [] });
+      });
+
+      expect(uploadPaste).toHaveBeenCalledWith(pasted, "s-new");
+      expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
+      expect(sendEnsuredMessage).not.toHaveBeenCalled();
+    });
+
+    it("restores the same branch draft and resets submit state after a session switch", async () => {
+      await renderFirstSend();
+      await act(async () => { q(container, "prompt-action")!.click(); });
+      let rejectTranslation!: (error: Error) => void;
+      vi.mocked(translateText).mockImplementationOnce(() => new Promise((_, reject) => {
+        rejectTranslation = reject;
+      }));
+
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = promptState.submit!({ text: "keep this draft", files: [] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(q(container, "prompt-submit")!.dataset.status).toBe("submitted");
+
+      // Same draft workspace, different explicit session. Session-specific UI
+      // must not be adopted, but component lifecycle and draft state still
+      // belong to the composer currently on this branch.
+      await render("pA", "featA", "selected-session");
+      await act(async () => {
+        rejectTranslation(new Error("failed"));
+        await pending;
+      });
+
+      expect(draftState.set).toHaveBeenLastCalledWith("keep this draft");
+      expect(q(container, "prompt-submit")!.dataset.status).toBe("ready");
+    });
+
+    it("clears materialized paste state after switching sessions on the same branch", async () => {
+      await renderFirstSend();
+      const pasted = "x".repeat(2001);
+      await act(async () => {
+        promptState.onPasteText!(
+          {
+            preventDefault: vi.fn(),
+            currentTarget: { value: "", selectionStart: 0, selectionEnd: 0 },
+          },
+          pasted,
+        );
+      });
+      let resolveUpload!: (value: { path: string; size: number }) => void;
+      uploadPaste.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveUpload = resolve;
+      }));
+
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = promptState.submit!({ text: "[📎 paste #1 (2.0KB)]", files: [] });
+        await Promise.resolve();
+      });
+      await render("pA", "featA", "selected-session");
+      await act(async () => {
+        resolveUpload({ path: "/tmp/paste", size: pasted.length });
+        await pending;
+      });
+
+      uploadPaste.mockClear();
+      await act(async () => {
+        await promptState.submit!({ text: "[📎 paste #1 (2.0KB)]", files: [] });
+      });
+      expect(uploadPaste).not.toHaveBeenCalled();
+    });
+
+    it("discards and restores the draft when first-message delivery fails", async () => {
+      await renderFirstSend();
+      sendEnsuredMessage.mockResolvedValueOnce(false);
+
+      await act(async () => {
+        await promptState.submit!({ text: "retry me", files: [] });
+      });
+
+      expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
+      expect(draftState.set).toHaveBeenLastCalledWith("retry me");
+    });
   });
 
   describe("reviewer startup placeholders", () => {
