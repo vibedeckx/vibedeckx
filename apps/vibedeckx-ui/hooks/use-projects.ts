@@ -57,6 +57,18 @@ export function useProjects(initialProjectId?: string | null) {
     return project;
   };
 
+  const applyProject = useCallback((id: string, next: Project | ((prev: Project) => Project)) => {
+    const resolve = (p: Project) => (typeof next === "function" ? next(p) : next);
+    setProjects((prev) => prev.map((p) => (p.id === id ? resolve(p) : p)));
+    setCurrentProject((prev) => (prev?.id === id ? resolve(prev) : prev));
+  }, []);
+
+  // One chain per project id for in-flight optimistic updates. `seq` marks the
+  // latest request so an earlier response arriving late can't overwrite a newer
+  // optimistic value; `baseline` is the last server-confirmed project, restored
+  // if the chain's final request fails.
+  const optimisticRef = useRef(new Map<string, { seq: number; baseline: Project }>());
+
   const updateProject = async (id: string, opts: {
     name?: string;
     path?: string | null;
@@ -66,12 +78,44 @@ export function useProjects(initialProjectId?: string | null) {
     syncUpConfig?: SyncButtonConfig | null;
     syncDownConfig?: SyncButtonConfig | null;
   }) => {
-    const updated = await api.updateProject(id, opts);
-    setProjects((prev) => prev.map((p) => (p.id === id ? updated : p)));
-    if (currentProject?.id === id) {
-      setCurrentProject(updated);
+    // Only the mode toggles are applied optimistically: they are pure
+    // preferences the UI reads directly (executor target, agent target), so
+    // waiting a PUT round trip just makes the toggle feel laggy. Name/path/sync
+    // edits go through dialogs with server-side validation and keep the
+    // confirm-then-apply flow.
+    const patch: Partial<Project> = {};
+    if (opts.agentMode !== undefined) patch.agent_mode = opts.agentMode;
+    if (opts.executorMode !== undefined) patch.executor_mode = opts.executorMode;
+    const optimistic = Object.keys(patch).length > 0;
+
+    let chain: { seq: number; baseline: Project } | undefined;
+    if (optimistic) {
+      const known = projects.find((p) => p.id === id) ?? currentProjectRef.current;
+      chain = optimisticRef.current.get(id);
+      if (!chain && known && known.id === id) {
+        chain = { seq: 0, baseline: known };
+        optimisticRef.current.set(id, chain);
+      }
+      if (chain) chain.seq += 1;
+      applyProject(id, (p) => ({ ...p, ...patch }));
     }
-    return updated;
+    const mySeq = chain?.seq;
+    const isLatest = () => !chain || chain.seq === mySeq;
+
+    try {
+      const updated = await api.updateProject(id, opts);
+      if (isLatest()) {
+        if (chain) optimisticRef.current.delete(id);
+        applyProject(id, updated);
+      }
+      return updated;
+    } catch (error) {
+      if (chain && isLatest()) {
+        optimisticRef.current.delete(id);
+        applyProject(id, chain.baseline);
+      }
+      throw error;
+    }
   };
 
   const deleteProject = async (id: string) => {
