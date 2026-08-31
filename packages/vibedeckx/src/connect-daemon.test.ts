@@ -7,7 +7,9 @@ import {
   buildDaemonChildArgs,
   claimDaemonState,
   CONNECT_DAEMON_CHILD_ENV,
+  CONNECT_DAEMON_READY_TIMEOUT_ENV,
   CONNECT_DAEMON_TOKEN_ENV,
+  MAX_CONNECT_DAEMON_READY_TIMEOUT_MS,
   consumeDaemonChildEnvironment,
   daemonStatePath,
   describeConnectDaemon,
@@ -18,6 +20,7 @@ import {
   readLinuxProcessStartTicks,
   removeDaemonStateIfOwned,
   removeVerifiedStaleState,
+  resolveConnectDaemonReadyTimeoutMs,
   resolveConnectToken,
   assertConnectDaemonPlatform,
   startConnectDaemon,
@@ -180,6 +183,20 @@ describe("daemon child arguments and environment", () => {
       ["connect", "--token=secret", "--daemon=true", "--data-dir=/tmp/data"],
       ["connect", "--data-dir=/tmp/data"],
     ],
+    [
+      [
+        "connect",
+        "--daemon",
+        "--daemon-ready-timeout-ms",
+        "60000",
+        "--connect-to=https://example.com",
+      ],
+      ["connect", "--connect-to=https://example.com"],
+    ],
+    [
+      ["connect", "--daemon-ready-timeout-ms=60000", "--daemon"],
+      ["connect"],
+    ],
   ])("removes daemon and token arguments", (input, expected) => {
     expect(buildDaemonChildArgs(input)).toEqual(expected);
   });
@@ -202,6 +219,12 @@ describe("daemon child arguments and environment", () => {
     expect(() => buildDaemonChildArgs(["connect", "--token"])).toThrow(
       /--token.*value/i,
     );
+  });
+
+  it("rejects a standalone daemon readiness timeout flag without a value", () => {
+    expect(() =>
+      buildDaemonChildArgs(["connect", "--daemon-ready-timeout-ms"]),
+    ).toThrow(/--daemon-ready-timeout-ms.*value/i);
   });
 
   it("consumes and deletes the internal child environment", () => {
@@ -236,6 +259,41 @@ describe("daemon child arguments and environment", () => {
 });
 
 describe("connect daemon runtime policy", () => {
+  it("uses the default daemon readiness timeout when unconfigured", () => {
+    expect(resolveConnectDaemonReadyTimeoutMs(undefined, undefined)).toBe(15_000);
+  });
+
+  it("uses the daemon readiness timeout from the environment", () => {
+    expect(resolveConnectDaemonReadyTimeoutMs(undefined, "60000")).toBe(60_000);
+  });
+
+  it("prefers the explicit daemon readiness timeout flag", () => {
+    expect(resolveConnectDaemonReadyTimeoutMs("90000", "60000")).toBe(90_000);
+  });
+
+  it("accepts the largest timeout Node timers can represent", () => {
+    expect(
+      resolveConnectDaemonReadyTimeoutMs(
+        String(MAX_CONNECT_DAEMON_READY_TIMEOUT_MS),
+        undefined,
+      ),
+    ).toBe(MAX_CONNECT_DAEMON_READY_TIMEOUT_MS);
+  });
+
+  it.each(["", "0", "-1", "1.5", "30s", "2147483648", "9007199254740992"])(
+    "rejects invalid daemon readiness timeout %j",
+    (value) => {
+      expect(() => resolveConnectDaemonReadyTimeoutMs(undefined, value)).toThrow(
+        new RegExp(CONNECT_DAEMON_READY_TIMEOUT_ENV),
+      );
+    },
+  );
+
+  it("rejects an invalid flag value even when the environment is valid", () => {
+    expect(() => resolveConnectDaemonReadyTimeoutMs("2147483648", "60000"))
+      .toThrow(`between 1 and ${MAX_CONNECT_DAEMON_READY_TIMEOUT_MS}`);
+  });
+
   it("prefers the explicit token flag over the daemon child token", () => {
     expect(
       resolveConnectToken("flag-secret", {

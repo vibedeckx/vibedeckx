@@ -10,11 +10,14 @@ import { setupLogging, shutdownLogging } from "./logger.js";
 import {
   assertConnectDaemonPlatform,
   claimDaemonState,
+  CONNECT_DAEMON_READY_TIMEOUT_ENV,
+  DEFAULT_CONNECT_DAEMON_READY_TIMEOUT_MS,
   consumeDaemonChildEnvironment,
   describeConnectDaemon,
   notifyDaemonParentError,
   notifyDaemonParentReady,
   removeDaemonStateIfOwned,
+  resolveConnectDaemonReadyTimeoutMs,
   resolveConnectToken,
   startConnectDaemon,
   stopConnectDaemon,
@@ -250,6 +253,12 @@ const connectCommand = buildCommand({
         brief: "Run in the background after initialization (Linux only)",
         optional: true,
       },
+      "daemon-ready-timeout-ms": {
+        kind: "parsed",
+        parse: String,
+        brief: `Maximum time to wait for daemon startup readiness (default: ${DEFAULT_CONNECT_DAEMON_READY_TIMEOUT_MS} ms). Env: ${CONNECT_DAEMON_READY_TIMEOUT_ENV}`,
+        optional: true,
+      },
       force: {
         kind: "boolean",
         brief: "Re-pin this machine to the token's remote, overriding the pinned-identity mismatch guard",
@@ -285,6 +294,7 @@ const connectCommand = buildCommand({
     "connect-to": string;
     token: string | undefined;
     daemon: boolean | undefined;
+    "daemon-ready-timeout-ms": string | undefined;
     force: boolean | undefined;
     port: number | undefined;
     "data-dir": string | undefined;
@@ -296,11 +306,16 @@ const connectCommand = buildCommand({
     const token = resolveConnectToken(flags.token, childContext);
 
     if (flags.daemon) {
+      const timeoutMs = resolveConnectDaemonReadyTimeoutMs(
+        flags["daemon-ready-timeout-ms"],
+        process.env[CONNECT_DAEMON_READY_TIMEOUT_ENV],
+      );
       const started = await startConnectDaemon({
         dataDir,
         connectTo: flags["connect-to"],
         token,
         argv: process.argv.slice(2),
+        timeoutMs,
       });
       console.log(
         `Vibedeckx connect started in background (PID ${started.pid}).`,

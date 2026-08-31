@@ -10,6 +10,31 @@ import {
 
 export const CONNECT_DAEMON_CHILD_ENV = "VIBEDECKX_INTERNAL_CONNECT_DAEMON";
 export const CONNECT_DAEMON_TOKEN_ENV = "VIBEDECKX_INTERNAL_CONNECT_TOKEN";
+export const CONNECT_DAEMON_READY_TIMEOUT_ENV =
+  "VIBEDECKX_CONNECT_DAEMON_READY_TIMEOUT_MS";
+export const DEFAULT_CONNECT_DAEMON_READY_TIMEOUT_MS = 15_000;
+export const MAX_CONNECT_DAEMON_READY_TIMEOUT_MS = 2_147_483_647;
+
+export function resolveConnectDaemonReadyTimeoutMs(
+  flagValue: string | undefined,
+  envValue: string | undefined,
+): number {
+  const raw = flagValue ?? envValue;
+  if (raw === undefined) return DEFAULT_CONNECT_DAEMON_READY_TIMEOUT_MS;
+  const timeoutMs = Number(raw);
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs <= 0 ||
+    timeoutMs > MAX_CONNECT_DAEMON_READY_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `Daemon readiness timeout must be an integer between 1 and ${MAX_CONNECT_DAEMON_READY_TIMEOUT_MS} milliseconds ` +
+      `(set --daemon-ready-timeout-ms or ${CONNECT_DAEMON_READY_TIMEOUT_ENV})`,
+    );
+  }
+  return timeoutMs;
+}
 
 export function buildDaemonChildArgs(argv: string[]): string[] {
   const args: string[] = [];
@@ -26,6 +51,14 @@ export function buildDaemonChildArgs(argv: string[]): string[] {
       continue;
     }
     if (argument.startsWith("--token=")) continue;
+    if (argument === "--daemon-ready-timeout-ms") {
+      if (index + 1 >= argv.length) {
+        throw new Error("--daemon-ready-timeout-ms requires a value");
+      }
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--daemon-ready-timeout-ms=")) continue;
     args.push(argument);
   }
   return args;
@@ -422,7 +455,10 @@ export async function startConnectDaemon(
     childStartTicks = childPid
       ? readLinuxProcessStartTicks(childPid)
       : undefined;
-    await waitForDaemonReady(child, options.timeoutMs ?? 15_000);
+    await waitForDaemonReady(
+      child,
+      options.timeoutMs ?? DEFAULT_CONNECT_DAEMON_READY_TIMEOUT_MS,
+    );
     if (!child.pid) {
       throw new Error("Daemon child reported readiness without a PID");
     }

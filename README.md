@@ -248,6 +248,7 @@ Runs in reverse-connect mode: starts a local server bound to `127.0.0.1` and tun
 | `--connect-to <url>` | URL of the remote vibedeckx server (required) |
 | `--token <value>` | Authentication token for the reverse connection (required) |
 | `--daemon` | Run in the background after initialization (Linux only) |
+| `--daemon-ready-timeout-ms <number>` | Maximum daemon startup wait in milliseconds (default: `15000`; env: `VIBEDECKX_CONNECT_DAEMON_READY_TIMEOUT_MS`) |
 | `--port <number>` | Local port (default: random) |
 | `--data-dir <path>` | Directory for the SQLite database (default: `~/.vibedeckx`) |
 
