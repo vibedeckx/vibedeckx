@@ -42,7 +42,8 @@ interface ExecutorItemProps {
   /** Active type-to-locate query, null when no query is engaged on this list. */
   locateQuery?: string | null;
   locateMatch?: boolean;
-  locateSelected?: boolean;
+  /** The panel's keyboard cursor (or the locate candidate) sits on this row. */
+  keyboardSelected?: boolean;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onStart: () => Promise<string | null>;
@@ -57,7 +58,7 @@ export function ExecutorItem({
   executorMode,
   locateQuery = null,
   locateMatch = false,
-  locateSelected = false,
+  keyboardSelected = false,
   isOpen,
   onOpenChange,
   onStart,
@@ -176,11 +177,11 @@ export function ExecutorItem({
             "border rounded-lg",
             isDragging && "shadow-lg bg-background",
             // Locate feedback (same language as the sidebar workspace list):
-            // non-matches recede, matches get a tint + bold name, the ↑↓
-            // candidate tints the card's existing border too.
+            // non-matches recede, matches get a tint + bold name. The border
+            // tint marks the ↑↓ cursor — present with or without a query.
             locateQuery !== null && !locateMatch && "opacity-40",
             locateQuery !== null && locateMatch && "bg-muted/50",
-            locateSelected && "border-primary/60",
+            keyboardSelected && "border-primary/60",
           )}
         >
           <CollapsibleTrigger asChild>

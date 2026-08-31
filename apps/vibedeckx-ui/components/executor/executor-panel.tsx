@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Plus, Terminal, Monitor } from "lucide-react";
 import { ExecutorItem } from "./executor-item";
@@ -131,10 +131,47 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
 
   const loading = executorsLoading;
 
+  // Two gates, deliberately separate. The mark is shown whenever the tab is
+  // visible with rows: a persisted tab restored on page load never claims the
+  // focus region (RightPanel won't steal focus for a programmatic tab change),
+  // and that path must still open with a current executor. Acting on it needs
+  // the stronger gate — the right panel actually holding the keyboard.
+  const listVisible = Boolean(locateActive && executors.length > 0);
+  const keyboardActive = listVisible && region === "right-panel";
+
+  const revealExecutor = useCallback((id: string) => {
+    document.querySelector(`[data-locate-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, []);
+  // Enter = press the row's Start/Stop button, exactly as a click would
+  // (ExecutorItem owns that logic, so we click the marked DOM button).
+  const commitExecutor = useCallback((id: string) => {
+    const row = document.querySelector(`[data-locate-id="${CSS.escape(id)}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+    row?.querySelector<HTMLButtonElement>("[data-locate-action]")?.click();
+  }, []);
+  const openExecutorOutput = useCallback(
+    (id: string) => {
+      setOpenExecutors((prev) => new Set(prev).add(id));
+      requestAnimationFrame(() => revealExecutor(id));
+    },
+    [revealExecutor],
+  );
+
+  // The current executor: a cursor that exists even with no query typed, so
+  // entering the tab always has something marked to act on. Stored loosely and
+  // resolved against the live list — a stale id (branch/target switch, delete)
+  // falls back to the first row, while an id that survives keeps the mark
+  // across tab switches and after Enter fires the row's action.
+  const [cursorId, setCursorId] = useState<string | null>(null);
+  const currentExecutorId = useMemo(() => {
+    if (executors.length === 0) return null;
+    if (cursorId && executors.some((e) => e.id === cursorId)) return cursorId;
+    return executors[0].id;
+  }, [cursorId, executors]);
+
   // Type-to-locate over the executor list. Outranks the sidebar workspace
-  // scope (priority 0) exactly while this tab is showing AND the right panel
-  // holds the keyboard focus region — an idle Esc releases the region and
-  // typing goes back to locating workspaces.
+  // scope (priority 0) exactly while the keyboard is here — an idle Esc
+  // releases the region and typing goes back to locating workspaces.
   const executorLocate = useLocateEngagement("executors");
   useLocateScope(
     {
@@ -142,60 +179,98 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
       label: "Executors",
       priority: 10,
       getItems: () => executors.map((e) => ({ id: e.id, text: e.name })),
-      // Enter = press the row's Start/Stop button, exactly as a click would
-      // (ExecutorItem owns that logic, so we click the marked DOM button).
-      onCommit: (item) => {
-        const row = document.querySelector(`[data-locate-id="${CSS.escape(item.id)}"]`);
-        row?.scrollIntoView({ block: "nearest" });
-        row?.querySelector<HTMLButtonElement>("[data-locate-action]")?.click();
-      },
+      onCommit: (item) => commitExecutor(item.id),
       // Space = reveal the output area.
-      onSecondaryCommit: (item) => {
-        setOpenExecutors((prev) => new Set(prev).add(item.id));
-        requestAnimationFrame(() => {
-          document
-            .querySelector(`[data-locate-id="${CSS.escape(item.id)}"]`)
-            ?.scrollIntoView({ block: "nearest" });
-        });
-      },
+      onSecondaryCommit: (item) => openExecutorOutput(item.id),
     },
-    Boolean(locateActive && region === "right-panel" && executors.length > 0),
+    keyboardActive,
   );
 
-  // Keep the locate candidate visible while ↑↓ cycles through matches.
+  // A locate query drives the mark while it is engaged, and hands the cursor
+  // over on the way out: whatever ↑↓ landed on stays the current executor once
+  // the query disengages (by commit or Esc). Adjusting state during render
+  // (React's documented pattern) rather than in an effect keeps the mark from
+  // flickering back to the old cursor for a frame.
   const locateSelectedId = executorLocate?.selectedId ?? null;
+  const [seenLocateId, setSeenLocateId] = useState<string | null>(null);
+  if (locateSelectedId !== seenLocateId) {
+    // Tracking null too, so a later query that lands on the same row as an
+    // earlier one still moves the cursor.
+    setSeenLocateId(locateSelectedId);
+    if (locateSelectedId !== null) setCursorId(locateSelectedId);
+  }
+  // Keep the marked row visible while ↑↓ walks past the fold.
   useEffect(() => {
     if (locateSelectedId === null) return;
-    document
-      .querySelector(`[data-locate-id="${CSS.escape(locateSelectedId)}"]`)
-      ?.scrollIntoView({ block: "nearest" });
-  }, [locateSelectedId]);
+    revealExecutor(locateSelectedId);
+  }, [locateSelectedId, revealExecutor]);
 
-  // ←/→ cycle the executor target (Local / remotes) while this tab holds the
-  // keyboard focus region — same layering guards as type-to-locate. Idle
-  // only: while a locate query is engaged the arrows stay out of the way.
+  // While a query is engaged its own selection is the mark (which may be
+  // nothing, when the query matches no row); otherwise it's the cursor.
+  const markedExecutorId = executorLocate ? executorLocate.selectedId : listVisible ? currentExecutorId : null;
+
   const targetIds = useMemo(
     () => [...(project?.path ? ["local"] : []), ...remotes.map((r) => r.remote_server_id)],
     [project?.path, remotes],
   );
   const activeTargetId = project?.executor_mode ?? "local";
   const locateEngaged = executorLocate !== null;
+
+  // Idle keyboard commands — same layering guards as type-to-locate, and off
+  // while a query is engaged so the locate controller keeps its own ↑↓/Enter.
+  // ↑↓ move the cursor, Enter fires the current executor's Start/Stop, ←/→
+  // cycle the executor target (Local / remotes).
   useEffect(() => {
-    if (!locateActive || region !== "right-panel" || locateEngaged) return;
-    if (targetIds.length < 2 || !onExecutorModeChange) return;
+    if (!keyboardActive || locateEngaged) return;
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (isEditableTarget(event.target) || isInOverlay(event.target)) return;
-      event.preventDefault();
-      const index = targetIds.indexOf(activeTargetId);
-      const step = event.key === "ArrowRight" ? 1 : -1;
-      const next = targetIds[(index + step + targetIds.length) % targetIds.length];
-      onExecutorModeChange(next as ExecutionMode);
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        if (targetIds.length < 2 || !onExecutorModeChange) return;
+        event.preventDefault();
+        const index = targetIds.indexOf(activeTargetId);
+        const step = event.key === "ArrowRight" ? 1 : -1;
+        onExecutorModeChange(targetIds[(index + step + targetIds.length) % targetIds.length] as ExecutionMode);
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const index = executors.findIndex((e) => e.id === currentExecutorId);
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        const next = executors[(index + step + executors.length) % executors.length];
+        setCursorId(next.id);
+        revealExecutor(next.id);
+        return;
+      }
+      // A focused button already turns Enter into its own click; only the
+      // idle panel (or a plain row) delegates it to the cursor.
+      if (event.key === "Enter" && currentExecutorId) {
+        if (event.target instanceof Element && event.target.closest("button,a,[role='button']")) return;
+        event.preventDefault();
+        commitExecutor(currentExecutorId);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [locateActive, region, locateEngaged, targetIds, activeTargetId, onExecutorModeChange]);
+  }, [
+    keyboardActive,
+    locateEngaged,
+    targetIds,
+    activeTargetId,
+    onExecutorModeChange,
+    executors,
+    currentExecutorId,
+    revealExecutor,
+    commitExecutor,
+  ]);
+
+  // Clicking a row makes it current, so the mark never sits somewhere the
+  // user has visibly moved on from.
+  const handleListPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const row = event.target instanceof Element ? event.target.closest("[data-locate-id]") : null;
+    const id = row?.getAttribute("data-locate-id");
+    if (id) setCursorId(id);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -260,7 +335,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <div className="p-4 space-y-3">
+        <div className="p-4 space-y-3" onPointerDown={handleListPointerDown}>
           {loading ? (
             <div className="text-center text-muted-foreground py-8">
               Loading executors...
@@ -289,7 +364,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
                     executorMode={project?.executor_mode ?? "local"}
                     locateQuery={executorLocate?.query ?? null}
                     locateMatch={executorLocate?.matchSet.has(executor.id) ?? false}
-                    locateSelected={executorLocate?.selectedId === executor.id}
+                    keyboardSelected={markedExecutorId === executor.id}
                     isOpen={openExecutors.has(executor.id)}
                     onOpenChange={(open) => setOpenExecutors(prev => {
                       const next = new Set(prev);
