@@ -193,6 +193,25 @@ describe("session retention predicate", () => {
     expect(await storage.agentSessions.deleteIfExpired("old", cutoff)).toBe(false);
   });
 
+  describe("conditional empty-session discard", () => {
+    it("deletes an exact empty session", async () => {
+      await storage.agentSessions.create({ id: "empty", project_id: "p1", branch: "dev" });
+
+      expect(await storage.agentSessions.deleteIfEmpty("empty")).toBe(true);
+      expect(await storage.agentSessions.getById("empty")).toBeUndefined();
+    });
+
+    it("retains a session with any persisted entry", async () => {
+      await storage.agentSessions.create({ id: "used", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.upsertEntry("used", 0, JSON.stringify({
+        type: "system", content: "startup diagnostic", timestamp: 1,
+      }));
+
+      expect(await storage.agentSessions.deleteIfEmpty("used")).toBe(false);
+      expect(await storage.agentSessions.getById("used")).toBeDefined();
+    });
+  });
+
   describe("remoteSessionMappings.delete", () => {
     const upsert = (local: string, remote: string) =>
       storage.remoteSessionMappings.upsert(local, "p1", "worker-1", remote, "dev");

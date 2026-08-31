@@ -137,9 +137,22 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             // unconfirmed operation is intentionally at-least-once: a crash
             // after write may duplicate, but transcript persistence is never
             // treated as proof that stdin accepted the command.
-            if (!(await agentSessionManager.sendUserMessage(
-              input.workerSessionId, input.instruction, project.path, input.userId,
-            ))) throw new Error("Agent session did not accept its initial instruction");
+            try {
+              if (!(await agentSessionManager.sendUserMessage(
+                input.workerSessionId, input.instruction, project.path, input.userId,
+              ))) throw new Error("Agent session did not accept its initial instruction");
+            } catch (error) {
+              // Exact-id retries can recreate a row deleted here. The
+              // conditional cleanup keeps a session that did accept/persist a
+              // user turn, preserving the existing at-least-once semantics.
+              await agentSessionManager
+                .discardSessionIfEmpty(input.workerSessionId)
+                .catch((cleanupError) => console.error(
+                  `[ProjectChat] Failed to discard ${input.workerSessionId} after initial delivery failure:`,
+                  cleanupError,
+                ));
+              throw error;
+            }
             return { sessionId: input.sessionId };
           }
 

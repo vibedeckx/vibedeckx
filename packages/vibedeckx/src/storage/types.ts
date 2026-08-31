@@ -1123,6 +1123,8 @@ export interface Storage {
      * in which case the caller must skip every side effect (§1.5).
      */
     deleteIfExpired: (id: string, cutoff: number) => Promise<boolean>;
+    /** Atomic exact-id cleanup used after a newly-created session rejects its first instruction. */
+    deleteIfEmpty: (id: string) => Promise<boolean>;
     /**
      * Every session id this project owns — the hub-reconciliation source of
      * truth (§3.1). Deliberately unfiltered: no sidebar-visibility rule, no

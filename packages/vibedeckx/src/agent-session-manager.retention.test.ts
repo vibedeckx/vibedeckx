@@ -28,6 +28,7 @@ interface Harness {
   manager: AgentSessionManager;
   storage: Storage;
   deleteIfExpired: ReturnType<typeof vi.fn>;
+  deleteIfEmpty: ReturnType<typeof vi.fn>;
   /**
    * Gates workspaceRegistry.getCheckoutById — the first await inside both a
    * wake and a restart. One shared gate for every call.
@@ -60,6 +61,7 @@ async function makeHarness(): Promise<Harness> {
   let checkoutGate: { promise: Promise<void>; resolve: () => void } | null = null;
   let perCallGates: Array<{ promise: Promise<void>; resolve: () => void; reject: (e: unknown) => void }> | null = null;
   const deleteIfExpired = vi.fn(async () => true);
+  const deleteIfEmpty = vi.fn(async () => true);
   const sent: string[] = [];
 
   const getCheckoutById = vi.fn(async () => {
@@ -88,6 +90,7 @@ async function makeHarness(): Promise<Harness> {
       upsertEntry: vi.fn(async () => undefined),
       upsertTurnEndWithOutbox: vi.fn(async () => undefined),
       deleteIfExpired,
+      deleteIfEmpty,
       delete: vi.fn(async () => undefined),
       getActivityById: async () => undefined,
       listRecentActivityByProject: async () => [],
@@ -101,7 +104,7 @@ async function makeHarness(): Promise<Harness> {
   await manager.restoreSessionsFromDb();
 
   return {
-    manager, storage, deleteIfExpired, sent, getCheckoutById,
+    manager, storage, deleteIfExpired, deleteIfEmpty, sent, getCheckoutById,
     gateCheckoutLookup: () => {
       const gate = deferred<void>();
       checkoutGate = { promise: gate.promise, resolve: gate.resolve };
@@ -176,6 +179,61 @@ describe("retention delete path", () => {
     const h = await makeHarness();
     expect(await h.manager.deleteDormantSessionIfExpired("never-restored", CUTOFF)).toBe(true);
     expect(h.deleteIfExpired).toHaveBeenCalledWith("never-restored", CUTOFF);
+  });
+});
+
+describe("empty-session discard path", () => {
+  it("reclaims an empty live process after the conditional delete succeeds", async () => {
+    const h = await makeHarness();
+    h.manager.getRawMessages("s1").length = 0;
+    const killed = vi.fn();
+    h.manager.getSession("s1")!.process = {
+      pid: 999_999_999,
+      exitCode: null,
+      kill: killed,
+    } as never;
+    const frames: string[] = [];
+    h.manager.subscribe("s1", fakeSocket(frames));
+
+    expect(await h.manager.discardSessionIfEmpty("s1")).toBe(true);
+    expect(h.deleteIfEmpty).toHaveBeenCalledWith("s1");
+    expect(killed).toHaveBeenCalled();
+    expect(h.manager.getSession("s1")).toBeNull();
+    expect(frames.some((frame) => JSON.parse(frame).finished === true)).toBe(true);
+  });
+
+  it("does not delete while a user message is in flight", async () => {
+    const h = await makeHarness();
+    h.manager.getRawMessages("s1").length = 0;
+    const gate = h.gateCheckoutLookup();
+
+    const send = h.manager.sendUserMessage("s1", "hello", PROJECT_PATH);
+    await Promise.resolve();
+    expect(await h.manager.discardSessionIfEmpty("s1")).toBe(false);
+    expect(h.deleteIfEmpty).not.toHaveBeenCalled();
+
+    gate.release();
+    await send.catch(() => undefined);
+  });
+
+  it("blocks a send while the conditional delete is in flight", async () => {
+    const h = await makeHarness();
+    h.manager.getRawMessages("s1").length = 0;
+    const deleteGate = deferred<boolean>();
+    h.deleteIfEmpty.mockReturnValueOnce(deleteGate.promise);
+
+    const deleting = h.manager.discardSessionIfEmpty("s1");
+    await Promise.resolve();
+    expect(await h.manager.sendUserMessage("s1", "hello", PROJECT_PATH)).toBe(false);
+
+    deleteGate.resolve(true);
+    expect(await deleting).toBe(true);
+  });
+
+  it("fails safe when memory already contains any transcript entry", async () => {
+    const h = await makeHarness();
+    expect(await h.manager.discardSessionIfEmpty("s1")).toBe(false);
+    expect(h.deleteIfEmpty).not.toHaveBeenCalled();
   });
 });
 

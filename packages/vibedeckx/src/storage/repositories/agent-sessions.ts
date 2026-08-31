@@ -878,6 +878,17 @@ export const createAgentSessionRepos = (
       return (result.numDeletedRows ?? 0n) > 0n;
     },
 
+    deleteIfEmpty: async (id) => {
+      const result = await kdb.deleteFrom("agent_sessions")
+        .where("id", "=", id)
+        .where(sql<SqlBool>`NOT EXISTS (
+          SELECT 1 FROM agent_session_entries entry
+          WHERE entry.session_id = agent_sessions.id
+        )`)
+        .executeTakeFirst();
+      return (result.numDeletedRows ?? 0n) > 0n;
+    },
+
     listIdsByProject: async (projectId) => {
       const rows = await kdb.selectFrom("agent_sessions")
         .select("id")

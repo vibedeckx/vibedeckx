@@ -316,6 +316,12 @@ export class AgentSessionManager {
    * (docs/plans/2026-08-08-session-retention.md §1.5).
    */
   private retentionDeleting: Set<string> = new Set();
+  /**
+   * User-message deliveries that have synchronously claimed a session but
+   * may still be suspended on checkout validation or persistence. A counter
+   * (not a Set) is required because callers can overlap.
+   */
+  private userMessagesInFlight: Map<string, number> = new Map();
   /** Grace window before committing a held completion (injectable for tests). */
   private readonly completionGraceMs: number;
   /** Bound on a parked completion (injectable for tests). */
@@ -2118,6 +2124,26 @@ export class AgentSessionManager {
     userId: string = "local",
     opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
   ): Promise<boolean> {
+    // Pair with discardSessionIfEmpty: whichever operation plants
+    // its synchronous marker first owns the session until it settles.
+    if (!this.sessions.has(sessionId) || this.retentionDeleting.has(sessionId)) return false;
+    this.userMessagesInFlight.set(sessionId, (this.userMessagesInFlight.get(sessionId) ?? 0) + 1);
+    try {
+      return await this.sendUserMessageClaimed(sessionId, content, projectPath, userId, opts);
+    } finally {
+      const remaining = (this.userMessagesInFlight.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) this.userMessagesInFlight.set(sessionId, remaining);
+      else this.userMessagesInFlight.delete(sessionId);
+    }
+  }
+
+  private async sendUserMessageClaimed(
+    sessionId: string,
+    content: string | ContentPart[],
+    projectPath?: string,
+    userId: string = "local",
+    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
+  ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
 
@@ -2659,6 +2685,45 @@ export class AgentSessionManager {
     } finally {
       // Released last, after the map entry is gone — releasing it earlier
       // would reopen the very gap the claim exists to close.
+      this.retentionDeleting.delete(sessionId);
+    }
+  }
+
+  /**
+   * Compensating delete for a session whose initial instruction failed.
+   *
+   * The database DELETE is the linearization point and succeeds only while no
+   * transcript entry exists. The in-memory and in-flight checks close the two
+   * gaps before persistence. This is deliberately an exact-id operation, not
+   * an age-based background policy.
+   */
+  async discardSessionIfEmpty(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (session?.skipDb) return false;
+    if ((this.userMessagesInFlight.get(sessionId) ?? 0) > 0) return false;
+    if (this.retentionDeleting.has(sessionId)) return false;
+
+    // Persistence follows the in-memory append. Never let a conditional DB
+    // delete race through that small window.
+    if (session?.store.entries.some((entry) => entry !== undefined)) return false;
+
+    this.retentionDeleting.add(sessionId);
+    try {
+      const deleted = await this.storage.agentSessions.deleteIfEmpty(sessionId);
+      if (!deleted) return false;
+
+      if (session) {
+        getProvider(session.agentType).onSessionDestroyed?.(sessionId);
+        const proc = session.process;
+        session.process = null;
+        this.killProcess(proc);
+        this.emitProcessAlive(session, false);
+        this.broadcastRaw(sessionId, { finished: true });
+        this.sessions.delete(sessionId);
+        await this.emitDerivedBranchActivity(session.projectId, session.branch);
+      }
+      return true;
+    } finally {
       this.retentionDeleting.delete(sessionId);
     }
   }

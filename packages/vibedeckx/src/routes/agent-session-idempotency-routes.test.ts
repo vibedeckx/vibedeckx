@@ -30,6 +30,10 @@ describe("path agent session preallocated identity", () => {
       messages.length = 0;
       return true;
     });
+    const discardSessionIfEmpty = vi.fn(async (id: string) => {
+      if (messages.length > 0) return false;
+      return deleteSession(id);
+    });
     const createNewSession = vi.fn(async (
       projectId: string, branch: string | null, projectPath: string, _skipDb: boolean,
       permissionMode: string, agentType: string, _announce: boolean, _force: boolean,
@@ -99,6 +103,7 @@ describe("path agent session preallocated identity", () => {
       getRawMessages: () => messages,
       sendUserMessage,
       deleteSession,
+      discardSessionIfEmpty,
       emitBranchActivityIfChanged: vi.fn(),
     });
     app.decorate("remoteSessionMap", new Map());

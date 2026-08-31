@@ -2401,11 +2401,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return serializeSessionMutation(req.params.sessionId, async () => {
         const liveSession = fastify.agentSessionManager.getSession(req.params.sessionId);
         if (!liveSession) return reply.code(404).send({ error: "Session not found" });
-        if (fastify.agentSessionManager.getRawMessages(req.params.sessionId).length > 0) {
-          return reply.code(409).send({ error: "Session is no longer empty" });
-        }
-        const deleted = await fastify.agentSessionManager.deleteSession(req.params.sessionId);
-        if (!deleted) return reply.code(404).send({ error: "Session not found" });
+        const deleted = await fastify.agentSessionManager.discardSessionIfEmpty(req.params.sessionId);
+        if (!deleted) return reply.code(409).send({ error: "Session is no longer discardable" });
         return reply.code(200).send({ success: true, discarded: true });
       });
     },

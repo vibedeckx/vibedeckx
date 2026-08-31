@@ -1695,7 +1695,21 @@ export class ChatSessionManager {
             // this spawned session instead of leaving it only in the dropdown.
             true,
           );
-          await agentSessionManager.sendUserMessage(newSessionId, prompt, project.path);
+          let accepted = false;
+          try {
+            accepted = await agentSessionManager.sendUserMessage(newSessionId, prompt, project.path);
+          } catch (error) {
+            console.error(`[ChatSession] Failed to deliver initial task to ${newSessionId}:`, error);
+          }
+          if (!accepted) {
+            await agentSessionManager
+              .discardSessionIfEmpty(newSessionId)
+              .catch((error) => console.error(`[ChatSession] Failed to discard ${newSessionId}:`, error));
+            return {
+              success: false,
+              message: "Coding agent was created but did not accept its initial task. Please try again.",
+            };
+          }
           this.registerChatInitiatedAgentTask(newSessionId);
           this.trackAgentSessionForChat(sessionId, newSessionId);
           this.setEventListening(sessionId, true);
