@@ -75,7 +75,6 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
 
   // --- Executors / processes / terminals ---
   "http:POST /api/path/execute": { since: "0.2.0", summary: "启动 executor 进程" },
-  "http:POST /api/execute-one-shot": { since: "0.2.0", summary: "一次性命令执行" },
   "http:POST /api/executor-processes/:param/stop": { since: "0.2.0", summary: "停止 executor 进程" },
   "http:GET /api/executor-processes/running": { since: "0.2.0", summary: "运行中进程列表" },
   "http:POST /api/path/terminals": { since: "0.2.0", summary: "开终端" },

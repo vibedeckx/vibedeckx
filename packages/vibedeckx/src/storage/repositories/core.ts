@@ -1,7 +1,7 @@
 import { type Kysely, type Selectable } from "kysely";
 import type { DB, ProjectsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
-import type { Storage, Project, ExecutionMode, SyncButtonConfig } from "../types.js";
+import type { Storage, Project, ExecutionMode } from "../types.js";
 
 const mapProject = (row: Selectable<ProjectsTable>): Project => ({
   id: row.id,
@@ -11,8 +11,6 @@ const mapProject = (row: Selectable<ProjectsTable>): Project => ({
   remote_path: row.remote_path ?? undefined,
   agent_mode: (row.agent_mode as ExecutionMode) ?? "local",
   executor_mode: (row.executor_mode as ExecutionMode) ?? "local",
-  sync_up_config: row.sync_up_config ? (JSON.parse(row.sync_up_config) as SyncButtonConfig) : undefined,
-  sync_down_config: row.sync_down_config ? (JSON.parse(row.sync_down_config) as SyncButtonConfig) : undefined,
   created_at: row.created_at,
 });
 
@@ -35,8 +33,6 @@ export const createCoreRepos = (
         remote_project_id: null,
         agent_mode: opts.agent_mode ?? "local",
         executor_mode: opts.executor_mode ?? "local",
-        sync_up_config: opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null,
-        sync_down_config: opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null,
         user_id: userId ?? "local",
       }).execute();
 
@@ -76,12 +72,6 @@ export const createCoreRepos = (
       if (opts.remote_path !== undefined) sets.remote_path = opts.remote_path;
       if (opts.agent_mode !== undefined) sets.agent_mode = opts.agent_mode;
       if (opts.executor_mode !== undefined) sets.executor_mode = opts.executor_mode;
-      if (opts.sync_up_config !== undefined) {
-        sets.sync_up_config = opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null;
-      }
-      if (opts.sync_down_config !== undefined) {
-        sets.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
-      }
       if (Object.keys(sets).length > 0) {
         let query = kdb.updateTable("projects").set(sets).where("id", "=", id);
         if (userId) query = query.where("user_id", "=", userId);

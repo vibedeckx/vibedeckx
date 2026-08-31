@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, type Project, type SyncButtonConfig, type ExecutionMode } from "@/lib/api";
+import { api, type Project, type ExecutionMode } from "@/lib/api";
 
 export function useProjects(initialProjectId?: string | null) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -75,12 +75,10 @@ export function useProjects(initialProjectId?: string | null) {
     remotePath?: string | null;
     agentMode?: ExecutionMode;
     executorMode?: ExecutionMode;
-    syncUpConfig?: SyncButtonConfig | null;
-    syncDownConfig?: SyncButtonConfig | null;
   }) => {
     // Only the mode toggles are applied optimistically: they are pure
     // preferences the UI reads directly (executor target, agent target), so
-    // waiting a PUT round trip just makes the toggle feel laggy. Name/path/sync
+    // waiting a PUT round trip just makes the toggle feel laggy. Name/path
     // edits go through dialogs with server-side validation and keep the
     // confirm-then-apply flow.
     const patch: Partial<Project> = {};

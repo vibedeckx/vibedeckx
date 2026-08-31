@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TaskDetailDialog } from "@/components/task/task-detail-dialog";
 import { useCreateProjectChatThread } from "@/hooks/use-create-project-chat-thread";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
-import type { Project, ProjectRemote, SyncButtonConfig, Task } from "@/lib/api";
+import type { Project, ProjectRemote, Task } from "@/lib/api";
 import { projectInitials } from "@/lib/project-initials";
 import { cn } from "@/lib/utils";
 import { ProjectActivityView } from "./project-activity-view";
@@ -59,8 +59,6 @@ interface ProjectInfoViewProps {
     name?: string;
     path?: string | null;
     remotePath?: string | null;
-    syncUpConfig?: SyncButtonConfig | null;
-    syncDownConfig?: SyncButtonConfig | null;
   }) => Promise<void> | Promise<unknown>;
 }
 

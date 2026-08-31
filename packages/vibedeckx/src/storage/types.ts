@@ -2,14 +2,6 @@ import type { WorkspaceBindingReadConsumer } from "../workspace-binding-metrics.
 
 export type ExecutionMode = 'local' | string;
 
-export type SyncActionType = 'command' | 'prompt';
-
-export interface SyncButtonConfig {
-  actionType: SyncActionType;
-  executionMode: ExecutionMode;
-  content: string;
-}
-
 export type RemoteServerStatus = 'unknown' | 'online' | 'offline';
 export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
@@ -54,8 +46,6 @@ export interface ProjectRemote {
   remote_server_id: string;
   remote_path: string;
   sort_order: number;
-  sync_up_config?: SyncButtonConfig;
-  sync_down_config?: SyncButtonConfig;
 }
 
 export interface ProjectRemoteWithServer extends ProjectRemote {
@@ -70,8 +60,6 @@ export interface Project {
   is_remote: boolean;
   agent_mode: ExecutionMode;
   executor_mode: ExecutionMode;
-  sync_up_config?: SyncButtonConfig;
-  sync_down_config?: SyncButtonConfig;
   created_at: string;
 }
 
@@ -732,8 +720,6 @@ export interface Storage {
       remote_path?: string;
       agent_mode?: ExecutionMode;
       executor_mode?: ExecutionMode;
-      sync_up_config?: SyncButtonConfig;
-      sync_down_config?: SyncButtonConfig;
     }, userId?: string) => Promise<Project>;
     getAll: (userId?: string) => Promise<Project[]>;
     getById: (id: string, userId?: string) => Promise<Project | undefined>;
@@ -744,8 +730,6 @@ export interface Storage {
       remote_path?: string | null;
       agent_mode?: ExecutionMode;
       executor_mode?: ExecutionMode;
-      sync_up_config?: SyncButtonConfig | null;
-      sync_down_config?: SyncButtonConfig | null;
     }, userId?: string) => Promise<Project | undefined>;
     delete: (id: string, userId?: string) => Promise<void>;
     /**
@@ -852,14 +836,10 @@ export interface Storage {
       remote_server_id: string;
       remote_path: string;
       sort_order?: number;
-      sync_up_config?: SyncButtonConfig;
-      sync_down_config?: SyncButtonConfig;
     }): Promise<ProjectRemote>;
     update(id: string, opts: {
       remote_path?: string;
       sort_order?: number;
-      sync_up_config?: SyncButtonConfig | null;
-      sync_down_config?: SyncButtonConfig | null;
     }, projectId?: string): Promise<ProjectRemote | undefined>;
     setPrimary(projectId: string, remoteId: string): Promise<boolean>;
     remove(id: string, projectId?: string): Promise<boolean>;

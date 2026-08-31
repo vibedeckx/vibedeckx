@@ -1,13 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
-import { randomUUID } from "crypto";
 import { exec } from "child_process";
+import { randomUUID } from "crypto";
 import { readdir, mkdir } from "fs/promises";
-import type { Project, SyncButtonConfig } from "../storage/types.js";
+import type { Project } from "../storage/types.js";
 import { selectFolder } from "../dialog.js";
-import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
@@ -154,8 +152,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       remotePath?: string | null;
       agentMode?: 'local' | 'remote';
       executorMode?: 'local' | 'remote';
-      syncUpConfig?: SyncButtonConfig | null;
-      syncDownConfig?: SyncButtonConfig | null;
     };
   }>("/api/projects/:id", async (req, reply) => {
     const authResult = requireAuth(req, reply);
@@ -166,7 +162,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { name, path: newPath, remotePath, agentMode, executorMode, syncUpConfig, syncDownConfig } = req.body;
+    const { name, path: newPath, remotePath, agentMode, executorMode } = req.body;
 
     // Block setting/adding a local path when local projects are disabled.
     // Existing local paths are untouched: only guard when the caller sends a new non-empty path.
@@ -198,8 +194,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       remote_path?: string | null;
       agent_mode?: 'local' | 'remote';
       executor_mode?: 'local' | 'remote';
-      sync_up_config?: SyncButtonConfig | null;
-      sync_down_config?: SyncButtonConfig | null;
     } = {};
 
     if (name !== undefined) updateOpts.name = name;
@@ -207,8 +201,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (remotePath !== undefined) updateOpts.remote_path = remotePath;
     if (agentMode !== undefined) updateOpts.agent_mode = agentMode;
     if (executorMode !== undefined) updateOpts.executor_mode = executorMode;
-    if (syncUpConfig !== undefined) updateOpts.sync_up_config = syncUpConfig;
-    if (syncDownConfig !== undefined) updateOpts.sync_down_config = syncDownConfig;
 
     const updated = await fastify.storage.projects.update(req.params.id, updateOpts, userId);
     if (!updated) {
@@ -232,91 +224,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reply.code(200).send({ success: true });
   });
 
-  // Execute sync command for a project
-  fastify.post<{
-    Params: { id: string };
-    Body: { syncType: 'up' | 'down'; branch?: string | null; remoteServerId?: string };
-  }>("/api/projects/:id/execute-sync", async (req, reply) => {
-    const authResult = requireAuth(req, reply);
-    if (authResult === null) return;
-    const userId = resolveUserId(authResult);
-    const project = await fastify.storage.projects.getById(req.params.id, userId);
-    if (!project) {
-      return reply.code(404).send({ error: "Project not found" });
-    }
-
-    const { syncType, branch, remoteServerId } = req.body;
-
-    // remoteServerId selects which config to run (per-remote configs live on
-    // the project_remotes row); absent, the legacy project-level config is used.
-    let syncConfig: import("../storage/types.js").SyncButtonConfig | undefined;
-
-    if (remoteServerId) {
-      const pr = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, remoteServerId);
-      if (!pr) {
-        return reply.code(404).send({ error: "Remote not linked to project" });
-      }
-      syncConfig = syncType === 'up' ? pr.sync_up_config : pr.sync_down_config;
-    } else {
-      // Fallback to legacy project fields
-      syncConfig = syncType === 'up' ? project.sync_up_config : project.sync_down_config;
-    }
-
-    if (!syncConfig || syncConfig.actionType !== 'command') {
-      return reply.code(400).send({ error: "Sync command not configured or not a command type" });
-    }
-
-    // The config's executionMode is the execution target: 'local', a concrete
-    // remote_server_id (what the ExecutionModeToggle stores), or the legacy
-    // literal 'remote' meaning "the remote this config belongs to".
-    const executionMode = syncConfig.executionMode;
-
-    if (executionMode !== 'local') {
-      const targetServerId = executionMode === 'remote' ? remoteServerId : executionMode;
-      if (!targetServerId) {
-        return reply.code(400).send({ error: "Remote execution requires a linked remote server" });
-      }
-      // cwd must be the target server's project path, which can differ from the
-      // config-source remote's path when a per-remote config targets a sibling.
-      const targetRemote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, targetServerId);
-      if (!targetRemote) {
-        return reply.code(404).send({ error: "Remote not linked to project" });
-      }
-      const remoteCwd = resolveWorktreePath(targetRemote.remote_path ?? '', branch ?? null);
-      const result = await proxyToRemoteAuto(targetServerId, 'POST', '/api/execute-one-shot', {
-        command: syncConfig.content,
-        cwd: remoteCwd,
-      }, { reverseConnectManager: fastify.reverseConnectManager });
-      if (!result.ok) {
-        return reply.code(proxyStatus(result, 500)).send(result.data);
-      }
-      return reply.code(200).send(result.data);
-    }
-
-    // Local execution
-    const basePath = project.path;
-    if (!basePath) {
-      return reply.code(400).send({ error: "Project has no local path" });
-    }
-    const cwd = resolveWorktreePath(basePath, branch ?? null);
-
-    try {
-      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
-        exec(syncConfig.content, { cwd, timeout: 30000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-          resolve({
-            stdout: stdout || '',
-            stderr: stderr || '',
-            exitCode: error ? (error.code ?? 1) : 0,
-          });
-        });
-      });
-      return reply.code(200).send({ success: result.exitCode === 0, ...result });
-    } catch {
-      return reply.code(500).send({ error: "Command execution failed" });
-    }
-  });
-
-  // Execute one-shot command (for remote instances)
+  // Execute one-shot command (worker-side only; nothing on this server calls it).
+  //
+  // Sync Up/Down was removed, and with it this route's only hub-side caller.
+  // The route itself stays: hubs generate `npx vibedeckx@latest connect`
+  // (remote-server-routes.ts), so a hub predating the sync removal routinely
+  // talks to a newer worker — deleting it here would 404 their Sync buttons.
+  // Deliberately absent from reverse-connect-capabilities.ts: that registry
+  // tracks routes *this* hub calls, and its test rejects entries without a
+  // live call site. Drop this once MIN_WORKER_VERSION passes the sync removal.
   fastify.post<{
     Body: { command: string; cwd: string };
   }>("/api/execute-one-shot", async (req, reply) => {

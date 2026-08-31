@@ -257,21 +257,6 @@ export function getWebSocketUrl(path: string, token?: string | null): string {
 
 export type ExecutionMode = 'local' | string;
 
-export type SyncActionType = 'command' | 'prompt';
-
-export interface SyncButtonConfig {
-  actionType: SyncActionType;
-  executionMode: ExecutionMode;
-  content: string;
-}
-
-export interface SyncExecutionResult {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
 export interface Project {
   id: string;
   name: string;
@@ -280,8 +265,6 @@ export interface Project {
   is_remote: boolean;
   agent_mode: ExecutionMode;
   executor_mode: ExecutionMode;
-  sync_up_config?: SyncButtonConfig;
-  sync_down_config?: SyncButtonConfig;
   created_at: string;
 }
 
@@ -313,8 +296,6 @@ export interface ProjectRemote {
   remote_server_id: string;
   remote_path: string;
   sort_order: number;
-  sync_up_config?: SyncButtonConfig;
-  sync_down_config?: SyncButtonConfig;
   server_name: string;
   // Optionally joined from the remote server (see useProjectRemotes withStatus)
   status?: RemoteServerStatus;
@@ -1607,8 +1588,6 @@ export const api = {
       remotePath?: string | null;
       agentMode?: ExecutionMode;
       executorMode?: ExecutionMode;
-      syncUpConfig?: SyncButtonConfig | null;
-      syncDownConfig?: SyncButtonConfig | null;
     }
   ): Promise<Project> {
     const res = await authFetch(`${getApiBase()}/api/projects/${id}`, {
@@ -1972,24 +1951,6 @@ export const api = {
     mode: ExecutionMode
   ): Promise<Project> {
     return this.updateProject(id, { [field]: mode });
-  },
-
-  async executeSyncCommand(
-    projectId: string,
-    syncType: 'up' | 'down',
-    branch?: string | null,
-    remoteServerId?: string
-  ): Promise<SyncExecutionResult> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/execute-sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ syncType, branch, remoteServerId }),
-    });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
-    return res.json();
   },
 
   // Task API
@@ -2960,8 +2921,6 @@ export const api = {
   async updateProjectRemote(projectId: string, remoteId: string, opts: {
     remotePath?: string;
     sortOrder?: number;
-    syncUpConfig?: SyncButtonConfig | null;
-    syncDownConfig?: SyncButtonConfig | null;
   }): Promise<ProjectRemote> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/remotes/${remoteId}`, {
       method: "PUT",

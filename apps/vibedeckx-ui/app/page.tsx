@@ -797,16 +797,6 @@ export default function Home() {
     selectWorkspace(branch);
   }, [refetchWorktrees, selectWorkspace]);
 
-  const handleSyncPrompt = useCallback((prompt: string, executionMode: ExecutionMode) => {
-    if (currentProject && executionMode !== currentProject.agent_mode) {
-      updateProject(currentProject.id, { agentMode: executionMode }).then(() => {
-        agentRef.current?.submitMessage(prompt);
-      });
-    } else {
-      agentRef.current?.submitMessage(prompt);
-    }
-  }, [currentProject, updateProject]);
-
   // Guard against double-click sending the same command twice: ignore a repeat
   // of the same content within a short window (a native double-click fires two
   // click events before the session status can update).

@@ -308,7 +308,6 @@ const { project } = await api("POST", "/api/projects", {
 await api("POST", `/api/projects/${project.id}/remotes`, {
   remoteServerId: record.id,
   remotePath: repoDir,
-  syncUpConfig: { actionType: "command", content: "echo sync-ok", executionMode: record.id },
 });
 // Worker-side project row (path == remote_path) — required by execute/upload/
 // search on the worker. In production this comes from the project-sync flow;
@@ -417,9 +416,6 @@ await smoke("worktrees", [
   const list = await api("GET", `${P}/worktrees?target=${record.id}`);
   assert(JSON.stringify(list).includes("xver/wt"), "created worktree not listed");
   await api("DELETE", `${P}/worktrees`, { branch: "xver/wt" });
-});
-await smoke("execute-sync", ["http:POST /api/execute-one-shot"], async () => {
-  await api("POST", `${P}/execute-sync`, { syncType: "up", remoteServerId: record.id });
 });
 let processId;
 await smoke("executor-start", ["http:POST /api/path/execute"], async () => {

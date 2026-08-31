@@ -35,8 +35,6 @@ export interface ProjectsTable {
   user_id: Generated<string>;
   agent_mode: string | null;
   executor_mode: string | null;
-  sync_up_config: string | null;   // JSON: SyncButtonConfig
-  sync_down_config: string | null; // JSON: SyncButtonConfig
   created_at: Generated<string>;
 }
 
@@ -336,8 +334,6 @@ export interface ProjectRemotesTable {
   remote_server_id: string;
   remote_path: string;
   sort_order: Generated<number>;
-  sync_up_config: string | null;   // JSON: SyncButtonConfig
-  sync_down_config: string | null; // JSON: SyncButtonConfig
 }
 
 export interface RemoteSessionMappingsTable {

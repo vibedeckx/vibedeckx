@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
-import type { ProjectRemoteWithServer, SyncButtonConfig } from "../storage/types.js";
+import type { ProjectRemoteWithServer } from "../storage/types.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
@@ -33,13 +33,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (userId === null) return;
 
       const { id } = request.params;
-      const { remoteServerId, remotePath, sortOrder, syncUpConfig, syncDownConfig } =
+      const { remoteServerId, remotePath, sortOrder } =
         request.body as {
           remoteServerId: string;
           remotePath: string;
           sortOrder?: number;
-          syncUpConfig?: SyncButtonConfig;
-          syncDownConfig?: SyncButtonConfig;
         };
 
       if (!remoteServerId || !remotePath)
@@ -69,8 +67,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         remote_server_id: remoteServerId,
         remote_path: remotePath,
         sort_order: sortOrder,
-        sync_up_config: syncUpConfig,
-        sync_down_config: syncDownConfig,
       });
       return reply.code(201).send(projectRemote);
     }
@@ -88,19 +84,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found" });
 
       const { rid } = request.params;
-      const { remotePath, sortOrder, syncUpConfig, syncDownConfig } =
+      const { remotePath, sortOrder } =
         request.body as {
           remotePath?: string;
           sortOrder?: number;
-          syncUpConfig?: SyncButtonConfig | null;
-          syncDownConfig?: SyncButtonConfig | null;
         };
 
       const updated = await fastify.storage.projectRemotes.update(rid, {
         remote_path: remotePath,
         sort_order: sortOrder,
-        sync_up_config: syncUpConfig,
-        sync_down_config: syncDownConfig,
       }, project.id);
       if (!updated)
         return reply.code(404).send({ error: "Project remote not found" });

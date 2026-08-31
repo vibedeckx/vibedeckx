@@ -498,8 +498,6 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       remote_server_id TEXT NOT NULL REFERENCES remote_servers(id),
       remote_path TEXT NOT NULL,
       sort_order INTEGER NOT NULL DEFAULT 0,
-      sync_up_config TEXT,
-      sync_down_config TEXT,
       UNIQUE(project_id, remote_server_id)
     );
 
@@ -909,13 +907,6 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     db.exec("UPDATE projects SET executor_mode = 'local' WHERE executor_mode IS NULL");
   }
 
-  // Migration: add sync button config columns
-  const hasSyncUpConfigColumn = projectTableInfo.some((col) => col.name === "sync_up_config");
-  if (!hasSyncUpConfigColumn) {
-    db.exec("ALTER TABLE projects ADD COLUMN sync_up_config TEXT");
-    db.exec("ALTER TABLE projects ADD COLUMN sync_down_config TEXT");
-  }
-
   // Migration: add user_id column for Clerk authentication
   const hasUserIdColumn = projectTableInfo.some((col) => col.name === "user_id");
   if (!hasUserIdColumn) {
@@ -1173,8 +1164,8 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     }
 
     const projectsWithRemote = db.prepare(
-      `SELECT id, remote_url, remote_path, sync_up_config, sync_down_config, agent_mode, executor_mode FROM projects WHERE remote_url IS NOT NULL AND remote_url != ''`
-    ).all() as { id: string; remote_url: string; remote_path: string | null; sync_up_config: string | null; sync_down_config: string | null; agent_mode: string; executor_mode: string }[];
+      `SELECT id, remote_url, remote_path, agent_mode, executor_mode FROM projects WHERE remote_url IS NOT NULL AND remote_url != ''`
+    ).all() as { id: string; remote_url: string; remote_path: string | null; agent_mode: string; executor_mode: string }[];
 
     for (const proj of projectsWithRemote) {
       const server = db.prepare(`SELECT id FROM remote_servers WHERE url = ?`).get(proj.remote_url) as { id: string } | undefined;
@@ -1185,8 +1176,8 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       ).get(proj.id, server.id);
       if (!existingLink && proj.remote_path) {
         db.prepare(
-          `INSERT INTO project_remotes (id, project_id, remote_server_id, remote_path, sort_order, sync_up_config, sync_down_config) VALUES (?, ?, ?, ?, 0, ?, ?)`
-        ).run(crypto.randomUUID(), proj.id, server.id, proj.remote_path, proj.sync_up_config, proj.sync_down_config);
+          `INSERT INTO project_remotes (id, project_id, remote_server_id, remote_path, sort_order) VALUES (?, ?, ?, ?, 0)`
+        ).run(crypto.randomUUID(), proj.id, server.id, proj.remote_path);
       }
 
       // Update agent_mode/executor_mode from 'remote' to the corresponding remote_server_id
@@ -1474,13 +1465,11 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
           user_id TEXT NOT NULL DEFAULT 'local',
           agent_mode TEXT DEFAULT 'local',
           executor_mode TEXT DEFAULT 'local',
-          sync_up_config TEXT,
-          sync_down_config TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         INSERT INTO projects_new SELECT
           id, name, path, remote_path, is_remote, remote_url, remote_api_key, remote_project_id,
-          user_id, agent_mode, executor_mode, sync_up_config, sync_down_config, created_at
+          user_id, agent_mode, executor_mode, created_at
         FROM projects;
         DROP TABLE projects;
         ALTER TABLE projects_new RENAME TO projects;

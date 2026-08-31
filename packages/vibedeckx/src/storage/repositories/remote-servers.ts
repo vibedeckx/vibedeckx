@@ -9,7 +9,6 @@ import type {
   CrossRemoteAccess,
   ProjectRemote,
   ProjectRemoteWithServer,
-  SyncButtonConfig,
 } from "../types.js";
 
 const mapRemoteServer = (row: Selectable<RemoteServersTable>): RemoteServer => ({
@@ -43,8 +42,6 @@ const mapProjectRemote = (row: Selectable<ProjectRemotesTable>): ProjectRemote =
   remote_server_id: row.remote_server_id,
   remote_path: row.remote_path,
   sort_order: row.sort_order,
-  sync_up_config: row.sync_up_config ? (JSON.parse(row.sync_up_config) as SyncButtonConfig) : undefined,
-  sync_down_config: row.sync_down_config ? (JSON.parse(row.sync_down_config) as SyncButtonConfig) : undefined,
 });
 
 type ProjectRemoteJoinedRow = Selectable<ProjectRemotesTable> & {
@@ -246,8 +243,6 @@ export const createRemoteServerRepos = (
           "project_remotes.remote_server_id",
           "project_remotes.remote_path",
           "project_remotes.sort_order",
-          "project_remotes.sync_up_config",
-          "project_remotes.sync_down_config",
           "remote_servers.name as server_name",
         ])
         .where("project_remotes.project_id", "=", projectId)
@@ -275,8 +270,6 @@ export const createRemoteServerRepos = (
           "project_remotes.remote_server_id",
           "project_remotes.remote_path",
           "project_remotes.sort_order",
-          "project_remotes.sync_up_config",
-          "project_remotes.sync_down_config",
           "remote_servers.name as server_name",
         ])
         .where("project_remotes.project_id", "=", projectId)
@@ -298,8 +291,6 @@ export const createRemoteServerRepos = (
           remote_server_id: opts.remote_server_id,
           remote_path: opts.remote_path,
           sort_order: orderedIds.length,
-          sync_up_config: opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null,
-          sync_down_config: opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null,
         }).execute();
 
         orderedIds.splice(insertionIndex, 0, id);
@@ -318,12 +309,6 @@ export const createRemoteServerRepos = (
 
         const sets: Record<string, unknown> = {};
         if (opts.remote_path !== undefined) sets.remote_path = opts.remote_path;
-        if (opts.sync_up_config !== undefined) {
-          sets.sync_up_config = opts.sync_up_config ? JSON.stringify(opts.sync_up_config) : null;
-        }
-        if (opts.sync_down_config !== undefined) {
-          sets.sync_down_config = opts.sync_down_config ? JSON.stringify(opts.sync_down_config) : null;
-        }
         if (Object.keys(sets).length > 0) {
           await trx.updateTable("project_remotes").set(sets)
             .where("id", "=", id).where("project_id", "=", existing.project_id).execute();

@@ -619,8 +619,6 @@ describe("createRemoteAgentSession", () => {
       remote_server_id: agentMode,
       remote_path: "/remote/path-moved-after-attempt",
       sort_order: 0,
-      sync_up_config: null,
-      sync_down_config: null,
     });
     const restartedDeps = makeDeps();
     restartedDeps.remoteSessionMap = new Map();
@@ -671,7 +669,7 @@ describe("createRemoteAgentSession", () => {
 
     vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
       project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path",
-      sort_order: 0, sync_up_config: null, sync_down_config: null,
+      sort_order: 0,
     });
     const recovered = await recoverPendingRemoteAgentSessions(makeDeps(), agentMode);
 
@@ -743,7 +741,7 @@ describe("createRemoteAgentSession", () => {
 
     vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
       project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path",
-      sort_order: 0, sync_up_config: null, sync_down_config: null,
+      sort_order: 0,
     });
     const recovery = await recoverPendingRemoteAgentSessions(makeDeps(), agentMode);
 
@@ -821,7 +819,7 @@ describe("createRemoteAgentSession", () => {
     });
     vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
       project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path",
-      sort_order: 0, sync_up_config: null, sync_down_config: null,
+      sort_order: 0,
     });
     let releaseWorker!: () => void;
     const workerGate = new Promise<void>((resolve) => { releaseWorker = resolve; });

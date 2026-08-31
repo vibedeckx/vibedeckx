@@ -6,7 +6,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { Project, SyncButtonConfig } from "@/lib/api";
+import type { Project } from "@/lib/api";
 import { ProjectSettingsForm } from "./project-settings-form";
 
 interface EditProjectDialogProps {
@@ -17,8 +17,6 @@ interface EditProjectDialogProps {
     name?: string;
     path?: string | null;
     remotePath?: string | null;
-    syncUpConfig?: SyncButtonConfig | null;
-    syncDownConfig?: SyncButtonConfig | null;
   }) => Promise<void> | Promise<unknown>;
 }
 

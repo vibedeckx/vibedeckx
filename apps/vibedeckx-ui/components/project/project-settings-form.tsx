@@ -4,18 +4,11 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import {
   FolderOpen,
   Loader2,
   X,
-  Terminal,
-  Bot,
-  Monitor,
-  Cloud,
   Plus,
   Trash2,
   Server,
@@ -25,142 +18,9 @@ import {
 import {
   api,
   type Project,
-  type SyncButtonConfig,
-  type SyncActionType,
-  type ExecutionMode,
   type RemoteServer,
 } from "@/lib/api";
 import { RemoteDirectoryBrowser } from "./remote-directory-browser";
-import { cn } from "@/lib/utils";
-
-interface SyncConfigState {
-  actionType: SyncActionType;
-  executionMode: ExecutionMode;
-  content: string;
-}
-
-const defaultSyncConfig: SyncConfigState = {
-  actionType: "command",
-  executionMode: "local",
-  content: "",
-};
-
-function fromSyncButtonConfig(config?: SyncButtonConfig): SyncConfigState {
-  if (!config) return { ...defaultSyncConfig };
-  return {
-    actionType: config.actionType,
-    executionMode: config.executionMode,
-    content: config.content,
-  };
-}
-
-function toSyncButtonConfig(state: SyncConfigState): SyncButtonConfig {
-  return {
-    actionType: state.actionType,
-    executionMode: state.executionMode,
-    content: state.content,
-  };
-}
-
-function ActionTypeToggle({
-  actionType,
-  onActionTypeChange,
-}: {
-  actionType: SyncActionType;
-  onActionTypeChange: (type: SyncActionType) => void;
-}) {
-  return (
-    <div className="inline-flex items-center rounded-md border bg-muted/50 p-0.5 text-xs">
-      <button
-        onClick={() => onActionTypeChange("command")}
-        className={cn(
-          "inline-flex items-center gap-1 rounded-sm px-2 py-0.5 transition-colors",
-          actionType === "command"
-            ? "bg-background text-foreground shadow-sm"
-            : "text-muted-foreground hover:text-foreground"
-        )}
-      >
-        <Terminal className="h-3 w-3" />
-        Command
-      </button>
-      <button
-        onClick={() => onActionTypeChange("prompt")}
-        className={cn(
-          "inline-flex items-center gap-1 rounded-sm px-2 py-0.5 transition-colors",
-          actionType === "prompt"
-            ? "bg-background text-foreground shadow-sm"
-            : "text-muted-foreground hover:text-foreground"
-        )}
-      >
-        <Bot className="h-3 w-3" />
-        Prompt
-      </button>
-    </div>
-  );
-}
-
-function SyncConfigForm({
-  config,
-  onChange,
-  label,
-  targets,
-}: {
-  config: SyncConfigState;
-  onChange: (config: SyncConfigState) => void;
-  label: string;
-  targets: ExecutionModeTarget[];
-}) {
-  return (
-    <div className="space-y-4 py-2">
-      <label className="text-sm font-medium">{label}</label>
-
-      {targets.length > 0 && (
-        <div className="space-y-2">
-          <label className="text-xs text-muted-foreground">
-            Execution Environment
-          </label>
-          <div>
-            <ExecutionModeToggle
-              targets={targets}
-              activeTarget={config.executionMode}
-              onTargetChange={(executionMode: string) =>
-                onChange({ ...config, executionMode })
-              }
-            />
-          </div>
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <label className="text-xs text-muted-foreground">Action Type</label>
-        <div>
-          <ActionTypeToggle
-            actionType={config.actionType}
-            onActionTypeChange={(actionType) =>
-              onChange({ ...config, actionType })
-            }
-          />
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <label className="text-xs text-muted-foreground">
-          {config.actionType === "command" ? "Shell Command" : "Agent Prompt"}
-        </label>
-        <Textarea
-          value={config.content}
-          onChange={(e) => onChange({ ...config, content: e.target.value })}
-          placeholder={
-            config.actionType === "command"
-              ? "git push origin HEAD"
-              : "Please pull the latest changes and rebase..."
-          }
-          rows={3}
-        />
-      </div>
-    </div>
-  );
-}
 
 type AddRemoteStep = "closed" | "pick-server" | "pick-path";
 
@@ -172,8 +32,6 @@ export interface ProjectSettingsFormProps {
       name?: string;
       path?: string | null;
       remotePath?: string | null;
-      syncUpConfig?: SyncButtonConfig | null;
-      syncDownConfig?: SyncButtonConfig | null;
     }
   ) => Promise<void> | Promise<unknown>;
   onCancel?: () => void;
@@ -186,24 +44,11 @@ export function ProjectSettingsForm({
 }: ProjectSettingsFormProps) {
   const { remotes, refresh: refreshRemotes } = useProjectRemotes(project.id);
 
-  const syncTargets: ExecutionModeTarget[] = [];
-  if (project.path) syncTargets.push({ id: "local", label: "Local", icon: Monitor });
-  for (const r of remotes) {
-    syncTargets.push({ id: r.remote_server_id, label: r.server_name, icon: Cloud });
-  }
-
   const [name, setName] = useState(project.name);
   const [path, setPath] = useState(project.path ?? "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [settingPrimaryRemoteId, setSettingPrimaryRemoteId] = useState<string | null>(null);
-  const [syncUpConfig, setSyncUpConfig] = useState<SyncConfigState>(
-    fromSyncButtonConfig(project.sync_up_config)
-  );
-  const [syncDownConfig, setSyncDownConfig] = useState<SyncConfigState>(
-    fromSyncButtonConfig(project.sync_down_config)
-  );
-
   const [addRemoteStep, setAddRemoteStep] = useState<AddRemoteStep>("closed");
   const [existingServers, setExistingServers] = useState<RemoteServer[]>([]);
   const [selectedServer, setSelectedServer] = useState<RemoteServer | null>(null);
@@ -219,8 +64,6 @@ export function ProjectSettingsForm({
     setName(project.name);
     setPath(project.path ?? "");
     setError("");
-    setSyncUpConfig(fromSyncButtonConfig(project.sync_up_config));
-    setSyncDownConfig(fromSyncButtonConfig(project.sync_down_config));
     resetAddRemoteFlow();
   }, [project.id]);
 
@@ -308,8 +151,6 @@ export function ProjectSettingsForm({
         name?: string;
         path?: string | null;
         remotePath?: string | null;
-        syncUpConfig?: SyncButtonConfig | null;
-        syncDownConfig?: SyncButtonConfig | null;
       } = {};
 
       if (name.trim() !== project.name) {
@@ -319,18 +160,6 @@ export function ProjectSettingsForm({
       const newPath = hasLocalPath ? path.trim() : null;
       if (newPath !== (project.path ?? null)) {
         opts.path = newPath;
-      }
-
-      const newSyncUp = toSyncButtonConfig(syncUpConfig);
-      const origSyncUp = project.sync_up_config;
-      if (JSON.stringify(newSyncUp) !== JSON.stringify(origSyncUp)) {
-        opts.syncUpConfig = newSyncUp;
-      }
-
-      const newSyncDown = toSyncButtonConfig(syncDownConfig);
-      const origSyncDown = project.sync_down_config;
-      if (JSON.stringify(newSyncDown) !== JSON.stringify(origSyncDown)) {
-        opts.syncDownConfig = newSyncDown;
       }
 
       await onSave(project.id, opts);
@@ -343,209 +172,175 @@ export function ProjectSettingsForm({
 
   return (
     <>
-      <Tabs defaultValue="settings">
-        <TabsList className="w-full">
-          <TabsTrigger value="settings" className="flex-1">
-            Project Settings
-          </TabsTrigger>
-          <TabsTrigger value="sync-up" className="flex-1">
-            Sync Up
-          </TabsTrigger>
-          <TabsTrigger value="sync-down" className="flex-1">
-            Sync Down
-          </TabsTrigger>
-        </TabsList>
+      <div className="space-y-5 py-2">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Project Name</label>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="My Project"
+          />
+        </div>
 
-        <TabsContent value="settings">
-          <div className="space-y-5 py-2">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Local Folder</label>
+          <div className="flex gap-2">
+            <Input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="/path/to/project (optional)"
+              className="flex-1"
+            />
+            <Button variant="outline" onClick={handleSelectFolder}>
+              <FolderOpen className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <label className="text-sm font-medium">Remote Servers</label>
+          <p className="text-xs text-muted-foreground">
+            The primary remote is used for remote-only projects and default remote
+            operations. When a local checkout exists, merge status is computed locally.
+          </p>
+
+          {remotes.length > 0 && (
             <div className="space-y-2">
-              <label className="text-sm font-medium">Project Name</label>
-              <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="My Project"
-              />
+              {remotes.map((remote, index) => (
+                <div
+                  key={remote.id}
+                  className="flex items-center gap-2 rounded-md border p-2 text-sm"
+                >
+                  <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium truncate">{remote.server_name}</p>
+                      {index === 0 && (
+                        <Badge variant="secondary" className="shrink-0 gap-1">
+                          <Crown className="h-3 w-3" />
+                          Primary
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground font-mono truncate">
+                      {remote.remote_path}
+                    </p>
+                  </div>
+                  {index !== 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0"
+                      disabled={settingPrimaryRemoteId !== null}
+                      onClick={() => handleSetPrimaryRemote(remote.id)}
+                    >
+                      {settingPrimaryRemoteId === remote.id && (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      )}
+                      Set as Primary
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-7 w-7 shrink-0"
+                    onClick={() => handleRemoveRemote(remote.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                  </Button>
+                </div>
+              ))}
             </div>
+          )}
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Local Folder</label>
-              <div className="flex gap-2">
-                <Input
-                  value={path}
-                  onChange={(e) => setPath(e.target.value)}
-                  placeholder="/path/to/project (optional)"
-                  className="flex-1"
-                />
-                <Button variant="outline" onClick={handleSelectFolder}>
-                  <FolderOpen className="h-4 w-4" />
+          {addRemoteStep === "closed" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleOpenAddRemote}
+              className="w-full"
+            >
+              <Plus className="h-4 w-4 mr-1" />
+              Add Remote
+            </Button>
+          )}
+
+          {addRemoteStep === "pick-server" && (
+            <div className="rounded-md border p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium">
+                  Select a Remote Server
+                </label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={resetAddRemoteFlow}
+                >
+                  <X className="h-3.5 w-3.5" />
                 </Button>
               </div>
-            </div>
-
-            <div className="space-y-3">
-              <label className="text-sm font-medium">Remote Servers</label>
-              <p className="text-xs text-muted-foreground">
-                The primary remote is used for remote-only projects and default remote
-                operations. When a local checkout exists, merge status is computed locally.
-              </p>
-
-              {remotes.length > 0 && (
-                <div className="space-y-2">
-                  {remotes.map((remote, index) => (
-                    <div
-                      key={remote.id}
-                      className="flex items-center gap-2 rounded-md border p-2 text-sm"
+              {existingServers.length > 0 && (
+                <div className="space-y-1">
+                  {existingServers.map((server) => (
+                    <button
+                      key={server.id}
+                      className="flex items-center gap-2 w-full rounded-md p-2 text-sm text-left hover:bg-muted"
+                      onClick={() => handleSelectExistingServer(server)}
                     >
-                      <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <Server className="h-4 w-4 text-muted-foreground" />
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="font-medium truncate">{remote.server_name}</p>
-                          {index === 0 && (
-                            <Badge variant="secondary" className="shrink-0 gap-1">
-                              <Crown className="h-3 w-3" />
-                              Primary
-                            </Badge>
-                          )}
-                        </div>
-                        <p className="text-xs text-muted-foreground font-mono truncate">
-                          {remote.remote_path}
+                        <p className="truncate">{server.name}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {server.status === "online"
+                            ? "Connected"
+                            : "Not connected"}
                         </p>
                       </div>
-                      {index !== 0 && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 shrink-0"
-                          disabled={settingPrimaryRemoteId !== null}
-                          onClick={() => handleSetPrimaryRemote(remote.id)}
-                        >
-                          {settingPrimaryRemoteId === remote.id && (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          )}
-                          Set as Primary
-                        </Button>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="h-7 w-7 shrink-0"
-                        onClick={() => handleRemoveRemote(remote.id)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-                      </Button>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
+              <p className="text-xs text-muted-foreground">
+                Add new servers in Settings → Remote Servers, then connect
+                the remote machine with a connect token.
+              </p>
+            </div>
+          )}
 
-              {addRemoteStep === "closed" && (
+          {addRemoteStep === "pick-path" && selectedServer && (
+            <div className="rounded-md border p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium">
+                  Select Directory on {selectedServer.name}
+                </label>
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
-                  onClick={handleOpenAddRemote}
-                  className="w-full"
+                  onClick={resetAddRemoteFlow}
                 >
-                  <Plus className="h-4 w-4 mr-1" />
-                  Add Remote
+                  <X className="h-3.5 w-3.5" />
                 </Button>
-              )}
-
-              {addRemoteStep === "pick-server" && (
-                <div className="rounded-md border p-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-medium">
-                      Select a Remote Server
-                    </label>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={resetAddRemoteFlow}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  {existingServers.length > 0 && (
-                    <div className="space-y-1">
-                      {existingServers.map((server) => (
-                        <button
-                          key={server.id}
-                          className="flex items-center gap-2 w-full rounded-md p-2 text-sm text-left hover:bg-muted"
-                          onClick={() => handleSelectExistingServer(server)}
-                        >
-                          <Server className="h-4 w-4 text-muted-foreground" />
-                          <div className="flex-1 min-w-0">
-                            <p className="truncate">{server.name}</p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {server.status === "online"
-                                ? "Connected"
-                                : "Not connected"}
-                            </p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+              </div>
+              <RemoteDirectoryBrowser
+                serverId={selectedServer.id}
+                onSelect={handleRemotePathSelect}
+                selectedPath={selectedRemotePath}
+              />
+              {selectedRemotePath && (
+                <div className="flex items-center justify-between">
                   <p className="text-xs text-muted-foreground">
-                    Add new servers in Settings → Remote Servers, then connect
-                    the remote machine with a connect token.
+                    Selected:{" "}
+                    <span className="font-mono">{selectedRemotePath}</span>
                   </p>
-                </div>
-              )}
-
-              {addRemoteStep === "pick-path" && selectedServer && (
-                <div className="rounded-md border p-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-medium">
-                      Select Directory on {selectedServer.name}
-                    </label>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={resetAddRemoteFlow}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  <RemoteDirectoryBrowser
-                    serverId={selectedServer.id}
-                    onSelect={handleRemotePathSelect}
-                    selectedPath={selectedRemotePath}
-                  />
-                  {selectedRemotePath && (
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs text-muted-foreground">
-                        Selected:{" "}
-                        <span className="font-mono">{selectedRemotePath}</span>
-                      </p>
-                      <Button size="sm" onClick={handleConfirmAddRemote}>
-                        Add
-                      </Button>
-                    </div>
-                  )}
+                  <Button size="sm" onClick={handleConfirmAddRemote}>
+                    Add
+                  </Button>
                 </div>
               )}
             </div>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="sync-up">
-          <SyncConfigForm
-            config={syncUpConfig}
-            onChange={setSyncUpConfig}
-            label="Sync Up Button"
-            targets={syncTargets}
-          />
-        </TabsContent>
-
-        <TabsContent value="sync-down">
-          <SyncConfigForm
-            config={syncDownConfig}
-            onChange={setSyncDownConfig}
-            label="Sync Down Button"
-            targets={syncTargets}
-          />
-        </TabsContent>
-      </Tabs>
+          )}
+        </div>
+      </div>
 
       {error && <p className="text-sm text-red-500">{error}</p>}
 

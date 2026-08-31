@@ -41,7 +41,7 @@ Frontend auth uses an in-memory `Authorization: Bearer` token, not a cookie
   third-party scripts), that content runs on the *shared* app origin and can:
   - read `window.parent` and exfiltrate that user's in-memory Bearer token →
     impersonate the user against the per-tenant APIs;
-  - drive privileged sinks (agent sessions, `execute-sync`); where these execute
+  - drive privileged sinks (agent sessions, executors); where these execute
     on the shared host, one hijacked session can become host / cross-tenant
     command execution.
 

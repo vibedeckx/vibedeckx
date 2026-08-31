@@ -19,16 +19,12 @@ describe("projects + settings storage", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("create/getById round-trips including JSON sync configs and is_remote coercion", async () => {
-    const p = await storage.projects.create({
-      id: "p1", name: "proj", path: "/tmp/x",
-      sync_up_config: { actionType: "command", executionMode: "local", content: "make up" },
-    });
+  it("create/getById round-trips with is_remote coercion", async () => {
+    const p = await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
     expect(p.is_remote).toBe(false);                     // boolean, not 0/1
-    expect(p.sync_up_config?.content).toBe("make up");   // parsed object, not JSON string
     const got = await storage.projects.getById("p1");
     expect(got?.is_remote).toBe(false);
-    expect(got?.sync_up_config?.actionType).toBe("command");
+    expect(got?.path).toBe("/tmp/x");
   });
 
   it("create defaults agent_mode/executor_mode to 'local' and is_remote to false", async () => {
@@ -36,8 +32,6 @@ describe("projects + settings storage", () => {
     expect(p.agent_mode).toBe("local");
     expect(p.executor_mode).toBe("local");
     expect(p.is_remote).toBe(false);
-    expect(p.sync_up_config).toBeUndefined();
-    expect(p.sync_down_config).toBeUndefined();
     expect(p.remote_path).toBeUndefined();
     // The legacy direct-URL columns are no longer mapped onto the domain object.
     expect(p).not.toHaveProperty("remote_url");
@@ -86,19 +80,6 @@ describe("projects + settings storage", () => {
     expect(same?.id).toBe("p1");
     const wrongUser = await storage.projects.update("p1", {}, "user-b");
     expect(wrongUser).toBeUndefined();
-  });
-
-  it("update: sync_up_config/sync_down_config JSON round-trip and clearing", async () => {
-    await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
-    const withCfg = await storage.projects.update("p1", {
-      sync_up_config: { actionType: "prompt", executionMode: "local", content: "up" },
-      sync_down_config: { actionType: "command", executionMode: "local", content: "down" },
-    });
-    expect(withCfg?.sync_up_config?.content).toBe("up");
-    expect(withCfg?.sync_down_config?.content).toBe("down");
-    const cleared = await storage.projects.update("p1", { sync_up_config: null, sync_down_config: null });
-    expect(cleared?.sync_up_config).toBeUndefined();
-    expect(cleared?.sync_down_config).toBeUndefined();
   });
 
   it("delete removes only the caller's own project when userId given", async () => {
@@ -301,7 +282,7 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     expect(await storage.remoteServers.getById(server.id)).toBeUndefined();
   });
 
-  it("projectRemotes add/getByProject/getByProjectAndServer join in server fields and parse JSON configs", async () => {
+  it("projectRemotes add/getByProject/getByProjectAndServer join in server fields", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
     const server = await storage.remoteServers.create({ name: "srv" });
 
@@ -309,16 +290,13 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
       project_id: "p1",
       remote_server_id: server.id,
       remote_path: "/remote/path",
-      sync_up_config: { actionType: "command", executionMode: "local", content: "up" },
     });
     expect(pr.sort_order).toBe(0);
-    expect(pr.sync_up_config?.content).toBe("up");
-    expect(pr.sync_down_config).toBeUndefined();
+    expect(pr.remote_path).toBe("/remote/path");
 
     const list = await storage.projectRemotes.getByProject("p1");
     expect(list).toHaveLength(1);
     expect(list[0].server_name).toBe("srv");
-    expect(list[0].sync_up_config?.content).toBe("up");
 
     const single = await storage.projectRemotes.getByProjectAndServer("p1", server.id);
     expect(single?.id).toBe(pr.id);
@@ -433,21 +411,17 @@ describe("remoteServers + projectRemotes + machineIdentity storage", () => {
     await legacyStorage.close();
   });
 
-  it("projectRemotes update: partial update and null clears sync configs", async () => {
+  it("projectRemotes update: partial update leaves other fields untouched", async () => {
     await storage.projects.create({ id: "p1", name: "proj", path: "/tmp/x" });
     const server = await storage.remoteServers.create({ name: "srv" });
     const pr = await storage.projectRemotes.add({
       project_id: "p1",
       remote_server_id: server.id,
       remote_path: "/remote/path",
-      sync_up_config: { actionType: "command", executionMode: "local", content: "up" },
     });
     const updated = await storage.projectRemotes.update(pr.id, { remote_path: "/new/path" });
     expect(updated?.remote_path).toBe("/new/path");
-    expect(updated?.sync_up_config?.content).toBe("up"); // untouched by undefined
-
-    const cleared = await storage.projectRemotes.update(pr.id, { sync_up_config: null });
-    expect(cleared?.sync_up_config).toBeUndefined();
+    expect(updated?.sort_order).toBe(0); // untouched by undefined
 
     // No-op update returns current row.
     const noop = await storage.projectRemotes.update(pr.id, {});

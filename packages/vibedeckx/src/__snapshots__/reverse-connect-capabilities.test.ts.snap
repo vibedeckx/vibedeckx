@@ -41,7 +41,6 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:POST /api/agent-sessions/:param/restart",
   "http:POST /api/agent-sessions/:param/stop",
   "http:POST /api/agent-sessions/:param/switch-mode",
-  "http:POST /api/execute-one-shot",
   "http:POST /api/executor-processes/:param/stop",
   "http:POST /api/mkdir",
   "http:POST /api/notification-outbox/query",
