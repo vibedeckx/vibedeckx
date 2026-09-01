@@ -8,12 +8,15 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
 import { useFileNavigation } from "./file-navigation-context";
 
 type AnchorProps = ComponentProps<"a"> & { node?: { properties?: Record<string, unknown> } };
 
 const REF_CLASS =
   "text-primary underline decoration-dotted underline-offset-2 cursor-pointer hover:decoration-solid";
+const LINK_CLASS =
+  "wrap-anywhere font-medium text-primary underline decoration-primary/60 underline-offset-2 transition-colors hover:text-primary/80 hover:decoration-primary";
 
 // Resolution happens HERE, at render time, against the index from context —
 // not in the rehype plugin. A late-arriving index therefore upgrades refs from
@@ -21,7 +24,7 @@ const REF_CLASS =
 // remounted (see rehype-file-refs.ts for the jump this avoids). Until the
 // index resolves a ref, it renders as its plain children — no element, no
 // link affordance.
-export function FileRefLink({ node, children, href, ...rest }: AnchorProps) {
+export function FileRefLink({ node, children, href, className, ...rest }: AnchorProps) {
   const { openFile, index } = useFileNavigation();
   const raw = node?.properties?.dataFileRaw as string | undefined;
 
@@ -30,13 +33,19 @@ export function FileRefLink({ node, children, href, ...rest }: AnchorProps) {
     const isHash = typeof href === "string" && href.startsWith("#");
     if (isHash) {
       return (
-        <a href={href} {...rest}>
+        <a href={href} className={cn(LINK_CLASS, className)} {...rest}>
           {children}
         </a>
       );
     }
     return (
-      <a href={href} target="_blank" rel="noreferrer noopener" {...rest}>
+      <a
+        href={href}
+        className={cn(LINK_CLASS, className)}
+        target="_blank"
+        rel="noreferrer noopener"
+        {...rest}
+      >
         {children}
       </a>
     );
@@ -63,7 +72,11 @@ export function FileRefLink({ node, children, href, ...rest }: AnchorProps) {
     );
   }
 
-  return <FileRefChoice paths={paths} line={line} children={children} />;
+  return (
+    <FileRefChoice paths={paths} line={line}>
+      {children}
+    </FileRefChoice>
+  );
 }
 
 function FileRefChoice({
