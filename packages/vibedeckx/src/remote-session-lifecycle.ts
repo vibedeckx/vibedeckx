@@ -470,6 +470,9 @@ export class RemoteSessionLifecycleAdapter {
         projectId: params.projectId, agentMode: params.remoteServerId, remoteConfig: { remote_path: params.remotePath },
         branch: params.branch, permissionMode: params.permissionMode, agentType: params.agentType, model: params.model,
         userId: params.userId, remoteSessionId, localSessionId, purpose: params.purpose, operationId: params.operationId,
+        // ensureIntent above already keyed this intent by the operation; the
+        // create must re-`begin` the same row, not one without the key.
+        prepareOperationId: params.operationId,
       });
       if (!created.ok) {
         if (created.status === 0) return { kind: "remote_unreachable", status: created.status, detail: created.data };

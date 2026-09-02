@@ -222,7 +222,17 @@ describe("RemoteSessionLifecycleAdapter", () => {
 
   it("legacy worker: prepare creates via /new, activate sends /message, cancel discards-if-empty", async () => {
     await setCapabilities(["http:POST /api/path/agent-sessions/new", "http:POST /api/agent-sessions/:param/discard-if-empty"]);
-    legacyCreate.mockImplementationOnce(async (_deps, p: { localSessionId: string; remoteSessionId: string }) => {
+    legacyCreate.mockImplementationOnce(async (_deps, p: { localSessionId: string; remoteSessionId: string; prepareOperationId?: string }) => {
+      // Mirror the real create's durable-intent write: it re-`begin`s the row
+      // this adapter already keyed by the operation, and `begin` rejects a
+      // row whose identity disagrees — so dropping the key here is the 500
+      // every legacy-worker first send used to hit.
+      await storage.remoteSessionCreationIntents.begin({
+        localSessionId: p.localSessionId, remoteSessionId: p.remoteSessionId, projectId: "p1",
+        remoteServerId: "srv", branch: null, remotePath: "/w", permissionMode: "edit",
+        agentType: "claude-code", model: null, force: false, userId: "u1",
+        prepareOperationId: p.prepareOperationId,
+      });
       await storage.remoteSessionMappings.upsert(p.localSessionId, "p1", "srv", p.remoteSessionId, null, "from_start");
       remoteSessionMap.set(p.localSessionId, { remoteServerId: "srv", remoteSessionId: p.remoteSessionId, branch: null });
       return { ok: true, localSessionId: p.localSessionId, remoteSession: { id: p.remoteSessionId }, messages: [] };
@@ -231,7 +241,9 @@ describe("RemoteSessionLifecycleAdapter", () => {
     expect(prepared.kind).toBe("prepared");
     const v = (prepared as { view: SessionLifecycleView }).view;
     expect(v).toMatchObject({ state: "active", legacy: true });
-    expect(legacyCreate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ localSessionId: v.sessionId, operationId: "op-1", purpose: "interactive" }));
+    expect(legacyCreate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      localSessionId: v.sessionId, operationId: "op-1", prepareOperationId: "op-1", purpose: "interactive",
+    }));
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
 
     proxyToRemoteAuto.mockImplementationOnce(async (_srv, method, apiPath, body) => {

@@ -26,6 +26,7 @@
 // --data-dir directories and are killed by PID / unique-path pkill on exit.
 
 import { spawn, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -626,6 +627,127 @@ await sessionSmoke("session-stop", ["http:POST /api/agent-sessions/:param/stop"]
 await sessionSmoke("session-delete", ["http:DELETE /api/agent-sessions/:param"], async () => {
   await api("DELETE", `/api/agent-sessions/${sessionId}`);
 });
+
+// --- prepared-session lifecycle (design §9.2), driven through the hub ---
+// Runs after session-delete so the branch is free again, and each smoke
+// removes whatever it created: the hub spawns a real stub agent per
+// activation and every one of these holds a resident slot until deleted.
+//
+// The hub gates all four lifecycle routes on the worker advertising
+// `prepare` and otherwise runs the legacy `/new` → `/message` →
+// `discard-if-empty` sequence, which answers 2xx with `lifecycle.legacy`.
+// That would read here as a silent pass, so re-raise it as the 404 it stands
+// for and let the version-gap policy judge it like any other additive gap.
+const assertLifecycleReachedWorker = (body, method, apiPath) => {
+  if (body?.lifecycle?.legacy === true) {
+    throw new HttpError(method, apiPath, 404, "worker predates the prepared-session lifecycle");
+  }
+};
+const discard = async (id) => {
+  if (id) await api("DELETE", `/api/agent-sessions/${id}`).catch(() => { /* best effort */ });
+};
+
+await smoke("session-prepare-activate", [
+  "http:POST /api/path/agent-sessions/prepare",
+  "http:POST /api/agent-sessions/:param/activate",
+], async () => {
+  const operationId = `xver-prepare-${randomUUID()}`;
+  let preparedId;
+  try {
+    const prepared = await api("POST", `${P}/agent-sessions/prepare`, {
+      operationId, branch: null, permissionMode: "edit", agentType: "claude-code",
+    });
+    // Read the id before the legacy check: the fallback really did create a
+    // session on the worker, and the cleanup has to reach it.
+    preparedId = prepared.lifecycle?.sessionId;
+    assertLifecycleReachedWorker(prepared, "POST", "/api/path/agent-sessions/prepare");
+    assert(prepared.kind === "prepared", `unexpected prepare kind: ${JSON.stringify(prepared).slice(0, 150)}`);
+    assert(typeof preparedId === "string" && preparedId.startsWith("remote-"), `unexpected prepared id: ${preparedId}`);
+    assert(prepared.lifecycle.state === "pending_first_turn", `unexpected prepared state: ${prepared.lifecycle.state}`);
+    // The contract that makes prepare worth a route of its own: an identity
+    // with no agent behind it. A pending row is not a session to the UI, so
+    // it must not show up as alive on the worker.
+    const alive = await api("GET", `${P}/agent-sessions/alive`);
+    assert(
+      !(alive.sessions ?? []).some((s) => s.id === preparedId),
+      `pending session ${preparedId} is already alive on the worker`,
+    );
+
+    const activation = { activationKey: operationId, instruction: "hello prepared" };
+    const activated = await api("POST", `/api/agent-sessions/${preparedId}/activate`, activation);
+    assert(activated.kind === "activated", `unexpected activate kind: ${JSON.stringify(activated).slice(0, 150)}`);
+    assert(activated.lifecycle?.state === "active", `unexpected activated state: ${activated.lifecycle?.state}`);
+    assert(activated.session?.id === preparedId, `activation returned a different session: ${JSON.stringify(activated.session).slice(0, 150)}`);
+    // Same key again replays the activation instead of sending a second turn.
+    const replayed = await api("POST", `/api/agent-sessions/${preparedId}/activate`, activation);
+    assert(replayed.kind === "replayed", `re-activation was not a replay: ${JSON.stringify(replayed).slice(0, 150)}`);
+  } finally {
+    await discard(preparedId);
+  }
+});
+
+await smoke("session-cancel-preparation", ["http:DELETE /api/agent-sessions/:param/preparation"], async () => {
+  const operationId = `xver-cancel-${randomUUID()}`;
+  let cancelId;
+  try {
+    const prepared = await api("POST", `${P}/agent-sessions/prepare`, {
+      operationId, branch: null, permissionMode: "edit", agentType: "claude-code",
+    });
+    cancelId = prepared.lifecycle?.sessionId;
+    assertLifecycleReachedWorker(prepared, "POST", "/api/path/agent-sessions/prepare");
+    const cancelled = await api("DELETE", `/api/agent-sessions/${cancelId}/preparation`, { reason: "cancelled" });
+    assert(cancelled.kind === "cancelled", `unexpected cancel kind: ${JSON.stringify(cancelled).slice(0, 150)}`);
+    assert(cancelled.lifecycle?.state === "expired", `cancelled row is not a tombstone: ${cancelled.lifecycle?.state}`);
+    cancelId = undefined;
+  } finally {
+    await discard(cancelId);
+  }
+});
+
+await smoke("session-start", ["http:POST /api/path/agent-sessions/start"], async () => {
+  const body = {
+    operationId: `xver-start-${randomUUID()}`, branch: null, permissionMode: "edit",
+    agentType: "claude-code", instruction: "hello stub",
+  };
+  let startedId;
+  try {
+    const started = await api("POST", `${P}/agent-sessions/start`, body);
+    startedId = started.session?.id ?? started.lifecycle?.sessionId;
+    assertLifecycleReachedWorker(started, "POST", "/api/path/agent-sessions/start");
+    assert(started.kind === "activated", `unexpected start kind: ${JSON.stringify(started).slice(0, 150)}`);
+    assert(typeof startedId === "string" && startedId.startsWith("remote-"), `unexpected started id: ${startedId}`);
+    // One operation, one session: a retried start must replay the same id
+    // rather than spawn a second agent.
+    const replayed = await api("POST", `${P}/agent-sessions/start`, body);
+    assert(replayed.kind === "replayed", `retried start was not a replay: ${JSON.stringify(replayed).slice(0, 150)}`);
+    assert(
+      (replayed.session?.id ?? replayed.lifecycle?.sessionId) === startedId,
+      `retried start produced a second session: ${JSON.stringify(replayed).slice(0, 150)}`,
+    );
+  } finally {
+    await discard(startedId);
+  }
+});
+
+await smoke("session-discard-if-empty", ["http:POST /api/agent-sessions/:param/discard-if-empty"], async () => {
+  // The compensation for a first send that never landed: only an entry-less
+  // session may go. Driven against a freshly created one, which is exactly
+  // that state — no /message has been sent to it.
+  let emptyId;
+  try {
+    const created = await api("POST", `${P}/agent-sessions/new`, { branch: null, permissionMode: "edit", agentType: "claude-code" });
+    emptyId = created.session?.id ?? created.id;
+    assert(typeof emptyId === "string" && emptyId.startsWith("remote-"), `unexpected session id: ${emptyId}`);
+    const discarded = await api("POST", `/api/agent-sessions/${emptyId}/discard-if-empty`);
+    assert(discarded?.discarded === true, `session was not discarded: ${JSON.stringify(discarded).slice(0, 150)}`);
+    const after = await request("GET", `/api/agent-sessions/${emptyId}`);
+    assert(after.status === 404, `discarded session still readable (status ${after.status})`);
+    emptyId = undefined;
+  } finally {
+    await discard(emptyId);
+  }
+});
+
 await smoke("workflow-list", ["http:GET /api/path/workflow-runs"], async () => {
   const r = await api("GET", `/api/workflow-runs?projectId=${project.id}&branch=main`);
   assert(Array.isArray(r.runs ?? r), "no runs array");

@@ -165,6 +165,13 @@ export async function createRemoteAgentSession(
     /** Lifecycle-log correlation forwarded to the worker (additive body fields; old workers ignore them). */
     purpose?: SessionPurpose;
     operationId?: string;
+    /**
+     * Set when this create IS the legacy half of a prepared-session operation
+     * (remote-session-lifecycle.ts): the lifecycle adapter already wrote the
+     * intent keyed by that operation, and `begin` below refuses a row whose
+     * identity disagrees — so the key has to be carried through, not dropped.
+     */
+    prepareOperationId?: string;
   },
 ): Promise<CreateRemoteAgentSessionResult> {
   const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, model, force, userId, purpose, operationId } = params;
@@ -190,6 +197,7 @@ export async function createRemoteAgentSession(
     model: model ?? null,
     force: force ?? false,
     userId: userId ?? null,
+    prepareOperationId: params.prepareOperationId,
   });
 
   const crossRemoteMcp = await mintCrossRemoteMcpConfig(
