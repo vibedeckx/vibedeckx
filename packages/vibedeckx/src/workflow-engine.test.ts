@@ -400,6 +400,17 @@ describe("buildReviewerPrompt scope", () => {
     expect(prompt).not.toContain("scope unknown");
   });
 
+  it("wraps scoped paths in inline code so Markdown preserves double underscores", () => {
+    const path = "packages/vibedeckx/src/__snapshots__/projection.test.ts.snap";
+    const prompt = buildReviewerPrompt({
+      taskContext: "update snapshots", originalIntent: "update snapshots",
+      authorSelfReport: null, intentBrief: null, reviewFocus: null, target,
+      scope: { changedFiles: [path], startHead: "base9" },
+    });
+    expect(prompt).toContain(`- \`${path}\``);
+    expect(prompt).not.toContain(`- ${path}`);
+  });
+
   it("falls back to a scope-unknown note when scope is null", () => {
     const prompt = buildReviewerPrompt({
       taskContext: "fix login", originalIntent: "fix login",
