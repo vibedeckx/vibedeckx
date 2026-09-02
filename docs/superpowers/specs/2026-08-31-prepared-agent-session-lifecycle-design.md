@@ -811,7 +811,7 @@ Phase 1+ 是否排期，这站不住：
 
 退出条件：Hub/worker 任一侧在 prepare/activate 各边界重启，都不会产生第二个 session。
 
-**实现状态（2026-09-01，已落代码，未发版；隧道契约 additive，`since: 0.3.34`）**：
+**实现状态（2026-09-01，已落代码，未发版；隧道契约 additive，`since: 0.3.33`）**：
 
 - Worker 路由（`routes/agent-session-lifecycle-routes.ts`，`server.ts` 注册）：
   `POST /api/path/agent-sessions/prepare|start`（`requireRawAuth`，pseudo-project 解析与
