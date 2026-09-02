@@ -5,6 +5,8 @@ import type {
   Storage,
   AgentSession,
   AgentSessionActivity,
+  AgentSessionLifecycleRow,
+  AgentSessionLifecycleState,
   AgentSessionStatus,
   NotificationSyncStart,
   RemoteSessionMapping,
@@ -19,6 +21,7 @@ import {
   type WorkspaceBindingReadConsumer,
 } from "../../workspace-binding-metrics.js";
 import { WORKFLOW_ACTIVE_STATUSES } from "../workflow-run-status.js";
+import { VISIBLE_LIFECYCLE_STATES } from "../types.js";
 // NotificationOutboxEvent is referenced only through Storage's method
 // signatures, which this factory's return type already pins.
 
@@ -117,7 +120,48 @@ const mapAgentSession = (row: Selectable<AgentSessionsTable>): AgentSession => (
   history_epoch: row.history_epoch,
   branched_from_session_id: row.branched_from_session_id,
   branched_from_entry_index: row.branched_from_entry_index,
+  lifecycle_state: row.lifecycle_state as AgentSessionLifecycleState,
+  purpose: row.purpose,
 });
+
+const mapLifecycleRow = (row: Selectable<AgentSessionsTable>): AgentSessionLifecycleRow => ({
+  id: row.id,
+  project_id: row.project_id,
+  branch: row.branch,
+  workspace_checkout_id: row.workspace_checkout_id,
+  status: row.status as AgentSessionStatus,
+  permission_mode: row.permission_mode,
+  agent_type: row.agent_type,
+  model: row.model ?? null,
+  lifecycle_state: row.lifecycle_state as AgentSessionLifecycleState,
+  purpose: row.purpose,
+  owner_kind: row.owner_kind,
+  owner_id: row.owner_id,
+  prepare_operation_id: row.prepare_operation_id,
+  pending_expires_at: row.pending_expires_at,
+  activated_at: row.activated_at,
+  expired_reason: row.expired_reason,
+  expired_at: row.expired_at,
+  activation_key: row.activation_key,
+  activation_content_hash: row.activation_content_hash,
+  activation_content_json: row.activation_content_json,
+  activation_lease_owner: row.activation_lease_owner,
+  activation_lease_expires_at: row.activation_lease_expires_at,
+  activation_attempt: row.activation_attempt,
+  activation_user_entry_index: row.activation_user_entry_index,
+  activation_error_code: row.activation_error_code,
+});
+
+/**
+ * Lifecycle visibility, in ONE place (design §6.1, §14.2). Every list,
+ * count, latest and retention query embeds it so a `pending_first_turn`
+ * identity or an `expired` tombstone can never surface as a session. Exact-
+ * id reads (`getById`, `getActivityById`) stay unscoped: they are how the
+ * lifecycle service and route authorization reach those rows.
+ */
+const visibleLifecycle = sql<SqlBool>`lifecycle_state IN (${sql.join(VISIBLE_LIFECYCLE_STATES.map((v) => sql`${v}`))})`;
+const visibleLifecycleOf = (alias: string) =>
+  sql<SqlBool>`${sql.ref(`${alias}.lifecycle_state`)} IN (${sql.join(VISIBLE_LIFECYCLE_STATES.map((v) => sql`${v}`))})`;
 
 const parseActivityTimestamp = (value: string): number | null => {
   const explicitZone = /(?:Z|[+-]\d\d:\d\d)$/i.test(value);
@@ -253,7 +297,8 @@ const projectedSessionByBranchBase = (
       eb("workspace.project_id", "=", projectId),
       eb("workspace.branch", "=", branch),
     ]),
-  ]));
+  ]))
+  .where(visibleLifecycleOf("s"));
 
 const mapProjectedAgentSession = (row: Selectable<AgentSessionsTable> & {
   projected_project_id: string;
@@ -304,6 +349,7 @@ const projectedSessionsByProject = async (
         eb("workspace.project_id", "=", projectId),
       ]),
     ]))
+    .where(visibleLifecycleOf("s"))
     .orderBy("s.updated_at", "desc")
     .execute();
   rows.forEach((row) => observeProjectedSession(consumer, row));
@@ -359,6 +405,8 @@ const mapRemoteCreationIntent = (
   error: row.error,
   created_at: row.created_at,
   updated_at: row.updated_at,
+  prepare_operation_id: row.prepare_operation_id ?? null,
+  prepared_at: row.prepared_at ?? null,
 });
 
 const mapRemoteReviewerCreationIntent = (
@@ -404,6 +452,7 @@ const retentionPredicate = (cutoff: number) => sql<SqlBool>`
   activity_at < ${cutoff}
   AND favorited_at IS NULL
   AND status <> 'running'
+  AND ${visibleLifecycle}
   AND NOT EXISTS (
     SELECT 1 FROM workflow_runs wr
     WHERE wr.status IN (${sql.join(WORKFLOW_ACTIVE_STATUSES.map((s) => sql`${s}`))})
@@ -534,8 +583,12 @@ export const createAgentSessionRepos = (
       return { session: mapAgentSession(session), checkout: mapWorkspaceCheckout(checkout) };
     }),
 
+    // Startup restore reads this: pending identities and tombstones must never
+    // be rebuilt as dormant sessions, so the scope applies here too.
     getAll: async () => {
-      const rows = await kdb.selectFrom("agent_sessions").selectAll().orderBy("updated_at", "desc").execute();
+      const rows = await kdb.selectFrom("agent_sessions").selectAll()
+        .where(visibleLifecycle)
+        .orderBy("updated_at", "desc").execute();
       return rows.map(mapAgentSession);
     },
 
@@ -547,6 +600,7 @@ export const createAgentSessionRepos = (
     getByProjectId: async (projectId) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
+        .where(visibleLifecycle)
         .orderBy("updated_at", "desc")
         .execute();
       return rows.map(mapAgentSession);
@@ -557,6 +611,7 @@ export const createAgentSessionRepos = (
     listByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
+        .where(visibleLifecycle)
         .orderBy("updated_at", "desc")
         .orderBy("id", "asc")
         .limit(limit)
@@ -567,6 +622,7 @@ export const createAgentSessionRepos = (
     listRecentByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
+        .where(visibleLifecycle)
         .orderBy("activity_at", "desc")
         .orderBy("id", "desc")
         .limit(limit)
@@ -576,6 +632,7 @@ export const createAgentSessionRepos = (
 
     listRecentActivityByProject: async (projectId, limit, consumer) => {
       const rows = await localActivityBase(kdb, projectId)
+        .where(visibleLifecycleOf("s"))
         .orderBy("s.activity_at", "desc")
         .orderBy("s.id", "desc")
         .limit(limit)
@@ -600,6 +657,7 @@ export const createAgentSessionRepos = (
     listAttentionByProject: async (projectId, limit) => {
       const rows = await kdb.selectFrom("agent_sessions").selectAll()
         .where("project_id", "=", projectId)
+        .where(visibleLifecycle)
         .where((eb) => eb.or([
           eb("status", "=", "error"),
           eb.and([
@@ -620,6 +678,7 @@ export const createAgentSessionRepos = (
 
     listAttentionActivityByProject: async (projectId, limit, consumer) => {
       const rows = await localActivityBase(kdb, projectId)
+        .where(visibleLifecycleOf("s"))
         .where((eb) => eb.or([
           eb("s.status", "=", "error"),
           eb.and([
@@ -645,6 +704,7 @@ export const createAgentSessionRepos = (
         .select(kdb.fn.countAll<number>().as("count"))
         .where("project_id", "=", projectId)
         .where("status", "=", "running")
+        .where(visibleLifecycle)
         .executeTakeFirstOrThrow();
       return Number(row.count);
     },
@@ -652,6 +712,7 @@ export const createAgentSessionRepos = (
     countRunningActivityByProject: async (projectId) => {
       const row = await localActivityBase(kdb, projectId)
         .where("s.status", "=", "running")
+        .where(visibleLifecycleOf("s"))
         .clearSelect()
         .select(kdb.fn.countAll<number>().as("count"))
         .executeTakeFirstOrThrow();
@@ -878,9 +939,13 @@ export const createAgentSessionRepos = (
       return (result.numDeletedRows ?? 0n) > 0n;
     },
 
+    // Legacy compensation only ever targets rows the legacy `/new` path
+    // created, i.e. `active` ones. Pending identities and tombstones belong
+    // to the lifecycle service; deleting them here would break its replay.
     deleteIfEmpty: async (id) => {
       const result = await kdb.deleteFrom("agent_sessions")
         .where("id", "=", id)
+        .where("lifecycle_state", "=", "active")
         .where(sql<SqlBool>`NOT EXISTS (
           SELECT 1 FROM agent_session_entries entry
           WHERE entry.session_id = agent_sessions.id
@@ -893,9 +958,294 @@ export const createAgentSessionRepos = (
       const rows = await kdb.selectFrom("agent_sessions")
         .select("id")
         .where("project_id", "=", projectId)
+        .where(visibleLifecycle)
         .orderBy("id", "asc")
         .execute();
       return rows.map((r) => r.id);
+    },
+
+    // ---- Prepared-session lifecycle (design §6, §8, §11) ----
+
+    createPending: async ({
+      id, project_id, branch, target_id, checkout_id, permission_mode, agent_type, model,
+      purpose, owner_kind, owner_id, prepare_operation_id, pending_expires_at,
+    }) => kdb.transaction().execute(async (trx) => {
+      let query = trx.selectFrom("workspace_checkouts")
+        .innerJoin("workspaces", "workspaces.id", "workspace_checkouts.workspace_id")
+        .selectAll("workspace_checkouts")
+        .where("workspaces.project_id", "=", project_id)
+        .where("workspaces.branch", "=", branch)
+        .where("workspace_checkouts.target_id", "=", target_id)
+        .where("workspace_checkouts.deleted_at", "is", null)
+        .where("workspace_checkouts.status", "=", "ready");
+      if (checkout_id) query = query.where("workspace_checkouts.id", "=", checkout_id);
+      const checkout = await query.executeTakeFirst();
+      if (!checkout) {
+        throw new Error(checkout_id
+          ? `Workspace checkout ${checkout_id} is not available for this session`
+          : `No ready workspace checkout for project ${project_id}, branch ${branch}, target ${target_id}`);
+      }
+      // `stopped`: the runtime column describes a process, and there is none.
+      await trx.insertInto("agent_sessions").values({
+        id,
+        project_id,
+        branch,
+        workspace_checkout_id: checkout.id,
+        status: "stopped",
+        permission_mode,
+        agent_type,
+        model,
+        lifecycle_state: "pending_first_turn",
+        purpose,
+        owner_kind,
+        owner_id,
+        prepare_operation_id,
+        pending_expires_at,
+        created_at: h.nowMs(),
+        updated_at: h.nowMs(),
+        activity_at: nowActivityAt(),
+      }).execute();
+      const session = await trx.selectFrom("agent_sessions").selectAll()
+        .where("id", "=", id).executeTakeFirstOrThrow();
+      return { session: mapAgentSession(session), checkout: mapWorkspaceCheckout(checkout) };
+    }),
+
+    getLifecycleById: async (id) => {
+      const row = await kdb.selectFrom("agent_sessions").selectAll().where("id", "=", id).executeTakeFirst();
+      return row ? mapLifecycleRow(row) : undefined;
+    },
+
+    getLifecycleByPrepareOperationId: async (operationId) => {
+      const row = await kdb.selectFrom("agent_sessions").selectAll()
+        .where("prepare_operation_id", "=", operationId).executeTakeFirst();
+      return row ? mapLifecycleRow(row) : undefined;
+    },
+
+    claimActivation: async ({ id, activationKey, contentHash, contentJson, leaseOwner, leaseExpiresAt, now }) => {
+      const result = await kdb.updateTable("agent_sessions")
+        .set({
+          activation_key: activationKey,
+          activation_content_hash: contentHash,
+          activation_content_json: contentJson,
+          activation_lease_owner: leaseOwner,
+          activation_lease_expires_at: leaseExpiresAt,
+          activation_attempt: sql<number>`activation_attempt + 1`,
+          activation_error_code: null,
+        })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where((eb) => eb.or([
+          eb("activation_lease_expires_at", "is", null),
+          eb("activation_lease_expires_at", "<=", now),
+        ]))
+        // A persisted user entry is delivery evidence (§8.3): the row can
+        // only become uncertain from here, never be re-claimed for a second
+        // first send — even by the same key after its lease lapsed.
+        .where("activation_user_entry_index", "is", null)
+        // A key, once set, sticks: a different key on the same pending row is
+        // an activation conflict, decided by the caller from the read; this
+        // guard only makes the CAS exact under a concurrent claim.
+        .where((eb) => eb.or([
+          eb("activation_key", "is", null),
+          eb("activation_key", "=", activationKey),
+        ]))
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    renewActivationLease: async ({ id, leaseOwner, leaseExpiresAt }) => {
+      const result = await kdb.updateTable("agent_sessions")
+        .set({ activation_lease_expires_at: leaseExpiresAt })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where("activation_lease_owner", "=", leaseOwner)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    releaseActivationLease: async ({ id, expectLeaseOwner, errorCode }) => {
+      let query = kdb.updateTable("agent_sessions")
+        .set({ activation_lease_owner: null, activation_lease_expires_at: null, activation_error_code: errorCode })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn");
+      if (expectLeaseOwner !== undefined) query = query.where("activation_lease_owner", "=", expectLeaseOwner);
+      const result = await query.executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    setActivationUserEntryIndex: async ({ id, leaseOwner, entryIndex, now }) => {
+      // Owner AND validity: a lease that lapsed while the entry was being
+      // persisted is no longer a licence to deliver — another claim or a
+      // cancel may already own the row (design §8.1).
+      const result = await kdb.updateTable("agent_sessions")
+        .set({ activation_user_entry_index: entryIndex })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where("activation_lease_owner", "=", leaseOwner)
+        .where("activation_lease_expires_at", ">", now)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    completeActivation: async ({ id, expectLeaseOwner, activatedAt, status }) => {
+      let query = kdb.updateTable("agent_sessions")
+        .set({
+          lifecycle_state: "active",
+          status,
+          activated_at: activatedAt,
+          activation_lease_owner: null,
+          activation_lease_expires_at: null,
+          activation_error_code: null,
+          updated_at: h.nowMs(),
+          activity_at: touchActivityAt(),
+        })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn");
+      if (expectLeaseOwner !== undefined) query = query.where("activation_lease_owner", "=", expectLeaseOwner);
+      const result = await query.executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    markActivationUncertain: async ({ id, expectLeaseOwner, errorCode }) => {
+      let query = kdb.updateTable("agent_sessions")
+        .set({
+          lifecycle_state: "activation_uncertain",
+          activation_lease_owner: null,
+          activation_lease_expires_at: null,
+          activation_error_code: errorCode,
+          updated_at: h.nowMs(),
+          activity_at: touchActivityAt(),
+        })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn");
+      if (expectLeaseOwner !== undefined) query = query.where("activation_lease_owner", "=", expectLeaseOwner);
+      const result = await query.executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    expirePending: async ({ id, reason, now }) => {
+      const result = await kdb.updateTable("agent_sessions")
+        .set({
+          lifecycle_state: "expired",
+          expired_reason: reason,
+          expired_at: now,
+          activation_lease_owner: null,
+          activation_lease_expires_at: null,
+        })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where((eb) => eb.or([
+          eb("activation_lease_expires_at", "is", null),
+          eb("activation_lease_expires_at", "<=", now),
+        ]))
+        .where("activation_user_entry_index", "is", null)
+        .executeTakeFirst();
+      if (Number(result.numUpdatedRows) === 1) return "expired";
+      const row = await kdb.selectFrom("agent_sessions")
+        .select(["lifecycle_state", "activation_lease_expires_at", "activation_user_entry_index"])
+        .where("id", "=", id).executeTakeFirst();
+      if (!row) return "not_found";
+      if (row.lifecycle_state === "expired") return "already_expired";
+      if (row.lifecycle_state !== "pending_first_turn") return "not_pending";
+      if (row.activation_lease_expires_at !== null && row.activation_lease_expires_at > now) return "lease_held";
+      // Pending, unleased, but a user entry was persisted by a holder that
+      // never committed: delivery is unprovable, so the honest terminal state
+      // is uncertain (§8.3) — a tombstone would hide a possibly-running agent.
+      const marked = await kdb.updateTable("agent_sessions")
+        .set({
+          lifecycle_state: "activation_uncertain",
+          activation_lease_owner: null,
+          activation_lease_expires_at: null,
+          activation_error_code: "lease_lost_after_entry",
+          updated_at: h.nowMs(),
+          activity_at: touchActivityAt(),
+        })
+        .where("id", "=", id)
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where("activation_user_entry_index", "is not", null)
+        .executeTakeFirst();
+      return Number(marked.numUpdatedRows) === 1 ? "uncertain" : "lease_held";
+    },
+
+    expirePendingOlderThan: async ({ now, limit }) => {
+      const stale = await kdb.selectFrom("agent_sessions").select("id")
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where("pending_expires_at", "is not", null)
+        .where("pending_expires_at", "<=", now)
+        .where((eb) => eb.or([
+          eb("activation_lease_expires_at", "is", null),
+          eb("activation_lease_expires_at", "<=", now),
+        ]))
+        // Evidence rows are recover()'s business (→ uncertain), never TTL garbage.
+        .where("activation_user_entry_index", "is", null)
+        .orderBy("pending_expires_at", "asc")
+        .limit(limit)
+        .execute();
+      if (stale.length === 0) return 0;
+      const result = await kdb.updateTable("agent_sessions")
+        .set({
+          lifecycle_state: "expired",
+          expired_reason: "ttl",
+          expired_at: now,
+          activation_lease_owner: null,
+          activation_lease_expires_at: null,
+        })
+        .where("id", "in", stale.map((r) => r.id))
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where((eb) => eb.or([
+          eb("activation_lease_expires_at", "is", null),
+          eb("activation_lease_expires_at", "<=", now),
+        ]))
+        // Re-checked here, not only in the SELECT: an activation can persist
+        // its evidence between the two statements, and such a row must never
+        // become a tombstone.
+        .where("activation_user_entry_index", "is", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows);
+    },
+
+    listPendingWithLease: async () => {
+      const rows = await kdb.selectFrom("agent_sessions").selectAll()
+        .where("lifecycle_state", "=", "pending_first_turn")
+        .where("activation_lease_owner", "is not", null)
+        .orderBy("id", "asc")
+        .execute();
+      return rows.map(mapLifecycleRow);
+    },
+
+    deleteExpiredTombstones: async ({ cutoff, limit }) => {
+      const victims = await kdb.selectFrom("agent_sessions").select("id")
+        .where("lifecycle_state", "=", "expired")
+        .where("expired_at", "is not", null)
+        .where("expired_at", "<", cutoff)
+        .orderBy("expired_at", "asc")
+        .limit(limit)
+        .execute();
+      if (victims.length === 0) return 0;
+      // Exact id + lifecycle CAS (§11.4): a tombstone cannot be resurrected,
+      // but the re-check keeps the statement honest if that ever changes.
+      const result = await kdb.deleteFrom("agent_sessions")
+        .where("id", "in", victims.map((r) => r.id))
+        .where("lifecycle_state", "=", "expired")
+        .where("expired_at", "<", cutoff)
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0n);
+    },
+
+    clearActivationPayloads: async ({ cutoff, limit }) => {
+      const rows = await kdb.selectFrom("agent_sessions").select("id")
+        .where("lifecycle_state", "=", "active")
+        .where("activation_content_json", "is not", null)
+        .where("activated_at", "is not", null)
+        .where("activated_at", "<", cutoff)
+        .limit(limit)
+        .execute();
+      if (rows.length === 0) return 0;
+      const result = await kdb.updateTable("agent_sessions")
+        .set({ activation_content_json: null })
+        .where("id", "in", rows.map((r) => r.id))
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows);
     },
   },
 
@@ -1205,6 +1555,8 @@ export const createAgentSessionRepos = (
         operation_kind: intent.operationKind ?? "new",
         source_remote_session_id: intent.sourceRemoteSessionId ?? null,
         up_to_entry_index: intent.upToEntryIndex ?? null,
+        prepare_operation_id: intent.prepareOperationId ?? null,
+        prepared_at: null,
         status: "pending",
         error: null,
         created_at: h.nowMs(),
@@ -1224,7 +1576,8 @@ export const createAgentSessionRepos = (
         && row.user_id === (intent.userId ?? null);
       const sameOperation = row.operation_kind === (intent.operationKind ?? "new")
         && row.source_remote_session_id === (intent.sourceRemoteSessionId ?? null)
-        && row.up_to_entry_index === (intent.upToEntryIndex ?? null);
+        && row.up_to_entry_index === (intent.upToEntryIndex ?? null)
+        && (row.prepare_operation_id ?? null) === (intent.prepareOperationId ?? null);
       if (!sameIdentity || !sameOperation) throw new Error(`Remote creation intent ${intent.localSessionId} has conflicting identity`);
       return mapRemoteCreationIntent(row);
     }),
@@ -1249,10 +1602,44 @@ export const createAgentSessionRepos = (
 
     listPending: async (remoteServerId) => {
       let query = kdb.selectFrom("remote_session_creation_intents").selectAll()
-        .where("status", "=", "pending");
+        .where("status", "=", "pending")
+        .where("prepare_operation_id", "is", null);
       if (remoteServerId) query = query.where("remote_server_id", "=", remoteServerId);
       return (await query.orderBy("updated_at", "asc").orderBy("local_session_id", "asc").execute())
         .map(mapRemoteCreationIntent);
+    },
+
+    getByLocal: async (localSessionId) => {
+      const row = await kdb.selectFrom("remote_session_creation_intents").selectAll()
+        .where("local_session_id", "=", localSessionId).executeTakeFirst();
+      return row ? mapRemoteCreationIntent(row) : undefined;
+    },
+
+    getByPrepareOperationId: async (operationId) => {
+      const row = await kdb.selectFrom("remote_session_creation_intents").selectAll()
+        .where("prepare_operation_id", "=", operationId).executeTakeFirst();
+      return row ? mapRemoteCreationIntent(row) : undefined;
+    },
+
+    markPrepared: async (localSessionId, preparedAt) => {
+      await kdb.updateTable("remote_session_creation_intents")
+        .set({ prepared_at: preparedAt, error: null, updated_at: h.nowMs() })
+        .where("local_session_id", "=", localSessionId).execute();
+    },
+
+    discardStaleLifecycleIntents: async ({ cutoff, limit }) => {
+      const victims = await kdb.selectFrom("remote_session_creation_intents").select("local_session_id")
+        .where("status", "=", "pending")
+        .where("prepare_operation_id", "is not", null)
+        .where(sql<SqlBool>`cast((julianday(updated_at) - 2440587.5) * 86400000 as integer) < ${cutoff}`)
+        .limit(limit)
+        .execute();
+      if (victims.length === 0) return 0;
+      const result = await kdb.deleteFrom("remote_session_creation_intents")
+        .where("local_session_id", "in", victims.map((r) => r.local_session_id))
+        .where("status", "=", "pending")
+        .executeTakeFirst();
+      return Number(result.numDeletedRows ?? 0n);
     },
   },
 

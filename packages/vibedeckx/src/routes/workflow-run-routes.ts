@@ -141,6 +141,143 @@ async function routes(fastify: FastifyInstance) {
   ] as const;
 
   /**
+   * Publish a worker-created reviewer on the front: handle, mapping, activity
+   * projection, notification watch, resident stream and the sidebar/window
+   * announcements. For a single-shot review this runs inline (the worker
+   * already prompted the reviewer); for a two-phase review it runs only after
+   * the worker's activate answered — until then the reviewer is a pending
+   * identity with no runtime, and publishing it would put an inert session
+   * in the sidebar/alive projections (lifecycle design §10.4).
+   */
+  const publishRemoteReviewer = async (opts: {
+    projectId: string;
+    remoteInfo: { remoteServerId: string };
+    bareRun: WorkflowRun;
+    localRun: WorkflowRun;
+    reviewerActivityAt: number;
+    twoPhase: boolean;
+  }): Promise<{ status: number; error: string } | null> => {
+    const { projectId, remoteInfo, bareRun, localRun, reviewerActivityAt, twoPhase } = opts;
+    // Surface the worker-created reviewer on the front: register the handle
+    // and open the resident stream — that stream is what carries the
+    // reviewer's suppressed taskCompleted and the workflowRunUpdated frames.
+    if (bareRun.reviewer_session_id && localRun.reviewer_session_id) {
+      const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
+        projectId, remoteInfo.remoteServerId,
+      );
+      if (!remoteConfig) return { status: 404, error: "Remote project configuration not found" };
+      const reviewerInfo = {
+        remoteServerId: remoteInfo.remoteServerId,
+        remoteSessionId: bareRun.reviewer_session_id,
+        branch: bareRun.branch,
+      };
+      fastify.remoteSessionMap.set(localRun.reviewer_session_id, reviewerInfo);
+      // from_start for a FRESH reviewer: it was created moments ago by this
+      // run, and its review may well finish before this mapping row lands —
+      // sequence zero is what recovers that race. Insert-only, so a REUSED
+      // reviewer keeps the cursor (and policy) it already had and does not
+      // replay its previous reviews.
+      await bindRemoteSessionMapping(fastify.storage, {
+        localSessionId: localRun.reviewer_session_id, projectId,
+        remoteServerId: remoteInfo.remoteServerId,
+        remoteSessionId: bareRun.reviewer_session_id, branch: bareRun.branch,
+        remotePath: remoteConfig.remote_path, notificationSyncStart: "from_start",
+      });
+      // The worker may be offline again before the resident stream attaches,
+      // so create the front's Activity projection from the acknowledged run
+      // response. This exact mapping+association-validated write must precede
+      // every local running/process/status invalidation below.
+      const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
+        localSessionId: localRun.reviewer_session_id,
+        projectId,
+        targetId: remoteInfo.remoteServerId,
+        remoteSessionId: bareRun.reviewer_session_id,
+        status: "running",
+        activityAt: reviewerActivityAt,
+        lastUserMessageAt: reviewerActivityAt,
+      });
+      if (activityReady === false) {
+        return { status: 409, error: "Remote reviewer mapping is no longer authorized" };
+      }
+      // The reviewer may already have finished on the worker; ask for its
+      // milestones now rather than waiting for the next periodic sweep.
+      await fastify.remoteNotificationSync.extendWatch(localRun.reviewer_session_id);
+      fastify.remoteNotificationSync.enqueue(() =>
+        fastify.remoteNotificationSync.syncServer(remoteInfo.remoteServerId, { includeExpired: true }),
+      );
+      ensureRemoteAgentStream(localRun.reviewer_session_id, {
+        remoteSessionMap: fastify.remoteSessionMap,
+        remotePatchCache: fastify.remotePatchCache,
+        reverseConnectManager: fastify.reverseConnectManager,
+        eventBus: fastify.eventBus,
+        agentSessionManager: fastify.agentSessionManager,
+        storage: fastify.storage,
+      });
+      // Seed branch:activity `working` for the reviewer's branch. The worker
+      // already prompted the reviewer (working state produced on ITS bus), but
+      // the front doesn't subscribe to the worker's SSE and only reconstructs
+      // remote branch:activity from its own outbound sends + `taskCompleted`
+      // frames — and this branch is still sitting at the source's `completed`.
+      // Mirrors the /message route's post-proxy `working` emit.
+      //
+      // DISPLAY ONLY — this has no notification role. The reviewer's
+      // attention milestone is a durable `review_ready` outbox row written by
+      // the worker's WorkflowEngine and imported by RemoteNotificationSync;
+      // the bell no longer derives anything from branch:activity, so this emit
+      // exists purely to keep the workspace dot honest while a review runs.
+      if (activityReady === true) {
+        fastify.agentSessionManager.emitBranchActivityIfChanged(projectId, bareRun.branch, {
+          activity: "working",
+          since: reviewerActivityAt,
+          sessionId: localRun.reviewer_session_id,
+        });
+      }
+      // The worker's spawn-time announcements (session:status/processAlive)
+      // fire before this front subscribes, so nothing surfaces the reviewer
+      // here on its own. Same intent as the commander's remote spawn path:
+      // session:process makes the sidebar (useResidentSessions) refetch the
+      // branch list — which now includes the reviewer — and session:status
+      // surfaces it in an open agent window on this workspace.
+      if (activityReady === true) {
+        fastify.eventBus.emit({
+          type: "session:process",
+          projectId,
+          branch: bareRun.branch,
+          sessionId: localRun.reviewer_session_id,
+          alive: true,
+        });
+        // session:status "running" auto-surfaces the reviewer into an open
+        // agent window (useSurfaceCommanderSession). The two-phase flow
+        // deliberately skips it: the user stays on the source session and
+        // opens the preparing reviewer from the sidebar entry the
+        // session:process emit above just produced.
+        if (!twoPhase) {
+          fastify.eventBus.emit({
+            type: "session:status",
+            projectId,
+            branch: bareRun.branch,
+            sessionId: localRun.reviewer_session_id,
+            status: "running",
+          });
+        }
+      }
+      // The worker's engine already wrote the final "Review - …" title
+      // before responding (the session:process refetch above picks it up).
+      // Claim the front's one-shot title slots so a later /message through
+      // the front (human takeover) can't regenerate an AI title over it.
+      fastify.agentSessionManager.markTitleResolved(localRun.reviewer_session_id);
+      await fastify.storage.remoteSessionMappings.markTitleResolved(localRun.reviewer_session_id);
+      // Two-phase: the creation intent was left pending at prepare so a crash
+      // before this point is recoverable (createRemoteWorkflowReviewer). Every
+      // durable piece of the publish is now in place — close it.
+      if (twoPhase) {
+        await fastify.storage.remoteReviewerCreationIntents.confirm(localRun.reviewer_session_id);
+      }
+    }
+    return null;
+  };
+
+  /**
    * Phase 2 for a remote review, after the 201 already went out: distill the
    * intent brief (unless the client supplied one or the review is blind) and
    * hand it to the worker's activate route, which sends the reviewer's first
@@ -158,6 +295,8 @@ async function routes(fastify: FastifyInstance) {
     reviewContextMode: "briefed" | "blind";
     clientBrief: string | undefined;
     clientProvidedBrief: boolean;
+    /** Runs once the worker reports the run past `preparing` (reviewer live). */
+    onActivated?: (run: WorkflowRun) => Promise<void>;
   }): Promise<void> => {
     const blind = opts.reviewContextMode === "blind";
     let intentBrief = opts.clientBrief;
@@ -169,7 +308,13 @@ async function routes(fastify: FastifyInstance) {
       const result = await proxyAuto(
         opts, "POST", `/api/path/workflow-runs/${opts.bareRunId}/activate`, body,
       );
-      if (result.ok) return;
+      if (result.ok) {
+        const run = (result.data as { run?: WorkflowRun } | null)?.run;
+        if (run && run.status !== "preparing" && run.status !== "failed" && run.status !== "cancelled") {
+          await opts.onActivated?.(run);
+        }
+        return;
+      }
       // status 0 = never reached the worker (tunnel blip / brief disconnect);
       // any semantic response means the worker owns the outcome now.
       if (result.status !== 0 || attempt >= 3) {
@@ -403,115 +548,12 @@ async function routes(fastify: FastifyInstance) {
         projectId,
       });
 
-      // Surface the worker-created reviewer on the front: register the handle
-      // and open the resident stream — that stream is what carries the
-      // reviewer's suppressed taskCompleted and the workflowRunUpdated frames.
-      if (bareRun.reviewer_session_id && localRun.reviewer_session_id) {
-        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(
-          projectId, remoteInfo.remoteServerId,
-        );
-        if (!remoteConfig) return reply.code(404).send({ error: "Remote project configuration not found" });
-        const reviewerInfo = {
-          remoteServerId: remoteInfo.remoteServerId,
-          remoteSessionId: bareRun.reviewer_session_id,
-          branch: bareRun.branch,
-        };
-        fastify.remoteSessionMap.set(localRun.reviewer_session_id, reviewerInfo);
-        // from_start for a FRESH reviewer: it was created moments ago by this
-        // run, and its review may well finish before this mapping row lands —
-        // sequence zero is what recovers that race. Insert-only, so a REUSED
-        // reviewer keeps the cursor (and policy) it already had and does not
-        // replay its previous reviews.
-        await bindRemoteSessionMapping(fastify.storage, {
-          localSessionId: localRun.reviewer_session_id, projectId,
-          remoteServerId: remoteInfo.remoteServerId,
-          remoteSessionId: bareRun.reviewer_session_id, branch: bareRun.branch,
-          remotePath: remoteConfig.remote_path, notificationSyncStart: "from_start",
-        });
-        // The worker may be offline again before the resident stream attaches,
-        // so create the front's Activity projection from the acknowledged run
-        // response. This exact mapping+association-validated write must precede
-        // every local running/process/status invalidation below.
-        const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
-          localSessionId: localRun.reviewer_session_id,
-          projectId,
-          targetId: remoteInfo.remoteServerId,
-          remoteSessionId: bareRun.reviewer_session_id,
-          status: "running",
-          activityAt: reviewerActivityAt,
-          lastUserMessageAt: reviewerActivityAt,
-        });
-        if (activityReady === false) {
-          return reply.code(409).send({ error: "Remote reviewer mapping is no longer authorized" });
-        }
-        // The reviewer may already have finished on the worker; ask for its
-        // milestones now rather than waiting for the next periodic sweep.
-        await fastify.remoteNotificationSync.extendWatch(localRun.reviewer_session_id);
-        fastify.remoteNotificationSync.enqueue(() =>
-          fastify.remoteNotificationSync.syncServer(remoteInfo.remoteServerId, { includeExpired: true }),
-        );
-        ensureRemoteAgentStream(localRun.reviewer_session_id, {
-          remoteSessionMap: fastify.remoteSessionMap,
-          remotePatchCache: fastify.remotePatchCache,
-          reverseConnectManager: fastify.reverseConnectManager,
-          eventBus: fastify.eventBus,
-          agentSessionManager: fastify.agentSessionManager,
-          storage: fastify.storage,
-        });
-        // Seed branch:activity `working` for the reviewer's branch. The worker
-        // already prompted the reviewer (working state produced on ITS bus), but
-        // the front doesn't subscribe to the worker's SSE and only reconstructs
-        // remote branch:activity from its own outbound sends + `taskCompleted`
-        // frames — and this branch is still sitting at the source's `completed`.
-        // Mirrors the /message route's post-proxy `working` emit.
-        //
-        // DISPLAY ONLY — this has no notification role. The reviewer's
-        // attention milestone is a durable `review_ready` outbox row written by
-        // the worker's WorkflowEngine and imported by RemoteNotificationSync;
-        // the bell no longer derives anything from branch:activity, so this emit
-        // exists purely to keep the workspace dot honest while a review runs.
-        if (activityReady === true) {
-          fastify.agentSessionManager.emitBranchActivityIfChanged(projectId, bareRun.branch, {
-            activity: "working",
-            since: reviewerActivityAt,
-            sessionId: localRun.reviewer_session_id,
-          });
-        }
-        // The worker's spawn-time announcements (session:status/processAlive)
-        // fire before this front subscribes, so nothing surfaces the reviewer
-        // here on its own. Same intent as the commander's remote spawn path:
-        // session:process makes the sidebar (useResidentSessions) refetch the
-        // branch list — which now includes the reviewer — and session:status
-        // surfaces it in an open agent window on this workspace.
-        if (activityReady === true) {
-          fastify.eventBus.emit({
-            type: "session:process",
-            projectId,
-            branch: bareRun.branch,
-            sessionId: localRun.reviewer_session_id,
-            alive: true,
-          });
-          // session:status "running" auto-surfaces the reviewer into an open
-          // agent window (useSurfaceCommanderSession). The two-phase flow
-          // deliberately skips it: the user stays on the source session and
-          // opens the preparing reviewer from the sidebar entry the
-          // session:process emit above just produced.
-          if (!twoPhase) {
-            fastify.eventBus.emit({
-              type: "session:status",
-              projectId,
-              branch: bareRun.branch,
-              sessionId: localRun.reviewer_session_id,
-              status: "running",
-            });
-          }
-        }
-        // The worker's engine already wrote the final "Review - …" title
-        // before responding (the session:process refetch above picks it up).
-        // Claim the front's one-shot title slots so a later /message through
-        // the front (human takeover) can't regenerate an AI title over it.
-        fastify.agentSessionManager.markTitleResolved(localRun.reviewer_session_id);
-        await fastify.storage.remoteSessionMappings.markTitleResolved(localRun.reviewer_session_id);
+      // Single-shot: the worker already prompted the reviewer, publish now.
+      // Two-phase: the reviewer is still a pending identity; it is published
+      // from the activation task once the worker reports it live.
+      if (!twoPhase) {
+        const failed = await publishRemoteReviewer({ projectId, remoteInfo, bareRun, localRun, reviewerActivityAt, twoPhase });
+        if (failed) return reply.code(failed.status).send({ error: failed.error });
       }
       fastify.eventBus.emit({ type: "workflow:run-updated", projectId, branch: bareRun.branch, run: localRun });
       if (twoPhase) {
@@ -524,6 +566,15 @@ async function routes(fastify: FastifyInstance) {
           reviewContextMode,
           clientBrief,
           clientProvidedBrief,
+          onActivated: async (activatedBareRun) => {
+            // Stamp the reviewer's first turn at activation time, not at
+            // prepare: that is when its first user message actually landed.
+            const failed = await publishRemoteReviewer({
+              projectId, remoteInfo, bareRun: activatedBareRun, localRun: mapRemoteRun(activatedBareRun, remoteInfo.remoteServerId, projectId),
+              reviewerActivityAt: Date.now(), twoPhase,
+            });
+            if (failed) console.warn(`[WorkflowRuns] remote reviewer publish failed for run ${bareRunId}: ${failed.error}`);
+          },
         }).catch((err) => {
           console.warn(`[WorkflowRuns] remote activation task failed for run ${bareRunId}:`, err);
         });

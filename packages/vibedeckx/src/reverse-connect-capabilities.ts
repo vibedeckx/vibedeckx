@@ -46,6 +46,14 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:GET /api/path/agent-sessions/alive": { since: "0.3.22", summary: "存活会话列表(全分支)" },
   "http:POST /api/path/agent-sessions": { since: "0.2.0", summary: "创建会话" },
   "http:POST /api/path/agent-sessions/new": { since: "0.2.0", summary: "创建会话(指定 ID)" },
+  // Prepared-session lifecycle (docs/superpowers/specs/2026-08-31-prepared-
+  // agent-session-lifecycle-design.md §9.2). Additive and explicitly gated:
+  // the hub checks for the `prepare` key before using any of the four and
+  // otherwise falls back to `/new` → `/message` → `discard-if-empty`.
+  "http:POST /api/path/agent-sessions/prepare": { since: "0.3.34", summary: "预备会话身份(不 spawn)" },
+  "http:POST /api/path/agent-sessions/start": { since: "0.3.34", summary: "预备+激活会话(单次首发)" },
+  "http:POST /api/agent-sessions/:param/activate": { since: "0.3.34", summary: "激活预备会话(首条指令,幂等)" },
+  "http:DELETE /api/agent-sessions/:param/preparation": { since: "0.3.34", summary: "取消预备会话(写 tombstone)" },
   "http:GET /api/agent-sessions/:param": { since: "0.2.0", summary: "读会话详情/对话" },
   "http:GET /api/agent-sessions/:param/history-window": { since: "0.3.18", summary: "按 turn 边界读取会话窗口" },
   "http:GET /api/agent-sessions/:param/history-head": { since: "0.3.18", summary: "读取会话历史游标" },

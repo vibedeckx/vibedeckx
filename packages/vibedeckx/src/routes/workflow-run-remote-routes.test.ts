@@ -81,6 +81,7 @@ function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serv
   const upsert = vi.fn(async () => undefined);
   const markTitleResolvedDb = vi.fn(async () => undefined);
   const updateRemoteSessionActivity = vi.fn(async (): Promise<RemoteSessionActivityUpdateResult> => true);
+  const confirmIntent = vi.fn(async () => {});
   const markTitleResolvedMem = vi.fn(() => true);
   const emitBranchActivityIfChanged = vi.fn();
   const emit = vi.fn();
@@ -118,6 +119,7 @@ function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serv
       }),
     },
     searchCache: { updateRemoteSessionActivity },
+    remoteReviewerCreationIntents: { confirm: confirmIntent },
     remoteServers: {
       getById: async (id: string) =>
         id === SERVER ? { id: SERVER, worker_capabilities: workerCapabilities } : undefined,
@@ -138,7 +140,7 @@ function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serv
     prepareForNewTurn, extendWatch, syncServer, enqueue,
   } as never);
   return {
-    remoteSessionMap, upsert, updateRemoteSessionActivity, emit, markTitleResolvedDb, markTitleResolvedMem,
+    remoteSessionMap, upsert, updateRemoteSessionActivity, emit, markTitleResolvedDb, markTitleResolvedMem, confirmIntent,
     emitBranchActivityIfChanged,
     prepareForNewTurn, extendWatch, syncServer, enqueue,
   };
@@ -356,6 +358,57 @@ describe("workflow-run remote proxying (front server)", () => {
       expect(activate![2]).toBe("/api/path/workflow-runs/run1/activate");
       expect(activate![3]).toMatchObject({ intentBrief: "distilled brief", reviewContextMode: "briefed" });
     });
+  });
+
+  it("two-phase: the reviewer is published (mapping, activity, stream, sidebar) only after the worker activates it", async () => {
+    const { remoteSessionMap, upsert, updateRemoteSessionActivity, emit, confirmIntent } = makeApp({ workerCapabilities: [
+      "http:POST /api/path/workflow-runs/prepare",
+      "http:POST /api/path/workflow-runs/:param/activate",
+    ] });
+    await app.register(workflowRunRoutes);
+    let releaseActivate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseActivate = resolve; });
+    proxyMock.mockImplementation(async (_srv: string, _method: string, apiPath: string) => {
+      if (apiPath.endsWith("/brief-source")) return { ok: true, status: 200, data: { messages: [] } };
+      if (apiPath.endsWith("/activate")) {
+        await gate;
+        return { ok: true, status: 200, data: { run: { ...bareRun, status: "waiting_reviewer" } } };
+      }
+      return { ok: true, status: 201, data: { run: { ...bareRun, status: "preparing" } } };
+    });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().run.status).toBe("preparing");
+    await vi.waitFor(() => expect(proxyMock.mock.calls.some((c) => String(c[2]).endsWith("/activate"))).toBe(true));
+    // Pending reviewer: no runtime on the worker, nothing on the front either —
+    // no handle, no mapping row, no activity projection, no stream, no
+    // sidebar/alive announcement.
+    expect(remoteSessionMap.has("remote-srv1-p1-rev1")).toBe(false);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(updateRemoteSessionActivity).not.toHaveBeenCalled();
+    expect(ensureStreamMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session:process" }));
+    expect(confirmIntent).not.toHaveBeenCalled();
+
+    releaseActivate();
+    await vi.waitFor(() => expect(ensureStreamMock).toHaveBeenCalledWith("remote-srv1-p1-rev1", expect.anything()));
+    expect(remoteSessionMap.get("remote-srv1-p1-rev1")).toMatchObject({ remoteSessionId: "rev1", remoteServerId: "srv1" });
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(updateRemoteSessionActivity).toHaveBeenCalledWith(expect.objectContaining({
+      localSessionId: "remote-srv1-p1-rev1", status: "running",
+    }));
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "session:process", sessionId: "remote-srv1-p1-rev1", alive: true,
+    }));
+    // Two-phase still never auto-surfaces the reviewer into the open window.
+    expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session:status", sessionId: "remote-srv1-p1-rev1" }));
+    // The creation intent closes only after the whole publish landed.
+    expect(confirmIntent).toHaveBeenCalledWith("remote-srv1-p1-rev1");
+    expect(confirmIntent.mock.invocationCallOrder[0]).toBeGreaterThan(upsert.mock.invocationCallOrder[0]);
   });
 
   it("POST /intent-brief pulls remote history over the session proxy and returns the brief", async () => {

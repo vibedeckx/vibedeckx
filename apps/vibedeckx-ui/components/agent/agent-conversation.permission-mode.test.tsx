@@ -7,8 +7,8 @@
 // be synced FROM a session but never reset when the session went away, so the
 // mode of whatever was on screen last (typically a reviewer session, which is
 // always plan) leaked into the next session created via
-// ensureSession(permissionMode) — chains of plan-mode sessions the user never
-// asked for.
+// startConversation(content, permissionMode) — chains of plan-mode sessions
+// the user never asked for.
 //
 // Mock scaffolding mirrors agent-conversation.pending-model.test.tsx; see the
 // notes there. PermissionModeToggle is stubbed to a node echoing the mode plus
@@ -20,8 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConversationHandle } from "./agent-conversation";
 import type { EnsuredAgentSession } from "@/hooks/use-agent-session";
 
-const ensureSession = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
-const sendEnsuredMessage = vi.fn(async () => true);
+const startConversation = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
 const switchMode = vi.fn(async () => {});
 
 const hookState: {
@@ -72,14 +71,15 @@ vi.mock("@/hooks/use-agent-session", () => ({
     remoteStatus: null,
     backgroundTasks: { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
     sendMessage: vi.fn(),
-    sendEnsuredMessage,
-    discardEnsuredSessionIfEmpty: vi.fn(),
+    startConversation,
+    prepareConversation: vi.fn(),
+    activateConversation: vi.fn(),
+    cancelPreparedConversation: vi.fn(),
     uploadPaste: vi.fn(),
     stopSession: vi.fn(),
     switchAgentType: vi.fn(),
     setModel: vi.fn(),
     startNewConversation: vi.fn(),
-    ensureSession,
     switchMode,
     acceptPlan: vi.fn(),
     residentLimitPrompt: null,
@@ -171,9 +171,8 @@ describe("AgentConversation permissionMode", () => {
       unobserve() {}
       disconnect() {}
     };
-    ensureSession.mockClear();
-    ensureSession.mockResolvedValue(null);
-    sendEnsuredMessage.mockClear();
+    startConversation.mockClear();
+    startConversation.mockResolvedValue(null);
     switchMode.mockClear();
     hookState.session = null;
     hookState.status = "idle";
@@ -224,7 +223,7 @@ describe("AgentConversation permissionMode", () => {
     await act(async () => {
       await ref.current!.submitMessage("hi");
     });
-    expect(ensureSession).toHaveBeenCalledWith("edit", null);
+    expect(startConversation).toHaveBeenCalledWith("hi", "edit", null);
   });
 
   it("re-syncs when a plan session is swapped for another plan session without a null in between", async () => {
@@ -245,7 +244,7 @@ describe("AgentConversation permissionMode", () => {
     expect(mode()).toBe("plan");
   });
 
-  it("keeps a mode picked on the placeholder and passes it to ensureSession", async () => {
+  it("keeps a mode picked on the placeholder and passes it to startConversation", async () => {
     await render();
     expect(mode()).toBe("edit");
     await act(async () => {
@@ -256,11 +255,11 @@ describe("AgentConversation permissionMode", () => {
     await act(async () => {
       await ref.current!.submitMessage("plan this");
     });
-    expect(ensureSession).toHaveBeenCalledWith("plan", null);
+    expect(startConversation).toHaveBeenCalledWith("plan this", "plan", null);
   });
 
-  it("delivers imperative first-sends through the ensured session id", async () => {
-    const ensured: EnsuredAgentSession = {
+  it("delivers imperative first-sends as one start under the current mode", async () => {
+    const started: EnsuredAgentSession = {
       session: { id: "s-new", projectId: "pA", branch: "featA", status: "running" },
       origin: {
         projectId: "pA",
@@ -270,17 +269,14 @@ describe("AgentConversation permissionMode", () => {
       },
       adopted: true,
     };
-    ensureSession.mockResolvedValueOnce(ensured);
+    startConversation.mockResolvedValueOnce(started);
     await render();
 
     await act(async () => {
       await ref.current!.submitMessage("start task");
     });
 
-    expect(sendEnsuredMessage).toHaveBeenCalledTimes(1);
-    expect(sendEnsuredMessage).toHaveBeenCalledWith(
-      ensured,
-      "start task",
-    );
+    expect(startConversation).toHaveBeenCalledTimes(1);
+    expect(startConversation).toHaveBeenCalledWith("start task", "edit", null);
   });
 });

@@ -12,6 +12,7 @@ import { randomUUID } from "crypto";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompletedEventFromRemoteFrame, runUpdatedEventFromRemoteFrame, runUpdatedFrameForSubscribers } from "./routes/remote-status-bridge.js";
 import type { EventBus } from "./event-bus.js";
+import type { SessionPurpose } from "./session-lifecycle-log.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
 import { conventionalWorktreePath } from "./utils/worktree-paths.js";
@@ -161,9 +162,12 @@ export async function createRemoteAgentSession(
     userId: string | undefined;
     remoteSessionId?: string;
     localSessionId?: string;
+    /** Lifecycle-log correlation forwarded to the worker (additive body fields; old workers ignore them). */
+    purpose?: SessionPurpose;
+    operationId?: string;
   },
 ): Promise<CreateRemoteAgentSessionResult> {
-  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, model, force, userId } = params;
+  const { projectId, agentMode, remoteConfig, branch, permissionMode, agentType, model, force, userId, purpose, operationId } = params;
 
   // The server picks the session id so it can mint a token bound to it before the
   // remote spawns claude. The remote honours the supplied id.
@@ -212,7 +216,7 @@ export async function createRemoteAgentSession(
       agentMode,
       "POST",
       `/api/path/agent-sessions/new`,
-      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp, model },
+      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp, model, purpose, operationId },
       { reverseConnectManager: deps.reverseConnectManager ?? undefined },
     );
     if (!result.ok) {
@@ -504,28 +508,40 @@ export async function createRemoteWorkflowReviewer(
       await deps.storage.remoteReviewerCreationIntents.discard(localReviewerSessionId);
     }
 
-    registeredLocalSessionId = effectiveLocalReviewerSessionId;
-    deps.remoteSessionMap.set(effectiveLocalReviewerSessionId, {
-      remoteServerId: params.agentMode,
-      remoteSessionId: effectiveRemoteReviewerSessionId,
-      branch: remoteRun.branch,
-    });
-    await bindRemoteSessionMapping(deps.storage, {
-      localSessionId: effectiveLocalReviewerSessionId,
-      projectId: params.projectId,
-      remoteServerId: params.agentMode,
-      remoteSessionId: effectiveRemoteReviewerSessionId,
-      branch: remoteRun.branch,
-      remotePath: params.remotePath,
-      notificationSyncStart: "from_start",
-      mappingRepo: deps.remoteSessionMappings,
-    });
-    await deps.remoteSessionMappings.markTitleResolved(effectiveLocalReviewerSessionId);
-    deps.agentSessionManager.markTitleResolved(effectiveLocalReviewerSessionId);
-    await deps.remoteSessionMappings.extendNotificationWatch(
-      effectiveLocalReviewerSessionId, Date.now() + NOTIFICATION_WATCH_WINDOW_MS,
-    );
-    if (stableIdentity) {
+    // Phase 1 of a two-phase review: the worker holds a PENDING reviewer
+    // identity — no runtime, in no projection (lifecycle design §10.4). The
+    // front must not publish it either: no handle, no mapping row, no title
+    // slot, no notification watch. All of that happens once the worker's
+    // activate answers (workflow-run-routes publishRemoteReviewer), and the
+    // creation intent stays PENDING until that publish has landed: a hub that
+    // dies between the worker's activation and the mapping write would
+    // otherwise leave a live reviewer nobody can find. Boot recovery replays
+    // the pending intent single-shot with the same ids — the worker returns
+    // the already-activated run — and publishes it then.
+    if (params.phase !== "prepare") {
+      registeredLocalSessionId = effectiveLocalReviewerSessionId;
+      deps.remoteSessionMap.set(effectiveLocalReviewerSessionId, {
+        remoteServerId: params.agentMode,
+        remoteSessionId: effectiveRemoteReviewerSessionId,
+        branch: remoteRun.branch,
+      });
+      await bindRemoteSessionMapping(deps.storage, {
+        localSessionId: effectiveLocalReviewerSessionId,
+        projectId: params.projectId,
+        remoteServerId: params.agentMode,
+        remoteSessionId: effectiveRemoteReviewerSessionId,
+        branch: remoteRun.branch,
+        remotePath: params.remotePath,
+        notificationSyncStart: "from_start",
+        mappingRepo: deps.remoteSessionMappings,
+      });
+      await deps.remoteSessionMappings.markTitleResolved(effectiveLocalReviewerSessionId);
+      deps.agentSessionManager.markTitleResolved(effectiveLocalReviewerSessionId);
+      await deps.remoteSessionMappings.extendNotificationWatch(
+        effectiveLocalReviewerSessionId, Date.now() + NOTIFICATION_WATCH_WINDOW_MS,
+      );
+    }
+    if (stableIdentity && params.phase !== "prepare") {
       await deps.storage.remoteReviewerCreationIntents.confirm(localReviewerSessionId);
     }
     return {
@@ -680,6 +696,21 @@ function recoverPendingRemoteReviewerOnce(
       && mapped.remote_server_id === intent.remote_server_id
       && mapped.remote_session_id === intent.remote_reviewer_session_id
       && (mapped.branch ?? "") === (intent.branch ?? "")) {
+      // The mapping is the FIRST durable step of a publish, not its
+      // completion: the notification watch and the title slot are written
+      // after it, and a hub that died in between left them out. Top them up
+      // — both idempotent — before closing the intent, so a reviewer that
+      // finishes after boot still gets its milestone imported.
+      await deps.remoteSessionMappings.extendNotificationWatch(key, Date.now() + NOTIFICATION_WATCH_WINDOW_MS);
+      await deps.remoteSessionMappings.markTitleResolved(key);
+      deps.agentSessionManager.markTitleResolved(key);
+      if (!deps.remoteSessionMap.has(key)) {
+        deps.remoteSessionMap.set(key, {
+          remoteServerId: intent.remote_server_id,
+          remoteSessionId: intent.remote_reviewer_session_id,
+          branch: intent.branch,
+        });
+      }
       await deps.storage.remoteReviewerCreationIntents.confirm(key);
       return "confirmed";
     }
@@ -714,55 +745,6 @@ function recoverPendingRemoteReviewerOnce(
   };
   void flight.then(clearFlight, clearFlight);
   return flight;
-}
-
-export async function createRemoteProjectChatSessionWithInstruction(
-  deps: RemoteAgentSessionDeps,
-  params: {
-    projectId: string; userId: string; remoteServerId: string;
-    remoteConfig: { remote_path?: string | null }; sessionId: string; workerSessionId: string;
-    branch: string | null; permissionMode: "plan" | "edit"; agentType: string;
-    model: string | null; instruction: string; idempotencyKey: string;
-  },
-): Promise<{ sessionId: string }> {
-  let mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);
-  if (mapping && (mapping.project_id !== params.projectId
-    || mapping.remote_server_id !== params.remoteServerId
-    || mapping.remote_session_id !== params.workerSessionId
-    || (mapping.branch ?? null) !== params.branch)) {
-    throw new Error("Session identity is already in use");
-  }
-  if (!mapping) {
-    const created = await createRemoteAgentSession(deps, {
-      projectId: params.projectId, agentMode: params.remoteServerId,
-      remoteConfig: params.remoteConfig, branch: params.branch,
-      permissionMode: params.permissionMode, agentType: params.agentType,
-      model: params.model, userId: params.userId,
-      remoteSessionId: params.workerSessionId, localSessionId: params.sessionId,
-    });
-    if (!created.ok) throw new Error("Remote agent session creation failed");
-    mapping = await deps.remoteSessionMappings.getByLocal(params.sessionId);
-  }
-  if (!mapping) throw new Error("Remote session mapping was not persisted");
-  const activityAt = Date.now();
-  const sent = await proxyToRemoteAuto(
-    mapping.remote_server_id, "POST",
-    `/api/agent-sessions/${encodeURIComponent(mapping.remote_session_id)}/message`,
-    { content: params.instruction, idempotencyKey: params.idempotencyKey },
-    { reverseConnectManager: deps.reverseConnectManager ?? undefined },
-  );
-  if (!sent.ok) throw new Error("Remote agent session did not accept its initial instruction");
-  const activityReady = await deps.storage.searchCache.updateRemoteSessionActivity({
-    localSessionId: params.sessionId,
-    projectId: params.projectId,
-    targetId: mapping.remote_server_id,
-    remoteSessionId: mapping.remote_session_id,
-    status: "running",
-    activityAt,
-    lastUserMessageAt: activityAt,
-  });
-  if (activityReady === false) throw new Error("Remote session mapping is no longer authorized");
-  return { sessionId: params.sessionId };
 }
 
 // ---- Remote reconnection constants ----

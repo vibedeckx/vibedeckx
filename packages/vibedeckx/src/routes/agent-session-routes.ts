@@ -15,6 +15,7 @@ import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { bindRemoteSessionMapping, createRemoteAgentSession, createRemoteBranchedSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList, type AliveAgentSession } from "../resident-agent-processes.js";
+import { isSessionPurpose, logSessionLifecycle } from "../session-lifecycle-log.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { createHash, randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
@@ -254,6 +255,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // retention, so "available" is re-resolved against the running-session map
   // (retention removes reclaimed sessions from it) on every fetch. Sessions
   // without a pointer (non-branches, pre-feature branches) get neither field.
+  /**
+   * Lifecycle disclosure for ordinary session DTOs (design §5.2): a
+   * crash-recovered `activation_uncertain` session is reopened through the
+   * normal history APIs — the immediate activate response is not the only
+   * consumer of the warning — so the state must ride these DTOs too. Absent
+   * for plain active rows (and legacy rows, which read as active).
+   */
+  async function lifecycleWarningFields(sessionId: string): Promise<{ lifecycleState?: string; activationErrorCode?: string | null }> {
+    const row = await fastify.storage.agentSessions.getLifecycleById(sessionId).catch(() => undefined);
+    if (!row || row.lifecycle_state === "active") return {};
+    return { lifecycleState: row.lifecycle_state, activationErrorCode: row.activation_error_code };
+  }
+
   function sendBackFields(session: { branchedFromSessionId?: string | null; branchedFromEntryIndex?: number | null }): {
     branchedFromSessionId?: string;
     branchedFromAvailable?: boolean;
@@ -468,6 +482,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
           checkoutDeletedAt: projection?.checkoutDeletedAt ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
           ...(session ? sendBackFields(session) : {}),
+          // The hub's remote find-existing proxy spreads this session object
+          // verbatim (mapRemoteSendBackFields keeps unknown fields), so the
+          // uncertainty warning for a remote session rides this response.
+          ...(await lifecycleWarningFields(sessionId)),
         },
         messages: historyWindow ? historyWindow.entries.map((entry) => entry.message) : messages,
         ...(historyWindow ? { historyWindow } : {}),
@@ -562,11 +580,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Path-based: always create a new session (for remote `/new` proxy target)
   fastify.post<{
-  Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null };
+  Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; model?: string | null; purpose?: string; operationId?: string };
   }>("/api/path/agent-sessions/new", async (req, reply) => {
     const authResult = requireRawAuth(req, reply);
     if (authResult === null) return;
     const { path: projectPath, branch, permissionMode, agentType, force, sessionId, crossRemoteMcp, model } = req.body;
+    // Additive tunnel fields (hub ≥ this version sends them; older hubs don't):
+    // logging correlation only, validated against the closed purpose set.
+    const purpose = isSessionPurpose(req.body.purpose) ? req.body.purpose : "interactive";
+    const operationId = typeof req.body.operationId === "string" ? req.body.operationId : undefined;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
@@ -620,7 +642,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
             const recoveredSessionId = await fastify.agentSessionManager.createNewSession(
               pseudoProjectId, requestedBranch, projectPath, false,
               requestedPermission, requestedAgentType, false, force === true,
-              { sessionId, crossRemoteMcp, model: requestedModel },
+              { sessionId, crossRemoteMcp, model: requestedModel, purpose, operationId },
             );
             const recovered = fastify.agentSessionManager.getSession(recoveredSessionId);
             return reply.code(200).send({
@@ -663,7 +685,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         (agentType as AgentType) || "claude-code",
         false,
         force === true,
-        { sessionId, crossRemoteMcp, model },
+        { sessionId, crossRemoteMcp, model, purpose, operationId },
       );
       const session = fastify.agentSessionManager.getSession(createdSessionId);
       return reply.code(200).send({
@@ -1119,6 +1141,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               model: session?.model ?? null,
               processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
               ...(session ? sendBackFields(session) : {}),
+              ...(await lifecycleWarningFields(sessionId)),
             },
         messages: historyWindow ? historyWindow.entries.map((entry) => entry.message) : messages,
         ...(historyWindow ? { historyWindow } : {}),
@@ -1132,7 +1155,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create a brand-new Agent Session (explicit, always creates)
   fastify.post<{
     Params: { projectId: string };
-    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; model?: string | null };
+    Body: { branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; model?: string | null; operationId?: string };
   }>("/api/projects/:projectId/agent-sessions/new", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -1142,6 +1165,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { branch, permissionMode, agentType, force, model } = req.body;
+    // Phase 0 (lifecycle design §12): accepted for log correlation only — no
+    // replay semantics yet. The UI does not send it today.
+    const operationId = typeof req.body.operationId === "string" ? req.body.operationId : undefined;
     const agentMode = project.agent_mode;
     const useRemoteAgent = agentMode !== 'local';
 
@@ -1170,6 +1196,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
             force: force === true,
             userId,
             model,
+            purpose: "interactive",
+            operationId,
           },
         );
         if (created.ok) {
@@ -1205,7 +1233,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         (agentType as AgentType) || "claude-code",
         false,
         force === true,
-        { sessionId: preSessionId, crossRemoteMcp, model, userId: userId ?? undefined },
+        { sessionId: preSessionId, crossRemoteMcp, model, userId: userId ?? undefined, purpose: "interactive", operationId },
       );
       const session = fastify.agentSessionManager.getSession(sessionId);
       return reply.code(200).send({
@@ -1422,6 +1450,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         model: session.model,
         processAlive: fastify.agentSessionManager.getSessionProcessAlive(session.id),
         ...sendBackFields(session),
+        ...(await lifecycleWarningFields(session.id)),
       },
     });
   });
@@ -1803,7 +1832,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (req.params.sessionId.startsWith("remote-")) {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+      // A prepared (not yet activated) remote session has no mapping and no
+      // map entry — only its durable intent. Paste upload is exactly the step
+      // that runs between prepare and activate (design §10.1), so resolve it
+      // through the intent under the same project authorization.
+      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId)
+        ?? await (async (): Promise<RemoteSessionInfo | null> => {
+          const intent = await fastify.storage.remoteSessionCreationIntents.getByLocal(req.params.sessionId);
+          if (!intent || intent.status !== "pending" || !intent.prepare_operation_id) return null;
+          if (!(await fastify.storage.projects.getById(intent.project_id, userId))) return null;
+          return { remoteServerId: intent.remote_server_id, remoteSessionId: intent.remote_session_id, branch: intent.branch ?? null };
+        })();
       if (!remoteInfo) {
         return reply.code(404).send({ error: "Remote session not found" });
       }
@@ -2387,6 +2426,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "POST",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}/discard-if-empty`,
         );
+        logSessionLifecycle({
+          event: "discard_remote",
+          localSessionId: req.params.sessionId,
+          remoteServerId: remoteInfo.remoteServerId,
+          outcome: result.ok ? "ok"
+            : result.errorCode === "network_error" ? "network_error"
+            : result.errorCode === "timeout" ? "timeout"
+            : result.status === 404 ? "worker_404"
+            : `http_${result.status}`,
+        });
         if (result.ok) await forgetRemoteSession(fastify, req.params.sessionId);
         return reply.code(proxyStatus(result)).send(result.data);
       }

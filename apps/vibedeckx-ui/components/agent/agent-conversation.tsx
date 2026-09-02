@@ -11,6 +11,7 @@ import {
   type UploadedPaste,
   type AgentSession,
   type EnsuredAgentSession,
+  type PreparedConversation,
   type AgentWorkspaceIdentity,
 } from "@/hooks/use-agent-session";
 import { AgentMessageItem } from "./agent-message";
@@ -276,6 +277,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     sendMessage,
     sendEnsuredMessage,
     discardEnsuredSessionIfEmpty,
+    startConversation,
+    prepareConversation,
+    activateConversation,
+    cancelPreparedConversation,
     uploadPaste,
     stopSession,
     switchAgentType,
@@ -729,22 +734,20 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       onStatusChange?.();  // Optimistic "working" overlay — overrides any prior
       // "idle" overlay set by New Conversation so the dot turns blue immediately.
       if (!session) {
-        // No persisted session yet (placeholder). Create one via /new on first send.
-        const ensured = await ensureSession(permissionMode, pendingModel);
-        if (ensured) {
-          // Arm the title-pending loader before sendMessage so the dropdown
-          // never flashes the snippet/timestamp the server writes synchronously.
-          if (isOriginDisplayed(ensured.origin)) {
-            setPendingTitleSessionId(ensured.session.id);
-          }
-          const sent = await sendEnsuredMessage(ensured, content);
-          if (!sent) await discardEnsuredSessionIfEmpty(ensured);
+        // No persisted session yet (placeholder): one `start` under a stable
+        // key creates, spawns and delivers; the session exists only once it
+        // has the message (prepared-session lifecycle, §10.1).
+        const started = await startConversation(content, permissionMode, pendingModel);
+        // Arm the title-pending loader the moment the session is real so the
+        // dropdown goes straight from "New Session" to the skeleton.
+        if (started && isOriginDisplayed(started.origin)) {
+          setPendingTitleSessionId(started.session.id);
         }
       } else {
         await sendMessage(content);
       }
     }
-  }), [handleNewConversation, session, ensureSession, sendEnsuredMessage, discardEnsuredSessionIfEmpty, sendMessage, permissionMode, pendingModel, onStatusChange, isOriginDisplayed]);
+  }), [handleNewConversation, session, startConversation, sendMessage, permissionMode, pendingModel, onStatusChange, isOriginDisplayed]);
 
   const handlePasteText = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => {
@@ -823,26 +826,29 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // so the workspace dot turns blue the moment the user hits send.
     onStatusChange?.();
 
-    // Resolve which session id to use. If no session yet, create one via /new
-    // and use the resulting id for paste materialization + sendMessage.
+    // Resolve which session id to use for paste uploads. With an existing
+    // session that is its id. On the placeholder, a paste (or oversize text
+    // that will become one) needs an upload target BEFORE the first
+    // instruction exists, so it goes two-phase: `prepare` an invisible
+    // identity now, `activate` it with the materialized content at the end.
+    // Plain text needs no identity up front and goes through one `start`.
     let targetSessionId: string | undefined = session?.id;
-    let ensuredSession: EnsuredAgentSession | null = null;
-    if (!session) {
-      ensuredSession = await ensureSession(permissionMode, pendingModel);
-      if (!ensuredSession) {
+    let prepared: PreparedConversation | null = null;
+    const needsUploadTarget = !session && (hasPastes || trimmedRaw.length > PASTE_TO_FILE_THRESHOLD);
+    if (needsUploadTarget) {
+      prepared = await prepareConversation(permissionMode, pendingModel);
+      if (!prepared) {
         // Restore input on failure so the user doesn't lose their pastes.
         if (isOriginDraftDisplayed(submissionOrigin)) setInput(rawText);
         return;
       }
-      targetSessionId = ensuredSession.session.id;
-      // Arm the title-pending loader the moment the session exists so the
-      // dropdown trigger goes straight from "New Session" to skeleton without
-      // flashing "History" or the snippet/created_at the server persists
-      // synchronously. Cleared by `onTitleUpdated` (or the 30s safety net).
-      if (isOriginDisplayed(submissionOrigin)) {
-        setPendingTitleSessionId(ensuredSession.session.id);
-      }
+      targetSessionId = prepared.sessionId;
     }
+    // Preprocessing failed after prepare: the identity goes back (tombstone),
+    // nothing was ever visible or spawned.
+    const abandonPrepared = async () => {
+      if (prepared) await cancelPreparedConversation(prepared);
+    };
 
     // Upload pastes (if any) and replace tokens with <vpaste/> markers.
     let processedText = trimmedRaw;
@@ -851,10 +857,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         processedText = (await materializePastes(rawText, pastes, uploadPaste, targetSessionId)).trim();
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to upload paste";
-        if (ensuredSession) {
-          const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
-          if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
-        }
+        await abandonPrepared();
         if (isOriginDraftDisplayed(submissionOrigin)) {
           toast.error("Paste upload failed", { description: msg });
           setInput(rawText);
@@ -872,10 +875,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         processedText = `<vpaste path="${uploaded.path}" size="${uploaded.size}" />`;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to upload paste";
-        if (ensuredSession) {
-          const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
-          if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
-        }
+        await abandonPrepared();
         if (isOriginDraftDisplayed(submissionOrigin)) {
           toast.error("Paste upload failed", { description: msg });
           setInput(rawText);
@@ -926,10 +926,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         try {
           const result = await translateText(textToTranslate);
           if (result.error) {
-            if (ensuredSession) {
-              const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
-              if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
-            }
+            await abandonPrepared();
             if (isOriginDraftDisplayed(submissionOrigin)) {
               setInput(rawText);
               setPastes(capturedPastes);
@@ -946,10 +943,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             );
           }
         } catch {
-          if (ensuredSession) {
-            const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
-            if (discarded && isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
-          }
+          await abandonPrepared();
           if (isOriginDraftDisplayed(submissionOrigin)) {
             setInput(rawText);
             setPastes(capturedPastes);
@@ -963,22 +957,27 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       }
     }
 
-    if (ensuredSession) {
-      console.log(`[AgentConversation] handleSubmit: using freshly started session ${ensuredSession.session.id}`);
-      const sent = await sendEnsuredMessage(ensuredSession, content);
-      if (!sent) {
-        const discarded = await discardEnsuredSessionIfEmpty(ensuredSession);
-        if (discarded) {
-          if (isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(null);
-          if (isOriginDraftDisplayed(submissionOrigin)) {
-            setInput(rawText);
-            setPastes(capturedPastes);
-            setNextPasteId(capturedNextPasteId);
-          }
-        }
+    if (!session) {
+      // First send: the session becomes real (cached, connected, selected)
+      // only when the server has accepted the instruction.
+      const started = prepared
+        ? await activateConversation(prepared, content)
+        : await startConversation(content, permissionMode, pendingModel);
+      if (started) {
+        console.log(`[AgentConversation] handleSubmit: started session ${started.session.id}`);
+        // Arm the title-pending loader now that the session exists so the
+        // dropdown trigger goes straight from "New Session" to skeleton.
+        // Cleared by `onTitleUpdated` (or the 30s safety net).
+        if (isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(started.session.id);
+      } else if (isOriginDraftDisplayed(submissionOrigin)) {
+        // The submission stays pending under its key; sending again retries
+        // the same operation instead of creating a second session.
+        setInput(rawText);
+        setPastes(capturedPastes);
+        setNextPasteId(capturedNextPasteId);
       }
     } else {
-      console.log(`[AgentConversation] handleSubmit: existing session ${session!.id}, status=${status}`);
+      console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
       await sendMessage(content);
     }
     } finally {
@@ -1301,6 +1300,19 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   tabIndex={-1}
                   onKeyDown={onMarkerKeyDown}
                 >
+                  {session?.lifecycleState === "activation_uncertain" && (
+                    // Crash-recovered uncertain first send (design §5.2): the
+                    // adopt-time toast only covers the immediate response, so
+                    // reopening the session must re-surface the warning — and
+                    // it must persist, not auto-dismiss.
+                    <div className="flex items-start gap-2 p-3 mb-2 rounded-lg border border-amber-500/40 bg-amber-500/10 text-sm text-amber-700 dark:text-amber-400">
+                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                      <span>
+                        First message delivery could not be confirmed for this session.
+                        Check whether the agent actually responded before resending — a resend may duplicate the task.
+                      </span>
+                    </div>
+                  )}
                   {hasEarlierHistory && (
                     <div className="flex justify-center pb-3">
                       <Button

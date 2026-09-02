@@ -158,6 +158,32 @@ export interface AgentSessionsTable {
   branched_from_session_id: string | null;
   /** The turn_end entry index the branched copy ended at (cutoff or tail). */
   branched_from_entry_index: number | null;
+
+  // ---- Prepared-session lifecycle (design §6.1). Legacy rows read as
+  // `active`; only AgentSessionLifecycleService writes the other states. ----
+  /** pending_first_turn | active | activation_uncertain | expired */
+  lifecycle_state: Generated<string>;
+  /** Business origin (SessionPurpose); server-assigned. */
+  purpose: Generated<string>;
+  owner_kind: string | null;
+  owner_id: string | null;
+  /** Stable operation key that created the row; prepare/start replay on it. */
+  prepare_operation_id: string | null;
+  pending_expires_at: number | null;
+  activated_at: number | null;
+  expired_reason: string | null;
+  /** Tombstone GC anchor: rows expire physically only past the replay window. */
+  expired_at: number | null;
+  // ---- First-instruction activation, folded into the row (design §6.2). ----
+  activation_key: string | null;
+  activation_content_hash: string | null;
+  activation_content_json: string | null;
+  activation_lease_owner: string | null;
+  activation_lease_expires_at: number | null;
+  activation_attempt: Generated<number>;
+  /** Index of the persisted first user entry; the crash-recovery evidence line (§8.3). */
+  activation_user_entry_index: number | null;
+  activation_error_code: string | null;
 }
 
 /**
@@ -367,6 +393,14 @@ export interface RemoteSessionCreationIntentsTable {
   error: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+  /**
+   * Prepared-session lifecycle (design §9.2): the caller's stable operation
+   * key. Set only by RemoteSessionLifecycleAdapter; such intents are never
+   * replayed by boot recovery (the worker's pending row is inert by design).
+   */
+  prepare_operation_id: string | null;
+  /** Epoch ms when the worker acknowledged the prepare; null until then. */
+  prepared_at: number | null;
 }
 
 export interface RemoteReviewerCreationIntentsTable {
@@ -533,6 +567,12 @@ export interface WorkflowRunsTable {
   feedback_snapshot: string | null;
   status: string;
   error: string | null;
+  /**
+   * Prompt inputs captured at prepare (JSON of the engine's PendingActivation),
+   * so activation after a restart rebuilds the same prompt instead of
+   * recomputing from a source that may have moved on (lifecycle design §10.4).
+   */
+  prepared_context: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

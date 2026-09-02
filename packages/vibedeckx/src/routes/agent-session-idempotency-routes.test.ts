@@ -16,6 +16,7 @@ describe("path agent session preallocated identity", () => {
   function makeApp(authEnabled = false) {
     let row: Record<string, unknown> | undefined;
     let running: Record<string, unknown> | undefined;
+    let lifecycleRow: Record<string, unknown> | undefined;
     const messages: Record<string, unknown>[] = [];
     const projects = new Map<string, Record<string, unknown>>();
     const deliveries = new Map<string, { hash: string; status: "pending" | "sent"; token: string | null }>();
@@ -59,7 +60,13 @@ describe("path agent session preallocated identity", () => {
           return stored;
         },
       },
-      agentSessions: { getById: async (id: string) => row?.id === id ? row : undefined },
+      agentSessions: {
+        getById: async (id: string) => row?.id === id ? row : undefined,
+        getActivityById: async (id: string) => row?.id === id
+          ? { projectId: row.project_id, branch: row.branch || null, target: "local", worktreePath: "/repo", checkoutDeletedAt: null }
+          : undefined,
+        getLifecycleById: async (id: string) => lifecycleRow?.id === id ? lifecycleRow : undefined,
+      },
       agentInstructionDeliveries: {
         claim: async ({ sessionId, idempotencyKey, contentHash, claimToken }: {
           sessionId: string; idempotencyKey: string; contentHash: string; claimToken: string;
@@ -99,6 +106,8 @@ describe("path agent session preallocated identity", () => {
       createNewSession,
       getSession: (id: string) => running?.id === id ? running : null,
       getSessionProcessAlive: (id: string) => running?.id === id,
+      findExistingSession: async () => running?.id ?? null,
+      getHistoryEpoch: () => 0,
       getMessages: () => [],
       getRawMessages: () => messages,
       sendUserMessage,
@@ -123,6 +132,9 @@ describe("path agent session preallocated identity", () => {
         row = nextRow;
         running = nextRunning;
       },
+      setLifecycleRow: (nextLifecycleRow: Record<string, unknown> | undefined) => {
+        lifecycleRow = nextLifecycleRow;
+      },
     };
   }
 
@@ -141,6 +153,37 @@ describe("path agent session preallocated identity", () => {
     expect(retry.statusCode).toBe(200);
     expect(retry.json()).toMatchObject({ session: { id: "preallocated", projectId: "path:/repo", branch: "dev" }, messages: [] });
     expect(createNewSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("find-existing surfaces an uncertain lifecycle state, and stays silent for active rows", async () => {
+    // The hub's remote find-existing proxy spreads this session object
+    // verbatim, so these two fields are exactly what a browser sees when it
+    // reopens a remote activation_uncertain session without an explicit id.
+    const { setStored, setLifecycleRow } = makeApp();
+    setStored(
+      { id: "s-unc", project_id: "path:/repo", branch: "dev", status: "stopped", permission_mode: "edit", agent_type: "claude-code", model: null },
+      { id: "s-unc", projectId: "path:/repo", branch: "dev", permissionMode: "edit", agentType: "claude-code", model: null, status: "stopped", projectPath: "/repo" },
+    );
+    setLifecycleRow({ id: "s-unc", lifecycle_state: "activation_uncertain", activation_error_code: "lease_lost_after_entry" });
+    await app.register(agentSessionRoutes);
+
+    const uncertain = await app.inject({
+      method: "POST", url: "/api/path/agent-sessions",
+      payload: { path: "/repo", branch: "dev" },
+    });
+    expect(uncertain.statusCode).toBe(200);
+    expect(uncertain.json().session).toMatchObject({
+      id: "s-unc", lifecycleState: "activation_uncertain", activationErrorCode: "lease_lost_after_entry",
+    });
+
+    setLifecycleRow({ id: "s-unc", lifecycle_state: "active", activation_error_code: null });
+    const active = await app.inject({
+      method: "POST", url: "/api/path/agent-sessions",
+      payload: { path: "/repo", branch: "dev" },
+    });
+    expect(active.statusCode).toBe(200);
+    expect(active.json().session.lifecycleState).toBeUndefined();
+    expect(active.json().session.activationErrorCode).toBeUndefined();
   });
 
   it("rejects reuse of a preallocated ID from another path or branch", async () => {

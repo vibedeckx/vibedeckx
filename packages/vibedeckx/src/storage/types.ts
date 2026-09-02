@@ -408,6 +408,8 @@ export interface WorkflowRun {
   feedback_snapshot: string | null;
   status: WorkflowRunStatus;
   error: string | null;
+  /** JSON prompt inputs captured at prepare; null for reuse runs and legacy rows. */
+  prepared_context: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -508,6 +510,9 @@ export interface RemoteSessionCreationIntent {
   error: string | null;
   created_at: string;
   updated_at: string;
+  /** Lifecycle adapter's operation key; null for legacy `/new` intents. */
+  prepare_operation_id: string | null;
+  prepared_at: number | null;
 }
 
 export interface RemoteReviewerCreationIntent {
@@ -533,6 +538,57 @@ export interface RemoteReviewerCreationIntent {
 }
 
 export type AgentSessionStatus = 'running' | 'stopped' | 'error';
+
+/**
+ * Prepared-session lifecycle (design §5.1). `pending_first_turn` is an
+ * identity that has not accepted its first instruction: no process, no
+ * resident slot, invisible to every list projection. `activation_uncertain`
+ * is the honest crash outcome — the first user entry is persisted but stdin
+ * delivery cannot be proven — and is visible with a warning, never re-sent.
+ * `expired` is a tombstone kept through the replay window so a late replay of
+ * the same operation gets 410 instead of a second session.
+ */
+export type AgentSessionLifecycleState =
+  | 'pending_first_turn'
+  | 'active'
+  | 'activation_uncertain'
+  | 'expired';
+
+/** Lifecycle states that ordinary projections (sidebar, search, alive, retention) may see. */
+export const VISIBLE_LIFECYCLE_STATES: readonly AgentSessionLifecycleState[] = ['active', 'activation_uncertain'];
+
+/** Full lifecycle view of one row; only the lifecycle service and owners read it. */
+export interface AgentSessionLifecycleRow {
+  id: string;
+  project_id: string;
+  branch: string;
+  workspace_checkout_id: string | null;
+  status: AgentSessionStatus;
+  permission_mode: string | null;
+  agent_type: string | null;
+  model: string | null;
+  lifecycle_state: AgentSessionLifecycleState;
+  purpose: string;
+  owner_kind: string | null;
+  owner_id: string | null;
+  prepare_operation_id: string | null;
+  pending_expires_at: number | null;
+  activated_at: number | null;
+  expired_reason: string | null;
+  expired_at: number | null;
+  activation_key: string | null;
+  activation_content_hash: string | null;
+  activation_content_json: string | null;
+  activation_lease_owner: string | null;
+  activation_lease_expires_at: number | null;
+  activation_attempt: number;
+  activation_user_entry_index: number | null;
+  activation_error_code: string | null;
+}
+
+export type ExpirePendingResult = 'expired' | 'already_expired' | 'lease_held' | 'not_pending' | 'not_found'
+  /** Unleased pending row with first-turn evidence: marked activation_uncertain instead of expired (§8.3). */
+  | 'uncertain';
 
 export interface AgentSession {
   id: string;
@@ -571,6 +627,10 @@ export interface AgentSession {
   branched_from_session_id?: string | null;
   /** The turn_end entry index the branched copy ended at (cutoff or tail). */
   branched_from_entry_index?: number | null;
+  /** Prepared-session lifecycle state (design §5.1). Legacy rows read as `active`. */
+  lifecycle_state?: AgentSessionLifecycleState;
+  /** Business origin of the session (SessionPurpose). */
+  purpose?: string;
 }
 
 export interface SearchCatalogSessionEntry {
@@ -1134,6 +1194,82 @@ export interface Storage {
      * as if the worker had deleted it.
      */
     listIdsByProject: (projectId: string) => Promise<string[]>;
+
+    // ---- Prepared-session lifecycle (design §6, §8, §11). Only
+    // AgentSessionLifecycleService calls these; routes and managers go
+    // through it. Every state change is a single-statement CAS so two
+    // concurrent callers can never both win. ----
+
+    /**
+     * Insert a `pending_first_turn` row bound to a ready checkout: identity
+     * only — no process, no resident slot, not visible to any projection.
+     * Unique on `prepare_operation_id` (a concurrent duplicate throws).
+     */
+    createPending: (opts: {
+      id: string;
+      project_id: string;
+      branch: string;
+      target_id: string;
+      checkout_id?: string;
+      permission_mode: string;
+      agent_type: string;
+      model: string | null;
+      purpose: string;
+      owner_kind: string | null;
+      owner_id: string | null;
+      prepare_operation_id: string;
+      pending_expires_at: number;
+    }) => Promise<{ session: AgentSession; checkout: WorkspaceCheckoutRecord }>;
+    /** Exact-id lifecycle read, regardless of state. */
+    getLifecycleById: (id: string) => Promise<AgentSessionLifecycleRow | undefined>;
+    /** Replay anchor for prepare/start: the row a prepare operation produced, in any state. */
+    getLifecycleByPrepareOperationId: (operationId: string) => Promise<AgentSessionLifecycleRow | undefined>;
+    /**
+     * Claim the first-instruction activation: only a `pending_first_turn` row
+     * with no live lease (`activation_lease_expires_at` null or <= now) can be
+     * claimed. Sets key/hash/payload/lease, bumps attempt. False = lost the CAS.
+     */
+    claimActivation: (opts: {
+      id: string;
+      activationKey: string;
+      contentHash: string;
+      contentJson: string;
+      leaseOwner: string;
+      leaseExpiresAt: number;
+      now: number;
+    }) => Promise<boolean>;
+    /** Extend a lease this owner still holds; false when the lease was lost. */
+    renewActivationLease: (opts: { id: string; leaseOwner: string; leaseExpiresAt: number }) => Promise<boolean>;
+    /**
+     * Give a pending row back (no delivery side effect happened): clears the
+     * lease, keeps key/hash/payload so the same key can retry. Without
+     * `expectLeaseOwner` (recovery) the lease is cleared unconditionally.
+     */
+    releaseActivationLease: (opts: { id: string; expectLeaseOwner?: string; errorCode: string | null }) => Promise<boolean>;
+    /** Record the persisted first user entry — written BEFORE the stdin write (§8.2). */
+    /** Evidence line (§8.2); applies only while `leaseOwner` holds a lease still valid at `now`. */
+    setActivationUserEntryIndex: (opts: { id: string; leaseOwner: string; entryIndex: number; now: number }) => Promise<boolean>;
+    /**
+     * pending → active (and runtime status), clearing the lease. With
+     * `expectLeaseOwner` it is the activation's own commit; without, recovery
+     * promotes a row whose entries prove the agent already ran.
+     */
+    completeActivation: (opts: { id: string; expectLeaseOwner?: string; activatedAt: number; status: AgentSessionStatus }) => Promise<boolean>;
+    /** pending → activation_uncertain: user entry persisted, delivery unprovable. Never auto-resent. */
+    markActivationUncertain: (opts: { id: string; expectLeaseOwner?: string; errorCode: string }) => Promise<boolean>;
+    /**
+     * pending (no live lease) → expired tombstone. The result names why the
+     * CAS did not apply so cancel can answer 404/409/410 precisely.
+     */
+    expirePending: (opts: { id: string; reason: string; now: number }) => Promise<ExpirePendingResult>;
+    /** TTL: expire every unleased pending row past `pending_expires_at`. Returns the count. */
+    expirePendingOlderThan: (opts: { now: number; limit: number }) => Promise<number>;
+    /** Pending rows that still carry a lease — the recovery worklist (§8.3). */
+    listPendingWithLease: () => Promise<AgentSessionLifecycleRow[]>;
+    /** Physically delete tombstones whose `expired_at` is past the replay window. */
+    deleteExpiredTombstones: (opts: { cutoff: number; limit: number }) => Promise<number>;
+    /** Drop the first-instruction payload of long-active rows; hash and outcome stay. */
+    clearActivationPayloads: (opts: { cutoff: number; limit: number }) => Promise<number>;
   };
   agentInstructionDeliveries: {
     claim: (opts: {
@@ -1227,11 +1363,25 @@ export interface Storage {
       operationKind?: "new" | "branch";
       sourceRemoteSessionId?: string | null;
       upToEntryIndex?: number | null;
+      /** Lifecycle prepare/start: stable caller key (unique). */
+      prepareOperationId?: string | null;
     }) => Promise<RemoteSessionCreationIntent>;
     confirm: (localSessionId: string) => Promise<void>;
     discard: (localSessionId: string) => Promise<void>;
     recordError: (localSessionId: string, error: string) => Promise<void>;
+    /**
+     * Pending legacy intents to replay as `/new`. Lifecycle intents (those
+     * with a `prepare_operation_id`) are excluded: their worker-side row is
+     * inert until the caller retries with the same key, and replaying them
+     * here would spawn behind the lifecycle's back.
+     */
     listPending: (remoteServerId?: string) => Promise<RemoteSessionCreationIntent[]>;
+    getByLocal: (localSessionId: string) => Promise<RemoteSessionCreationIntent | undefined>;
+    getByPrepareOperationId: (operationId: string) => Promise<RemoteSessionCreationIntent | undefined>;
+    /** Worker acknowledged the prepare (or the legacy create). */
+    markPrepared: (localSessionId: string, preparedAt: number) => Promise<void>;
+    /** Hub GC: drop unconfirmed lifecycle intents whose worker row has long since expired. */
+    discardStaleLifecycleIntents: (opts: { cutoff: number; limit: number }) => Promise<number>;
   };
   remoteReviewerCreationIntents: {
     begin: (intent: {
@@ -1747,7 +1897,7 @@ export interface Storage {
     listReviewedSourceSessions(projectId: string, branch: string | null): Promise<string[]>;
     update(
       id: string,
-      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error">>,
+      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context">>,
     ): Promise<WorkflowRun | undefined>;
     transition(
       id: string,

@@ -28,6 +28,7 @@ import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
 import { getRegisteredWorktreeBranches, resolveWorktreePath } from "./utils/worktree-paths.js";
 import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
 import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
+import { logSessionLifecycle, type SessionPurpose } from "./session-lifecycle-log.js";
 import {
   BranchActivityDedupe,
   computeBranchActivity,
@@ -255,6 +256,29 @@ interface RunningSession {
    * which is what keeps worker-side self-minting off.
    */
   userId?: string;
+  /**
+   * Phase 0 lifecycle observability (session-lifecycle-log.ts). Set only by
+   * createNewSession — restored/branched sessions have no first-instruction
+   * window to measure. `firstInstructionAccepted` flips once, on the first
+   * provider-accepted send, so a session logs exactly one accept/reject.
+   */
+  lifecycle?: {
+    purpose: SessionPurpose;
+    operationId?: string;
+    createdAt: number;
+    firstInstructionAccepted: boolean;
+  };
+}
+
+/** Options for `sendUserMessage`; see `onUserEntryPersisted` for the lifecycle hook. */
+export interface FirstSendOptions {
+  origin?: "workflow";
+  notificationDisposition?: NotificationDisposition;
+  /**
+   * Called once the user entry is persisted and before the provider stdin
+   * write. Only the lifecycle service sets it (activation evidence, §8.2).
+   */
+  onUserEntryPersisted?: (entryIndex: number) => Promise<void>;
 }
 
 /**
@@ -738,6 +762,119 @@ export class AgentSessionManager {
   }
 
   /**
+   * Lifecycle `prepare` (design §7, §8): persist a `pending_first_turn`
+   * identity bound to the branch's ready checkout — and nothing else. No
+   * RunningSession, no capacity check, no process. The row becomes a session
+   * only through `hydratePendingSession` + first send, driven by
+   * AgentSessionLifecycleService.
+   */
+  async prepareSessionRow(input: {
+    sessionId: string;
+    projectId: string;
+    branch: string | null;
+    projectPath: string;
+    permissionMode: "plan" | "edit";
+    agentType: AgentType;
+    model: string | null;
+    purpose: SessionPurpose;
+    owner: { kind: string; id: string } | null;
+    prepareOperationId: string;
+    pendingExpiresAt: number;
+    startSnapshot?: SnapshotState | null;
+  }): Promise<{ workspaceCheckoutId: string; worktreePath: string }> {
+    const branchKey = input.branch ?? "";
+    const existingCheckout = await this.storage.workspaceRegistry.getByProjectBranch(
+      input.projectId, branchKey, "local",
+    );
+    if (!existingCheckout) {
+      await getRegisteredWorktreeBranches(this.storage, input.projectId, input.projectPath);
+    }
+    const bound = await this.storage.agentSessions.createPending({
+      id: input.sessionId,
+      project_id: input.projectId,
+      branch: branchKey,
+      target_id: "local",
+      permission_mode: input.permissionMode,
+      agent_type: input.agentType,
+      model: input.model,
+      purpose: input.purpose,
+      owner_kind: input.owner?.kind ?? null,
+      owner_id: input.owner?.id ?? null,
+      prepare_operation_id: input.prepareOperationId,
+      pending_expires_at: input.pendingExpiresAt,
+    });
+    await recordTurnSnapshot(this.storage, input.sessionId, -1, bound.checkout.worktree_path, input.startSnapshot);
+    return { workspaceCheckoutId: bound.checkout.id, worktreePath: bound.checkout.worktree_path };
+  }
+
+  /**
+   * Lifecycle `activate`, runtime half (design §8.2): rebuild the
+   * RunningSession for a pending row by id, take a resident slot and spawn.
+   * The pending row is never in the manager map — startup restore skips
+   * zero-entry rows — so this is the hydrate step the design calls
+   * mandatory. Throws ResidentProcessLimitError / WorkspaceCheckoutUnavailableError.
+   */
+  async hydratePendingSession(
+    sessionId: string,
+    row: { projectId: string; branch: string | null; permissionMode: "plan" | "edit"; agentType: AgentType; model: string | null; purpose: SessionPurpose; operationId: string },
+    opts: { projectPath: string; force?: boolean; crossRemoteMcp?: CrossRemoteMcpConfig; userId?: string },
+  ): Promise<void> {
+    await this.createNewSession(
+      row.projectId, row.branch, opts.projectPath, false, row.permissionMode, row.agentType,
+      false, opts.force === true,
+      {
+        sessionId, crossRemoteMcp: opts.crossRemoteMcp, userId: opts.userId,
+        // The stored model is part of the identity CAS in createNewSession:
+        // omitting it normalizes to null and refuses every prepared row that
+        // chose a model.
+        model: row.model,
+        purpose: row.purpose, operationId: row.operationId, allowPending: true,
+      },
+    );
+  }
+
+  /**
+   * Commander surfacing (design §10.2), called by the lifecycle service only
+   * AFTER the first instruction is committed: announcing at spawn could push
+   * an empty pending session into an open agent window if the send then
+   * failed — the very race this lifecycle removes.
+   */
+  announceSessionRunning(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status !== "running") return;
+    this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "running" });
+  }
+
+  /**
+   * Tear a runtime down without touching its row's conversation: kill the
+   * process, drop the map entry, mark the row stopped. Used by the lifecycle
+   * service when an activation cannot proceed after spawn (capacity race,
+   * cancel race, provider rejected before any entry). Unlike `stopSession`
+   * this pushes NO system entry — a pending row must stay entry-free, or
+   * recovery would misread it.
+   */
+  async dropRuntime(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const proc = session.process;
+    session.process = null;
+    this.killProcess(proc);
+    this.emitProcessAlive(session, false);
+    this.resetCompletion(session);
+    session.dormant = true;
+    session.status = "stopped";
+    getProvider(session.agentType).onSessionDestroyed?.(sessionId);
+    if (!session.skipDb) {
+      await this.storage.agentSessions.updateStatusPreservingTimestamp(sessionId, "stopped").catch((err) => {
+        console.error(`[AgentSession] dropRuntime: failed to mark ${sessionId} stopped:`, err);
+      });
+    }
+    this.broadcastRaw(sessionId, { finished: true });
+    this.sessions.delete(sessionId);
+    return true;
+  }
+
+  /**
    * Always create a brand-new session row and spawn a process.
    * Unlike getOrCreateSession, this never reuses an existing row for the branch.
    * Used by "New Conversation" flow where the user explicitly wants a fresh conversation.
@@ -759,6 +896,17 @@ export class AgentSessionManager {
       startSnapshot?: SnapshotState | null;
       /** Authenticated owner; enables per-spawn cross-remote token re-minting. */
       userId?: string;
+      /** Business origin, for lifecycle logging (design §5.3). Defaults to interactive. */
+      purpose?: SessionPurpose;
+      /** Caller's stable operation key, when it has one (project-chat op, commander tool call, workflow run). */
+      operationId?: string;
+      /**
+       * Lifecycle-service only: hydrate a `pending_first_turn` row (design
+       * §8.2). Every other caller is refused a non-active stored identity so
+       * the legacy `/new` path can neither resurrect a tombstone nor spawn a
+       * pending session behind the service's back.
+       */
+      allowPending?: boolean;
     } = {},
   ): Promise<string> {
     // The caller may supply the id so it can mint a session-scoped token before spawn.
@@ -788,6 +936,10 @@ export class AgentSessionManager {
       || stored.agent_type !== agentType
       || (stored.model ?? null) !== model)) {
       throw new Error("Session identity is already in use");
+    }
+    if (stored && stored.lifecycle_state !== undefined && stored.lifecycle_state !== "active"
+      && !(opts.allowPending && stored.lifecycle_state === "pending_first_turn")) {
+      throw new Error(`Session identity is ${stored.lifecycle_state}; it must be activated through the lifecycle service`);
     }
 
     await this.ensureResidentCapacity({ projectId, branch }, { force });
@@ -870,6 +1022,16 @@ export class AgentSessionManager {
       lastActiveAt: Date.now(),
       turnOpenSince: null,
       turnDisposition: null,
+      lifecycle: {
+        purpose: opts.purpose ?? "interactive",
+        operationId: opts.operationId,
+        createdAt: Date.now(),
+        // A recovered row that already carries a user turn has had its first
+        // instruction; only a fresh/zero-entry identity is still waiting.
+        firstInstructionAccepted: storedEntries.some((row) => {
+          try { return (JSON.parse(row.data) as { type?: string }).type === "user"; } catch { return false; }
+        }),
+      },
     };
 
     this.sessions.set(sessionId, session);
@@ -881,6 +1043,10 @@ export class AgentSessionManager {
     // Spawn agent process
     await this.spawnAgent(session, absoluteWorktreePath);
     console.log(`[AgentSession] createNewSession: id=${sessionId}, projectId=${projectId}, branch=${branchKey}`);
+    logSessionLifecycle({
+      event: "created", sessionId, projectId, branch,
+      purpose: session.lifecycle!.purpose, operationId: opts.operationId, recovered: stored !== undefined,
+    });
 
     // Announce the freshly-running session over the event bus so live
     // consumers can react to it — in particular the agent panel's
@@ -1931,6 +2097,7 @@ export class AgentSessionManager {
     message: AgentMessage,
     broadcast: boolean = true,
     userId: string = "local",
+    pushOpts?: { strictPersist?: boolean },
   ): Promise<number> {
     const session = this.sessions.get(sessionId);
     if (!session) return -1;
@@ -1939,7 +2106,7 @@ export class AgentSessionManager {
 
     // Persist to DB (skip streaming assistant text — those get finalized later)
     if (!session.skipDb && message.type !== "assistant") {
-      await this.persistEntry(session, index, message, userId);
+      await this.persistEntry(session, index, message, userId, { strict: pushOpts?.strictPersist });
     }
 
     if (broadcast) {
@@ -2038,10 +2205,25 @@ export class AgentSessionManager {
     index: number,
     message: AgentMessage,
     userId: string = "local",
+    opts?: {
+      /**
+       * Rethrow an entry-write failure instead of swallowing it. Set only for
+       * the lifecycle first send: its evidence contract ("entry durable, THEN
+       * stdin", design §8.2) is void if the upsert silently failed — the
+       * session would go active with an empty transcript and be skipped by
+       * restore. The ancillary writes below stay best-effort either way.
+       */
+      strict?: boolean;
+    },
   ): Promise<void> {
     if (session.skipDb) return;
-    try {
+    if (opts?.strict) {
       await this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
+    }
+    try {
+      if (!opts?.strict) {
+        await this.storage.agentSessions.upsertEntry(session.id, index, JSON.stringify(message));
+      }
       await this.storage.agentSessions.touchUpdatedAt(session.id);
       if (message.type === "user") {
         const now = Date.now();
@@ -2122,14 +2304,45 @@ export class AgentSessionManager {
     content: string | ContentPart[],
     projectPath?: string,
     userId: string = "local",
-    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
+    opts?: FirstSendOptions,
   ): Promise<boolean> {
     // Pair with discardSessionIfEmpty: whichever operation plants
     // its synchronous marker first owns the session until it settles.
     if (!this.sessions.has(sessionId) || this.retentionDeleting.has(sessionId)) return false;
     this.userMessagesInFlight.set(sessionId, (this.userMessagesInFlight.get(sessionId) ?? 0) + 1);
     try {
-      return await this.sendUserMessageClaimed(sessionId, content, projectPath, userId, opts);
+      // Phase 0 observability: the first provider-accepted send closes the
+      // create-then-send window the lifecycle design measures. Logged once
+      // per session, on whichever path (resident or wake) delivers it.
+      const lifecycle = this.sessions.get(sessionId)?.lifecycle;
+      const pendingFirst = lifecycle !== undefined && !lifecycle.firstInstructionAccepted ? lifecycle : undefined;
+      let accepted: boolean;
+      try {
+        accepted = await this.sendUserMessageClaimed(sessionId, content, projectPath, userId, opts);
+      } catch (error) {
+        if (pendingFirst) {
+          logSessionLifecycle({
+            event: "first_instruction_rejected", sessionId, purpose: pendingFirst.purpose,
+            operationId: pendingFirst.operationId, reason: "send_threw",
+          });
+        }
+        throw error;
+      }
+      if (pendingFirst) {
+        if (accepted) {
+          pendingFirst.firstInstructionAccepted = true;
+          logSessionLifecycle({
+            event: "first_instruction_accepted", sessionId, purpose: pendingFirst.purpose,
+            operationId: pendingFirst.operationId, msSinceCreated: Date.now() - pendingFirst.createdAt,
+          });
+        } else {
+          logSessionLifecycle({
+            event: "first_instruction_rejected", sessionId, purpose: pendingFirst.purpose,
+            operationId: pendingFirst.operationId, reason: "provider_rejected",
+          });
+        }
+      }
+      return accepted;
     } finally {
       const remaining = (this.userMessagesInFlight.get(sessionId) ?? 1) - 1;
       if (remaining > 0) this.userMessagesInFlight.set(sessionId, remaining);
@@ -2142,7 +2355,7 @@ export class AgentSessionManager {
     content: string | ContentPart[],
     projectPath?: string,
     userId: string = "local",
-    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
+    opts?: FirstSendOptions,
   ): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
@@ -2200,13 +2413,19 @@ export class AgentSessionManager {
     // the turn's opening entry, because that's the only place the *intent*
     // behind the turn is known — and it has to survive a restart for crash
     // repair and remote outbox generation to agree with the live path.
-    await this.pushEntry(sessionId, {
+    const userEntryIndex = await this.pushEntry(sessionId, {
       type: "user",
       content,
       timestamp: Date.now(),
       ...(opts?.origin ? { origin: opts.origin } : {}),
       notificationDisposition: disposition,
-    }, true, userId);
+      // Lifecycle activation: an entry-write failure must abort before stdin
+      // (strict), or the session would be marked active with no durable turn.
+    }, true, userId, { strictPersist: opts?.onUserEntryPersisted !== undefined });
+    // Lifecycle activation records the evidence line here — after the entry
+    // is durable, before the stdin write — so crash recovery can tell "no
+    // side effect yet" from "delivery unprovable" (design §8.2/§8.3).
+    if (opts?.onUserEntryPersisted) await opts.onUserEntryPersisted(userEntryIndex);
 
     // Send to agent stdin via provider
     try {
@@ -2699,18 +2918,23 @@ export class AgentSessionManager {
    */
   async discardSessionIfEmpty(sessionId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
-    if (session?.skipDb) return false;
-    if ((this.userMessagesInFlight.get(sessionId) ?? 0) > 0) return false;
-    if (this.retentionDeleting.has(sessionId)) return false;
+    const retained = (outcome: Exclude<Extract<Parameters<typeof logSessionLifecycle>[0], { event: "discard" }>["outcome"], "discarded">) => {
+      logSessionLifecycle({ event: "discard", sessionId, outcome });
+      return false;
+    };
+    if (session?.skipDb) return retained("retained_skip_db");
+    if ((this.userMessagesInFlight.get(sessionId) ?? 0) > 0) return retained("retained_in_flight");
+    if (this.retentionDeleting.has(sessionId)) return retained("retained_deleting");
 
     // Persistence follows the in-memory append. Never let a conditional DB
     // delete race through that small window.
-    if (session?.store.entries.some((entry) => entry !== undefined)) return false;
+    if (session?.store.entries.some((entry) => entry !== undefined)) return retained("retained_has_entries");
 
     this.retentionDeleting.add(sessionId);
     try {
       const deleted = await this.storage.agentSessions.deleteIfEmpty(sessionId);
-      if (!deleted) return false;
+      if (!deleted) return retained("retained_db_not_empty");
+      logSessionLifecycle({ event: "discard", sessionId, outcome: "discarded" });
 
       if (session) {
         getProvider(session.agentType).onSessionDestroyed?.(sessionId);
@@ -3440,6 +3664,7 @@ export class AgentSessionManager {
   async restoreSessionsFromDb(): Promise<void> {
     const allSessions = await this.storage.agentSessions.getAll();
     let restoredCount = 0;
+    let zeroEntryRows = 0;
 
     for (const dbSession of allSessions) {
       // Skip sessions already in memory
@@ -3447,7 +3672,7 @@ export class AgentSessionManager {
 
       let entries = await this.storage.agentSessions.getEntries(dbSession.id);
       // Skip sessions with no entries (stale metadata)
-      if (entries.length === 0) continue;
+      if (entries.length === 0) { zeroEntryRows++; continue; }
 
       // Only sessions the crash left as "running" can hold an interrupted
       // turn. The gate also keeps pre-feature (marker-less, cleanly stopped)
@@ -3519,6 +3744,10 @@ export class AgentSessionManager {
     }
 
     await this.repairOrphanedRunningRows(allSessions);
+    // Boot baseline for the lifecycle design's Phase 0: every row here is a
+    // session identity that never received an instruction (or lost its
+    // entries). Logged unconditionally so a zero is also a data point.
+    logSessionLifecycle({ event: "boot_zero_entry_rows", count: zeroEntryRows });
 
     if (restoredCount > 0) {
       console.log(`[AgentSession] Restored ${restoredCount} dormant session(s) from database`);

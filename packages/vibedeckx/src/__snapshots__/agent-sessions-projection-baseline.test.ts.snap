@@ -1,0 +1,231 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes every production call site that reads or writes agent_sessions through the repository 1`] = `
+{
+  "claimActivation": [
+    "agent-session-lifecycle.ts",
+  ],
+  "clearActivationPayloads": [
+    "agent-session-lifecycle.ts",
+  ],
+  "completeActivation": [
+    "agent-session-lifecycle.ts",
+  ],
+  "countEntries": [
+    "routes/agent-session-routes.ts",
+    "search/catalog.ts",
+  ],
+  "countRunningActivityByProject": [
+    "project-activity.ts",
+  ],
+  "createBound": [
+    "agent-session-manager.ts",
+  ],
+  "createPending": [
+    "agent-session-manager.ts",
+  ],
+  "delete": [
+    "agent-session-manager.ts",
+  ],
+  "deleteEntries": [
+    "agent-session-manager.ts",
+  ],
+  "deleteExpiredTombstones": [
+    "agent-session-lifecycle.ts",
+  ],
+  "deleteIfEmpty": [
+    "agent-session-manager.ts",
+  ],
+  "deleteIfExpired": [
+    "agent-session-manager.ts",
+  ],
+  "expirePending": [
+    "agent-session-lifecycle.ts",
+  ],
+  "expirePendingOlderThan": [
+    "agent-session-lifecycle.ts",
+  ],
+  "getActivityById": [
+    "project-chat-tools.ts",
+    "routes/agent-session-lifecycle-routes.ts",
+    "routes/agent-session-routes.ts",
+    "routes/ws-authz.ts",
+    "workflow-engine.ts",
+  ],
+  "getAll": [
+    "agent-session-manager.ts",
+  ],
+  "getById": [
+    "agent-session-manager.ts",
+    "notification-service.ts",
+    "plugins/shared-services.ts",
+    "project-chat-manager.ts",
+    "project-chat-tools.ts",
+    "routes/agent-session-routes.ts",
+    "routes/cross-remote-mcp-routes.ts",
+    "routes/notification-outbox-routes.ts",
+    "routes/schedule-routes.ts",
+    "routes/workflow-run-routes.ts",
+    "routes/ws-authz.ts",
+    "workflow-engine.ts",
+  ],
+  "getEntries": [
+    "agent-session-lifecycle.ts",
+    "agent-session-manager.ts",
+  ],
+  "getLatestByBranch": [
+    "agent-session-manager.ts",
+  ],
+  "getLifecycleById": [
+    "agent-session-lifecycle.ts",
+    "chat-session-manager.ts",
+    "routes/agent-session-routes.ts",
+  ],
+  "getLifecycleByPrepareOperationId": [
+    "agent-session-lifecycle.ts",
+  ],
+  "getProjectedByProjectId": [
+    "routes/branch-activity-routes.ts",
+    "search/catalog.ts",
+    "utils/worktree-paths.ts",
+  ],
+  "incrementHistoryEpoch": [
+    "agent-session-manager.ts",
+  ],
+  "listAttentionActivityByProject": [
+    "project-activity.ts",
+  ],
+  "listByBranch": [
+    "agent-session-manager.ts",
+    "routes/agent-session-routes.ts",
+  ],
+  "listIdsByProject": [
+    "routes/session-inventory-routes.ts",
+  ],
+  "listPendingWithLease": [
+    "agent-session-lifecycle.ts",
+  ],
+  "listRecentActivityByProject": [
+    "project-activity.ts",
+    "project-chat-tools.ts",
+  ],
+  "listRetentionCandidates": [
+    "session-retention.ts",
+  ],
+  "markActivationUncertain": [
+    "agent-session-lifecycle.ts",
+  ],
+  "markCompleted": [
+    "agent-session-manager.ts",
+  ],
+  "markUserMessage": [
+    "agent-session-manager.ts",
+  ],
+  "releaseActivationLease": [
+    "agent-session-lifecycle.ts",
+  ],
+  "renewActivationLease": [
+    "agent-session-lifecycle.ts",
+  ],
+  "setActivationUserEntryIndex": [
+    "agent-session-lifecycle.ts",
+  ],
+  "setBranchedFrom": [
+    "agent-session-manager.ts",
+  ],
+  "setFavorited": [
+    "routes/agent-session-routes.ts",
+  ],
+  "setNativeSessionId": [
+    "agent-session-manager.ts",
+  ],
+  "touchUpdatedAt": [
+    "agent-session-manager.ts",
+  ],
+  "updateAgentType": [
+    "agent-session-manager.ts",
+  ],
+  "updateModel": [
+    "agent-session-manager.ts",
+  ],
+  "updatePermissionMode": [
+    "agent-session-manager.ts",
+  ],
+  "updateStatus": [
+    "agent-session-manager.ts",
+  ],
+  "updateStatusPreservingTimestamp": [
+    "agent-session-manager.ts",
+  ],
+  "updateTitle": [
+    "agent-session-manager.ts",
+    "routes/agent-session-routes.ts",
+  ],
+  "upsertEntry": [
+    "agent-session-manager.ts",
+  ],
+  "upsertTurnEndWithOutbox": [
+    "agent-session-manager.ts",
+  ],
+}
+`;
+
+exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes the agentSessions repository surface 1`] = `
+[
+  "claimActivation",
+  "clearActivationPayloads",
+  "completeActivation",
+  "countEntries",
+  "countRunningActivityByProject",
+  "countRunningByProject",
+  "create",
+  "createBound",
+  "createPending",
+  "delete",
+  "deleteEntries",
+  "deleteExpiredTombstones",
+  "deleteIfEmpty",
+  "deleteIfExpired",
+  "expirePending",
+  "expirePendingOlderThan",
+  "getActivityById",
+  "getAll",
+  "getByBranch",
+  "getById",
+  "getByProjectId",
+  "getEntries",
+  "getLatestByBranch",
+  "getLifecycleById",
+  "getLifecycleByPrepareOperationId",
+  "getNativeSessionIds",
+  "getProjectedByProjectId",
+  "incrementHistoryEpoch",
+  "listAttentionActivityByProject",
+  "listAttentionByProject",
+  "listByBranch",
+  "listByProject",
+  "listIdsByProject",
+  "listPendingWithLease",
+  "listRecentActivityByProject",
+  "listRecentByProject",
+  "listRetentionCandidates",
+  "markActivationUncertain",
+  "markCompleted",
+  "markUserMessage",
+  "releaseActivationLease",
+  "renewActivationLease",
+  "setActivationUserEntryIndex",
+  "setBranchedFrom",
+  "setFavorited",
+  "setNativeSessionId",
+  "touchUpdatedAt",
+  "updateAgentType",
+  "updateModel",
+  "updatePermissionMode",
+  "updateStatus",
+  "updateStatusPreservingTimestamp",
+  "updateTitle",
+  "upsertEntry",
+  "upsertTurnEndWithOutbox",
+]
+`;

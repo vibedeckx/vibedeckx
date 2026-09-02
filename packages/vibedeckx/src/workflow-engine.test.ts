@@ -464,8 +464,18 @@ describe("WorkflowEngine", () => {
   let engine: WorkflowEngine;
   let bus: EventBus;
   const reviewerEntries: AgentMessage[] = [];
+  // Lifecycle view for the reviewer the mock "prepares"/"activates" (design §10.4).
+  const lifecycleView = (sessionId: string, state: "pending_first_turn" | "active" = "pending_first_turn") => ({
+    sessionId, projectId: "p1", branch: "dev", state, purpose: "workflow_review", leaseHeld: false,
+    activationKey: null, activationAttempt: 0, activatedAt: null, activationErrorCode: null, userEntryIndex: null,
+    expiredReason: null, expiredAt: null, pendingExpiresAt: null,
+  });
   const agentOps = {
-    createNewSession: vi.fn(async () => "s-rev"),
+    prepareReviewer: vi.fn(async (input: { sessionId?: string }) =>
+      ({ kind: "prepared" as const, view: lifecycleView(input.sessionId ?? "s-rev") })),
+    activateReviewer: vi.fn(async (input: { sessionId: string }) =>
+      ({ kind: "activated" as const, view: lifecycleView(input.sessionId, "active") })),
+    cancelReviewer: vi.fn(async () => ({ kind: "not_found" as const })),
     sendUserMessage: vi.fn(async () => true),
     switchMode: vi.fn(async () => true),
     setFinalSessionTitle: vi.fn(async () => undefined),
@@ -552,20 +562,23 @@ describe("WorkflowEngine", () => {
     expect(run.status).toBe("waiting_reviewer");
     expect(run.reviewer_session_id).toBe("s-rev");
     expect(run.source_turn_end_index).toBe(4); // derived from entries
-    // Trailing args: announceRunning=false (the preparing reviewer must not
-    // auto-surface into the open agent window), no forced eviction, and the
-    // worktree snapshot taken for the scope handed over so the new session
-    // doesn't re-walk it.
-    expect(agentOps.createNewSession).toHaveBeenCalledWith(
-      "p1", "dev", project.path, false, "plan", "claude-code", false,
-      false, { startSnapshot: null },
-    );
-    const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
+    // A pending identity in plan mode owned by the run (the run id is its
+    // prepare key), carrying the worktree snapshot taken for the scope so the
+    // new session doesn't re-walk it. Nothing spawns until activation.
+    expect(agentOps.prepareReviewer).toHaveBeenCalledWith({
+      operationId: run.id, projectId: "p1", branch: "dev", permissionMode: "plan", agentType: "claude-code",
+      purpose: "workflow_review", owner: { kind: "workflow_run", id: run.id }, startSnapshot: null,
+    });
+    const activation = agentOps.activateReviewer.mock.calls[0][0] as {
+      sessionId: string; activationKey: string; instruction: string; origin: string; notificationDisposition: string;
+    };
+    expect(activation).toMatchObject({ sessionId: "s-rev", activationKey: `review:${run.id}` });
+    const prompt = activation.instruction;
     // Machine-authored: `origin` marks it so the UI renders it as markdown
     // rather than verbatim, and the disposition hands the attention event to
     // the run — the reviewer's own completion must not also ding as a generic
     // session result.
-    expect(agentOps.sendUserMessage.mock.calls[0][4]).toEqual({
+    expect(activation).toMatchObject({
       origin: "workflow",
       notificationDisposition: "milestone-managed",
     });
@@ -579,12 +592,12 @@ describe("WorkflowEngine", () => {
     // Source has no title here → falls back to the task-context snippet.
     expect(agentOps.setFinalSessionTitle).toHaveBeenCalledWith("s-rev", "Review - please fix the bug");
     expect(agentOps.setFinalSessionTitle.mock.invocationCallOrder[0])
-      .toBeLessThan(agentOps.sendUserMessage.mock.invocationCallOrder[0]);
+      .toBeLessThan(agentOps.activateReviewer.mock.invocationCallOrder[0]);
+    // The prompt inputs are durable on the run, not only in memory.
+    expect(JSON.parse(run.prepared_context!)).toMatchObject({ taskContext: expect.stringContaining("please fix the bug") });
   });
 
   it("replays preallocated workflow and reviewer identities without spawning twice", async () => {
-    agentOps.createNewSession.mockImplementationOnce(async (...args: unknown[]) =>
-      ((args[8] as { sessionId?: string }).sessionId ?? "unexpected"));
     const request = {
       project,
       branch: "dev" as const,
@@ -599,11 +612,11 @@ describe("WorkflowEngine", () => {
 
     expect(first).toMatchObject({ id: "durable-run", reviewer_session_id: "durable-reviewer" });
     expect(replay).toEqual(first);
-    expect(agentOps.createNewSession).toHaveBeenCalledTimes(1);
-    expect(agentOps.createNewSession.mock.calls[0]?.[8]).toMatchObject({
-      sessionId: "durable-reviewer",
+    expect(agentOps.prepareReviewer).toHaveBeenCalledTimes(1);
+    expect(agentOps.prepareReviewer.mock.calls[0]?.[0]).toMatchObject({
+      operationId: "durable-run", sessionId: "durable-reviewer",
     });
-    expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
   });
 
   it("resumes a durable run left between run creation and reviewer binding", async () => {
@@ -617,9 +630,6 @@ describe("WorkflowEngine", () => {
       review_target: null,
       review_span: "this_turn",
     });
-    agentOps.createNewSession.mockImplementationOnce(async (...args: unknown[]) =>
-      ((args[8] as { sessionId?: string }).sessionId ?? "unexpected"));
-
     const resumed = await engine.startAdhocReview({
       project,
       branch: "dev",
@@ -632,8 +642,8 @@ describe("WorkflowEngine", () => {
     expect(resumed).toMatchObject({
       id: "interrupted-run", reviewer_session_id: "interrupted-reviewer", status: "waiting_reviewer",
     });
-    expect(agentOps.createNewSession).toHaveBeenCalledTimes(1);
-    expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(agentOps.prepareReviewer).toHaveBeenCalledTimes(1);
+    expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
   });
 
   it("a failed run is pushed to the event bus and both participant streams", async () => {
@@ -663,12 +673,12 @@ describe("WorkflowEngine", () => {
     });
     expect(run.status).toBe("preparing");
 
-    let release!: (sent: boolean) => void;
-    agentOps.sendUserMessage.mockImplementationOnce(
-      () => new Promise<boolean>((resolve) => { release = resolve; }),
+    let release!: (outcome: Awaited<ReturnType<typeof agentOps.activateReviewer>>) => void;
+    agentOps.activateReviewer.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
     );
     const activation = engine.activateAdhocReview(run.id);
-    await vi.waitFor(() => expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1));
     // The send is in flight: a crash here must leave `preparing` — the
     // recoverable state boot re-arms a preparation timeout for — not a
     // prompt-less waiting_reviewer that replayed activation would skip.
@@ -676,11 +686,56 @@ describe("WorkflowEngine", () => {
     // A concurrent activation joins the in-flight one instead of double-sending.
     const duplicate = engine.activateAdhocReview(run.id);
 
-    release(true);
+    release({ kind: "activated", view: lifecycleView("s-rev", "active") });
     const [done, dupDone] = await Promise.all([activation, duplicate]);
     expect(done.status).toBe("waiting_reviewer");
     expect(dupDone.status).toBe("waiting_reviewer");
-    expect(agentOps.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it("activation after a restart rebuilds the prompt from the persisted context", async () => {
+    const run = await engine.prepareAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src", reviewFocus: "focus on tests",
+    });
+    // New process: in-memory prompt inputs are gone; the row still has them.
+    const engine2 = new WorkflowEngine(storage, agentOps);
+    engine2.setEventBus(bus);
+    await engine2.init();
+    agentOps.getRawMessages.mockClear();
+
+    const activated = await engine2.activateAdhocReview(run.id);
+    expect(activated.status).toBe("waiting_reviewer");
+    const prompt = (agentOps.activateReviewer.mock.calls[0][0] as { instruction: string }).instruction;
+    expect(prompt).toContain("please fix the bug");
+    expect(prompt).toContain("done — fixed in foo.ts");
+    // Not recomputed from the (possibly moved-on) source conversation.
+    expect(agentOps.getRawMessages).not.toHaveBeenCalledWith("s-src");
+  });
+
+  it("an uncertain first delivery moves the run on with a note instead of re-sending", async () => {
+    agentOps.activateReviewer.mockResolvedValueOnce({ kind: "uncertain", view: lifecycleView("s-rev", "active") });
+    const run = await start();
+    expect(run.status).toBe("waiting_reviewer");
+    expect(run.error).toMatch(/投递结果未知/);
+    expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it("a prepare timeout cancels the pending reviewer to a tombstone", async () => {
+    const run = await engine.prepareAdhocReview({ project, branch: "dev", sourceSessionId: "s-src" });
+    await engine.failRunForTest(run.id, "review 准备超时");
+    expect(agentOps.cancelReviewer).toHaveBeenCalledWith({ sessionId: "s-rev", reason: "owner_failed" });
+  });
+
+  it("cancelling a preparing run cancels the pending reviewer; cancelling a live run leaves it alone", async () => {
+    const preparing = await engine.prepareAdhocReview({ project, branch: "dev", sourceSessionId: "s-src" });
+    await engine.cancelRun(preparing.id);
+    expect(agentOps.cancelReviewer).toHaveBeenCalledWith({ sessionId: "s-rev", reason: "cancelled" });
+
+    agentOps.cancelReviewer.mockClear();
+    const live = await start();
+    expect(live.status).toBe("waiting_reviewer");
+    await engine.cancelRun(live.id);
+    expect(agentOps.cancelReviewer).not.toHaveBeenCalled();
   });
 
   it("boot fails a preparing run whose activation window has expired", async () => {
@@ -727,7 +782,7 @@ describe("WorkflowEngine", () => {
       runId: "failed-run",
       newReviewerSessionId: "failed-reviewer",
     })).rejects.toMatchObject({ code: "bad-state" });
-    expect(agentOps.createNewSession).not.toHaveBeenCalled();
+    expect(agentOps.prepareReviewer).not.toHaveBeenCalled();
   });
 
   it("uses checkout ownership when source compatibility snapshots disagree", async () => {
@@ -769,7 +824,7 @@ describe("WorkflowEngine", () => {
     await expect(engine.startAdhocReview({
       project, branch: "gone", sourceSessionId: "gone-source",
     })).rejects.toMatchObject({ code: "reviewer-unavailable" });
-    expect(agentOps.createNewSession).not.toHaveBeenCalled();
+    expect(agentOps.prepareReviewer).not.toHaveBeenCalled();
   });
 
   it("startAdhocReview threads an intent brief into the reviewer prompt", async () => {
@@ -777,7 +832,7 @@ describe("WorkflowEngine", () => {
       project, branch: "dev", sourceSessionId: "s-src",
       intentBrief: "1. Goal: fix the login bug\n2. Constraints: keep the session API stable",
     });
-    const prompt = agentOps.sendUserMessage.mock.calls[0][1] as string;
+    const prompt = (agentOps.activateReviewer.mock.calls[0][0] as { instruction: string }).instruction;
     expect(prompt).toContain("keep the session API stable");
     expect(prompt).toContain("distilled intent brief");
     // The brief subsumes the verbatim conversation excerpts.
@@ -791,10 +846,9 @@ describe("WorkflowEngine", () => {
     await engine.startAdhocReview({
       project, branch: "dev", sourceSessionId: "s-src", reviewerAgentType: "codex",
     });
-    expect(agentOps.createNewSession).toHaveBeenCalledWith(
-      "p1", "dev", project.path, false, "plan", "codex", false,
-      false, { startSnapshot: null },
-    );
+    expect(agentOps.prepareReviewer).toHaveBeenCalledWith(expect.objectContaining({
+      permissionMode: "plan", agentType: "codex", purpose: "workflow_review",
+    }));
   });
 
   it("reviewer title prefers the source session's own title", async () => {
@@ -840,7 +894,7 @@ describe("WorkflowEngine", () => {
     });
 
     expect(run.reviewer_session_id).toBe("s-rev");
-    expect(agentOps.createNewSession).not.toHaveBeenCalled();
+    expect(agentOps.prepareReviewer).not.toHaveBeenCalled();
     expect(agentOps.sendUserMessage).toHaveBeenCalledWith(
       "s-rev",
       expect.stringContaining("previous review"),
@@ -956,15 +1010,15 @@ describe("WorkflowEngine", () => {
   });
 
   it("two concurrent startAdhocReview calls for the same session: exactly one succeeds", async () => {
-    // Force interleaving: the first call's createNewSession hangs on a
-    // deferred promise (simulating a slow reviewer spawn), so the second
-    // call is issued while the first is still deep inside its awaits —
-    // not just back-to-back before either has started.
+    // Force interleaving: the first call's prepareReviewer hangs on a
+    // deferred promise (simulating a slow prepare), so the second call is
+    // issued while the first is still deep inside its awaits — not just
+    // back-to-back before either has started.
     let releaseFirst!: () => void;
     const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    agentOps.createNewSession.mockImplementationOnce(async () => {
+    agentOps.prepareReviewer.mockImplementationOnce(async () => {
       await gate;
-      return "s-rev";
+      return { kind: "prepared" as const, view: lifecycleView("s-rev") };
     });
 
     const first = start();
@@ -981,9 +1035,13 @@ describe("WorkflowEngine", () => {
   });
 
   it("run fails and releases the source lock when the reviewer prompt send fails", async () => {
-    agentOps.sendUserMessage.mockResolvedValueOnce(false);
+    agentOps.activateReviewer.mockResolvedValueOnce({
+      kind: "retryable_failure", view: lifecycleView("s-rev"), errorCode: "provider_rejected",
+    });
     await expect(start()).rejects.toMatchObject({ code: "spawn-failed" });
     expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+    // The pending reviewer is tombstoned with the run, never left behind.
+    expect(agentOps.cancelReviewer).toHaveBeenCalledWith({ sessionId: "s-rev", reason: "owner_failed" });
 
     const runs = await storage.workflowRuns.getActive("p1", "dev");
     expect(runs).toHaveLength(0); // not "active" — status flipped to failed
@@ -998,7 +1056,7 @@ describe("WorkflowEngine", () => {
     const run = await storage.workflowRuns.getById(
       (await storage.notificationOutbox.listAfter(0, 10))[0].workflow_run_id!,
     );
-    expect(run).toMatchObject({ status: "failed", error: "向 reviewer 投递任务失败" });
+    expect(run).toMatchObject({ status: "failed", error: "向 reviewer 投递任务失败（provider_rejected）" });
   });
 
   it("claims reviewer completion: suppresses, snapshots full feedback, waits for gate", async () => {
@@ -1300,7 +1358,7 @@ describe("WorkflowEngine", () => {
     });
 
     it("a reviewer-stage failure targets the source session when no reviewer exists yet", async () => {
-      agentOps.createNewSession.mockRejectedValueOnce(new Error("spawn boom"));
+      agentOps.prepareReviewer.mockRejectedValueOnce(new Error("spawn boom"));
       await expect(start()).rejects.toMatchObject({ code: "spawn-failed" });
 
       const rows = await outboxRows();

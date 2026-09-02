@@ -7,20 +7,28 @@ import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/revi
 import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
+import type {
+  ActivateAgentSessionInput,
+  ActivationResult,
+  CancelPreparedSessionInput,
+  CancelResult,
+  PrepareAgentSessionInput,
+  PrepareResult,
+} from "./agent-session-lifecycle.js";
 
-/** Minimal surface the engine needs from AgentSessionManager (structural). */
+/**
+ * Minimal surface the engine needs from the agent runtime (structural): the
+ * prepared-session lifecycle for a fresh reviewer (design §10.4 — prepare
+ * without spawning, activate with the prompt, cancel to a tombstone) and the
+ * plain message path for everything that talks to an already-active session.
+ */
 export interface AgentOps {
-  createNewSession(
-    projectId: string,
-    branch: string | null,
-    projectPath: string,
-    skipDb?: boolean,
-    permissionMode?: "plan" | "edit",
-    agentType?: string,
-    announceRunning?: boolean,
-    force?: boolean,
-    opts?: { startSnapshot?: SnapshotState | null; sessionId?: string },
-  ): Promise<string>;
+  /** Lifecycle `prepare`: a pending reviewer identity — no process, no sidebar. */
+  prepareReviewer(input: PrepareAgentSessionInput): Promise<PrepareResult>;
+  /** Lifecycle `activate`: spawn + first instruction under a run-scoped key. */
+  activateReviewer(input: ActivateAgentSessionInput): Promise<ActivationResult>;
+  /** Lifecycle `cancel`: a pending reviewer becomes a tombstone; active rows are left alone. */
+  cancelReviewer(input: CancelPreparedSessionInput): Promise<CancelResult>;
   sendUserMessage(
     sessionId: string,
     content: string,
@@ -443,6 +451,47 @@ interface PendingActivation {
   authorSelfReport: string | null;
 }
 
+function parsePreparedContext(raw: string | null | undefined): PendingActivation | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PendingActivation>;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return {
+      scope: parsed.scope ?? null,
+      taskContext: parsed.taskContext ?? null,
+      originalIntent: parsed.originalIntent ?? null,
+      authorSelfReport: parsed.authorSelfReport ?? null,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The run-scoped activation key: one prompt per run, replay-safe (§10.4). */
+export function reviewerActivationKey(runId: string): string {
+  return `review:${runId}`;
+}
+
+function describePrepareFailure(result: Exclude<PrepareResult, { kind: "prepared" | "replayed" }>): string {
+  switch (result.kind) {
+    case "expired": return "reviewer 的准备身份已过期或被取消";
+    case "idempotency_conflict": return `reviewer 身份冲突：${result.detail}`;
+    case "workspace_unavailable": return `workspace 不可用：${result.detail}`;
+  }
+}
+
+function describeActivationFailure(result: Exclude<ActivationResult, { kind: "activated" | "replayed" | "uncertain" | "in_progress" }>): string {
+  switch (result.kind) {
+    case "resident_limit": return "常驻 agent 进程已达上限，无法启动 reviewer";
+    case "expired": return "reviewer 的准备身份已过期或被取消";
+    case "not_found": return "reviewer session 不存在";
+    case "idempotency_conflict": return "reviewer 首条指令与已记录的内容不一致";
+    case "activation_conflict": return "reviewer 已被其它操作激活";
+    case "retryable_failure": return `向 reviewer 投递任务失败（${result.errorCode}）`;
+    case "permanent_failure": return `reviewer 无法启动（${result.errorCode}）`;
+  }
+}
+
 export interface AdhocReviewOptions {
   project: { id: string; path: string };
   branch: string | null;
@@ -585,6 +634,23 @@ export class WorkflowEngine {
   }
 
   /**
+   * A run that ends before its fresh reviewer was activated leaves that
+   * reviewer as a pending identity nobody will ever activate. Cancel it to a
+   * tombstone (lifecycle §11.1) so the row can never surface or be replayed
+   * into a session. An already-active reviewer (reuse, or activation won the
+   * race) reports `not_pending` and is deliberately left untouched — the user
+   * may still want to read it.
+   */
+  private async expirePendingReviewer(run: WorkflowRun, reason: "cancelled" | "owner_failed"): Promise<void> {
+    if (!run.reviewer_session_id) return;
+    try {
+      await this.agentOps.cancelReviewer({ sessionId: run.reviewer_session_id, reason });
+    } catch (err) {
+      console.warn(`[WorkflowEngine] failed to cancel pending reviewer ${run.reviewer_session_id} for run ${run.id}:`, err);
+    }
+  }
+
+  /**
    * The single place a run becomes `failed`. Goes through a guarded transition
    * out of the run's CURRENT status rather than an unconditional status write,
    * so the failure milestone can only be created by the caller that actually
@@ -621,6 +687,7 @@ export class WorkflowEngine {
     const failed = await this.storage.workflowRuns.getById(run.id);
     if (failed) {
       this.untrackRun(failed);
+      if (from === "preparing") await this.expirePendingReviewer(failed, "owner_failed");
       // Push, don't just persist: a failed run leaves the active set, so pull
       // paths (active-run list) go blank — the reviewer window's failure view
       // and the source panel both live off this pushed terminal frame.
@@ -721,8 +788,9 @@ export class WorkflowEngine {
 
   /**
    * Phase 1 of the two-phase adhoc review: validate, reserve participants,
-   * create the run row and (for a fresh review) the reviewer session — titled
-   * and visible in the sidebar — WITHOUT sending the reviewer prompt. Fast
+   * create the run row and (for a fresh review) a PENDING reviewer identity —
+   * no process, absent from every sidebar/alive projection (design §10.4) —
+   * WITHOUT sending the reviewer prompt. Fast
    * (no model calls), so the route can respond immediately and let the
    * intent-brief distillation happen after the user has moved on. The run
    * stays `preparing` until activateAdhocReview delivers the first message,
@@ -927,20 +995,27 @@ export class WorkflowEngine {
         // The reviewer's own session-start snapshot describes the same
         // worktree we just snapshotted for the scope, milliseconds earlier —
         // hand it over rather than walking the worktree a second time.
-        const reviewerId = await this.agentOps.createNewSession(
-          opts.project.id, opts.branch, opts.project.path, false, "plan", opts.reviewerAgentType ?? "claude-code",
-          // announceRunning=false — deliberate change from the single-shot
-          // start: the preparing reviewer must appear in the sidebar (the
-          // spawn's unconditional session:process emit covers that) WITHOUT
-          // the session:status "running" emit that auto-surfaces it into the
-          // open agent window. The user stays on the source session and opens
-          // the reviewer from the sidebar when they choose to.
-          false,
-          false, {
-            startSnapshot: endSnap,
-            ...(opts.newReviewerSessionId ? { sessionId: opts.newReviewerSessionId } : {}),
-          },
-        );
+        //
+        // Lifecycle `prepare` (design §10.4): an identity only. Nothing
+        // spawns, no resident slot is taken and the reviewer is in no sidebar
+        // projection until activation delivers its prompt — a prepare that
+        // times out or is cancelled leaves a tombstone, not a process. The
+        // run id is the prepare key, so a durable replay gets the same row.
+        const prepared = await this.agentOps.prepareReviewer({
+          operationId: run.id,
+          ...(opts.newReviewerSessionId ? { sessionId: opts.newReviewerSessionId } : {}),
+          projectId: opts.project.id,
+          branch: opts.branch,
+          permissionMode: "plan",
+          agentType: (opts.reviewerAgentType ?? "claude-code") as AgentType,
+          purpose: "workflow_review",
+          owner: { kind: "workflow_run", id: run.id },
+          startSnapshot: endSnap,
+        });
+        if (prepared.kind !== "prepared" && prepared.kind !== "replayed") {
+          throw new Error(describePrepareFailure(prepared));
+        }
+        const reviewerId = prepared.view.sessionId;
         const taskContext = extractTaskContextBefore(entries, turnEndIndex);
         // Deterministic "Review - <source title>" (same pattern as Branch
         // sessions) — no AI generation. Set BEFORE the prompt is delivered so
@@ -955,14 +1030,18 @@ export class WorkflowEngine {
         // Prompt inputs are captured NOW — at review start — and carried to
         // activation in memory (see PendingActivation for why not rebuilt
         // later, and what happens to them across a restart).
-        this.pendingActivations.set(run.id, {
+        const pendingContext: PendingActivation = {
           scope,
           taskContext,
           originalIntent: extractFirstUserMessage(entries),
           authorSelfReport: extractAuthorSelfReport(entries, turnEndIndex),
-        });
+        };
+        this.pendingActivations.set(run.id, pendingContext);
         const updated = await this.storage.workflowRuns.update(run.id, {
           reviewer_session_id: reviewerId,
+          // Durable copy of the prompt inputs (§10.4): a restart between
+          // prepare and activate rebuilds the same prompt from here.
+          prepared_context: JSON.stringify(pendingContext),
           // Legacy replay backfill: a durable run interrupted before reviewer
           // binding may carry no stored target. Activation builds the prompt
           // from the stored one, so persist the target just captured (same
@@ -1043,11 +1122,12 @@ export class WorkflowEngine {
     // concurrent cancel by the CAS after the send. The pending inputs and the
     // timer are cleared only on a known outcome (CAS success below, or
     // failRun's untrackRun).
-    const pending = this.pendingActivations.get(runId);
+    const pending = this.pendingActivations.get(runId) ?? parsePreparedContext(run.prepared_context);
+    let outcome: ActivationResult;
     try {
-      // Restart fallback: the in-memory prompt inputs are gone, so recompute
-      // from the stored cutoff. Scope is unrecoverable (its snapshots were in
-      // memory too) and degrades to "scope unknown" rather than blocking.
+      // Last-resort fallback for legacy rows prepared before the context was
+      // persisted: recompute from the stored cutoff. Scope is unrecoverable
+      // there and degrades to "scope unknown" rather than blocking.
       const entries = pending ? null : this.agentOps.getRawMessages(run.source_session_id);
       const prompt = buildReviewerPrompt({
         taskContext: pending
@@ -1063,18 +1143,45 @@ export class WorkflowEngine {
         target: JSON.parse(run.review_target) as ReviewTarget,
         scope: pending?.scope ?? null,
       });
-      const project = await this.storage.projects.getById(run.project_id);
-      const sent = await this.agentOps
-        .sendUserMessage(run.reviewer_session_id, prompt, project?.path ?? undefined, undefined, REVIEWER_TURN)
-        .catch(() => false);
-      if (!sent) {
-        await this.failRun(run, "向 reviewer 投递任务失败");
-        throw new WorkflowError("spawn-failed", "向 reviewer 投递任务失败");
-      }
+      // Lifecycle `activate` (§10.4): hydrate + spawn + first instruction
+      // under a run-scoped key, so a replayed activation returns the same
+      // outcome instead of prompting the reviewer twice.
+      outcome = await this.agentOps.activateReviewer({
+        sessionId: run.reviewer_session_id,
+        activationKey: reviewerActivationKey(run.id),
+        instruction: prompt,
+        ...REVIEWER_TURN,
+      });
     } catch (err) {
-      if (err instanceof WorkflowError && err.code === "spawn-failed") throw err;
       await this.failRun(run, `激活 reviewer 失败：${err instanceof Error ? err.message : String(err)}`);
       throw new WorkflowError("spawn-failed", "激活 reviewer session 失败");
+    }
+    switch (outcome.kind) {
+      case "activated":
+      case "replayed":
+        break;
+      case "in_progress":
+        // Another activation of this run holds the lease (a hub retry that
+        // raced this one). Its outcome will move the run; nothing to do here.
+        return run;
+      case "uncertain": {
+        // The prompt is durable but stdin acceptance is unprovable (§5.2).
+        // Never re-send: move on with an honest note so a reviewer that did
+        // start can still complete the run, and the user can end it if not.
+        const claimed = await this.storage.workflowRuns.transition(runId, "preparing", "waiting_reviewer", {
+          error: "reviewer 首次指令投递结果未知：服务在投递期间中断。若 reviewer 没有开始工作，请结束本次 review 后重新发起。",
+        });
+        if (!claimed) throw new WorkflowError("bad-state", "run 在准备期间已被取消或失败");
+        this.clearPendingActivation(runId);
+        const updated = (await this.storage.workflowRuns.getById(runId))!;
+        this.emitRunUpdated(updated);
+        return updated;
+      }
+      default: {
+        const message = describeActivationFailure(outcome);
+        await this.failRun(run, message);
+        throw new WorkflowError("spawn-failed", message);
+      }
     }
     const claimed = await this.storage.workflowRuns.transition(runId, "preparing", "waiting_reviewer");
     if (!claimed) {
@@ -1257,6 +1364,7 @@ export class WorkflowEngine {
     const updated = await this.storage.workflowRuns.getById(runId);
     if (updated) {
       this.untrackRun(updated);
+      if (run.status === "preparing") await this.expirePendingReviewer(updated, "cancelled");
       this.emitRunUpdated(updated);
     }
     return updated;

@@ -3,6 +3,7 @@
 exports[`reverse-connect capability registry > registry snapshot (a diff here IS a tunnel-contract change — declare additive vs breaking in the PR) 1`] = `
 [
   "http:DELETE /api/agent-sessions/:param",
+  "http:DELETE /api/agent-sessions/:param/preparation",
   "http:DELETE /api/path/delete",
   "http:DELETE /api/path/worktrees",
   "http:GET /api/agent-sessions/:param",
@@ -31,6 +32,7 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:PATCH /api/agent-sessions/:param/favorite",
   "http:PATCH /api/agent-sessions/:param/title",
   "http:POST /api/agent-sessions/:param/accept-plan",
+  "http:POST /api/agent-sessions/:param/activate",
   "http:POST /api/agent-sessions/:param/agent-type",
   "http:POST /api/agent-sessions/:param/approve",
   "http:POST /api/agent-sessions/:param/background-tasks/:param/keep",
@@ -48,6 +50,8 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:POST /api/path/agent-sessions",
   "http:POST /api/path/agent-sessions/:param/branch",
   "http:POST /api/path/agent-sessions/new",
+  "http:POST /api/path/agent-sessions/prepare",
+  "http:POST /api/path/agent-sessions/start",
   "http:POST /api/path/branches/merge-status",
   "http:POST /api/path/cross-remote/exec",
   "http:POST /api/path/cross-remote/list-dir",

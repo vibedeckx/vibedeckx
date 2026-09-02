@@ -22,7 +22,9 @@ import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
-import { createRemoteAgentSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "./remote-agent-sessions.js";
+import { ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "./remote-agent-sessions.js";
+import type { AgentSessionLifecycleService, StartResult } from "./agent-session-lifecycle.js";
+import type { RemoteSessionLifecycleAdapter } from "./remote-session-lifecycle.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
@@ -192,6 +194,37 @@ function formatRelativeAge(timestamp: string, nowMs: number): string {
 
 // ============ Manager ============
 
+const UNCERTAIN_SPAWN_MESSAGE =
+  "Coding agent was created and the task was recorded, but delivery to the agent could not be confirmed. " +
+  "Do NOT spawn again blindly: inspect the session (getAgentConversation) — if it is working you will be woken on completion; " +
+  "if it never started, send the task with sendToAgentSession.";
+
+/** Commander-facing text for every lifecycle outcome that is not a session with its task. */
+function describeSpawnFailure(result: { kind: string; errorCode?: string; detail?: unknown; error?: { message: string } }): string {
+  switch (result.kind) {
+    case "resident_limit":
+      return `${result.error?.message ?? "Resident agent process limit reached"} Stop or hibernate another agent, then try again.`;
+    case "retryable_failure":
+      return `Coding agent did not accept its initial task (${result.errorCode ?? "unknown"}). Please try again.`;
+    case "permanent_failure":
+      return `Coding agent cannot start in this workspace (${result.errorCode ?? "unknown"}).`;
+    case "workspace_unavailable":
+      return `This workspace is unavailable: ${String(result.detail ?? "")}`;
+    case "idempotency_conflict":
+      return "This tool call already started a coding agent with a different task; use sendToAgentSession for follow-ups.";
+    case "activation_conflict":
+      return "This coding agent session was already claimed by another operation.";
+    case "in_progress":
+      return "This coding agent is still being started by an earlier attempt; wait for its completion event.";
+    case "expired":
+      return "The prepared coding agent session expired before it could start. Please try again.";
+    case "remote_unreachable":
+      return "Remote server unreachable, could not start the coding agent.";
+    default:
+      return `Failed to start the coding agent (${result.kind}).`;
+  }
+}
+
 export class ChatSessionManager {
   /** sessionId → ChatSession */
   private sessions = new Map<string, ChatSession>();
@@ -255,6 +288,9 @@ export class ChatSessionManager {
   private reverseConnectManager: ReverseConnectManager | null = null;
   private browserManager: BrowserManager | null = null;
   private workflowEngine: { shouldSuppressAgentEvent(sessionId: string): boolean } | null = null;
+  /** Prepared-session lifecycle (design §10.2): the only way the commander starts a coding agent. */
+  private sessionLifecycle: AgentSessionLifecycleService | null = null;
+  private remoteSessionLifecycle: RemoteSessionLifecycleAdapter | null = null;
 
   /** Pending browser commands waiting for iframe response: commandId → resolve */
   private pendingBrowserCommands = new Map<string, {
@@ -293,6 +329,11 @@ export class ChatSessionManager {
 
   setWorkflowEngine(engine: { shouldSuppressAgentEvent(sessionId: string): boolean }): void {
     this.workflowEngine = engine;
+  }
+
+  setSessionLifecycle(local: AgentSessionLifecycleService, remote: RemoteSessionLifecycleAdapter): void {
+    this.sessionLifecycle = local;
+    this.remoteSessionLifecycle = remote;
   }
 
   setEventListening(sessionId: string, enabled: boolean): boolean {
@@ -557,8 +598,11 @@ export class ChatSessionManager {
     prompt: string;
     agentType?: string;
     chatSessionId: string;
+    operationId: string;
   }): Promise<{ success: boolean; agentSessionId?: string; message: string }> {
-    const { projectId, branch, agentMode, prompt, agentType, chatSessionId } = params;
+    const { projectId, branch, agentMode, prompt, agentType, chatSessionId, operationId } = params;
+    const lifecycle = this.remoteSessionLifecycle;
+    if (!lifecycle) return { success: false, message: "Remote session lifecycle is not available." };
 
     const remoteConfig = await this.storage.projectRemotes.getByProjectAndServer(projectId, agentMode);
     if (!remoteConfig) {
@@ -585,117 +629,70 @@ export class ChatSessionManager {
       staleLocalId = existing.localSessionId;
     }
 
-    let created;
+    // One `start` under the tool call's key (design §10.2): the hub's durable
+    // intent lands first, the worker prepares + activates in one round trip,
+    // and the adapter publishes the mapping / search cache / stream / title
+    // only once the worker reports the session active. A legacy worker gets
+    // the old `/new` → `/message` sequence behind the same call.
+    let started: Awaited<ReturnType<RemoteSessionLifecycleAdapter["start"]>>;
     try {
-      created = await createRemoteAgentSession(
-        {
-          remoteSessionMap: this.remoteSessionMap,
-          remoteSessionMappings: this.storage.remoteSessionMappings,
-          remotePatchCache: this.remotePatchCache,
-          agentSessionManager: this.agentSessionManager,
-          reverseConnectManager: this.reverseConnectManager,
-          storage: this.storage,
-        },
-        { projectId, agentMode, remoteConfig, branch, permissionMode: "edit", agentType, userId: undefined },
-      );
+      started = await lifecycle.start({
+        projectId, remoteServerId: agentMode, remotePath: remoteConfig.remote_path, branch,
+        permissionMode: "edit", agentType: agentType ?? "claude-code", model: null,
+        purpose: "commander", owner: { kind: "commander_request", id: chatSessionId }, operationId,
+        // Title generation reads the commanding user's chat_provider config
+        // (per-user in SaaS) — fall back to the "local" sentinel if the chat
+        // session is gone.
+        userId: this.sessions.get(chatSessionId)?.userId ?? "local",
+        instruction: prompt,
+      });
     } catch (error) {
       return { success: false, message: `Remote server unreachable, could not start the coding agent: ${String(error)}` };
     }
-    if (!created.ok) {
-      return { success: false, message: `Failed to start the remote coding agent (status ${created.status}).` };
+    if (started.kind === "remote_unreachable") {
+      return { success: false, message: `Remote server unreachable, could not start the coding agent (status ${started.status}).` };
     }
+    if (!("view" in started) || !started.view) {
+      return { success: false, message: describeSpawnFailure(started) };
+    }
+    const localSessionId = started.view.sessionId;
 
     // Drop the stale mapping now that a fresh session exists on this branch.
-    if (staleLocalId && staleLocalId !== created.localSessionId) {
+    if (staleLocalId && staleLocalId !== localSessionId) {
       this.remoteSessionMap.delete(staleLocalId);
       await this.storage.remoteSessionMappings.delete(staleLocalId);
     }
 
-    // Capture before dispatch: a fast worker can complete before the ACK
-    // reaches us, and that newer terminal transition must win in the cache.
-    const initialActivityAt = Date.now();
-    // Deliver the first task.
-    try {
-      const msgRes = await proxyToRemoteAuto(
-        agentMode,
-        "POST", `/api/agent-sessions/${created.remoteSession.id}/message`, { content: prompt },
-        { reverseConnectManager: this.reverseConnectManager ?? undefined },
-      );
-      if (!msgRes.ok) {
-        return { success: false, message: `Remote agent started but the task could not be delivered (status ${msgRes.status}).` };
-      }
-    } catch (error) {
-      return { success: false, message: `Remote agent started but the task could not be delivered: ${String(error)}` };
+    if (started.kind !== "activated" && started.kind !== "replayed" && started.kind !== "uncertain") {
+      return { success: false, message: describeSpawnFailure(started) };
     }
-
-    const initialActivityReady = await this.storage.searchCache.updateRemoteSessionActivity({
-      localSessionId: created.localSessionId,
-      projectId,
-      targetId: agentMode,
-      remoteSessionId: created.remoteSession.id,
-      status: "running",
-      activityAt: initialActivityAt,
-      lastUserMessageAt: initialActivityAt,
-    }).catch((error) => {
-      console.error(`[ChatSession] remote activity write-through failed for ${created.localSessionId}:`, error);
-      return false;
-    });
-
-    // Generate a session title from the first task (the commander proxies
-    // /message directly, bypassing the UI route that normally triggers this).
-    // Fire-and-forget; idempotent per session id.
-    const spawnedInfo = this.remoteSessionMap.get(created.localSessionId);
-    if (spawnedInfo) {
-      void generateAndPushRemoteSessionTitle(
-        {
-          storage: this.storage,
-          agentSessionManager: this.agentSessionManager,
-          remotePatchCache: this.remotePatchCache,
-          reverseConnectManager: this.reverseConnectManager,
-        },
-        created.localSessionId,
-        prompt,
-        spawnedInfo,
-        // Title generation reads the commanding user's chat_provider config
-        // (per-user in SaaS) — fall back to the "local" sentinel if the chat
-        // session is gone.
-        this.sessions.get(chatSessionId)?.userId ?? "local",
-      );
-    }
-
-    ensureRemoteAgentStream(created.localSessionId, {
-      remoteSessionMap: this.remoteSessionMap,
-      remotePatchCache: this.remotePatchCache,
-      reverseConnectManager: this.reverseConnectManager,
-      eventBus: this.eventBus,
-      agentSessionManager: this.agentSessionManager,
-      storage: this.storage,
-    });
-    this.registerChatInitiatedAgentTask(created.localSessionId);
-    this.trackAgentSessionForChat(chatSessionId, created.localSessionId);
+    // Wake on completion even when delivery is uncertain: if the agent did
+    // start, its finish is the commander's only evidence. Success itself is
+    // reported only for a confirmed activation.
+    this.registerChatInitiatedAgentTask(localSessionId);
+    this.trackAgentSessionForChat(chatSessionId, localSessionId);
     this.setEventListening(chatSessionId, true);
+    if (started.kind === "uncertain") {
+      return { success: false, agentSessionId: localSessionId, message: UNCERTAIN_SPAWN_MESSAGE };
+    }
 
     // Announce the new session on the LOCAL event bus so an open agent window
     // on this workspace (incl. a blank "New Conversation" placeholder) surfaces
     // it — same intent as the local-spawn `announceRunning` path. The
     // remote→local status bridge (statusEventFromRemotePatch) can't carry this:
-    // a freshly spawned remote session never streams a `/status: running` patch
-    // (the remote's createNewSession doesn't broadcast one, and its
-    // sendUserMessage skips the broadcast because status is already "running"),
-    // so without this emit the session would only ever land in the dropdown.
-    if (initialActivityReady === true) {
-      this.eventBus?.emit({
-        type: "session:status",
-        projectId,
-        branch,
-        sessionId: created.localSessionId,
-        status: "running",
-      });
-    }
+    // a freshly activated remote session never streams a `/status: running`
+    // patch, so without this emit the session would only land in the dropdown.
+    this.eventBus?.emit({
+      type: "session:status",
+      projectId,
+      branch,
+      sessionId: localSessionId,
+      status: "running",
+    });
 
     return {
       success: true,
-      agentSessionId: created.localSessionId,
+      agentSessionId: localSessionId,
       message: "Coding agent started on the remote server and given the task. It runs autonomously; you'll be woken with an '[Agent Event: Task Completed]' message when it finishes. Do not claim completion yet.",
     };
   }
@@ -1655,64 +1652,88 @@ export class ChatSessionManager {
             .describe("Which agent to spawn. Defaults to claude-code."),
         }),
         needsApproval: wokenByEvent,
-        execute: async ({ prompt, agentType }) => {
+        execute: async ({ prompt, agentType }, toolOptions?: { toolCallId?: string }) => {
           if (!sessionId) {
             return { success: false, message: "No session context available." };
           }
           const project = await storage.projects.getById(projectId);
           const agentMode = project?.agent_mode;
+          // The tool call id is the commander's natural operation key (design
+          // §10.2): a retried call replays the same session instead of
+          // starting a second one.
+          const operationId = toolOptions?.toolCallId ?? randomUUID();
           if (project && agentMode && agentMode !== "local") {
-            return await this.spawnRemoteAgentSession({ projectId, branch, agentMode, prompt, agentType, chatSessionId: sessionId });
+            return await this.spawnRemoteAgentSession({ projectId, branch, agentMode, prompt, agentType, chatSessionId: sessionId, operationId });
           }
           if (!project?.path) {
             return { success: false, message: "No project path configured for this workspace." };
           }
+          const lifecycle = this.sessionLifecycle;
+          if (!lifecycle) return { success: false, message: "Session lifecycle is not available." };
           const existing = agentSessionManager.getSessionByBranch(projectId, branch);
-          if (existing && !existing.dormant) {
-            return {
-              success: false,
-              message:
-                "This workspace already has an active coding agent. Use sendToAgentSession to send it a message instead.",
-            };
-          }
           if (existing) {
-            // A dormant session (stopped, or restored from a prior server run)
-            // still occupies this branch's slot. createNewSession only stops
-            // non-dormant sessions, so leaving it would leave two sessions on
-            // the same branch — and getSessionByBranch returns the first/stale
-            // one. Remove it so this spawn yields a single, fresh session.
-            await agentSessionManager.deleteSession(existing.id);
+            // Is the session occupying this branch THIS operation's row? Then
+            // every state of it is a replay case, never an obstacle: a live
+            // one means the original call succeeded (lost response — start()
+            // returns `replayed`); a dormant one is the restored anchor after
+            // a restart. Rejecting or deleting it would either refuse an
+            // idempotent retry or destroy the anchor and prompt a SECOND
+            // session. The anchor check therefore comes BEFORE the generic
+            // busy rejection.
+            const storedLifecycle = await storage.agentSessions.getLifecycleById(existing.id).catch(() => undefined);
+            const isThisOperation = storedLifecycle?.prepare_operation_id === operationId;
+            if (!isThisOperation) {
+              if (!existing.dormant) {
+                return {
+                  success: false,
+                  message:
+                    "This workspace already has an active coding agent. Use sendToAgentSession to send it a message instead.",
+                };
+              }
+              // A dormant session from some other origin still occupies this
+              // branch's slot. createNewSession only stops non-dormant
+              // sessions, so leaving it would leave two sessions on the same
+              // branch — and getSessionByBranch returns the first/stale one.
+              await agentSessionManager.deleteSession(existing.id);
+            }
           }
-          const newSessionId = await agentSessionManager.createNewSession(
-            projectId,
-            branch,
-            project.path,
-            false,
-            "edit",
-            (agentType as AgentType | undefined) ?? "claude-code",
-            // Announce over the event bus so an open agent window on this
-            // workspace (incl. a blank "New Conversation" placeholder) surfaces
-            // this spawned session instead of leaving it only in the dropdown.
-            true,
-          );
-          let accepted = false;
+          // One `start`: identity, spawn and first instruction under the
+          // tool call's key. The session exists only once it has the task —
+          // there is no create-then-send window to compensate for.
+          let started: StartResult;
           try {
-            accepted = await agentSessionManager.sendUserMessage(newSessionId, prompt, project.path);
+            started = await lifecycle.start({
+              operationId,
+              projectId,
+              branch,
+              permissionMode: "edit",
+              agentType: (agentType as AgentType | undefined) ?? "claude-code",
+              purpose: "commander",
+              owner: { kind: "commander_request", id: sessionId },
+              instruction: prompt,
+              // Announce over the event bus so an open agent window on this
+              // workspace (incl. a blank "New Conversation" placeholder)
+              // surfaces this spawned session instead of leaving it only in
+              // the dropdown.
+              announceRunning: true,
+            });
           } catch (error) {
-            console.error(`[ChatSession] Failed to deliver initial task to ${newSessionId}:`, error);
+            console.error(`[ChatSession] Failed to start a coding agent for ${projectId}/${branch ?? "main"}:`, error);
+            return { success: false, message: `Failed to start the coding agent: ${String(error)}` };
           }
-          if (!accepted) {
-            await agentSessionManager
-              .discardSessionIfEmpty(newSessionId)
-              .catch((error) => console.error(`[ChatSession] Failed to discard ${newSessionId}:`, error));
-            return {
-              success: false,
-              message: "Coding agent was created but did not accept its initial task. Please try again.",
-            };
+          if (started.kind !== "activated" && started.kind !== "replayed" && started.kind !== "uncertain") {
+            return { success: false, message: describeSpawnFailure(started) };
           }
+          const newSessionId = started.view.sessionId;
+          // Wake on completion even when delivery is uncertain: if the agent
+          // did start, its finish is the commander's only evidence. Success
+          // itself is reported only for a confirmed activation.
           this.registerChatInitiatedAgentTask(newSessionId);
           this.trackAgentSessionForChat(sessionId, newSessionId);
           this.setEventListening(sessionId, true);
+          if (started.kind === "uncertain") {
+            return { success: false, agentSessionId: newSessionId, message: UNCERTAIN_SPAWN_MESSAGE };
+          }
           return {
             success: true,
             agentSessionId: newSessionId,

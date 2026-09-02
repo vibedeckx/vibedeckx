@@ -51,6 +51,14 @@ export interface SessionRetentionDeps {
    * deleteDormantSessionIfExpired`.
    */
   deleteIfExpired: (sessionId: string, cutoff: number) => Promise<boolean>;
+  /**
+   * Lifecycle maintenance that rides this tick (prepared-session design
+   * §11): TTL-expire stale pending rows, GC tombstones past the replay
+   * window. Runs BEFORE the retention gate because it cleans protocol
+   * bookkeeping, not user history — the retention window (off by default)
+   * must not be able to switch it off.
+   */
+  maintenance?: () => Promise<void>;
   now?: () => number;
   batchSize?: number;
   tickBudgetMs?: number;
@@ -71,6 +79,7 @@ export interface SweepResult {
 export class SessionRetentionSweeper {
   private readonly storage: Storage;
   private readonly deleteIfExpired: SessionRetentionDeps["deleteIfExpired"];
+  private readonly maintenance: SessionRetentionDeps["maintenance"];
   private readonly now: () => number;
   private readonly batchSize: number;
   private readonly tickBudgetMs: number;
@@ -91,6 +100,7 @@ export class SessionRetentionSweeper {
   constructor(deps: SessionRetentionDeps) {
     this.storage = deps.storage;
     this.deleteIfExpired = deps.deleteIfExpired;
+    this.maintenance = deps.maintenance;
     this.now = deps.now ?? Date.now;
     this.batchSize = deps.batchSize ?? BATCH_SIZE;
     this.tickBudgetMs = deps.tickBudgetMs ?? TICK_BUDGET_MS;
@@ -139,6 +149,14 @@ export class SessionRetentionSweeper {
   }
 
   private async runSweep(): Promise<SweepResult> {
+    if (this.maintenance) {
+      try {
+        await this.maintenance();
+      } catch (error) {
+        // Never let bookkeeping block retention — or vice versa.
+        console.error("[SessionRetention] lifecycle maintenance failed:", error);
+      }
+    }
     const startedAt = this.now();
     let scanned = 0;
     let deleted = 0;

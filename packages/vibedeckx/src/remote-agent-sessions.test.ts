@@ -18,7 +18,7 @@ vi.mock("./utils/remote-proxy.js", () => ({
 
 // vi.mock is hoisted above imports, so this static import receives the mocked module.
 import {
-  connectPersistentRemoteWs, createRemoteAgentSession, createRemoteBranchedSession, createRemoteProjectChatSessionWithInstruction,
+  connectPersistentRemoteWs, createRemoteAgentSession, createRemoteBranchedSession,
   createRemoteWorkflowReviewer,
   bindRemoteSessionMapping, entryPatchFrames, isEntryPatchFrame, recoverPendingRemoteAgentSessions,
   type RemoteAgentSessionDeps,
@@ -756,6 +756,107 @@ describe("createRemoteAgentSession", () => {
     expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([]);
   });
 
+  it("phase=prepare publishes nothing and leaves the creation intent pending until the post-activation publish", async () => {
+    proxyToRemoteAuto.mockImplementation(async (...args: unknown[]) => {
+      const body = args[3] as { runId: string; newReviewerSessionId: string };
+      expect(args[2]).toBe("/api/path/workflow-runs/prepare");
+      return {
+        ok: true, status: 201,
+        data: { run: {
+          id: body.runId, project_id: "worker-project", branch: "main", source_session_id: "worker-source",
+          source_turn_end_index: 4, reviewer_session_id: body.newReviewerSessionId, review_focus: null,
+          review_target: null, review_span: "this_turn", feedback_snapshot: null, status: "preparing",
+          error: null, created_at: "", updated_at: "",
+        } },
+      };
+    });
+    const deps = makeDeps();
+    const watch = vi.spyOn(deps.remoteSessionMappings, "extendNotificationWatch");
+    const result = await createRemoteWorkflowReviewer(deps, {
+      projectId, agentMode, remotePath: "/remote/path", branch: "main",
+      sourceRemoteSessionId: "worker-source", reviewSpan: "this_turn" as const, reviewerAgentType: "codex",
+      userId: "user-1", remoteRunId: "worker-run", remoteReviewerSessionId: "worker-reviewer",
+      localReviewerSessionId: "front-reviewer", phase: "prepare",
+    });
+    expect(result).toMatchObject({ ok: true, localReviewerSessionId: "front-reviewer", remoteReviewerSessionId: "worker-reviewer" });
+    // The pending reviewer is not a session on the front yet, and the
+    // creation intent stays open until the post-activation publish lands.
+    expect(upsert).not.toHaveBeenCalled();
+    expect(watch).not.toHaveBeenCalled();
+    expect(deps.remoteSessionMap.has("front-reviewer")).toBe(false);
+    expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([
+      expect.objectContaining({ local_reviewer_session_id: "front-reviewer", remote_run_id: "worker-run" }),
+    ]);
+  });
+
+  it("hub dies after the mapping but before the watch: recovery tops up the watch and title slot, then confirms — no worker call", async () => {
+    await storage.remoteReviewerCreationIntents.begin({
+      localReviewerSessionId: "front-reviewer", remoteReviewerSessionId: "worker-reviewer", remoteRunId: "worker-run",
+      projectId, remoteServerId: agentMode, branch: "main", remotePath: "/remote/path",
+      sourceRemoteSessionId: "worker-source", reviewFocus: null, sourceTurnEndIndex: null, reviewSpan: "this_turn",
+      reviewContextMode: null, agentType: "codex", intentBrief: null, userId: "user-1",
+    });
+    // The publish got as far as the mapping row (bound to a checkout), then the hub died.
+    mapping = {
+      local_session_id: "front-reviewer", project_id: projectId, remote_server_id: agentMode,
+      remote_session_id: "worker-reviewer", branch: "main", workspace_checkout_id: "c-1",
+    };
+    vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
+      project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path", sort_order: 0,
+    });
+    const deps = makeDeps();
+    const watch = vi.spyOn(deps.remoteSessionMappings, "extendNotificationWatch");
+    const title = vi.spyOn(deps.remoteSessionMappings, "markTitleResolved");
+    expect(await recoverPendingRemoteAgentSessions(deps, agentMode)).toEqual({ attempted: 1, confirmed: 1, failed: 0 });
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+    expect(watch).toHaveBeenCalledWith("front-reviewer", expect.any(Number));
+    expect(title).toHaveBeenCalledWith("front-reviewer");
+    expect(deps.remoteSessionMap.get("front-reviewer")).toMatchObject({ remoteSessionId: "worker-reviewer" });
+    expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([]);
+  });
+
+  it("hub dies after the worker activated but before the publish: boot recovery finds the same live reviewer", async () => {
+    // Prepare (phase 1) — intent pending, nothing published.
+    proxyToRemoteAuto.mockResolvedValueOnce({
+      ok: true, status: 201,
+      data: { run: {
+        id: "worker-run", project_id: "worker-project", branch: "main", source_session_id: "worker-source",
+        source_turn_end_index: 4, reviewer_session_id: "worker-reviewer", review_focus: null, review_target: null,
+        review_span: "this_turn", feedback_snapshot: null, status: "preparing", error: null, created_at: "", updated_at: "",
+      } },
+    });
+    await createRemoteWorkflowReviewer(makeDeps(), {
+      projectId, agentMode, remotePath: "/remote/path", branch: "main",
+      sourceRemoteSessionId: "worker-source", reviewSpan: "this_turn" as const, reviewerAgentType: "codex",
+      userId: "user-1", remoteRunId: "worker-run", remoteReviewerSessionId: "worker-reviewer",
+      localReviewerSessionId: "front-reviewer", phase: "prepare",
+    });
+    expect(upsert).not.toHaveBeenCalled();
+    // (worker activates; hub crashes before publishRemoteReviewer)
+
+    // Boot recovery replays the pending intent single-shot with the SAME ids;
+    // the worker answers with the run it already activated, and only now the
+    // front binds the mapping and closes the intent.
+    proxyToRemoteAuto.mockImplementationOnce(async (...args: unknown[]) => {
+      const body = args[3] as { runId: string; newReviewerSessionId: string };
+      expect(args[2]).toBe("/api/path/workflow-runs");
+      expect(body).toMatchObject({ runId: "worker-run", newReviewerSessionId: "worker-reviewer" });
+      return { ok: true, status: 201, data: { run: {
+        id: "worker-run", project_id: "worker-project", branch: "main", source_session_id: "worker-source",
+        source_turn_end_index: 4, reviewer_session_id: "worker-reviewer", review_focus: null, review_target: null,
+        review_span: "this_turn", feedback_snapshot: null, status: "waiting_reviewer", error: null, created_at: "", updated_at: "",
+      } } };
+    });
+    vi.spyOn(storage.projectRemotes, "getByProjectAndServer").mockResolvedValue({
+      project_id: projectId, remote_server_id: agentMode, remote_path: "/remote/path", sort_order: 0,
+    });
+    const deps = makeDeps();
+    expect(await recoverPendingRemoteAgentSessions(deps, agentMode)).toEqual({ attempted: 1, confirmed: 1, failed: 0 });
+    expect(upsert).toHaveBeenCalledWith("front-reviewer", projectId, agentMode, "worker-reviewer", "main", "from_start");
+    expect(deps.remoteSessionMap.get("front-reviewer")).toMatchObject({ remoteSessionId: "worker-reviewer" });
+    expect(await storage.remoteReviewerCreationIntents.listPending()).toEqual([]);
+  });
+
   it("accepts an acknowledged old-worker reviewer response but does not leave it replayable", async () => {
     proxyToRemoteAuto.mockResolvedValue({
       ok: true,
@@ -840,84 +941,6 @@ describe("createRemoteAgentSession", () => {
       { attempted: 1, confirmed: 1, failed: 0 },
     ]);
     expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
-  });
-
-  it("recreates a lost frontend mapping and only then delivers the initial instruction with the stable key", async () => {
-    const activitySpy = vi.spyOn(storage.searchCache, "updateRemoteSessionActivity").mockResolvedValue(true);
-    proxyToRemoteAuto.mockImplementation(async (
-      _serverId: string, _method: string, apiPath: string, body: Record<string, unknown>,
-    ) => apiPath === "/api/path/agent-sessions/new"
-      ? { ok: true, status: 200, data: { session: { id: body.sessionId, status: "running" }, messages: [] } }
-      : { ok: true, status: 200, data: { accepted: true } });
-    upsert.mockRejectedValueOnce(new Error("frontend crashed before mapping"));
-    const input = {
-      projectId, userId: "user-1", remoteServerId: agentMode,
-      remoteConfig: { remote_path: "/remote/path" }, sessionId: "front-preallocated",
-      workerSessionId: "550e8400-e29b-41d4-a716-446655440000",
-      branch: "main", permissionMode: "edit" as const, agentType: "claude-code", model: null,
-      instruction: "Implement", idempotencyKey: "stable-delivery-key",
-    };
-
-    await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), input))
-      .rejects.toThrow("frontend crashed before mapping");
-    await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), input))
-      .resolves.toEqual({ sessionId: "front-preallocated" });
-
-    expect(upsert).toHaveBeenLastCalledWith(
-      "front-preallocated", projectId, agentMode,
-      "550e8400-e29b-41d4-a716-446655440000", "main", "from_start",
-    );
-    expect(proxyToRemoteAuto.mock.calls.filter((call) => call[2] === "/api/path/agent-sessions/new"))
-      .toHaveLength(2);
-    expect(proxyToRemoteAuto).toHaveBeenLastCalledWith(
-      agentMode, "POST", "/api/agent-sessions/550e8400-e29b-41d4-a716-446655440000/message",
-      { content: "Implement", idempotencyKey: "stable-delivery-key" },
-      expect.objectContaining({ reverseConnectManager: undefined }),
-    );
-    activitySpy.mockRestore();
-  });
-
-  it("rejects an existing frontend mapping whose branch does not match the requested scope", async () => {
-    mapping = {
-      local_session_id: "preallocated", project_id: projectId, remote_server_id: agentMode,
-      remote_session_id: "preallocated", branch: "other",
-    };
-
-    await expect(createRemoteProjectChatSessionWithInstruction(makeDeps(), {
-      projectId, userId: "user-1", remoteServerId: agentMode,
-      remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
-      workerSessionId: "worker-preallocated",
-      branch: "main", permissionMode: "edit", agentType: "claude-code", model: null,
-      instruction: "No", idempotencyKey: "key",
-    })).rejects.toThrow("Session identity is already in use");
-    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
-  });
-
-  it("timestamps an initial instruction before its ACK so a concurrent completion stays newer", async () => {
-    mapping = {
-      local_session_id: "preallocated", project_id: projectId, remote_server_id: agentMode,
-      remote_session_id: "worker-preallocated", branch: "main",
-    };
-    let clock = 1_000;
-    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-    const updateActivity = vi.spyOn(storage.searchCache, "updateRemoteSessionActivity").mockResolvedValue(true);
-    proxyToRemoteAuto.mockImplementationOnce(async () => {
-      clock = 2_000;
-      return { ok: true, status: 200, data: { accepted: true } };
-    });
-
-    await createRemoteProjectChatSessionWithInstruction(makeDeps(), {
-      projectId, userId: "user-1", remoteServerId: agentMode,
-      remoteConfig: { remote_path: "/remote/path" }, sessionId: "preallocated",
-      workerSessionId: "worker-preallocated", branch: "main", permissionMode: "edit",
-      agentType: "claude-code", model: null, instruction: "Implement", idempotencyKey: "delivery-key",
-    });
-
-    expect(updateActivity).toHaveBeenCalledWith(expect.objectContaining({
-      status: "running", activityAt: 1_000, lastUserMessageAt: 1_000,
-    }));
-    updateActivity.mockRestore();
-    now.mockRestore();
   });
 
   it("id-echo mismatch: deletes the entry, does NOT upsert, returns status 409", async () => {

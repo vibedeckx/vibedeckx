@@ -106,6 +106,24 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
 
   db.transaction(() => {
     if (!bound("agent_sessions")) {
+      // Columns are copied by name, from the intersection of what the old
+      // table actually has and what the new DDL declares: a column a later
+      // migration added (the lifecycle set below) must survive this rebuild
+      // with its data, and the replayed index DDL must find it. Columns the
+      // new DDL declares but the old table lacks simply take their defaults.
+      const newDdlColumns = [
+        "id", "project_id", "branch", "workspace_checkout_id", "status", "permission_mode", "agent_type",
+        "title", "model", "created_at", "updated_at", "activity_at", "last_user_message_at",
+        "last_completed_at", "favorited_at", "native_session_id", "history_epoch",
+        "branched_from_session_id", "branched_from_entry_index",
+        "lifecycle_state", "purpose", "owner_kind", "owner_id", "prepare_operation_id",
+        "pending_expires_at", "activated_at", "expired_reason", "expired_at",
+        "activation_key", "activation_content_hash", "activation_content_json",
+        "activation_lease_owner", "activation_lease_expires_at", "activation_attempt",
+        "activation_user_entry_index", "activation_error_code",
+      ];
+      const existing = new Set((db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[]).map((c) => c.name));
+      const copied = newDdlColumns.filter((c) => existing.has(c)).join(", ");
       db.exec(`
         CREATE TABLE agent_sessions_fk_new (
           id TEXT PRIMARY KEY,
@@ -127,20 +145,29 @@ const tightenWorkspaceCheckoutForeignKeys = (db: BetterSqlite3Database): void =>
           history_epoch INTEGER NOT NULL DEFAULT 0,
           branched_from_session_id TEXT DEFAULT NULL,
           branched_from_entry_index INTEGER DEFAULT NULL,
+          lifecycle_state TEXT NOT NULL DEFAULT 'active',
+          purpose TEXT NOT NULL DEFAULT 'interactive',
+          owner_kind TEXT DEFAULT NULL,
+          owner_id TEXT DEFAULT NULL,
+          prepare_operation_id TEXT DEFAULT NULL,
+          pending_expires_at INTEGER DEFAULT NULL,
+          activated_at INTEGER DEFAULT NULL,
+          expired_reason TEXT DEFAULT NULL,
+          expired_at INTEGER DEFAULT NULL,
+          activation_key TEXT DEFAULT NULL,
+          activation_content_hash TEXT DEFAULT NULL,
+          activation_content_json TEXT DEFAULT NULL,
+          activation_lease_owner TEXT DEFAULT NULL,
+          activation_lease_expires_at INTEGER DEFAULT NULL,
+          activation_attempt INTEGER NOT NULL DEFAULT 0,
+          activation_user_entry_index INTEGER DEFAULT NULL,
+          activation_error_code TEXT DEFAULT NULL,
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
           FOREIGN KEY (workspace_checkout_id) REFERENCES workspace_checkouts(id)
             DEFERRABLE INITIALLY DEFERRED
         );
-        INSERT INTO agent_sessions_fk_new
-          (id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
-           title, model, created_at, updated_at, activity_at, last_user_message_at,
-           last_completed_at, favorited_at, native_session_id, history_epoch,
-           branched_from_session_id, branched_from_entry_index)
-          SELECT id, project_id, branch, workspace_checkout_id, status, permission_mode, agent_type,
-                 title, model, created_at, updated_at, activity_at, last_user_message_at,
-                 last_completed_at, favorited_at, native_session_id, history_epoch,
-                 branched_from_session_id, branched_from_entry_index
-            FROM agent_sessions;
+        INSERT INTO agent_sessions_fk_new (${copied})
+          SELECT ${copied} FROM agent_sessions;
         DROP TABLE agent_sessions;
         ALTER TABLE agent_sessions_fk_new RENAME TO agent_sessions;
       `);
@@ -714,6 +741,18 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   if (!remoteCreationIntentColumns.some((column) => column.name === "up_to_entry_index")) {
     db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN up_to_entry_index INTEGER");
   }
+  // Prepared-session lifecycle (design §9.2): hub-side durable intent keyed by
+  // the caller's operation id, so a lost response replays the same local and
+  // remote ids instead of minting a second session.
+  if (!remoteCreationIntentColumns.some((column) => column.name === "prepare_operation_id")) {
+    db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN prepare_operation_id TEXT DEFAULT NULL");
+    db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN prepared_at INTEGER DEFAULT NULL");
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_session_creation_intents_prepare_operation
+      ON remote_session_creation_intents(prepare_operation_id)
+      WHERE prepare_operation_id IS NOT NULL;
+  `);
 
   const instructionDeliveryCols = db.prepare("PRAGMA table_info(agent_instruction_deliveries)").all() as { name: string }[];
   if (!instructionDeliveryCols.some((c) => c.name === "owner_token")) {
@@ -1066,6 +1105,35 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     db.exec("ALTER TABLE agent_sessions ADD COLUMN branched_from_entry_index INTEGER DEFAULT NULL");
   }
 
+  // Prepared-session lifecycle (docs/superpowers/specs/2026-08-31-prepared-
+  // agent-session-lifecycle-design.md §6). Every pre-existing row is a session
+  // that already received its first instruction, so the column default
+  // `active` IS the migration — nothing is hidden by the upgrade. Activation
+  // bookkeeping lives on the same row (§6.2): one session has exactly one
+  // first-instruction activation, so a side table would only add a join.
+  const sessionLifecycleInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
+  if (!sessionLifecycleInfo.some(col => col.name === "lifecycle_state")) {
+    db.exec(`
+      ALTER TABLE agent_sessions ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active';
+      ALTER TABLE agent_sessions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'interactive';
+      ALTER TABLE agent_sessions ADD COLUMN owner_kind TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN owner_id TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN prepare_operation_id TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN pending_expires_at INTEGER DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activated_at INTEGER DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN expired_reason TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN expired_at INTEGER DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_key TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_content_hash TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_content_json TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_lease_owner TEXT DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_lease_expires_at INTEGER DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_attempt INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE agent_sessions ADD COLUMN activation_user_entry_index INTEGER DEFAULT NULL;
+      ALTER TABLE agent_sessions ADD COLUMN activation_error_code TEXT DEFAULT NULL;
+    `);
+  }
+
   // Ensure agent_sessions indexes exist. Safe to run here because either:
   //  - the fresh-DDL path created the table with all columns, or
   //  - the Task 1.1 rebuild migration above recreated the table with updated_at.
@@ -1080,6 +1148,14 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       ON agent_sessions(project_id, activity_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_sessions_workspace_checkout
       ON agent_sessions(workspace_checkout_id, updated_at DESC);
+    -- Lifecycle: one row per prepare operation (the replay anchor — a
+    -- concurrent duplicate prepare loses on this index, not on a check-then-
+    -- act), plus the recover/sweep access path over non-active rows.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sessions_prepare_operation
+      ON agent_sessions(prepare_operation_id)
+      WHERE prepare_operation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_lifecycle
+      ON agent_sessions(lifecycle_state, expired_at, pending_expires_at);
   `);
 
   // Migration: add pid column to executor_processes
@@ -1781,6 +1857,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       feedback_snapshot TEXT,
       status TEXT NOT NULL DEFAULT 'waiting_reviewer',
       error TEXT,
+      prepared_context TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -1946,6 +2023,12 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   const workflowRunsInfo = db.prepare("PRAGMA table_info(workflow_runs)").all() as { name: string }[];
   if (!workflowRunsInfo.some((col) => col.name === "review_span")) {
     db.exec("ALTER TABLE workflow_runs ADD COLUMN review_span TEXT NOT NULL DEFAULT 'this_turn'");
+  }
+  // Prepared-session lifecycle §10.4: the reviewer prompt inputs captured at
+  // prepare survive a restart, so activation never rebuilds them from a
+  // source conversation that kept moving.
+  if (!workflowRunsInfo.some((col) => col.name === "prepared_context")) {
+    db.exec("ALTER TABLE workflow_runs ADD COLUMN prepared_context TEXT");
   }
 
   // Migration: add review_context_mode to the reviewer-creation durable

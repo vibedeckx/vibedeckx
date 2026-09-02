@@ -24,11 +24,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { translateText, type WorkflowRun } from "@/lib/api";
-import type { EnsuredAgentSession } from "@/hooks/use-agent-session";
+import type { EnsuredAgentSession, PreparedConversation } from "@/hooks/use-agent-session";
 
-const ensureSession = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
-const sendEnsuredMessage = vi.fn(async () => true);
-const discardEnsuredSessionIfEmpty = vi.fn(async () => true);
+const startConversation = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
+const prepareConversation = vi.fn(async (): Promise<PreparedConversation | null> => null);
+const activateConversation = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
+const cancelPreparedConversation = vi.fn(async () => {});
 const uploadPaste = vi.fn();
 const setModel = vi.fn(async (): Promise<string | null> => null);
 const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }));
@@ -99,14 +100,15 @@ vi.mock("@/hooks/use-agent-session", () => ({
     backgroundTasks: { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
     streamEpoch: 0,
     sendMessage: vi.fn(),
-    sendEnsuredMessage,
-    discardEnsuredSessionIfEmpty,
+    startConversation,
+    prepareConversation,
+    activateConversation,
+    cancelPreparedConversation,
     uploadPaste,
     stopSession: vi.fn(),
     switchAgentType: vi.fn(),
     setModel,
     startNewConversation: vi.fn(),
-    ensureSession,
     switchMode: vi.fn(),
     acceptPlan: vi.fn(),
     residentLimitPrompt: null,
@@ -294,12 +296,14 @@ describe("AgentConversation pendingModel", () => {
       unobserve() {}
       disconnect() {}
     };
-    ensureSession.mockClear();
-    ensureSession.mockResolvedValue(null);
-    sendEnsuredMessage.mockReset();
-    sendEnsuredMessage.mockResolvedValue(true);
-    discardEnsuredSessionIfEmpty.mockReset();
-    discardEnsuredSessionIfEmpty.mockResolvedValue(true);
+    startConversation.mockReset();
+    startConversation.mockResolvedValue(null);
+    prepareConversation.mockReset();
+    prepareConversation.mockResolvedValue(null);
+    activateConversation.mockReset();
+    activateConversation.mockResolvedValue(null);
+    cancelPreparedConversation.mockReset();
+    cancelPreparedConversation.mockResolvedValue(undefined);
     uploadPaste.mockReset();
     vi.mocked(translateText).mockReset();
     setModel.mockClear();
@@ -507,30 +511,29 @@ describe("AgentConversation pendingModel", () => {
   });
 
   describe("failed first-send preprocessing", () => {
-    const ensured: EnsuredAgentSession = {
-      session: {
-        id: "s-new",
-        projectId: "pA",
-        branch: "featA",
-        status: "running",
-      },
+    // Uploads need an identity before the first instruction exists, so a
+    // paste first send goes prepare → upload → activate; plain text goes
+    // through one start. Either way nothing is visible until activation.
+    const prepared: PreparedConversation = {
+      operationId: "op-1",
+      sessionId: "s-new",
       origin: {
         projectId: "pA",
         branch: "featA",
         agentMode: "local",
         explicitSessionId: null,
       },
-      adopted: true,
+      legacy: false,
     };
 
     const renderFirstSend = async () => {
-      ensureSession.mockResolvedValue(ensured);
+      prepareConversation.mockResolvedValue(prepared);
       await render("pA", "featA");
       expect(promptState.submit).not.toBeNull();
     };
 
     it.each(["returned-error", "thrown-error"] as const)(
-      "discards the empty created session on translation %s",
+      "does not start a session when translation fails (%s)",
       async (failure) => {
         await renderFirstSend();
         await act(async () => { q(container, "prompt-action")!.click(); });
@@ -544,12 +547,15 @@ describe("AgentConversation pendingModel", () => {
           await promptState.submit!({ text: "hello", files: [] });
         });
 
-        expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
-        expect(sendEnsuredMessage).not.toHaveBeenCalled();
+        // Translation needs no identity, so nothing was prepared and nothing
+        // needs discarding: the placeholder simply stays.
+        expect(prepareConversation).not.toHaveBeenCalled();
+        expect(startConversation).not.toHaveBeenCalled();
+        expect(activateConversation).not.toHaveBeenCalled();
       },
     );
 
-    it("discards the empty created session when oversize paste upload fails", async () => {
+    it("cancels the prepared identity when oversize paste upload fails", async () => {
       await renderFirstSend();
       uploadPaste.mockRejectedValue(new Error("upload failed"));
 
@@ -558,11 +564,12 @@ describe("AgentConversation pendingModel", () => {
       });
 
       expect(uploadPaste).toHaveBeenCalledWith("x".repeat(2001), "s-new");
-      expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
-      expect(sendEnsuredMessage).not.toHaveBeenCalled();
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(activateConversation).not.toHaveBeenCalled();
+      expect(startConversation).not.toHaveBeenCalled();
     });
 
-    it("discards the empty created session when tokenized paste upload fails", async () => {
+    it("cancels the prepared identity when tokenized paste upload fails", async () => {
       await renderFirstSend();
       const pasted = "x".repeat(2001);
       await act(async () => {
@@ -581,8 +588,8 @@ describe("AgentConversation pendingModel", () => {
       });
 
       expect(uploadPaste).toHaveBeenCalledWith(pasted, "s-new");
-      expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
-      expect(sendEnsuredMessage).not.toHaveBeenCalled();
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(activateConversation).not.toHaveBeenCalled();
     });
 
     it("restores the same branch draft and resets submit state after a session switch", async () => {
@@ -616,6 +623,13 @@ describe("AgentConversation pendingModel", () => {
 
     it("clears materialized paste state after switching sessions on the same branch", async () => {
       await renderFirstSend();
+      // The first send succeeds (for a workspace no longer displayed): the
+      // pastes it materialized must not come back into the composer.
+      activateConversation.mockResolvedValue({
+        session: { id: "s-new", projectId: "pA", branch: "featA", status: "running" },
+        origin: prepared.origin,
+        adopted: false,
+      });
       const pasted = "x".repeat(2001);
       await act(async () => {
         promptState.onPasteText!(
@@ -649,16 +663,33 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadPaste).not.toHaveBeenCalled();
     });
 
-    it("discards and restores the draft when first-message delivery fails", async () => {
+    it("restores the draft when the first send does not start a session", async () => {
       await renderFirstSend();
-      sendEnsuredMessage.mockResolvedValueOnce(false);
+      startConversation.mockResolvedValueOnce(null);
 
       await act(async () => {
         await promptState.submit!({ text: "retry me", files: [] });
       });
 
-      expect(discardEnsuredSessionIfEmpty).toHaveBeenCalledWith(ensured);
+      // Text-only: one start under a stable key; the submission stays pending
+      // so resending retries the same operation. Nothing to discard.
+      expect(startConversation).toHaveBeenCalledWith("retry me", "edit", null);
+      expect(cancelPreparedConversation).not.toHaveBeenCalled();
       expect(draftState.set).toHaveBeenLastCalledWith("retry me");
+    });
+
+    it("activates the prepared identity with the materialized paste", async () => {
+      await renderFirstSend();
+      uploadPaste.mockResolvedValueOnce({ path: "/tmp/paste", size: 2001 });
+
+      await act(async () => {
+        await promptState.submit!({ text: "x".repeat(2001), files: [] });
+      });
+
+      expect(prepareConversation).toHaveBeenCalledWith("edit", null);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, '<vpaste path="/tmp/paste" size="2001" />');
+      expect(startConversation).not.toHaveBeenCalled();
+      expect(cancelPreparedConversation).not.toHaveBeenCalled();
     });
   });
 

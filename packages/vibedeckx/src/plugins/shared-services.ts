@@ -6,7 +6,7 @@ import { AgentSessionManager } from "../agent-session-manager.js";
 import { ChatSessionManager } from "../chat-session-manager.js";
 import { ProjectChatManager } from "../project-chat-manager.js";
 import { createRemoteProjectSessionReader } from "../project-chat-tools.js";
-import { WorkflowEngine } from "../workflow-engine.js";
+import { WorkflowEngine, type AgentOps } from "../workflow-engine.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
@@ -18,9 +18,11 @@ import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
 import { RemoteNotificationSync } from "../remote-notification-sync.js";
-import { createRemoteAgentSession, createRemoteProjectChatSessionWithInstruction, recoverPendingRemoteAgentSessions } from "../remote-agent-sessions.js";
+import { createRemoteAgentSession, recoverPendingRemoteAgentSessions } from "../remote-agent-sessions.js";
 import { formatBackfillSummary, healWorkspaceBindings } from "../workspace-binding-backfill.js";
 import { SessionRetentionSweeper } from "../session-retention.js";
+import { AgentSessionLifecycleService } from "../agent-session-lifecycle.js";
+import { RemoteSessionLifecycleAdapter } from "../remote-session-lifecycle.js";
 import { readRetentionDays } from "../session-retention-config.js";
 import { pushRetentionToWorker } from "../session-retention-downlink.js";
 import { RemoteSessionReconciler } from "../remote-session-reconcile-service.js";
@@ -33,9 +35,46 @@ interface SharedServicesOptions {
   authEnabled?: boolean;
 }
 
+/**
+ * Project chat confirms an operation only on an active session. `uncertain`
+ * (instruction durable, stdin unprovable) is thrown too: the operation stays
+ * pending under its key and every replay returns the same uncertain view —
+ * never a re-send — until a person inspects the session.
+ */
+function assertProjectChatStarted(result: { kind: string; errorCode?: string; detail?: unknown; error?: { message: string } }): void {
+  switch (result.kind) {
+    case "activated":
+    case "replayed":
+      return;
+    case "uncertain":
+      throw new Error("Agent session recorded its initial instruction but delivery could not be confirmed");
+    case "resident_limit":
+      throw new Error(result.error?.message ?? "Resident agent process limit reached");
+    case "idempotency_conflict":
+      throw new Error("Session identity is already in use");
+    case "expired":
+      throw new Error("Agent session preparation expired");
+    case "remote_unreachable":
+      throw new Error("Remote server unreachable");
+    case "workspace_unavailable":
+      throw new Error(`Workspace unavailable: ${String(result.detail ?? "")}`);
+    default:
+      throw new Error(`Agent session did not accept its initial instruction (${result.errorCode ?? result.kind})`);
+  }
+}
+
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
   const processManager = new ProcessManager(opts.storage);
   const agentSessionManager = new AgentSessionManager(opts.storage);
+  // Lifecycle recovery runs BEFORE restore (design §8.3): a pending row whose
+  // entries prove the agent ran is promoted to active here, and only then is
+  // it visible to `restoreSessionsFromDb` — the other order would leave it
+  // visible in the DB but absent from the manager until the next boot.
+  const agentSessionLifecycle = new AgentSessionLifecycleService({
+    storage: opts.storage,
+    runtime: agentSessionManager,
+  });
+  await agentSessionLifecycle.recover();
   await agentSessionManager.restoreSessionsFromDb();
   const remoteExecutorMap = new Map<string, RemoteExecutorInfo>();
 
@@ -112,13 +151,29 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
       { reverseConnectManager },
     ),
   });
+  // Hub-side prepared-session lifecycle for remote projects (design §9.2):
+  // one adapter shared by every caller that starts sessions on a worker
+  // (project chat below and the commander; the lifecycle routes build their own).
+  const remoteSessionLifecycle = new RemoteSessionLifecycleAdapter({
+    remoteSessionMap, remoteSessionMappings: opts.storage.remoteSessionMappings,
+    remotePatchCache, agentSessionManager, reverseConnectManager, storage: opts.storage,
+    eventBus,
+  });
+  chatSessionManager.setSessionLifecycle(agentSessionLifecycle, remoteSessionLifecycle);
   const projectChatManager = new ProjectChatManager(opts.storage, undefined, {
     eventBus,
     toolDependencies: {
       agentSessionManager,
       remoteSessions: projectChatRemoteSessions,
       mutationServices: {
+        // Prepared-session lifecycle §10.3: one `start` under the operation's
+        // own idempotency key. A replay of the same operation returns the
+        // same active session; the same key with a different payload is a
+        // conflict. Every non-success outcome throws — the caller keeps the
+        // operation pending (the row exists under this key) and replays the
+        // same call later, so there is no create-then-send compensation here.
         createAgentSession: async (input) => {
+          const owner = { kind: "project_chat_operation", id: input.idempotencyKey } as const;
           if (input.target === "local") {
             const project = await opts.storage.projects.getById(input.projectId, input.userId);
             if (!project?.path) throw new Error("Project has no local path");
@@ -126,33 +181,15 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             if (existing && existing.project_id !== input.projectId) {
               throw new Error("Session identity is already in use");
             }
-            // Always enter the manager's exact-scope create/recovery path. A
-            // durable row alone does not prove this process has rehydrated or
-            // spawned the resident session after restart.
-            await agentSessionManager.createNewSession(
-              input.projectId, input.branch, project.path, false, input.permissionMode,
-              input.agentType, true, false, { sessionId: input.workerSessionId, model: input.model },
-            );
-            // Local stdin has no acknowledgement protocol. Retrying a durable
-            // unconfirmed operation is intentionally at-least-once: a crash
-            // after write may duplicate, but transcript persistence is never
-            // treated as proof that stdin accepted the command.
-            try {
-              if (!(await agentSessionManager.sendUserMessage(
-                input.workerSessionId, input.instruction, project.path, input.userId,
-              ))) throw new Error("Agent session did not accept its initial instruction");
-            } catch (error) {
-              // Exact-id retries can recreate a row deleted here. The
-              // conditional cleanup keeps a session that did accept/persist a
-              // user turn, preserving the existing at-least-once semantics.
-              await agentSessionManager
-                .discardSessionIfEmpty(input.workerSessionId)
-                .catch((cleanupError) => console.error(
-                  `[ProjectChat] Failed to discard ${input.workerSessionId} after initial delivery failure:`,
-                  cleanupError,
-                ));
-              throw error;
-            }
+            const started = await agentSessionLifecycle.start({
+              operationId: input.idempotencyKey,
+              sessionId: input.workerSessionId,
+              projectId: input.projectId, branch: input.branch,
+              permissionMode: input.permissionMode, agentType: input.agentType, model: input.model,
+              purpose: "project_chat", owner,
+              instruction: input.instruction, userId: input.userId,
+            });
+            assertProjectChatStarted(started);
             return { sessionId: input.sessionId };
           }
 
@@ -160,16 +197,15 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
             input.projectId, input.target,
           );
           if (!association) throw new Error("Remote workspace is no longer authorized");
-          return createRemoteProjectChatSessionWithInstruction({
-            remoteSessionMap, remoteSessionMappings: opts.storage.remoteSessionMappings,
-            remotePatchCache, agentSessionManager, reverseConnectManager, storage: opts.storage,
-          }, {
-            projectId: input.projectId, userId: input.userId, remoteServerId: input.target,
-            remoteConfig: association, sessionId: input.sessionId,
-            workerSessionId: input.workerSessionId, branch: input.branch,
-            permissionMode: input.permissionMode, agentType: input.agentType, model: input.model,
-            instruction: input.instruction, idempotencyKey: input.idempotencyKey,
+          const started = await remoteSessionLifecycle.start({
+            projectId: input.projectId, remoteServerId: input.target, remotePath: association.remote_path,
+            branch: input.branch, permissionMode: input.permissionMode, agentType: input.agentType,
+            model: input.model, purpose: "project_chat", owner, operationId: input.idempotencyKey,
+            localSessionId: input.sessionId, remoteSessionId: input.workerSessionId,
+            userId: input.userId, instruction: input.instruction,
           });
+          assertProjectChatStarted(started);
+          return { sessionId: input.sessionId };
         },
         sendAgentInstruction: async (input) => {
           if (input.target === "local") {
@@ -339,6 +375,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("storage", opts.storage);
   fastify.decorate("processManager", processManager);
   fastify.decorate("agentSessionManager", agentSessionManager);
+  fastify.decorate("agentSessionLifecycle", agentSessionLifecycle);
   fastify.decorate("chatSessionManager", chatSessionManager);
   fastify.decorate("projectChatManager", projectChatManager);
   fastify.decorate("remoteExecutorMap", remoteExecutorMap);
@@ -411,7 +448,20 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     );
   });
 
-  const workflowEngine = new WorkflowEngine(opts.storage, agentSessionManager);
+  // The engine drives a fresh reviewer through the lifecycle service
+  // (prepare → activate → cancel, design §10.4) and everything else through
+  // the manager's plain message path.
+  const reviewAgentOps: AgentOps = {
+    prepareReviewer: (input) => agentSessionLifecycle.prepare(input),
+    activateReviewer: (input) => agentSessionLifecycle.activate(input),
+    cancelReviewer: (input) => agentSessionLifecycle.cancel(input),
+    sendUserMessage: (...args) => agentSessionManager.sendUserMessage(...args),
+    setFinalSessionTitle: (sessionId, title) => agentSessionManager.setFinalSessionTitle(sessionId, title),
+    switchMode: (sessionId, projectPath, mode) => agentSessionManager.switchMode(sessionId, projectPath, mode),
+    getRawMessages: (sessionId) => agentSessionManager.getRawMessages(sessionId),
+    broadcastRawToSession: (sessionId, payload) => agentSessionManager.broadcastRawToSession(sessionId, payload),
+  };
+  const workflowEngine = new WorkflowEngine(opts.storage, reviewAgentOps);
   workflowEngine.setEventBus(eventBus);   // subscribe BEFORE chatSessionManager so ordering is explicit
   workflowEngine.setMilestoneListener(() => notificationService.requestDrain());
   await workflowEngine.init();
@@ -433,6 +483,14 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     storage: opts.storage,
     deleteIfExpired: (sessionId, cutoff) =>
       agentSessionManager.deleteDormantSessionIfExpired(sessionId, cutoff),
+    maintenance: async () => {
+      await agentSessionLifecycle.maintain();
+      // Hub half of §11: a lifecycle intent whose caller never came back has
+      // a worker row that TTL-expired long ago; the intent is the only trace.
+      await opts.storage.remoteSessionCreationIntents.discardStaleLifecycleIntents({
+        cutoff: Date.now() - 7 * 24 * 60 * 60_000, limit: 200,
+      });
+    },
   });
   fastify.decorate("sessionRetention", sessionRetention);
   sessionRetention.start();

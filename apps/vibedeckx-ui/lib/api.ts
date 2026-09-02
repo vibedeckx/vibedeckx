@@ -1265,6 +1265,129 @@ export async function createNewAgentSession(
   return res.json();
 }
 
+import type { ContentPart as LifecycleContentPart } from "@/hooks/use-agent-session";
+
+// ============ Prepared-session lifecycle (design §9.1) ============
+//
+// A first send is a lifecycle operation with a stable key: `start` (text-only)
+// or `prepare` → paste upload → `activate`. Every response carries `kind` and
+// the row's lifecycle view; `session` is present only once the session is
+// real (activated / replayed / uncertain), which is the moment the UI may
+// cache, connect and select it. These helpers never throw on a lifecycle
+// outcome — only on transport failure — so callers branch on `kind`.
+
+export type LifecycleState = "pending_first_turn" | "active" | "activation_uncertain" | "expired";
+
+export interface LifecycleView {
+  sessionId: string;
+  projectId: string;
+  branch: string | null;
+  state: LifecycleState;
+  purpose: string;
+  leaseHeld: boolean;
+  activationKey: string | null;
+  activationAttempt: number;
+  activatedAt: number | null;
+  activationErrorCode: string | null;
+  userEntryIndex: number | null;
+  expiredReason: string | null;
+  expiredAt: number | null;
+  pendingExpiresAt: number | null;
+  remoteSessionId?: string;
+  legacy?: boolean;
+}
+
+export type LifecycleKind =
+  | "prepared" | "activated" | "replayed" | "uncertain" | "in_progress" | "cancelled" | "already_expired"
+  | "idempotency_conflict" | "activation_conflict" | "activation_in_progress" | "not_pending"
+  | "resident_limit" | "expired" | "not_found" | "retryable_failure" | "permanent_failure"
+  | "workspace_unavailable" | "remote_unreachable";
+
+export interface LifecycleSessionSummary {
+  id: string;
+  projectId: string;
+  branch: string | null;
+  status: string;
+  permissionMode?: string;
+  agentType?: string;
+  model?: string | null;
+  processAlive?: boolean;
+}
+
+export interface LifecycleResponse {
+  status: number;
+  kind: LifecycleKind;
+  lifecycle?: LifecycleView;
+  session?: LifecycleSessionSummary;
+  error?: string;
+  errorCode?: string;
+  maxResidentAgentProcesses?: number;
+  runningSessions?: RunningResidentSession[];
+}
+
+/** True for the outcomes that leave a real session behind. */
+export function lifecycleSessionReady(kind: LifecycleKind): boolean {
+  return kind === "activated" || kind === "replayed" || kind === "uncertain";
+}
+
+async function lifecycleRequest(url: string, method: string, body?: unknown): Promise<LifecycleResponse> {
+  const res = await authFetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const parsed = await res.json().catch(() => ({}));
+  if (typeof parsed?.kind !== "string") {
+    throw new Error(`Lifecycle request failed: ${res.status}${parsed?.error ? ` — ${parsed.error}` : ""}`);
+  }
+  return { status: res.status, ...parsed } as LifecycleResponse;
+}
+
+export interface StartAgentSessionRequest {
+  operationId: string;
+  sessionId?: string;
+  branch: string | null;
+  permissionMode?: "plan" | "edit";
+  agentType?: string;
+  model?: string | null;
+  instruction: string | LifecycleContentPart[];
+  force?: boolean;
+}
+
+/** prepare + activate in one round trip (§10.1 text-only first send). */
+export function startAgentSession(projectId: string, body: StartAgentSessionRequest): Promise<LifecycleResponse> {
+  return lifecycleRequest(`${getApiBase()}/api/projects/${projectId}/agent-sessions/start`, "POST", body);
+}
+
+export interface PrepareAgentSessionRequest {
+  operationId: string;
+  sessionId?: string;
+  branch: string | null;
+  permissionMode?: "plan" | "edit";
+  agentType?: string;
+  model?: string | null;
+  purpose?: "interactive" | "interactive_upload";
+}
+
+/** Identity only — no process, invisible to every list — for the paste/upload first send. */
+export function prepareAgentSession(projectId: string, body: PrepareAgentSessionRequest): Promise<LifecycleResponse> {
+  return lifecycleRequest(`${getApiBase()}/api/projects/${projectId}/agent-sessions/prepare`, "POST", body);
+}
+
+export interface ActivateAgentSessionRequest {
+  activationKey: string;
+  instruction: string | LifecycleContentPart[];
+  force?: boolean;
+}
+
+export function activateAgentSession(sessionId: string, body: ActivateAgentSessionRequest): Promise<LifecycleResponse> {
+  return lifecycleRequest(`${getApiBase()}/api/agent-sessions/${sessionId}/activate`, "POST", body);
+}
+
+export function cancelPreparedAgentSession(sessionId: string, reason: "cancelled" | "owner_failed" = "cancelled"): Promise<LifecycleResponse> {
+  return lifecycleRequest(`${getApiBase()}/api/agent-sessions/${sessionId}/preparation`, "DELETE", { reason });
+}
+
 export interface RunningResidentSession {
   id: string;
   projectId?: string;

@@ -1,6 +1,7 @@
 import type { Storage } from "./storage/types.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
+import type { AgentSessionLifecycleService } from "./agent-session-lifecycle.js";
 import type { ChatSessionManager } from "./chat-session-manager.js";
 import type { ProjectChatManager } from "./project-chat-manager.js";
 import type { EventBus } from "./event-bus.js";
@@ -55,6 +56,7 @@ declare module "fastify" {
     notificationService: NotificationService;
     remoteNotificationSync: RemoteNotificationSync;
     sessionRetention: SessionRetentionSweeper;
+    agentSessionLifecycle: AgentSessionLifecycleService;
     remoteSessionReconciler: RemoteSessionReconciler;
     remoteMcpSessionManager: RemoteMcpSessionManager;
     workflowEngine: import("./workflow-engine.js").WorkflowEngine;

@@ -3,7 +3,15 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError, type RunningResidentSession } from "@/lib/api";
+import {
+  getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError,
+  startAgentSession, prepareAgentSession, activateAgentSession, cancelPreparedAgentSession, lifecycleSessionReady,
+  type RunningResidentSession, type LifecycleResponse,
+} from "@/lib/api";
+import {
+  clearPendingSubmission, readPendingSubmission, sameSubmissionContent, writePendingSubmission,
+  type PendingSubmission,
+} from "@/lib/pending-submissions";
 import type { AgentType, BackgroundTask, WorkflowRun } from "@/lib/api";
 import {
   workspaceKey,
@@ -45,6 +53,14 @@ export interface AgentSession {
   agentType?: AgentType;
   model?: string | null;
   processAlive?: boolean;
+  /**
+   * Present only when the row is not a plain active session — in practice
+   * `activation_uncertain`: the first instruction was persisted but its
+   * delivery could not be proven (crash mid-activation). The conversation
+   * renders a persistent warning; nothing is ever auto-resent.
+   */
+  lifecycleState?: string;
+  activationErrorCode?: string | null;
   /**
    * Session this one was branched from (already remote-prefixed for remote
    * targets), or absent for non-branches, pre-feature branches, and remote
@@ -89,6 +105,19 @@ export interface EnsuredAgentSession {
   origin: AgentWorkspaceIdentity;
   /** Whether the workspace that requested the create is currently displayed. */
   adopted: boolean;
+}
+
+/**
+ * A prepared (not yet activated) first send: an identity the server holds
+ * invisibly — no process, no list presence — so pastes can be uploaded
+ * against it before the first instruction activates it (design §10.1).
+ */
+export interface PreparedConversation {
+  operationId: string;
+  sessionId: string;
+  origin: AgentWorkspaceIdentity;
+  /** Legacy remote worker: the session spawned at prepare and is already visible. */
+  legacy: boolean;
 }
 
 export function sameAgentWorkspace(
@@ -1299,7 +1328,43 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const cached = readSessionCache(cacheKey);
     setIsLoading(true);
 
+    // The empty "New Conversation" state for this workspace: no session, no
+    // history, initialized so the empty-state UI (not a spinner) shows.
+    const settlePlaceholder = () => {
+      console.log(`[AgentSession] No existing session for ${projectId}/${branch ?? "<null>"} — placeholder`);
+      setSession(null);
+      setStatus("stopped");
+      setMessages([]);
+      containerRef.current = { entries: {}, status: "stopped" };
+      historyRef.current = null;
+      setHasEarlierHistory(false);
+      setIsInitialized(true);
+    };
+
     try {
+      // A first send interrupted by a refresh (or a lost response) is still
+      // pending under its stable key: replay it BEFORE looking at the latest
+      // session, so the user gets the session they started — not a second
+      // one, and not the branch's previous session. This is also the only
+      // way in for a persisted placeholder ("New Conversation"): the
+      // auto-start effect lets a placeholder through precisely when a pending
+      // submission exists (design §10.1).
+      if (!explicitSessionId) {
+        const pendingKey = workspaceKey(projectId, branch, agentMode);
+        const pending = readPendingSubmission(pendingKey);
+        if (pending?.content) {
+          const replayed = await replayPendingSubmissionRef.current?.(pending, generation);
+          if (replayed?.adopted) return replayed.session;
+          if (sessionGenerationRef.current !== generation) return null;
+          if (hasPlaceholder(pendingKey)) {
+            // No session came out of the replay (retryable failure, eviction
+            // declined): stay on the placeholder the user chose. The
+            // submission is still pending; the next send retries the same key.
+            settlePlaceholder();
+            return null;
+          }
+        }
+      }
       console.log(`[AgentSession] Starting REST call: projectId=${projectId}, branch=${branch}, sessionId=${explicitSessionId ?? "latest"}, agentType=${agentType}, generation=${generation}`);
       let newSession: AgentSession | null;
       let initialMessages: AgentMessage[];
@@ -1354,14 +1419,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // placeholder. A real session is created on first user message via
       // ensureSession() / POST /agent-sessions/new.
       if (!newSession) {
-        console.log(`[AgentSession] No existing session for ${projectId}/${branch ?? "<null>"} — placeholder`);
-        setSession(null);
-        setStatus("stopped");
-        setMessages([]);
-        containerRef.current = { entries: {}, status: "stopped" };
-        historyRef.current = null;
-        setHasEarlierHistory(false);
-        setIsInitialized(true);
+        settlePlaceholder();
         return null;
       }
 
@@ -1451,7 +1509,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         cachePreviewRef.current = false;
       }
     }
-  }, [projectId, branch, agentType, explicitSessionId, connectWebSocket]);
+  }, [projectId, branch, agentMode, agentType, explicitSessionId, connectWebSocket]);
 
   // Send user message - optionally accepts sessionId for immediate use after session creation
   const sendMessage = useCallback(
@@ -1857,6 +1915,349 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const ensureSessionInFlightRef = useRef<Map<string, Promise<EnsuredAgentSession | null>>>(new Map());
   const latestCreatedSessionByWorkspaceRef = useRef<Map<string, string>>(new Map());
 
+  // ===================================================================
+  // Prepared-session lifecycle first send (design §10.1)
+  //
+  // `startConversation` (text-only) and `prepareConversation` →
+  // `activateConversation` (paste/upload) replace the create-then-send
+  // `ensureSession` + `sendEnsuredMessage` pair. The submission is persisted
+  // under a stable operation key BEFORE any request, so a refresh, a lost
+  // response, a resident-limit retry or an explicit resend replays the same
+  // key — and the session is cached/connected/selected only once the server
+  // reports it real (activated / replayed / uncertain).
+  // ===================================================================
+
+  /** Suspend on the eviction dialog; false = declined or workspace switched. */
+  const promptForEviction = useCallback(async (
+    data: { maxResidentAgentProcesses?: number; runningSessions?: RunningResidentSession[] },
+    generation: number,
+  ): Promise<boolean> => {
+    let resolvePrompt!: (evict: boolean) => void;
+    const answer = new Promise<boolean>((resolve) => { resolvePrompt = resolve; });
+    const prompt: ResidentLimitPromptState = {
+      maxResidentAgentProcesses: data.maxResidentAgentProcesses ?? 0,
+      runningSessions: data.runningSessions ?? [],
+      resolve: resolvePrompt,
+    };
+    residentLimitPromptRef.current = prompt;
+    setResidentLimitPrompt(prompt);
+    const confirmed = await answer;
+    if (residentLimitPromptRef.current === prompt) residentLimitPromptRef.current = null;
+    setResidentLimitPrompt((cur) => (cur === prompt ? null : cur));
+    if (sessionGenerationRef.current !== generation) return false;
+    return confirmed;
+  }, []);
+
+  /** The moment a session is real: cache, mark the workspace, and adopt into the live view if still displayed. */
+  const adoptActivatedSession = useCallback((
+    data: LifecycleResponse,
+    origin: AgentWorkspaceIdentity,
+  ): EnsuredAgentSession => {
+    const summary = data.session!;
+    const newSession: AgentSession = {
+      id: summary.id,
+      projectId: summary.projectId,
+      branch: summary.branch,
+      status: summary.status as AgentSessionStatus,
+      permissionMode: (summary.permissionMode ?? "edit") as "plan" | "edit",
+      agentType: (summary.agentType ?? "claude-code") as AgentType,
+      model: summary.model ?? null,
+      processAlive: summary.processAlive ?? true,
+    };
+    const history = emptyHistory(newSession);
+    cacheSessionSnapshot(origin.projectId, origin.branch, origin.explicitSessionId, newSession, history);
+    const originKey = workspaceKey(origin.projectId, origin.branch, origin.agentMode);
+    removePlaceholder(originKey);
+    latestCreatedSessionByWorkspaceRef.current.set(originKey, newSession.id);
+
+    const currentIdentity = workspaceIdentityRef.current;
+    const adopted = currentIdentity !== null && sameAgentWorkspace(origin, currentIdentity);
+    if (adopted) {
+      // Newer authoritative state than any in-flight latest-session lookup.
+      sessionGenerationRef.current += 1;
+      setIsLoading(false);
+      setSession(newSession);
+      sessionRef.current = newSession;
+      historyRef.current = history;
+      setStatus(newSession.status);
+      setIsInitialized(true);
+      try {
+        connectWebSocket(newSession.id);
+      } catch (connectionError) {
+        console.error(`[AgentSession] Failed to connect activated session ${newSession.id}:`, connectionError);
+      }
+      try {
+        onSessionStartedRef.current?.(newSession);
+      } catch (callbackError) {
+        console.error(`[AgentSession] onSessionStarted failed for ${newSession.id}:`, callbackError);
+      }
+      if (data.kind === "uncertain") {
+        toast.warning("First message delivery could not be confirmed", {
+          description: "The session exists, but the agent may not have received your message. Check the conversation before resending.",
+        });
+      }
+    } else {
+      console.log(`[AgentSession] Activated session ${newSession.id} for a background workspace; not adopting it into the current view`);
+    }
+    return { session: newSession, origin, adopted };
+  }, [connectWebSocket]);
+
+  const IN_PROGRESS_RETRY_MS = 1000;
+  const IN_PROGRESS_MAX_RETRIES = 15;
+
+  /**
+   * Drive one first-send operation to a terminal outcome. `call(force)` is
+   * the request (start or activate) under the submission's stable key; the
+   * loop handles the eviction prompt (same key, `force: true`), another
+   * holder's lease (202 → poll), and decides whether the persisted
+   * submission survives for a retry (transport / retryable) or is cleared
+   * (real session, or a terminal refusal).
+   */
+  const runFirstSend = useCallback(async (
+    origin: AgentWorkspaceIdentity,
+    generation: number,
+    pending: PendingSubmission,
+    call: (force: boolean) => Promise<LifecycleResponse>,
+  ): Promise<EnsuredAgentSession | null> => {
+    let force = false;
+    let waits = 0;
+    for (;;) {
+      let data: LifecycleResponse;
+      try {
+        data = await call(force);
+      } catch (e) {
+        // Transport failure: the outcome is unknown, the key is still good.
+        // Keep the submission so a retry (or a refresh) replays it.
+        const msg = e instanceof Error ? e.message : "Failed to start session";
+        console.error(`[AgentSession] first send transport failure for ${pending.operationId}:`, msg);
+        if (sessionGenerationRef.current === generation) {
+          setError(msg);
+          toast.error("Failed to send message", { description: `${msg}. Sending again will retry the same request.` });
+        }
+        return null;
+      }
+      if (lifecycleSessionReady(data.kind) && data.session) {
+        clearPendingSubmission(pending.workspaceKey, pending.operationId);
+        return adoptActivatedSession(data, origin);
+      }
+      if (sessionGenerationRef.current !== generation) return null;
+      switch (data.kind) {
+        case "resident_limit": {
+          const evict = await promptForEviction(data, generation);
+          if (!evict) return null; // submission kept: the user may retry
+          force = true;
+          continue;
+        }
+        case "in_progress": {
+          if (waits++ >= IN_PROGRESS_MAX_RETRIES) {
+            setError("Activation is still in progress; try again in a moment");
+            return null;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, IN_PROGRESS_RETRY_MS));
+          if (sessionGenerationRef.current !== generation) return null;
+          continue;
+        }
+        case "retryable_failure":
+        case "remote_unreachable": {
+          const msg = data.error ?? `Failed to start session (${data.kind})`;
+          setError(msg);
+          toast.error("Failed to send message", { description: `${msg}. Sending again will retry the same request.` });
+          return null;
+        }
+        default: {
+          // expired / conflicts / not_found / permanent failures: this key is
+          // finished. Clear it so the next send starts a fresh operation.
+          clearPendingSubmission(pending.workspaceKey, pending.operationId);
+          const msg = data.error ?? `Failed to start session (${data.kind})`;
+          setError(msg);
+          toast.error("Failed to send message", { description: msg });
+          return null;
+        }
+      }
+    }
+  }, [adoptActivatedSession, promptForEviction]);
+
+  // Single-flight per workspace: the imperative submitMessage (page.tsx) and
+  // the form submit can race on the same placeholder. The second caller waits
+  // for the first's session and delivers its own content there as a normal
+  // message instead of opening a second conversation.
+  const firstSendInFlightRef = useRef<Map<string, Promise<EnsuredAgentSession | null>>>(new Map());
+
+  const currentOrigin = useCallback((): { origin: AgentWorkspaceIdentity; key: string } | null => {
+    if (!projectId) return null;
+    const origin = createAgentWorkspaceIdentity(projectId, branch, agentMode, explicitSessionId)!;
+    return { origin, key: workspaceKey(origin.projectId, origin.branch, origin.agentMode) };
+  }, [projectId, branch, agentMode, explicitSessionId]);
+
+  /** Text-only first send: one `start` round trip under a stable key. */
+  const startConversation = useCallback((
+    content: string | ContentPart[],
+    permissionMode?: "plan" | "edit",
+    model?: string | null,
+  ): Promise<EnsuredAgentSession | null> => {
+    const ctx = currentOrigin();
+    if (!ctx) return Promise.resolve(null);
+    if (session) return Promise.resolve({ session, origin: ctx.origin, adopted: true });
+    const { origin, key } = ctx;
+    const generation = sessionGenerationRef.current;
+
+    const inFlight = firstSendInFlightRef.current.get(key);
+    if (inFlight) {
+      return inFlight.then(async (first) => {
+        if (!first) return null;
+        await sendMessage(content, first.session.id);
+        return first;
+      });
+    }
+
+    const run = async (): Promise<EnsuredAgentSession | null> => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        // An explicit resend of the same content continues the same
+        // operation; anything else is a new one, and the one it replaces is
+        // cancelled so its pending identity does not wait for its TTL.
+        const existing = readPendingSubmission(key);
+        const retrying = existing !== null && sameSubmissionContent(existing.content, content);
+        const pending: PendingSubmission = retrying ? { ...existing!, content } : {
+          workspaceKey: key, projectId: origin.projectId, branch: origin.branch, agentMode: origin.agentMode ?? "local",
+          operationId: crypto.randomUUID(), sessionId: null, content, permissionMode, model: model ?? null, createdAt: Date.now(),
+        };
+        const replaced = writePendingSubmission(pending);
+        if (replaced?.sessionId) void cancelPreparedAgentSession(replaced.sessionId).catch(() => undefined);
+
+        return await runFirstSend(origin, generation, pending, (force) => pending.sessionId
+          ? activateAgentSession(pending.sessionId, { activationKey: pending.operationId, instruction: content, force })
+          : startAgentSession(origin.projectId, {
+            operationId: pending.operationId, branch: origin.branch, permissionMode: pending.permissionMode ?? permissionMode,
+            agentType, model: pending.model ?? model, instruction: content, force,
+          }));
+      } finally {
+        if (firstSendInFlightRef.current.get(key) === promise) firstSendInFlightRef.current.delete(key);
+        if (sessionGenerationRef.current === generation) setIsLoading(false);
+      }
+    };
+    const promise = run();
+    firstSendInFlightRef.current.set(key, promise);
+    return promise;
+  }, [session, currentOrigin, agentType, runFirstSend, sendMessage]);
+
+  /** Paste/upload first send, step 1: an invisible identity to upload against. */
+  const prepareConversation = useCallback(async (
+    permissionMode?: "plan" | "edit",
+    model?: string | null,
+  ): Promise<PreparedConversation | null> => {
+    const ctx = currentOrigin();
+    if (!ctx) return null;
+    const { origin, key } = ctx;
+    const generation = sessionGenerationRef.current;
+    setError(null);
+    // A submission still in its prepare step (no content yet) is resumed
+    // under the same key; a completed-but-unsent one is superseded.
+    const existing = readPendingSubmission(key);
+    let pending: PendingSubmission = existing && existing.content === null ? existing : {
+      workspaceKey: key, projectId: origin.projectId, branch: origin.branch, agentMode: origin.agentMode ?? "local",
+      operationId: crypto.randomUUID(), sessionId: null, content: null, permissionMode, model: model ?? null, createdAt: Date.now(),
+    };
+    const replaced = writePendingSubmission(pending);
+    if (replaced?.sessionId) void cancelPreparedAgentSession(replaced.sessionId).catch(() => undefined);
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let data: LifecycleResponse;
+      try {
+        data = await prepareAgentSession(origin.projectId, {
+          operationId: pending.operationId, branch: origin.branch, permissionMode: pending.permissionMode ?? permissionMode,
+          agentType, model: pending.model ?? model, purpose: "interactive_upload",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Failed to prepare session";
+        if (sessionGenerationRef.current === generation) { setError(msg); toast.error("Failed to send message", { description: msg }); }
+        return null;
+      }
+      if (sessionGenerationRef.current !== generation) return null;
+      if ((data.kind === "prepared" || data.kind === "replayed") && data.lifecycle) {
+        pending = { ...pending, sessionId: data.lifecycle.sessionId };
+        writePendingSubmission(pending);
+        return { operationId: pending.operationId, sessionId: data.lifecycle.sessionId, origin, legacy: data.lifecycle.legacy === true };
+      }
+      if (data.kind === "expired") {
+        // The resumed key had been cancelled meanwhile: start a fresh one.
+        clearPendingSubmission(key, pending.operationId);
+        pending = { ...pending, operationId: crypto.randomUUID(), sessionId: null };
+        writePendingSubmission(pending);
+        continue;
+      }
+      clearPendingSubmission(key, pending.operationId);
+      const msg = data.error ?? `Failed to prepare session (${data.kind})`;
+      setError(msg);
+      toast.error("Failed to send message", { description: msg });
+      return null;
+    }
+    return null;
+  }, [currentOrigin, agentType]);
+
+  /** Paste/upload first send, step 2: activate the prepared identity with the materialized content. */
+  const activateConversation = useCallback((
+    prepared: PreparedConversation,
+    content: string | ContentPart[],
+  ): Promise<EnsuredAgentSession | null> => {
+    const key = workspaceKey(prepared.origin.projectId, prepared.origin.branch, prepared.origin.agentMode);
+    const generation = sessionGenerationRef.current;
+    const existing = readPendingSubmission(key);
+    const pending: PendingSubmission = existing && existing.operationId === prepared.operationId
+      ? { ...existing, sessionId: prepared.sessionId, content }
+      : {
+        workspaceKey: key, projectId: prepared.origin.projectId, branch: prepared.origin.branch,
+        agentMode: prepared.origin.agentMode ?? "local", operationId: prepared.operationId,
+        sessionId: prepared.sessionId, content, createdAt: Date.now(),
+      };
+    writePendingSubmission(pending);
+    const run = async (): Promise<EnsuredAgentSession | null> => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        return await runFirstSend(prepared.origin, generation, pending, (force) =>
+          activateAgentSession(prepared.sessionId, { activationKey: prepared.operationId, instruction: content, force }));
+      } finally {
+        if (firstSendInFlightRef.current.get(key) === promise) firstSendInFlightRef.current.delete(key);
+        if (sessionGenerationRef.current === generation) setIsLoading(false);
+      }
+    };
+    const promise = run();
+    firstSendInFlightRef.current.set(key, promise);
+    return promise;
+  }, [runFirstSend]);
+
+  /** Preprocessing failed after prepare: tombstone the identity (idempotent) and forget the submission. */
+  const cancelPreparedConversation = useCallback(async (prepared: PreparedConversation): Promise<void> => {
+    const key = workspaceKey(prepared.origin.projectId, prepared.origin.branch, prepared.origin.agentMode);
+    clearPendingSubmission(key, prepared.operationId);
+    try {
+      const result = await cancelPreparedAgentSession(prepared.sessionId);
+      if (prepared.legacy && result.kind === "cancelled") {
+        deleteCachedSessionSnapshot(prepared.origin.projectId, prepared.origin.branch, prepared.origin.explicitSessionId, prepared.sessionId);
+      }
+    } catch (e) {
+      // The pending identity has a TTL; failing to cancel costs nothing visible.
+      console.warn(`[AgentSession] cancel prepared session ${prepared.sessionId} failed:`, e);
+    }
+  }, []);
+
+  // Replay entry point for startSession's "no session" branch (declared as a
+  // ref: startSession is defined above these callbacks).
+  const replayPendingSubmissionRef = useRef<((pending: PendingSubmission, generation: number) => Promise<EnsuredAgentSession | null>) | null>(null);
+  replayPendingSubmissionRef.current = async (pending, generation) => {
+    const origin = createAgentWorkspaceIdentity(pending.projectId, pending.branch, pending.agentMode, null)!;
+    const content = pending.content!;
+    console.log(`[AgentSession] Replaying pending first send ${pending.operationId} for ${pending.workspaceKey}`);
+    return runFirstSend(origin, generation, pending, (force) => pending.sessionId
+      ? activateAgentSession(pending.sessionId, { activationKey: pending.operationId, instruction: content, force })
+      : startAgentSession(pending.projectId, {
+        operationId: pending.operationId, branch: pending.branch, permissionMode: pending.permissionMode,
+        agentType, model: pending.model, instruction: content, force,
+      }));
+  };
+
   // Create a real session on demand (called by submitMessage on first send).
   // POSTs to /api/projects/:projectId/agent-sessions/new and wires up WS.
   // If a session already exists, returns it unchanged.
@@ -2136,9 +2537,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     if (currentWorkspaceKey && explicitSessionId) {
       removePlaceholder(currentWorkspaceKey);
     }
+    // A placeholder with a first send still pending under its key (refresh
+    // mid-send) is not "staying": startSession must run to replay it. Same
+    // rule as the auto-start effect below.
     const stayingInPlaceholder =
       !explicitSessionId && currentWorkspaceKey !== null
-      && hasPlaceholder(currentWorkspaceKey);
+      && hasPlaceholder(currentWorkspaceKey)
+      && !readPendingSubmission(currentWorkspaceKey)?.content;
 
     // Restore a warm target snapshot synchronously so switching does not blank
     // the conversation while the lightweight head check runs.
@@ -2212,9 +2617,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // the default branch's latest session and flash it before the real target.
     // shouldAutoStartRef stays true, so we start once suspension lifts.
     if (suspended) return;
-    const inPlaceholder =
-      projectId !== null
-      && hasPlaceholder(workspaceKey(projectId, branch, agentMode));
+    const currentKey = projectId !== null ? workspaceKey(projectId, branch, agentMode) : null;
+    // A persisted placeholder normally means "show the empty state, load
+    // nothing" — except when a first send for this workspace is still pending
+    // under its key (refresh mid-send): then startSession must run so the
+    // pending submission is replayed instead of silently abandoned.
+    const inPlaceholder = currentKey !== null && hasPlaceholder(currentKey)
+      && !readPendingSubmission(currentKey)?.content;
     if (shouldAutoStartRef.current && projectId && (!session || cachePreviewRef.current) && !isLoading && !lastStartFailedRef.current && !inPlaceholder) {
       shouldAutoStartRef.current = false;
       console.log(`[AgentSession] Auto-start: projectId=${projectId}, branch=${branch}, agentMode=${agentMode}`);
@@ -2280,6 +2689,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     setModel,
     startNewConversation,
     ensureSession,
+    startConversation,
+    prepareConversation,
+    activateConversation,
+    cancelPreparedConversation,
     switchMode,
     acceptPlan,
     residentLimitPrompt,
