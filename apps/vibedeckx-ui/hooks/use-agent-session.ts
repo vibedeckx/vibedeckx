@@ -744,6 +744,13 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
+  /**
+   * The session the stream is *supposed* to be on, claimed synchronously by
+   * `connectWebSocket` before its token hop. `wsSessionIdRef` only catches up
+   * once `openSocket` runs, so it cannot arbitrate between two connects that
+   * are both in flight.
+   */
+  const desiredSessionIdRef = useRef<string | null>(null);
   // Sockets already warned about for dropping frames — one line each, not one
   // per frame. Weak so a closed socket is not retained for the warning's sake.
   const reportedRetiredDropRef = useRef<WeakSet<WebSocket>>(new WeakSet());
@@ -896,12 +903,36 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // unlike a promise that never settles.
   const TOKEN_WAIT_TIMEOUT_MS = 5000;
   const connectWebSocket = useCallback((sessionId: string, forceRefresh = false) => {
+    // Claim the stream for `sessionId` before the token hop, and retire the
+    // previous session's socket right now rather than in `openSocket`. Until
+    // `openSocket` runs, that socket is still `wsRef.current`, so its
+    // `isCurrentSocket()` guard passes and its frames are applied to a buffer
+    // that has already been handed to another conversation — refilling a
+    // container the adopt path just cleared, which `openSocket` then preserves
+    // because it is no longer empty.
+    desiredSessionIdRef.current = sessionId;
+    if (wsRef.current && wsSessionIdRef.current !== sessionId) {
+      console.log(`[AgentSession] Retiring WS for ${wsSessionIdRef.current}, claiming ${sessionId}`);
+      wsRef.current.close(1000, "session-switch");
+      wsRef.current = null;
+      wsSessionIdRef.current = null;
+    }
     void Promise.race([
       getFreshToken(forceRefresh ? { skipCache: true } : undefined),
       new Promise<void>((resolve) => setTimeout(resolve, TOKEN_WAIT_TIMEOUT_MS)),
     ])
       .catch(() => undefined)
-      .then(() => openSocketRef.current(sessionId));
+      .then(() => {
+        // Two token hops can settle out of order (cache hit vs. network mint,
+        // or the 5s timeout arm). A continuation for a session we have since
+        // moved off must not open a socket: `openSocket` would close the live
+        // one and subscribe the view back to the conversation it left.
+        if (desiredSessionIdRef.current !== sessionId) {
+          console.log(`[AgentSession] Dropping stale connect for ${sessionId} (now ${desiredSessionIdRef.current})`);
+          return;
+        }
+        openSocketRef.current(sessionId);
+      });
   }, []);
 
   // Connect WebSocket to session
@@ -1631,6 +1662,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         wsRef.current = null;
         wsSessionIdRef.current = null;
       }
+      // Not inside the branch above: a connect can be mid token hop, which
+      // owns no socket yet. Leaving the claim standing lets its continuation
+      // subscribe to a session this view has already dropped.
+      desiredSessionIdRef.current = null;
       setSession(null);
       sessionRef.current = null;
       historyRef.current = null;
@@ -1846,6 +1881,10 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       wsRef.current = null;
       wsSessionIdRef.current = null;
     }
+    // Outside the branch: `connectWebSocket` retires the old socket before its
+    // token hop, so "a connect is pending and no socket exists" is the normal
+    // state here, and it is exactly the one that must be revoked.
+    desiredSessionIdRef.current = null;
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -1948,6 +1987,26 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     return confirmed;
   }, []);
 
+  /**
+   * A create/activate is adopted on workspace identity, not on what the view
+   * currently shows — and the two diverge: "New Conversation" clears the
+   * buffer, but while the create is in flight the workspace can re-resolve the
+   * URL's `?session=` and repaint the PREVIOUS session's transcript. Adopting
+   * on top of that buffer renders the old conversation under the new id, and
+   * `persistCurrentSnapshot` then copies its tail into the new session's
+   * history and reconnect cursor, so a reconnect asks for `?after=<old tail>`
+   * and the real entries are never replayed.
+   */
+  const discardEntriesOfOtherSession = useCallback((newSession: AgentSession) => {
+    if (!sessionRef.current || sessionRef.current.id === newSession.id) return;
+    console.log(
+      `[AgentSession] Adopting ${newSession.id} over ${sessionRef.current.id} — dropping its entries`,
+    );
+    setMessages([]);
+    containerRef.current = { entries: {}, status: newSession.status };
+    setHasEarlierHistory(false);
+  }, []);
+
   /** The moment a session is real: cache, mark the workspace, and adopt into the live view if still displayed. */
   const adoptActivatedSession = useCallback((
     data: LifecycleResponse,
@@ -1976,6 +2035,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // Newer authoritative state than any in-flight latest-session lookup.
       sessionGenerationRef.current += 1;
       setIsLoading(false);
+      discardEntriesOfOtherSession(newSession);
       setSession(newSession);
       sessionRef.current = newSession;
       historyRef.current = history;
@@ -2000,7 +2060,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       console.log(`[AgentSession] Activated session ${newSession.id} for a background workspace; not adopting it into the current view`);
     }
     return { session: newSession, origin, adopted };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, discardEntriesOfOtherSession]);
 
   const IN_PROGRESS_RETRY_MS = 1000;
   const IN_PROGRESS_MAX_RETRIES = 15;
@@ -2347,6 +2407,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           // response cannot overwrite the adopted session.
           sessionGenerationRef.current += 1;
           setIsLoading(false);
+          discardEntriesOfOtherSession(newSession);
           setSession(newSession);
           sessionRef.current = newSession;
           historyRef.current = history;
@@ -2394,7 +2455,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const promise = run();
     ensureSessionInFlightRef.current.set(inFlightKey, promise);
     return promise;
-  }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket]);
+  }, [projectId, branch, agentMode, agentType, session, explicitSessionId, connectWebSocket, discardEntriesOfOtherSession]);
 
   const loadEarlierHistory = useCallback(async (): Promise<void> => {
     const currentSession = sessionRef.current;
@@ -2442,6 +2503,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         wsRef.current.close();
         wsSessionIdRef.current = null;
       }
+      // A pending token hop outlives the component; revoking its claim is the
+      // only thing that stops it opening a socket nobody will ever close.
+      desiredSessionIdRef.current = null;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
@@ -2509,6 +2573,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       wsRef.current = null;
       wsSessionIdRef.current = null;
     }
+    // Outside the branch: a connect pending on its token hop holds no socket,
+    // and its continuation would open one into the workspace we just left.
+    desiredSessionIdRef.current = null;
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
