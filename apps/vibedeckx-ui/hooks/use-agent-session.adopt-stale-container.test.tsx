@@ -187,7 +187,7 @@ describe("adopting a newly created session", () => {
     expect(contents()).toEqual(["new-session-answer"]);
   });
 
-  it("retires the previous socket at adoption, not when its replacement finally opens", async () => {
+  it("drops frames from the previous session's socket while the replacement connects", async () => {
     await render("s-old");
     await act(async () => { FakeWebSocket.instances.at(-1)!.open(); });
     expect(contents()).toEqual(["old-session-answer", "turn_end"]);
@@ -214,8 +214,8 @@ describe("adopting a newly created session", () => {
 
     // Creating a session on this branch stops the previous one, so its socket
     // emits a closing entry and a status patch right here. Both belong to
-    // s-old; applied, they refill the buffer the adopt just cleared — and
-    // `openSocket` preserves a non-empty buffer.
+    // s-old, and s-old's socket is still `wsRef.current` — only the buffer's
+    // own id can tell them apart from frames this view is waiting for.
     await act(async () => {
       oldSocket.receive(entryPatch(287, text("old-session-farewell")));
       oldSocket.receive({ JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }] });
@@ -277,5 +277,89 @@ describe("adopting a newly created session", () => {
       .toEqual([expect.stringContaining("/s-new/stream")]);
     const live = FakeWebSocket.instances.filter((ws) => ws.readyState !== FakeWebSocket.CLOSED);
     expect(live.map((ws) => ws.url)).toEqual([expect.stringContaining("/s-new/stream")]);
+  });
+});
+
+describe("connecting a socket over a buffer that belongs elsewhere", () => {
+  it("replaces the loaded transcript when the resolved session has no history of its own", async () => {
+    await render("s-old");
+    await act(async () => { FakeWebSocket.instances.at(-1)!.open(); });
+    expect(contents()).toEqual(["old-session-answer", "turn_end"]);
+
+    // The id resolves to a different session, and that one is empty. The
+    // window carries nothing to commit, so the buffer is never overwritten —
+    // it is still holding s-old's entries when the socket for s-other opens.
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url).includes("/history-head")) {
+        return { ok: true, json: async () => ({ historyEpoch: 0, latestEntryIndex: null, lastTurnEndEntryIndex: null, status: "stopped" }) } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          historyEpoch: 0, latestEntryIndex: null, lastTurnEndEntryIndex: null,
+          entries: [], previousCursor: null, hasMore: false, status: "stopped",
+          session: { id: "s-other", projectId: "p1", branch: "main", status: "stopped" },
+        }),
+      } as Response;
+    });
+    await act(async () => { await latest!.startSession(); });
+    expect(latest!.session?.id).toBe("s-other");
+
+    const socket = FakeWebSocket.instances.at(-1)!;
+    expect(socket.url).toContain("/s-other/stream");
+    await act(async () => {
+      socket.open();
+      socket.receive({ Ready: true, historyEpoch: 0 });
+    });
+    expect(contents()).toEqual([]);
+  });
+});
+
+describe("switching sessions while a socket is still live", () => {
+  it("does not let the outgoing socket's watchdog reclaim the stream mid-switch", async () => {
+    vi.useFakeTimers();
+    try {
+      await render("s-old");
+      await act(async () => { FakeWebSocket.instances.at(-1)!.open(); });
+
+      await act(async () => { await latest!.startNewConversation(); });
+      let releaseCreate!: () => void;
+      const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+      start.mockImplementationOnce(async () => { await createGate; return activated("s-new"); });
+      let sending!: Promise<unknown>;
+      await act(async () => { sending = latest!.startConversation("hi", "edit", null); });
+
+      // The re-resolve of ?session=s-old leaves a LIVE socket on the outgoing
+      // session, which is what arms the watchdog below.
+      await act(async () => { await latest!.startSession(); });
+      const oldSocket = FakeWebSocket.instances.at(-1)!;
+      expect(oldSocket.url).toContain("/s-old/stream");
+      await act(async () => { oldSocket.open(); });
+
+      // Walk s-old's 95s silence watchdog to just short of firing. It has to
+      // land INSIDE the switch's 5s token wait: any later and that wait's own
+      // timeout arm opens s-new first, and `openSocket` retires s-old on its
+      // way in — which is not the ordering under test.
+      await act(async () => { await vi.advanceTimersByTimeAsync(93_000); });
+
+      // Adopt s-new; its socket is stuck on the token hop.
+      const gates = heldToken();
+      await act(async () => { releaseCreate(); await sending; });
+      expect(gates.pending()).toBeGreaterThan(0);
+      const openedBeforeSilence = FakeWebSocket.instances.length;
+
+      // s-old now goes quiet. Its watchdog reads wsRef/wsSessionIdRef to decide
+      // where to reconnect — state that still names s-old unless the claim
+      // retired it. Firing here would reclaim the stream for the conversation
+      // the view just left and discard the s-new continuation.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      await gates.releaseAll();
+
+      expect(FakeWebSocket.instances.slice(openedBeforeSilence).map((ws) => ws.url))
+        .toEqual([expect.stringContaining("/s-new/stream")]);
+      expect(latest!.session?.id).toBe("s-new");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

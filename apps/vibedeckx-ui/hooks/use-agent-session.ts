@@ -171,7 +171,15 @@ type AgentWsMessage =
   | { keepalive: number };
 
 // Container for patch target
+/**
+ * The live entry buffer, and whose entries they are. A JSON Patch carries only
+ * `/entries/<index>` — nothing that names a conversation — so without
+ * `sessionId` the only way to decide whether an arriving frame belongs here is
+ * to ask a proxy question ("is this the current socket?", "is the buffer
+ * empty?") and hope it tracks the real one.
+ */
 interface PatchContainer {
+  sessionId: string | null;
   entries: Record<number, AgentMessage>;
   status: AgentSessionStatus;
 }
@@ -758,7 +766,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const replaceSilentSocketRef = useRef<(socket: WebSocket) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
-  const containerRef = useRef<PatchContainer>({ entries: {}, status: "stopped" });
+  const containerRef = useRef<PatchContainer>({ sessionId: null, entries: {}, status: "stopped" });
   const historyRef = useRef<SessionHistoryWindow | null>(null);
   const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
   const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
@@ -903,13 +911,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // unlike a promise that never settles.
   const TOKEN_WAIT_TIMEOUT_MS = 5000;
   const connectWebSocket = useCallback((sessionId: string, forceRefresh = false) => {
-    // Claim the stream for `sessionId` before the token hop, and retire the
-    // previous session's socket right now rather than in `openSocket`. Until
-    // `openSocket` runs, that socket is still `wsRef.current`, so its
-    // `isCurrentSocket()` guard passes and its frames are applied to a buffer
-    // that has already been handed to another conversation — refilling a
-    // container the adopt path just cleared, which `openSocket` then preserves
-    // because it is no longer empty.
+    // Claim the stream, and retire a socket belonging to another session now
+    // rather than in `openSocket`. Not for its frames — `onmessage` guards
+    // those — but because `wsRef`/`wsSessionIdRef` are what the silence
+    // watchdog and the onclose reconnect read to decide WHERE to reconnect.
+    // Left pointing at the outgoing session across the token hop, either one
+    // can fire and reclaim the stream for the conversation we just left.
     desiredSessionIdRef.current = sessionId;
     if (wsRef.current && wsSessionIdRef.current !== sessionId) {
       console.log(`[AgentSession] Retiring WS for ${wsSessionIdRef.current}, claiming ${sessionId}`);
@@ -1001,9 +1008,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       return;
     }
 
-    // Only reset container if it has no existing data (preserve REST-provided messages)
-    if (Object.keys(containerRef.current.entries).length === 0) {
-      containerRef.current = { entries: {}, status: "running" };
+    // The buffer is reusable only if it already holds THIS conversation —
+    // typically entries a REST window just put there. Emptiness used to stand
+    // in for that question and answered it wrong whenever another session's
+    // transcript was still loaded.
+    if (containerRef.current.sessionId !== sessionId) {
+      containerRef.current = { sessionId, entries: {}, status: "running" };
     }
     finishedRef.current = false;
     isReplayingRef.current = true; // Buffer patches until Ready signal
@@ -1050,13 +1060,23 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     };
 
     ws.onmessage = (event) => {
-      if (!isCurrentSocket()) {
+      // Two questions, and neither guard answers the other's.
+      // `isCurrentSocket()` asks whether this socket is still the live one for
+      // its session — the only thing that can separate a watchdog-retired
+      // socket from the replacement that took over the SAME session, because
+      // their ids are equal. The buffer's id asks whether these entries belong
+      // to the conversation on screen, which socket currency cannot answer
+      // while a connect is in flight and `wsRef` has not moved yet.
+      if (!isCurrentSocket() || containerRef.current.sessionId !== sessionId) {
         // Silently dropping conversation frames is indistinguishable from the
         // server never sending them. Say it once per retired socket so the next
         // "content vanished" report is attributable without guesswork.
         if (!reportedRetiredDropRef.current.has(ws)) {
           reportedRetiredDropRef.current.add(ws);
-          console.warn(`[AgentSession] Dropping frames from retired socket for ${sessionId}`);
+          console.warn(
+            `[AgentSession] Dropping frames from retired socket for ${sessionId}` +
+            (containerRef.current.sessionId === sessionId ? "" : `; buffer holds ${containerRef.current.sessionId}`),
+          );
         }
         return;
       }
@@ -1070,7 +1090,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
         if ("HistorySync" in msg) {
           if (msg.HistorySync.reset || (historyRef.current && historyRef.current.historyEpoch !== msg.HistorySync.historyEpoch)) {
-            containerRef.current = { entries: {}, status: containerRef.current.status };
+            containerRef.current = { sessionId, entries: {}, status: containerRef.current.status };
             historyRef.current = historyRef.current
               ? {
                   ...historyRef.current,
@@ -1366,7 +1386,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setSession(null);
       setStatus("stopped");
       setMessages([]);
-      containerRef.current = { entries: {}, status: "stopped" };
+      containerRef.current = { sessionId: null, entries: {}, status: "stopped" };
       historyRef.current = null;
       setHasEarlierHistory(false);
       setIsInitialized(true);
@@ -1484,7 +1504,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // cache cannot disagree about the tail (a regressed `historyRef` would hand
       // the next reconnect a cursor below what is on screen, and the next warm
       // preview a snapshot missing the same entries).
-      const sameConversation = sessionRef.current?.id === newSession.id
+      const sameConversation = containerRef.current.sessionId === newSession.id
         && historyRef.current?.historyEpoch === normalizedHistory.historyEpoch;
       const committed = commitWindowOverLiveTail(normalizedHistory, containerRef.current, sameConversation);
       if (committed !== normalizedHistory) {
@@ -1505,7 +1525,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       // the active tail after its sealed boundary.
       if (committed.entries.length > 0) {
         setMessages(committed.entries.map((entry) => entry.message));
-        containerRef.current = { entries: entriesRecord(committed.entries), status: newSession.status };
+        containerRef.current = { sessionId: newSession.id, entries: entriesRecord(committed.entries), status: newSession.status };
       }
       setIsInitialized(true);
 
@@ -1672,7 +1692,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setStatus("stopped");
       setIsInitialized(true);
       setMessages([]);
-      containerRef.current = { entries: {}, status: "stopped" };
+      containerRef.current = { sessionId: null, entries: {}, status: "stopped" };
     }
     return true;
   }, []);
@@ -1906,7 +1926,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     // bar left over from the session we just detached from.
     setBackgroundTasks({ tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false });
     setMessages([]);
-    containerRef.current = { entries: {}, status: "stopped" };
+    containerRef.current = { sessionId: null, entries: {}, status: "stopped" };
     historyRef.current = null;
     setHasEarlierHistory(false);
     // Mark this workspace as "in placeholder mode" so auto-start skips it,
@@ -1996,14 +2016,18 @@ export function useAgentSession(projectId: string | null, branch: string | null,
    * `persistCurrentSnapshot` then copies its tail into the new session's
    * history and reconnect cursor, so a reconnect asks for `?after=<old tail>`
    * and the real entries are never replayed.
+   *
+   * `openSocket` would reach the same conclusion, but only after its token
+   * hop; handing the buffer over here keeps the wrong transcript off screen in
+   * the meantime.
    */
   const discardEntriesOfOtherSession = useCallback((newSession: AgentSession) => {
-    if (!sessionRef.current || sessionRef.current.id === newSession.id) return;
+    if (containerRef.current.sessionId === newSession.id) return;
     console.log(
-      `[AgentSession] Adopting ${newSession.id} over ${sessionRef.current.id} — dropping its entries`,
+      `[AgentSession] Adopting ${newSession.id} over ${containerRef.current.sessionId} — dropping its entries`,
     );
     setMessages([]);
-    containerRef.current = { entries: {}, status: newSession.status };
+    containerRef.current = { sessionId: newSession.id, entries: {}, status: newSession.status };
     setHasEarlierHistory(false);
   }, []);
 
@@ -2467,7 +2491,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       if (sessionRef.current?.id !== currentSession.id) return;
       if (older.historyEpoch !== currentHistory.historyEpoch) {
         historyRef.current = older;
-        containerRef.current = { entries: entriesRecord(older.entries), status: older.status };
+        containerRef.current = { sessionId: currentSession.id, entries: entriesRecord(older.entries), status: older.status };
       } else {
         const merged = new Map<number, AgentMessage>();
         for (const entry of older.entries) merged.set(entry.entryIndex, entry.message);
@@ -2480,7 +2504,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           previousCursor: older.previousCursor,
           hasMore: older.hasMore,
         };
-        containerRef.current = { entries: entriesRecord(entries), status: containerRef.current.status };
+        containerRef.current = { sessionId: containerRef.current.sessionId, entries: entriesRecord(entries), status: containerRef.current.status };
       }
       const nextHistory = historyRef.current!;
       setMessages(nextHistory.entries.map((entry) => entry.message));
@@ -2556,6 +2580,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     cachePreviewRef.current = true;
     setMessages(previewEntries.map((entry) => entry.message));
     containerRef.current = {
+      sessionId: warmSnapshot.session.id,
       entries: entriesRecord(previewEntries),
       status: warmSnapshot.session.status,
     };
@@ -2634,7 +2659,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setIsCachePreview(false);
       cachePreviewRef.current = false;
       setMessages([]);
-      containerRef.current = { entries: entriesRecord([]), status: "stopped" };
+      containerRef.current = { sessionId: null, entries: entriesRecord([]), status: "stopped" };
       historyRef.current = null;
       setHasEarlierHistory(false);
     }

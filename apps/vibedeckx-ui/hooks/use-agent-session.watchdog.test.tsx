@@ -126,4 +126,43 @@ describe("agent WebSocket silence watchdog", () => {
     expect(latest!.isConnected).toBe(true);
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
+
+  it("ignores a retired socket's late frames and keeps watching the replacement", async () => {
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+    await act(async () => {
+      root!.render(<Probe />);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const silentSocket = FakeWebSocket.instances[0];
+    silentSocket.readyState = FakeWebSocket.OPEN;
+    const lateMessage = silentSocket.onmessage;
+
+    await act(async () => {
+      silentSocket.onopen?.();
+      await vi.advanceTimersByTimeAsync(95_000);
+    });
+
+    const replacement = FakeWebSocket.instances[1];
+    replacement.readyState = FakeWebSocket.OPEN;
+    await act(async () => { replacement.onopen?.(); });
+    expect(latest!.isConnected).toBe(true);
+
+    // The retired socket belongs to the same session as its replacement, so
+    // nothing about the conversation's identity separates them — only socket
+    // currency does. A straggler frame that gets through re-arms the single
+    // shared silence timer against a socket that is already closing; that
+    // timer then expires into a no-op and the live connection is never
+    // watched again.
+    await act(async () => {
+      lateMessage?.({ data: JSON.stringify({ Ready: true }) } as MessageEvent);
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // Still watched: silence on the replacement retires it in turn.
+    await act(async () => { await vi.advanceTimersByTimeAsync(95_000); });
+    expect(replacement.closeCalls).toContainEqual({ code: 4000, reason: "silence watchdog" });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
 });
