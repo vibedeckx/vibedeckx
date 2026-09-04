@@ -32,6 +32,38 @@ const RECONNECT_MAX_DELAY_MS = 30_000;
  */
 const NO_PING_TIMEOUT_MS = 40_000;
 
+/**
+ * How long a dial may sit without completing the WebSocket handshake.
+ *
+ * `ws` installs no handshake timeout of its own. When the dial is swallowed by
+ * something that completes the TCP handshake and then never speaks — a CDN edge
+ * or tunnel daemon whose origin is down — the socket stays in CONNECTING
+ * forever: no `open`, no `error`, no `close`. None of the recovery paths below
+ * are armed in that state, so the worker goes permanently silent while its
+ * process, timers and logs all look healthy (observed in the field: six days).
+ *
+ * ws implements this as an inactivity timeout on the upgrade request and clears
+ * it once the socket is upgraded, so it cannot fire on an idle live tunnel.
+ */
+const HANDSHAKE_TIMEOUT_MS = 20_000;
+
+/** How often the supervisor re-evaluates the connection against the wall clock. */
+const SUPERVISOR_INTERVAL_MS = 10_000;
+
+/**
+ * Supervisor backstop for a stuck dial. Deliberately longer than
+ * HANDSHAKE_TIMEOUT_MS, which is the primary defence: this only fires if ws's
+ * own timeout somehow did not.
+ */
+const DIAL_TIMEOUT_MS = 25_000;
+
+/**
+ * How long a socket may sit in CLOSING. A graceful close() waits for the peer's
+ * close frame, and the peer not answering is exactly the failure we are
+ * recovering from, so the teardown itself needs a deadline.
+ */
+const CLOSING_TIMEOUT_MS = 10_000;
+
 // The hub accepts the WebSocket upgrade and only *then* closes with one of these
 // when it rejects the connect token or the machine identity. So `open` firing
 // proves nothing — a rejected client would otherwise clear its backoff on every
@@ -71,7 +103,13 @@ export class ReverseConnectClient {
   private reconnectAttempt = 0;
   private openedAt: number | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private noPingTimer: ReturnType<typeof setTimeout> | null = null;
+  private supervisorTimer: ReturnType<typeof setInterval> | null = null;
+  /** When the current dial started — the CONNECTING watchdog's reference point. */
+  private dialStartedAt = 0;
+  /** Last time the hub said anything on the control socket (a superset of pings). */
+  private lastFrameAt = 0;
+  /** First tick that observed CLOSING, so a stalled teardown can be forced. */
+  private closingSince = 0;
   private shuttingDown = false;
 
   constructor(localServer: FastifyInstance, serverUrl: string, token: string, localPort: number) {
@@ -84,6 +122,21 @@ export class ReverseConnectClient {
   connect(): void {
     if (this.shuttingDown) return;
 
+    // The supervisor is the one recovery path that cannot be starved. Every
+    // other one is armed by an event — `open`/`ping` arm the liveness check,
+    // `close` schedules the reconnect — and a socket stuck in CONNECTING fires
+    // none of them. Started here, stopped only by shutdown().
+    this.startSupervisor();
+
+    if (this.ws) {
+      // Shouldn't happen: every teardown path clears this first. If it ever
+      // does, dropping the old socket beats leaking a second silent one.
+      console.warn("[ReverseClient] connect() called with a live socket — discarding the old one");
+      const stale = this.ws;
+      this.ws = null;
+      try { stale.terminate(); } catch { /* already gone */ }
+    }
+
     const cleanUrl = this.serverUrl.replace(/\/+$/, "");
     const wsProtocol = cleanUrl.startsWith("https") ? "wss" : "ws";
     const wsUrl = cleanUrl.replace(/^https?/, wsProtocol);
@@ -91,17 +144,22 @@ export class ReverseConnectClient {
 
     console.log(`[ReverseClient] Connecting to ${cleanUrl}...`);
 
-    this.ws = new WebSocket(connectUrl, {
-      maxPayload: 11 * 1024 * 1024,
-    });
+    this.dialStartedAt = Date.now();
+    this.closingSince = 0;
 
-    this.ws.on("open", () => {
+    const ws = new WebSocket(connectUrl, {
+      maxPayload: 11 * 1024 * 1024,
+      handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
+    });
+    this.ws = ws;
+
+    ws.on("open", () => {
       // Deliberately not "Connected": the hub can still reject us after the
-      // upgrade. Backoff is cleared in the close handler, once we know the
-      // connection actually lasted.
+      // upgrade. Backoff is cleared on disconnect, once we know the connection
+      // actually lasted.
       console.log("[ReverseClient] Socket open, awaiting server handshake");
       this.openedAt = Date.now();
-      this.resetNoPingTimer();
+      this.lastFrameAt = Date.now();
 
       // Send status ready. version/capabilities also ride machine_auth (the
       // reliable carrier — this frame can beat the hub's handshake listener).
@@ -111,10 +169,13 @@ export class ReverseConnectClient {
         version: readPackageVersion(),
         capabilities: WORKER_CAPABILITY_KEYS,
       };
-      this.ws!.send(JSON.stringify(frame));
+      ws.send(JSON.stringify(frame));
     });
 
-    this.ws.on("message", (data) => {
+    ws.on("message", (data) => {
+      // Any frame proves the hub is alive, so this is a superset of "last ping"
+      // and is what the liveness check measures against.
+      this.lastFrameAt = Date.now();
       try {
         const frame = JSON.parse(data.toString()) as ControlFrame;
         this.handleFrame(frame);
@@ -123,63 +184,163 @@ export class ReverseConnectClient {
       }
     });
 
-    this.ws.on("close", (code, reason) => {
+    ws.on("close", (code, reason) => {
       const safeReason = redactSecretForms(reason?.toString() || "", this.token);
-      const rejected = AUTH_REJECT_CODES.has(code);
-      const uptime = this.openedAt === null ? 0 : Date.now() - this.openedAt;
-
-      if (rejected) {
-        console.error(
-          `[ReverseClient] Server rejected this connection (code=${code}, reason=${safeReason}). ` +
-            (code === 4001
-              ? "The connect token is no longer valid — open Settings → Remote Servers, " +
-                "read the current token, and re-run `vibedeckx connect` with it."
-              : "This machine's identity was refused — the remote record may belong to " +
-                "another machine or another account.") +
-            " Retrying with backoff, but it will not recover on its own."
-        );
-      } else {
-        console.log(`[ReverseClient] Disconnected (code=${code}, reason=${safeReason})`);
-      }
-
-      // Only a connection that actually held clears the backoff. Resetting on
-      // `open` made every rejected attempt look like a fresh start, pinning the
-      // retry delay at its 1s floor.
-      if (!rejected && this.openedAt !== null && uptime >= HEALTHY_CONNECTION_MS) {
-        this.reconnectAttempt = 0;
-      }
-      this.openedAt = null;
-
-      this.clearNoPingTimer();
-      this.closeAllLocalChannels();
-      void this.localServer.remoteMcpSessionManager?.closeAll("reverse-connect disconnected");
-      this.ws = null;
-
-      if (!this.shuttingDown) {
-        this.scheduleReconnect();
-      }
+      this.handleDisconnect(ws, `code=${code}, reason=${safeReason}`, code);
     });
 
-    this.ws.on("error", (err) => {
+    ws.on("error", (err) => {
+      // A socket we already gave up on emits one of these from terminate(). The
+      // supervisor has already logged why, so don't dress it up as news.
+      if (ws !== this.ws) return;
       console.error(
         "[ReverseClient] WebSocket error:",
         redactErrorSecret(err, this.token),
       );
+      // No reconnect is scheduled here: `close` follows an error, and if it ever
+      // doesn't, the supervisor picks the socket up.
     });
+  }
+
+  /**
+   * The single "this connection is over" funnel. Reached from the close event,
+   * from the supervisor declaring a socket dead, or from both in that order —
+   * so it keys on socket identity and schedules at most one reconnect per
+   * connection.
+   */
+  private handleDisconnect(ws: WebSocket | null, reason: string, code?: number): void {
+    if (ws !== null && ws !== this.ws) return;
+
+    const rejected = code !== undefined && AUTH_REJECT_CODES.has(code);
+    const uptime = this.openedAt === null ? 0 : Date.now() - this.openedAt;
+
+    if (rejected) {
+      console.error(
+        `[ReverseClient] Server rejected this connection (${reason}). ` +
+          (code === 4001
+            ? "The connect token is no longer valid — open Settings → Remote Servers, " +
+              "read the current token, and re-run `vibedeckx connect` with it."
+            : "This machine's identity was refused — the remote record may belong to " +
+              "another machine or another account.") +
+          " Retrying with backoff, but it will not recover on its own."
+      );
+    } else {
+      console.log(`[ReverseClient] Disconnected (${reason})`);
+    }
+
+    // Only a connection that actually held clears the backoff. Resetting on
+    // `open` made every rejected attempt look like a fresh start, pinning the
+    // retry delay at its 1s floor.
+    if (!rejected && this.openedAt !== null && uptime >= HEALTHY_CONNECTION_MS) {
+      this.reconnectAttempt = 0;
+    }
+    this.openedAt = null;
+    this.closingSince = 0;
+
+    this.closeAllLocalChannels();
+    void this.localServer.remoteMcpSessionManager?.closeAll("reverse-connect disconnected");
+
+    // Drop our claim on the socket *before* touching it, and leave the listeners
+    // attached. terminate() on a CONNECTING socket goes through ws's
+    // abortHandshake, which emits `error` and then `close` on a later tick — an
+    // 'error' with no listener is an unhandled EventEmitter error, and thrown
+    // from a nextTick callback it takes the process down. Both late events land
+    // after this.ws is null and are dropped by the identity check above.
+    this.ws = null;
+    if (ws) {
+      try { ws.terminate(); } catch { /* already gone */ }
+    }
+
+    if (this.shuttingDown) return;
+    if (this.reconnectTimer) return;
+    this.scheduleReconnect();
+  }
+
+  private startSupervisor(): void {
+    if (this.supervisorTimer) return;
+    this.supervisorTimer = setInterval(() => this.superviseTick(), SUPERVISOR_INTERVAL_MS);
+    // Never the reason the process stays alive; the local Fastify server is.
+    this.supervisorTimer.unref?.();
+  }
+
+  private stopSupervisor(): void {
+    if (!this.supervisorTimer) return;
+    clearInterval(this.supervisorTimer);
+    this.supervisorTimer = null;
+  }
+
+  /**
+   * Level-triggered recovery: judges the current state against the wall clock
+   * rather than waiting to be armed by an event. That is what survives a dial
+   * that never completes, a close frame the peer never answers, and a host that
+   * was suspended for hours.
+   */
+  private superviseTick(): void {
+    if (this.shuttingDown) return;
+    const now = Date.now();
+    const ws = this.ws;
+
+    if (ws === null) {
+      // No socket and no reconnect pending means the recovery chain was lost.
+      // Today that path is completely silent — not even diagnosable.
+      if (!this.reconnectTimer) {
+        console.warn("[ReverseClient] Supervisor: no socket and no pending reconnect — self-healing");
+        this.scheduleReconnect();
+      }
+      return;
+    }
+
+    switch (ws.readyState) {
+      case WebSocket.CONNECTING: {
+        const stuckFor = now - this.dialStartedAt;
+        if (stuckFor > DIAL_TIMEOUT_MS) {
+          console.warn(
+            `[ReverseClient] Supervisor: dial stuck ${Math.round(stuckFor / 1000)}s with no handshake — terminating`
+          );
+          this.handleDisconnect(ws, "dial timeout");
+        }
+        break;
+      }
+      case WebSocket.OPEN: {
+        const silentFor = now - this.lastFrameAt;
+        if (silentFor > NO_PING_TIMEOUT_MS) {
+          console.warn(
+            `[ReverseClient] Supervisor: no hub traffic for ${Math.round(silentFor / 1000)}s — terminating`
+          );
+          this.handleDisconnect(ws, "no ping timeout");
+        }
+        break;
+      }
+      case WebSocket.CLOSING: {
+        if (this.closingSince === 0) {
+          this.closingSince = now;
+        } else if (now - this.closingSince > CLOSING_TIMEOUT_MS) {
+          console.warn("[ReverseClient] Supervisor: close handshake stalled — terminating");
+          this.handleDisconnect(ws, "closing stalled");
+        }
+        break;
+      }
+      default:
+        break;
+    }
   }
 
   shutdown(): void {
     this.shuttingDown = true;
-    this.clearNoPingTimer();
+    this.stopSupervisor();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     this.closeAllLocalChannels();
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      this.ws.close(1000, "Shutdown");
-    }
+    const ws = this.ws;
     this.ws = null;
+    // A deliberate, graceful goodbye: the hub should see a clean 1000 rather
+    // than a torn socket. Listeners stay attached so a late close is a no-op
+    // rather than an unhandled event.
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      ws.close(1000, "Shutdown");
+    }
   }
 
   private async handleFrame(frame: ControlFrame): Promise<void> {
@@ -386,7 +547,8 @@ export class ReverseConnectClient {
   }
 
   private handlePing(frame: PingFrame): void {
-    this.resetNoPingTimer();
+    // Liveness is tracked in the message handler for every inbound frame, so
+    // there is nothing to refresh here beyond answering.
     const pong: PongFrame = { type: "pong", ts: frame.ts };
     this.sendFrame(pong);
   }
@@ -412,23 +574,6 @@ export class ReverseConnectClient {
       this.reconnectTimer = null;
       this.connect();
     }, totalDelay);
-  }
-
-  private resetNoPingTimer(): void {
-    this.clearNoPingTimer();
-    this.noPingTimer = setTimeout(() => {
-      console.log(`[ReverseClient] No ping received in ${NO_PING_TIMEOUT_MS / 1000}s, reconnecting...`);
-      if (this.ws) {
-        this.ws.close(1000, "No ping timeout");
-      }
-    }, NO_PING_TIMEOUT_MS);
-  }
-
-  private clearNoPingTimer(): void {
-    if (this.noPingTimer) {
-      clearTimeout(this.noPingTimer);
-      this.noPingTimer = null;
-    }
   }
 
   private closeAllLocalChannels(): void {
