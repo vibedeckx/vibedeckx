@@ -24,6 +24,7 @@ const activity = (id: string): ProjectActivity => ({
     created_at: "2026-07-31 00:00:00", updated_at: "2026-07-31 00:00:00", archived_at: null,
   }],
   recentAgentSessions: [],
+  starredSessions: [],
   recentScheduleRuns: [],
   priorityTasks: [],
   attention: [],

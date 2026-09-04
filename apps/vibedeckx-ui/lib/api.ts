@@ -813,6 +813,8 @@ export interface ProjectAgentSessionActivity {
   lastActiveAt: number | null;
   lastUserMessageAt: number | null;
   lastCompletedAt: number | null;
+  /** When the user starred this session; null when it is not starred. */
+  favoritedAt: number | null;
 }
 
 export interface ProjectScheduleRunActivity {
@@ -842,6 +844,8 @@ export interface ProjectActivityAttentionItem {
 export interface ProjectActivity {
   recentThreads: ProjectChatThread[];
   recentAgentSessions: ProjectAgentSessionActivity[];
+  /** Sessions the user starred, newest star first. */
+  starredSessions: ProjectAgentSessionActivity[];
   recentScheduleRuns: ProjectScheduleRunActivity[];
   priorityTasks: Task[];
   attention: ProjectActivityAttentionItem[];

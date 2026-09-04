@@ -189,6 +189,7 @@ const mapLocalActivity = (row: {
   updated_at: string;
   last_user_message_at: number | null;
   last_completed_at: number | null;
+  favorited_at: number | null;
 }): AgentSessionActivity => {
   const branch = row.projected_branch === "" ? null : row.projected_branch;
   return {
@@ -213,6 +214,7 @@ const mapLocalActivity = (row: {
     ),
     lastUserMessageAt: row.last_user_message_at,
     lastCompletedAt: row.last_completed_at,
+    favoritedAt: row.favorited_at,
   };
 };
 
@@ -248,6 +250,7 @@ const localActivityBase = (kdb: Kysely<DB>, projectId?: string) => {
     "s.id", "s.workspace_checkout_id", "s.status", "s.title", "s.agent_type", "s.model",
     "s.project_id as snapshot_project_id", "s.branch as snapshot_branch",
     "s.activity_at", "s.created_at", "s.updated_at", "s.last_user_message_at", "s.last_completed_at",
+    "s.favorited_at",
     "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at", "checkout.status as checkout_status",
     sql<string>`case when s.workspace_checkout_id is null then s.project_id else workspace.project_id end`.as("projected_project_id"),
     sql<string>`case when s.workspace_checkout_id is null then s.branch else workspace.branch end`.as("projected_branch"),
@@ -691,6 +694,21 @@ export const createAgentSessionRepos = (
           ]),
         ]))
         .orderBy("s.activity_at", "desc")
+        .orderBy("s.id", "desc")
+        .limit(limit)
+        .execute();
+      rows.forEach((row) => observeLocalActivity(consumer, row));
+      await observeDanglingLocalScope(kdb, consumer, projectId);
+      return rows.map(mapLocalActivity);
+    },
+
+    listFavoritedActivityByProject: async (projectId, limit, consumer) => {
+      const rows = await localActivityBase(kdb, projectId)
+        .where(visibleLifecycleOf("s"))
+        .where("s.favorited_at", "is not", null)
+        // Newest star first: the list should stay put while the sessions in it
+        // run, and a session the user just starred belongs at the top.
+        .orderBy("s.favorited_at", "desc")
         .orderBy("s.id", "desc")
         .limit(limit)
         .execute();

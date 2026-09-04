@@ -12,6 +12,7 @@ import { RecentAgentSessionsCard } from "./recent-agent-sessions-card";
 import { ScheduleResultsCard } from "./schedule-results-card";
 import { PriorityTasksCard } from "./priority-tasks-card";
 import { AttentionRequiredCard } from "./attention-required-card";
+import { StarredSessionsCard } from "./starred-sessions-card";
 
 export interface ProjectActivityViewProps {
   projectId: string;
@@ -223,6 +224,11 @@ export function ProjectActivityView({
 
         <div className="flex min-w-0 flex-col gap-4">
           <PriorityTasksCard tasks={activity.priorityTasks} onOpenTask={onOpenTask} onViewAll={onViewAllTasks} />
+          <StarredSessionsCard
+            sessions={activity.starredSessions}
+            remoteNames={remoteNames}
+            onOpenSession={onOpenAgentSession}
+          />
           <AttentionRequiredCard
             scopeKey={projectId}
             items={activity.attention}

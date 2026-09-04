@@ -14,6 +14,9 @@ const RECENT_SESSION_LIMIT = 8;
 const RECENT_RUN_LIMIT = 5;
 const PRIORITY_TASK_LIMIT = 5;
 const ATTENTION_LIMIT = 10;
+// Starring is deliberate and rare, so the whole set normally fits; the cap only
+// stops a pathological project from unrolling a hundred rows into the sidebar.
+const STARRED_LIMIT = 10;
 
 export interface ProjectActivityAttentionItem {
   type: "agent_session" | "schedule_run";
@@ -28,6 +31,8 @@ export interface ProjectActivityAttentionItem {
 export interface ProjectActivity {
   recentThreads: ProjectChatThread[];
   recentAgentSessions: AgentSessionActivity[];
+  /** Sessions the user starred, newest star first. */
+  starredSessions: AgentSessionActivity[];
   recentScheduleRuns: ScheduledTaskRunActivity[];
   priorityTasks: Task[];
   attention: ProjectActivityAttentionItem[];
@@ -44,14 +49,21 @@ const parseDbTimestamp = (value: string | null | undefined): number | null => {
   return Number.isNaN(parsed) ? null : parsed;
 };
 
-const mergeActivity = (local: AgentSessionActivity[], remote: AgentSessionActivity[], limit: number) => {
+const mergeBy = (
+  local: AgentSessionActivity[],
+  remote: AgentSessionActivity[],
+  limit: number,
+  rank: (row: AgentSessionActivity) => number,
+) => {
   const byId = new Map<string, AgentSessionActivity>();
   for (const row of [...local, ...remote]) if (!byId.has(row.id)) byId.set(row.id, row);
   return [...byId.values()]
-    .sort((left, right) => (right.lastActiveAt ?? 0) - (left.lastActiveAt ?? 0)
-      || left.id.localeCompare(right.id))
+    .sort((left, right) => rank(right) - rank(left) || left.id.localeCompare(right.id))
     .slice(0, limit);
 };
+
+const mergeActivity = (local: AgentSessionActivity[], remote: AgentSessionActivity[], limit: number) =>
+  mergeBy(local, remote, limit, (row) => row.lastActiveAt ?? 0);
 
 export async function getProjectActivity(
   storage: Storage,
@@ -66,6 +78,8 @@ export async function getProjectActivity(
     priorityTasks,
     localAttentionSessions,
     remoteAttentionSessions,
+    localStarredSessions,
+    remoteStarredSessions,
     attentionRuns,
     runningSessions,
     runningRuns,
@@ -79,6 +93,8 @@ export async function getProjectActivity(
     storage.tasks.listPriorityByProject(projectId, PRIORITY_TASK_LIMIT),
     storage.agentSessions.listAttentionActivityByProject(projectId, ATTENTION_LIMIT, "project-activity"),
     storage.searchCache.listRemoteSessionAttentionByProject(projectId, ATTENTION_LIMIT, "project-activity"),
+    storage.agentSessions.listFavoritedActivityByProject(projectId, STARRED_LIMIT, "project-activity"),
+    storage.searchCache.listRemoteSessionFavoritesByProject(projectId, STARRED_LIMIT, "project-activity"),
     storage.scheduledTaskRuns.getAttentionByProject(projectId, ATTENTION_LIMIT),
     storage.agentSessions.countRunningActivityByProject(projectId),
     storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["starting", "running"]),
@@ -95,6 +111,12 @@ export async function getProjectActivity(
     localAttentionSessions,
     remoteAttentionSessions,
     ATTENTION_LIMIT,
+  );
+  const starredSessions = mergeBy(
+    localStarredSessions,
+    remoteStarredSessions,
+    STARRED_LIMIT,
+    (row) => row.favoritedAt ?? 0,
   );
 
   const attention = [
@@ -127,6 +149,7 @@ export async function getProjectActivity(
   return {
     recentThreads,
     recentAgentSessions,
+    starredSessions,
     recentScheduleRuns,
     priorityTasks,
     attention,

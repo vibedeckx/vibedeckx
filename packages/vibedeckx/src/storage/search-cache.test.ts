@@ -201,6 +201,49 @@ describe("searchCache", () => {
     expect(res.sessions.map(s => s.sessionId)).toEqual(["remote-w1-p1-s1"]);
   });
 
+  it("updateCachedSessionFavorited stars and unstars a cached remote session in place", async () => {
+    const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert("remote-w1-p1-s1", "p1", server.id, "s1", "dev");
+    await applySnapshot("p1", server.id, snap());
+    expect(await storage.searchCache.listRemoteSessionFavoritesByProject("p1", 10)).toEqual([]);
+
+    await storage.searchCache.updateCachedSessionFavorited("remote-w1-p1-s1", 1_700_000_000_000);
+    expect((await storage.searchCache.listRemoteSessionFavoritesByProject("p1", 10)).map((s) => s.id))
+      .toEqual(["remote-w1-p1-s1"]);
+
+    await storage.searchCache.updateCachedSessionFavorited("remote-w1-p1-s1", null);
+    expect(await storage.searchCache.listRemoteSessionFavoritesByProject("p1", 10)).toEqual([]);
+  });
+
+  it("updateCachedSessionFavorited creates the row for a session known only through its mapping", async () => {
+    // No applySnapshot: this is the state the session-list discovery path
+    // leaves behind before the target's first catalog sync.
+    const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert("remote-w1-p1-s1", "p1", server.id, "s1", "dev");
+
+    await storage.searchCache.updateCachedSessionFavorited("remote-w1-p1-s1", 1_700_000_000_000);
+
+    const [starred] = await storage.searchCache.listRemoteSessionFavoritesByProject("p1", 10);
+    expect(starred).toMatchObject({ id: "remote-w1-p1-s1", branch: "dev", target: server.id });
+    // Starring is passive: the created row must claim no activity.
+    expect(starred.lastActiveAt).toBeNull();
+  });
+
+  it("updateCachedSessionFavorited(null) never creates a row, and an unmapped session is left alone", async () => {
+    const server = await storage.remoteServers.create({ name: "W1", url: "http://w1" });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert("remote-w1-p1-s1", "p1", server.id, "s1", "dev");
+
+    await storage.searchCache.updateCachedSessionFavorited("remote-w1-p1-s1", null);
+    // No mapping at all — nothing can place the row in a project.
+    await storage.searchCache.updateCachedSessionFavorited("remote-w1-p1-unmapped", 1_700_000_000_000);
+
+    expect(await storage.searchCache.listRemoteSessionFavoritesByProject("p1", 10)).toEqual([]);
+    expect(await storage.searchCache.listRemoteSessionActivityByProject("p1", 10)).toEqual([]);
+  });
+
   describe("search", () => {
     let serverId: string;
     beforeEach(async () => {

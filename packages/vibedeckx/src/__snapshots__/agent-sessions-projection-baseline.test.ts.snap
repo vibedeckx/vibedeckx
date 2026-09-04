@@ -99,6 +99,9 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
     "agent-session-manager.ts",
     "routes/agent-session-routes.ts",
   ],
+  "listFavoritedActivityByProject": [
+    "project-activity.ts",
+  ],
   "listIdsByProject": [
     "routes/session-inventory-routes.ts",
   ],
@@ -204,6 +207,7 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
   "listAttentionByProject",
   "listByBranch",
   "listByProject",
+  "listFavoritedActivityByProject",
   "listIdsByProject",
   "listPendingWithLease",
   "listRecentActivityByProject",

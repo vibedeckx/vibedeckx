@@ -71,6 +71,7 @@ const session = (index: number): ProjectAgentSessionActivity => ({
   lastActiveAt: Date.parse(timestamp(index)),
   lastUserMessageAt: null,
   lastCompletedAt: null,
+  favoritedAt: null,
 });
 
 const run = (index: number): ProjectScheduleRunActivity => ({
@@ -118,6 +119,10 @@ const task = (
 const populatedActivity = (): ProjectActivity => ({
   recentThreads: [thread(4), thread(3), thread(2), thread(1)],
   recentAgentSessions: Array.from({ length: 9 }, (_, index) => session(index + 1)),
+  starredSessions: [
+    { ...session(3), favoritedAt: Date.parse(timestamp(9)) },
+    { ...session(1), favoritedAt: Date.parse(timestamp(8)) },
+  ],
   recentScheduleRuns: Array.from({ length: 6 }, (_, index) => run(index + 1)),
   priorityTasks: [
     task("high-new", "todo", "high", 7),
@@ -211,6 +216,7 @@ describe("ProjectActivityView", () => {
     expect(container.textContent).toContain("Schedule Results");
     expect(container.textContent).toContain("Priority Tasks");
     expect(container.textContent).toContain("Attention Required");
+    expect(container.textContent).toContain("Starred Sessions");
     expect(container.textContent).not.toContain("Workspaces");
 
     // Every thread the server sent, not a client-side slice — the server owns
@@ -251,6 +257,9 @@ describe("ProjectActivityView", () => {
       activity: {
         ...populatedActivity(),
         recentAgentSessions: [{ ...session(3), status: "running" }],
+        // Starred rows name the same workspace; keep the count below about the
+        // tile and the session row only.
+        starredSessions: [],
       },
     };
     render();
@@ -292,6 +301,28 @@ describe("ProjectActivityView", () => {
 
     await act(async () => button("Run again: Broken schedule").click());
     expect(props.onRunScheduleAgain).toHaveBeenCalledWith("run-2");
+  });
+
+  it("lists starred sessions above Attention Required and opens them in place", () => {
+    const props = render();
+
+    const starred = [...container.querySelectorAll('[data-testid="starred-session"]')];
+    // Server order (newest star first) is preserved verbatim.
+    expect(starred.map((row) => row.getAttribute("aria-label"))).toEqual([
+      "Open starred session: Session 3",
+      "Open starred session: Session 1",
+    ]);
+    // A remote starred session names its remote, never the raw server id.
+    expect(starred[0].textContent).toContain("feature-3 · gpu-01");
+
+    const cards = [...container.querySelectorAll("section")].map((node) => node.textContent ?? "");
+    const starredIndex = cards.findIndex((text) => text.startsWith("Starred Sessions"));
+    const attentionIndex = cards.findIndex((text) => text.startsWith("Attention Required"));
+    expect(starredIndex).toBeGreaterThanOrEqual(0);
+    expect(starredIndex).toBeLessThan(attentionIndex);
+
+    act(() => (starred[0] as HTMLButtonElement).click());
+    expect(props.onOpenAgentSession).toHaveBeenCalledWith("session-3", "remote-server-3", "feature-3");
   });
 
   it("disables the composer and recent threads when no Project Chat workbench is wired", () => {
@@ -443,6 +474,7 @@ describe("ProjectActivityView", () => {
       activity: {
         recentThreads: [],
         recentAgentSessions: [],
+        starredSessions: [],
         recentScheduleRuns: [],
         priorityTasks: [],
         attention: [],
@@ -455,6 +487,7 @@ describe("ProjectActivityView", () => {
     expect(container.textContent).toContain("No agent sessions yet");
     expect(container.textContent).toContain("No schedule runs yet");
     expect(container.textContent).toContain("No priority tasks");
+    expect(container.textContent).toContain("No starred sessions");
     const allClear = container.querySelector('[data-testid="attention-all-clear"]');
     expect(allClear?.textContent).toContain("All clear");
     expect(allClear?.closest("div")?.className).toContain("py-3");

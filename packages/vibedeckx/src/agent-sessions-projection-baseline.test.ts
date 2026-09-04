@@ -93,6 +93,7 @@ describe("agent_sessions projection baseline (lifecycle design Phase 0)", () => 
       "listByBranch",
       "listRecentActivityByProject",
       "listAttentionActivityByProject",
+      "listFavoritedActivityByProject",
       "countRunningActivityByProject",
       "listRetentionCandidates",
       "listIdsByProject",

@@ -672,6 +672,8 @@ export interface AgentSessionActivity {
   lastActiveAt: number | null;
   lastUserMessageAt: number | null;
   lastCompletedAt: number | null;
+  /** When the user starred this session; null when it is not starred. */
+  favoritedAt: number | null;
 }
 
 export interface SearchCatalogSnapshot {
@@ -1080,6 +1082,8 @@ export interface Storage {
     listAttentionByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** Checkout-first attention projection using the same identity rules as recent activity. */
     listAttentionActivityByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity[]>;
+    /** Checkout-first starred projection, newest star first — independent of the recent-sessions window. */
+    listFavoritedActivityByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity[]>;
     countRunningByProject: (projectId: string) => Promise<number>;
     /** Checkout-first running count; bound rows are scoped through their workspace. */
     countRunningActivityByProject: (projectId: string) => Promise<number>;
@@ -1514,6 +1518,8 @@ export interface Storage {
     listWorkspacesByProject(projectId: string, limit: number): Promise<Array<{ targetId: string; branch: string | null }>>;
     listRemoteSessionActivityByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
     listRemoteSessionAttentionByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
+    /** Cached remote sessions the user starred, newest star first. */
+    listRemoteSessionFavoritesByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
     countRemoteSessionActivityByProject(projectId: string): Promise<{ running: number }>;
     /** Operator stats: fleet-wide count of remote sessions whose cached status is 'running' (= turns in flight a deploy would interrupt). */
     countRunningRemoteSessions(): Promise<number>;
@@ -1546,6 +1552,13 @@ export interface Storage {
     recordSyncFailure(projectId: string, targetId: string, error: string): Promise<void>;
     getSyncStates(projectIds: string[]): Promise<SearchSyncState[]>;
     updateCachedSessionTitle(localSessionId: string, title: string | null): Promise<void>;
+    /**
+     * Write-through for a star toggled through this server, so the Starred card
+     * does not wait for the next catalog sync. Starring creates the projection
+     * when the session is only known through its mapping; unstarring is
+     * UPDATE-only (no row → nothing to hide).
+     */
+    updateCachedSessionFavorited(localSessionId: string, favoritedAt: number | null): Promise<void>;
     /**
      * Write-through for a remote session created via this server: surfaces it
      * in search immediately instead of after the next on-open refresh. The

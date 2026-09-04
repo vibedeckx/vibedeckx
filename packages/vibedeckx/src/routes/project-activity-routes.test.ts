@@ -394,6 +394,82 @@ describe("project activity route", () => {
     ]));
   });
 
+  it("lists local and cached remote starred sessions together, newest star first", async () => {
+    await storage.agentSessions.create({ id: "starred-local", project_id: "project-1", branch: "kept" });
+    await storage.agentSessions.create({ id: "plain-local", project_id: "project-1", branch: "plain" });
+    await storage.agentSessions.create({ id: "starred-foreign", project_id: "project-2", branch: "theirs" });
+    await storage.agentSessions.setFavorited("starred-foreign", true);
+    vi.advanceTimersByTime(1_000);
+    await storage.agentSessions.setFavorited("starred-local", true);
+
+    const remote = await storage.remoteServers.create({ name: "Worker", url: "http://worker" }, "user-1");
+    await storage.projectRemotes.add({ project_id: "project-1", remote_server_id: remote.id, remote_path: "/repo" });
+    await storage.remoteSessionMappings.upsert("remote-starred", "project-1", remote.id, "worker-starred", "feature", "from_now");
+    await storage.remoteSessionMappings.upsert("remote-plain", "project-1", remote.id, "worker-plain", "other", "from_now");
+    await storage.searchCache.applyCatalogSnapshot("project-1", remote.id, {
+      workspaces: [{ branch: "feature" }, { branch: "other" }],
+      sessions: [
+        {
+          id: "remote-starred", branch: "feature", title: "Remote starred",
+          // Starred after the local one, so it sorts ahead of it.
+          lastActiveAt: 1, favoritedAt: Date.now() + 1_000, entryCount: 1, status: "stopped",
+        },
+        {
+          id: "remote-plain", branch: "other", title: "Remote plain",
+          lastActiveAt: 2, favoritedAt: null, entryCount: 1, status: "stopped",
+        },
+      ],
+    } as unknown as SearchCatalogSnapshot);
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    const body = response.json();
+
+    expect(body.starredSessions.map((item: { id: string }) => item.id))
+      .toEqual(["remote-starred", "starred-local"]);
+    expect(body.starredSessions[0]).toMatchObject({
+      target: remote.id, branch: "feature", workspace: { target: remote.id, branch: "feature" },
+    });
+    expect(body.starredSessions.map((item: { id: string }) => item.id)).not.toContain("plain-local");
+    expect(JSON.stringify(body.starredSessions)).not.toContain("starred-foreign");
+  });
+
+  it("keeps starred sessions out of a project whose remote association was removed", async () => {
+    const remote = await storage.remoteServers.create({ name: "Worker", url: "http://worker" }, "user-1");
+    const association = await storage.projectRemotes.add({
+      project_id: "project-1", remote_server_id: remote.id, remote_path: "/repo",
+    });
+    await storage.remoteSessionMappings.upsert("remote-starred", "project-1", remote.id, "worker-starred", "feature", "from_now");
+    await storage.searchCache.applyCatalogSnapshot("project-1", remote.id, {
+      workspaces: [{ branch: "feature" }],
+      sessions: [{
+        id: "remote-starred", branch: "feature", title: "Remote starred",
+        lastActiveAt: 1, favoritedAt: Date.now(), entryCount: 1, status: "stopped",
+      }],
+    } as unknown as SearchCatalogSnapshot);
+    await storage.projectRemotes.remove(association.id, "project-1");
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().starredSessions).toEqual([]);
+  });
+
+  it("caps starred sessions at the server-owned limit", async () => {
+    for (let index = 0; index < 12; index += 1) {
+      const id = `starred-${String(index).padStart(2, "0")}`;
+      await storage.agentSessions.create({ id, project_id: "project-1", branch: id });
+      vi.advanceTimersByTime(1_000);
+      await storage.agentSessions.setFavorited(id, true);
+    }
+
+    const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
+    expect(response.statusCode, response.body).toBe(200);
+    const body = response.json();
+    expect(body.starredSessions).toHaveLength(10);
+    // The cap keeps the newest stars, not an arbitrary ten.
+    expect(body.starredSessions[0].id).toBe("starred-11");
+  });
+
   it("finds the globally earliest enabled schedule beyond the old candidate cap", async () => {
     for (let index = 0; index < 1_001; index += 1) {
       await createSchedule(`disabled-${String(index).padStart(4, "0")}`, "project-1", {

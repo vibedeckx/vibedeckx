@@ -2576,6 +2576,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/favorite`,
         { favorited }
       );
+      // The star lives on the worker, but the Starred card and Cmd+K both read
+      // the local cache — without this the toggle would sit invisible until the
+      // next catalog sync. Best-effort: the remote PATCH has already succeeded,
+      // so a cache write failure must not 500 an otherwise-successful star.
+      if (result.ok) {
+        try {
+          await fastify.storage.searchCache.updateCachedSessionFavorited(
+            req.params.sessionId,
+            favorited ? Date.now() : null,
+          );
+        } catch (err) {
+          console.error("[API] searchCache.updateCachedSessionFavorited failed:", err);
+        }
+      }
       return reply.code(proxyStatus(result)).send(result.data);
     }
 

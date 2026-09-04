@@ -73,7 +73,7 @@ const mapRemoteActivity = (row: {
   workspace_checkout_id: string | null;
   title: string | null; last_active_at: number | null; status: string;
   agent_type: string | null; model: string | null; last_user_message_at: number | null;
-  last_completed_at: number | null;
+  last_completed_at: number | null; favorited_at: number | null;
 }): AgentSessionActivity => {
   const branch = fromDbBranch(row.branch);
   return {
@@ -93,6 +93,7 @@ const mapRemoteActivity = (row: {
     lastActiveAt: row.last_active_at,
     lastUserMessageAt: row.last_user_message_at,
     lastCompletedAt: row.last_completed_at,
+    favoritedAt: row.favorited_at,
   };
 };
 
@@ -196,7 +197,7 @@ const remoteActivityBase = (kdb: Kysely<DB>, projectId: string) => remoteSession
     "mapping.project_id as snapshot_project_id", "mapping.remote_server_id as snapshot_target_id",
     "mapping.branch as snapshot_branch",
     "c.last_active_at", "c.status", "c.agent_type", "c.model",
-    "c.last_user_message_at", "c.last_completed_at",
+    "c.last_user_message_at", "c.last_completed_at", "c.favorited_at",
     "checkout.worktree_path", "checkout.deleted_at as checkout_deleted_at", "checkout.status as checkout_status",
     sql<string>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end`.as("project_id"),
     sql<string>`case when mapping.workspace_checkout_id is null then mapping.remote_server_id else checkout.target_id end`.as("target_id"),
@@ -245,6 +246,18 @@ export const createSearchCacheRepos = (
           ]),
         ]))
         .orderBy("c.last_active_at", "desc")
+        .orderBy("c.local_session_id", "asc")
+        .limit(limit)
+        .execute();
+      rows.forEach((row) => observeRemoteActivity(consumer, row));
+      await observeDanglingRemoteActivity(kdb, consumer, projectId);
+      return rows.map(mapRemoteActivity);
+    },
+
+    listRemoteSessionFavoritesByProject: async (projectId, limit, consumer) => {
+      const rows = await remoteActivityBase(kdb, projectId)
+        .where("c.favorited_at", "is not", null)
+        .orderBy("c.favorited_at", "desc")
         .orderBy("c.local_session_id", "asc")
         .limit(limit)
         .execute();
@@ -522,6 +535,49 @@ export const createSearchCacheRepos = (
       await kdb.updateTable("session_search_cache")
         .set({ title, written_at: Date.now() })
         .where("local_session_id", "=", localSessionId)
+        .execute();
+    },
+
+    // Star write-through. Unlike the title and delete write-throughs this one
+    // may CREATE the row: the remote favorite PATCH has already succeeded on
+    // the worker, so the session provably exists, and the path that lists a
+    // remote's sessions (where the star button lives) binds only a mapping —
+    // no cache row. Before that target's first catalog snapshot there would be
+    // nothing to update and the star would sit invisible, which is the exact
+    // latency this write-through exists to remove. Only starring creates a
+    // row; an unstar with no row has nothing to hide (see noteSessionDeleted).
+    updateCachedSessionFavorited: async (localSessionId, favoritedAt) => {
+      const now = Date.now();
+      const updated = await kdb.updateTable("session_search_cache")
+        .set({ favorited_at: favoritedAt, written_at: now })
+        .where("local_session_id", "=", localSessionId)
+        .executeTakeFirst();
+      if (Number(updated?.numUpdatedRows ?? 0) > 0 || favoritedAt === null) return;
+
+      // The durable mapping is the only thing that can place the row in a
+      // project and target; without it the row would be unreachable anyway.
+      const mapping = await kdb.selectFrom("remote_session_mappings")
+        .select(["project_id", "remote_server_id", "branch"])
+        .where("local_session_id", "=", localSessionId)
+        .executeTakeFirst();
+      if (!mapping || mapping.remote_server_id === "local") return;
+
+      // generation 0 + written_at now: same snapshot-reconciliation exemption
+      // noteSessionCreated relies on. last_active_at stays NULL — starring is
+      // passive and must never promote a session up the recent-activity list.
+      await kdb.insertInto("session_search_cache")
+        .values({
+          local_session_id: localSessionId,
+          project_id: mapping.project_id,
+          target_id: mapping.remote_server_id,
+          branch: toDbBranch(mapping.branch),
+          title: null, last_active_at: null, favorited_at: favoritedAt,
+          entry_count: 0, status: "unknown", agent_type: null, model: null,
+          last_user_message_at: null, last_completed_at: null,
+          generation: 0, deleted_at: null, written_at: now,
+        })
+        .onConflict((oc) => oc.column("local_session_id")
+          .doUpdateSet({ favorited_at: favoritedAt, written_at: now }))
         .execute();
     },
 
