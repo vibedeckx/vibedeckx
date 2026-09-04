@@ -226,6 +226,7 @@ export function ProjectActivityView({
           <PriorityTasksCard tasks={activity.priorityTasks} onOpenTask={onOpenTask} onViewAll={onViewAllTasks} />
           <StarredSessionsCard
             sessions={activity.starredSessions}
+            hasMore={activity.starredHasMore}
             remoteNames={remoteNames}
             onOpenSession={onOpenAgentSession}
           />

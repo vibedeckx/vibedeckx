@@ -25,6 +25,7 @@ const activity = (id: string): ProjectActivity => ({
   }],
   recentAgentSessions: [],
   starredSessions: [],
+  starredHasMore: false,
   recentScheduleRuns: [],
   priorityTasks: [],
   attention: [],

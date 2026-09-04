@@ -123,6 +123,7 @@ const populatedActivity = (): ProjectActivity => ({
     { ...session(3), favoritedAt: Date.parse(timestamp(9)) },
     { ...session(1), favoritedAt: Date.parse(timestamp(8)) },
   ],
+  starredHasMore: false,
   recentScheduleRuns: Array.from({ length: 6 }, (_, index) => run(index + 1)),
   priorityTasks: [
     task("high-new", "todo", "high", 7),
@@ -325,6 +326,56 @@ describe("ProjectActivityView", () => {
     expect(props.onOpenAgentSession).toHaveBeenCalledWith("session-3", "remote-server-3", "feature-3");
   });
 
+  it("scrolls a long starred list in place instead of pushing Attention Required away", () => {
+    activityHook.value = {
+      ...activityHook.value,
+      activity: {
+        ...populatedActivity(),
+        starredSessions: Array.from({ length: 40 }, (_, index) => ({
+          ...session(1),
+          id: `starred-${index}`,
+          title: `Starred ${index}`,
+          favoritedAt: Date.parse(timestamp(9)) - index,
+        })),
+        starredHasMore: true,
+      },
+    };
+    render();
+
+    // Every row is rendered — the scroller bounds the height, not the list.
+    expect(container.querySelectorAll('[data-testid="starred-session"]')).toHaveLength(40);
+    const scroller = container.querySelector('[data-testid="starred-scroller"]') as HTMLElement;
+    expect(scroller.className).toContain("overflow-y-auto");
+    // A wheel that runs off the end must not scroll the project page behind it.
+    expect(scroller.className).toContain("overscroll-contain");
+    // The 40 rows live inside the bounded scroller, so Attention Required is
+    // still a sibling card rather than something 40 rows of intrinsic height
+    // pushed off screen.
+    expect(scroller.querySelectorAll('[data-testid="starred-session"]')).toHaveLength(40);
+    expect(container.textContent).toContain("Attention Required");
+  });
+
+  it("marks a capped starred count as a prefix rather than claiming it is the total", () => {
+    activityHook.value = {
+      ...activityHook.value,
+      activity: { ...populatedActivity(), starredHasMore: true },
+    };
+    render();
+
+    const card = [...container.querySelectorAll("section")]
+      .find((node) => node.textContent?.startsWith("Starred Sessions"));
+    expect(card?.textContent).toContain("Starred Sessions2+");
+  });
+
+  it("shows a bare count when nothing was capped", () => {
+    render();
+
+    const card = [...container.querySelectorAll("section")]
+      .find((node) => node.textContent?.startsWith("Starred Sessions"));
+    expect(card?.textContent).toContain("Starred Sessions2");
+    expect(card?.textContent).not.toContain("2+");
+  });
+
   it("disables the composer and recent threads when no Project Chat workbench is wired", () => {
     render({ onCreateThread: undefined, onOpenThread: undefined });
 
@@ -475,6 +526,7 @@ describe("ProjectActivityView", () => {
         recentThreads: [],
         recentAgentSessions: [],
         starredSessions: [],
+        starredHasMore: false,
         recentScheduleRuns: [],
         priorityTasks: [],
         attention: [],

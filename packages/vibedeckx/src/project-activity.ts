@@ -14,9 +14,11 @@ const RECENT_SESSION_LIMIT = 8;
 const RECENT_RUN_LIMIT = 5;
 const PRIORITY_TASK_LIMIT = 5;
 const ATTENTION_LIMIT = 10;
-// Starring is deliberate and rare, so the whole set normally fits; the cap only
-// stops a pathological project from unrolling a hundred rows into the sidebar.
-const STARRED_LIMIT = 10;
+// The card scrolls internally, so this bounds the payload rather than the
+// layout. Starring is deliberate and rare, so 50 holds the whole set for any
+// realistic project; one row past it is fetched purely to tell the card
+// truthfully that it is showing a prefix.
+const STARRED_LIMIT = 50;
 
 export interface ProjectActivityAttentionItem {
   type: "agent_session" | "schedule_run";
@@ -31,8 +33,10 @@ export interface ProjectActivityAttentionItem {
 export interface ProjectActivity {
   recentThreads: ProjectChatThread[];
   recentAgentSessions: AgentSessionActivity[];
-  /** Sessions the user starred, newest star first. */
+  /** Sessions the user starred, newest star first, capped at STARRED_LIMIT. */
   starredSessions: AgentSessionActivity[];
+  /** True when stars were dropped by that cap, so the card can say "50+" instead of lying. */
+  starredHasMore: boolean;
   recentScheduleRuns: ScheduledTaskRunActivity[];
   priorityTasks: Task[];
   attention: ProjectActivityAttentionItem[];
@@ -93,8 +97,8 @@ export async function getProjectActivity(
     storage.tasks.listPriorityByProject(projectId, PRIORITY_TASK_LIMIT),
     storage.agentSessions.listAttentionActivityByProject(projectId, ATTENTION_LIMIT, "project-activity"),
     storage.searchCache.listRemoteSessionAttentionByProject(projectId, ATTENTION_LIMIT, "project-activity"),
-    storage.agentSessions.listFavoritedActivityByProject(projectId, STARRED_LIMIT, "project-activity"),
-    storage.searchCache.listRemoteSessionFavoritesByProject(projectId, STARRED_LIMIT, "project-activity"),
+    storage.agentSessions.listFavoritedActivityByProject(projectId, STARRED_LIMIT + 1, "project-activity"),
+    storage.searchCache.listRemoteSessionFavoritesByProject(projectId, STARRED_LIMIT + 1, "project-activity"),
     storage.scheduledTaskRuns.getAttentionByProject(projectId, ATTENTION_LIMIT),
     storage.agentSessions.countRunningActivityByProject(projectId),
     storage.scheduledTaskRuns.countByProjectStatuses(projectId, ["starting", "running"]),
@@ -112,12 +116,16 @@ export async function getProjectActivity(
     remoteAttentionSessions,
     ATTENTION_LIMIT,
   );
-  const starredSessions = mergeBy(
+  // Merge at the probe width so the overflow test sees the deduped total, then
+  // cut to the real cap.
+  const starredProbe = mergeBy(
     localStarredSessions,
     remoteStarredSessions,
-    STARRED_LIMIT,
+    STARRED_LIMIT + 1,
     (row) => row.favoritedAt ?? 0,
   );
+  const starredHasMore = starredProbe.length > STARRED_LIMIT;
+  const starredSessions = starredProbe.slice(0, STARRED_LIMIT);
 
   const attention = [
     ...attentionSessions
@@ -150,6 +158,7 @@ export async function getProjectActivity(
     recentThreads,
     recentAgentSessions,
     starredSessions,
+    starredHasMore,
     recentScheduleRuns,
     priorityTasks,
     attention,

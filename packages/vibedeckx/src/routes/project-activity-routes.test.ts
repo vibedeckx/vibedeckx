@@ -454,8 +454,8 @@ describe("project activity route", () => {
     expect(response.json().starredSessions).toEqual([]);
   });
 
-  it("caps starred sessions at the server-owned limit", async () => {
-    for (let index = 0; index < 12; index += 1) {
+  it("caps starred sessions at the server-owned limit and admits it overflowed", async () => {
+    for (let index = 0; index < 52; index += 1) {
       const id = `starred-${String(index).padStart(2, "0")}`;
       await storage.agentSessions.create({ id, project_id: "project-1", branch: id });
       vi.advanceTimersByTime(1_000);
@@ -465,9 +465,25 @@ describe("project activity route", () => {
     const response = await app.inject({ method: "GET", url: "/api/projects/project-1/activity" });
     expect(response.statusCode, response.body).toBe(200);
     const body = response.json();
-    expect(body.starredSessions).toHaveLength(10);
-    // The cap keeps the newest stars, not an arbitrary ten.
-    expect(body.starredSessions[0].id).toBe("starred-11");
+    expect(body.starredSessions).toHaveLength(50);
+    // The cap keeps the newest stars, not an arbitrary fifty.
+    expect(body.starredSessions[0].id).toBe("starred-51");
+    // The probe row is spent on the flag, never leaked as a 51st result.
+    expect(body.starredHasMore).toBe(true);
+    expect(body.starredSessions.map((s: { id: string }) => s.id)).not.toContain("starred-01");
+  });
+
+  it("reports no overflow when the starred set exactly fills the limit", async () => {
+    for (let index = 0; index < 50; index += 1) {
+      const id = `starred-${String(index).padStart(2, "0")}`;
+      await storage.agentSessions.create({ id, project_id: "project-1", branch: id });
+      vi.advanceTimersByTime(1_000);
+      await storage.agentSessions.setFavorited(id, true);
+    }
+
+    const body = (await app.inject({ method: "GET", url: "/api/projects/project-1/activity" })).json();
+    expect(body.starredSessions).toHaveLength(50);
+    expect(body.starredHasMore).toBe(false);
   });
 
   it("finds the globally earliest enabled schedule beyond the old candidate cap", async () => {

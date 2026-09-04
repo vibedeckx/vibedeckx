@@ -844,8 +844,10 @@ export interface ProjectActivityAttentionItem {
 export interface ProjectActivity {
   recentThreads: ProjectChatThread[];
   recentAgentSessions: ProjectAgentSessionActivity[];
-  /** Sessions the user starred, newest star first. */
+  /** Sessions the user starred, newest star first, capped server-side. */
   starredSessions: ProjectAgentSessionActivity[];
+  /** True when stars were dropped by that cap, so the card can say "50+" instead of lying. */
+  starredHasMore: boolean;
   recentScheduleRuns: ProjectScheduleRunActivity[];
   priorityTasks: Task[];
   attention: ProjectActivityAttentionItem[];

@@ -20,6 +20,7 @@ vi.mock("@/hooks/use-project-activity", () => ({
       recentThreads: [],
       recentAgentSessions: [],
       starredSessions: [],
+      starredHasMore: false,
       recentScheduleRuns: [],
       priorityTasks: [],
       attention: [],
