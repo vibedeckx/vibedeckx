@@ -25,7 +25,7 @@
 // ~/.vibedeckx and never runs `connect stop`: both processes get throwaway
 // --data-dir directories and are killed by PID / unique-path pkill on exit.
 
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -146,15 +146,25 @@ function launch(name, cmd, cmdArgs, opts = {}) {
   const logPath = path.join(serverDir, `${name}.log`);
   const fd = openSync(logPath, "a");
   const child = spawn(cmd, cmdArgs, { stdio: ["ignore", fd, fd], ...opts });
-  children.push({ name, child, logPath });
+  const entry = { name, child, logPath, exit: null };
+  // Without this a child that dies early (crash on boot, port clash, missing
+  // prebuilt) surfaces only as the online poll timing out minutes later, with
+  // nothing in the log to say the process is already gone.
+  child.on("exit", (code, signal) => { entry.exit = { code, signal }; });
+  children.push(entry);
   console.log(`[xver] ${name}: pid=${child.pid} log=${logPath}`);
   return child;
 }
 
-// npx wraps the real worker in sh → bin shims, so killing the spawned pid is
-// not enough. The throwaway workerDir path is unique per run and appears on
-// every process in that chain's command line — and on nothing else, so this
-// can never touch a real worker on the host.
+/** The most recently launched child with this name (the worker is relaunched). */
+function childEntry(name) {
+  return [...children].reverse().find((c) => c.name === name);
+}
+
+// The published launcher re-spawns the platform binary as a child, so killing
+// the pid we spawned is not enough. The throwaway workerDir path is unique per
+// run and appears on every process in that chain's command line — and on
+// nothing else, so this can never touch a real worker on the host.
 function killWorkerTree() {
   try { execFileSync("pkill", ["-KILL", "-f", workerDir]); } catch { /* none left */ }
 }
@@ -173,12 +183,20 @@ process.on("SIGINT", () => process.exit(130));
 function fail(message) {
   failed = true;
   console.error(`[xver] FAIL: ${message}`);
-  for (const { name, logPath } of children) {
+  for (const { name, logPath, exit } of children) {
+    const state = exit ? `exited code=${exit.code} signal=${exit.signal}` : "still running";
     try {
       const tail = readFileSync(logPath, "utf8").split("\n").slice(-25).join("\n");
-      console.error(`[xver] --- last lines of ${name} (${logPath} kept for inspection) ---\n${tail}`);
+      console.error(`[xver] --- last lines of ${name} (${state}; ${logPath} kept for inspection) ---\n${tail}`);
     } catch { /* log unreadable */ }
   }
+  // A silent worker is ambiguous from the log alone — still installing, booted
+  // but wedged, or already reaped. The process table says which.
+  try {
+    const ps = execFileSync("ps", ["-eo", "pid,ppid,etime,stat,args"], { encoding: "utf8" })
+      .split("\n").filter((l) => l.includes(workerDir) || l.includes(serverDir)).join("\n");
+    console.error(`[xver] --- processes touching the throwaway dirs ---\n${ps || "(none)"}`);
+  } catch { /* ps unavailable */ }
   process.exit(1);
 }
 
@@ -274,17 +292,56 @@ const connectArgs = [
   "--port", String(WORKER_PORT),
   "--data-dir", workerDir,
 ];
-const startWorker = () => workerBin
-  ? launch("worker", process.execPath, [workerBin, ...connectArgs], { env: workerEnv })
-  : launch("worker", "npx", ["-y", `vibedeckx@${workerVersion}`, ...connectArgs], { env: workerEnv });
+// The published worker is installed up front instead of being run through
+// `npx -y`: npx installs silently, so a registry stall or a broken install
+// reads as "the worker never came online" three minutes later with an empty
+// worker log and nothing to point at. A plain install has its own log, its own
+// timeout and a retry, and keeps download time out of the connect budget.
+function installPublishedWorker(version) {
+  const prefix = path.join(workerDir, "npm-prefix");
+  mkdirSync(prefix, { recursive: true });
+  writeFileSync(
+    path.join(prefix, "package.json"),
+    JSON.stringify({ name: "xver-worker-host", version: "0.0.0", private: true }),
+  );
+  const logPath = path.join(serverDir, "worker-install.log");
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const started = Date.now();
+    const res = spawnSync(
+      "npm",
+      ["install", "--no-audit", "--no-fund", "--loglevel", "http", `vibedeckx@${version}`],
+      { cwd: prefix, encoding: "utf8", timeout: 240_000 },
+    );
+    writeFileSync(
+      logPath,
+      `$ npm install vibedeckx@${version} (attempt ${attempt})\n${res.stdout ?? ""}${res.stderr ?? ""}`,
+      { flag: attempt === 1 ? "w" : "a" },
+    );
+    const secs = ((Date.now() - started) / 1000).toFixed(1);
+    if (res.status === 0) {
+      console.log(`[xver] installed vibedeckx@${version} in ${secs}s (npm log ${logPath})`);
+      const root = path.join(prefix, "node_modules", "vibedeckx");
+      const { bin } = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+      const rel = typeof bin === "string" ? bin : bin?.vibedeckx;
+      if (!rel) fail(`vibedeckx@${version} declares no vibedeckx bin`);
+      return path.join(root, rel);
+    }
+    console.error(`[xver] npm install vibedeckx@${version} failed after ${secs}s (${res.error?.code ?? `exit ${res.status}`}), attempt ${attempt}/2`);
+  }
+  fail(`could not install vibedeckx@${version} — see ${logPath}`);
+}
+
+const workerEntrypoint = workerBin ?? installPublishedWorker(workerVersion);
+const startWorker = () => launch("worker", process.execPath, [workerEntrypoint, ...connectArgs], { env: workerEnv });
 startWorker();
 
 const online = async () => {
+  const dead = childEntry("worker").exit;
+  if (dead) fail(`worker exited before coming online (code=${dead.code} signal=${dead.signal})`);
   const servers = await api("GET", "/api/remote-servers");
   const row = servers.find((s) => s.id === record.id);
   return row?.status === "online" ? row : undefined;
 };
-// npx may download the package on first run — allow a long warm-up.
 const row = await poll("worker online", 180_000, online);
 console.log(`[xver] worker online (reported version: ${row.worker_version ?? "none — pre-reporting worker"})`);
 
@@ -757,8 +814,8 @@ await smoke("workflow-list", ["http:GET /api/path/workflow-runs"], async () => {
 // 4. drop + reconnect
 // ---------------------------------------------------------------------------
 
-const workerEntry = children.find((c) => c.name === "worker");
-process.kill(workerEntry.child.pid, "SIGKILL");
+const killed = childEntry("worker");
+process.kill(killed.child.pid, "SIGKILL");
 killWorkerTree();
 await poll("worker offline after kill", 30_000, async () => {
   const servers = await api("GET", "/api/remote-servers");
