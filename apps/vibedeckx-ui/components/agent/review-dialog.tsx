@@ -85,7 +85,7 @@ function ChoiceCard({
       aria-checked={selected}
       onClick={onSelect}
       className={cn(
-        "flex items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors",
+        "flex min-w-0 items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors",
         selected
           ? "border-primary bg-accent ring-[3px] ring-accent"
           : "bg-card opacity-75 hover:bg-muted hover:opacity-100",
