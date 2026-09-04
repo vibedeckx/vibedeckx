@@ -71,11 +71,14 @@ function ChoiceTag({ tone, children }: { tone: "rec" | "warn"; children: ReactNo
 }
 
 function ChoiceCard({
-  selected, title, meta, onSelect,
+  selected, title, meta, trailing, onSelect,
 }: {
   selected: boolean;
   title: ReactNode;
-  meta: ReactNode;
+  /** Second line under the title. Omit it when `trailing` already says it all. */
+  meta?: ReactNode;
+  /** Right-aligned detail on the title row, for cards that stay one line tall. */
+  trailing?: ReactNode;
   onSelect: () => void;
 }) {
   return (
@@ -99,11 +102,20 @@ function ChoiceCard({
       >
         {selected && <span className="size-[5px] rounded-full bg-primary-foreground" />}
       </span>
-      <span className="min-w-0">
-        <span className="flex flex-wrap items-center gap-2 text-[12.5px] font-medium">{title}</span>
-        <span className="mt-0.5 flex flex-wrap items-center gap-2 font-mono text-[10.5px] text-muted-foreground">
-          {meta}
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-2 text-[12.5px] font-medium">
+          <span className="flex shrink-0 flex-wrap items-center gap-2">{title}</span>
+          {trailing && (
+            <span className="ml-auto flex min-w-0 items-center gap-1.5 font-mono text-[10.5px] font-normal text-muted-foreground">
+              {trailing}
+            </span>
+          )}
         </span>
+        {meta && (
+          <span className="mt-0.5 flex flex-wrap items-center gap-2 font-mono text-[10.5px] text-muted-foreground">
+            {meta}
+          </span>
+        )}
       </span>
     </button>
   );
@@ -545,23 +557,27 @@ export function ReviewDialog({
                   selected={reuseSelected}
                   onSelect={() => candidateKey && setReviewerModeOverride({ key: candidateKey, mode: "reuse" })}
                   title="Continue last reviewer"
-                  meta={
-                    // Which reviewer it is only arrives with the live check.
-                    // The card's identity ("there is one to continue") is
-                    // already known, so hold the row and fill the details in
-                    // rather than materializing the whole card late.
-                    candidateSettled ? (
+                  // Who and when ride the title row: they are short, fixed-width
+                  // facts that would otherwise waste a line of their own.
+                  trailing={
+                    candidateSettled && (
                       <>
-                        <span className="truncate">{candidate?.title ?? "Review session"}</span>
-                        <span className="text-muted-foreground/60">·</span>
-                        <span>{agentLabel(candidate?.agentType)}</span>
+                        <span className="shrink-0">{agentLabel(candidate?.agentType)}</span>
                         {typeof candidate?.lastActiveAt === "number" && (
                           <>
-                            <span className="text-muted-foreground/60">·</span>
-                            <span>{formatRelativeTime(candidate.lastActiveAt)}</span>
+                            <span className="shrink-0 text-muted-foreground/60">·</span>
+                            <span className="shrink-0">{formatRelativeTime(candidate.lastActiveAt)}</span>
                           </>
                         )}
                       </>
+                    )
+                  }
+                  meta={
+                    // Which reviewer it is only arrives with the live check. The
+                    // second line is held either way, so the card is the same
+                    // height before and after the details land.
+                    candidateSettled ? (
+                      <span className="min-w-0 truncate">{candidate?.title ?? "Review session"}</span>
                     ) : (
                       <span className="text-muted-foreground/60">Loading details…</span>
                     )
