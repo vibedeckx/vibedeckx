@@ -79,6 +79,7 @@ describe("agent session model routes", () => {
       "fable",
     ]);
     expect(providers.find((p) => p.type === "codex")?.models).toEqual([
+      "gpt-6-astra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
