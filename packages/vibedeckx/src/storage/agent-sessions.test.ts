@@ -813,6 +813,51 @@ describe("agentSessions/remoteSessionMappings storage", () => {
         { session_id: "s2", cnt: 1 },
       ]);
     });
+
+    // Startup restores a session's runtime state from this alone — never from
+    // the transcript (docs/plans/2026-09-05-session-history-lazy-hydration-b.md).
+    it("getEntryMetaAll reports count and highest index per session, skipping empty ones", async () => {
+      await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.create({ id: "s2", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.create({ id: "s3", project_id: "p1", branch: "dev" });
+      // Sparse on purpose: indices are allocated, not contiguous, so `count`
+      // and `max` are two different facts and restore needs both.
+      await storage.agentSessions.upsertEntry("s1", 0, "a");
+      await storage.agentSessions.upsertEntry("s1", 7, "b");
+      await storage.agentSessions.upsertEntry("s2", 3, "c");
+
+      const meta = await storage.agentSessions.getEntryMetaAll();
+      expect(meta.slice().sort((a, b) => a.session_id.localeCompare(b.session_id))).toEqual([
+        { session_id: "s1", cnt: 2, max_index: 7 },
+        { session_id: "s2", cnt: 1, max_index: 3 },
+      ]);
+    });
+
+    it("getEntriesBefore pages backwards from the tail, exclusive of the cursor", async () => {
+      await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.create({ id: "s2", project_id: "p1", branch: "dev" });
+      for (const index of [0, 1, 2, 3, 4]) {
+        await storage.agentSessions.upsertEntry("s1", index, `e${index}`);
+      }
+      await storage.agentSessions.upsertEntry("s2", 9, "other");
+
+      // null cursor = start at the tail, descending.
+      expect(await storage.agentSessions.getEntriesBefore("s1", null, 2)).toEqual([
+        { entry_index: 4, data: "e4" },
+        { entry_index: 3, data: "e3" },
+      ]);
+      // Strictly before the cursor, so pages never overlap or repeat a row.
+      expect(await storage.agentSessions.getEntriesBefore("s1", 3, 2)).toEqual([
+        { entry_index: 2, data: "e2" },
+        { entry_index: 1, data: "e1" },
+      ]);
+      // Walking off the front terminates the caller's loop.
+      expect(await storage.agentSessions.getEntriesBefore("s1", 0, 2)).toEqual([]);
+      // Scoped to one session.
+      expect(await storage.agentSessions.getEntriesBefore("s2", null, 10)).toEqual([
+        { entry_index: 9, data: "other" },
+      ]);
+    });
   });
 
   describe("remoteSessionMappings", () => {

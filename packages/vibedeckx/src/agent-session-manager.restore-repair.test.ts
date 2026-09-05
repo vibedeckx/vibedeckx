@@ -36,6 +36,20 @@ function makeHarness(status: AgentSession["status"], rows: Row[]) {
       // orphan-repair pass's map check behind an already-updated status.
       getAll: async () => [{ ...row }],
       getEntries: async () => [...rows],
+      // Restore reads metadata, not transcripts (lazy hydration): one
+      // aggregate over every session, no `data` column.
+      getEntryMetaAll: async () => rows.length === 0 ? [] : [{
+        session_id: "s1",
+        cnt: rows.length,
+        max_index: rows.reduce((m, r) => Math.max(m, r.entry_index), -1),
+      }],
+      // Descending page, strictly before the cursor — what crash repair walks
+      // back through to find the turn boundary.
+      getEntriesBefore: vi.fn(async (_id: string, before: number | null, limit: number) =>
+        [...rows]
+          .filter((r) => before === null || r.entry_index < before)
+          .sort((a, b) => b.entry_index - a.entry_index)
+          .slice(0, limit)),
       getById: async () => row,
       listByBranch: async () => [row],
       updateStatusPreservingTimestamp: vi.fn(async (_id: string, s: AgentSession["status"]) => { row.status = s; }),
@@ -82,8 +96,10 @@ describe("restore-time turn repair", () => {
     expect(turnEnds[0].index).toBe(2); // maxIndex + 1
     expect((turnEnds[0].msg as { outcome?: string }).outcome).toBe("server_restart");
     expect((turnEnds[0].msg as { durationMs?: number }).durationMs).toBeUndefined();
-    // The rebuilt in-memory store includes the repair entry.
-    const msgs = manager.getMessages("s1");
+    // The restored session is cold, so the repair entry is read back from
+    // storage rather than a rebuilt store.
+    expect(manager.getSession("s1")?.hot).toBe(false);
+    const msgs = await manager.loadMessages("s1");
     expect(msgs[2]?.type).toBe("turn_end");
   });
 

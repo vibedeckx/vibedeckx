@@ -39,8 +39,11 @@ export interface AgentOps {
   /** Write a final title and claim the one-shot slot (AI titling never fires). */
   setFinalSessionTitle(sessionId: string, title: string): Promise<void>;
   switchMode(sessionId: string, projectPath: string, newMode: "plan" | "edit"): Promise<boolean>;
-  /** Raw sparse entries (holes preserved) — index space matches entry indices. */
-  getRawMessages(sessionId: string): AgentMessage[];
+  /**
+   * Raw sparse entries (holes preserved) — index space matches entry indices.
+   * Async because a dormant session's transcript is read from storage.
+   */
+  getRawMessages(sessionId: string): Promise<AgentMessage[]>;
   /** Optional: push a raw WS frame to a session's stream subscribers. */
   broadcastRawToSession?(sessionId: string, payload: Record<string, unknown>): void;
 }
@@ -877,7 +880,7 @@ export class WorkflowEngine {
         throw new WorkflowError("source-running", "source session 正在运行，请等待当前 turn 完成后再发起 review");
       }
 
-      const entries = this.agentOps.getRawMessages(opts.sourceSessionId);
+      const entries = await this.agentOps.getRawMessages(opts.sourceSessionId);
       const turnEndIndex = opts.sourceTurnEndIndex ?? extractLatestTurnEndIndex(entries);
       if (turnEndIndex === null) {
         throw new WorkflowError("no-completed-turn", "source session 还没有已完成的 turn 可供 review");
@@ -1128,7 +1131,7 @@ export class WorkflowEngine {
       // Last-resort fallback for legacy rows prepared before the context was
       // persisted: recompute from the stored cutoff. Scope is unrecoverable
       // there and degrades to "scope unknown" rather than blocking.
-      const entries = pending ? null : this.agentOps.getRawMessages(run.source_session_id);
+      const entries = pending ? null : await this.agentOps.getRawMessages(run.source_session_id);
       const prompt = buildReviewerPrompt({
         taskContext: pending
           ? pending.taskContext
@@ -1202,7 +1205,7 @@ export class WorkflowEngine {
     const run = await this.storage.workflowRuns.getById(p.runId);
     if (!run || run.status !== "waiting_reviewer") return;
 
-    const entries = this.agentOps.getRawMessages(event.sessionId);
+    const entries = await this.agentOps.getRawMessages(event.sessionId);
     const boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries) ?? entries.length;
     const feedback = extractLastAssistantInTurn(entries, boundary) ?? "(reviewer 没有输出可用的反馈文本)";
 

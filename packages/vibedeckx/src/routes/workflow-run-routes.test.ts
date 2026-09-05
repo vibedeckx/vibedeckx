@@ -59,7 +59,7 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
   app.decorate("remoteSessionMap", new Map() as never);
   app.decorate("reverseConnectManager", null as never);
   app.decorate("eventBus", { emit: vi.fn() } as never);
-  app.decorate("agentSessionManager", { getMessages: () => [] } as never);
+  app.decorate("agentSessionManager", { loadMessages: async () => [] } as never);
   return app;
 }
 

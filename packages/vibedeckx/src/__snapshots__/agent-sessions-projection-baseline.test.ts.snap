@@ -72,6 +72,13 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
   "getEntries": [
     "agent-session-lifecycle.ts",
     "agent-session-manager.ts",
+    "session-history-reader.ts",
+  ],
+  "getEntriesBefore": [
+    "session-history-reader.ts",
+  ],
+  "getEntryMetaAll": [
+    "agent-session-manager.ts",
   ],
   "getLatestByBranch": [
     "agent-session-manager.ts",
@@ -197,6 +204,8 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
   "getById",
   "getByProjectId",
   "getEntries",
+  "getEntriesBefore",
+  "getEntryMetaAll",
   "getLatestByBranch",
   "getLifecycleById",
   "getLifecycleByPrepareOperationId",

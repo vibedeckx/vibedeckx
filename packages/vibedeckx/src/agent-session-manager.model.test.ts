@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
 import type { AgentSession, Storage } from "./storage/types.js";
+import { derivedEntryMeta } from "./__fixtures__/entry-meta-mock.js";
 
 // spawnAgent bails out before calling buildSpawnConfig if the cwd doesn't
 // exist on disk — not in the brief's harness, but createNewSession resolves
@@ -39,6 +40,8 @@ function makeStorage() {
       getById: async (id: string) => rows.get(id) ?? null,
       getAll: async () => [...rows.values()],
       getEntries: async () => [],
+      getEntryMetaAll: async () => [],
+      getEntriesBefore: async () => [],
       upsertEntry: vi.fn(async () => undefined),
       updateStatus: vi.fn(async () => undefined),
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
@@ -170,6 +173,20 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
   } as AgentSession;
 
   const created: AgentSession[] = [];
+  // Entries per session, seeded with the source's history. Writes have to be
+  // readable back: a dormant session's transcript lives here, not in memory,
+  // so an appended system note is only observable if this records it.
+  const entriesBySession = new Map<string, Array<{ session_id: string; entry_index: number; data: string }>>([
+    ["s-src", [...HISTORY]],
+  ]);
+  const getEntries = async (id: string) => entriesBySession.get(id) ?? [];
+  const upsertEntry = vi.fn(async (id: string, entry_index: number, data: string) => {
+    const rows = entriesBySession.get(id) ?? [];
+    const at = rows.findIndex((r) => r.entry_index === entry_index);
+    const next = { session_id: id, entry_index, data };
+    if (at >= 0) rows[at] = next; else rows.push(next);
+    entriesBySession.set(id, rows);
+  });
   const checkout = {
     id: "checkout-feat", workspace_id: "workspace-feat", target_id: "local",
     worktree_path: "/tmp/p1", expected_branch: "feat", status: "ready" as const,
@@ -187,7 +204,8 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
     agentSessions: {
       getAll: async () => [source],
       getById: async (id: string) => (id === "s-src" ? source : created.find((r) => r.id === id) ?? null),
-      getEntries: async () => HISTORY,
+      getEntries,
+      ...derivedEntryMeta("s-src", getEntries),
       create: async (row: Partial<AgentSession>) => { created.push({ ...source, ...row } as AgentSession); },
       createBound: async (row: Partial<AgentSession>) => {
         const session = { ...source, ...row, workspace_checkout_id: checkout.id } as AgentSession;
@@ -198,7 +216,7 @@ function makeSeededStorage(sourceRow: Partial<AgentSession>) {
       updateStatus: vi.fn(async () => undefined),
       updateAgentType: vi.fn(async () => undefined),
       updateModel,
-      upsertEntry: vi.fn(async () => undefined),
+      upsertEntry,
       updateTitle: vi.fn(async () => undefined),
       setBranchedFrom: vi.fn(async () => undefined),
       listByBranch: async () => created,
@@ -322,8 +340,7 @@ describe("model survives every respawn path", () => {
 
     await manager.switchAgentType("s-src", "codex");
 
-    const systemEntry = manager
-      .getMessages("s-src")
+    const systemEntry = (await manager.loadMessages("s-src"))
       .filter(Boolean)
       .find((m) => m?.type === "system" && m.content?.includes("Coding agent switched"));
     expect(systemEntry?.content).toBe(
@@ -339,8 +356,7 @@ describe("model survives every respawn path", () => {
 
     await manager.switchAgentType("s-src", "codex");
 
-    const systemEntry = manager
-      .getMessages("s-src")
+    const systemEntry = (await manager.loadMessages("s-src"))
       .filter(Boolean)
       .find((m) => m?.type === "system" && m.content?.includes("Coding agent switched"));
     expect(systemEntry?.content).not.toContain("Model reset");

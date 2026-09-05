@@ -1528,7 +1528,7 @@ export class ChatSessionManager {
               ?? null;
           }
           if (agentSession) {
-            const allMessages = agentSessionManager.getMessages(agentSession.id);
+            const allMessages = await agentSessionManager.loadMessages(agentSession.id);
             const recent = allMessages.slice(-tailMessages);
             localResult = {
               sessionId: agentSession.id,

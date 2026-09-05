@@ -4,6 +4,7 @@ import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
 import type { AgentSession, NotificationOutboxEvent, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
+import { derivedEntryMeta } from "./__fixtures__/entry-meta-mock.js";
 
 type OutboxWrite = Omit<NotificationOutboxEvent, "seq">;
 type TurnEndWrite = { sessionId: string; entryIndex: number; entryData: string; outbox?: OutboxWrite };
@@ -57,12 +58,14 @@ function makeHarness(
   // Mirrors the real ON CONFLICT(id) DO NOTHING so "retrying the same turn-end
   // write creates no duplicate" is a genuine assertion, not a harness artifact.
   const outboxIds = new Set<string>();
+  const getEntries = async () => seedEntries.map((entry, i) => ({
+    session_id: SESSION_ID, entry_index: i, data: JSON.stringify(entry),
+  }));
   const storage = {
     agentSessions: {
       getAll: async () => [row],
-      getEntries: async () => seedEntries.map((entry, i) => ({
-        session_id: SESSION_ID, entry_index: i, data: JSON.stringify(entry),
-      })),
+      getEntries,
+      ...derivedEntryMeta(SESSION_ID, getEntries),
       getById: async () => row,
       listByBranch: async () => [row],
       markCompleted: vi.fn(async () => undefined),
@@ -103,6 +106,10 @@ async function liveSession(manager: AgentSessionManager, openSince: number | nul
     buildFullConversationContext: (entries: AgentMessage[]) => string | null;
   };
   const session = internals.sessions.get(SESSION_ID)!;
+  // A restored session is cold. Loading its transcript is what wakeDormantSession
+  // does before it spawns, and the streaming paths below assume it (invariant
+  // B1: a session with a process has its history in memory).
+  await (manager as unknown as { hydrateForSpawn(s: unknown): Promise<void> }).hydrateForSpawn(session);
   session.dormant = false;
   session.status = "running";
   session.turnOpenSince = openSince;

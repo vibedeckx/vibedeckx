@@ -490,16 +490,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
-        // Local session handling
-        const unsubscribe = fastify.agentSessionManager.subscribe(sessionId, socket, { afterEntryIndex, historyEpoch });
-
-        if (!unsubscribe) {
-          console.log(`[AgentWS] Session ${sessionId} not found`);
+        // Local session handling.
+        //
+        // `subscribe` is async — a dormant session's history is read from
+        // storage inside it — so the disconnect handler is registered FIRST,
+        // through a mutable reference. Registering it after the await (as this
+        // did while history was always in memory) means a user who closes the
+        // tab during the read never stops the heartbeat, and the socket that
+        // subscribe then registers is dead on arrival and never removed.
+        let unsubscribe: (() => void) | null = null;
+        socket.on("close", () => {
+          console.log(`[AgentWS] Client disconnected from session ${sessionId}`);
           stopHeartbeat();
-          socket.send(JSON.stringify({ error: "Session not found" }));
-          socket.close();
-          return;
-        }
+          unsubscribe?.();
+        });
 
         socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
           try {
@@ -514,11 +518,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
           }
         });
 
-        socket.on("close", () => {
-          console.log(`[AgentWS] Client disconnected from session ${sessionId}`);
+        unsubscribe = await fastify.agentSessionManager.subscribe(
+          sessionId, socket, { afterEntryIndex, historyEpoch },
+        );
+
+        // Null also covers "the client disconnected mid-read", in which case
+        // the close handler above has already run and there is nothing to say.
+        if (!unsubscribe) {
+          console.log(`[AgentWS] Session ${sessionId} unavailable for subscribe`);
           stopHeartbeat();
-          unsubscribe?.();
-        });
+          try {
+            socket.send(JSON.stringify({ error: "Session not found" }));
+            socket.close();
+          } catch { /* socket already gone */ }
+          return;
+        }
       }
     );
     // Chat Session WebSocket

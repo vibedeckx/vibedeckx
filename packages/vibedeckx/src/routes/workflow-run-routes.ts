@@ -393,7 +393,7 @@ async function routes(fastify: FastifyInstance) {
         if (!historyResult.ok) return undefined;
         messages = (historyResult.data as { messages?: AgentMessage[] }).messages ?? [];
       } else {
-        messages = fastify.agentSessionManager.getMessages(sourceSessionId);
+        messages = await fastify.agentSessionManager.loadMessages(sourceSessionId);
       }
       return (await generateIntentBrief(fastify.storage, resolveUserId(userId), messages)) ?? undefined;
     } catch (err) {

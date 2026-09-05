@@ -342,7 +342,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const newSessionId = result.sessionId;
 
     const session = fastify.agentSessionManager.getSession(newSessionId);
-    const messages = fastify.agentSessionManager.getMessages(newSessionId);
+    // From the branch operation itself: the new session is dormant, so its
+    // transcript is in the database only, and it just wrote every row of it.
+    const messages = result.messages;
     const dbRow = await fastify.storage.agentSessions.getById(newSessionId);
     return {
       ok: true,
@@ -450,10 +452,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       const session = fastify.agentSessionManager.getSession(sessionId);
-      const messages = fastify.agentSessionManager.getMessages(sessionId);
+      // One read serves both shapes: for a dormant session each `load*` call
+      // is a database round-trip, so the window is sliced from the same array.
       const epoch = fastify.agentSessionManager.getHistoryEpoch(sessionId) ?? 0;
+      const rawMessages = await fastify.agentSessionManager.loadRawMessages(sessionId);
+      const messages = rawMessages.filter(Boolean);
       const historyWindow = historyTurns
-        ? buildHistoryWindow(fastify.agentSessionManager.getRawMessages(sessionId), epoch, { turns: historyTurns })
+        ? buildHistoryWindow(rawMessages, epoch, { turns: historyTurns })
         : undefined;
       const projection = await fastify.storage.agentSessions.getActivityById(sessionId, "session-detail");
       if (session?.workspaceCheckoutId && !projection) {
@@ -655,7 +660,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
                 processAlive: recovered
                   ? fastify.agentSessionManager.getSessionProcessAlive(recoveredSessionId) : false,
               },
-              messages: fastify.agentSessionManager.getMessages(recoveredSessionId),
+              messages: await fastify.agentSessionManager.loadMessages(recoveredSessionId),
             });
           }
           return reply.code(200).send({
@@ -672,7 +677,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
               processAlive: fastify.agentSessionManager.getSessionProcessAlive(sessionId),
               ...sendBackFields(active!),
             },
-            messages: fastify.agentSessionManager.getMessages(sessionId),
+            messages: await fastify.agentSessionManager.loadMessages(sessionId),
           });
         }
       }
@@ -1122,10 +1127,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       const session = fastify.agentSessionManager.getSession(sessionId);
-      const messages = fastify.agentSessionManager.getMessages(sessionId);
       const epoch = fastify.agentSessionManager.getHistoryEpoch(sessionId) ?? 0;
+      const rawMessages = await fastify.agentSessionManager.loadRawMessages(sessionId);
+      const messages = rawMessages.filter(Boolean);
       const historyWindow = historyTurns
-        ? buildHistoryWindow(fastify.agentSessionManager.getRawMessages(sessionId), epoch, { turns: historyTurns })
+        ? buildHistoryWindow(rawMessages, epoch, { turns: historyTurns })
         : undefined;
 
       const effectiveStatus = session?.status || "stopped";
@@ -1344,7 +1350,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      const messages = fastify.agentSessionManager.getMessages(req.params.sessionId);
+      const messages = await fastify.agentSessionManager.loadMessages(req.params.sessionId);
 
       return reply.code(200).send({
         session: {
@@ -1436,9 +1442,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const session = fastify.agentSessionManager.getSession(req.params.sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
-    const epoch = fastify.agentSessionManager.getHistoryEpoch(req.params.sessionId) ?? 0;
+    const window = await fastify.agentSessionManager.loadHistoryWindow(req.params.sessionId, { before, turns });
+    if (!window) return reply.code(404).send({ error: "Session not found" });
     return reply.code(200).send({
-      ...buildHistoryWindow(fastify.agentSessionManager.getRawMessages(req.params.sessionId), epoch, { before, turns }),
+      ...window,
       status: session.status,
       session: {
         id: session.id,
@@ -1511,8 +1518,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const session = fastify.agentSessionManager.getSession(req.params.sessionId);
       if (!session) return reply.code(404).send({ error: "Session not found" });
-      const epoch = fastify.agentSessionManager.getHistoryEpoch(req.params.sessionId) ?? 0;
-      const head = buildHistoryWindow(fastify.agentSessionManager.getRawMessages(req.params.sessionId), epoch, { turns: 1 });
+      const head = await fastify.agentSessionManager.loadHistoryHead(req.params.sessionId);
+      if (!head) return reply.code(404).send({ error: "Session not found" });
       return reply.code(200).send({
         historyEpoch: head.historyEpoch,
         latestEntryIndex: head.latestEntryIndex,
@@ -1542,7 +1549,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const session = fastify.agentSessionManager.getSession(req.params.sessionId);
       if (!session) return reply.code(404).send({ error: "Session not found" });
       return reply.code(200).send({
-        messages: projectMessagesForBrief(fastify.agentSessionManager.getMessages(req.params.sessionId)),
+        messages: projectMessagesForBrief(await fastify.agentSessionManager.loadMessages(req.params.sessionId)),
       });
     },
   );

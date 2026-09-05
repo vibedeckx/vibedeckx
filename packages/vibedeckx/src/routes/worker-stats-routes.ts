@@ -74,6 +74,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return reply.send(collectMemoryStats({
       remotePatchCache: fastify.remotePatchCache,
       processManager: fastify.processManager,
+      sessionHydration: fastify.agentSessionManager,
     }));
   });
 

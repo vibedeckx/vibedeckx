@@ -3,6 +3,7 @@ import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
+import { derivedEntryMeta } from "./__fixtures__/entry-meta-mock.js";
 
 /**
  * switchMode × Codex provider state, and load-path mode neutrality.
@@ -27,12 +28,14 @@ function makeHarness(permissionMode: "plan" | "edit") {
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
     last_user_message_at: 1, last_completed_at: null,
   };
+  const getEntries = async () => [
+    { session_id: SESSION_ID, entry_index: 0, data: JSON.stringify({ type: "user", content: "go", timestamp: 1 }) },
+  ];
   const storage = {
     agentSessions: {
       getAll: async () => [row],
-      getEntries: async () => [
-        { session_id: SESSION_ID, entry_index: 0, data: JSON.stringify({ type: "user", content: "go", timestamp: 1 }) },
-      ],
+      getEntries,
+      ...derivedEntryMeta(SESSION_ID, getEntries),
       getById: async () => row,
       getLatestByBranch: async () => row,
       listByBranch: async () => [row],

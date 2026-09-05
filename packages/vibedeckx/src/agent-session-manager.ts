@@ -25,6 +25,13 @@ import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
 import { EntryIndexProvider, EntryTracker } from "./entry-index-provider.js";
+import { SessionHistoryReader } from "./session-history-reader.js";
+import {
+  buildHistoryWindow,
+  historyHead,
+  type SessionHistoryHead,
+  type SessionHistoryWindow,
+} from "./session-history-window.js";
 import { getRegisteredWorktreeBranches, resolveWorktreePath } from "./utils/worktree-paths.js";
 import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
 import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
@@ -95,6 +102,13 @@ export function buildStartupFailureMessage(
 const SUMMARY_TEXT_CAP = 1500;
 
 /**
+ * Page size for crash repair's backward walk to the previous turn boundary.
+ * Big enough that an ordinary turn resolves in one query, small enough that a
+ * clean tail (the common case, decided by the first row) costs almost nothing.
+ */
+const REPAIR_SCAN_BATCH = 64;
+
+/**
  * Pull the agent's last assistant message out of the store so the orchestrator
  * chat can summarize a completed task without a round-trip to read history.
  * Entries are sparse (indices assigned non-contiguously) so scan from the end
@@ -126,6 +140,103 @@ interface MessageStore {
   currentAssistantIndex: number | null;
 }
 
+/**
+ * What a session knows about its transcript while the transcript itself is in
+ * the database rather than the heap
+ * (docs/plans/2026-09-05-session-history-lazy-hydration-b.md §3.2).
+ *
+ * Authoritative only while the session is COLD. Going hot recomputes it from
+ * the loaded store, and every unload recomputes it again — so it is correct at
+ * each moment it is actually read, without a new invariant threaded through
+ * the streaming write paths. See `hasHistory`.
+ */
+interface SessionHistoryMeta {
+  entryCount: number;
+  /** Highest entry index ever allocated, or -1 for an empty transcript. */
+  maxEntryIndex: number;
+}
+
+/** `WebSocket.OPEN`; the ws readyState enum is not imported for one constant. */
+const WS_OPEN = 1;
+
+function isSocketOpen(ws: WebSocket): boolean {
+  // Some test doubles omit readyState entirely; absent means "not closed".
+  return ws.readyState === undefined || ws.readyState === WS_OPEN;
+}
+
+/**
+ * The replay frames for a transcript held only in storage: one `addEntry` per
+ * entry, in index order.
+ *
+ * Frame-for-frame identical to what `rebuildStoreFromRows` used to leave in
+ * `store.patches` for a restored session, which is why the hub's prefix
+ * comparison over replayed frames (`remote-agent-sessions.ts`) sees no change.
+ */
+function replayPatchesFor(entries: Array<AgentMessage | undefined>): Patch[] {
+  const patches: Patch[] = [];
+  entries.forEach((message, index) => {
+    if (message !== undefined) patches.push(ConversationPatch.addEntry(index, message));
+  });
+  return patches;
+}
+
+/** Parse persisted rows into the dense `getMessages` shape, dropping unreadable ones. */
+function denseMessagesFromRows(rows: Array<{ entry_index: number; data: string }>): AgentMessage[] {
+  const messages: AgentMessage[] = [];
+  for (const row of rows) {
+    try {
+      messages.push(JSON.parse(row.data) as AgentMessage);
+    } catch { /* corrupted row: skipped, exactly as rebuildStoreFromRows skips it */ }
+  }
+  return messages;
+}
+
+function metaFromStore(store: MessageStore): SessionHistoryMeta {
+  let entryCount = 0;
+  let maxEntryIndex = -1;
+  store.entries.forEach((entry, index) => {
+    if (entry === undefined) return;
+    entryCount++;
+    if (index > maxEntryIndex) maxEntryIndex = index;
+  });
+  return { entryCount, maxEntryIndex };
+}
+
+/**
+ * The store a cold session carries: empty, but with its index counter already
+ * positioned past the persisted tail. That last part is what lets a cold
+ * append (`pushEntry`'s cold branch) allocate a correct index without reading
+ * anything — invariant B4.
+ */
+function coldStore(maxEntryIndex: number): MessageStore {
+  const indexProvider = new EntryIndexProvider(maxEntryIndex + 1);
+  return {
+    patches: [],
+    entries: [],
+    indexProvider,
+    toolTracker: new EntryTracker(indexProvider),
+    currentAssistantIndex: null,
+  };
+}
+
+/**
+ * Thrown by `hydrateForSpawn` when a `restartSession` overtook the wake or
+ * mode switch that was loading history for its own spawn. The operation must
+ * abort outright: restart has already killed the process, wiped the
+ * transcript and started its own respawn, so continuing would spawn a second
+ * process for the session and append a user entry into history that the
+ * restart just cleared.
+ */
+export class SpawnSupersededError extends Error {
+  readonly code = "spawn_superseded";
+  readonly statusCode = 409;
+
+  constructor(sessionId: string) {
+    super(`Session ${sessionId} was restarted while its history was loading`);
+    this.name = "SpawnSupersededError";
+  }
+}
+
 interface RunningSession {
   id: string;
   projectId: string;
@@ -153,6 +264,31 @@ interface RunningSession {
   /** Durable generation of this session's entry-index namespace. */
   historyEpoch: number;
   store: MessageStore;
+  /**
+   * True while `store` holds this session's transcript; false while the
+   * transcript lives only in the database and `store` is an empty shell.
+   *
+   * Process-bound by design (plan §2.1): a session is hot for exactly as long
+   * as it owns an agent process, plus the short spans on either side that
+   * `processStartsInFlight` or the event chain already cover. That is what
+   * keeps every streaming write path synchronous — see `assertHot`.
+   */
+  hot: boolean;
+  /** Valid in both states; see `SessionHistoryMeta`. */
+  historyMeta: SessionHistoryMeta;
+  /** Single-flight handle for an in-progress `hydrateForSpawn`, else null. */
+  hydrating: Promise<void> | null;
+  /**
+   * Incremented SYNCHRONOUSLY by `restartSessionInner` before its first
+   * await. Anything holding a transcript snapshot across an await — a
+   * hydration, a cold replay — compares it afterwards and discards the
+   * snapshot if it moved.
+   *
+   * `historyEpoch` cannot do this job: its in-memory value is only assigned
+   * after `await incrementHistoryEpoch()`, leaving a window in which a
+   * snapshot taken before the restart still matches.
+   */
+  clearGeneration: number;
   subscribers: Set<WebSocket>;
   status: AgentSessionStatus;
   buffer: string; // Buffer for incomplete JSON lines
@@ -207,6 +343,26 @@ interface RunningSession {
    * awaits storage calls, and the stdout data callback can't await).
    */
   eventChain: Promise<void>;
+  /**
+   * Tasks queued on or running on `eventChain`; 0 means it is idle.
+   *
+   * Read by `unloadHistory` so a transcript is never pulled out from under
+   * work that is already mid-flight against it.
+   */
+  chainPending: number;
+  /**
+   * Serializes history *installation* (`hydrateForSpawn`) against history
+   * *appends* on a cold session (`pushEntry`'s cold branch), so an append can
+   * never be lost between a hydration's read and its install.
+   *
+   * Deliberately NOT `eventChain`. A cold append can originate from work that
+   * is itself running on `eventChain` — a stdout chunk that was in flight when
+   * Stop unloaded the transcript underneath it — and queuing there would make
+   * that task wait for itself, wedging the chain permanently and leaving the
+   * session unwakeable. These two operations only ever need to exclude each
+   * other, so they get their own one-slot queue.
+   */
+  historyChain: Promise<void>;
   /**
    * Protocol-drift detection, both counted since the last `result`. A
    * `run_in_background: true` tool_use input is a model request parameter
@@ -289,7 +445,17 @@ export interface FirstSendOptions {
  * the source is running — refused so a half-finished turn is never copied.
  */
 export type BranchResult =
-  | { ok: true; sessionId: string }
+  | {
+    ok: true;
+    sessionId: string;
+    /**
+     * The copied transcript, so the caller can render the new session without
+     * a second read. The branch arrives cold (no process, so no in-memory
+     * store — §3.3), and re-reading rows this call just wrote would be the
+     * one place lazy hydration made a common path slower rather than faster.
+     */
+    messages: AgentMessage[];
+  }
   | { ok: false; reason: "not-found" | "empty-history" | "invalid-cutoff" | "running-needs-cutoff" };
 
 export class WorkspaceCheckoutUnavailableError extends Error {
@@ -352,8 +518,12 @@ export class AgentSessionManager {
   private readonly parkTimeoutMs: number;
   private workflowSuppressionCheck: ((sessionId: string) => boolean) | null = null;
 
+  /** Every read of a cold session's transcript goes through here. */
+  private readonly reader: SessionHistoryReader;
+
   constructor(storage: Storage, opts?: { completionGraceMs?: number; parkTimeoutMs?: number }) {
     this.storage = storage;
+    this.reader = new SessionHistoryReader(storage);
     this.completionGraceMs = opts?.completionGraceMs ?? COMPLETION_GRACE_MS;
     this.parkTimeoutMs = opts?.parkTimeoutMs ?? PARK_TIMEOUT_MS;
   }
@@ -539,6 +709,198 @@ export class AgentSessionManager {
     this.broadcastRaw(sessionId, { titleUpdated: { title } });
     const session = this.sessions.get(sessionId);
     if (session) this.emitSessionTitle(session.projectId, session.branch, sessionId, title);
+  }
+
+  // ============ History hydration (plan B §2) ============
+
+  /**
+   * Guard for the paths that may only run against an in-memory transcript:
+   * everything on the streaming write side (`stageEntry` and the stdout
+   * parsing chain behind it) plus the turn-boundary scans that read
+   * `store.entries` directly.
+   *
+   * They all sit behind invariant B1 — a session with a process is hot — so
+   * this should be unreachable. It throws rather than silently degrading
+   * because the failure mode it guards against is invisible: a cold session
+   * reads as a transcript of length zero, which would make a turn boundary
+   * resolve to a fabricated disposition instead of blowing up.
+   */
+  private assertHot(session: RunningSession, operation: string): void {
+    if (session.hot) return;
+    throw new Error(
+      `[AgentSession] ${operation} requires a hydrated session but ${session.id} is cold`,
+    );
+  }
+
+  /**
+   * Load a cold session's transcript into memory ahead of spawning a process
+   * for it. The ONLY hydration path.
+   *
+   * @throws SpawnSupersededError if a restart overtook the caller's operation.
+   *   The caller must abort: not spawn, not append, not touch the session.
+   */
+  private async hydrateForSpawn(session: RunningSession): Promise<void> {
+    // Captured before any await, and compared after: this asks "is my
+    // operation still valid?", which is a different question from "is the
+    // transcript loaded?". Answering it with `hot` was the bug — restart
+    // installs a hot empty shell, so a superseded wake would find `hot`
+    // true and cheerfully spawn a competing process.
+    const generation = session.clearGeneration;
+
+    if (!session.hot) {
+      if (!session.hydrating) {
+        // On the history chain, so a cold append cannot slip in between the
+        // read and the install and be lost when the snapshot lands (§3.3).
+        session.hydrating = this.runOnHistoryChain(session, async () => {
+          if (session.hot) return;
+          const generationAtRead = session.clearGeneration;
+          const rows = await this.storage.agentSessions.getEntries(session.id);
+          // A restart cleared the transcript under us — its own empty shell
+          // is the current truth, so drop what we read.
+          if (session.clearGeneration !== generationAtRead || session.hot) return;
+          const store = this.rebuildStoreFromRows(rows, session.id);
+          session.store = store;
+          session.historyMeta = metaFromStore(store);
+          session.hot = true;
+        }).finally(() => {
+          session.hydrating = null;
+        });
+      }
+      await session.hydrating;
+    }
+
+    if (session.clearGeneration !== generation) throw new SpawnSupersededError(session.id);
+  }
+
+  /**
+   * Drop a session's transcript back to the database. Called at every point
+   * where a session stops owning a process — the four in plan §2.3 (process
+   * exit, Stop, hibernate, agent switch) plus `setModel` retiring an idle
+   * process. This is the whole of the memory-reclaim story: no sweeper and no
+   * idle threshold, because "does it have a process" is not a policy.
+   *
+   * A no-op for sessions that are already cold (a second Stop, a Stop on a
+   * session restored from disk) and for `skipDb` mirrors, which have no rows
+   * to read back.
+   */
+  private unloadHistory(session: RunningSession, reason: string): void {
+    if (!session.hot || session.skipDb) return;
+    if (session.chainPending > 0) {
+      // Work is already queued or running against this transcript — a stdout
+      // chunk the dying process flushed, the process-close handler. Stop and
+      // the agent/model switches all run OFF the chain, so unloading here
+      // would yank the store out from under a task that started with it and
+      // push its remaining appends down the cold path. Defer instead: the
+      // chain is where "the session's own work" is ordered, so joining the
+      // back of it is exactly "after everything in flight".
+      //
+      // `unloadHistoryNow` is what runs there, not this method — re-entering
+      // here would see its own queued task and defer forever.
+      this.enqueueSessionWork(
+        session,
+        async () => this.unloadHistoryNow(session, reason),
+        `unload:${reason}`,
+      );
+      return;
+    }
+    this.unloadHistoryNow(session, reason);
+  }
+
+  private unloadHistoryNow(session: RunningSession, reason: string): void {
+    if (!session.hot || session.skipDb) return;
+    if (session.process !== null) {
+      // B1 in the other direction. Not fatal — leaving the transcript loaded
+      // is only a memory cost — but it means a caller unloaded too early.
+      console.warn(`[AgentSession] Refusing to unload ${session.id} (${reason}): process still attached`);
+      return;
+    }
+    if (session.processStartsInFlight > 0) {
+      // A wake or restart is between `hydrateForSpawn` and its `spawnAgent`.
+      // The session looks process-less and (for a wake) still dormant, so
+      // `switchAgentType` accepts it and would unload the transcript the
+      // pending spawn is about to replay — leaving a live process with an
+      // empty store, where the first streamed entry throws in `stageEntry`.
+      // This counter is claimed synchronously before that operation's first
+      // await precisely so concurrent callers can see the commitment.
+      return;
+    }
+    const meta = metaFromStore(session.store);
+    session.historyMeta = meta;
+    session.store = coldStore(Math.max(meta.maxEntryIndex, session.store.indexProvider.current() - 1));
+    session.hot = false;
+  }
+
+  /**
+   * Release the transcript when a spawn attempt ends without attaching a
+   * process — `ensureResidentCapacity` refusing at the cap, a checkout that
+   * vanished, a spawn that could not start.
+   *
+   * Without this, every rejected send on a dormant session loads a transcript
+   * that nothing will ever unload (the four unload points all hang off a
+   * process going away, and no process ever arrived). A user retrying against
+   * a full resident pool would walk the memory bound back up one session at a
+   * time — the exact failure this design exists to prevent.
+   *
+   * Must run AFTER the caller releases its `processStartsInFlight` claim: a
+   * second, still-committed start means the transcript has a new owner.
+   */
+  private unloadIfSpawnAbandoned(session: RunningSession): void {
+    if (session.process !== null || session.processStartsInFlight > 0) return;
+    this.unloadHistory(session, "spawn-abandoned");
+  }
+
+  /**
+   * Aggregate hydration counters for `memory-stats`. Aggregate-only and
+   * name-free by construction, like everything else on that endpoint.
+   *
+   * `hot_entries` is the number of transcript entries actually resident. It is
+   * the curve this whole design exists to flatten: before it, that number was
+   * every entry in the database; after it, it should track the number of live
+   * agent processes. No byte estimate is reported — measuring it means
+   * serializing the very heap we are trying not to touch, twelve times an hour.
+   */
+  hydrationStats(): { total: number; hot: number; cold: number; hot_entries: number } {
+    let hot = 0;
+    let hotEntries = 0;
+    for (const session of this.sessions.values()) {
+      if (!session.hot) continue;
+      hot++;
+      hotEntries += session.store.entries.filter(Boolean).length;
+    }
+    return { total: this.sessions.size, hot, cold: this.sessions.size - hot, hot_entries: hotEntries };
+  }
+
+  /** Dense messages (holes dropped), from memory when hot and storage when cold. */
+  async loadMessages(sessionId: string): Promise<AgentMessage[]> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    if (session.hot) return session.store.entries.filter(Boolean);
+    return this.reader.readDense(sessionId);
+  }
+
+  /** Sparse entries (holes preserved) — index space matches entry indices. */
+  async loadRawMessages(sessionId: string): Promise<AgentMessage[]> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    if (session.hot) return session.store.entries;
+    return this.reader.readAll(sessionId);
+  }
+
+  async loadHistoryWindow(
+    sessionId: string,
+    opts: { before?: number | null; turns?: number } = {},
+  ): Promise<SessionHistoryWindow | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    if (session.hot) return buildHistoryWindow(session.store.entries, session.historyEpoch, opts);
+    return this.reader.readWindow(sessionId, session.historyEpoch, opts);
+  }
+
+  async loadHistoryHead(sessionId: string): Promise<SessionHistoryHead | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    if (session.hot) return historyHead(session.store.entries, session.historyEpoch);
+    return this.reader.readHead(sessionId, session.historyEpoch);
   }
 
   private isProcessAlive(session: RunningSession): boolean {
@@ -754,7 +1116,7 @@ export class AgentSessionManager {
     // skipDb fallback: in-memory scan for remote path-based sessions.
     for (const session of this.sessions.values()) {
       if (session.projectId === projectId && session.branch === branch) {
-        console.log(`[findExisting] skipDb in-memory match: ${session.id} (entries=${session.store.entries.filter(Boolean).length})`);
+        console.log(`[findExisting] skipDb in-memory match: ${session.id} (entries=${this.historyEntryCount(session)})`);
         return this.reuseExistingSession(session, projectPath);
       }
     }
@@ -1004,6 +1366,11 @@ export class AgentSessionManager {
       processStartsInFlight: 0,
       historyEpoch: stored?.history_epoch ?? 0,
       store,
+      // Born hot: a process is spawned for it a few lines below (B1).
+      hot: true,
+      historyMeta: metaFromStore(store),
+      hydrating: null,
+      clearGeneration: 0,
       subscribers: new Set(),
       status: "running",
       buffer: "",
@@ -1017,6 +1384,8 @@ export class AgentSessionManager {
       graceTimer: null,
       parkTimer: null,
       eventChain: Promise.resolve(),
+      chainPending: 0,
+      historyChain: Promise.resolve(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
@@ -1095,7 +1464,7 @@ export class AgentSessionManager {
     session: RunningSession,
     projectPath: string,
   ): Promise<string> {
-    const entriesCount = session.store.entries.filter(Boolean).length;
+    const entriesCount = this.historyEntryCount(session);
     this.touchSession(session);
     if (session.dormant) {
       console.log(`[AgentSession] Returning dormant session ${session.id} (entries=${entriesCount})`);
@@ -1137,9 +1506,12 @@ export class AgentSessionManager {
    * Uses negative PID to signal the process group (requires detached: true at spawn).
    */
   private killProcess(proc: ChildProcess | null, signal: NodeJS.Signals = "SIGTERM"): void {
-    if (!proc?.pid) return;
+    const pid = proc?.pid;
+    // Negating PID 1 broadcasts to every process we can signal on POSIX.
+    // Only accept real child PIDs; invalid IDs must not reach either kill path.
+    if (!proc || pid === undefined || !Number.isSafeInteger(pid) || pid <= 1) return;
     try {
-      process.kill(-proc.pid, signal);
+      process.kill(-pid, signal);
     } catch {
       // Process group kill failed (e.g. already dead) — try direct kill as fallback
       try { proc.kill(signal); } catch { /* already dead */ }
@@ -1337,6 +1709,13 @@ export class AgentSessionManager {
       this.broadcastPatch(session.id, ConversationPatch.updateStatus(session.status));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: session.status });
       this.broadcastRaw(session.id, { finished: true });
+
+      // Unload point: the process is gone, so by B1 the transcript stops
+      // living in memory. Last step of the chain deliberately —
+      // everything above (turn_end, the startup-failure entry, the streaming
+      // finalize) still needs the store, and running on the event chain means
+      // the stdout the process flushed as it died has already been applied.
+      this.unloadHistory(session, "process-exit");
       }, "process-close");
     });
 
@@ -1374,9 +1753,30 @@ export class AgentSessionManager {
    * runs through here so steps never interleave across await points.
    */
   private enqueueSessionWork(session: RunningSession, work: () => Promise<void>, label: string): void {
-    session.eventChain = session.eventChain.then(work).catch((err) => {
-      console.error(`[AgentSession] Error in ${label} handler for ${session.id}:`, err);
-    });
+    session.chainPending += 1;
+    session.eventChain = session.eventChain
+      .then(work)
+      .catch((err) => {
+        console.error(`[AgentSession] Error in ${label} handler for ${session.id}:`, err);
+      })
+      .then(() => {
+        session.chainPending -= 1;
+      });
+  }
+
+  /**
+   * Run `work` with exclusive access to the session's history, i.e. serialized
+   * against every other hydration and cold append for that session.
+   *
+   * Separate from `eventChain` on purpose — see `historyChain`'s declaration.
+   */
+  private runOnHistoryChain<T>(session: RunningSession, work: () => Promise<T>): Promise<T> {
+    const result = session.historyChain.then(work);
+    session.historyChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   /**
@@ -1385,10 +1785,15 @@ export class AgentSessionManager {
    * one queued step can never break the next; the caller gets the real promise.
    */
   private runSerialForResult<T>(session: RunningSession, work: () => Promise<T>): Promise<T> {
+    session.chainPending += 1;
     const result = session.eventChain.then(work);
     session.eventChain = result.then(
-      () => undefined,
-      () => undefined,
+      () => {
+        session.chainPending -= 1;
+      },
+      () => {
+        session.chainPending -= 1;
+      },
     );
     return result;
   }
@@ -1735,6 +2140,11 @@ export class AgentSessionManager {
         event.type === "approval_request")
     ) {
       session.turnOpenSince = timestamp;
+      // An agent event means a live process, which by B1 means a loaded
+      // transcript. Asserted rather than assumed because the failure would be
+      // silent: an empty store resolves to "result", turning an internal
+      // reviewer turn into a spurious "session failed" notification.
+      this.assertHot(session, "turn-open disposition");
       // Not findTurnOpeningUserEntry: a queued message sits *before* the
       // previous turn_end, which that helper treats as a hard boundary.
       session.turnDisposition = resolveNotificationDisposition(findLatestUserEntry(session.store.entries));
@@ -2085,11 +2495,41 @@ export class AgentSessionManager {
    * the two persistence paths can't drift on index allocation or patch shape.
    */
   private stageEntry(session: RunningSession, message: AgentMessage): { index: number; patch: Patch } {
+    this.assertHot(session, "stageEntry");
     const index = session.store.indexProvider.next();
     session.store.entries[index] = message;
     const patch = ConversationPatch.addEntry(index, message);
     session.store.patches.push(patch);
     return { index, patch };
+  }
+
+  /**
+   * Does this session have any transcript at all?
+   *
+   * Reads the store when hot and the metadata when cold, so it is correct in
+   * both states AND — the load-bearing half — never triggers a read. Retention
+   * and the discard compensator ask this of every candidate they consider; if
+   * the question could hydrate, one sweep would pull the whole database back
+   * into the heap that this design just emptied (§3.2).
+   *
+   * Deliberately NOT "historyMeta.entryCount > 0" in both states: keeping the
+   * counter exact through the streaming write paths (which allocate indices
+   * via `toolTracker.getOrCreate`, not only `stageEntry`) would be a new
+   * invariant spread across a dozen sites. While hot, the store is already the
+   * authority; `historyMeta` only has to be right at the moments it is read,
+   * which are all cold.
+   */
+  private hasHistory(session: RunningSession): boolean {
+    return session.hot
+      ? session.store.entries.some((entry) => entry !== undefined)
+      : session.historyMeta.entryCount > 0;
+  }
+
+  /** Entry count for logging — same hot/cold split as `hasHistory`, never reads. */
+  private historyEntryCount(session: RunningSession): number {
+    return session.hot
+      ? session.store.entries.filter(Boolean).length
+      : session.historyMeta.entryCount;
   }
 
   private async pushEntry(
@@ -2101,6 +2541,8 @@ export class AgentSessionManager {
   ): Promise<number> {
     const session = this.sessions.get(sessionId);
     if (!session) return -1;
+
+    if (!session.hot) return this.pushColdEntry(session, message, broadcast, userId, pushOpts);
 
     const { index, patch } = this.stageEntry(session, message);
 
@@ -2114,6 +2556,60 @@ export class AgentSessionManager {
     }
 
     return index;
+  }
+
+  /**
+   * Append to a session whose transcript is not in memory: allocate an index,
+   * write the row, advance the metadata, broadcast the patch. No store is
+   * built — a Stop note or an agent-switch note must not be a reason to pull a
+   * whole transcript into the heap.
+   *
+   * Callers do not choose this path; `pushEntry` picks it. That is what makes
+   * "stop a session restored from disk" and "switch the agent on a dormant
+   * session" work unchanged, which the previous design missed by giving only
+   * `switchAgentType` a bespoke cold-append helper.
+   *
+   * Runs on the session's history chain so it cannot interleave with a
+   * `hydrateForSpawn` and be dropped when that installs its snapshot (§3.3).
+   * It must NOT run on `eventChain`: an unload can land while a stdout chunk
+   * is mid-flight on that chain, so the chunk resumes against a session that
+   * went cold underneath it and appends from *inside* the chain. Queuing there
+   * would make that task wait for itself — the chain wedges, and because
+   * `hydrateForSpawn` used to queue on it too, the session could then never be
+   * woken again.
+   */
+  private pushColdEntry(
+    session: RunningSession,
+    message: AgentMessage,
+    broadcast: boolean,
+    userId: string,
+    pushOpts?: { strictPersist?: boolean },
+  ): Promise<number> {
+    return this.runOnHistoryChain(session, async () => {
+      // Re-checked at the front of the queue: a hydration may have run while
+      // this waited, in which case the ordinary hot path is now correct.
+      if (session.hot) {
+        const { index, patch } = this.stageEntry(session, message);
+        if (!session.skipDb && message.type !== "assistant") {
+          await this.persistEntry(session, index, message, userId, { strict: pushOpts?.strictPersist });
+        }
+        if (broadcast) this.broadcastPatch(session.id, patch);
+        return index;
+      }
+
+      // B4: a cold store's index provider is positioned past the persisted
+      // tail, so this allocates the same index a hot append would.
+      const index = session.store.indexProvider.next();
+      if (!session.skipDb && message.type !== "assistant") {
+        await this.persistEntry(session, index, message, userId, { strict: pushOpts?.strictPersist });
+      }
+      session.historyMeta = {
+        entryCount: session.historyMeta.entryCount + 1,
+        maxEntryIndex: Math.max(session.historyMeta.maxEntryIndex, index),
+      };
+      if (broadcast) this.broadcastPatch(session.id, ConversationPatch.addEntry(index, message));
+      return index;
+    });
   }
 
   /**
@@ -2149,8 +2645,19 @@ export class AgentSessionManager {
     if (entryIndexOverride !== undefined) {
       index = entryIndexOverride;
       patch = ConversationPatch.addEntry(index, message);
-    } else {
+    } else if (session.hot) {
       ({ index, patch } = this.stageEntry(session, message));
+    } else {
+      // A turn can still be open on a cold session: `hibernateSession` frees
+      // the process (and unloads the transcript) without closing the turn, so
+      // a later Stop lands here. Allocate and broadcast exactly as the hot
+      // path does, minus the store write there is no store for.
+      index = session.store.indexProvider.next();
+      session.historyMeta = {
+        entryCount: session.historyMeta.entryCount + 1,
+        maxEntryIndex: Math.max(session.historyMeta.maxEntryIndex, index),
+      };
+      patch = ConversationPatch.addEntry(index, message);
     }
 
     // skipDb sessions (remote path-based pseudo-sessions) have no durable store,
@@ -2276,9 +2783,16 @@ export class AgentSessionManager {
     // Live path: the disposition was decided when this turn opened. The history
     // fallback only covers a turn whose open state predates the field (and is
     // the same resolution crash repair uses), so the two paths never disagree.
-    const disposition = session.turnDisposition ?? resolveNotificationDisposition(
-      findTurnOpeningUserEntry(session.store.entries, session.store.entries.length),
-    );
+    // It is resolved lazily, and from storage when the session is cold — the
+    // rare case pushTurnEnd also handles, a turn left open by hibernate and
+    // closed later by a Stop. Scanning the empty store there would resolve to
+    // "result" and notify about an internal turn's failure.
+    let disposition = session.turnDisposition;
+    if (disposition === null) {
+      const entries = session.hot ? session.store.entries : await this.reader.readAll(session.id);
+      const beforeIndex = session.hot ? entries.length : session.historyMeta.maxEntryIndex + 1;
+      disposition = resolveNotificationDisposition(findTurnOpeningUserEntry(entries, beforeIndex));
+    }
     const index = await this.pushTurnEnd(session, outcome, disposition, endedAt, durationMs);
     session.turnOpenSince = null; // cleared only after the write resolves
     session.turnDisposition = null;
@@ -2492,79 +3006,130 @@ export class AgentSessionManager {
   }
 
   /**
-   * Subscribe to session updates (WebSocket connection)
+   * Attach a client to a session's live stream and replay its history to it.
+   *
+   * Async since lazy hydration: a dormant session's transcript is read from
+   * storage here. The caller MUST register its `close` handler before
+   * awaiting — see `websocket-routes.ts` — or a user who closes the tab during
+   * that read leaves a dead socket in `subscribers` and a heartbeat running.
    */
-  subscribe(
+  async subscribe(
     sessionId: string,
     ws: WebSocket,
     opts: { afterEntryIndex?: number; historyEpoch?: number } = {},
-  ): (() => void) | null {
+  ): Promise<(() => void) | null> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return null;
     }
+    if (!isSocketOpen(ws)) return null;
 
+    // Registered BEFORE the read below, so patches broadcast while it is in
+    // flight reach this client rather than falling into the gap between the
+    // snapshot and the subscription.
     session.subscribers.add(ws);
+    const unsubscribe = () => { session.subscribers.delete(ws); };
 
-    // A mismatched epoch means the client is naming an old index namespace;
-    // replay the replacement conversation from its beginning.
-    const after = opts.historyEpoch === undefined || opts.historyEpoch === session.historyEpoch
-      ? (opts.afterEntryIndex ?? -1)
-      : -1;
-    ws.send(JSON.stringify({
-      HistorySync: {
-        historyEpoch: session.historyEpoch,
-        reset: opts.historyEpoch !== undefined && opts.historyEpoch !== session.historyEpoch,
-      },
-    }));
+    // Bounded only as a backstop. A restart makes the session hot with an
+    // empty shell, so the retry below takes the no-await branch and cannot be
+    // invalidated again; reaching this ceiling would mean a pathological
+    // restart/unload interleaving, and giving up beats spinning on the disk.
+    for (let attempt = 0; ; attempt++) {
+      if (attempt >= 5) {
+        console.error(`[AgentSession] subscribe to ${sessionId} kept being invalidated; giving up`);
+        unsubscribe();
+        return null;
+      }
+      const generation = session.clearGeneration;
 
-    // Send the live background-task set BEFORE the history replay. The harness
-    // pushes these only on change, so without a snapshot here a reload during a
-    // long-running background task shows an empty bar while the task is still
-    // running — exactly the case the bar exists for. It goes first because it
-    // is a standalone snapshot, not a patch: it depends on nothing that
-    // replays, and putting it last made the bar wait out the whole transcript
-    // on every reload. The client renders it against the status it already got
-    // from the REST session load; the status patch below only reconciles.
-    ws.send(JSON.stringify(this.backgroundTasksMessage(session)));
+      // A mismatched epoch means the client is naming an old index namespace;
+      // replay the replacement conversation from its beginning.
+      const after = opts.historyEpoch === undefined || opts.historyEpoch === session.historyEpoch
+        ? (opts.afterEntryIndex ?? -1)
+        : -1;
+      ws.send(JSON.stringify({
+        HistorySync: {
+          historyEpoch: session.historyEpoch,
+          reset: opts.historyEpoch !== undefined && opts.historyEpoch !== session.historyEpoch,
+        },
+      }));
 
-    // Send historical entry patches after the client's sealed boundary. Keep
-    // every replace for the active tail: multiple patches may target the same
-    // entry index while assistant text streams.
-    for (const patch of session.store.patches) {
-      const entryIndices = patch.flatMap((op) => {
-        const match = op.path.match(/^\/entries\/(\d+)$/);
-        return match ? [Number(match[1])] : [];
-      });
-      if (entryIndices.length > 0 && entryIndices.every((index) => index <= after)) continue;
-      const msg: AgentWsMessage = { JsonPatch: patch };
-      ws.send(JSON.stringify(msg));
+      // Send the live background-task set BEFORE the history replay. The harness
+      // pushes these only on change, so without a snapshot here a reload during a
+      // long-running background task shows an empty bar while the task is still
+      // running — exactly the case the bar exists for. It goes first because it
+      // is a standalone snapshot, not a patch: it depends on nothing that
+      // replays, and putting it last made the bar wait out the whole transcript
+      // on every reload. The client renders it against the status it already got
+      // from the REST session load; the status patch below only reconciles.
+      ws.send(JSON.stringify(this.backgroundTasksMessage(session)));
+
+      // Hot: the recorded patch stream, exactly as before — no await, and the
+      // per-entry `replace` frames of the streaming tail are preserved.
+      // Cold: one `add` per persisted entry, which is frame-for-frame what a
+      // restored session's patch list used to be.
+      const patches = session.hot
+        ? session.store.patches
+        : replayPatchesFor(await this.reader.readAll(sessionId));
+
+      // The client may have closed the tab during that read.
+      if (!isSocketOpen(ws)) { unsubscribe(); return null; }
+      // A restart landed while we were reading: the client has already been
+      // sent HistorySync{reset} + clearAll, and replaying the snapshot now
+      // would resurrect the history that restart just deleted. Start over —
+      // the second pass finds the session hot with restart's empty shell, so
+      // it does not touch storage again.
+      if (session.clearGeneration !== generation) continue;
+
+      // Send historical entry patches after the client's sealed boundary. Keep
+      // every replace for the active tail: multiple patches may target the same
+      // entry index while assistant text streams.
+      for (const patch of patches) {
+        const entryIndices = patch.flatMap((op) => {
+          const match = op.path.match(/^\/entries\/(\d+)$/);
+          return match ? [Number(match[1])] : [];
+        });
+        if (entryIndices.length > 0 && entryIndices.every((index) => index <= after)) continue;
+        const msg: AgentWsMessage = { JsonPatch: patch };
+        ws.send(JSON.stringify(msg));
+      }
+
+      // Send Ready signal to indicate history is complete
+      ws.send(JSON.stringify({ Ready: true, historyEpoch: session.historyEpoch }));
+
+      // Send current status
+      const statusPatch = ConversationPatch.updateStatus(session.status);
+      ws.send(JSON.stringify({ JsonPatch: statusPatch }));
+
+      return unsubscribe;
     }
-
-    // Send Ready signal to indicate history is complete
-    ws.send(JSON.stringify({ Ready: true, historyEpoch: session.historyEpoch }));
-
-    // Send current status
-    const statusPatch = ConversationPatch.updateStatus(session.status);
-    ws.send(JSON.stringify({ JsonPatch: statusPatch }));
-
-    // Return unsubscribe function
-    return () => {
-      session.subscribers.delete(ws);
-    };
   }
 
   /**
-   * Get all messages for a session (reconstructed from patches)
+   * Get all messages for a session (reconstructed from patches).
+   *
+   * HOT SESSIONS ONLY — use `loadMessages` unless you know a process is
+   * attached. Throwing beats returning `[]` for a cold session: an empty
+   * transcript is a plausible-looking answer that would quietly corrupt
+   * whatever the caller does next.
    */
   getMessages(sessionId: string): AgentMessage[] {
     const session = this.sessions.get(sessionId);
-    return session?.store.entries.filter(Boolean) ?? [];
+    if (!session) return [];
+    this.assertHot(session, "getMessages");
+    return session.store.entries.filter(Boolean);
   }
 
-  /** Raw sparse entries (holes preserved) — index space matches entry indices. */
+  /**
+   * Raw sparse entries (holes preserved) — index space matches entry indices.
+   * Hot sessions only, same as `getMessages`; cold callers want
+   * `loadRawMessages`.
+   */
   getRawMessages(sessionId: string): AgentMessage[] {
-    return this.sessions.get(sessionId)?.store.entries ?? [];
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    this.assertHot(session, "getRawMessages");
+    return session.store.entries;
   }
 
   getHistoryEpoch(sessionId: string): number | undefined {
@@ -2714,6 +3279,9 @@ export class AgentSessionManager {
           });
         }
       }
+      // Unload point. A no-op when the session was already cold — Stop on a
+      // session restored from disk, or a second Stop.
+      this.unloadHistory(session, "stop");
       // Don't send { finished: true } — keep the WebSocket connection alive
       // so the UI stays "Connected" and the user can continue the conversation.
       return true;
@@ -2801,6 +3369,10 @@ export class AgentSessionManager {
         sessionId: session.id,
         status: "stopped",
       });
+      // Unload point, after the hibernate note is appended. Hibernation
+      // exists to free resident capacity; freeing the process while keeping
+      // its transcript in the heap would give back only half of it.
+      this.unloadHistory(session, "hibernate");
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to hibernate session:`, error);
@@ -2928,7 +3500,9 @@ export class AgentSessionManager {
 
     // Persistence follows the in-memory append. Never let a conditional DB
     // delete race through that small window.
-    if (session?.store.entries.some((entry) => entry !== undefined)) return retained("retained_has_entries");
+    // Metadata, never a read: this runs for every discard candidate, and the
+    // whole point of lazy hydration is that asking "is it empty?" costs nothing.
+    if (session && this.hasHistory(session)) return retained("retained_has_entries");
 
     this.retentionDeleting.add(sessionId);
     try {
@@ -3003,22 +3577,36 @@ export class AgentSessionManager {
     // spawnAgent resets again; that one stays as the fresh-process guard.
     this.resetCompletion(session);
 
-    // 2. Clear persisted entries
+    // 2. Clear the message store — synchronously, BEFORE the database delete.
+    //
+    // `clearGeneration` is what tells anything holding a transcript snapshot
+    // across an await (a `hydrateForSpawn` for a concurrent wake, a cold
+    // `subscribe` replay) that its snapshot is void. Bumping it after the
+    // delete would leave a window in which such a snapshot still looked
+    // current and could reinstall the history being wiped, or read half of it
+    // mid-DELETE. `historyEpoch` cannot serve here: its in-memory value only
+    // changes once `incrementHistoryEpoch` resolves, several lines below.
+    //
+    // Clearing memory before the durable delete is safe because the process is
+    // already dead and the `clearAll` broadcast still goes out after it, so
+    // the client sees the same order as before.
+    session.clearGeneration += 1;
+    session.store = coldStore(-1);
+    session.historyMeta = { entryCount: 0, maxEntryIndex: -1 };
+    // Hot, not cold: there is no history left to load, so a later
+    // `hydrateForSpawn` must find nothing to do rather than read the rows this
+    // is about to delete.
+    session.hot = true;
+    session.buffer = "";
+    session.dormant = false;
+
+    // 3. Clear persisted entries
     if (!session.skipDb) {
       await this.storage.agentSessions.deleteEntries(sessionId);
       session.historyEpoch = await this.storage.agentSessions.incrementHistoryEpoch(sessionId);
     } else {
       session.historyEpoch += 1;
     }
-
-    // 3. Clear message store
-    session.store.patches = [];
-    session.store.entries = [];
-    session.store.indexProvider.reset();
-    session.store.toolTracker.clear();
-    session.store.currentAssistantIndex = null;
-    session.buffer = "";
-    session.dormant = false;
     // The restarted conversation starts with no open turn — never inherit the wiped history's clock.
     session.turnOpenSince = null;
     this.touchSession(session);
@@ -3071,8 +3659,7 @@ export class AgentSessionManager {
     if (!session) return "not_found";
     if (session.agentType === agentType) return "ok";
 
-    const hasHistory = session.store.entries.some(Boolean);
-    if (session.status === "running" && hasHistory) return "busy";
+    if (session.status === "running" && this.hasHistory(session)) return "busy";
 
     console.log(`[AgentSession] Switching session ${sessionId} agent ${session.agentType} → ${agentType} (dormant, history preserved)`);
 
@@ -3127,6 +3714,11 @@ export class AgentSessionManager {
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
       this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
     }
+
+    // Unload point, after the switch note. A session that was already
+    // dormant took `pushEntry`'s cold branch above, and unloading it is a
+    // no-op — which is exactly why the note did not need its own cold helper.
+    this.unloadHistory(session, "agent-switch");
 
     return "ok";
   }
@@ -3229,6 +3821,11 @@ export class AgentSessionManager {
           this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
           this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
         }
+        // Retiring the idle process is a process exit like any other, so the
+        // transcript goes with it. (Not one of the plan's four points — it
+        // folded this into "switchAgentType-shaped" — but the rule is the
+        // same: no process, no store.)
+        this.unloadHistory(session, "model-change");
       }
 
       return "ok";
@@ -3242,7 +3839,7 @@ export class AgentSessionManager {
    * chip and the agent chip lock at different moments in the same header row.
    */
   private isModelChangeTooLate(session: RunningSession): boolean {
-    return session.status === "running" && session.store.entries.some(Boolean);
+    return session.status === "running" && this.hasHistory(session);
   }
 
   /**
@@ -3258,9 +3855,49 @@ export class AgentSessionManager {
     if (!session) {
       return false;
     }
-    // Do not mutate mode/process state unless the exact checkout can respawn.
-    const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
+    // Claimed before the FIRST await — that is the counter's contract, not
+    // merely "before the mutations". Resolving the checkout first would leave
+    // a window in which retention runs to completion: it deletes the row,
+    // drops the map entry and clears its own flag, after which this claim
+    // succeeds on a detached session and the switch spawns a process for a
+    // session that no longer exists. `wakeDormantSession` and `restartSession`
+    // both claim here and resolve inside; this one used to be the exception.
+    //
+    // The claim also protects the hydrate→spawn window: this method kills the
+    // old process and respawns several awaits later, so in between the session
+    // reads as process-less and (for a dormant one) not-yet-running — enough
+    // for `switchAgentType` to accept it and unload the transcript this
+    // respawn is about to replay. It is what makes `unloadHistory` refuse.
+    const release = this.beginProcessStart(session);
+    if (!release) {
+      console.log(`[AgentSession] Refusing to switch mode on ${sessionId}: retention is deleting it`);
+      return false;
+    }
+    try {
+      // Do not mutate mode/process state unless the exact checkout can respawn.
+      // Still first inside the claim, so nothing has changed if it throws.
+      const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
+      // Respawning replays the conversation to the new process, so the
+      // transcript has to be in memory first. A no-op for the common case (a
+      // running session is already hot); a load for a dormant one.
+      await this.hydrateForSpawn(session);
+      return await this.switchModeInner(session, sessionId, absoluteWorktreePath, newMode, initialMessage);
+    } finally {
+      release();
+      // After the release, so the check sees this operation's own claim gone:
+      // a switch that hydrated and then failed (capacity, persistence) must
+      // not strand the transcript with no owner.
+      this.unloadIfSpawnAbandoned(session);
+    }
+  }
 
+  private async switchModeInner(
+    session: RunningSession,
+    sessionId: string,
+    absoluteWorktreePath: string,
+    newMode: "plan" | "edit",
+    initialMessage?: string,
+  ): Promise<boolean> {
     console.log(`[AgentSession] Switching session ${sessionId} from ${session.permissionMode} to ${newMode}`);
 
     // 1. Kill existing process. Discard turn-completion state with it —
@@ -3442,6 +4079,10 @@ export class AgentSessionManager {
       return true;
     } finally {
       release();
+      // Ordered after the release so the check sees this wake's own claim
+      // gone. A wake that hydrated and then failed (capacity, checkout,
+      // spawn) must not leave the transcript behind it.
+      this.unloadIfSpawnAbandoned(session);
     }
   }
 
@@ -3454,6 +4095,11 @@ export class AgentSessionManager {
     notificationDisposition: NotificationDisposition,
   ): Promise<void> {
     const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
+
+    // The transcript this wake is about to replay to the new process lives in
+    // storage until here. Throws SpawnSupersededError if a restart got there
+    // first, which aborts the wake before it spawns or writes anything.
+    await this.hydrateForSpawn(session);
 
     await this.ensureResidentCapacity(
       { projectId: session.projectId, branch: session.branch },
@@ -3557,9 +4203,10 @@ export class AgentSessionManager {
    * Crash repair (restore path): if the previous process died mid-turn, the
    * history has no closing turn_end — append one with outcome
    * "server_restart" and no duration (the crash time is unknown; the UI
-   * shows "interrupted" instead of a fabricated number). Runs BEFORE
-   * rebuildStoreFromRows so the store is built from the repaired rows.
-   * The other constructor of turn_end entries is endActiveTurn (live paths).
+   * shows "interrupted" instead of a fabricated number). Returns the session's
+   * updated history metadata, so restore accounts for the entry it wrote
+   * without re-reading. The other constructor of turn_end entries is
+   * endActiveTurn (live paths).
    *
    * Also records a turn_snapshots row at the repair index (mirrors
    * endActiveTurn's hook), capturing the worktree exactly as the crash left
@@ -3571,41 +4218,69 @@ export class AgentSessionManager {
    */
   private async repairInterruptedTurn(
     dbSession: AgentSessionRow,
-    rows: Array<{ entry_index: number; data: string }>,
-  ): Promise<Array<{ entry_index: number; data: string }>> {
+    meta: SessionHistoryMeta,
+  ): Promise<SessionHistoryMeta> {
     const sessionId = dbSession.id;
-    // Scan past trailing system entries (e.g. the hibernate note lands after
-    // the turn's turn_end).
-    let landingType: string | null = null; // null = no non-system row found
-    for (let i = rows.length - 1; i >= 0; i--) {
-      try {
-        const msg = JSON.parse(rows[i].data) as AgentMessage;
-        if (msg.type === "system") continue;
-        landingType = msg.type;
-      } catch {
-        landingType = "unparsable"; // corrupted tail write — treat as content, repair
-      }
-      break;
-    }
-    if (landingType === null || landingType === "turn_end") return rows;
+    if (meta.entryCount === 0) return meta;
 
-    const maxIndex = rows.reduce((m, r) => Math.max(m, r.entry_index), -1);
-    const repairIndex = maxIndex + 1;
+    // One backward walk answers both questions this repair needs, because
+    // both start at the tail:
+    //
+    //  - the LANDING type: skipping trailing system entries (the hibernate
+    //    note lands after its turn's turn_end), is the last real entry a
+    //    turn_end? If so the turn closed cleanly and there is nothing to do.
+    //  - the turn's OPENING user entry: the earliest user entry before the
+    //    previous turn_end, which is what carries the disposition. Mid-turn
+    //    steering messages are also `user`, so "earliest wins".
+    //
+    // The walk is paged and unbounded rather than a fixed tail window: a turn
+    // full of long tool calls can put its opener hundreds of entries back, and
+    // missing it makes `resolveNotificationDisposition` fall through to
+    // `result` — turning a silent internal reviewer turn into a spurious
+    // "session failed" notification. Worst case this reads the whole
+    // transcript, which is exactly what the old implementation always did, and
+    // only for rows the crash left as `running`.
+    let landingType: string | undefined; // undefined = no non-system row seen yet
+    let opening: AgentMessage | undefined;
+    let cursor: number | null = null;
+    let atBoundary = false;
+
+    while (!atBoundary) {
+      const batch = await this.reader.readBefore(sessionId, cursor, REPAIR_SCAN_BATCH);
+      if (batch.length === 0) break; // walked off the front (a first-turn crash)
+      for (const { message } of batch) {
+        if (message === undefined) {
+          // Corrupted row. As a landing it means content, so repair; deeper in
+          // the walk it is a hole, and a hole is not a turn boundary.
+          landingType ??= "unparsable";
+          continue;
+        }
+        if (landingType === undefined) {
+          if (message.type === "system") continue;
+          landingType = message.type;
+          if (landingType === "turn_end") return meta; // clean tail, nothing to repair
+          if (message.type === "user") opening = message; // the landing row can be the opener
+          continue;
+        }
+        if (message.type === "turn_end") { atBoundary = true; break; }
+        if (message.type === "user") opening = message;
+      }
+      cursor = batch[batch.length - 1].entryIndex;
+    }
+    // Only system entries (or nothing readable at all). Same conclusion the
+    // old scan reached with `landingType === null`: writing a turn_end here
+    // would invent a turn that never ran and, with no opener to read a
+    // disposition off, notify about its failure.
+    if (landingType === undefined) return meta;
+
+    const repairIndex = meta.maxEntryIndex + 1;
 
     // The interrupted turn's disposition has to come off its persisted opening
     // user entry — process memory died with the crash. A crash mid-`result`
     // turn is a genuine attention milestone (the user asked for something that
     // never finished), so it becomes one durable session_failed; a workflow
     // helper or reviewer turn gets its boundary repaired silently.
-    const entries: Array<AgentMessage | undefined> = [];
-    for (const row of rows) {
-      try {
-        entries[row.entry_index] = JSON.parse(row.data) as AgentMessage;
-      } catch { /* corrupted row: a hole, not a boundary */ }
-    }
-    const disposition = resolveNotificationDisposition(
-      findTurnOpeningUserEntry(entries, repairIndex),
-    );
+    const disposition = resolveNotificationDisposition(opening);
 
     const repair: AgentMessage = {
       type: "turn_end",
@@ -3654,15 +4329,30 @@ export class AgentSessionManager {
       console.warn(`[AgentSession] Turn snapshot lookup failed for ${sessionId}@${repairIndex}:`, error);
     }
 
-    return [...rows, { entry_index: repairIndex, data }];
+    return { entryCount: meta.entryCount + 1, maxEntryIndex: repairIndex };
   }
 
   /**
    * Restore sessions from database on startup.
    * Creates dormant RunningSession objects with process=null for sessions that have entries.
+   *
+   * Restores IDENTITY AND METADATA ONLY — no transcripts. One aggregate query
+   * gives every session its entry count and highest index; the entries
+   * themselves stay in the database until something actually spawns a process
+   * for the session (`hydrateForSpawn`) or reads its history
+   * (`SessionHistoryReader`). That is what turns startup from O(all history)
+   * into O(session count): on the worker this plan was written for, 1385
+   * sessions were carrying 474 MiB of transcript that boot used to parse into
+   * the heap before the server would answer its first request.
    */
   async restoreSessionsFromDb(): Promise<void> {
     const allSessions = await this.storage.agentSessions.getAll();
+    const entryMeta = new Map(
+      (await this.storage.agentSessions.getEntryMetaAll()).map((row) => [
+        row.session_id,
+        { entryCount: row.cnt, maxEntryIndex: row.max_index },
+      ]),
+    );
     let restoredCount = 0;
     let zeroEntryRows = 0;
 
@@ -3670,19 +4360,20 @@ export class AgentSessionManager {
       // Skip sessions already in memory
       if (this.sessions.has(dbSession.id)) continue;
 
-      let entries = await this.storage.agentSessions.getEntries(dbSession.id);
       // Skip sessions with no entries (stale metadata)
-      if (entries.length === 0) { zeroEntryRows++; continue; }
+      let meta = entryMeta.get(dbSession.id);
+      if (!meta || meta.entryCount === 0) { zeroEntryRows++; continue; }
 
       // Only sessions the crash left as "running" can hold an interrupted
       // turn. The gate also keeps pre-feature (marker-less, cleanly stopped)
       // histories untouched and makes repair idempotent — this run resets
-      // the row to "stopped" below.
+      // the row to "stopped" below. This is the one path that reads entry
+      // data at boot, and only the tail of it.
       if (dbSession.status === "running") {
-        entries = await this.repairInterruptedTurn(dbSession, entries);
+        meta = await this.repairInterruptedTurn(dbSession, meta);
       }
 
-      const store = this.rebuildStoreFromRows(entries, dbSession.id);
+      const store = coldStore(meta.maxEntryIndex);
 
       const permissionMode = (dbSession.permission_mode === "plan" ? "plan" : "edit") as "plan" | "edit";
       const restoredCheckout = dbSession.workspace_checkout_id
@@ -3711,6 +4402,11 @@ export class AgentSessionManager {
         processStartsInFlight: 0,
         historyEpoch: dbSession.history_epoch ?? 0,
         store,
+        // Restored cold: no process, so no transcript in memory (B1).
+        hot: false,
+        historyMeta: meta,
+        hydrating: null,
+        clearGeneration: 0,
         subscribers: new Set(),
         status: "stopped",
         buffer: "",
@@ -3724,6 +4420,8 @@ export class AgentSessionManager {
       graceTimer: null,
       parkTimer: null,
       eventChain: Promise.resolve(),
+      chainPending: 0,
+      historyChain: Promise.resolve(),
         bgSpawnHintsThisTurn: 0,
         taskStartedThisTurn: 0,
         lastActiveAt: Date.now(),
@@ -3918,7 +4616,7 @@ export class AgentSessionManager {
             existingRuntime.branchedFromEntryIndex = repairedEntryIndex;
           }
         }
-        return { ok: true, sessionId: newId };
+        return { ok: true, sessionId: newId, messages: denseMessagesFromRows(entryRows) };
       }
     }
     let inheritedCheckoutId = source?.workspaceCheckoutId ?? sourceRow?.workspace_checkout_id ?? undefined;
@@ -3983,7 +4681,16 @@ export class AgentSessionManager {
     // never fires for this session.
     this.markTitleResolved(newId);
 
-    const store = this.rebuildStoreFromRows(entryRows, newId);
+    // Cold from birth. The branch is dormant until someone sends it a
+    // message, and a dormant session never reaches an unload point — so
+    // handing it a rebuilt store here would pin a full copy of the source
+    // transcript in memory for as long as the process lives, for a session
+    // nobody may ever open (§3.3).
+    const branchedMeta: SessionHistoryMeta = {
+      entryCount: entryRows.length,
+      maxEntryIndex: entryRows[entryRows.length - 1]!.entry_index,
+    };
+    const store = coldStore(branchedMeta.maxEntryIndex);
 
     const branched: RunningSession = {
       id: newId,
@@ -3996,6 +4703,10 @@ export class AgentSessionManager {
       processStartsInFlight: 0,
       historyEpoch: 0,
       store,
+      hot: false,
+      historyMeta: branchedMeta,
+      hydrating: null,
+      clearGeneration: 0,
       subscribers: new Set(),
       status: "stopped",
       buffer: "",
@@ -4007,6 +4718,8 @@ export class AgentSessionManager {
       graceTimer: null,
       parkTimer: null,
       eventChain: Promise.resolve(),
+      chainPending: 0,
+      historyChain: Promise.resolve(),
       bgSpawnHintsThisTurn: 0,
       taskStartedThisTurn: 0,
       lastActiveAt: Date.now(),
@@ -4024,7 +4737,7 @@ export class AgentSessionManager {
     await this.emitDerivedBranchActivity(projectId, branch);
 
     console.log(`[AgentSession] branchSession: ${sourceSessionId} → ${newId} (entries=${entryRows.length}, agentType=${agentType})`);
-    return { ok: true, sessionId: newId };
+    return { ok: true, sessionId: newId, messages: denseMessagesFromRows(entryRows) };
   }
 
   /**

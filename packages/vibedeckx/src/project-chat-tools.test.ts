@@ -16,7 +16,7 @@ describe("createProjectChatTools", () => {
   let dir: string;
   let storage: Storage;
   let remote: RemoteProjectSessionReader;
-  const localMessages = vi.fn<(sessionId: string) => unknown[]>();
+  const localMessages = vi.fn<(sessionId: string) => Promise<unknown[]>>();
   const localAlive = vi.fn<(sessionId: string) => boolean>();
   const createAgentSession = vi.fn(async ({ sessionId }: { sessionId: string }) => ({ sessionId }));
   const sendAgentInstruction = vi.fn(async () => true);
@@ -53,7 +53,7 @@ describe("createProjectChatTools", () => {
       threadId: overrides.threadId ?? "thread-1",
       userId: overrides.userId ?? "user-1",
       storage,
-      agentSessionManager: { getMessages: localMessages, getSessionProcessAlive: localAlive },
+      agentSessionManager: { loadMessages: localMessages, getSessionProcessAlive: localAlive },
       remoteSessions: remote,
       mutationServices: { createAgentSession, sendAgentInstruction, runScheduleNow },
     });
@@ -705,7 +705,7 @@ describe("createProjectChatTools", () => {
       { id: "opaque-remote", projectId: "project-1", branch: "remote-dev", title: "Remote", status: "stopped", target: "server-a" },
       { id: "foreign-remote", projectId: "project-2", branch: "secret", title: "Foreign", status: "stopped", target: "server-a" },
     ]);
-    localMessages.mockReturnValue([
+    localMessages.mockResolvedValue([
       { type: "user", content: "old" },
       { type: "assistant", content: `recent-${"x".repeat(20_000)}` },
     ]);
@@ -799,7 +799,7 @@ describe("createProjectChatTools", () => {
     await storage.projectRemotes.remove(association.id);
     const surface = await createProjectChatTools({
       projectId: "project-1", threadId: "thread-1", userId: "user-1", storage,
-      agentSessionManager: { getMessages: localMessages, getSessionProcessAlive: localAlive },
+      agentSessionManager: { loadMessages: localMessages, getSessionProcessAlive: localAlive },
       remoteSessions: reader,
     });
 
@@ -1110,7 +1110,7 @@ describe("createProjectChatTools", () => {
     });
     await storage.agentSessions.updateTitle("session-id", huge);
     await storage.agentSessions.updateStatus("session-id", huge as never);
-    localMessages.mockReturnValue([]);
+    localMessages.mockResolvedValue([]);
     vi.mocked(remote.listByProject).mockResolvedValue([{
       id: "remote-id", projectId: "project-1", branch: huge, title: huge,
       status: huge, target: huge, agentType: huge, model: huge,
@@ -1224,7 +1224,7 @@ describe("createProjectChatTools", () => {
       enumerable: true,
       get() { throw new Error("getter secret"); },
     });
-    localMessages.mockReturnValue([{
+    localMessages.mockResolvedValue([{
       type: "t".repeat(20_000),
       content: hostile,
     }, {

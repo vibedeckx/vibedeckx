@@ -38,7 +38,8 @@ const LIST_TARGET_CHAR_LIMIT = 256;
 const LIST_MODEL_CHAR_LIMIT = 128;
 
 export interface ProjectAgentSessionReader {
-  getMessages(sessionId: string): unknown[];
+  /** Async: a dormant session's transcript is read from storage, not memory. */
+  loadMessages(sessionId: string): Promise<unknown[]>;
   getSessionProcessAlive(sessionId: string): boolean;
 }
 
@@ -1281,7 +1282,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             agentType: nullablePreview(local.agent_type, ENUM_CHAR_LIMIT),
             model: nullablePreview(local.model, MODEL_CHAR_LIMIT),
             processAlive: agentSessionManager.getSessionProcessAlive(local.id),
-            transcript: transcriptPreview(agentSessionManager.getMessages(local.id)),
+            transcript: transcriptPreview(await agentSessionManager.loadMessages(local.id)),
           };
           await touch("agent_session", local.id);
           return detail;

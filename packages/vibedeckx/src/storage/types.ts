@@ -1161,8 +1161,30 @@ export interface Storage {
       outbox?: Omit<NotificationOutboxEvent, "seq">;
     }) => Promise<void>;
     getEntries: (sessionId: string) => Promise<Array<{ entry_index: number; data: string }>>;
+    /**
+     * One page of a session's entries in DESCENDING index order, strictly
+     * before `beforeIndex` (null = start at the tail).
+     *
+     * Exists so a caller that only needs the tail — crash repair walking back
+     * to the previous turn boundary — never pays for the whole transcript
+     * (docs/plans/2026-09-05-session-history-lazy-hydration-b.md §2.3).
+     */
+    getEntriesBefore: (
+      sessionId: string,
+      beforeIndex: number | null,
+      limit: number,
+    ) => Promise<Array<{ entry_index: number; data: string }>>;
     deleteEntries: (sessionId: string) => Promise<void>;
     countEntries: () => Promise<Array<{ session_id: string; cnt: number }>>;
+    /**
+     * Per-session entry count and highest index, for EVERY session, in one
+     * aggregate query that never reads the `data` column.
+     *
+     * This is what lets startup restore build a session's runtime state
+     * without its transcript: `count`/`max` over the (session_id, entry_index)
+     * index is a scan of keys, not of the ~500 MB of JSON they point at.
+     */
+    getEntryMetaAll: () => Promise<Array<{ session_id: string; cnt: number; max_index: number }>>;
     /**
      * One bounded page of retention candidates, oldest first
      * (docs/plans/2026-08-08-session-retention.md §1.2). The predicate —

@@ -917,6 +917,14 @@ export const createAgentSessionRepos = (
         .execute();
     },
 
+    getEntriesBefore: async (sessionId, beforeIndex, limit) => {
+      let query = kdb.selectFrom("agent_session_entries")
+        .select(["entry_index", "data"])
+        .where("session_id", "=", sessionId);
+      if (beforeIndex !== null) query = query.where("entry_index", "<", beforeIndex);
+      return query.orderBy("entry_index", "desc").limit(limit).execute();
+    },
+
     deleteEntries: async (sessionId) => {
       await kdb.deleteFrom("agent_session_entries").where("session_id", "=", sessionId).execute();
     },
@@ -927,6 +935,23 @@ export const createAgentSessionRepos = (
         .select(kdb.fn.countAll<number>().as("cnt"))
         .groupBy("session_id")
         .execute();
+    },
+
+    getEntryMetaAll: async () => {
+      const rows = await kdb.selectFrom("agent_session_entries")
+        .select("session_id")
+        .select(kdb.fn.countAll<number>().as("cnt"))
+        .select(kdb.fn.max("entry_index").as("max_index"))
+        .groupBy("session_id")
+        .execute();
+      // `max()` is typed nullable because SQL's is; a GROUP BY group always
+      // has at least one row, so the coalesce is only there to keep the
+      // caller's arithmetic (`max_index + 1`) free of null checks.
+      return rows.map((row) => ({
+        session_id: row.session_id,
+        cnt: Number(row.cnt),
+        max_index: row.max_index ?? -1,
+      }));
     },
 
     listRetentionCandidates: async ({ cutoff, limit, after }) => {

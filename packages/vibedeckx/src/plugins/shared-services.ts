@@ -458,7 +458,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     sendUserMessage: (...args) => agentSessionManager.sendUserMessage(...args),
     setFinalSessionTitle: (sessionId, title) => agentSessionManager.setFinalSessionTitle(sessionId, title),
     switchMode: (sessionId, projectPath, mode) => agentSessionManager.switchMode(sessionId, projectPath, mode),
-    getRawMessages: (sessionId) => agentSessionManager.getRawMessages(sessionId),
+    getRawMessages: (sessionId) => agentSessionManager.loadRawMessages(sessionId),
     broadcastRawToSession: (sessionId, payload) => agentSessionManager.broadcastRawToSession(sessionId, payload),
   };
   const workflowEngine = new WorkflowEngine(opts.storage, reviewAgentOps);
@@ -542,6 +542,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const memoryStatsReporter = new MemoryStatsReporter({
     remotePatchCache,
     processManager,
+    sessionHydration: agentSessionManager,
   });
   memoryStatsReporter.start();
 

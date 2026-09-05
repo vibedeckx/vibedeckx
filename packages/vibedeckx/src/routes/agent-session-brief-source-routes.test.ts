@@ -17,7 +17,7 @@ function makeApp(messages: AgentMessage[], sessionExists = true) {
   app.decorate("storage", {});
   app.decorate("agentSessionManager", {
     getSession: () => (sessionExists ? { id: SESSION_ID } : undefined),
-    getMessages: () => messages,
+    loadMessages: async () => messages,
     getSessionProcessAlive: () => true,
   });
   app.decorate("remoteSessionMap", new Map());

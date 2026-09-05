@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import type { AgentSession, Storage } from "./storage/types.js";
+import { derivedEntryMeta } from "./__fixtures__/entry-meta-mock.js";
 
 /**
  * Retention's delete path inside the manager
@@ -74,14 +75,16 @@ async function makeHarness(): Promise<Harness> {
     return checkout;
   });
 
+  const getEntries = async () => [
+    { entry_index: 0, data: JSON.stringify({ type: "user", content: "hi", timestamp: 1 }) },
+    { entry_index: 1, data: JSON.stringify({ type: "turn_end", timestamp: 2 }) },
+  ];
   const storage = {
     agentSessions: {
       getAll: async () => [row],
       getById: async () => row,
-      getEntries: async () => [
-        { entry_index: 0, data: JSON.stringify({ type: "user", content: "hi", timestamp: 1 }) },
-        { entry_index: 1, data: JSON.stringify({ type: "turn_end", timestamp: 2 }) },
-      ],
+      getEntries,
+      ...derivedEntryMeta(row.id, getEntries),
       listByBranch: async () => [row],
       updateStatus: vi.fn(async () => undefined),
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
@@ -117,6 +120,20 @@ async function makeHarness(): Promise<Harness> {
   };
 }
 
+/**
+ * Make a restored (cold) session look like one that never recorded anything.
+ * Its transcript lives in storage, so "empty" is a fact about its metadata —
+ * reaching into an in-memory entry array no longer says it.
+ */
+function emptyTheHistory(manager: { getSession(id: string): unknown }, id: string) {
+  const session = manager.getSession(id) as {
+    historyMeta: { entryCount: number; maxEntryIndex: number };
+    store: { entries: unknown[] };
+  };
+  session.store.entries.length = 0;
+  session.historyMeta = { entryCount: 0, maxEntryIndex: -1 };
+}
+
 /** Minimal WebSocket stand-in so broadcasts are observable. */
 function fakeSocket(frames: string[]) {
   return { send: (data: string) => frames.push(data) } as unknown as import("ws").WebSocket;
@@ -126,7 +143,7 @@ describe("retention delete path", () => {
   it("replays only entries after the client's sealed boundary", async () => {
     const h = await makeHarness();
     const frames: string[] = [];
-    h.manager.subscribe("s1", fakeSocket(frames), { afterEntryIndex: 0, historyEpoch: 0 });
+    await h.manager.subscribe("s1", fakeSocket(frames), { afterEntryIndex: 0, historyEpoch: 0 });
     const entryPaths = frames.flatMap((raw) => {
       const parsed = JSON.parse(raw) as { JsonPatch?: Array<{ path: string }> };
       return parsed.JsonPatch?.map((op) => op.path).filter((path) => path.startsWith("/entries/")) ?? [];
@@ -139,7 +156,7 @@ describe("retention delete path", () => {
   it("deletes a dormant session and tells its subscribers it is finished", async () => {
     const h = await makeHarness();
     const frames: string[] = [];
-    h.manager.subscribe("s1", fakeSocket(frames));
+    await h.manager.subscribe("s1", fakeSocket(frames));
 
     expect(await h.manager.deleteDormantSessionIfExpired("s1", CUTOFF)).toBe(true);
     expect(h.deleteIfExpired).toHaveBeenCalledWith("s1", CUTOFF);
@@ -166,7 +183,7 @@ describe("retention delete path", () => {
   it("does nothing at all when the conditional DELETE misses", async () => {
     const h = await makeHarness();
     const frames: string[] = [];
-    h.manager.subscribe("s1", fakeSocket(frames));
+    await h.manager.subscribe("s1", fakeSocket(frames));
     h.deleteIfExpired.mockResolvedValueOnce(false);
 
     expect(await h.manager.deleteDormantSessionIfExpired("s1", CUTOFF)).toBe(false);
@@ -185,7 +202,7 @@ describe("retention delete path", () => {
 describe("empty-session discard path", () => {
   it("reclaims an empty live process after the conditional delete succeeds", async () => {
     const h = await makeHarness();
-    h.manager.getRawMessages("s1").length = 0;
+    emptyTheHistory(h.manager, "s1");
     const killed = vi.fn();
     h.manager.getSession("s1")!.process = {
       pid: 999_999_999,
@@ -193,7 +210,7 @@ describe("empty-session discard path", () => {
       kill: killed,
     } as never;
     const frames: string[] = [];
-    h.manager.subscribe("s1", fakeSocket(frames));
+    await h.manager.subscribe("s1", fakeSocket(frames));
 
     expect(await h.manager.discardSessionIfEmpty("s1")).toBe(true);
     expect(h.deleteIfEmpty).toHaveBeenCalledWith("s1");
@@ -204,7 +221,7 @@ describe("empty-session discard path", () => {
 
   it("does not delete while a user message is in flight", async () => {
     const h = await makeHarness();
-    h.manager.getRawMessages("s1").length = 0;
+    emptyTheHistory(h.manager, "s1");
     const gate = h.gateCheckoutLookup();
 
     const send = h.manager.sendUserMessage("s1", "hello", PROJECT_PATH);
@@ -218,7 +235,7 @@ describe("empty-session discard path", () => {
 
   it("blocks a send while the conditional delete is in flight", async () => {
     const h = await makeHarness();
-    h.manager.getRawMessages("s1").length = 0;
+    emptyTheHistory(h.manager, "s1");
     const deleteGate = deferred<boolean>();
     h.deleteIfEmpty.mockReturnValueOnce(deleteGate.promise);
 

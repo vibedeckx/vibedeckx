@@ -5,6 +5,7 @@ import { EventBus, type GlobalEvent } from "./event-bus.js";
 import { getProvider } from "./providers/index.js";
 import type { CodexProvider } from "./providers/codex-provider.js";
 import type { AgentSession, Storage } from "./storage/types.js";
+import { derivedEntryMeta } from "./__fixtures__/entry-meta-mock.js";
 
 /**
  * Wiring tests for turn-completion: replay real Claude Code stream-json
@@ -54,12 +55,14 @@ function makeHarness(agentType: string = "claude-code") {
   const completeIfAssigned = vi.fn(async () => undefined);
   const upsertEntry = vi.fn(async () => undefined);
 
+  const getEntries = async () => [
+    { session_id: SESSION_ID, entry_index: 0, data: JSON.stringify({ type: "user", content: "go", timestamp: 1 }) },
+  ];
   const storage = {
     agentSessions: {
       getAll: async () => [row],
-      getEntries: async () => [
-        { session_id: SESSION_ID, entry_index: 0, data: JSON.stringify({ type: "user", content: "go", timestamp: 1 }) },
-      ],
+      getEntries,
+      ...derivedEntryMeta(SESSION_ID, getEntries),
       getById: async () => row,
       listByBranch: async () => [row],
       markCompleted,
@@ -94,6 +97,9 @@ async function liveSession(manager: AgentSessionManager) {
     handleStdout: (session: unknown, data: string) => Promise<void>;
   };
   const session = internals.sessions.get(SESSION_ID)!;
+  // Restored sessions are cold; loading the transcript is what the wake path
+  // does before spawning, and the streaming pipeline below relies on it.
+  await (manager as unknown as { hydrateForSpawn(s: unknown): Promise<void> }).hydrateForSpawn(session);
   session.dormant = false;
   session.status = "running";
   return { session, feed: (data: string) => internals.handleStdout(session, data) };

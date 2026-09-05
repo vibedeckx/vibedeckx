@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import { derivedEntryMeta } from "./__fixtures__/entry-meta-mock.js";
 
 /**
  * branchSession must carry a cross-remote MCP config onto the branched
@@ -38,6 +39,20 @@ function makeHarness() {
   };
 
   const created: AgentSession[] = [];
+  // Entries actually written per session. branchSession's exact-ID replay
+  // compares the branch's stored rows against the source's, and a cold branch
+  // has nowhere else to read them from.
+  const entriesBySession = new Map<string, Array<{ session_id: string; entry_index: number; data: string }>>([
+    [SOURCE_ID, HISTORY],
+  ]);
+  const getEntries = async (id: string) => entriesBySession.get(id) ?? [];
+  const upsertEntry = vi.fn(async (id: string, entry_index: number, data: string) => {
+    const rows = entriesBySession.get(id) ?? [];
+    const at = rows.findIndex((r) => r.entry_index === entry_index);
+    const next = { session_id: id, entry_index, data };
+    if (at >= 0) rows[at] = next; else rows.push(next);
+    entriesBySession.set(id, rows);
+  });
   const checkout = {
     id: "checkout-feat", workspace_id: "workspace-feat", target_id: "local",
     worktree_path: "/tmp/p1-feat", expected_branch: "feat", status: "ready" as const,
@@ -58,7 +73,8 @@ function makeHarness() {
     agentSessions: {
       getAll: async () => [sourceRow],
       getById: async (id: string) => (id === SOURCE_ID ? sourceRow : created.find((r) => r.id === id) ?? null),
-      getEntries: async () => HISTORY,
+      getEntries,
+      ...derivedEntryMeta(SOURCE_ID, getEntries),
       create: async (row: AgentSession) => { created.push({ ...sourceRow, ...row }); },
       createBound: async (row: AgentSession) => {
         const session = { ...sourceRow, ...row, workspace_checkout_id: checkout.id };
@@ -66,7 +82,7 @@ function makeHarness() {
         return { session, checkout };
       },
       updateStatusPreservingTimestamp: vi.fn(async () => undefined),
-      upsertEntry: vi.fn(async () => undefined),
+      upsertEntry,
       updateTitle: vi.fn(async () => undefined),
       setBranchedFrom,
       listByBranch: async () => created,
@@ -99,7 +115,7 @@ describe("branchSession cross-remote MCP", () => {
       crossRemoteMcp,
     });
 
-    expect(result).toEqual({ ok: true, sessionId: preSessionId });
+    expect(result).toMatchObject({ ok: true, sessionId: preSessionId });
     expect(manager.getSession(preSessionId)?.crossRemoteMcp).toEqual(crossRemoteMcp);
   });
 
@@ -113,7 +129,7 @@ describe("branchSession cross-remote MCP", () => {
       sessionId: "durable-branch", crossRemoteMcp: freshCrossRemoteMcp,
     });
 
-    expect(first).toEqual({ ok: true, sessionId: "durable-branch" });
+    expect(first).toMatchObject({ ok: true, sessionId: "durable-branch" });
     expect(replay).toEqual(first);
     expect(created).toHaveLength(1);
     expect(manager.getSession("durable-branch")?.crossRemoteMcp).toEqual(freshCrossRemoteMcp);
@@ -153,7 +169,7 @@ describe("branchSession send-back pointer", () => {
     setBranchedFrom.mockClear();
 
     const replay = await manager.branchSession(SOURCE_ID, undefined, { sessionId: "sb3" });
-    expect(replay).toEqual({ ok: true, sessionId: "sb3" });
+    expect(replay).toMatchObject({ ok: true, sessionId: "sb3" });
     expect(setBranchedFrom).toHaveBeenCalledWith("sb3", SOURCE_ID, 5);
     // Session payloads read the runtime — a DB-only repair would keep the
     // send-back button hidden for the rest of the process lifetime.
@@ -167,11 +183,14 @@ describe("branchSession cutoff", () => {
     const { storage } = makeHarness();
     const manager = new AgentSessionManager(storage);
     const result = await manager.branchSession(SOURCE_ID, undefined, { sessionId: "b1", upToEntryIndex: 2 });
-    expect(result).toEqual({ ok: true, sessionId: "b1" });
-    const msgs = manager.getMessages("b1");
-    expect(msgs.filter(Boolean)).toHaveLength(3);
-    expect(msgs[2]?.type).toBe("turn_end");
-    expect(msgs[3]).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, sessionId: "b1" });
+    // The branch is born cold (no process), so the copied transcript comes
+    // back on the result rather than out of an in-memory store.
+    const msgs = (result as { messages: unknown[] }).messages;
+    expect(msgs).toHaveLength(3);
+    expect((msgs[2] as { type: string }).type).toBe("turn_end");
+    expect(manager.getSession("b1")?.hot).toBe(false);
+    expect(manager.getSession("b1")?.historyMeta).toEqual({ entryCount: 3, maxEntryIndex: 2 });
   });
 
   it("rejects a cutoff that is not a turn_end entry", async () => {
@@ -208,7 +227,7 @@ describe("branchSession while running", () => {
     const { manager, internals } = await runningManager();
     const finalizeSpy = vi.spyOn(internals as never, "finalizeStreamingEntry" as never);
     const result = await manager.branchSession(SOURCE_ID, undefined, { sessionId: "b4", upToEntryIndex: 2 });
-    expect(result).toEqual({ ok: true, sessionId: "b4" });
+    expect(result).toMatchObject({ ok: true, sessionId: "b4" });
     expect(finalizeSpy).not.toHaveBeenCalled();
   });
 

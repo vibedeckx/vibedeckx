@@ -17,11 +17,33 @@ import { getLogger } from "./logger.js";
 import type { ProcessManager, ProcessLogBufferStats } from "./process-manager.js";
 import type { RemotePatchCache, RemotePatchCacheStats } from "./remote-patch-cache.js";
 
+/** Hydration counters — see `AgentSessionManager.hydrationStats`. */
+export interface AgentSessionHydrationStats {
+  total: number;
+  hot: number;
+  cold: number;
+  hot_entries: number;
+}
+
+/** The one method this module needs; keeps the manager out of the import graph. */
+export interface AgentSessionStatsSource {
+  hydrationStats(): AgentSessionHydrationStats;
+}
+
 const REPORT_INTERVAL_MS = 5 * 60 * 1000;
 
 export interface MemoryStatsDeps {
   remotePatchCache: RemotePatchCache;
   processManager: ProcessManager;
+  /**
+   * Optional so existing callers and tests need no change; when absent the
+   * `agent_sessions` block is simply omitted from the snapshot.
+   *
+   * Named `sessionHydration`, not `agentSessions`, so it is not mistaken for
+   * the storage repository of that name — the projection-baseline snapshot
+   * freezes `storage.agentSessions.*` call sites by matching on that prefix.
+   */
+  sessionHydration?: AgentSessionStatsSource;
 }
 
 export interface MemoryStatsSnapshot {
@@ -35,6 +57,8 @@ export interface MemoryStatsSnapshot {
   };
   patch_cache: RemotePatchCacheStats;
   process_manager: ProcessLogBufferStats;
+  /** Worker-side history residency (lazy hydration). Absent on hub-only deps. */
+  agent_sessions?: AgentSessionHydrationStats;
 }
 
 export function collectMemoryStats(deps: MemoryStatsDeps): MemoryStatsSnapshot {
@@ -50,6 +74,7 @@ export function collectMemoryStats(deps: MemoryStatsDeps): MemoryStatsSnapshot {
     },
     patch_cache: deps.remotePatchCache.stats(),
     process_manager: deps.processManager.logBufferStats(),
+    ...(deps.sessionHydration ? { agent_sessions: deps.sessionHydration.hydrationStats() } : {}),
   };
 }
 
