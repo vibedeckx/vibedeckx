@@ -13,5 +13,5 @@
  */
 export const MODEL_SUGGESTIONS: Record<"claude-code" | "codex", readonly string[]> = {
   "claude-code": ["opus", "sonnet", "haiku", "fable"],
-  codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+  codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 } as const;
